@@ -65,6 +65,7 @@ from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import OrderInsertRow
 from snapper.data.repository_types import TickRow
+from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.data.repository_types import VenueEventInsertRow
@@ -9832,3 +9833,205 @@ async def test_get_order_lifecycle_events_filters_and_orders(tmp_path: Path) -> 
     assert [row["id"] for row in rows] == [first, second]
     assert [row["event_type"] for row in rows] == ["order_accepted", "fill_observed"]
     assert await r.get_order_lifecycle_events([]) == []
+
+
+def _phase_e_command(
+    public_id: str,
+    cid: str,
+    *,
+    status: str = "dispatched",
+    command_type: str = "create",
+    wallet: str = "wallet-1",
+    created_at: datetime | None = None,
+) -> TradeCommandInsertRow:
+    """Build a trade-command insert row for Phase E sweep tests."""
+    now = created_at or datetime.now(UTC)
+    return cast(
+        TradeCommandInsertRow,
+        {
+            "command_type": command_type,
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-e2",
+            "client_order_id": cid,
+            "venue_client_id": cid,
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": 1.0,
+            "price": 100.0,
+            "status": status,
+            "created_at": now,
+            "correlation_id": f"corr-{public_id}",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+            "wallet_public_id": wallet,
+        },
+    )
+
+
+def _phase_e_event(cid: str, event_type: str, sequence_id: int) -> VenueEventInsertRow:
+    """Build a venue-event insert row for Phase E sweep tests."""
+    now = datetime.now(UTC)
+    return {
+        "event_type": event_type,
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "received_at": now,
+        "session_id": "s1",
+        "sequence_id": sequence_id,
+        "timestamp": now,
+        "client_order_id": cid,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_active_create_command_by_cid_ignores_cancels(tmp_path: Path) -> None:
+    """The strict lookup targets create/submit rows only, fail-closed on >1.
+
+    Given: a create command and a cancel command sharing the same cid,
+    When: get_active_create_command_by_client_order_id runs,
+    Then: the create row returns; an unknown cid returns None; a second
+        active create with the same cid raises (broken idempotency must
+        never be adopted ambiguously).
+    """
+    db_path = tmp_path / "cmd_strict_lookup.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    await r.insert_trade_command(_phase_e_command("cmd-create", "cid-shared"))
+    await r.insert_trade_command(
+        _phase_e_command("cmd-cancel", "cid-shared", command_type="cancel")
+    )
+    row = await r.get_active_create_command_by_client_order_id("cid-shared", "kraken")
+    assert row is not None
+    assert row["command_type"] == "create"
+    assert await r.get_active_create_command_by_client_order_id("cid-none", "kraken") is None
+    await r.insert_trade_command(_phase_e_command("cmd-create-2", "cid-shared"))
+    with pytest.raises(RuntimeError, match="multiple active create/submit"):
+        await r.get_active_create_command_by_client_order_id("cid-shared", "kraken")
+
+
+@pytest.mark.asyncio
+async def test_get_unresolved_dispatched_commands_evidence_rules(tmp_path: Path) -> None:
+    """The sweep queue applies the any-resolving-evidence exemption.
+
+    Given: dispatched commands with no evidence, unknown-only evidence,
+        accepted evidence, fill evidence, plus a created row, a cancel
+        row, a fresh row and another wallet's row,
+    When: get_unresolved_dispatched_commands runs,
+    Then: only the evidence-less and unknown-only dispatched rows of the
+        requested wallet older than the cutoff return, in created order.
+    """
+    db_path = tmp_path / "cmd_unresolved.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    old = datetime.now(UTC) - timedelta(seconds=600)
+    await r.insert_trade_command(_phase_e_command("cmd-bare", "cid-bare", created_at=old))
+    await r.insert_trade_command(
+        _phase_e_command("cmd-unknown", "cid-unknown", created_at=old + timedelta(seconds=1))
+    )
+    await r.insert_venue_event(_phase_e_event("cid-unknown", "order_submit_unknown", 1))
+    await r.insert_trade_command(_phase_e_command("cmd-acked", "cid-acked", created_at=old))
+    await r.insert_venue_event(_phase_e_event("cid-acked", "order_accepted", 2))
+    await r.insert_trade_command(_phase_e_command("cmd-filled", "cid-filled", created_at=old))
+    await r.insert_venue_event(_phase_e_event("cid-filled", "fill_observed", 3))
+    await r.insert_trade_command(
+        _phase_e_command("cmd-created", "cid-created", status="created", created_at=old)
+    )
+    await r.insert_trade_command(
+        _phase_e_command("cmd-cancel", "cid-bare", command_type="cancel", created_at=old)
+    )
+    await r.insert_trade_command(_phase_e_command("cmd-fresh", "cid-fresh"))
+    await r.insert_trade_command(
+        _phase_e_command("cmd-other", "cid-other", wallet="wallet-2", created_at=old)
+    )
+    cutoff = datetime.now(UTC) - timedelta(seconds=120)
+    rows = await r.get_unresolved_dispatched_commands("kraken", "wallet-1", cutoff)
+    assert [row["client_order_id"] for row in rows] == ["cid-bare", "cid-unknown"]
+
+
+@pytest.mark.asyncio
+async def test_advance_trade_command_lifecycle_clears_terminal_at(tmp_path: Path) -> None:
+    """The restore path can NULL a stale terminal stamp.
+
+    Given: a rejected command with terminal_at set,
+    When: advance_trade_command_lifecycle restores it to accepted with
+        clear_terminal_at,
+    Then: the active row reads accepted with terminal_at None.
+    """
+    db_path = tmp_path / "cmd_restore.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _, pid = await r.insert_trade_command(_phase_e_command("cmd-restore", "cid-restore"))
+    rejected_at = now + timedelta(seconds=1)
+    assert await r.advance_trade_command_lifecycle(
+        public_id=pid,
+        expected_status="dispatched",
+        new_status="rejected",
+        bus_time=rejected_at,
+        session_id="s1",
+        sequence_id=1,
+        terminal_at=rejected_at,
+        last_error="false absence",
+    )
+    restored_at = now + timedelta(seconds=2)
+    assert await r.advance_trade_command_lifecycle(
+        public_id=pid,
+        expected_status="rejected",
+        new_status="accepted",
+        bus_time=restored_at,
+        session_id="s1",
+        sequence_id=1,
+        acked_at=restored_at,
+        exchange_order_id="ex-r",
+        clear_terminal_at=True,
+    )
+    later = now + timedelta(seconds=5)
+    active = await r.get_active_commands_for_exchange(exchange="kraken", as_of=later)
+    row = next(cmd for cmd in active if cmd["public_id"] == pid)
+    assert row["status"] == "accepted"
+    assert row["terminal_at"] is None
+    assert row["exchange_order_id"] == "ex-r"
+
+
+@pytest.mark.asyncio
+async def test_get_rejected_commands_with_later_live_evidence(tmp_path: Path) -> None:
+    """Resurrection candidates require live evidence AFTER the rejection.
+
+    Given: three rejected commands — one with accepted evidence after its
+        rejection event, one whose accepted evidence PRECEDES the
+        rejection, one with fill evidence and no rejection event at all —
+        plus a dispatched command,
+    When: get_rejected_commands_with_later_live_evidence runs,
+    Then: only the postdated-evidence and no-rejection-event rows return.
+    """
+    db_path = tmp_path / "cmd_resurrect.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    old = datetime.now(UTC) - timedelta(seconds=600)
+    await r.insert_trade_command(
+        _phase_e_command("cmd-res", "cid-res", status="rejected", created_at=old)
+    )
+    await r.insert_venue_event(_phase_e_event("cid-res", "order_rejected", 1))
+    await r.insert_venue_event(_phase_e_event("cid-res", "order_accepted", 2))
+    await r.insert_trade_command(
+        _phase_e_command(
+            "cmd-stale", "cid-stale", status="rejected", created_at=old + timedelta(seconds=1)
+        )
+    )
+    await r.insert_venue_event(_phase_e_event("cid-stale", "order_accepted", 3))
+    await r.insert_venue_event(_phase_e_event("cid-stale", "order_rejected", 4))
+    await r.insert_trade_command(
+        _phase_e_command(
+            "cmd-norej", "cid-norej", status="rejected", created_at=old + timedelta(seconds=2)
+        )
+    )
+    await r.insert_venue_event(_phase_e_event("cid-norej", "fill_observed", 5))
+    await r.insert_trade_command(_phase_e_command("cmd-live", "cid-live", created_at=old))
+    rows = await r.get_rejected_commands_with_later_live_evidence("kraken")
+    assert [row["client_order_id"] for row in rows] == ["cid-res", "cid-norej"]

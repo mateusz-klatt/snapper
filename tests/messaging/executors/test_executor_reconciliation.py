@@ -2,6 +2,7 @@
 
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -12,6 +13,7 @@ import httpx
 import pytest
 from loguru import logger
 
+from snapper.application.trade.command_request import order_request_from_command
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
@@ -52,11 +54,12 @@ def _make_order_snapshot(
     filled: float = 0.0,
     price: float | None = 100.0,
     status: ExchangeOrderStatusEnum = ExchangeOrderStatusEnum.OPEN,
+    client_order_id: str | None = "cid-1",
 ) -> ExchangeOrderSnapshot:
     """Build an ExchangeOrderSnapshot for testing."""
     return ExchangeOrderSnapshot(
         id=order_id,
-        client_order_id="cid-1",
+        client_order_id=client_order_id,
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
         type=ExchangeOrderTypeEnum.LIMIT,
@@ -868,3 +871,914 @@ class TestAmbiguousReconResolution:
             await ex._reconcile_with_exchange()
         assert "cid-1" not in ex._unhealed_accept_events
         ex._record_venue_event.assert_awaited_once()
+
+
+def _make_cmd_row(
+    cid: str = "cid-1",
+    *,
+    public_id: str = "cmd-1",
+    status: str = "dispatched",
+    wallet: str = "wallet-1",
+    created_at: datetime | None = None,
+    shard_key: str = "kraken.BTC-USD.live",
+) -> dict[str, Any]:
+    """Build a TradeCommandRow-shaped dict for Phase E sweep tests."""
+    now = created_at or datetime.now(UTC)
+    return {
+        "public_id": public_id,
+        "timestamp": now,
+        "session_id": "s1",
+        "sequence_id": 4,
+        "command_type": "create",
+        "shard_key": shard_key,
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "strat-1",
+        "client_order_id": cid,
+        "venue_client_id": cid,
+        "idempotency_key": None,
+        "side": "buy",
+        "order_type": "limit",
+        "quantity": 1.0,
+        "price": 100.0,
+        "leverage": None,
+        "reduce_only": False,
+        "status": status,
+        "attempt_count": 1,
+        "last_error": None,
+        "created_at": now,
+        "dispatched_at": now,
+        "acked_at": None,
+        "terminal_at": None,
+        "exchange_order_id": None,
+        "supersedes_command_id": None,
+        "correlation_id": "corr-1",
+        "wallet_public_id": wallet,
+        "operator_public_id": None,
+        "user_public_id": None,
+        "source_surface": None,
+        "plan_public_id": None,
+    }
+
+
+def _make_sweep_executor() -> Any:
+    """Build an executor wired for Phase E sweep tests."""
+    ex = _make_executor()
+    ex.wallet_public_id = "wallet-1"
+    ex.settings.trade_command_dispatch_ttl_s = 30.0
+    ex.repository = MagicMock(spec=SQLAlchemyRepository)
+    ex.repository.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
+    ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[])
+    ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(return_value=None)
+    ex.repository.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+    ex.repository.advance_trade_command_lifecycle = AsyncMock(return_value=True)
+    ex.exchange_client._log_order_to_db = AsyncMock(return_value=(7, "ord-pub-1"))
+    ex._adopt_found_order = AsyncMock()
+    ex._publish_order_status = AsyncMock(return_value=True)
+    ex._record_venue_event = AsyncMock()
+    return ex
+
+
+class TestGhostOrderAdoption:
+    """Reverse sweep over the open-orders snapshot (#145 Phase E §1c)."""
+
+    @pytest.mark.asyncio
+    async def test_own_ghost_order_is_adopted(self) -> None:
+        """An open venue order with our wallet's command is adopted.
+
+        Given: a snapshot order absent from pending_orders whose strict
+            lookup returns this wallet's dispatched create command,
+        When: the ghost sweep runs,
+        Then: a pending entry is rebuilt FROM THE COMMAND ROW (tag from
+            the shard key) and _adopt_found_order receives the snapshot.
+        """
+        ex = _make_sweep_executor()
+        cmd = _make_cmd_row(shard_key="kraken.BTC-USD.paper.momo")
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(return_value=cmd)
+        snapshot = _make_order_snapshot(order_id="ex-9")
+        adopted: set[str] = set()
+        await ex._adopt_ghost_orders([snapshot], adopted, set())
+        assert adopted == {"cid-1"}
+        assert "cid-1" in ex.pending_orders
+        order = ex.pending_orders["cid-1"].request
+        assert order.strategy_tag == "momo"
+        assert order.signaled_at == cmd["created_at"]
+        ex._adopt_found_order.assert_awaited_once()
+        assert ex._adopt_found_order.await_args.args[2] is snapshot
+
+    @pytest.mark.asyncio
+    async def test_foreign_order_warned_once_never_touched(self) -> None:
+        """An order with no command row is foreign — warn once, skip after.
+
+        Given: a snapshot order whose strict lookup returns None,
+        When: the ghost sweep runs twice,
+        Then: no adoption happens and the second pass skips the lookup.
+        """
+        ex = _make_sweep_executor()
+        snapshot = _make_order_snapshot()
+        await ex._adopt_ghost_orders([snapshot], set(), set())
+        await ex._adopt_ghost_orders([snapshot], set(), set())
+        ex._adopt_found_order.assert_not_awaited()
+        assert ex.repository.get_active_create_command_by_client_order_id.await_count == 1
+        assert "cid-1" in ex._ghost_foreign_warned
+
+    @pytest.mark.asyncio
+    async def test_other_wallet_command_is_skipped_silently(self) -> None:
+        """Another wallet's command belongs to its own executor.
+
+        Given: the strict lookup returning a command of wallet-2,
+        When: the ghost sweep runs,
+        Then: no adoption and the cid is NOT marked foreign (the owning
+            executor adopts it).
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row(wallet="wallet-2")
+        )
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        ex._adopt_found_order.assert_not_awaited()
+        assert "cid-1" not in ex._ghost_foreign_warned
+
+    @pytest.mark.asyncio
+    async def test_terminal_command_with_open_order_not_adopted(self) -> None:
+        """A durably-terminal command never re-enters live accounting.
+
+        Given: the strict lookup returning a CANCELLED command while the
+            venue order is OPEN,
+        When: the ghost sweep runs,
+        Then: the order is left for the operator (loud warning, no adopt).
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row(status="cancelled")
+        )
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        ex._adopt_found_order.assert_not_awaited()
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_adoption_cap_defers_excess(self) -> None:
+        """At most five adoptions per cycle.
+
+        Given: six own-wallet ghost orders,
+        When: the ghost sweep runs,
+        Then: five adopt and the sixth waits for the next cycle.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            side_effect=lambda cid, _ex: _make_cmd_row(cid, public_id=f"cmd-{cid}")
+        )
+        snapshots = [
+            _make_order_snapshot(order_id=f"ex-{i}", client_order_id=f"cid-{i}") for i in range(6)
+        ]
+        adopted: set[str] = set()
+        await ex._adopt_ghost_orders(snapshots, adopted, set())
+        assert len(adopted) == 5
+
+    @pytest.mark.asyncio
+    async def test_lookup_failure_retries_next_cycle(self) -> None:
+        """A failing strict lookup skips the order without state changes.
+
+        Given: the strict lookup raising (fail-closed multi-match or DB),
+        When: the ghost sweep runs,
+        Then: nothing is adopted or marked and the next cycle retries.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            side_effect=RuntimeError("multiple active")
+        )
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        ex._adopt_found_order.assert_not_awaited()
+        assert "cid-1" not in ex._ghost_foreign_warned
+
+    @pytest.mark.asyncio
+    async def test_pending_adopted_and_idless_snapshots_skipped(self) -> None:
+        """Pending entries, cycle-adopted cids and id-less orders skip.
+
+        Given: a snapshot trio — one cid already pending, one already in
+            the cycle's adopted set, one with no client id,
+        When: the ghost sweep runs,
+        Then: no lookups happen at all.
+        """
+        ex = _make_sweep_executor()
+        ex.pending_orders["cid-pending"] = _make_pending()
+        snapshots = [
+            _make_order_snapshot(client_order_id="cid-pending"),
+            _make_order_snapshot(client_order_id="cid-adopted"),
+            _make_order_snapshot(client_order_id=None),
+        ]
+        await ex._adopt_ghost_orders(snapshots, {"cid-adopted"}, set())
+        ex.repository.get_active_create_command_by_client_order_id.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_pending_recheck_blocks_double_adopt(self) -> None:
+        """The recheck right before adoption wins over a stale candidate.
+
+        Given: a lookup whose await window races a pending-entry insert
+            for the same cid (the in-flight order handler landed it),
+        When: the ghost sweep runs,
+        Then: no second adoption happens.
+        """
+        ex = _make_sweep_executor()
+
+        async def _lookup_and_race(cid: str, _exchange: str) -> dict[str, Any]:
+            ex.pending_orders[cid] = _make_pending()
+            return _make_cmd_row(cid)
+
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            side_effect=_lookup_and_race
+        )
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        ex._adopt_found_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_plain_repository_disables_sweep(self) -> None:
+        """A non-SQL repository (paper/test) disables the sweep cleanly.
+
+        Given: an executor with a plain MagicMock repository,
+        When: the ghost sweep runs,
+        Then: nothing happens.
+        """
+        ex = _make_executor()
+        ex._adopt_found_order = AsyncMock()
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        ex._adopt_found_order.assert_not_awaited()
+
+
+class TestDispatchedVerification:
+    """Durable-plane verification sweep (#145 Phase E §1d)."""
+
+    @pytest.mark.asyncio
+    async def test_found_command_is_adopted(self) -> None:
+        """A venue-found unresolved command adopts via the command row.
+
+        Given: one unresolved dispatched command and a venue lookup
+            returning a snapshot,
+        When: the verification sweep runs,
+        Then: a pending entry is created and _adopt_found_order runs;
+            the absence counter clears.
+        """
+        ex = _make_sweep_executor()
+        cmd = _make_cmd_row()
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[cmd])
+        snapshot = _make_order_snapshot(order_id="ex-7")
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=snapshot)
+        ex._dispatched_absence_counts["cid-1"] = 1
+        await ex._verify_unresolved_dispatched(set())
+        assert "cid-1" in ex.pending_orders
+        ex._adopt_found_order.assert_awaited_once()
+        assert "cid-1" not in ex._dispatched_absence_counts
+
+    @pytest.mark.asyncio
+    async def test_single_absence_only_counts(self) -> None:
+        """One authoritative absence is not enough to reject.
+
+        Given: a venue lookup returning None once,
+        When: the verification sweep runs,
+        Then: the absence counter is 1 and nothing publishes.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        await ex._verify_unresolved_dispatched(set())
+        assert ex._dispatched_absence_counts["cid-1"] == 1
+        ex._publish_order_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_double_absence_rejects_publish_first(self) -> None:
+        """Two consecutive absences reject with publish-before-record.
+
+        Given: a young command verified absent for the second time,
+        When: the verification sweep runs,
+        Then: REJECTED publishes, the order_rejected row records AFTER,
+            and the counter clears.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        ex._dispatched_absence_counts["cid-1"] = 1
+        await ex._verify_unresolved_dispatched(set())
+        ex._publish_order_status.assert_awaited_once()
+        event = ex._record_venue_event.await_args.args[0]
+        assert event["event_type"] == "order_rejected"
+        assert "cid-1" not in ex._dispatched_absence_counts
+
+    @pytest.mark.asyncio
+    async def test_failed_publish_writes_no_terminal_event(self) -> None:
+        """A failed REJECTED publish never records a terminal row.
+
+        Given: the second absence with a publisher returning False,
+        When: the verification sweep runs,
+        Then: NO venue event is written and the absence state survives
+            so the next cycle retries the release (a premature terminal
+            row would strand the engine guard forever).
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        ex._publish_order_status = AsyncMock(return_value=False)
+        ex._dispatched_absence_counts["cid-1"] = 1
+        await ex._verify_unresolved_dispatched(set())
+        ex._record_venue_event.assert_not_awaited()
+        assert ex._dispatched_absence_counts["cid-1"] == 2
+
+    @pytest.mark.asyncio
+    async def test_old_command_gets_warn_only(self) -> None:
+        """Absence stops being authoritative past the age bound.
+
+        Given: a command older than an hour verified absent twice,
+        When: the verification sweep runs,
+        Then: no publish and no terminal event — operator escalation only.
+        """
+        ex = _make_sweep_executor()
+        old_cmd = _make_cmd_row(created_at=datetime.now(UTC) - timedelta(seconds=7200))
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[old_cmd])
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        ex._dispatched_absence_counts["cid-1"] = 1
+        await ex._verify_unresolved_dispatched(set())
+        ex._publish_order_status.assert_not_awaited()
+        ex._record_venue_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_record_failure_keeps_state_for_retry(self) -> None:
+        """A failed durable write after a confirmed publish stays retryable.
+
+        Given: the second absence where the publish confirms but the
+            order_rejected write raises,
+        When: the verification sweep runs,
+        Then: the counter survives so the sweep re-verifies (duplicate
+            REJECTED publishes are engine-idempotent).
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        ex._dispatched_absence_counts["cid-1"] = 1
+        await ex._verify_unresolved_dispatched(set())
+        assert ex._dispatched_absence_counts["cid-1"] == 2
+
+    @pytest.mark.asyncio
+    async def test_unsupported_venue_logs_once_and_skips(self) -> None:
+        """A venue without client-id lookup disables the sweep quietly.
+
+        Given: find_order_by_client_id raising NotImplementedError,
+        When: the verification sweep runs twice,
+        Then: nothing publishes and the one-time flag is set.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        ex.exchange_client.find_order_by_client_id = AsyncMock(side_effect=NotImplementedError())
+        await ex._verify_unresolved_dispatched(set())
+        await ex._verify_unresolved_dispatched(set())
+        assert ex._verify_unsupported_logged is True
+        ex._publish_order_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_lookup_error_leaves_counter_untouched(self) -> None:
+        """A transient lookup failure neither counts nor resets absence.
+
+        Given: a lookup raising a network error,
+        When: the verification sweep runs,
+        Then: the existing absence counter value is preserved.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            side_effect=RuntimeError("venue down")
+        )
+        ex._dispatched_absence_counts["cid-1"] = 1
+        await ex._verify_unresolved_dispatched(set())
+        assert ex._dispatched_absence_counts["cid-1"] == 1
+
+    @pytest.mark.asyncio
+    async def test_fairness_cap_and_rotation(self) -> None:
+        """At most three verifications per cycle with rotating start.
+
+        Given: four unresolved commands and a venue answering absence,
+        When: one verification sweep runs,
+        Then: exactly three lookups happen and the rotation offset moves.
+        """
+        ex = _make_sweep_executor()
+        cmds = [_make_cmd_row(f"cid-{i}", public_id=f"cmd-{i}") for i in range(4)]
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=cmds)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        await ex._verify_unresolved_dispatched(set())
+        assert ex.exchange_client.find_order_by_client_id.await_count == 3
+        assert ex._dispatched_rotation_offset == 3
+
+    @pytest.mark.asyncio
+    async def test_resolved_cids_drop_stale_counters(self) -> None:
+        """Counters of cids that left the candidate set are dropped.
+
+        Given: an absence counter for a cid that no longer appears in
+            the unresolved query (evidence landed elsewhere),
+        When: the verification sweep runs,
+        Then: the stale counter is removed.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[])
+        ex._dispatched_absence_counts["cid-gone"] = 1
+        await ex._verify_unresolved_dispatched(set())
+        assert "cid-gone" not in ex._dispatched_absence_counts
+
+    @pytest.mark.asyncio
+    async def test_pending_and_adopted_cids_excluded(self) -> None:
+        """In-memory-tracked and cycle-adopted cids are not re-verified.
+
+        Given: unresolved rows whose cids are pending or just adopted,
+        When: the verification sweep runs,
+        Then: no venue lookups happen.
+        """
+        ex = _make_sweep_executor()
+        ex.pending_orders["cid-pending"] = _make_pending()
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(
+            return_value=[
+                _make_cmd_row("cid-pending"),
+                _make_cmd_row("cid-adopted", public_id="cmd-2"),
+            ]
+        )
+        await ex._verify_unresolved_dispatched({"cid-adopted"})
+        ex.exchange_client.find_order_by_client_id.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_query_failure_retries_next_cycle(self) -> None:
+        """A failing unresolved query aborts the sweep cleanly.
+
+        Given: the repository query raising,
+        When: the verification sweep runs,
+        Then: no lookups happen and nothing raises.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        await ex._verify_unresolved_dispatched(set())
+        ex.exchange_client.find_order_by_client_id.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_found_with_concurrent_pending_recheck_skips(self) -> None:
+        """The pre-adoption recheck blocks a racing pending insert.
+
+        Given: a FOUND verification whose lookup await raced a pending
+            insert for the same cid,
+        When: the per-command verification runs,
+        Then: no adoption happens.
+        """
+        ex = _make_sweep_executor()
+        cmd = _make_cmd_row()
+
+        async def _find_and_race(cid: str, _instrument: str) -> Any:
+            ex.pending_orders[cid] = _make_pending()
+            return _make_order_snapshot()
+
+        ex.exchange_client.find_order_by_client_id = AsyncMock(side_effect=_find_and_race)
+        await ex._verify_one_dispatched_command(cmd)
+        ex._adopt_found_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_exchange_client_is_noop(self) -> None:
+        """A client-less executor skips per-command verification.
+
+        Given: exchange_client is None,
+        When: the per-command verification runs directly,
+        Then: nothing happens.
+        """
+        ex = _make_sweep_executor()
+        ex.exchange_client = None
+        await ex._verify_one_dispatched_command(_make_cmd_row())
+        ex._publish_order_status.assert_not_awaited()
+
+
+class TestGhostAdoptionHardening:
+    """Round-2 review fixes: false-reject heal, stale snapshot, watermarks."""
+
+    @pytest.mark.asyncio
+    async def test_rejected_command_found_open_is_healed(self) -> None:
+        """A falsely-rejected command found OPEN adopts and restores.
+
+        Given: the strict lookup returning a REJECTED command while the
+            venue shows the order OPEN (false absence rejection),
+        When: the ghost sweep runs,
+        Then: the order is adopted AND the durable row is CAS'd back to
+            ACCEPTED with the venue order id.
+        """
+        ex = _make_sweep_executor()
+        cmd = _make_cmd_row(status="rejected")
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(return_value=cmd)
+        snapshot = _make_order_snapshot(order_id="ex-9")
+        await ex._adopt_ghost_orders([snapshot], set(), set())
+        ex._adopt_found_order.assert_awaited_once()
+        kwargs = ex.repository.advance_trade_command_lifecycle.await_args.kwargs
+        assert kwargs["expected_status"] == "rejected"
+        assert kwargs["new_status"] == "accepted"
+        assert kwargs["exchange_order_id"] == "ex-9"
+        assert kwargs["clear_terminal_at"] is True
+        assert "cmd-1" not in ex._pending_rejected_restores
+
+    @pytest.mark.asyncio
+    async def test_non_rejected_terminal_still_refused(self) -> None:
+        """Only REJECTED has the healing valve; others stay refused.
+
+        Given: a CANCELLED command with an OPEN venue order,
+        When: the ghost sweep runs,
+        Then: no adoption and no restore CAS.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row(status="cancelled")
+        )
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        ex._adopt_found_order.assert_not_awaited()
+        ex.repository.advance_trade_command_lifecycle.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pending_at_snapshot_cid_is_skipped(self) -> None:
+        """A cid pending at snapshot time never adopts from that snapshot.
+
+        Given: an order present in the (stale) snapshot whose pending
+            entry was popped mid-cycle by a live fill,
+        When: the ghost sweep runs with the snapshot-time pending set,
+        Then: no lookup and no adoption — the next cycle's fresh
+            snapshot decides.
+        """
+        ex = _make_sweep_executor()
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), {"cid-1"})
+        ex.repository.get_active_create_command_by_client_order_id.assert_not_awaited()
+        ex._adopt_found_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_adoption_seeds_watermarks_from_durable_fills(self) -> None:
+        """Durable fill history seeds the adopted entry's watermarks.
+
+        Given: a ghost order whose cid has a durable max-cum fill row,
+        When: the ghost sweep adopts it,
+        Then: both cumulative watermarks start at the durable maximum so
+            the fill-gap pass cannot re-emit the whole history.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row()
+        )
+        ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(
+            return_value={"cum_fill_size": 0.6}
+        )
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        pending = ex.pending_orders["cid-1"]
+        assert pending.last_seen_cum_qty == 0.6
+        assert pending.last_recorded_cum_qty == 0.6
+
+    @pytest.mark.asyncio
+    async def test_watermark_seed_failure_defers_adoption(self) -> None:
+        """A failed seed read defers the adoption — FAIL-CLOSED.
+
+        Given: the max-cum read raising,
+        When: the ghost sweep runs,
+        Then: NO adoption happens this cycle (an untrusted zero
+            watermark could double-book already-published fills) and
+            the next cycle retries.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row()
+        )
+        ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        assert "cid-1" not in ex.pending_orders
+        ex._adopt_found_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_dispatched_found_seed_failure_defers_adoption(self) -> None:
+        """The dispatched FOUND path is equally fail-closed on seeding.
+
+        Given: a venue-found unresolved command whose max-cum read raises,
+        When: the per-command verification runs,
+        Then: no adoption and the absence counter survives untouched.
+        """
+        ex = _make_sweep_executor()
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=_make_order_snapshot())
+        ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        ex._dispatched_absence_counts["cid-1"] = 1
+        await ex._verify_one_dispatched_command(_make_cmd_row())
+        assert "cid-1" not in ex.pending_orders
+        ex._adopt_found_order.assert_not_awaited()
+        assert "cid-1" not in ex._dispatched_absence_counts
+
+    @pytest.mark.asyncio
+    async def test_found_with_seed_failure_resets_absence_streak(self) -> None:
+        """A live observation breaks the absence streak even on seed failure.
+
+        Given: an absence count of 1, then a FOUND verification whose
+            watermark seed fails (adoption deferred), then a fresh
+            absence,
+        When: the verifications run in sequence,
+        Then: the fresh absence counts as 1 — never 2 — so no REJECT can
+            fire right after the order was observed live.
+        """
+        ex = _make_sweep_executor()
+        cmd = _make_cmd_row()
+        ex._dispatched_absence_counts["cid-1"] = 1
+        ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=_make_order_snapshot())
+        await ex._verify_one_dispatched_command(cmd)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        await ex._verify_one_dispatched_command(cmd)
+        assert ex._dispatched_absence_counts["cid-1"] == 1
+        ex._publish_order_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_restore_failure_queues_and_recon_retries(self) -> None:
+        """A failed restore CAS survives in the retry queue.
+
+        Given: a rejected-found-open adoption whose restore CAS raises
+            inline,
+        When: the next recon cycle's DB-only sweep runs with a healthy
+            repository,
+        Then: the restore is retried and the queue entry clears.
+        """
+        ex = _make_sweep_executor()
+        cmd = _make_cmd_row(status="rejected")
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(return_value=cmd)
+        ex.repository.advance_trade_command_lifecycle = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        await ex._adopt_ghost_orders([_make_order_snapshot(order_id="ex-9")], set(), set())
+        assert "cmd-1" in ex._pending_rejected_restores
+        ex.repository.advance_trade_command_lifecycle = AsyncMock(return_value=True)
+        await ex._retry_rejected_restore("cmd-1")
+        assert "cmd-1" not in ex._pending_rejected_restores
+        kwargs = ex.repository.advance_trade_command_lifecycle.await_args.kwargs
+        assert kwargs["exchange_order_id"] == "ex-9"
+        assert kwargs["clear_terminal_at"] is True
+
+    @pytest.mark.asyncio
+    async def test_restore_lost_cas_still_rejected_keeps_queue(self) -> None:
+        """A lost CAS with the row STILL rejected keeps retrying.
+
+        Given: a queued restore whose CAS returns False while the
+            current status re-reads as rejected,
+        When: the retry runs,
+        Then: the queue entry survives for the next cycle.
+        """
+        ex = _make_sweep_executor()
+        ex._pending_rejected_restores["cmd-1"] = _make_cmd_row(status="rejected")
+        ex.repository.advance_trade_command_lifecycle = AsyncMock(return_value=False)
+        ex.repository.get_current_trade_command_status = AsyncMock(return_value="rejected")
+        await ex._retry_rejected_restore("cmd-1")
+        assert "cmd-1" in ex._pending_rejected_restores
+
+    @pytest.mark.asyncio
+    async def test_restore_lost_cas_row_moved_clears_queue(self) -> None:
+        """A lost CAS whose row moved on is verified done.
+
+        Given: a queued restore whose CAS returns False and the current
+            status re-reads as accepted (another writer fixed it),
+        When: the retry runs,
+        Then: the queue entry clears.
+        """
+        ex = _make_sweep_executor()
+        ex._pending_rejected_restores["cmd-1"] = _make_cmd_row(status="rejected")
+        ex.repository.advance_trade_command_lifecycle = AsyncMock(return_value=False)
+        ex.repository.get_current_trade_command_status = AsyncMock(return_value="accepted")
+        await ex._retry_rejected_restore("cmd-1")
+        assert "cmd-1" not in ex._pending_rejected_restores
+
+    @pytest.mark.asyncio
+    async def test_restore_retry_unknown_key_is_noop(self) -> None:
+        """A retry for an already-cleared restore key is harmless.
+
+        Given: no queued restore for the public id,
+        When: the retry runs,
+        Then: nothing is written.
+        """
+        ex = _make_sweep_executor()
+        await ex._retry_rejected_restore("ghost-cmd")
+        ex.repository.advance_trade_command_lifecycle.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_foreign_warned_set_is_lru_bounded(self) -> None:
+        """The warned-foreign cid set cannot grow unbounded.
+
+        Given: more foreign cids than the LRU bound,
+        When: each is marked warned,
+        Then: the set size stays at the bound and the oldest fall out.
+        """
+        ex = _make_sweep_executor()
+        for i in range(600):
+            ex._mark_foreign_order_warned(f"cid-{i}")
+        assert len(ex._ghost_foreign_warned) == 512
+        assert "cid-0" not in ex._ghost_foreign_warned
+        assert "cid-599" in ex._ghost_foreign_warned
+
+
+class TestSweepTtlGating:
+    """The verification sweep derives its bounds from the dispatch TTL."""
+
+    @pytest.mark.asyncio
+    async def test_disabled_ttl_blocks_absence_reject(self) -> None:
+        """With the TTL disabled, absence may never auto-REJECT.
+
+        Given: trade_command_dispatch_ttl_s = 0 (frames never expire) and
+            a command verified absent for the second time,
+        When: the verification sweep runs,
+        Then: WARN-only — no publish, no terminal event (a late frame
+            could still legally arrive and submit).
+        """
+        ex = _make_sweep_executor()
+        ex.settings.trade_command_dispatch_ttl_s = 0.0
+        ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        ex._dispatched_absence_counts["cid-1"] = 1
+        await ex._verify_unresolved_dispatched(set())
+        ex._publish_order_status.assert_not_awaited()
+        ex._record_venue_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cutoff_scales_with_configured_ttl(self) -> None:
+        """A TTL above the floor pushes the sweep cutoff out to 2x TTL.
+
+        Given: trade_command_dispatch_ttl_s = 120,
+        When: the verification sweep queries its candidates,
+        Then: the cutoff is at least 240 seconds in the past — a frame
+            still legitimately deliverable under the TTL can never be
+            absence-verified.
+        """
+        ex = _make_sweep_executor()
+        ex.settings.trade_command_dispatch_ttl_s = 120.0
+        await ex._verify_unresolved_dispatched(set())
+        cutoff = ex.repository.get_unresolved_dispatched_commands.await_args.args[2]
+        assert (datetime.now(UTC) - cutoff).total_seconds() >= 239.0
+
+
+class TestAdoptedOrderRowRepair:
+    """Adoption repairs the durable orders row when it is missing."""
+
+    @pytest.mark.asyncio
+    async def test_missing_row_is_repaired_on_adoption(self) -> None:
+        """A ghost adoption without an active orders row writes one.
+
+        Given: no active orders row for the adopted cid,
+        When: the ghost sweep adopts,
+        Then: _log_order_to_db runs and the pending entry carries the
+            repaired db ids (restart recovery re-arms from that row).
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row()
+        )
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        ex.exchange_client._log_order_to_db.assert_awaited_once()
+        pending = ex.pending_orders["cid-1"]
+        assert pending.db_order_id == 7
+        assert pending.order_public_id == "ord-pub-1"
+
+    @pytest.mark.asyncio
+    async def test_existing_row_is_not_duplicated(self) -> None:
+        """An already-present orders row is left alone.
+
+        Given: an active orders row exists for the cid,
+        When: the ghost sweep adopts,
+        Then: no second insert happens.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row()
+        )
+        ex.repository.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        ex.exchange_client._log_order_to_db.assert_not_awaited()
+        ex._adopt_found_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_repair_failure_never_blocks_adoption(self) -> None:
+        """A failing row repair is best-effort — adoption proceeds.
+
+        Given: the existence probe raising,
+        When: the ghost sweep adopts,
+        Then: the adoption completes with no db ids.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row()
+        )
+        ex.repository.get_exchange_order_id_for_client_order_id = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        ex._adopt_found_order.assert_awaited_once()
+        assert ex.pending_orders["cid-1"].db_order_id is None
+
+
+class TestReconstructionFailureIsolation:
+    """A malformed command row cannot wedge the recon cycle."""
+
+    @pytest.mark.asyncio
+    async def test_ghost_adoption_skips_unreconstructable_command(self) -> None:
+        """A vocabulary-mismatched row skips adoption, not the cycle.
+
+        Given: a command row whose order_type is an exchange-wire value
+            the dispatch schema rejects (the pre-existing stop-order
+            pipeline bug),
+        When: the ghost sweep runs,
+        Then: the order is skipped with an ERROR log and no exception
+            escapes to abort the rest of the cycle.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row(public_id="cmd-stop")
+        )
+        ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(return_value=None)
+        bad = _make_cmd_row(public_id="cmd-stop")
+        bad["order_type"] = "stop-loss"
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(return_value=bad)
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        ex._adopt_found_order.assert_not_awaited()
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_dispatched_verification_skips_unreconstructable_command(self) -> None:
+        """The verification sweep is equally isolated per command.
+
+        Given: an unresolved dispatched row with a vocabulary-mismatched
+            order_type and a venue answering FOUND,
+        When: the per-command verification runs,
+        Then: it returns without adopting and without raising.
+        """
+        ex = _make_sweep_executor()
+        bad = _make_cmd_row(public_id="cmd-stop")
+        bad["order_type"] = "stop-loss"
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=_make_order_snapshot())
+        await ex._verify_one_dispatched_command(bad)
+        ex._adopt_found_order.assert_not_awaited()
+
+
+class TestPhaseECoverageEdges:
+    """Edge branches of the E2 helpers."""
+
+    @pytest.mark.asyncio
+    async def test_recon_cycle_drives_queued_restores(self) -> None:
+        """The recon cycle replays the rejected-restore queue.
+
+        Given: a queued restore and a healthy repository,
+        When: one reconciliation cycle runs,
+        Then: the restore CAS is attempted before venue work.
+        """
+        ex = _make_sweep_executor()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        ex._pending_rejected_restores["cmd-1"] = _make_cmd_row(status="rejected")
+        await ex._reconcile_with_exchange()
+        ex.repository.advance_trade_command_lifecycle.assert_awaited_once()
+        assert "cmd-1" not in ex._pending_rejected_restores
+
+    @pytest.mark.asyncio
+    async def test_row_repair_without_exchange_client_is_noop(self) -> None:
+        """Row repair needs a venue client for the log seam.
+
+        Given: an executor whose exchange_client is None,
+        When: _repair_adopted_order_row runs directly,
+        Then: nothing is probed or written.
+        """
+        ex = _make_sweep_executor()
+        cmd = _make_cmd_row()
+        order = order_request_from_command(cmd)
+        pending = PendingOrderState(request=order)
+        ex.exchange_client = None
+        await ex._repair_adopted_order_row(order, _make_order_snapshot(), pending)
+        ex.repository.get_exchange_order_id_for_client_order_id.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_row_repair_logging_miss_leaves_ids_unset(self) -> None:
+        """A None from the order-log seam keeps the entry id-less.
+
+        Given: _log_order_to_db returning None (repository off or write
+            failed inside the never-raises seam),
+        When: the ghost sweep adopts,
+        Then: adoption proceeds with db ids unset.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row()
+        )
+        ex.exchange_client._log_order_to_db = AsyncMock(return_value=None)
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        assert ex.pending_orders["cid-1"].db_order_id is None
+        ex._adopt_found_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_watermark_seed_with_plain_repository_is_trusted(self) -> None:
+        """A non-SQL repository trusts the zero watermarks (paper/tests).
+
+        Given: an executor with a plain MagicMock repository,
+        When: _seed_adoption_watermarks runs directly,
+        Then: it returns True without any read.
+        """
+        ex = _make_executor()
+        pending = PendingOrderState(request=order_request_from_command(_make_cmd_row()))
+        assert await ex._seed_adoption_watermarks(pending, "cid-1") is True

@@ -483,6 +483,22 @@ warning forever about rows stuck at ``dispatched``. Superset of
 differently.
 """
 _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE = 300
+_ORDER_RESOLVING_EVENT_TYPES: tuple[str, ...] = (
+    "order_accepted",
+    "order_rejected",
+    "order_terminal",
+    "fill_observed",
+    "order_breaker_open",
+)
+"""Venue event types that RESOLVE a dispatched command's fate.
+
+The executor's dispatched-verification sweep targets commands with NONE
+of these: a lone ``order_submit_unknown`` does NOT resolve (those are
+exactly the restart-lost parked entries the sweep must re-verify), and
+``order_rejected`` DOES (rejecting again on stale absence evidence after
+a legal retry would race the retry's own lifecycle).
+"""
+_LIFECYCLE_FOLD_COMMAND_TYPES: tuple[str, ...] = ("create", "submit")
 _CandleNaturalKey = tuple[str, str, datetime]
 _EquityRepairKey = tuple[str, datetime]
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
@@ -7732,6 +7748,7 @@ class SQLAlchemyRepository(Repository):
         exchange_order_id: str | None = None,
         terminal_at: datetime | None = None,
         last_error: str | None = None,
+        clear_terminal_at: bool = False,
     ) -> bool:
         """SCD2 CAS advancing a command with venue-evidenced lifecycle fields.
 
@@ -7743,9 +7760,12 @@ class SQLAlchemyRepository(Repository):
         the ack-time fields the original CAS cannot express: ``acked_at`` and
         ``exchange_order_id`` override the successor row when provided and
         are carried forward from the existing row when ``None``.
-        ``terminal_at`` keeps the same carry-forward rule; ``last_error`` is
-        written verbatim (``None`` CLEARS a previous error — an advance to a
-        healthy lifecycle state supersedes stale dispatch errors, mirroring
+        ``terminal_at`` keeps the same carry-forward rule unless
+        ``clear_terminal_at`` is set (the false-absence-rejection restore
+        must NULL the stale terminal stamp when resurrecting
+        ``rejected -> accepted``); ``last_error`` is written verbatim
+        (``None`` CLEARS a previous error — an advance to a healthy
+        lifecycle state supersedes stale dispatch errors, mirroring
         ``bulk_dispatch_trade_commands``). Returns ``True`` iff the
         transition was applied.
         """
@@ -7795,7 +7815,11 @@ class SQLAlchemyRepository(Repository):
                     created_at=existing.created_at,
                     dispatched_at=existing.dispatched_at,
                     acked_at=acked_at if acked_at is not None else existing.acked_at,
-                    terminal_at=terminal_at if terminal_at is not None else existing.terminal_at,
+                    terminal_at=(
+                        None
+                        if clear_terminal_at
+                        else (terminal_at if terminal_at is not None else existing.terminal_at)
+                    ),
                     exchange_order_id=(
                         exchange_order_id
                         if exchange_order_id is not None
@@ -8097,47 +8121,198 @@ class SQLAlchemyRepository(Repository):
                 )
                 .order_by(TradeCommand.created_at)
             )
-            rows: list[TradeCommandRow] = []
-            for cmd in result.scalars().all():
-                rows.append(
-                    {
-                        "public_id": cmd.public_id,
-                        "timestamp": cmd.timestamp,
-                        "session_id": cmd.session_id,
-                        "sequence_id": cmd.sequence_id,
-                        "command_type": cmd.command_type,
-                        "shard_key": cmd.shard_key,
-                        "exchange": cmd.exchange,
-                        "instrument": cmd.instrument,
-                        "mode": cmd.mode,
-                        "strategy_id": cmd.strategy_id,
-                        "client_order_id": cmd.client_order_id,
-                        "venue_client_id": cmd.venue_client_id,
-                        "idempotency_key": cmd.idempotency_key,
-                        "side": cmd.side,
-                        "order_type": cmd.order_type,
-                        "quantity": cmd.quantity,
-                        "price": cmd.price,
-                        "leverage": cmd.leverage,
-                        "reduce_only": cmd.reduce_only,
-                        "status": cmd.status,
-                        "attempt_count": cmd.attempt_count,
-                        "last_error": cmd.last_error,
-                        "created_at": cmd.created_at,
-                        "dispatched_at": cmd.dispatched_at,
-                        "acked_at": cmd.acked_at,
-                        "terminal_at": cmd.terminal_at,
-                        "exchange_order_id": cmd.exchange_order_id,
-                        "supersedes_command_id": cmd.supersedes_command_id,
-                        "correlation_id": cmd.correlation_id,
-                        "wallet_public_id": cmd.wallet_public_id,
-                        "operator_public_id": cmd.operator_public_id,
-                        "user_public_id": cmd.user_public_id,
-                        "source_surface": cmd.source_surface,
-                        "plan_public_id": cmd.plan_public_id,
-                    }
+            return [self._trade_command_to_row(cmd) for cmd in result.scalars().all()]
+
+    @staticmethod
+    def _trade_command_to_row(cmd: TradeCommand) -> TradeCommandRow:
+        """Project a TradeCommand ORM row into the TradeCommandRow TypedDict shape."""
+        return {
+            "public_id": cmd.public_id,
+            "timestamp": cmd.timestamp,
+            "session_id": cmd.session_id,
+            "sequence_id": cmd.sequence_id,
+            "command_type": cmd.command_type,
+            "shard_key": cmd.shard_key,
+            "exchange": cmd.exchange,
+            "instrument": cmd.instrument,
+            "mode": cmd.mode,
+            "strategy_id": cmd.strategy_id,
+            "client_order_id": cmd.client_order_id,
+            "venue_client_id": cmd.venue_client_id,
+            "idempotency_key": cmd.idempotency_key,
+            "side": cmd.side,
+            "order_type": cmd.order_type,
+            "quantity": cmd.quantity,
+            "price": cmd.price,
+            "leverage": cmd.leverage,
+            "reduce_only": cmd.reduce_only,
+            "status": cmd.status,
+            "attempt_count": cmd.attempt_count,
+            "last_error": cmd.last_error,
+            "created_at": cmd.created_at,
+            "dispatched_at": cmd.dispatched_at,
+            "acked_at": cmd.acked_at,
+            "terminal_at": cmd.terminal_at,
+            "exchange_order_id": cmd.exchange_order_id,
+            "supersedes_command_id": cmd.supersedes_command_id,
+            "correlation_id": cmd.correlation_id,
+            "wallet_public_id": cmd.wallet_public_id,
+            "operator_public_id": cmd.operator_public_id,
+            "user_public_id": cmd.user_public_id,
+            "source_surface": cmd.source_surface,
+            "plan_public_id": cmd.plan_public_id,
+        }
+
+    async def get_active_create_command_by_client_order_id(
+        self, client_order_id: str, exchange: str
+    ) -> TradeCommandRow | None:
+        """Strict create/submit command lookup for executor adoption sweeps.
+
+        ``client_order_id`` is NOT unique on trade_commands — cancel
+        commands deliberately share the original order's cid — so this
+        targets the active SCD2 row (``known_to == KNOWN_TO_MAX``) of
+        create/submit types only, scoped to the exchange. Fail-closed
+        contract: more than one active match means the idempotency
+        invariants are broken and adopting ANY of them could attribute
+        venue state to the wrong command, so it raises instead of
+        guessing.
+
+        Args:
+            client_order_id: The venue client id observed on the order.
+            exchange: The executor's exchange name.
+
+        Returns:
+            The active command row, or ``None`` when no create/submit
+            command exists for the cid.
+
+        Raises:
+            RuntimeError: When multiple active create/submit rows match.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeCommand).where(
+                    TradeCommand.client_order_id == client_order_id,
+                    TradeCommand.exchange == exchange,
+                    TradeCommand.command_type.in_(_LIFECYCLE_FOLD_COMMAND_TYPES),
+                    TradeCommand.known_to == KNOWN_TO_MAX,
                 )
-            return rows
+            )
+            rows = result.scalars().all()
+            if not rows:
+                return None
+            if len(rows) > 1:
+                raise RuntimeError(
+                    f"multiple active create/submit commands for client_order_id "
+                    f"{client_order_id} on {exchange} ({len(rows)} rows) — refusing "
+                    f"to adopt ambiguously"
+                )
+            return self._trade_command_to_row(rows[0])
+
+    async def get_unresolved_dispatched_commands(
+        self, exchange: str, wallet_public_id: str, older_than: datetime
+    ) -> list[TradeCommandRow]:
+        """Dispatched create/submit commands with no resolving venue evidence.
+
+        The executor's verification sweep's work queue: active rows in
+        ``dispatched``/``direct_dispatched`` older than the cutoff with
+        NO ``_ORDER_RESOLVING_EVENT_TYPES`` row for their cid (NOT
+        EXISTS anti-join). A lone ``order_submit_unknown`` does not
+        exempt — those are exactly the restart-lost parked entries the
+        sweep must re-verify against the venue. Scoped to the
+        executor's wallet: another wallet's commands belong to its own
+        executor. Ordered ``(created_at, id)`` for stable rotation.
+
+        Args:
+            exchange: The executor's exchange name.
+            wallet_public_id: The executor's wallet.
+            older_than: Only commands created strictly before this.
+
+        Returns:
+            Ordered unresolved command rows.
+        """
+        evidence_exists = (
+            select(VenueEvent.id)
+            .where(
+                VenueEvent.client_order_id == TradeCommand.client_order_id,
+                VenueEvent.event_type.in_(_ORDER_RESOLVING_EVENT_TYPES),
+            )
+            .exists()
+        )
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeCommand)
+                .where(
+                    TradeCommand.exchange == exchange,
+                    TradeCommand.wallet_public_id == wallet_public_id,
+                    TradeCommand.command_type.in_(_LIFECYCLE_FOLD_COMMAND_TYPES),
+                    TradeCommand.status.in_(
+                        (
+                            TradeCommandStatusEnum.DISPATCHED,
+                            TradeCommandStatusEnum.DIRECT_DISPATCHED,
+                        )
+                    ),
+                    TradeCommand.known_to == KNOWN_TO_MAX,
+                    TradeCommand.created_at < older_than,
+                    ~evidence_exists,
+                )
+                .order_by(TradeCommand.created_at, TradeCommand.id)
+            )
+            return [self._trade_command_to_row(cmd) for cmd in result.scalars().all()]
+
+    async def get_rejected_commands_with_later_live_evidence(
+        self, exchange: str, limit: int = 20
+    ) -> list[TradeCommandRow]:
+        """REJECTED create/submit commands whose cid shows LATER live evidence.
+
+        The durable resurrection backstop for false absence rejections
+        (#145 Phase E): a command can be durably REJECTED (stale gate,
+        dispatched-verification sweep, fold) and only later prove alive —
+        an ``order_accepted`` or ``fill_observed`` row with an id GREATER
+        than the cid's latest ``order_rejected`` event. The executor's
+        in-memory restore queue heals the common case; this query makes
+        the heal restart-proof — the ReconciliationLoop resurrects such
+        rows to ACCEPTED so the lifecycle fold can re-derive their true
+        state. Bounded by ``limit`` per cycle.
+
+        Args:
+            exchange: Exchange name to scan.
+            limit: Maximum rows per call.
+
+        Returns:
+            Matching command rows ordered by created_at.
+        """
+        latest_rejection = (
+            select(func.coalesce(func.max(VenueEvent.id), 0))
+            .where(
+                VenueEvent.client_order_id == TradeCommand.client_order_id,
+                VenueEvent.event_type == "order_rejected",
+            )
+            .correlate(TradeCommand)
+            .scalar_subquery()
+        )
+        live_after_rejection = (
+            select(VenueEvent.id)
+            .where(
+                VenueEvent.client_order_id == TradeCommand.client_order_id,
+                VenueEvent.event_type.in_(("order_accepted", "fill_observed")),
+                VenueEvent.id > latest_rejection,
+            )
+            .exists()
+        )
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeCommand)
+                .where(
+                    TradeCommand.exchange == exchange,
+                    TradeCommand.command_type.in_(_LIFECYCLE_FOLD_COMMAND_TYPES),
+                    TradeCommand.status == TradeCommandStatusEnum.REJECTED,
+                    TradeCommand.known_to == KNOWN_TO_MAX,
+                    live_after_rejection,
+                )
+                .order_by(TradeCommand.created_at)
+                .limit(limit)
+            )
+            return [self._trade_command_to_row(cmd) for cmd in result.scalars().all()]
 
     async def insert_venue_event(self, row: VenueEventInsertRow) -> int:
         """Insert a venue event and return its local_seq.

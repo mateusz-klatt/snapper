@@ -6907,6 +6907,28 @@ class TestStaleCommandGate:
         assert order.client_order_id not in ex.pending_orders
 
     @pytest.mark.asyncio
+    async def test_stale_reject_publish_failure_writes_no_terminal_event(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed REJECTED publish never records the terminal row.
+
+        Given: A stale frame with verified venue absence whose REJECTED
+            publish returns False,
+        When: _process_order runs,
+        Then: The frame is consumed WITHOUT an order_rejected venue
+            event — a terminal row before a confirmed publish would
+            exempt the command from the dispatched-verification sweep
+            while the engine guard stays held forever.
+        """
+        ex = self._executor(monkeypatch)
+        ex._publish_order_status = AsyncMock(return_value=False)
+        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        await ex._process_order(order)
+        ex._record_venue_event.assert_not_awaited()
+        ex._execute_live_order.assert_not_awaited()
+        assert order.client_order_id not in ex.pending_orders
+
+    @pytest.mark.asyncio
     async def test_fresh_frame_proceeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A frame inside the TTL submits normally."""
         ex = self._executor(monkeypatch)

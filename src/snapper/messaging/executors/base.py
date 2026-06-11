@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import Any
 from typing import cast
 from uuid import uuid7
@@ -29,6 +30,7 @@ from loguru import logger
 from snapper.application.engine.service import compute_shard_key
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
+from snapper.application.trade.command_request import order_request_from_command
 from snapper.config.credentials import CredentialResolver
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
@@ -46,12 +48,14 @@ from snapper.core.types import OrderEventEnum
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
 from snapper.core.types import ReplaceEventType
+from snapper.core.types import TradeCommandStatusEnum
 from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import RecordVenueEventParams
+from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -180,6 +184,49 @@ cycle budget room for the rest of the pass; the index-based rotation
 parked set regardless of entries getting popped mid-rotation — a
 popped-identity resume pointer would silently fall back to prefix order
 and re-starve the tail."""
+
+_GHOST_ADOPT_PER_CYCLE_MAX = 5
+"""Cap on ghost-order adoptions per recon cycle.
+
+Each adoption finalizes acceptance (durable write + publish) and may
+route a terminal snapshot through the disappeared-order reconciler;
+five per cycle bounds the added cycle time while the set shrinks as
+adoptions land — no rotation needed."""
+
+_DISPATCHED_VERIFY_PER_CYCLE_MAX = 3
+"""Fairness cap on dispatched-command venue verifications per cycle.
+
+Same budget rationale as ``_AMBIGUOUS_VERIFY_PER_CYCLE_MAX``: each
+verification is one bounded venue lookup, and index rotation
+(``_dispatched_rotation_offset``) guarantees tail progress."""
+
+_DISPATCHED_VERIFY_MIN_AGE_S = 120.0
+"""Minimum command age before the dispatched-verification sweep acts.
+
+Two recon intervals: gives the lifecycle fold and the ghost-adoption
+sweep a chance to resolve the command from durable evidence or the
+open-orders snapshot first, and comfortably exceeds the dispatch TTL
+so no in-flight frame is still legitimately pending."""
+
+_ABSENCE_REJECT_MAX_AGE_S = 3600.0
+"""Command age beyond which venue absence stops being authoritative.
+
+Venue closed-order endpoints have bounded lookback, so an old order
+can be reported absent while it actually existed (and filled). Older
+commands get WARN-only escalation, never an auto-REJECT."""
+
+_GHOST_FOREIGN_WARNED_MAX = 512
+"""LRU bound on the warned-foreign-order cid set (process-memory cap)."""
+
+_COMMAND_TERMINAL_STATUSES = frozenset(
+    {
+        TradeCommandStatusEnum.FILLED.value,
+        TradeCommandStatusEnum.CANCELLED.value,
+        TradeCommandStatusEnum.EXPIRED.value,
+        TradeCommandStatusEnum.REJECTED.value,
+        TradeCommandStatusEnum.FAILED.value,
+    }
+)
 
 _RECON_CYCLE_TIMEOUT_S = 300.0
 """Bound on one full reconciliation cycle INCLUDING lock acquisition.
@@ -332,6 +379,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._task_deaths_in_streak: dict[str, int] = {}
         self._order_inflight_started: float | None = None
         self._ambiguous_rotation_offset: int = 0
+        self._dispatched_rotation_offset: int = 0
+        self._dispatched_absence_counts: dict[str, int] = {}
+        self._ghost_foreign_warned: OrderedDict[str, None] = OrderedDict()
+        self._pending_rejected_restores: dict[str, TradeCommandRow] = {}
+        self._verify_unsupported_logged: bool = False
         self._recon_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
 
@@ -1286,7 +1338,15 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"age {age_s:.1f}s exceeds dispatch TTL {ttl:.1f}s and the venue verified "
             f"absence — an outage-backlog MARKET order must not fire into a moved market"
         )
-        await self._publish_order_status(order, OrderEventEnum.REJECTED)
+        if not await self._publish_order_status(order, OrderEventEnum.REJECTED):
+            logger.warning(
+                f"[{exchange_name}] REJECTED publish failed for STALE "
+                f"{order.client_order_id} — NOT recording order_rejected (a terminal "
+                f"row before a confirmed publish would exempt the command from the "
+                f"dispatched-verification sweep while the engine guard stays held); "
+                f"the frame is consumed and the sweep retries the release durably"
+            )
+            return True
         await self._record_venue_event(
             {
                 "event_type": "order_rejected",
@@ -2055,6 +2115,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         for client_order_id in tuple(self._unhealed_accept_events):
             await self._retry_accept_event(client_order_id)
 
+        for restore_public_id in tuple(self._pending_rejected_restores):
+            await self._retry_rejected_restore(restore_public_id)
+
+        pending_at_snapshot = set(self.pending_orders)
         exchange_orders = await self.exchange_client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
         exchange_by_id = {o.id: o for o in exchange_orders}
 
@@ -2090,6 +2154,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             else:
                 exchange_order = exchange_by_id[exchange_oid]
                 await self._reconcile_fill_gap(exchange_name, exchange_oid, pending, exchange_order)
+
+        adopted_this_cycle: set[str] = set()
+        await self._adopt_ghost_orders(exchange_orders, adopted_this_cycle, pending_at_snapshot)
+        await self._verify_unresolved_dispatched(adopted_this_cycle)
 
         balances = await self.exchange_client.get_balance()
         threshold = self.settings.recon_balance_threshold
@@ -2130,6 +2198,464 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         logger.warning(
             f"[{exchange_name}] Recon: order {order.client_order_id} still UNKNOWN "
             f"(venue verification pending) — retrying next cycle"
+        )
+
+    async def _adopt_ghost_orders(
+        self,
+        exchange_orders: list[ExchangeOrderSnapshot],
+        adopted: set[str],
+        pending_at_snapshot: set[str],
+    ) -> None:
+        """Reverse sweep: adopt open venue orders missing from pending_orders.
+
+        The forward pass only checks pending entries against the venue;
+        an open venue order with NO in-memory entry (executor restart,
+        crash after send, redispatched frame processed by a previous
+        incarnation) was previously ignored forever. For each such
+        order: a strict command lookup attributes it — our wallet's
+        create/submit command rebuilds the ORIGINAL request from the
+        command row (snapshot-built requests would lose strategy_tag
+        and corrupt shard attribution) and adopts via
+        ``_adopt_found_order`` with watermarks seeded from durable fill
+        evidence; another wallet's command is the owning executor's
+        job; no command row at all means a foreign/manual order that
+        must never be touched (one warning per cid, LRU-bounded). A
+        durably REJECTED command found OPEN is the false-absence-reject
+        healing valve: adopt AND restore the durable row to ACCEPTED;
+        other terminal statuses refuse loudly. Cids that were pending
+        when the venue snapshot was taken are skipped for the whole
+        cycle — the snapshot is stale for them (a live fill may have
+        popped the entry mid-cycle) and adopting from it would reset
+        the fill watermark to zero and double-emit correctives.
+        Adoptions are capped per cycle; the set shrinks as they land.
+
+        Args:
+            exchange_orders: The open-orders snapshot already fetched
+                by the cycle.
+            adopted: Cycle-shared set of adopted cids (the
+                dispatched-verification sweep must not double-adopt).
+            pending_at_snapshot: Cids pending when the snapshot was
+                fetched.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        exchange_name = self._get_exchange_name()
+        budget = _GHOST_ADOPT_PER_CYCLE_MAX
+        for snapshot in exchange_orders:
+            cid = snapshot.client_order_id
+            if not cid or cid in self.pending_orders or cid in adopted:
+                continue
+            if cid in pending_at_snapshot:
+                continue
+            if cid in self._ghost_foreign_warned:
+                continue
+            if budget <= 0:
+                logger.info(
+                    f"[{exchange_name}] Recon: ghost-order adoptions deferred to later "
+                    f"cycles (cap {_GHOST_ADOPT_PER_CYCLE_MAX}/cycle)"
+                )
+                return
+            try:
+                cmd = await self.repository.get_active_create_command_by_client_order_id(
+                    cid, exchange_name
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[{exchange_name}] Recon: command lookup failed for ghost order "
+                    f"{snapshot.id} (cid={cid}): {e} — retrying next cycle"
+                )
+                continue
+            if cmd is None:
+                self._mark_foreign_order_warned(cid)
+                logger.warning(
+                    f"[{exchange_name}] Recon: open venue order {snapshot.id} "
+                    f"(cid={cid}) has NO command row — foreign/manual order, leaving "
+                    f"untouched"
+                )
+                continue
+            if cmd["wallet_public_id"] != self.wallet_public_id:
+                continue
+            heal_rejected = cmd["status"] == TradeCommandStatusEnum.REJECTED.value
+            if cmd["status"] in _COMMAND_TERMINAL_STATUSES and not heal_rejected:
+                logger.warning(
+                    f"[{exchange_name}] Recon: venue order {snapshot.id} (cid={cid}) is "
+                    f"OPEN but its command {cmd['public_id']} is durably "
+                    f"{cmd['status']} — refusing to adopt a terminally-accounted "
+                    f"command; operator attention required"
+                )
+                continue
+            budget -= 1
+            if cid in self.pending_orders:
+                continue
+            try:
+                order = order_request_from_command(cmd)
+            except Exception as e:
+                logger.error(
+                    f"[{exchange_name}] Recon: command {cmd['public_id']} cannot be "
+                    f"reconstructed into a dispatch payload ({e}) — skipping adoption "
+                    f"of {cid}; operator attention required (vocabulary mismatch, see "
+                    f"the stop-order pipeline follow-up)"
+                )
+                continue
+            pending = PendingOrderState(request=order)
+            if not await self._seed_adoption_watermarks(pending, cid):
+                continue
+            self.pending_orders[cid] = pending
+            await self._repair_adopted_order_row(order, snapshot, pending)
+            logger.warning(
+                f"[{exchange_name}] Recon: ADOPTING ghost venue order {snapshot.id} "
+                f"(cid={cid}, command {cmd['public_id']}, status={snapshot.status}) — "
+                f"open at the venue with no in-memory entry"
+            )
+            await self._adopt_found_order(order, pending, snapshot)
+            adopted.add(cid)
+            if heal_rejected:
+                restore_cmd = dict(cmd)
+                restore_cmd["exchange_order_id"] = snapshot.id
+                self._pending_rejected_restores[cmd["public_id"]] = cast(
+                    TradeCommandRow, restore_cmd
+                )
+                await self._retry_rejected_restore(cmd["public_id"])
+
+    async def _repair_adopted_order_row(
+        self,
+        order: OrderRequestData,
+        snapshot: ExchangeOrderSnapshot,
+        pending: PendingOrderState,
+    ) -> None:
+        """Ensure an adopted order has an active durable ``orders`` row.
+
+        Coordinator restart recovery re-arms engine in-flight intent
+        from ACTIVE order rows; the original post-accept row write is
+        best-effort and can have failed (that failure is one of the
+        ways an order becomes a ghost in the first place). Repairing
+        the row at adoption time restores that recovery path and gives
+        the pending entry a ``db_order_id`` so terminal status updates
+        persist. Best-effort like the original write: never raises, a
+        miss is logged and the durable plane stays recon-healed.
+
+        Args:
+            order: The reconstructed original request.
+            snapshot: The venue snapshot for the adopted order.
+            pending: The pending entry being adopted.
+        """
+        if self.exchange_client is None or not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        try:
+            existing = await self.repository.get_exchange_order_id_for_client_order_id(
+                order.client_order_id, as_of=datetime.now(UTC)
+            )
+            if existing:
+                return
+            request = ExchangeOrderRequest(
+                symbol=order.instrument,
+                side=OrderSideEnum(order.side),
+                type=ExchangeOrderTypeEnum(order.order_type),
+                amount=float(order.quantity),
+                price=float(order.price) if order.price else None,
+                client_order_id=order.client_order_id,
+                signaled_at=order.signaled_at,
+                leverage=order.leverage,
+                reduce_only=order.reduce_only,
+                wallet_public_id=self.wallet_public_id,
+                operator_public_id=order.operator_public_id,
+            )
+            logged = await self.exchange_client._log_order_to_db(request, snapshot)
+            if logged is not None:
+                pending.db_order_id, pending.order_public_id = logged
+        except Exception as e:
+            logger.warning(
+                f"[{self._get_exchange_name()}] Recon: adopted-order row repair failed "
+                f"for {order.client_order_id}: {e} — adoption proceeds; the durable "
+                f"row stays missing until the next adoption-path retry"
+            )
+
+    def _mark_foreign_order_warned(self, cid: str) -> None:
+        """Record a warned foreign cid with an LRU bound on the set."""
+        self._ghost_foreign_warned[cid] = None
+        while len(self._ghost_foreign_warned) > _GHOST_FOREIGN_WARNED_MAX:
+            self._ghost_foreign_warned.popitem(last=False)
+
+    async def _seed_adoption_watermarks(self, pending: PendingOrderState, cid: str) -> bool:
+        """Seed an adopted entry's fill watermarks from durable evidence.
+
+        A fresh ``PendingOrderState`` starts both cumulative watermarks
+        at zero; if the order has durable fill history (a previous
+        incarnation recorded fills before losing the entry), a zero
+        watermark would make the next fill-gap pass re-record and
+        re-emit the FULL venue cumulative — and the engine books
+        corrective deltas, so an already-published fill re-emitted
+        under a fresh recon exec id would DOUBLE exposure. Seeding from
+        the MAX durable cumulative confines correctives to the
+        genuinely-new span; the recorded-but-unpublished tail (if any)
+        stays with P0-3 startup recovery. A failed seed read is
+        FAIL-CLOSED: the caller must skip the adoption this cycle and
+        retry next (adopting at an untrusted zero watermark is the
+        double-booking path).
+
+        Args:
+            pending: The freshly-built pending entry being adopted.
+            cid: The order's client id.
+
+        Returns:
+            True when the watermarks are trustworthy (seeded or
+            verified empty); False when the read failed.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return True
+        try:
+            row = await self.repository.get_max_cumulative_fill_venue_event(cid)
+        except Exception as e:
+            logger.warning(
+                f"[{self._get_exchange_name()}] Recon: durable watermark seed failed "
+                f"for {cid}: {e} — deferring adoption to the next cycle (FAIL-CLOSED: "
+                f"a zero watermark could double-book already-published fills)"
+            )
+            return False
+        if row is not None and row["cum_fill_size"]:
+            pending.last_seen_cum_qty = row["cum_fill_size"]
+            pending.last_recorded_cum_qty = row["cum_fill_size"]
+        return True
+
+    async def _retry_rejected_restore(self, public_id: str) -> None:
+        """Drive one queued REJECTED->ACCEPTED restore to completion.
+
+        The false-absence-rejection heal must be retryable: the adopted
+        order's cid is in ``pending_orders`` (so the ghost sweep will
+        never revisit it) while a stale durably-REJECTED row would keep
+        the lifecycle fold blind to it AND let the paired-leg backstop
+        project a false terminal. The queue entry survives until the
+        row's CURRENT status is verifiably no longer ``rejected``: a
+        lost CAS alone is dropped only after a re-read confirms another
+        writer moved the row; errors keep the entry queued for the next
+        recon cycle (this sweep is DB-only and runs before venue calls).
+
+        Args:
+            public_id: Key into ``_pending_rejected_restores``.
+        """
+        cmd = self._pending_rejected_restores.get(public_id)
+        if cmd is None or not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        exchange_name = self._get_exchange_name()
+        now = datetime.now(UTC)
+        try:
+            restored = await self.repository.advance_trade_command_lifecycle(
+                public_id=public_id,
+                expected_status=TradeCommandStatusEnum.REJECTED.value,
+                new_status=TradeCommandStatusEnum.ACCEPTED.value,
+                bus_time=now,
+                session_id=cmd["session_id"],
+                sequence_id=cmd["sequence_id"],
+                acked_at=now,
+                exchange_order_id=cmd["exchange_order_id"],
+                last_error="restored from venue truth after false absence rejection",
+                clear_terminal_at=True,
+            )
+            if not restored:
+                current = await self.repository.get_current_trade_command_status(public_id)
+                if current == TradeCommandStatusEnum.REJECTED.value:
+                    logger.warning(
+                        f"[{exchange_name}] Recon: restore CAS for {public_id} lost but "
+                        f"the row is STILL rejected — retrying next cycle"
+                    )
+                    return
+        except Exception as e:
+            logger.warning(
+                f"[{exchange_name}] Recon: REJECTED->ACCEPTED restore failed for "
+                f"{public_id}: {e} — retrying next cycle"
+            )
+            return
+        self._pending_rejected_restores.pop(public_id, None)
+        logger.warning(
+            f"[{exchange_name}] Recon: command {public_id} was durably REJECTED but "
+            f"the venue shows its order OPEN — durable status restored to ACCEPTED"
+        )
+
+    async def _verify_unresolved_dispatched(self, adopted: set[str]) -> None:
+        """Venue-verify stale dispatched commands with no resolving evidence.
+
+        The durable plane's work queue: active dispatched/
+        direct_dispatched create/submit commands past
+        ``_DISPATCHED_VERIFY_MIN_AGE_S`` whose cid has no resolving
+        venue event (a lone ``order_submit_unknown`` does not resolve —
+        restart-lost parked entries land exactly here, closing P0-1
+        slice 7). Each gets a bounded ``find_order_by_client_id`` round,
+        fairness-capped with index rotation like the parked-ambiguous
+        pass. The per-cid absence counters of cids that left the
+        candidate set are dropped (resolved elsewhere).
+
+        Args:
+            adopted: Cids adopted earlier this cycle (skip — their
+                evidence row may not be visible to the query snapshot).
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository) or self.exchange_client is None:
+            return
+        exchange_name = self._get_exchange_name()
+        ttl = self._resolve_dispatch_ttl()
+        allow_reject = ttl > 0
+        min_age_s = max(_DISPATCHED_VERIFY_MIN_AGE_S, ttl * 2)
+        cutoff = datetime.now(UTC) - timedelta(seconds=min_age_s)
+        try:
+            commands = await self.repository.get_unresolved_dispatched_commands(
+                exchange_name, self.wallet_public_id, cutoff
+            )
+        except Exception as e:
+            logger.warning(
+                f"[{exchange_name}] Recon: unresolved-dispatched query failed: {e} — "
+                f"retrying next cycle"
+            )
+            return
+        candidates = [
+            cmd
+            for cmd in commands
+            if cmd["client_order_id"] not in self.pending_orders
+            and cmd["client_order_id"] not in adopted
+        ]
+        candidate_cids = {cmd["client_order_id"] for cmd in candidates}
+        for stale_cid in tuple(self._dispatched_absence_counts):
+            if stale_cid not in candidate_cids:
+                self._dispatched_absence_counts.pop(stale_cid, None)
+        if not candidates:
+            return
+        budget = _DISPATCHED_VERIFY_PER_CYCLE_MAX
+        start = self._dispatched_rotation_offset % len(candidates)
+        rotated = candidates[start:] + candidates[:start]
+        self._dispatched_rotation_offset = start + min(budget, len(rotated))
+        for cmd in rotated[:budget]:
+            await self._verify_one_dispatched_command(cmd, allow_reject=allow_reject)
+        if len(rotated) > budget:
+            logger.info(
+                f"[{exchange_name}] Recon: {len(rotated) - budget} unresolved dispatched "
+                f"commands deferred to later cycles (fairness cap {budget}/cycle)"
+            )
+
+    async def _verify_one_dispatched_command(
+        self, cmd: TradeCommandRow, *, allow_reject: bool = True
+    ) -> None:
+        """Resolve one evidence-less dispatched command against venue truth.
+
+        FOUND: rebuild the original request from the command row and
+        adopt (covers executor-restart-lost parked UNKNOWN entries and
+        crash-during-ambiguity — the DISPATCHED row is the durable
+        intent, closing P0-1 open question 4). Authoritative absence
+        twice in a row AND command younger than
+        ``_ABSENCE_REJECT_MAX_AGE_S``: REJECT with publish-success-
+        before-terminal-event semantics — the ``order_rejected`` row is
+        written ONLY after a confirmed REJECTED publish, because a
+        premature terminal row would exempt the command from this sweep
+        (any-evidence rule) while the engine guard stays held forever.
+        Older commands get WARN-only escalation: venue closed-order
+        lookback makes absence non-authoritative with age. Lookup
+        errors leave the absence counter untouched.
+
+        Args:
+            cmd: The unresolved dispatched command row.
+            allow_reject: False when the dispatch TTL is disabled — a
+                frame can then be legitimately in flight at ANY age
+                (nothing expires it), so absence may never auto-REJECT:
+                a late frame arriving after the engine released intent
+                would place an untracked order. The caller derives the
+                sweep cutoff from the TTL for the same reason.
+        """
+        if self.exchange_client is None:
+            return
+        exchange_name = self._get_exchange_name()
+        cid = cmd["client_order_id"]
+        try:
+            async with asyncio.timeout(_AMBIGUOUS_VERIFY_TIMEOUT_S):
+                snapshot = await self.exchange_client.find_order_by_client_id(
+                    cid, cmd["instrument"]
+                )
+        except NotImplementedError:
+            if not self._verify_unsupported_logged:
+                self._verify_unsupported_logged = True
+                logger.info(
+                    f"[{exchange_name}] venue cannot verify orders by client id — "
+                    f"dispatched-command verification skipped (park-only default)"
+                )
+            return
+        except Exception as e:
+            logger.warning(
+                f"[{exchange_name}] Recon: dispatched-command verification failed for "
+                f"{cid}: {e} — retrying next cycle"
+            )
+            return
+        try:
+            order = order_request_from_command(cmd)
+        except Exception as e:
+            logger.error(
+                f"[{exchange_name}] Recon: command {cmd['public_id']} cannot be "
+                f"reconstructed into a dispatch payload ({e}) — skipping verification "
+                f"actions for {cid}; operator attention required (vocabulary mismatch, "
+                f"see the stop-order pipeline follow-up)"
+            )
+            return
+        if snapshot is not None:
+            self._dispatched_absence_counts.pop(cid, None)
+            if cid in self.pending_orders:
+                return
+            pending = PendingOrderState(request=order)
+            if not await self._seed_adoption_watermarks(pending, cid):
+                return
+            self.pending_orders[cid] = pending
+            await self._repair_adopted_order_row(order, snapshot, pending)
+            logger.warning(
+                f"[{exchange_name}] Recon: unresolved DISPATCHED command "
+                f"{cmd['public_id']} FOUND on venue as {snapshot.id} "
+                f"(status={snapshot.status}) — adopting"
+            )
+            await self._adopt_found_order(order, pending, snapshot)
+            return
+        count = self._dispatched_absence_counts.get(cid, 0) + 1
+        self._dispatched_absence_counts[cid] = count
+        if count < 2:
+            return
+        if not allow_reject:
+            logger.warning(
+                f"[{exchange_name}] Recon: command {cmd['public_id']} verified absent "
+                f"x{count} but the dispatch TTL is disabled — a frame may still be in "
+                f"flight at any age, NOT auto-rejecting; operator attention required"
+            )
+            return
+        age_s = (datetime.now(UTC) - cmd["created_at"]).total_seconds()
+        if age_s >= _ABSENCE_REJECT_MAX_AGE_S:
+            logger.warning(
+                f"[{exchange_name}] Recon: command {cmd['public_id']} verified absent "
+                f"x{count} but is {age_s:.0f}s old — venue closed-order lookback makes "
+                f"absence non-authoritative; NOT auto-rejecting, operator attention "
+                f"required"
+            )
+            return
+        if not await self._publish_order_status(order, OrderEventEnum.REJECTED):
+            logger.warning(
+                f"[{exchange_name}] Recon: REJECTED publish failed for {cid} — keeping "
+                f"absence state and retrying next cycle (a terminal event before a "
+                f"confirmed publish would strand the engine guard)"
+            )
+            return
+        try:
+            await self._record_venue_event(
+                {
+                    "event_type": "order_rejected",
+                    "exchange_name": exchange_name,
+                    "instrument": cmd["instrument"],
+                    "client_order_id": cid,
+                    "side": cmd["side"],
+                    "error": "dispatched command verified absent on venue (2 consecutive)",
+                    "strategy_tag": order.strategy_tag,
+                }
+            )
+        except Exception:
+            logger.warning(
+                f"[{exchange_name}] Recon: order_rejected venue event failed for {cid} "
+                f"after a confirmed REJECTED publish — the sweep re-verifies next cycle "
+                f"and re-records (duplicate REJECTED publishes are engine-idempotent)"
+            )
+            return
+        self._dispatched_absence_counts.pop(cid, None)
+        logger.warning(
+            f"[{exchange_name}] Recon: REJECTED dispatched command {cmd['public_id']} "
+            f"({cid}) — venue verified absent twice, engine intent released"
         )
 
     async def _retry_accept_event(self, client_order_id: str) -> None:

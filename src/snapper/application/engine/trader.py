@@ -46,6 +46,8 @@ from snapper.application.risk.models import RiskEvaluator
 from snapper.application.services.settings import SettingsService
 from snapper.application.trade.balance_service import BalanceService
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.command_request import order_request_from_command
+from snapper.application.trade.command_request import parse_shard_key
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import ShardState
@@ -63,7 +65,6 @@ from snapper.core.types import FillStatusEnum
 from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderEventEnum
 from snapper.core.types import OrderExchange
-from snapper.core.types import OrderType
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
 from snapper.core.types import PairedFillProjection
@@ -89,8 +90,6 @@ from snapper.data.repository_types import VenueEventRow
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
-from snapper.interface.websocket.schemas import ExecutionMode
-from snapper.interface.websocket.schemas import TradeSide
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -103,7 +102,6 @@ from snapper.messaging.schemas.data import FundingAccrualData
 from snapper.messaging.schemas.data import OrderCancelData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
-from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.messages import MessageParseError
@@ -358,10 +356,10 @@ class TraderCoordinator(RegisterableProcess):
     def _parse_shard_key(shard_key: str) -> tuple[str, str, str, str, str | None] | None:
         """Parse a persisted ``shard_key`` into its components.
 
-        An optional ``w{wallet_short}`` segment sits between ``mode``
-        and the optional paper-mode strategy_tag.
-        The parser handles both legacy (3- or 4-segment) and
-        wallet-aware (4- or 5-segment) formats.
+        Thin delegate to the shared
+        :func:`snapper.application.trade.command_request.parse_shard_key`
+        (the executor-side request reconstruction needs the identical
+        parse), kept as a method for the existing call sites and tests.
 
         Returns:
             Tuple of ``(exchange, instrument, mode, wallet_short,
@@ -369,24 +367,7 @@ class TraderCoordinator(RegisterableProcess):
             legacy keys and ``strategy_tag`` is None when absent.
             Returns ``None`` if the key has fewer than 3 segments.
         """
-        parts = shard_key.split(".")
-        if len(parts) < 3:
-            return None
-        exchange_str, instrument, mode_str = parts[0], parts[1], parts[2]
-        wallet_short = ""
-        strategy_tag: str | None = None
-        remaining = parts[3:]
-        if (
-            remaining
-            and remaining[0].startswith("w")
-            and len(remaining[0]) == 13
-            and all(c in "0123456789abcdef" for c in remaining[0][1:])
-        ):
-            wallet_short = remaining[0][1:]
-            remaining = remaining[1:]
-        if remaining:
-            strategy_tag = remaining[0]
-        return exchange_str, instrument, mode_str, wallet_short, strategy_tag
+        return parse_shard_key(shard_key)
 
     async def start(self) -> None:
         """Start the trader coordinator.
@@ -3335,30 +3316,7 @@ class TraderCoordinator(RegisterableProcess):
             await self.msg_publisher.send(topic, cancel)
             return
         topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.SUBMIT)
-        parsed_shard = self._parse_shard_key(cmd["shard_key"])
-        tag = parsed_shard[4] if parsed_shard else None
-        order = OrderRequestData(
-            public_id=cmd["client_order_id"],
-            timestamp=datetime.now(UTC),
-            session_id=cmd["session_id"],
-            sequence_id=cmd["sequence_id"],
-            strategy_id=cmd["strategy_id"],
-            instrument=cmd["instrument"],
-            mode=cast(ExecutionMode, cmd["mode"]),
-            side=cast(TradeSide, cmd["side"]),
-            order_type=cast(OrderType, cmd["order_type"]),
-            quantity=cmd["quantity"],
-            price=cmd["price"],
-            client_order_id=cmd["client_order_id"],
-            exchange=exchange,
-            strategy_tag=tag,
-            leverage=cmd["leverage"],
-            reduce_only=cmd["reduce_only"],
-            wallet_public_id=cmd.get("wallet_public_id") or "",
-            operator_public_id=cmd.get("operator_public_id"),
-            user_public_id=cmd.get("user_public_id"),
-            signaled_at=cmd["created_at"],
-        )
+        order = order_request_from_command(cmd)
         if command_type in ("create", OrderCommandEnum.SUBMIT.value):
             self._register_order_shard_key(cmd["client_order_id"], cmd["shard_key"])
         await self.msg_publisher.send(topic, order)

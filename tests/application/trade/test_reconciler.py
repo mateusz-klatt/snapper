@@ -14,6 +14,7 @@ import pytest
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.reconciler import _fold_lifecycle_advance
 from snapper.application.trade.trade_service import TradeService
+from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
@@ -108,6 +109,7 @@ def _make_repo(
     repo.get_active_commands_for_exchange = AsyncMock(return_value=cmds or [])
     repo.get_order_lifecycle_events = AsyncMock(return_value=events or [])
     repo.advance_trade_command_lifecycle = AsyncMock(return_value=True)
+    repo.get_rejected_commands_with_later_live_evidence = AsyncMock(return_value=[])
     return repo
 
 
@@ -745,3 +747,69 @@ async def test_reconcile_fresh_command_not_stale() -> None:
     recon.stop()
     await asyncio.wait_for(task, timeout=1.0)
     trade_svc.record_recon_success.assert_called()
+
+
+class TestFalseRejectionResurrection:
+    """Durable backstop restoring falsely-rejected commands (#145 E2)."""
+
+    @pytest.mark.asyncio
+    async def test_rejected_row_with_live_evidence_is_resurrected(self) -> None:
+        """A REJECTED row with later live evidence CAS-es back to ACCEPTED.
+
+        Given: the resurrection query returning one rejected command,
+        When: one reconciliation cycle runs,
+        Then: the lifecycle CAS restores it with the terminal stamp
+            cleared, ready for the next cycle's fold.
+        """
+        repo = _make_repo()
+        rejected = _make_cmd(status="rejected")
+        repo.get_rejected_commands_with_later_live_evidence = AsyncMock(return_value=[rejected])
+        recon, trade_svc = _make_loop(repo)
+        await recon._reconcile_cycle()
+        kwargs = repo.advance_trade_command_lifecycle.await_args.kwargs
+        assert kwargs["expected_status"] == TradeCommandStatusEnum.REJECTED
+        assert kwargs["new_status"] == TradeCommandStatusEnum.ACCEPTED
+        assert kwargs["clear_terminal_at"] is True
+        assert kwargs["public_id"] == "cmd-1"
+
+    @pytest.mark.asyncio
+    async def test_resurrection_respects_ownership(self) -> None:
+        """Foreign-shard rejected rows are left to their owning instance.
+
+        Given: a resurrection candidate on a foreign shard under N=2,
+        When: one reconciliation cycle runs,
+        Then: no CAS is attempted.
+        """
+        foreign_shard = "kraken.FOREIGN.live"
+        foreign_owner = ShardOwnership._hash(foreign_shard) % 2
+        repo = _make_repo()
+        repo.get_rejected_commands_with_later_live_evidence = AsyncMock(
+            return_value=[_make_cmd(status="rejected", shard_key=foreign_shard)]
+        )
+        trade_svc = MagicMock(spec=TradeService)
+        recon = ReconciliationLoop(
+            exchange_name="kraken",
+            repository=repo,
+            trade_service=trade_svc,
+            interval_seconds=60.0,
+            ownership=ShardOwnership(instance_id=(foreign_owner + 1) % 2, instance_count=2),
+        )
+        await recon._reconcile_cycle()
+        repo.advance_trade_command_lifecycle.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_lost_resurrection_cas_is_clean_skip(self) -> None:
+        """A lost resurrection CAS skips without error.
+
+        Given: a resurrection candidate whose CAS returns False,
+        When: one reconciliation cycle runs,
+        Then: the cycle completes and records success.
+        """
+        repo = _make_repo()
+        repo.get_rejected_commands_with_later_live_evidence = AsyncMock(
+            return_value=[_make_cmd(status="rejected")]
+        )
+        repo.advance_trade_command_lifecycle = AsyncMock(return_value=False)
+        recon, _ = _make_loop(repo)
+        await recon._reconcile_cycle()
+        repo.advance_trade_command_lifecycle.assert_awaited_once()

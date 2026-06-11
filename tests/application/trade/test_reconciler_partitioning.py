@@ -34,6 +34,7 @@ def _repo(cmds: list[dict[str, Any]]) -> Any:
     repo.get_active_commands_for_exchange = AsyncMock(return_value=cmds)
     repo.get_order_lifecycle_events = AsyncMock(return_value=[])
     repo.advance_trade_command_lifecycle = AsyncMock(return_value=True)
+    repo.get_rejected_commands_with_later_live_evidence = AsyncMock(return_value=[])
     return repo
 
 

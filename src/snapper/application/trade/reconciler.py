@@ -305,6 +305,52 @@ class ReconciliationLoop:
             )
         return applied
 
+    async def _resurrect_falsely_rejected(self, now: datetime) -> int:
+        """Restore REJECTED commands whose cid shows later live evidence.
+
+        Restart-proof backstop for the false-absence-rejection heal: the
+        executor's in-memory restore queue dies with its process, but a
+        durably REJECTED row with an ``order_accepted``/``fill_observed``
+        event LATER than its rejection is proof the rejection was wrong
+        (or legally retried) — terminal rows are invisible to the normal
+        fold (the active-command read excludes them), so without this
+        pass they would stay wrong forever and the paired-leg backstop
+        would keep projecting a false terminal. Resurrection CAS-es the
+        row to ACCEPTED with the stale terminal stamp cleared; the NEXT
+        cycle's fold re-derives the true state from the full event
+        history. Bounded per cycle; CAS misses skip.
+
+        Args:
+            now: Cycle bus time.
+
+        Returns:
+            Number of rows resurrected.
+        """
+        rows = await self._repo.get_rejected_commands_with_later_live_evidence(self._exchange)
+        if self._ownership is not None:
+            rows = [cmd for cmd in rows if self._ownership.owns(cmd["shard_key"])]
+        resurrected = 0
+        for cmd in rows:
+            applied = await self._repo.advance_trade_command_lifecycle(
+                public_id=cmd["public_id"],
+                expected_status=TradeCommandStatusEnum.REJECTED,
+                new_status=TradeCommandStatusEnum.ACCEPTED,
+                bus_time=now,
+                session_id=cmd["session_id"],
+                sequence_id=cmd["sequence_id"],
+                acked_at=now,
+                last_error="resurrected: live venue evidence postdates the rejection",
+                clear_terminal_at=True,
+            )
+            if applied:
+                resurrected += 1
+                logger.warning(
+                    f"ReconciliationLoop[{self._exchange}] RESURRECTED command "
+                    f"{cmd['public_id']} (cid={cmd['client_order_id']}) — rejected "
+                    f"durably but live venue evidence postdates the rejection"
+                )
+        return resurrected
+
     def _report_stale(self, cmd: TradeCommandRow, age: float, events: list[VenueEventRow]) -> bool:
         """Report one over-age command according to its evidence class.
 
@@ -375,6 +421,7 @@ class ReconciliationLoop:
                     continue
                 if await self._advance_command(cmd, advance, now):
                     advanced += 1
+            advanced += await self._resurrect_falsely_rejected(now)
             stale_count = 0
             seen_shards: set[str] = set()
             for cmd in active_cmds:
