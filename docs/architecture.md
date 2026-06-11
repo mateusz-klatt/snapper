@@ -364,7 +364,20 @@ Business logic:
 
 External integrations:
 
-- **Exchanges** (`exchanges/`) — Exchange clients (Kraken, Walutomat)
+- **Exchanges** (`exchanges/`) — Exchange clients (Kraken, Walutomat).
+  `kraken_sdk_patches.py` is a version-coupled patch layer over
+  python-kraken-sdk (3.2.x) that the Kraken venue implementations
+  install at import time, so every process that builds a Kraken WS
+  client — executors as well as publishers — is covered. Among its
+  fixes is WS teardown hardening: the stock SDK reconnect backoff
+  sleeps uninterruptibly (up to ~3 min), so a venue-bounded `close()`
+  firing during it leaked one aiohttp `ClientSession` per rebuild
+  cycle and the abandoned reconnect later spawned orphaned child
+  tasks. The hardened reconnect polls the stop flag during backoff
+  and reaps its children on every exit path, and
+  `force_close_ws_client()` finishes teardown directly — cancel run
+  tasks, bounded drain, close the session — whenever a venue's
+  bounded `close()` times out or raises.
 - **Market Data** (`market_data/`) — WebSocket feeds
 - **Symbols** (`symbols/`) — Symbol mapping
 - **Security** (`security/`) — Settings encryption

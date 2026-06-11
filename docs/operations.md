@@ -295,6 +295,22 @@ action:
   Bounding it makes a stalled handshake fail fast so the recovery loop
   tears the partial client down and retries with a fresh one, reconnecting
   as soon as the network returns.
+- **Bounded teardown.** Tearing a client down is bounded too: every venue
+  WS close runs under a 10 s timeout, and a close that times out or raises
+  escalates to a last-resort force close that cancels the SDK's connector
+  run tasks, drains them (5 s bound), and closes the SDK's internal aiohttp
+  session directly. Previously a close landing during the SDK's reconnect
+  backoff sleep (up to ~3 min; the SDK's stop flag did not interrupt it)
+  abandoned the SDK's own session cleanup, so each rebuild cycle during a
+  prolonged blackout leaked one HTTP session and the abandoned reconnect
+  later spawned orphaned background tasks. The reconnect backoff is now
+  hardened to re-check the stop flag every 0.5 s and to reap its child
+  tasks on every exit path, so blackout-driven rebuild cycles no longer
+  accumulate leaked sessions. This covers every process that tears down a
+  Kraken WS client — the executors' private clients included, not just the
+  publishers. A `close timed out - forcing cleanup` warning followed by
+  `kraken WS force-close: leaked aiohttp session closed` is the cleanup
+  working, not a fault to act on.
 - **Bounded subscribe sends + serialized reconnects.** Every Kraken
   Futures SDK subscribe/unsubscribe send is wrapped in a 5 s timeout
   (`_SDK_SEND_TIMEOUT_S`): the Futures SDK's `send_message` spins forever
