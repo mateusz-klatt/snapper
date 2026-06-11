@@ -71,13 +71,6 @@ _ORDER_VALIDATION_RESPONSE: dict[int | str, dict[str, Any]] = {
     422: {"description": "Order request validation failed"}
 }
 
-_ORDER_TYPE_MAP: dict[str, str] = {
-    "market": "market",
-    "limit": "limit",
-    "stop": "stop-loss",
-    "stop_limit": "stop-loss-limit",
-}
-
 router = APIRouter(prefix="/orders", tags=["orders"])
 
 
@@ -283,7 +276,6 @@ async def create_order(
     user_pid = principal.user_public_id or principal.username
 
     client_order_id = str(uuid7())
-    venue_order_type = _ORDER_TYPE_MAP.get(body.order_type, body.order_type)
     plan_params: dict[str, Any] = {
         "order_type": body.order_type,
         "side": body.side,
@@ -291,7 +283,6 @@ async def create_order(
         "post_only": body.post_only,
         "child_client_order_id": client_order_id,
         "native_instrument": body.instrument,
-        "venue_order_type": venue_order_type,
     }
     if body.price is not None:
         plan_params["price"] = body.price
@@ -307,7 +298,7 @@ async def create_order(
         instrument_public_id=resolved_instrument_public_id,
         command_type="create",
         side=body.side,
-        order_type=venue_order_type,
+        order_type=body.order_type,
         quantity=Decimal(str(body.quantity)),
         price=Decimal(str(body.price)) if body.price is not None else None,
         source_surface="rest",
@@ -364,9 +355,10 @@ async def create_order(
                     "client_order_id": client_order_id,
                     "venue_client_id": client_order_id,
                     "side": body.side,
-                    "order_type": venue_order_type,
+                    "order_type": body.order_type,
                     "quantity": body.quantity,
                     "price": body.price,
+                    "stop_price": body.stop_price,
                     "leverage": body.leverage,
                     "reduce_only": body.reduce_only,
                     "status": TradeCommandStatusEnum.CREATED,

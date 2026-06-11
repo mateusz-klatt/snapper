@@ -1120,9 +1120,20 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: If not connected or not authenticated, or the
                 venue answered ``success=false``.
+            ValueError: If the request is stop-typed — Walutomat's FX
+                market API has no stop orders. Raised BEFORE any network
+                send, so the failure is provably-not-placed and the
+                executor's definitive-reject branch (publish REJECTED)
+                is the honest disposition, never an ambiguous park
+                (#156).
             AmbiguousOrderSubmitError: If the call failed in a way where
                 the order MAY exist on the venue.
         """
+        if request.type in (
+            ExchangeOrderTypeEnum.STOP_LOSS,
+            ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+        ):
+            raise ValueError("Walutomat does not support stop orders")
         client = self._require_authenticated()
         walutomat_rest_symbol = native_to_walutomat_rest(request.symbol)
         base_currency = request.symbol.split("-")[0]

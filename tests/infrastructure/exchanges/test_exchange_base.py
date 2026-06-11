@@ -937,3 +937,105 @@ async def test_get_order_fill_summary_defaults_to_none() -> None:
     """
     client = DummyExchangeClient(repository=None)
     assert await client.get_order_fill_summary("ex-1") is None
+
+
+@pytest.mark.asyncio()
+@patch(
+    "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
+    return_value="fake-spid",
+)
+async def test_log_order_to_db_normalizes_wire_order_type_to_core(
+    mock_resolve: AsyncMock,
+) -> None:
+    """The durable orders row speaks CORE, not the venue wire value (#156).
+
+    Given: an accepted stop order whose venue snapshot carries the wire
+        type 'stop-loss',
+    When: _log_order_to_db persists it,
+    Then: insert_order receives order_type='stop' so GET /orders
+        serialization (OrderData CORE Literal) cannot 500 on the first
+        accepted stop; coinciding values (limit) stay untouched.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.ensure_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
+    mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-stop"))
+    client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
+    request = ExchangeOrderRequest(
+        client_order_id="client_stop",
+        symbol="BTC-USD",
+        side=OrderSideEnum.SELL,
+        type=ExchangeOrderTypeEnum.STOP_LOSS,
+        amount=1.0,
+        stop_price=48000.0,
+    )
+    order = ExchangeOrderSnapshot(
+        id="order_stop",
+        client_order_id="client_stop",
+        symbol="BTC-USD",
+        side=OrderSideEnum.SELL,
+        type=ExchangeOrderTypeEnum.STOP_LOSS,
+        amount=1.0,
+        price=None,
+        filled=0.0,
+        remaining=1.0,
+        status=ExchangeOrderStatusEnum.OPEN,
+        timestamp=1234567890.0,
+    )
+    result = await client._log_order_to_db(request, order)
+    assert result == (99, "order-uuid-stop")
+    insert_kwargs = mock_repo.insert_order.call_args.kwargs
+    assert insert_kwargs["order_type"] == "stop"
+
+
+@pytest.mark.asyncio()
+@patch(
+    "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
+    return_value="fake-spid",
+)
+async def test_log_order_to_db_persists_request_type_over_snapshot_type(
+    mock_resolve: AsyncMock,
+) -> None:
+    """The orders row records the REQUEST's intent, not the snapshot (#156).
+
+    Given: an adoption-repair shape — the reconstructed request says
+        stop-loss-limit while the fetched ccxt snapshot collapsed the
+        type to plain LIMIT,
+    When: _log_order_to_db persists it,
+    Then: insert_order receives order_type='stop_limit' from the request
+        so a repaired protective stop is never durably recorded as a
+        plain limit order.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.ensure_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
+    mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-repair"))
+    client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
+    request = ExchangeOrderRequest(
+        client_order_id="client_repair",
+        symbol="BTC-USD",
+        side=OrderSideEnum.SELL,
+        type=ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+        amount=1.0,
+        price=47900.0,
+        stop_price=48000.0,
+    )
+    order = ExchangeOrderSnapshot(
+        id="order_repair",
+        client_order_id="client_repair",
+        symbol="BTC-USD",
+        side=OrderSideEnum.SELL,
+        type=ExchangeOrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=47900.0,
+        filled=0.0,
+        remaining=1.0,
+        status=ExchangeOrderStatusEnum.OPEN,
+        timestamp=1234567890.0,
+    )
+    result = await client._log_order_to_db(request, order)
+    assert result == (99, "order-uuid-repair")
+    insert_kwargs = mock_repo.insert_order.call_args.kwargs
+    assert insert_kwargs["order_type"] == "stop_limit"

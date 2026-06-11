@@ -327,6 +327,7 @@ class TradeCommandRow(TypedDict):
     order_type: str
     quantity: float
     price: float | None
+    stop_price: float | None
     leverage: int | None
     reduce_only: bool
     status: str
@@ -549,6 +550,7 @@ class TradeCommandInsertRow(TypedDict, total=False):
     order_type: str
     quantity: float
     price: float | None
+    stop_price: float | None
     leverage: int | None
     reduce_only: bool
     status: str

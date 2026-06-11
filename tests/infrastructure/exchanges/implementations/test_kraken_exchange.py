@@ -7279,3 +7279,368 @@ class TestFindOrderByClientId:
             pytest.raises(RuntimeError, match="non-list order set"),
         ):
             await kraken_client.find_order_by_client_id("cid-find-7", "BTC-USD")
+
+
+class TestStopOrderTranslation:
+    """Spot stop-order translation at the venue boundary (#156).
+
+    The ccxt path passes the BASE type plus ``stopLossPrice`` and lets
+    the pinned ccxt 4.5.57 kraken ``order_request`` derive the AddOrder
+    ``ordertype``/``price``/``price2``; the native fallback maps the
+    documented AddOrder fields directly (price = trigger, price2 =
+    limit leg).
+    """
+
+    @pytest.fixture
+    def kraken_client(self) -> KrakenExchangeClient:
+        """Provide test client instance."""
+        return KrakenExchangeClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            sandbox=False,
+        )
+
+    def _stop_request(
+        self,
+        order_type: ExchangeOrderTypeEnum,
+        *,
+        price: float | None = None,
+        stop_price: float | None = 48000.0,
+    ) -> ExchangeOrderRequest:
+        """Build a stop-typed order request."""
+        return ExchangeOrderRequest(
+            symbol="BTC-USD",
+            side=OrderSideEnum.SELL,
+            type=order_type,
+            amount=0.25,
+            price=price,
+            stop_price=stop_price,
+            client_order_id="cid-stop-spot",
+        )
+
+    @pytest.mark.asyncio
+    async def test_ccxt_stop_loss_sends_market_type_with_trigger_param(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A stop-loss submit hands ccxt the base market type plus trigger.
+
+        Given: a stop-loss request with a trigger,
+        When: _create_order_via_ccxt runs,
+        Then: ccxt create_order receives type 'market', price None and
+            params.stopLossPrice — the wire value is never passed as
+            the ccxt type (ccxt would skip the trigger wiring).
+        """
+        mock_client = AsyncMock()
+        mock_client.create_order.return_value = {"id": "OID-stop-1"}
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch.object(
+                kraken_client,
+                "_log_order_to_db",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            order = await kraken_client.create_order(
+                self._stop_request(ExchangeOrderTypeEnum.STOP_LOSS)
+            )
+        assert order.id == "OID-stop-1"
+        args = mock_client.create_order.call_args[0]
+        assert args[1] == "market"
+        assert args[4] is None
+        assert args[5]["stopLossPrice"] == 48000.0
+
+    @pytest.mark.asyncio
+    async def test_ccxt_stop_loss_limit_sends_limit_type_with_trigger_param(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A stop-loss-limit submit keeps the limit leg as the price arg.
+
+        Given: a stop-loss-limit request with trigger and limit leg,
+        When: _create_order_via_ccxt runs,
+        Then: ccxt create_order receives type 'limit', the limit leg as
+            price, and the trigger via params.stopLossPrice.
+        """
+        mock_client = AsyncMock()
+        mock_client.create_order.return_value = {"id": "OID-stop-2"}
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch.object(
+                kraken_client,
+                "_log_order_to_db",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await kraken_client.create_order(
+                self._stop_request(ExchangeOrderTypeEnum.STOP_LOSS_LIMIT, price=47900.0)
+            )
+        args = mock_client.create_order.call_args[0]
+        assert args[1] == "limit"
+        assert args[4] == 47900.0
+        assert args[5]["stopLossPrice"] == 48000.0
+
+    def test_pinned_ccxt_translates_trigger_into_addorder_payload(self) -> None:
+        """The pinned ccxt build produces the documented AddOrder payload.
+
+        Given: an OFFLINE ccxt.kraken instance with a seeded market,
+        When: order_request translates base type + stopLossPrice exactly
+            as our _create_order_via_ccxt passes them,
+        Then: the AddOrder request carries ordertype stop-loss-limit /
+            stop-loss with price = TRIGGER and price2 = limit leg — the
+            decision rule pin for #156; a ccxt upgrade that changes this
+            translation fails here, not in production.
+        """
+        client = ccxt.kraken()
+        client.set_markets(
+            [
+                {
+                    "id": "XXBTZUSD",
+                    "symbol": "BTC/USD",
+                    "base": "BTC",
+                    "quote": "USD",
+                    "baseId": "XXBT",
+                    "quoteId": "ZUSD",
+                    "active": True,
+                    "type": "spot",
+                    "spot": True,
+                    "precision": {"amount": 1e-8, "price": 0.1},
+                    "limits": {
+                        "amount": {"min": None, "max": None},
+                        "price": {"min": None, "max": None},
+                    },
+                    "darkpool": False,
+                }
+            ]
+        )
+        base_request = {
+            "pair": "XXBTZUSD",
+            "type": "sell",
+            "ordertype": "limit",
+            "volume": client.amount_to_precision("BTC/USD", 0.25),
+        }
+        translated, leftover = client.order_request(
+            "createOrder",
+            "BTC/USD",
+            "limit",
+            base_request,
+            0.25,
+            47900.0,
+            {"stopLossPrice": 48000.0},
+        )
+        assert translated["ordertype"] == "stop-loss-limit"
+        assert translated["price"] == "48000"
+        assert translated["price2"] == "47900"
+        assert "stopLossPrice" not in leftover
+        market_request = {
+            "pair": "XXBTZUSD",
+            "type": "sell",
+            "ordertype": "market",
+            "volume": client.amount_to_precision("BTC/USD", 0.25),
+        }
+        translated_stop, _ = client.order_request(
+            "createOrder",
+            "BTC/USD",
+            "market",
+            market_request,
+            0.25,
+            None,
+            {"stopLossPrice": 48000.0},
+        )
+        assert translated_stop["ordertype"] == "stop-loss"
+        assert translated_stop["price"] == "48000"
+        assert "price2" not in translated_stop
+
+    @pytest.mark.asyncio
+    async def test_stop_without_trigger_rejected_before_any_send(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A stop request without stop_price never reaches ccxt.
+
+        Given: a stop-loss request whose trigger is missing,
+        When: create_order runs,
+        Then: a pre-send ValueError surfaces and ccxt is never called —
+            provably-not-placed, so the executor may definitively reject.
+        """
+        mock_client = AsyncMock()
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            pytest.raises(ValueError, match="requires stop_price"),
+        ):
+            await kraken_client.create_order(
+                self._stop_request(ExchangeOrderTypeEnum.STOP_LOSS, stop_price=None)
+            )
+        mock_client.create_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_native_stop_loss_limit_maps_trigger_and_limit_leg(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """The native AddOrder fallback uses price=trigger, price2=limit.
+
+        Given: a native-path stop-loss-limit request,
+        When: _create_order_via_native runs,
+        Then: the Trade API call carries ordertype stop-loss-limit with
+            the documented price/price2 mapping.
+        """
+        trade_client = MagicMock()
+        trade_client.create_order.return_value = {"txid": ["OID-native-1"], "descr": {}}
+        with (
+            patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
+            patch.object(
+                kraken_client,
+                "_log_order_to_db",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await kraken_client._create_order_via_native(
+                self._stop_request(ExchangeOrderTypeEnum.STOP_LOSS_LIMIT, price=47900.0)
+            )
+        kwargs = trade_client.create_order.call_args.kwargs
+        assert kwargs["ordertype"] == "stop-loss-limit"
+        assert kwargs["price"] == "48000.0"
+        assert kwargs["price2"] == "47900.0"
+
+    @pytest.mark.asyncio
+    async def test_native_stop_loss_omits_limit_leg(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A plain native stop carries only the trigger.
+
+        Given: a native-path stop-loss request without a limit leg,
+        When: _create_order_via_native runs,
+        Then: price is the trigger and no price2 is sent.
+        """
+        trade_client = MagicMock()
+        trade_client.create_order.return_value = {"txid": ["OID-native-2"], "descr": {}}
+        with (
+            patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
+            patch.object(
+                kraken_client,
+                "_log_order_to_db",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await kraken_client._create_order_via_native(
+                self._stop_request(ExchangeOrderTypeEnum.STOP_LOSS)
+            )
+        kwargs = trade_client.create_order.call_args.kwargs
+        assert kwargs["ordertype"] == "stop-loss"
+        assert kwargs["price"] == "48000.0"
+        assert "price2" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_spot_stop_limit_without_limit_leg_rejected_pre_send() -> None:
+    """A spot stop_limit without its limit leg is refused, not degraded (#156).
+
+    Given: a stop-loss-limit request carrying a trigger but no price,
+    When: create_order runs,
+    Then: a pre-send ValueError surfaces and ccxt is never called —
+        mirroring the futures client's gate; passing price=None on would
+        crash inside ccxt price formatting or send a degraded order
+        natively.
+    """
+    kraken_client = KrakenExchangeClient(
+        api_key="test_key",
+        api_secret="test_secret",
+        sandbox=False,
+    )
+    mock_client = AsyncMock()
+    request = ExchangeOrderRequest(
+        symbol="BTC-USD",
+        side=OrderSideEnum.SELL,
+        type=ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+        amount=0.25,
+        stop_price=48000.0,
+        client_order_id="cid-stop-noleg",
+    )
+    with (
+        patch.object(kraken_client, "_ccxt_client", mock_client),
+        pytest.raises(ValueError, match="limit leg"),
+    ):
+        await kraken_client.create_order(request)
+    mock_client.create_order.assert_not_called()
+
+
+class TestResolveCcxtOrderType:
+    """Raw-ordertype recovery for fetched ccxt snapshots (#156)."""
+
+    @pytest.fixture
+    def kraken_client(self) -> KrakenExchangeClient:
+        """Provide test client instance."""
+        return KrakenExchangeClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            sandbox=False,
+        )
+
+    def _ccxt_order(self, **overrides: Any) -> dict[str, Any]:
+        """Build a minimal unified ccxt order dict."""
+        base: dict[str, Any] = {
+            "id": "OID-fetched-1",
+            "clientOrderId": "cid-fetched-1",
+            "symbol": "BTC/USD",
+            "side": "sell",
+            "type": "limit",
+            "amount": 0.25,
+            "price": 47900.0,
+            "status": "open",
+            "filled": 0.0,
+            "remaining": 0.25,
+            "timestamp": 1700000000000,
+            "info": {"descr": {"ordertype": "stop-loss-limit"}},
+        }
+        base.update(overrides)
+        return base
+
+    def test_raw_kraken_ordertype_recovers_stop_identity(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A fetched stop order keeps its stop identity in the snapshot.
+
+        Given: a unified ccxt order whose type was collapsed to 'limit'
+            but whose raw info.descr.ordertype says stop-loss-limit,
+        When: converted to an ExchangeOrderSnapshot,
+        Then: the snapshot type is STOP_LOSS_LIMIT, not LIMIT — fetched
+            protective stops stay distinguishable on adoption paths.
+        """
+        snapshot = kraken_client._convert_ccxt_order(self._ccxt_order())
+        assert snapshot.type is ExchangeOrderTypeEnum.STOP_LOSS_LIMIT
+        market_collapsed = self._ccxt_order(
+            type="market",
+            price=None,
+            info={"descr": {"ordertype": "stop-loss"}},
+        )
+        assert (
+            kraken_client._convert_ccxt_order(market_collapsed).type
+            is ExchangeOrderTypeEnum.STOP_LOSS
+        )
+
+    def test_missing_raw_description_falls_back_to_unified_type(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Payloads without info.descr keep the unified-type mapping.
+
+        Given: unified orders with no raw description (or non-dict info),
+        When: converted,
+        Then: the pre-existing _CCXT_TYPE_MAP fallback applies.
+        """
+        no_info = self._ccxt_order(info=None)
+        assert kraken_client._convert_ccxt_order(no_info).type is ExchangeOrderTypeEnum.LIMIT
+        no_descr = self._ccxt_order(info={}, type="market")
+        assert kraken_client._convert_ccxt_order(no_descr).type is ExchangeOrderTypeEnum.MARKET
+
+    def test_unknown_raw_ordertype_falls_back_with_warning(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """An unrecognized raw ordertype degrades to the unified type.
+
+        Given: a raw info.descr.ordertype outside the wire enum,
+        When: converted,
+        Then: the unified type mapping is used instead of raising.
+        """
+        weird = self._ccxt_order(info={"descr": {"ordertype": "quantum-stop"}})
+        assert kraken_client._convert_ccxt_order(weird).type is ExchangeOrderTypeEnum.LIMIT

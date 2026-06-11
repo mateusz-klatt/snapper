@@ -423,6 +423,7 @@ class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
         order_type: Type of order ('market', 'limit', etc.).
         quantity: Order size (must be positive).
         price: Limit price (required for limit orders).
+        stop_price: Trigger price (required for stop / stop_limit orders).
         client_order_id: Client-side order identifier.
         signaled_at: Original signal timestamp (optional).
         leverage: Margin leverage (None for spot, integer for margin).
@@ -438,6 +439,7 @@ class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
     order_type: OrderType
     quantity: float = Field(gt=0)
     price: float | None = None
+    stop_price: float | None = None
     client_order_id: str
     signaled_at: datetime | None = None
     strategy_tag: str | None = None

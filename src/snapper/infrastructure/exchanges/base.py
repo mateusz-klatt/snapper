@@ -32,6 +32,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
+from snapper.infrastructure.exchanges.contracts import EXCHANGE_TO_CORE_ORDER_TYPE
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -839,6 +840,14 @@ class ExchangeClientBase(ABC):
         blanket exception catch; the caller treats None as "not
         persisted" and downstream reconciliation heals the row.
 
+        ``order_type`` is persisted from ``request.type`` (normalized
+        wire -> CORE, #156), not the snapshot: the request carries the
+        original intent on every call site, while fetched ccxt snapshots
+        collapse Kraken stop types to their unified base ``market`` /
+        ``limit`` — logging the snapshot type on the adoption-repair
+        path would durably misrepresent a protective stop as a plain
+        order.
+
         Args:
             request: Original order request with parameters.
             order: Exchange response with order details.
@@ -871,7 +880,7 @@ class ExchangeClientBase(ABC):
                 exchange_order_id=order.id,
                 created_at=order_time,
                 side=order.side.value,
-                order_type=order.type.value,
+                order_type=EXCHANGE_TO_CORE_ORDER_TYPE.get(request.type.value, request.type.value),
                 price=order.price,
                 size=order.amount,
                 status=order.status.value,

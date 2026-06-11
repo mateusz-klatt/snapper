@@ -332,13 +332,16 @@ at registration.
 
 - **`submit_manual_order(exchange, instrument, instrument_public_id,
     side, order_type, quantity, wallet_public_id, idempotency_key,
-    price?, operator_public_id?, ai_review_public_id?)`** —
+    price?, stop_price?, operator_public_id?, ai_review_public_id?)`** —
     enqueues a trade command under the delegate's user_public_id
     with `source_surface='mcp'` + the caps check from
     `TradingCapsEnforcer.guard`. Requires `CREATE_ORDERS`, rejects
     non-admin `operator_public_id` values outside the caller's
     authenticated operator set, rechecks wallet scope against active
     grants on every call, and fails closed on any cap violation.
+    Validates order params with the same evaluator rule as REST:
+    `price` is required for `limit`/`stop_limit` and `stop_price` is
+    required for `stop`/`stop_limit` order types.
     Wraps the REST `create_order` route.
 
 - **`cancel_order(plan_public_id, idempotency_key)`** — cancels an

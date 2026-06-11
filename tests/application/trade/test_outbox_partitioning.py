@@ -46,6 +46,7 @@ def _make_cmd_row(
         "order_type": "market",
         "quantity": 0.5,
         "price": None,
+        "stop_price": None,
         "leverage": None,
         "reduce_only": False,
         "status": "created",

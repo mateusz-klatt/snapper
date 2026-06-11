@@ -349,6 +349,62 @@ class TestCreateOrder:
         assert plan_insert["params"]["stop_price"] == 48000.0
         client.close()
 
+    def test_create_order_stop_persists_core_vocabulary_and_trigger(self) -> None:
+        """The durable command row speaks CORE and carries the trigger (#156).
+
+        Given: a stop order with a stop_price,
+        When: created via POST /api/orders,
+        Then: the trade-command insert stores order_type='stop' (NOT the
+            wire value that stranded rows CREATED) plus stop_price, and
+            the plan params no longer write the legacy venue_order_type.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
+        repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        client = _create_client(repo)
+        body = _create_order_body()
+        body["payload"]["order_type"] = "stop"
+        body["payload"]["price"] = None
+        body["payload"]["stop_price"] = 48000.0
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 200
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        assert cmd_insert["order_type"] == "stop"
+        assert cmd_insert["stop_price"] == 48000.0
+        plan_insert = repo.insert_execution_plan.call_args[0][0]
+        assert plan_insert["params"]["order_type"] == "stop"
+        assert "venue_order_type" not in plan_insert["params"]
+        client.close()
+
+    def test_create_order_stop_limit_persists_core_vocabulary_and_both_prices(self) -> None:
+        """A stop_limit command keeps CORE type, limit leg and trigger (#156).
+
+        Given: a stop_limit order with price and stop_price,
+        When: created via POST /api/orders,
+        Then: the command row stores order_type='stop_limit' with both
+            prices, so the outbox payload and the venue submit carry the
+            full trigger semantics.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
+        repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        client = _create_client(repo)
+        body = _create_order_body()
+        body["payload"]["order_type"] = "stop_limit"
+        body["payload"]["price"] = 47900.0
+        body["payload"]["stop_price"] = 48000.0
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 200
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        assert cmd_insert["order_type"] == "stop_limit"
+        assert cmd_insert["price"] == 47900.0
+        assert cmd_insert["stop_price"] == 48000.0
+        client.close()
+
     def test_create_order_with_leverage(self) -> None:
         """Given order with leverage, When creating, Then leverage in params."""
         repo = AsyncMock()

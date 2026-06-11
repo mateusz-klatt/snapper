@@ -9307,3 +9307,175 @@ class TestHonestHeartbeatStatus:
             await ex._supervise_execution_stream()
         assert ex._task_deaths_in_streak["execution_stream"] == 1
         assert "execution_stream" in ex._task_streak_started
+
+
+class TestCoreToWireOrderRequest:
+    """Core->wire translation at the venue boundary (#156)."""
+
+    def _order(self, **overrides: Any) -> OrderRequestData:
+        base: dict[str, Any] = {
+            "strategy_id": "test_strategy",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.1,
+            "client_order_id": "cid-stop-1",
+        }
+        base.update(overrides)
+        return OrderRequestData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            **base,
+        )
+
+    def test_market_and_limit_map_identically(self) -> None:
+        """The coinciding vocabulary values translate one-to-one.
+
+        Given: CORE market and limit requests,
+        When: translated to the wire contract,
+        Then: the wire enum matches and no trigger is set.
+        """
+        market = base_module._exchange_order_request_from_core(self._order(), "wallet-1")
+        assert market.type is ExchangeOrderTypeEnum.MARKET
+        assert market.stop_price is None
+        assert market.wallet_public_id == "wallet-1"
+        limit = base_module._exchange_order_request_from_core(
+            self._order(order_type="limit", price=50000.0), "wallet-1"
+        )
+        assert limit.type is ExchangeOrderTypeEnum.LIMIT
+        assert limit.price == 50000.0
+
+    def test_stop_types_map_to_wire_and_thread_trigger(self) -> None:
+        """Stop types translate to wire values WITH the trigger (#156).
+
+        Given: CORE stop and stop_limit requests carrying stop_price,
+        When: translated,
+        Then: the wire enum is stop-loss / stop-loss-limit and
+            stop_price reaches the venue contract.
+        """
+        stop = base_module._exchange_order_request_from_core(
+            self._order(order_type="stop", stop_price=48000.0), "wallet-1"
+        )
+        assert stop.type is ExchangeOrderTypeEnum.STOP_LOSS
+        assert stop.stop_price == 48000.0
+        assert stop.price is None
+        stop_limit = base_module._exchange_order_request_from_core(
+            self._order(order_type="stop_limit", price=47900.0, stop_price=48000.0),
+            "wallet-1",
+        )
+        assert stop_limit.type is ExchangeOrderTypeEnum.STOP_LOSS_LIMIT
+        assert stop_limit.stop_price == 48000.0
+        assert stop_limit.price == 47900.0
+
+    def test_unknown_core_type_raises_vocabulary_error(self) -> None:
+        """A wire value smuggled into the durable plane is rejected.
+
+        Given: a corrupted request whose order_type bypassed schema
+            validation (model_copy skips pydantic),
+        When: translated,
+        Then: a descriptive vocabulary ValueError is raised pre-send.
+        """
+        corrupt = self._order().model_copy(update={"order_type": "stop-loss"})
+        with pytest.raises(ValueError, match="no exchange wire mapping"):
+            base_module._exchange_order_request_from_core(corrupt, "wallet-1")
+
+    def test_stop_without_trigger_raises_pre_send(self) -> None:
+        """A stop-typed request without stop_price never reaches a venue.
+
+        Given: a stop request whose trigger is missing (redispatched
+            legacy frame),
+        When: translated,
+        Then: a descriptive ValueError is raised pre-send.
+        """
+        with pytest.raises(ValueError, match="without stop_price"):
+            base_module._exchange_order_request_from_core(
+                self._order(order_type="stop"), "wallet-1"
+            )
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_execute_live_order_sends_wire_request(
+        self, mock_get_settings: MagicMock
+    ) -> None:
+        """The submit path hands the venue client the translated request.
+
+        Given: a stop_limit order with a trigger,
+        When: _execute_live_order runs,
+        Then: create_order receives wire type stop-loss-limit with both
+            the trigger and the limit leg.
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.paper_initial_cash_usd = 10000.0
+        mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        mock_exchange_client = AsyncMock()
+        result = MagicMock()
+        result.id = "OID-1"
+        result.db_order_id = None
+        result.db_order_public_id = None
+        mock_exchange_client.create_order = AsyncMock(return_value=result)
+        service_any.exchange_client = mock_exchange_client
+        order = self._order(order_type="stop_limit", price=47900.0, stop_price=48000.0)
+        returned = await service_any._execute_live_order(order)
+        assert returned == "OID-1"
+        sent = mock_exchange_client.create_order.call_args[0][0]
+        assert sent.type is ExchangeOrderTypeEnum.STOP_LOSS_LIMIT
+        assert sent.stop_price == 48000.0
+        assert sent.price == 47900.0
+        assert sent.client_order_id == "cid-stop-1"
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_order_stop_without_trigger_definitively_rejects(
+        self, mock_get_settings: MagicMock
+    ) -> None:
+        """The defensive gate routes to the definitive-reject branch.
+
+        Given: a stop order without stop_price reaching _process_order,
+        When: processed,
+        Then: REJECTED is published with a durable order_rejected event
+            and the venue client is never called.
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7601"
+        mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.paper_initial_cash_usd = 10000.0
+        mock_settings.db_url = "sqlite+aiosqlite:///:memory:"
+        mock_get_settings.return_value = mock_settings
+        service = KrakenOrderExecutor()
+        service_any = cast(Any, service)
+        service_any.running = True
+        service_any._is_duplicate_submit = AsyncMock(return_value=False)
+        service_any._reject_if_stale = AsyncMock(return_value=False)
+        mock_exchange_client = AsyncMock()
+        service_any.exchange_client = mock_exchange_client
+        statuses: list[str] = []
+
+        async def track_status(order: Any, status: str) -> bool:
+            statuses.append(status)
+            return True
+
+        recorded: list[dict[str, Any]] = []
+
+        async def track_event(params: dict[str, Any]) -> None:
+            recorded.append(params)
+
+        service_any._publish_order_status = track_status
+        service_any._record_venue_event = track_event
+        order = self._order(order_type="stop")
+        await service_any._process_order(order)
+        mock_exchange_client.create_order.assert_not_called()
+        assert "rejected" in statuses
+        assert recorded and recorded[0]["event_type"] == "order_rejected"
+        assert "without stop_price" in recorded[0]["error"]
+        assert order.client_order_id not in service_any.pending_orders

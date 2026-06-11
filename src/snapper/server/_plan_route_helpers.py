@@ -13,6 +13,7 @@ from fastapi import status
 from loguru import logger
 
 from snapper.api.schemas.orders import ExecutionPlanResponse
+from snapper.application.plans.params import core_order_type_from_plan_params
 from snapper.application.plans.service import PlanExecutorService
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -548,7 +549,7 @@ def build_cancel_submission(
         instrument_public_id=plan.get("instrument_public_id"),
         command_type="cancel",
         side=plan["side"],
-        order_type=str(params.get("venue_order_type", "market")),
+        order_type=core_order_type_from_plan_params(params),
         quantity=None,
         price=None,
         source_surface="rest",
@@ -595,7 +596,7 @@ def _build_cancel_trade_command(
         client_order_id=child_client_order_id,
         venue_client_id=child_client_order_id,
         side=plan["side"],
-        order_type=str(params.get("venue_order_type", "market")),
+        order_type=core_order_type_from_plan_params(params),
         quantity=plan["total_quantity"],
         price=cast(float | None, params.get("price")),
         leverage=cast(int | None, params.get("leverage")),

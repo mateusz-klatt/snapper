@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 import snapper.data.repository
 import snapper.data.repository as repo
 import snapper.data.repository as repository
+from snapper.application.trade.command_request import order_request_from_command
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
 from snapper.data import repository as repo_module
@@ -10088,3 +10089,103 @@ async def test_get_order_identity_for_client_order_id(tmp_path: Path) -> None:
     identity = await r.get_order_identity_for_client_order_id("cid-ident", now)
     assert identity == (oid, opid, "ex-ident")
     assert await r.get_order_identity_for_client_order_id("cid-none", now) is None
+
+
+@pytest.mark.asyncio
+async def test_stop_command_round_trip_preserves_trigger_through_pipeline(
+    tmp_path: Path,
+) -> None:
+    """The stop trigger survives insert, outbox read, and every SCD2 successor (#156).
+
+    Given: a stop_limit command persisted with CORE vocabulary and a
+        stop_price trigger,
+    When: the row cycles through every SCD2 writer — the outbox revert
+        (update_trade_command_status, created -> created), the bulk
+        dispatch (created -> dispatched) and the lifecycle CAS
+        (dispatched -> accepted) — with outbox reads in between,
+    Then: order_type stays the CORE value, OrderRequestData validates
+        (the pre-fix wire value failed pydantic and stranded the row
+        CREATED), and stop_price is intact after EVERY transition — a
+        missed successor constructor or row projection would NULL the
+        trigger exactly on the publish path.
+    """
+    db_path = tmp_path / "cmd_stop_trip.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "create",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "manual",
+            "client_order_id": "cid-stop-1",
+            "venue_client_id": "cid-stop-1",
+            "side": "sell",
+            "order_type": "stop_limit",
+            "quantity": 0.25,
+            "price": 47900.0,
+            "stop_price": 48000.0,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-stop-1",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    t0 = now + timedelta(milliseconds=500)
+    reverted_id = await r.update_trade_command_status(
+        public_id=cmd_pid,
+        new_status="created",
+        bus_time=t0,
+        session_id="s1",
+        sequence_id=2,
+        last_error="publish failed",
+        attempt_count=2,
+    )
+    assert reverted_id is not None
+    undispatched = await r.get_undispatched_commands(as_of=t0, limit=10)
+    assert len(undispatched) == 1
+    outbox_row = undispatched[0]
+    assert outbox_row["order_type"] == "stop_limit"
+    assert outbox_row["stop_price"] == 48000.0
+    request = order_request_from_command(outbox_row)
+    assert request.order_type == "stop_limit"
+    assert request.stop_price == 48000.0
+    assert request.price == 47900.0
+    t1 = now + timedelta(seconds=1)
+    applied = await r.bulk_dispatch_trade_commands(
+        [
+            {
+                "public_id": cmd_pid,
+                "bus_time": t1,
+                "session_id": "s1",
+                "sequence_id": 3,
+                "dispatched_at": t1,
+                "attempt_count": 1,
+            }
+        ]
+    )
+    assert applied == 1
+    active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", t1)
+    assert active[0]["status"] == "dispatched"
+    assert active[0]["stop_price"] == 48000.0
+    t2 = now + timedelta(seconds=2)
+    advanced = await r.advance_trade_command_lifecycle(
+        public_id=cmd_pid,
+        expected_status="dispatched",
+        new_status="accepted",
+        bus_time=t2,
+        session_id="s1",
+        sequence_id=4,
+        acked_at=t2,
+        exchange_order_id="OID-1",
+    )
+    assert advanced is True
+    active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", t2)
+    assert active[0]["status"] == "accepted"
+    assert active[0]["stop_price"] == 48000.0
+    assert active[0]["order_type"] == "stop_limit"

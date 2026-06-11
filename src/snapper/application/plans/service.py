@@ -24,6 +24,7 @@ from loguru import logger
 from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.evaluator import PlanEvaluator
 from snapper.application.plans.manual_once import ManualOnceEvaluator
+from snapper.application.plans.params import core_order_type_from_plan_params
 from snapper.application.plans.trailing_stop import TrailingStopEvaluator
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.process_manager.models import RegisterableProcess
@@ -521,7 +522,7 @@ class PlanExecutorService(RegisterableProcess):
             "client_order_id": child_client_order_id,
             "venue_client_id": child_client_order_id,
             "side": plan["side"],
-            "order_type": str(params.get("venue_order_type", "market")),
+            "order_type": core_order_type_from_plan_params(params),
             "quantity": plan["total_quantity"],
             "price": params.get("price"),
             "leverage": params.get("leverage"),
@@ -544,7 +545,7 @@ class PlanExecutorService(RegisterableProcess):
                 plan=plan,
                 command_type="cancel",
                 side=plan["side"],
-                order_type=str(params.get("venue_order_type", "market")),
+                order_type=core_order_type_from_plan_params(params),
                 quantity=plan["total_quantity"],
             )
             logger.info(

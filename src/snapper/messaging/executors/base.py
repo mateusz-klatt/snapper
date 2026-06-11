@@ -60,6 +60,7 @@ from snapper.data.repository_types import RecordVenueEventParams
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
+from snapper.infrastructure.exchanges.contracts import CORE_TO_EXCHANGE_ORDER_TYPE
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
@@ -281,6 +282,59 @@ _SEEN_EXEC_IDS_MAX = 10_000
 apply_fill LRU). At one fill per second this covers ~3 hours of
 lookback — far beyond any venue replay window — while capping memory.
 """
+
+
+_STOP_TYPED_EXCHANGE_ORDER_TYPES = frozenset(
+    {ExchangeOrderTypeEnum.STOP_LOSS, ExchangeOrderTypeEnum.STOP_LOSS_LIMIT}
+)
+"""Wire order types that REQUIRE a trigger price on submit (#156)."""
+
+
+def _exchange_order_request_from_core(
+    order: OrderRequestData, wallet_public_id: str
+) -> ExchangeOrderRequest:
+    """Translate a CORE-vocabulary order request into the venue wire contract.
+
+    The durable plane (trade_commands, ``OrderRequestData``) speaks CORE
+    (``market``/``limit``/``stop``/``stop_limit``); venue SDKs speak
+    ``ExchangeOrderTypeEnum`` wire values (``stop-loss``/...). The bare
+    ``ExchangeOrderTypeEnum(value)`` cast this replaces only worked
+    because the two vocabularies coincide on market/limit — for stop
+    types it raised an opaque ValueError (#156). Raising HERE, before
+    any network send, is provably-not-placed, so the caller's generic
+    definitive-reject branch (publish REJECTED + durable
+    ``order_rejected`` event) is the correct disposition.
+
+    Raises:
+        ValueError: When the core order type has no wire mapping, or a
+            stop-typed order carries no ``stop_price`` (redispatched
+            legacy frames must not reach the venue half-formed).
+    """
+    wire_type = CORE_TO_EXCHANGE_ORDER_TYPE.get(order.order_type)
+    if wire_type is None:
+        raise ValueError(
+            f"order {order.client_order_id}: core order type {order.order_type!r} "
+            f"has no exchange wire mapping — vocabulary error, definitive reject"
+        )
+    if wire_type in _STOP_TYPED_EXCHANGE_ORDER_TYPES and order.stop_price is None:
+        raise ValueError(
+            f"order {order.client_order_id}: stop-typed order ({order.order_type}) "
+            f"without stop_price — refusing half-formed venue submit, definitive reject"
+        )
+    return ExchangeOrderRequest(
+        symbol=order.instrument,
+        side=OrderSideEnum(order.side),
+        type=wire_type,
+        amount=float(order.quantity),
+        price=float(order.price) if order.price else None,
+        stop_price=float(order.stop_price) if order.stop_price else None,
+        client_order_id=order.client_order_id,
+        signaled_at=order.signaled_at,
+        leverage=order.leverage,
+        reduce_only=order.reduce_only,
+        wallet_public_id=wallet_public_id,
+        operator_public_id=order.operator_public_id,
+    )
 
 
 class ExecutorTaskDeadError(RuntimeError):
@@ -2223,19 +2277,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             Exception: Any other submit failure (definitive reject).
         """
         exchange_name = self._get_exchange_name()
-        order_request = ExchangeOrderRequest(
-            symbol=order.instrument,
-            side=OrderSideEnum(order.side),
-            type=ExchangeOrderTypeEnum(order.order_type),
-            amount=float(order.quantity),
-            price=float(order.price) if order.price else None,
-            client_order_id=order.client_order_id,
-            signaled_at=order.signaled_at,
-            leverage=order.leverage,
-            reduce_only=order.reduce_only,
-            wallet_public_id=self.wallet_public_id,
-            operator_public_id=order.operator_public_id,
-        )
+        order_request = _exchange_order_request_from_core(order, self.wallet_public_id)
         assert self.exchange_client is not None, _EXCHANGE_NOT_INIT_MSG
         result = await self.exchange_client.create_order(order_request)
         exchange_order_id = result.id if result else None
@@ -2685,19 +2727,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if existing is not None:
                 pending.db_order_id, pending.order_public_id, _venue_id = existing
                 return
-            request = ExchangeOrderRequest(
-                symbol=order.instrument,
-                side=OrderSideEnum(order.side),
-                type=ExchangeOrderTypeEnum(order.order_type),
-                amount=float(order.quantity),
-                price=float(order.price) if order.price else None,
-                client_order_id=order.client_order_id,
-                signaled_at=order.signaled_at,
-                leverage=order.leverage,
-                reduce_only=order.reduce_only,
-                wallet_public_id=self.wallet_public_id,
-                operator_public_id=order.operator_public_id,
-            )
+            request = _exchange_order_request_from_core(order, self.wallet_public_id)
             logged = await self.exchange_client._log_order_to_db(request, snapshot)
             if logged is not None:
                 pending.db_order_id, pending.order_public_id = logged

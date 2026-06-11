@@ -42,6 +42,7 @@ from typing import cast
 from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
+from snapper.application.plans.params import core_order_type_from_plan_params
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -222,7 +223,7 @@ def _build_cancel_submission(
             stamped on the submission so caps audit can attribute the
             attempt distinctly.
     """
-    order_type = _json_str_param(plan["params"], "venue_order_type") or "market"
+    order_type = core_order_type_from_plan_params(plan["params"])
     return TradeCommandSubmission(
         user_public_id=principal.user_public_id,
         operator_public_id=plan["operator_public_id"],
@@ -282,7 +283,7 @@ def _build_cancel_trade_command(
         client_order_id=child_client_order_id,
         venue_client_id=child_client_order_id,
         side=plan["side"],
-        order_type=_json_str_param(params, "venue_order_type") or "market",
+        order_type=core_order_type_from_plan_params(params),
         quantity=plan["total_quantity"],
         price=cast(float | None, params.get("price")),
         leverage=cast(int | None, params.get("leverage")),

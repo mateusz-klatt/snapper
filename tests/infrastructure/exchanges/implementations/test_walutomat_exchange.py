@@ -4927,3 +4927,30 @@ class TestWalutomatAmbiguousSubmitClassification:
         )
         with pytest.raises(AmbiguousOrderSubmitError):
             await client.create_order(self._request())
+
+
+@pytest.mark.asyncio()
+async def test_create_order_rejects_stop_types_before_any_send() -> None:
+    """Stop orders are honestly refused pre-send — Walutomat has none (#156).
+
+    Given: A client (even unauthenticated — the gate runs first),
+    When: create_order() is called with a stop or stop-limit request,
+    Then: a ValueError surfaces BEFORE auth or any HTTP send, so the
+        executor's definitive-reject branch publishes REJECTED instead
+        of parking the order as ambiguous.
+    """
+    client = WalutomatExchangeClient(api_key="key")
+    for order_type in (
+        ExchangeOrderTypeEnum.STOP_LOSS,
+        ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+    ):
+        request = ExchangeOrderRequest(
+            symbol="EUR-PLN",
+            side=OrderSideEnum.BUY,
+            type=order_type,
+            amount=100.0,
+            price=4.2,
+            stop_price=4.3,
+        )
+        with pytest.raises(ValueError, match="does not support stop orders"):
+            await client.create_order(request)

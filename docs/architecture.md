@@ -1091,12 +1091,17 @@ checkpoint persistence, separate `/api/trailing-stops` route module),
 `peg`, `scheduler`.
 
 **Manual order create flow:** `POST /api/orders` creates a `manual_once`
-plan (pending), stamps `child_client_order_id`, `native_instrument`, and
-`venue_order_type` into `plan.params`, then inserts a `create`
-`TradeCommand` for the outbox dispatcher and transitions the plan to
-`active`. The `OutboxDispatcher` inside `TraderCoordinator` publishes the
-command as `OrderRequestData` on the `orders.commands.{ex}.{instr}.submit`
-topic.
+plan (pending), stamps `child_client_order_id` and `native_instrument`
+into `plan.params`, then inserts a `create` `TradeCommand` for the outbox
+dispatcher and transitions the plan to `active`. The command row stores
+the CORE order-type vocabulary (`market`/`limit`/`stop`/`stop_limit`)
+plus the `stop_price` trigger for stop types; translation to the venue
+wire vocabulary (`stop-loss`/`stop-loss-limit`) happens only at the
+executor's venue boundary. Cancel/flatten readers resolve the order type
+through `core_order_type_from_plan_params`, which still normalizes the
+legacy `venue_order_type` param written by pre-fix plans. The
+`OutboxDispatcher` inside `TraderCoordinator` publishes the command as
+`OrderRequestData` on the `orders.commands.{ex}.{instr}.submit` topic.
 
 **Fill propagation:** `PlanExecutorService` subscribes to
 `orders.events.` and `market.` on the broker XPUB and consumes every

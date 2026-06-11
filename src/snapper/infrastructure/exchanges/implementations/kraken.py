@@ -95,6 +95,33 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 apply_kraken_ws_teardown_hardening()
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
+_STOP_ORDER_TYPES = frozenset(
+    {ExchangeOrderTypeEnum.STOP_LOSS, ExchangeOrderTypeEnum.STOP_LOSS_LIMIT}
+)
+
+
+def _require_stop_price(request: ExchangeOrderRequest) -> float:
+    """Return the trigger price of a stop-typed request, or raise pre-send.
+
+    Raising BEFORE any network call keeps the failure provably-not-placed,
+    so the executor's definitive-reject branch is the correct disposition
+    (#156). The executor's own gate makes this unreachable for outbox
+    traffic; it defends direct client callers. A stop-loss-limit request
+    must also carry its limit leg — silently submitting without it would
+    either crash inside ccxt's price formatting or degrade the order on
+    the native path, mirroring the futures client's pre-send gate.
+
+    Raises:
+        ValueError: When ``stop_price`` is missing, or a stop-loss-limit
+            request carries no ``price``.
+    """
+    if request.stop_price is None:
+        raise ValueError(f"{request.type.value} order requires stop_price")
+    if request.type is ExchangeOrderTypeEnum.STOP_LOSS_LIMIT and request.price is None:
+        raise ValueError("stop-loss-limit order requires price (the limit leg)")
+    return float(request.stop_price)
+
+
 _WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
 _REPLAY_CLIENT_REPLACED_MSG = "WebSocket client replaced during subscription replay"
 _CONNECT_OWNERSHIP_LOST_MSG = "WebSocket client replaced during connect"
@@ -250,6 +277,29 @@ _CCXT_TYPE_MAP: Final[dict[str, ExchangeOrderTypeEnum]] = {
     "stop-loss": ExchangeOrderTypeEnum.STOP_LOSS,
     "take-profit": ExchangeOrderTypeEnum.TAKE_PROFIT,
 }
+
+
+def _resolve_ccxt_order_type(ccxt_order: dict[str, Any]) -> ExchangeOrderTypeEnum:
+    """Resolve the wire order type of a fetched ccxt order.
+
+    ccxt's unified ``type`` collapses Kraken stop orders to their BASE
+    type (``parse_order_type`` maps raw ``stop-loss`` -> ``market`` and
+    ``stop-loss-limit`` -> ``limit``), which would make an adopted or
+    fetched protective stop indistinguishable from a plain order (#156).
+    The raw Kraken ``ordertype`` survives under ``info.descr`` and its
+    values coincide exactly with ``ExchangeOrderTypeEnum``, so it is
+    preferred; the unified ``type`` via ``_CCXT_TYPE_MAP`` remains the
+    fallback for payloads without a raw description.
+    """
+    info = ccxt_order.get("info")
+    descr = info.get("descr") if isinstance(info, dict) else None
+    raw = descr.get("ordertype") if isinstance(descr, dict) else None
+    if isinstance(raw, str):
+        try:
+            return ExchangeOrderTypeEnum(raw)
+        except ValueError:
+            logger.warning(f"Unknown raw Kraken ordertype {raw!r}; falling back to unified type")
+    return _CCXT_TYPE_MAP.get(ccxt_order.get("type", ""), ExchangeOrderTypeEnum.LIMIT)
 
 
 def _resolve_ccxt_fill_price(ccxt_order: dict[str, Any]) -> float | None:
@@ -534,6 +584,9 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         Raises:
             RuntimeError: If API credentials are missing.
+            ValueError: If a stop-typed request carries no
+                ``stop_price`` — raised BEFORE any network send so the
+                failure is provably-not-placed (definitive reject).
             Exception: If order creation fails.
         """
         if not self.api_key or not self.api_secret:
@@ -566,6 +619,16 @@ class KrakenExchangeClient(ExchangeClientBase):
         subclasses ``NetworkError`` while being a definitive venue-side
         rejection (the exhausted 429 cannot have placed the order).
 
+        Stop types translate through ccxt's ``stopLossPrice`` param
+        (verified against the pinned ccxt 4.5.57 kraken source,
+        ``order_request``): the ccxt type is the BASE type (``market``
+        for stop-loss, ``limit`` for stop-loss-limit) and ccxt itself
+        derives ``ordertype`` from the param, putting the trigger in
+        AddOrder ``price`` and the limit leg in ``price2``. Passing the
+        wire value (``stop-loss``) as the ccxt type instead would make
+        ccxt treat it as an already-triggered exotic type and skip the
+        trigger wiring.
+
         Args:
             request: Order parameters.
 
@@ -584,11 +647,17 @@ class KrakenExchangeClient(ExchangeClientBase):
             ccxt_params["leverage"] = request.leverage
         if request.post_only:
             ccxt_params["postOnly"] = True
+        ccxt_type = request.type.value
+        if request.type in _STOP_ORDER_TYPES:
+            ccxt_params["stopLossPrice"] = _require_stop_price(request)
+            ccxt_type = (
+                "limit" if request.type is ExchangeOrderTypeEnum.STOP_LOSS_LIMIT else "market"
+            )
         try:
             order_data = await self._with_retry(
                 self._ccxt_client.create_order,
                 ccxt_symbol,
-                request.type.value,
+                ccxt_type,
                 request.side.value,
                 float(request.amount),
                 float(request.price) if request.price else None,
@@ -629,6 +698,10 @@ class KrakenExchangeClient(ExchangeClientBase):
     ) -> ExchangeOrderSnapshot:
         """Create order using native Kraken Trade API (fallback for unsupported CCXT symbols).
 
+        For stop types the AddOrder mapping is the documented Kraken
+        one: ``price`` carries the STOP TRIGGER and ``price2`` the
+        limit leg of ``stop-loss-limit`` (#156).
+
         Args:
             request: Order parameters.
 
@@ -636,6 +709,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             Created order snapshot.
 
         Raises:
+            ValueError: If a stop-typed request carries no ``stop_price``
+                (pre-send, provably-not-placed).
             Exception: If native API order creation fails.
         """
         try:
@@ -647,7 +722,11 @@ class KrakenExchangeClient(ExchangeClientBase):
                 "pair": kraken_rest_symbol,
                 "volume": str(request.amount),
             }
-            if request.price:
+            if request.type in _STOP_ORDER_TYPES:
+                kraken_params["price"] = str(_require_stop_price(request))
+                if request.price:
+                    kraken_params["price2"] = str(request.price)
+            elif request.price:
                 kraken_params["price"] = str(request.price)
             if request.leverage is not None:
                 kraken_params["leverage"] = str(request.leverage)
@@ -2449,7 +2528,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             client_order_id=ccxt_order.get("clientOrderId"),
             symbol=native_symbol,
             side=_CCXT_SIDE_MAP.get(ccxt_order.get("side", ""), OrderSideEnum.BUY),
-            type=_CCXT_TYPE_MAP.get(ccxt_order.get("type", ""), ExchangeOrderTypeEnum.LIMIT),
+            type=_resolve_ccxt_order_type(ccxt_order),
             amount=float(ccxt_order.get("amount") or 0),
             price=_resolve_ccxt_fill_price(ccxt_order),
             status=_CCXT_STATUS_MAP[ccxt_order["status"]],

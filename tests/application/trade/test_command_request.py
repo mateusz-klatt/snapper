@@ -178,3 +178,30 @@ class TestOrderRequestFromCommand:
         """
         order = order_request_from_command(_cmd(wallet_public_id=None))
         assert order.wallet_public_id == ""
+
+    def test_stop_order_carries_type_and_trigger(self) -> None:
+        """A stop command reconstructs with CORE type and its trigger (#156).
+
+        Given: a stop_limit command row with a persisted stop_price,
+        When: the request is reconstructed,
+        Then: order_type stays the CORE value and stop_price survives —
+            the outbox publish AND the adoption sweeps carry the trigger.
+        """
+        order = order_request_from_command(
+            _cmd(order_type="stop_limit", price=99.0, stop_price=100.5)
+        )
+        assert order.order_type == "stop_limit"
+        assert order.price == 99.0
+        assert order.stop_price == 100.5
+
+    def test_row_without_stop_price_key_reconstructs_none(self) -> None:
+        """A pre-#156 row shape (no stop_price key) degrades to None.
+
+        Given: a command row dict lacking the stop_price key entirely,
+        When: the request is reconstructed,
+        Then: stop_price is None rather than a KeyError.
+        """
+        legacy = dict(_cmd())
+        legacy.pop("stop_price", None)
+        order = order_request_from_command(cast(TradeCommandRow, legacy))
+        assert order.stop_price is None

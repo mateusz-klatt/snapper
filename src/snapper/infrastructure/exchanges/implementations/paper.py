@@ -169,9 +169,19 @@ class PaperExchangeClient(ExchangeClientBase):
 
         Raises:
             RuntimeError: If client not connected.
+            ValueError: If the request is stop-typed — the paper fill
+                simulator has no trigger logic, so accepting a stop
+                would fill it IMMEDIATELY and misrepresent the
+                protective semantics (#156). Pre-send rejection keeps
+                the executor's definitive-reject branch honest.
         """
         if not self._running:
             raise RuntimeError(_NOT_CONNECTED_MSG)
+        if request.type in (
+            ExchangeOrderTypeEnum.STOP_LOSS,
+            ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+        ):
+            raise ValueError("Paper trading does not support stop orders (no trigger simulation)")
         order_id = str(uuid.uuid4())
         timestamp = request.signaled_at.timestamp() if request.signaled_at else time.time()
         logger.info(

@@ -44,6 +44,36 @@ class ExchangeOrderTypeEnum(StrEnum):
     SETTLE_POSITION = "settle-position"
 
 
+CORE_TO_EXCHANGE_ORDER_TYPE: dict[str, ExchangeOrderTypeEnum] = {
+    "market": ExchangeOrderTypeEnum.MARKET,
+    "limit": ExchangeOrderTypeEnum.LIMIT,
+    "stop": ExchangeOrderTypeEnum.STOP_LOSS,
+    "stop_limit": ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+}
+"""Core domain order types -> exchange wire types (#156).
+
+The two vocabularies coincide ONLY for market/limit;
+``ExchangeOrderTypeEnum('stop')`` raises, so every venue-boundary
+translation must go through this map. An order type absent here is a
+DEFINITIVE executor-side rejection, never a bare ValueError.
+"""
+
+EXCHANGE_TO_CORE_ORDER_TYPE: dict[str, str] = {
+    ExchangeOrderTypeEnum.MARKET.value: "market",
+    ExchangeOrderTypeEnum.LIMIT.value: "limit",
+    ExchangeOrderTypeEnum.STOP_LOSS.value: "stop",
+    ExchangeOrderTypeEnum.STOP_LOSS_LIMIT.value: "stop_limit",
+}
+"""Exchange wire order types -> core domain types (#156).
+
+Used at the durable boundaries that historically leaked wire vocabulary:
+the ``orders`` table persistence (venue snapshots carry wire types) and
+the legacy ``venue_order_type`` plan-param fallback. Unmapped wire types
+(iceberg, take-profit, ...) pass through unchanged — they never enter
+core flows.
+"""
+
+
 class ExchangeOrderStatusEnum(StrEnum):
     """Exchange-wire-format order status.
 

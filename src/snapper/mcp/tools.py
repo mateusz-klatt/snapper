@@ -49,6 +49,7 @@ from snapper.application.plans.cancel_service import PlanConcurrentChangeError
 from snapper.application.plans.cancel_service import PlanNotFoundError
 from snapper.application.plans.cancel_service import PlansCancelService
 from snapper.application.plans.cancel_service import PlanScopeError
+from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -84,6 +85,7 @@ _MCP_TOOL_STREAM = "rest.mcp"
 _PG_UNIQUE_VIOLATION_SQLSTATE = "23505"
 _SQLITE_CONSTRAINT_UNIQUE_EXTCODE = 2067
 _ORDER_STATUS_VALUES: frozenset[str] = frozenset(member.value for member in OrderStatusEnum)
+_MANUAL_ORDER_EVALUATOR = ManualOnceEvaluator()
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,7 @@ class _ManualOrderInput:
     wallet_public_id: str
     idempotency_key: str
     price: float | None
+    stop_price: float | None
     operator_public_id: str | None
     ai_review_public_id: str | None
 
@@ -124,6 +127,7 @@ class _PreparedManualOrder:
     order_type: str
     quantity: float
     price: float | None
+    stop_price: float | None
     created_at: datetime
     bus_time: dt.datetime
     wallet_public_id: str
@@ -555,6 +559,14 @@ async def _prepare_manual_order(
     """
     claims = claims_getter()
     _require_permission(claims, Permission.CREATE_ORDERS)
+    _MANUAL_ORDER_EVALUATOR.validate_params(
+        {
+            "order_type": order.order_type,
+            "side": order.side,
+            "price": order.price,
+            "stop_price": order.stop_price,
+        }
+    )
     repo, enforcer = _get_write_dependencies(repository_getter, caps_enforcer_getter)
     created_at = datetime.now(UTC)
     ensure_operator_in_claims(claims, order.operator_public_id)
@@ -609,8 +621,8 @@ async def _prepare_manual_order(
             "side": order.side,
             "child_client_order_id": client_order_id,
             "native_instrument": order.instrument,
-            "venue_order_type": order.order_type,
             **({"price": order.price} if order.price is not None else {}),
+            **({"stop_price": order.stop_price} if order.stop_price is not None else {}),
         },
         "status": "pending",
         "created_at": created_at,
@@ -631,6 +643,7 @@ async def _prepare_manual_order(
         order_type=order.order_type,
         quantity=order.quantity,
         price=order.price,
+        stop_price=order.stop_price,
         created_at=created_at,
         bus_time=bus_time,
         wallet_public_id=order.wallet_public_id,
@@ -673,6 +686,7 @@ def _build_manual_order_command_row(
         "order_type": prepared.order_type,
         "quantity": prepared.quantity,
         "price": prepared.price,
+        "stop_price": prepared.stop_price,
         "leverage": None,
         "reduce_only": False,
         "status": TradeCommandStatusEnum.CREATED,
@@ -1462,6 +1476,7 @@ def register_mcp_tools(
         wallet_public_id: str,
         idempotency_key: str,
         price: float | None = None,
+        stop_price: float | None = None,
         operator_public_id: str | None = None,
         ai_review_public_id: str | None = None,
     ) -> dict[str, Any]:
@@ -1485,8 +1500,11 @@ def register_mcp_tools(
             idempotency_key: Client-supplied uniqueness key; required
                 because MCP clients are the most
                 likely source of accidental retries.
-            price: Limit / stop price. Required for non-market order
-                types.
+            price: Limit price. Required for ``limit`` and
+                ``stop_limit`` order types.
+            stop_price: Trigger price. Required for ``stop`` and
+                ``stop_limit`` order types; persisted on the command
+                row so the executor submits the trigger to the venue.
             operator_public_id: Optional operator scope. Omit to
                 inherit the caller's primary operator.
             ai_review_public_id: Optional UUID7 of the
@@ -1505,6 +1523,10 @@ def register_mcp_tools(
         Raises:
             PermissionError: if the caller lacks
                 :data:`Permission.CREATE_ORDERS`.
+            ValueError: if order params fail the manual-order rule
+                (unknown ``order_type``, ``limit``/``stop_limit``
+                without ``price``, ``stop``/``stop_limit`` without
+                ``stop_price``) — same evaluator rule as REST 422.
             RuntimeError: if repository / caps enforcer are not
                 initialized yet.
             CapsViolationError: on a caps rejection — surfaced to the
@@ -1521,6 +1543,7 @@ def register_mcp_tools(
             wallet_public_id=wallet_public_id,
             idempotency_key=idempotency_key,
             price=price,
+            stop_price=stop_price,
             operator_public_id=operator_public_id,
             ai_review_public_id=ai_review_public_id,
         )

@@ -79,6 +79,9 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 apply_kraken_ws_teardown_hardening()
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for authenticated operations"
+_STOP_ORDER_TYPES = frozenset(
+    {ExchangeOrderTypeEnum.STOP_LOSS, ExchangeOrderTypeEnum.STOP_LOSS_LIMIT}
+)
 _PUBLIC_WS_NOT_CONNECTED_MSG = "WebSocket client not connected"
 _QUEUE_DRAIN_TIMEOUT = 0.1
 _WS_CLOSE_TIMEOUT_S = 10.0
@@ -831,6 +834,12 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
     async def create_order(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
         """Submit a new order on Kraken Futures.
 
+        Both stop types map to the venue's ``stp`` orderType: the
+        send-order endpoint takes ``stopPrice`` (trigger) and
+        ``limitPrice`` independently — with a limit price the triggered
+        order is a limit order (stop-loss-limit), without it the stop
+        executes at market (#156).
+
         Args:
             request: Order parameters.
 
@@ -839,7 +848,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
 
         Raises:
             RuntimeError: If API credentials are missing.
-            ValueError: If the order type or symbol is unsupported
+            ValueError: If the order type or symbol is unsupported, a
+                stop-typed request carries no ``stop_price``, or a
+                stop-loss-limit request carries no ``price``
                 (raised before any network send — safe to reject).
             AmbiguousOrderSubmitError: If the HTTP transport failed in a
                 way where the request may have reached the venue
@@ -860,6 +871,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             ExchangeOrderTypeEnum.LIMIT: "lmt",
             ExchangeOrderTypeEnum.MARKET: "mkt",
             ExchangeOrderTypeEnum.STOP_LOSS: "stp",
+            ExchangeOrderTypeEnum.STOP_LOSS_LIMIT: "stp",
             ExchangeOrderTypeEnum.TAKE_PROFIT: "take_profit",
             ExchangeOrderTypeEnum.TRAILING_STOP: "trailing_stop",
         }
@@ -868,6 +880,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 f"Unsupported order type for Kraken Futures: {request.type.value}. "
                 f"Supported: {', '.join(t.value for t in supported_order_types)}"
             )
+        if request.type in _STOP_ORDER_TYPES and request.stop_price is None:
+            raise ValueError(f"{request.type.value} order requires stop_price")
+        if request.type is ExchangeOrderTypeEnum.STOP_LOSS_LIMIT and request.price is None:
+            raise ValueError("stop-loss-limit order requires price (the limit leg)")
         kraken_order_type = supported_order_types[request.type]
         if request.post_only and kraken_order_type == "lmt":
             kraken_order_type = "post"

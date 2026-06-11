@@ -1324,3 +1324,37 @@ async def test_subscribe_ticks_alias_replays_snapshots() -> None:
     async for tick in client.subscribe_ticks(["BTC/USD"]):
         updates.append(tick)
     assert updates and isinstance(updates[0], TickerUpdate)
+
+
+@pytest.mark.asyncio
+async def test_create_order_rejects_stop_types_before_storing() -> None:
+    """Paper trading honestly refuses stop orders pre-send (#156).
+
+    Given: a connected paper client and a stop-typed request,
+    When: create_order is called,
+    Then: a ValueError surfaces BEFORE the order is stored or a fill is
+        scheduled — the fill simulator has no trigger logic, so accepting
+        the order would fill a protective stop immediately.
+    """
+    client = PaperExchangeClient()
+    await client.connect()
+    try:
+        for order_type in (
+            ExchangeOrderTypeEnum.STOP_LOSS,
+            ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+        ):
+            request = ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.SELL,
+                type=order_type,
+                amount=0.5,
+                price=47900.0,
+                stop_price=48000.0,
+                client_order_id=f"cid-paper-{order_type.value}",
+            )
+            with pytest.raises(ValueError, match="does not support stop orders"):
+                await client.create_order(request)
+        assert client._orders == {}
+        assert client._fill_simulator_task is None
+    finally:
+        await client.disconnect()

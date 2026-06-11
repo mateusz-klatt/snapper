@@ -89,6 +89,7 @@ def order_request_from_command(cmd: TradeCommandRow) -> OrderRequestData:
         order_type=cast(OrderType, cmd["order_type"]),
         quantity=cmd["quantity"],
         price=cmd["price"],
+        stop_price=cmd.get("stop_price"),
         client_order_id=cmd["client_order_id"],
         exchange=cast(OrderExchange, cmd["exchange"]),
         strategy_tag=tag,

@@ -2335,13 +2335,13 @@ class TestCreateOrderValidation:
         """Reject unsupported order types instead of silent fallback.
 
         Given: Authenticated client,
-        When: create_order is called with STOP_LOSS_LIMIT (unsupported),
+        When: create_order is called with ICEBERG (no Futures mapping),
         Then: Raises ValueError listing supported types.
         """
         request = ExchangeOrderRequest(
             symbol="BTC-USD-PERP",
             side=OrderSideEnum.BUY,
-            type=ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+            type=ExchangeOrderTypeEnum.ICEBERG,
             amount=1.0,
             price=60000.0,
         )
@@ -2353,6 +2353,106 @@ class TestCreateOrderValidation:
             pytest.raises(ValueError, match="Unsupported order type"),
         ):
             await auth_client.create_order(request)
+
+    @pytest.mark.asyncio
+    async def test_stop_loss_limit_maps_to_stp_with_both_prices(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A stop_limit submit reaches the venue as stp + both prices (#156).
+
+        Given: Authenticated client and a STOP_LOSS_LIMIT request with
+            trigger and limit leg,
+        When: create_order is called,
+        Then: the SDK receives orderType 'stp', stopPrice = trigger and
+            limitPrice = limit leg — the venue's native stop-limit.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={"sendStatus": {"order_id": "ord-stp-lim", "status": "placed"}}
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.SELL,
+            type=ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+            amount=1.0,
+            price=59500.0,
+            stop_price=60000.0,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch.object(auth_client, "_log_order_to_db", new_callable=AsyncMock) as mock_log,
+        ):
+            mock_log.return_value = None
+            result = await auth_client.create_order(request)
+        assert result.id == "ord-stp-lim"
+        call_kwargs = auth_client._trade_client.create_order.call_args.kwargs
+        assert call_kwargs["orderType"] == "stp"
+        assert call_kwargs["stopPrice"] == pytest.approx(60000.0)
+        assert call_kwargs["limitPrice"] == pytest.approx(59500.0)
+
+    @pytest.mark.asyncio
+    async def test_stop_without_trigger_rejected_pre_send(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A stop-typed request without its trigger never reaches the SDK.
+
+        Given: Authenticated client and a STOP_LOSS request lacking
+            stop_price,
+        When: create_order is called,
+        Then: a pre-send ValueError surfaces (provably-not-placed) and
+            the SDK is never invoked.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock()
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.STOP_LOSS,
+            amount=1.0,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            pytest.raises(ValueError, match="requires stop_price"),
+        ):
+            await auth_client.create_order(request)
+        auth_client._trade_client.create_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_limit_without_limit_leg_rejected_pre_send(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A stop_limit without its limit leg is refused, not degraded.
+
+        Given: Authenticated client and a STOP_LOSS_LIMIT request whose
+            price is missing,
+        When: create_order is called,
+        Then: a pre-send ValueError surfaces — silently submitting stp
+            without limitPrice would degrade the order to a market stop.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock()
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+            amount=1.0,
+            stop_price=60000.0,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            pytest.raises(ValueError, match="limit leg"),
+        ):
+            await auth_client.create_order(request)
+        auth_client._trade_client.create_order.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_order_db_log_returns_none(

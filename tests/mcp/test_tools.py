@@ -274,6 +274,83 @@ class TestSubmitManualOrderTool:
         assert cmd_row["source_surface"] == "mcp"
 
     @pytest.mark.asyncio
+    async def test_stop_order_without_trigger_is_rejected_before_any_write(self) -> None:
+        """A stop order missing stop_price fails validation pre-persist (#156).
+
+        Given: a stop submit with no stop_price,
+        When: ``submit_manual_order`` runs,
+        Then: the manual-order evaluator rule rejects it (same rule as
+            REST 422) and neither the plan nor the command is written —
+            MCP can no longer produce half-formed stop commands.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        _allow_wallet(repo)
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        with pytest.raises(ToolError, match="requires stop_price"):
+            await server._tool_manager.call_tool(
+                "submit_manual_order",
+                {
+                    "exchange": "kraken",
+                    "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
+                    "side": "sell",
+                    "order_type": "stop",
+                    "quantity": 0.5,
+                    "wallet_public_id": "wallet-1",
+                    "idempotency_key": "idem-stop-1",
+                },
+            )
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stop_order_with_trigger_persists_core_type_and_stop_price(self) -> None:
+        """A valid stop_limit submit persists the trigger durably (#156).
+
+        Given: a stop_limit submit with price and stop_price,
+        When: ``submit_manual_order`` runs,
+        Then: the command row stores CORE order_type with stop_price,
+            and the plan params carry stop_price WITHOUT the legacy
+            venue_order_type key.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-pid"))
+        repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-pid"))
+        _allow_wallet(repo)
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "sell",
+                "order_type": "stop_limit",
+                "quantity": 0.5,
+                "wallet_public_id": "wallet-1",
+                "idempotency_key": "idem-stop-2",
+                "price": 47900.0,
+                "stop_price": 48000.0,
+            },
+        )
+        assert result["command_public_id"] == "cmd-pid"
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert cmd_row["order_type"] == "stop_limit"
+        assert cmd_row["price"] == 47900.0
+        assert cmd_row["stop_price"] == 48000.0
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        assert plan_row["params"]["stop_price"] == 48000.0
+        assert "venue_order_type" not in plan_row["params"]
+
+    @pytest.mark.asyncio
     async def test_caps_violation_propagates(self) -> None:
         """Enforcer rejection → CapsViolationError surfaces to MCP client.
 
