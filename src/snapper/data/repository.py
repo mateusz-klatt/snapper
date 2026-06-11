@@ -47,6 +47,7 @@ import weakref
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import AsyncIterator
+from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
 from contextlib import suppress
@@ -181,8 +182,6 @@ from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import CreateScopeGrantRequest
 from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
-from snapper.data.repository_types import EquityCandleRepairBatch
-from snapper.data.repository_types import EquityCandleRepairRow
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import ExecutionPlanCheckpointRow
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
@@ -415,31 +414,6 @@ class _UserAlertDefaultAttemptResult:
     error: Exception | None
 
 
-@dataclass(frozen=True, slots=True)
-class _EquityTradeForRepair:
-    """Ordered raw trade row used to rebuild one fragmented minute."""
-
-    instrument_public_id: str
-    executed_at: datetime
-    price: float
-    size: float
-
-
-@dataclass(slots=True)
-class _EquityTradeCandleAccumulator:
-    """Mutable OHLCV accumulator for one trade-derived candle."""
-
-    instrument_public_id: str
-    open_at: datetime
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-    weighted_value: float
-    trades: int
-
-
 _TRADE_COMMAND_TERMINAL_STATUSES: tuple[str, ...] = (
     TradeCommandStatusEnum.FILLED,
     TradeCommandStatusEnum.CANCELLED,
@@ -500,10 +474,8 @@ a legal retry would race the retry's own lifecycle).
 """
 _LIFECYCLE_FOLD_COMMAND_TYPES: tuple[str, ...] = ("create", "submit")
 _CandleNaturalKey = tuple[str, str, datetime]
-_EquityRepairKey = tuple[str, datetime]
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
 _KRAKEN_EQUITIES_EXCHANGE: Final[str] = "kraken_equities"
-_EQUITY_REPAIR_TIMEFRAME: Final[str] = "1m"
 _CANDLE_ID_CACHE_LOOKBACK: Final[timedelta] = timedelta(days=2)
 """How far back ``get_latest_candle_ids`` looks for the newest candle per
 ``(instrument, timeframe)`` when warming the publisher's startup cache.
@@ -555,139 +527,6 @@ def where_active_now(model: type[Any]) -> tuple[Any, Any]:
         Tuple of two filter clauses: (timestamp <= now, known_to > now).
     """
     return where_active(model, datetime.now(UTC))
-
-
-def _aggregate_equity_trade_repairs(
-    fragmented_keys: set[_EquityRepairKey],
-    trades: list[_EquityTradeForRepair],
-) -> EquityCandleRepairBatch:
-    """Aggregate ordered raw trades for fragmented candle minutes.
-
-    Args:
-        fragmented_keys: Candle minute keys with more than one live-synthesized
-            SCD2 version.
-        trades: Kraken Equities trades ordered by instrument, event time, and
-            database id.
-
-    Returns:
-        Corrected one-minute candle rows derived only from raw trades whose
-        event-time minute is in ``fragmented_keys``, plus the count of
-        detected fragmented minutes that have no raw trades to rebuild from.
-    """
-    accumulators: dict[_EquityRepairKey, _EquityTradeCandleAccumulator] = {}
-    for trade in trades:
-        open_at = _floor_to_utc_minute(trade.executed_at)
-        key = (trade.instrument_public_id, open_at)
-        if key not in fragmented_keys:
-            continue
-        accumulator = accumulators.get(key)
-        if accumulator is None:
-            accumulators[key] = _new_equity_trade_candle_accumulator(trade, open_at)
-            continue
-        _add_equity_trade_to_accumulator(accumulator, trade)
-    return EquityCandleRepairBatch(
-        repairs=[
-            _equity_trade_accumulator_to_repair(accumulator)
-            for accumulator in accumulators.values()
-        ],
-        unreconstructable_minutes=len(fragmented_keys) - len(accumulators),
-    )
-
-
-def _floor_to_utc_minute(value: datetime) -> datetime:
-    """Floor a datetime to its UTC minute bucket.
-
-    Args:
-        value: Event-time datetime to normalize.
-
-    Returns:
-        UTC-aware datetime with seconds and microseconds cleared.
-    """
-    aware_value = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    return aware_value.astimezone(UTC).replace(second=0, microsecond=0)
-
-
-def _new_equity_trade_candle_accumulator(
-    trade: _EquityTradeForRepair,
-    open_at: datetime,
-) -> _EquityTradeCandleAccumulator:
-    """Start a candle accumulator from the first event-time trade.
-
-    Args:
-        trade: First ordered trade for the minute.
-        open_at: UTC minute bucket for the trade.
-
-    Returns:
-        New accumulator seeded with the trade values.
-    """
-    return _EquityTradeCandleAccumulator(
-        instrument_public_id=trade.instrument_public_id,
-        open_at=open_at,
-        open=trade.price,
-        high=trade.price,
-        low=trade.price,
-        close=trade.price,
-        volume=trade.size,
-        weighted_value=trade.price * trade.size,
-        trades=1,
-    )
-
-
-def _add_equity_trade_to_accumulator(
-    accumulator: _EquityTradeCandleAccumulator,
-    trade: _EquityTradeForRepair,
-) -> None:
-    """Merge the next event-time-ordered trade into a candle accumulator.
-
-    Args:
-        accumulator: Mutable candle accumulator to update.
-        trade: Next trade for the same instrument and minute.
-    """
-    accumulator.high = max(accumulator.high, trade.price)
-    accumulator.low = min(accumulator.low, trade.price)
-    accumulator.close = trade.price
-    accumulator.volume += trade.size
-    accumulator.weighted_value += trade.price * trade.size
-    accumulator.trades += 1
-
-
-def _equity_trade_accumulator_to_repair(
-    accumulator: _EquityTradeCandleAccumulator,
-) -> EquityCandleRepairRow:
-    """Convert an accumulated trade-derived candle into a repair row.
-
-    Args:
-        accumulator: Completed one-minute trade accumulator.
-
-    Returns:
-        Corrected candle row ready for SCD2 upsert.
-    """
-    return EquityCandleRepairRow(
-        instrument_public_id=accumulator.instrument_public_id,
-        open_at=accumulator.open_at,
-        timeframe=_EQUITY_REPAIR_TIMEFRAME,
-        open=accumulator.open,
-        high=accumulator.high,
-        low=accumulator.low,
-        close=accumulator.close,
-        volume=accumulator.volume,
-        vwap=_equity_trade_vwap(accumulator),
-        trades=accumulator.trades,
-    )
-
-
-def _equity_trade_vwap(accumulator: _EquityTradeCandleAccumulator) -> float | None:
-    """Return volume-weighted trade price when total size is positive.
-
-    Args:
-        accumulator: Completed one-minute trade accumulator.
-
-    Returns:
-        Weighted average price, or ``None`` for zero-size informational fills.
-    """
-    if accumulator.volume <= 0.0:
-        return None
-    return accumulator.weighted_value / accumulator.volume
 
 
 async def close_and_insert(
@@ -4508,36 +4347,6 @@ class Repository(ABC):
         Returns:
             One :class:`MarketDataCoverageRow` per exchange, ordered by
             exchange.
-        """
-        ...
-
-    @abstractmethod
-    async def get_equity_candle_repairs_from_trades(
-        self, *, start: datetime, end: datetime
-    ) -> EquityCandleRepairBatch:
-        """Return raw-trade rebuilt Kraken Equities one-minute candles.
-
-        Finds fragmented live-synthesized ``kraken_equities`` 1m candle
-        minutes in the half-open ``open_at`` range, then rebuilds each
-        detected minute from persisted raw trades using ``executed_at`` as
-        event time. Single-version candle minutes and backfill rows whose
-        ``trades`` value is ``NULL`` do not become repair candidates.
-        Detected fragmented minutes without any raw trades cannot be
-        rebuilt and are reported through the batch's
-        ``unreconstructable_minutes`` counter instead of being silently
-        dropped. Callers must pass minute-aligned bounds: a mid-minute
-        ``end`` would admit a candle via ``open_at < end`` while truncating
-        that minute's trades. :class:`EquityCandleRepairService` floors its
-        window and chunk boundaries to whole minutes before calling this
-        method.
-
-        Args:
-            start: Inclusive UTC ``open_at`` lower bound.
-            end: Exclusive UTC ``open_at`` upper bound.
-
-        Returns:
-            Batch of corrected candle rows ordered by instrument and
-            event-time minute, plus the unreconstructable-minute count.
         """
         ...
 
@@ -9994,6 +9803,127 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             return True
 
+    def _paired_execution_leg_is_settled_flat(self, leg: PairedExecutionLeg) -> bool:
+        """Return whether a leg is settled with zero open exposure.
+
+        Settled-flat means the leg carries a terminal status (a member of
+        :data:`_PEL_SETTLED_STATUSES` — ``flattened`` / ``cancelled`` /
+        ``expired`` / ``rejected`` / ``filled``) AND its open exposure
+        ``|filled_signed_qty − compensated_signed_qty|`` is below
+        :data:`_PEC_QTY_EPSILON`. ``filled``-with-zero-open is reachable (a
+        reopened leg whose old flatten's late fill report zeroes the residual)
+        and counts. A ``pending`` / ``working`` / ``compensating`` /
+        ``manual_intervention`` leg is never settled-flat. Shared by the
+        automatic completion predicate and the operator attestation predicate.
+        """
+        if leg.status not in self._PEL_SETTLED_STATUSES:
+            return False
+        open_qty = leg.filled_signed_qty - leg.compensated_signed_qty
+        return not abs(open_qty) >= self._PEC_QTY_EPSILON
+
+    def _paired_execution_group_is_settled_for_completion(
+        self,
+        group: PairedExecutionGroup,
+        legs: Sequence[PairedExecutionLeg],
+        expected_status: str,
+    ) -> bool:
+        """Return whether a group's locked legs satisfy the status-specific settled predicate.
+
+        The per-status completion gate of
+        :meth:`complete_paired_execution_group_if_settled`, evaluated on legs
+        already locked ``FOR UPDATE``: for ``armed`` the legs must form the
+        COMPLETE validated leg set (:meth:`_paired_execution_leg_set_is_complete`
+        — never a vacuous or partial set) and every leg must be fully
+        ``filled``; for ``broken`` / ``compensating`` every leg must be
+        settled-flat (:meth:`_paired_execution_leg_is_settled_flat`). Callers
+        guarantee ``legs`` is non-empty, so the all-legs checks are never
+        vacuously true.
+        """
+        if expected_status == PairedExecutionGroupStatusEnum.ARMED.value:
+            if not self._paired_execution_leg_set_is_complete(list(legs), group):
+                return False
+            return not any(leg.status != PairedExecutionLegStatusEnum.FILLED.value for leg in legs)
+        return all(self._paired_execution_leg_is_settled_flat(leg) for leg in legs)
+
+    @staticmethod
+    async def _paired_execution_group_has_held_original(
+        s: AsyncSession, group_public_id: str
+    ) -> bool:
+        """Return whether a current-active HELD ``created`` ORIGINAL command carries the group.
+
+        Probes, inside the caller's transaction, for a CURRENT active
+        ``created`` trade command (``supersedes_command_id IS NULL``) whose
+        ``correlation_id`` is the group's public id. Completing or attesting a
+        group over such a command would leave it held by the outbox gate
+        forever (the gate releases grouped commands only for ARMED groups),
+        polluting every outbox poll page — and a held original means the group
+        was not truly settled. COMPENSATION commands (cancel / flatten, which
+        supersede an original) are deliberately excluded: the outbox dispatches
+        them regardless of group status.
+        """
+        held = (
+            await s.execute(
+                select(TradeCommand.id)
+                .where(
+                    TradeCommand.correlation_id == group_public_id,
+                    TradeCommand.status == TradeCommandStatusEnum.CREATED.value,
+                    TradeCommand.supersedes_command_id.is_(None),
+                    TradeCommand.known_to == KNOWN_TO_MAX,
+                )
+                .limit(1)
+            )
+        ).first()
+        return held is not None
+
+    @staticmethod
+    async def _close_paired_execution_group_as_completed(
+        s: AsyncSession,
+        group: PairedExecutionGroup,
+        failure_reason: str | None,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> None:
+        """SCD2-close a locked group and insert its ``completed`` successor row.
+
+        The shared row-transition tail of
+        :meth:`complete_paired_execution_group_if_settled` and
+        :meth:`terminalize_paired_execution_group`, on a group already locked
+        ``FOR UPDATE`` inside the caller's transaction (the caller commits).
+        The close / successor time is clamped to ``max(bus_time,
+        group.timestamp)`` so the successor never precedes the row it closes.
+        Every group attribute is carried forward unchanged except ``status``
+        (forced to ``completed``) and ``failure_reason`` (the caller-supplied
+        value: the prior reason for automatic completion, the attestation-
+        stamped reason for operator terminalization).
+        """
+        effective_bus_time = max(bus_time, group.timestamp)
+        await s.execute(
+            update(PairedExecutionGroup)
+            .where(PairedExecutionGroup.id == group.id)
+            .values(known_to=effective_bus_time)
+        )
+        s.add(
+            PairedExecutionGroup(
+                public_id=group.public_id,
+                wallet_public_id=group.wallet_public_id,
+                operator_public_id=group.operator_public_id,
+                strategy_id=group.strategy_id,
+                policy=group.policy,
+                expected_leg_count=group.expected_leg_count,
+                group_key=group.group_key,
+                status=PairedExecutionGroupStatusEnum.COMPLETED.value,
+                assembly_deadline=group.assembly_deadline,
+                fill_deadline=group.fill_deadline,
+                failure_reason=failure_reason,
+                halted_at=group.halted_at,
+                created_at=group.created_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=effective_bus_time,
+            )
+        )
+
     async def complete_paired_execution_group_if_settled(
         self,
         group_public_id: str,
@@ -10079,57 +10009,14 @@ class SQLAlchemyRepository(Repository):
             )
             if not legs:
                 return False
-            if expected_status == PairedExecutionGroupStatusEnum.ARMED.value:
-                if not self._paired_execution_leg_set_is_complete(list(legs), group):
-                    return False
-                if any(leg.status != PairedExecutionLegStatusEnum.FILLED.value for leg in legs):
-                    return False
-            else:
-                for leg in legs:
-                    if leg.status not in self._PEL_SETTLED_STATUSES:
-                        return False
-                    open_qty = leg.filled_signed_qty - leg.compensated_signed_qty
-                    if abs(open_qty) >= self._PEC_QTY_EPSILON:
-                        return False
-            held = (
-                await s.execute(
-                    select(TradeCommand.id)
-                    .where(
-                        TradeCommand.correlation_id == group_public_id,
-                        TradeCommand.status == TradeCommandStatusEnum.CREATED.value,
-                        TradeCommand.supersedes_command_id.is_(None),
-                        TradeCommand.known_to == KNOWN_TO_MAX,
-                    )
-                    .limit(1)
-                )
-            ).first()
-            if held is not None:
+            if not self._paired_execution_group_is_settled_for_completion(
+                group, legs, expected_status
+            ):
                 return False
-            effective_bus_time = max(bus_time, group.timestamp)
-            await s.execute(
-                update(PairedExecutionGroup)
-                .where(PairedExecutionGroup.id == group.id)
-                .values(known_to=effective_bus_time)
-            )
-            s.add(
-                PairedExecutionGroup(
-                    public_id=group.public_id,
-                    wallet_public_id=group.wallet_public_id,
-                    operator_public_id=group.operator_public_id,
-                    strategy_id=group.strategy_id,
-                    policy=group.policy,
-                    expected_leg_count=group.expected_leg_count,
-                    group_key=group.group_key,
-                    status=PairedExecutionGroupStatusEnum.COMPLETED.value,
-                    assembly_deadline=group.assembly_deadline,
-                    fill_deadline=group.fill_deadline,
-                    failure_reason=group.failure_reason,
-                    halted_at=group.halted_at,
-                    created_at=group.created_at,
-                    session_id=session_id,
-                    sequence_id=sequence_id,
-                    timestamp=effective_bus_time,
-                )
+            if await self._paired_execution_group_has_held_original(s, group_public_id):
+                return False
+            await self._close_paired_execution_group_as_completed(
+                s, group, group.failure_reason, bus_time, session_id, sequence_id
             )
             await s.commit()
             return True
@@ -10185,6 +10072,46 @@ class SQLAlchemyRepository(Repository):
             if group is None:
                 return None
             return self._paired_execution_group_row_to_dict(group)
+
+    def _paired_execution_group_is_attestable(
+        self,
+        group: PairedExecutionGroup,
+        legs: Sequence[PairedExecutionLeg],
+    ) -> bool:
+        """Return whether a locked group may be operator-attested as resolved.
+
+        The attestable predicate of :meth:`terminalize_paired_execution_group`,
+        evaluated on rows already locked ``FOR UPDATE``: the group must be
+        ``manual_intervention`` (the operator owns it outright), OR
+        ``compensating`` with at least one current ``manual_intervention`` leg
+        — the re-attestation path after a late original fill reopened an
+        already-terminalized group whose manual leg cannot re-enter
+        automation. In BOTH cases every leg must be either settled-flat
+        (:meth:`_paired_execution_leg_is_settled_flat`) or
+        ``manual_intervention``: an operator must never attest over a sibling
+        leg's in-flight automation. A group with NO current legs is never
+        attestable: a vacuous attestation would clear the scope's halt while
+        erasing the operator-visible incident.
+        """
+        if not legs:
+            return False
+        manual_legs = [
+            leg
+            for leg in legs
+            if leg.status == PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value
+        ]
+        group_is_manual = group.status == PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value
+        group_is_reopened_manual = (
+            group.status == PairedExecutionGroupStatusEnum.COMPENSATING.value and bool(manual_legs)
+        )
+        if not (group_is_manual or group_is_reopened_manual):
+            return False
+        for leg in legs:
+            if leg.status == PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value:
+                continue
+            if not self._paired_execution_leg_is_settled_flat(leg):
+                return False
+        return True
 
     async def terminalize_paired_execution_group(
         self,
@@ -10258,71 +10185,15 @@ class SQLAlchemyRepository(Repository):
                 .scalars()
                 .all()
             )
-            if not legs:
+            if not self._paired_execution_group_is_attestable(group, legs):
                 return PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
-            manual_legs = [
-                leg
-                for leg in legs
-                if leg.status == PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value
-            ]
-            group_is_manual = (
-                group.status == PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value
-            )
-            group_is_reopened_manual = (
-                group.status == PairedExecutionGroupStatusEnum.COMPENSATING.value
-                and bool(manual_legs)
-            )
-            if not (group_is_manual or group_is_reopened_manual):
-                return PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
-            for leg in legs:
-                if leg.status == PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value:
-                    continue
-                if leg.status not in self._PEL_SETTLED_STATUSES:
-                    return PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
-                if abs(leg.filled_signed_qty - leg.compensated_signed_qty) >= self._PEC_QTY_EPSILON:
-                    return PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
-            held = (
-                await s.execute(
-                    select(TradeCommand.id)
-                    .where(
-                        TradeCommand.correlation_id == public_id,
-                        TradeCommand.status == TradeCommandStatusEnum.CREATED.value,
-                        TradeCommand.supersedes_command_id.is_(None),
-                        TradeCommand.known_to == KNOWN_TO_MAX,
-                    )
-                    .limit(1)
-                )
-            ).first()
-            if held is not None:
+            if await self._paired_execution_group_has_held_original(s, public_id):
                 return PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
             suffix = f"; terminalized_by={attested_by[:64]}"
             base = group.failure_reason or "manual intervention"
             stamped = base[: max(0, 512 - len(suffix))] + suffix
-            effective_bus_time = max(bus_time, group.timestamp)
-            await s.execute(
-                update(PairedExecutionGroup)
-                .where(PairedExecutionGroup.id == group.id)
-                .values(known_to=effective_bus_time)
-            )
-            s.add(
-                PairedExecutionGroup(
-                    public_id=group.public_id,
-                    wallet_public_id=group.wallet_public_id,
-                    operator_public_id=group.operator_public_id,
-                    strategy_id=group.strategy_id,
-                    policy=group.policy,
-                    expected_leg_count=group.expected_leg_count,
-                    group_key=group.group_key,
-                    status=PairedExecutionGroupStatusEnum.COMPLETED.value,
-                    assembly_deadline=group.assembly_deadline,
-                    fill_deadline=group.fill_deadline,
-                    failure_reason=stamped,
-                    halted_at=group.halted_at,
-                    created_at=group.created_at,
-                    session_id=session_id,
-                    sequence_id=sequence_id,
-                    timestamp=effective_bus_time,
-                )
+            await self._close_paired_execution_group_as_completed(
+                s, group, stamped, bus_time, session_id, sequence_id
             )
             await s.commit()
             return PairedGroupTerminalizeOutcome.TERMINALIZED
@@ -15711,95 +15582,6 @@ class SQLAlchemyRepository(Repository):
                 )
                 archivable = int((await s.execute(archivable_stmt)).scalar_one())
             return TableCounters(total=total, current=current, closed=closed, archivable=archivable)
-
-    async def get_equity_candle_repairs_from_trades(
-        self, *, start: datetime, end: datetime
-    ) -> EquityCandleRepairBatch:
-        """Return raw-trade rebuilt bars for fragmented equities 1m minutes.
-
-        The SQL portion stays deliberately portable. It first detects
-        fragmented live-synthesized candle minutes with a plain
-        ``GROUP BY``/``HAVING count(*) > 1`` query, then loads raw Kraken
-        Equities trades ordered by event time. Minute flooring, filtering to
-        detected keys, and OHLCV/VWAP reconstruction happen in Python so the
-        same implementation runs under SQLite tests and PostgreSQL. Detected
-        minutes with no raw trades in the window are counted as
-        unreconstructable in the returned batch rather than silently dropped.
-
-        Args:
-            start: Inclusive UTC ``open_at`` lower bound.
-            end: Exclusive UTC ``open_at`` upper bound.
-
-        Returns:
-            Batch of corrected candle rows for fragmented minutes that have
-            persisted raw trades in the requested event-time range, plus the
-            count of detected minutes that have none.
-        """
-        candle_instrument_exists = (
-            select(Instrument.id)
-            .where(
-                Instrument.public_id == Candle.instrument_public_id,
-                Instrument.exchange == _KRAKEN_EQUITIES_EXCHANGE,
-            )
-            .exists()
-        )
-        fragmented_statement = (
-            select(
-                Candle.instrument_public_id,
-                Candle.open_at,
-            )
-            .where(
-                candle_instrument_exists,
-                Candle.timeframe == _EQUITY_REPAIR_TIMEFRAME,
-                Candle.open_at >= start,
-                Candle.open_at < end,
-                Candle.trades.is_not(None),
-            )
-            .group_by(Candle.instrument_public_id, Candle.open_at)
-            .having(func.count() > 1)
-            .order_by(Candle.instrument_public_id, Candle.open_at)
-        )
-        trade_instrument_exists = (
-            select(Instrument.id)
-            .where(
-                Instrument.public_id == Trade.instrument_public_id,
-                Instrument.exchange == _KRAKEN_EQUITIES_EXCHANGE,
-            )
-            .exists()
-        )
-        trade_statement = (
-            select(
-                Trade.instrument_public_id,
-                Trade.executed_at,
-                Trade.price,
-                Trade.size,
-            )
-            .where(
-                trade_instrument_exists,
-                Trade.executed_at.is_not(None),
-                Trade.executed_at >= start,
-                Trade.executed_at < end,
-            )
-            .order_by(Trade.instrument_public_id, Trade.executed_at, Trade.id)
-        )
-        async with self.session() as s:
-            fragmented_result = await s.execute(fragmented_statement)
-            fragmented_keys = {
-                (row.instrument_public_id, row.open_at) for row in fragmented_result.all()
-            }
-            if not fragmented_keys:
-                return EquityCandleRepairBatch(repairs=[], unreconstructable_minutes=0)
-            trade_result = await s.execute(trade_statement)
-            trades = [
-                _EquityTradeForRepair(
-                    instrument_public_id=row.instrument_public_id,
-                    executed_at=cast(datetime, row.executed_at),
-                    price=float(row.price),
-                    size=float(row.size),
-                )
-                for row in trade_result.all()
-            ]
-        return _aggregate_equity_trade_repairs(fragmented_keys, trades)
 
     async def get_market_data_coverage(
         self,

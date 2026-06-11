@@ -352,11 +352,6 @@ Business logic:
   and `market_persist_policy.py` (runtime policy deciding which
   market-data streams are persisted to DB versus cache-only)
 - **Updaters** (`updaters/`) — Data updates (symbols, historical)
-- **Maintenance** (`maintenance/`) — Offline repair services:
-  `equity_candle_repair.py` rebuilds fragmented Kraken Equities
-  one-minute candles from persisted raw trades (chunked, idempotent,
-  dry-run by default, writes through the candle SCD2 value guard);
-  invoked via the CLI — see [`docs/cli.md`](cli.md)
 - **Risk** (`risk/`) — Risk defaults and sizing models
 - **Portfolio** (`portfolio/`) — Signed long/short portfolio accounting
 

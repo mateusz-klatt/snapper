@@ -687,7 +687,10 @@ class ExchangeClientBase(ABC):
         the skip when the page does not cover it.
 
         The default returns ``None``: a venue without a usable per-order
-        fills lookup keeps reconciliation's documented fail-safe skip.
+        fills lookup keeps reconciliation's documented fail-safe skip. The
+        zero-delay sleep keeps this default a genuine coroutine — venue
+        overrides await real I/O and the reconciliation caller awaits
+        through the base type, so the ``async`` signature must stay.
 
         Args:
             order_id: Exchange order ID whose fills should be averaged.
@@ -701,6 +704,7 @@ class ExchangeClientBase(ABC):
                 the reconciliation caller treats any failure as
                 could-not-resolve and skips.
         """
+        await asyncio.sleep(0)
         return None
 
     @abstractmethod

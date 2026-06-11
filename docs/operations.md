@@ -777,10 +777,11 @@ contracts (`MNQM6-CME` = Jun 26, etc.) and must be rotated before the
   `can_trade=True` instrument (crypto/xStocks) for execution.
 - **Fragmented Kraken Equities 1m candles** (a settled minute holding
   more than one historical candle version, written from partial trade
-  sets): rebuild from persisted raw trades with
-  `snapper repair-equity-candle-fragmentation` — dry-run by default,
-  with `--end` capped to one hour before now (the settled horizon for
-  this delayed feed). The full runbook, including the
-  `ix_trades_executed_at` migration prerequisite, is in the
-  Maintenance section of `docs/cli.md`. Never run it in parallel with
-  an equities candle backfill.
+  sets): the live-synthesis builder fix (`065463de`, 2026-06-10) stops
+  new fragmentation, and the historical damage window
+  (2026-05-24 → 2026-06-10) was repaired in full on 2026-06-11
+  (158 444 candles rebuilt from raw trades, rerun-idempotent). The
+  one-off repair tooling was removed after execution; if fragmentation
+  ever reappears, recover the `repair-equity-candle-fragmentation` CLI
+  and its service/repository code from commit `50c98684`
+  (`ix_trades_executed_at` from migration 0007 is still in place).

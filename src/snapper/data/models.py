@@ -183,6 +183,7 @@ __all__ = [
 
 
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
+_CK_MODE_LIVE_PAPER = "mode IN ('live', 'paper')"
 _KNOWN_TO_ACTIVE_PG = text("known_to = '9999-12-31T23:59:59+00:00'")
 _KNOWN_TO_ACTIVE_SQLITE = text("known_to = '9999-12-31 23:59:59.000000'")
 _PAIRED_GROUP_ID_NOT_NULL = text("paired_group_id IS NOT NULL")
@@ -1244,7 +1245,7 @@ class PairedExecutionLeg(TemporalMixin, Base):
         Index("ix_pel_exchange_order_id", "exchange_order_id"),
         Index("ix_pel_shard_status", "shard_key", "status"),
         CheckConstraint("side IN ('buy', 'sell')", name="ck_pel_side"),
-        CheckConstraint("mode IN ('live', 'paper')", name="ck_pel_mode"),
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_pel_mode"),
     )
     group_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     leg_index: Mapped[int] = mapped_column(Integer)
@@ -1299,7 +1300,7 @@ class PairedExecutionHalt(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index("ix_peh_group_key", "group_key"),
-        CheckConstraint("mode IN ('live', 'paper')", name="ck_peh_mode"),
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_peh_mode"),
     )
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
@@ -2019,7 +2020,7 @@ class ExecutionPlan(TemporalMixin, Base):
             name="ck_ep_side",
         ),
         CheckConstraint(
-            "mode IN ('live', 'paper')",
+            _CK_MODE_LIVE_PAPER,
             name="ck_ep_mode",
         ),
         CheckConstraint(
@@ -2183,7 +2184,7 @@ class PositionCycle(TemporalMixin, Base):
             postgresql_where=text("status = 'open' AND known_to = '9999-12-31T23:59:59+00:00'"),
         ),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_pc_exchange_lower"),
-        CheckConstraint("mode IN ('live', 'paper')", name="ck_pc_mode"),
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_pc_mode"),
         CheckConstraint(
             "direction IN ('long', 'short')",
             name="ck_pc_direction",

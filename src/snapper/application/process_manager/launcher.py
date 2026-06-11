@@ -1532,11 +1532,43 @@ class ProcessLauncherService:
             self.expected_terminations.update(tracked_processes)
         for name in set(self._desired_state):
             self._desired_state[name] = _DesiredState.STOPPED
+        await self._cancel_restart_tasks_for_shutdown()
+        await self._cancel_tracked_tasks_for_shutdown(registry)
+        await self._stop_started_instances_for_shutdown(registry)
+        self._clear_process_tracking_state()
+        logger.info("All processes stopped")
+        await self._emit_summary_snapshot()
+
+    async def _cancel_restart_tasks_for_shutdown(self) -> None:
+        """Cancel every pending watchdog restart task during full shutdown.
+
+        Cancels each not-yet-done task in :attr:`_restart_tasks` and
+        awaits it with ``asyncio.CancelledError`` suppressed so a
+        mid-backoff restart never resurrects a process after
+        :meth:`stop_all_processes` has marked it STOPPED.
+        """
         for restart_task in self._restart_tasks.values():
             if not restart_task.done():
                 restart_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await restart_task
+
+    async def _cancel_tracked_tasks_for_shutdown(
+        self, registry: dict[str, ProcessRegistryEntry]
+    ) -> None:
+        """Cancel tracked asyncio tasks in reverse priority order.
+
+        Sorts :attr:`process_tasks` by registry priority (descending,
+        defaulting to 50 for unregistered names such as per-wallet
+        instances) and cancels each not-yet-done task, awaiting it with
+        ``asyncio.CancelledError`` suppressed. Each cancelled name is
+        added to :attr:`expected_terminations` so the completion handler
+        treats the cancellation as intentional.
+
+        Args:
+            registry: Registered process entries keyed by name, used to
+                resolve teardown priority.
+        """
         tasks_with_priority = [
             (name, task, registry[name].priority if name in registry else 50)
             for name, task in self.process_tasks.items()
@@ -1549,6 +1581,26 @@ class ProcessLauncherService:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+
+    async def _stop_started_instances_for_shutdown(
+        self, registry: dict[str, ProcessRegistryEntry]
+    ) -> None:
+        """Stop started process instances in reverse priority order.
+
+        Sorts :attr:`started_processes` by registry priority (descending,
+        defaulting to 50 for unregistered names such as per-wallet
+        instances) and stops each instance. A failure to stop one
+        instance is logged and never blocks the remaining instances.
+        Native subprocess children (:class:`ProcessInstanceInfo`)
+        additionally get their spawner bookkeeping cleaned up with all
+        exceptions suppressed. Each name is added to
+        :attr:`expected_terminations` before its stop so the completion
+        handler treats the termination as intentional.
+
+        Args:
+            registry: Registered process entries keyed by name, used to
+                resolve teardown priority.
+        """
         processes_with_priority = [
             (name, instance, registry[name].priority if name in registry else 50)
             for name, instance in self.started_processes.items()
@@ -1564,6 +1616,16 @@ class ProcessLauncherService:
             if isinstance(instance, ProcessInstanceInfo):
                 with contextlib.suppress(Exception):
                     self.spawner.cleanup(name)
+
+    def _clear_process_tracking_state(self) -> None:
+        """Clear every per-process tracking dictionary after full shutdown.
+
+        Resets task/instance maps, lifecycle and config caches,
+        expected-termination markers, run tracking, desired-state flags,
+        watchdog restart bookkeeping, and process metrics handles so the
+        launcher returns to a pristine state after
+        :meth:`stop_all_processes`.
+        """
         self.started_processes.clear()
         self.process_tasks.clear()
         self.process_lifecycles.clear()
@@ -1580,8 +1642,6 @@ class ProcessLauncherService:
         self._restart_locks.clear()
         self._process_metrics.clear()
         self._psutil_handles.clear()
-        logger.info("All processes stopped")
-        await self._emit_summary_snapshot()
 
     def _try_chain_result(self, name: str, result: Any) -> bool:
         """Chain a task or coroutine result into a new tracked task.

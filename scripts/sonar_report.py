@@ -434,6 +434,12 @@ def fetch_source_cache(token: str, issues: list[dict[str, Any]]) -> dict[str, li
             auth=(token, ""),
             timeout=30,
         )
+        if resp.status_code >= 500:
+            print(
+                f"  source {index}/{total}: {_component_path(component)}"
+                f" SKIPPED (SonarCloud {resp.status_code} - issue context unavailable)"
+            )
+            continue
         resp.raise_for_status()
         payload: dict[str, Any] = resp.json()
         lines: list[SourceLine] = []

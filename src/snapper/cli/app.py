@@ -73,7 +73,6 @@ from snapper.application.backtest.direct_engine import DirectDbEngine
 from snapper.application.backtest.metrics import compute_metrics
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.engine.trader import TraderCoordinator
-from snapper.application.maintenance.equity_candle_repair import EquityCandleRepairService
 from snapper.application.notify.apns_client import build_apns_client_pool
 from snapper.application.notify.apns_config import load_apns_config
 from snapper.application.notify.push_beta import PUSH_BETA_SETTING_KEY
@@ -1424,115 +1423,6 @@ def kraken_equities_backfill_candles(
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_backfill())
-
-
-_EQUITY_REPAIR_SETTLED_LAG = timedelta(hours=1)
-
-
-@app.command(name="repair-equity-candle-fragmentation")
-def repair_equity_candle_fragmentation(
-    start: Annotated[
-        str,
-        typer.Option("--start", help="Inclusive UTC open_at date or datetime."),
-    ],
-    end: Annotated[
-        str | None,
-        typer.Option("--end", help="Exclusive UTC open_at date or datetime. Defaults to now."),
-    ] = None,
-    dry_run: bool = typer.Option(
-        True,
-        "--dry-run/--no-dry-run",
-        help="Read and report repairs without writing by default.",
-    ),
-    batch_size: int = typer.Option(500, "--batch-size", min=1, help="Rows per upsert batch."),
-    chunk_hours: float = typer.Option(
-        1.0,
-        "--chunk-hours",
-        min=0.01,
-        help="Hours per raw-trade scan chunk; must be a whole number of minutes.",
-    ),
-) -> None:
-    """Repair fragmented Kraken Equities 1m candles safely.
-
-    The command is idempotent because it detects historically fragmented
-    candle minutes, rebuilds deterministic OHLCV values from persisted raw
-    trades, and writes through the candle SCD2 value guard. It is safe to run
-    as a dry run first. Backfill-only candle rows with ``trades`` set to
-    ``NULL`` are not repair candidates. The service floors ``start`` and
-    ``end`` down to whole UTC minutes (so the wall-clock default ``end``
-    never truncates an in-progress minute) and rejects chunk sizes that are
-    not whole minutes, keeping every chunk boundary candle-bucket aligned.
-    ``end`` is additionally capped at one hour before now: Kraken Equities is
-    a delayed feed, so trades for recent minutes may still be arriving, and
-    rebuilding an unsettled minute would persist a wrong bar from a partial
-    trade set. The cap also keeps repairs out of the live synthesis write
-    window. Detected fragmented minutes without persisted raw trades cannot
-    be rebuilt and are reported as ``unreconstructable``.
-
-    Args:
-        start: Inclusive UTC ``open_at`` lower bound.
-        end: Exclusive UTC ``open_at`` upper bound, or current UTC time
-            when omitted; floored to the containing whole minute and capped
-            to the settled horizon (now minus one hour).
-        dry_run: When true, print candidate counts without writing.
-        batch_size: Maximum corrected rows per upsert batch.
-        chunk_hours: Number of hours per raw-trade scan chunk; must equal a
-            whole number of minutes.
-
-    Raises:
-        typer.Exit: When parsing or repair execution fails.
-    """
-
-    async def run_repair() -> None:
-        try:
-            now = datetime.now(UTC)
-            start_dt = _parse_utc(start)
-            end_dt = _parse_utc(end) if end is not None else now
-            settled_end = now - _EQUITY_REPAIR_SETTLED_LAG
-            if end_dt > settled_end:
-                end_dt = settled_end
-                typer.echo(
-                    "end capped to settled horizon "
-                    f"{settled_end.isoformat()} (now - 1h): delayed-feed trades "
-                    "for newer minutes may still be arriving"
-                )
-            repair_bus_time = now
-            bootstrap = get_bootstrap_settings()
-            repository = get_repository(bootstrap.db_url)
-            service = EquityCandleRepairService(repository)
-            stats = await service.repair(
-                start=start_dt,
-                end=end_dt,
-                repair_bus_time=repair_bus_time,
-                dry_run=dry_run,
-                batch_size=batch_size,
-                chunk_size=timedelta(hours=chunk_hours),
-            )
-            row_label = "rows_would_rewrite" if stats.dry_run else "rows_rewritten"
-            for chunk in stats.chunk_stats:
-                typer.echo(
-                    f"chunk {chunk.start.isoformat()} -> {chunk.end.isoformat()}: "
-                    f"fragmented_minutes={chunk.fragmented_minutes_found}, "
-                    f"{row_label}={chunk.rows_rewritten}, "
-                    f"unreconstructable={chunk.unreconstructable_minutes}"
-                )
-            typer.echo(
-                f"total: dry_run={stats.dry_run}, chunks={stats.chunks_processed}, "
-                f"fragmented_minutes={stats.fragmented_minutes_found}, "
-                f"{row_label}={stats.rows_rewritten}, "
-                f"unreconstructable={stats.unreconstructable_minutes}"
-            )
-            if stats.unreconstructable_minutes:
-                typer.echo(
-                    f"WARNING: {stats.unreconstructable_minutes} fragmented minute(s) "
-                    "have no persisted raw trades and remain fragmented; they need a "
-                    "venue backfill or other remediation"
-                )
-        except Exception as e:
-            typer.echo(f"Error repairing Kraken Equities candle fragmentation: {e}")
-            raise typer.Exit(code=1) from e
-
-    asyncio.run(run_repair())
 
 
 @app.command(name="update-kraken-futures-funding-rates")

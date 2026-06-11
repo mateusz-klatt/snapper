@@ -1029,30 +1029,80 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         quantities: list[float] = []
         seen_fill_ids: set[str] = set()
         for fill in fills:
-            if not isinstance(fill, dict) or fill.get("order_id") != order_id:
+            parsed = self._extract_order_fill(fill, order_id, seen_fill_ids)
+            if parsed is None:
                 continue
-            fill_id = fill.get("fill_id")
-            if fill_id is not None and fill_id in seen_fill_ids:
-                continue
-            price_raw = fill.get("price")
-            size_raw = fill.get("size", fill.get("qty"))
-            if price_raw is None or size_raw is None:
-                continue
-            try:
-                price = float(price_raw)
-                size = float(size_raw)
-            except (TypeError, ValueError):
-                continue
-            if not (math.isfinite(price) and math.isfinite(size)) or size <= 0.0:
-                continue
-            if fill_id is not None:
-                seen_fill_ids.add(fill_id)
+            price, size = parsed
             notionals.append(price * size)
             quantities.append(size)
         quantity = math.fsum(quantities)
         if quantity <= 0.0:
             return None
         return math.fsum(notionals) / quantity, quantity
+
+    @staticmethod
+    def _extract_order_fill(
+        fill: object, order_id: str, seen_fill_ids: set[str]
+    ) -> tuple[float, float] | None:
+        """Extract a usable (price, size) from one raw fills-page row.
+
+        Skips rows that are not dictionaries, belong to a different
+        order, or duplicate an already-counted ``fill_id`` (a retried
+        fetch must not inflate coverage or bias the average). The row's
+        ``fill_id`` is marked as seen only once its price and quantity
+        parse as usable, matching the documented fail-safe skip of
+        malformed fills.
+
+        Args:
+            fill: One raw element of the venue fills list.
+            order_id: Exchange order ID whose fills are being averaged.
+            seen_fill_ids: Mutable set of fill ids already counted;
+                updated in place when this row is accepted.
+
+        Returns:
+            A ``(price, size)`` tuple, or None when the row must be
+            skipped.
+        """
+        if not isinstance(fill, dict) or fill.get("order_id") != order_id:
+            return None
+        fill_id = fill.get("fill_id")
+        if fill_id is not None and fill_id in seen_fill_ids:
+            return None
+        parsed = KrakenFuturesExchangeClient._parse_fill_price_size(fill)
+        if parsed is None:
+            return None
+        if fill_id is not None:
+            seen_fill_ids.add(fill_id)
+        return parsed
+
+    @staticmethod
+    def _parse_fill_price_size(fill: dict[str, Any]) -> tuple[float, float] | None:
+        """Parse and validate one venue fill's price and quantity.
+
+        The quantity key is ``size`` or ``qty`` (the venue uses both
+        shapes across surfaces). A missing, unparseable, non-finite or
+        non-positive value yields None so the caller skips the fill
+        rather than aborting the lookup.
+
+        Args:
+            fill: One raw fill dictionary from the venue fills page.
+
+        Returns:
+            A ``(price, size)`` tuple, or None when the fill is
+            unusable.
+        """
+        price_raw = fill.get("price")
+        size_raw = fill.get("size", fill.get("qty"))
+        if price_raw is None or size_raw is None:
+            return None
+        try:
+            price = float(price_raw)
+            size = float(size_raw)
+        except (TypeError, ValueError):
+            return None
+        if not (math.isfinite(price) and math.isfinite(size)) or size <= 0.0:
+            return None
+        return price, size
 
     def _convert_status_entry(self, entry: dict[str, Any]) -> ExchangeOrderSnapshot:
         """Convert one get_orders_status entry to an order snapshot.

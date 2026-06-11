@@ -198,6 +198,7 @@ class TestFetchSourceCache:
     ) -> None:
         """Loads and normalizes source lines for primary and secondary components."""
         response_main = MagicMock()
+        response_main.status_code = 200
         response_main.raise_for_status = MagicMock()
         response_main.json = MagicMock(
             return_value={
@@ -212,6 +213,7 @@ class TestFetchSourceCache:
             }
         )
         response_flow = MagicMock()
+        response_flow.status_code = 200
         response_flow.raise_for_status = MagicMock()
         response_flow.json = MagicMock(
             return_value={
@@ -253,6 +255,7 @@ class TestFetchSourceCache:
     ) -> None:
         """Skips empty primary and secondary component entries when collecting sources."""
         response = MagicMock()
+        response.status_code = 200
         response.raise_for_status = MagicMock()
         response.json = MagicMock(return_value={"sources": []})
         issues: list[dict[str, Any]] = [
@@ -273,6 +276,44 @@ class TestFetchSourceCache:
         assert mock_get.call_count == 1
         captured = capsys.readouterr()
         assert "source 1/1" in captured.out
+
+    def test_skips_component_on_server_error_and_keeps_fetching(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A SonarCloud 5xx on one component skips it instead of crashing the report.
+
+        Observed live 2026-06-11: ``/api/sources/lines`` returned 500 for one
+        large file and the whole report run died. The skip keeps the issue
+        list usable, just without source context for that component.
+        """
+        response_error = MagicMock()
+        response_error.status_code = 500
+        response_ok = MagicMock()
+        response_ok.status_code = 200
+        response_ok.raise_for_status = MagicMock()
+        response_ok.json = MagicMock(
+            return_value={
+                "sources": [
+                    {"line": 1, "code": "ok", "duplicated": False, "isNew": False},
+                ]
+            }
+        )
+        issues: list[dict[str, Any]] = [
+            {"component": f"{sonar_report.PROJECT_KEY}:src/big.py", "flows": []},
+            {"component": f"{sonar_report.PROJECT_KEY}:src/ok.py", "flows": []},
+        ]
+
+        with patch(
+            "scripts.sonar_report.httpx.get", side_effect=[response_error, response_ok]
+        ) as mock_get:
+            cache = sonar_report.fetch_source_cache("t", issues)
+
+        assert sorted(cache) == [f"{sonar_report.PROJECT_KEY}:src/ok.py"]
+        assert mock_get.call_count == 2
+        response_error.raise_for_status.assert_not_called()
+        captured = capsys.readouterr()
+        assert "SKIPPED (SonarCloud 500" in captured.out
+        assert "src/big.py" in captured.out
 
 
 class TestFetchMetrics:

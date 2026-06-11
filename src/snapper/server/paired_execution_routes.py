@@ -170,6 +170,121 @@ def _halt_info(halt: PairedExecutionHaltRow) -> PairedHaltInfo:
     )
 
 
+def _halts_by_scope(
+    halts: list[PairedExecutionHaltRow],
+) -> dict[_ScopeKey, PairedExecutionHaltRow]:
+    """Index active durable halt rows by their (wallet, strategy, group_key) scope.
+
+    The halt is active-unique per scope, so a plain assignment (last write
+    wins) is a faithful index — there is never more than one active row.
+
+    Args:
+        halts: Active durable halt rows from the repository.
+
+    Returns:
+        Mapping of scope key to its active halt row.
+    """
+    by_scope: dict[_ScopeKey, PairedExecutionHaltRow] = {}
+    for halt in halts:
+        by_scope[(halt["wallet_public_id"], halt["strategy_id"], halt["group_key"])] = halt
+    return by_scope
+
+
+def _groups_by_scope(
+    groups: list[PairedExecutionGroupRow],
+) -> dict[_ScopeKey, list[PairedExecutionGroupRow]]:
+    """Bucket current exposed-status group rows by their scope key.
+
+    Args:
+        groups: Current group rows in an exposed status.
+
+    Returns:
+        Mapping of (wallet, strategy, group_key) to its group rows, preserving
+        repository order within each scope.
+    """
+    by_scope: dict[_ScopeKey, list[PairedExecutionGroupRow]] = {}
+    for group in groups:
+        key = (group["wallet_public_id"], group["strategy_id"], group["group_key"])
+        by_scope.setdefault(key, []).append(group)
+    return by_scope
+
+
+async def _exposed_group_incidents(
+    repo: SQLAlchemyRepository,
+    group_rows: list[PairedExecutionGroupRow],
+    sid: str,
+    seq: int,
+    ts: datetime,
+) -> list[PairedGroupIncident]:
+    """Project a scope's group rows into incidents, keeping only exposed ones.
+
+    Applies :func:`_group_is_exposed` after loading each group's CURRENT legs,
+    so a zero-fill ``broken`` group is dropped exactly like the scanner does.
+
+    Args:
+        repo: SQL repository for leg lookups.
+        group_rows: The scope's current exposed-status group rows.
+        sid: REST session id stamped on every projected record.
+        seq: REST sequence id stamped on every projected record.
+        ts: Snapshot timestamp stamped on every projected record.
+
+    Returns:
+        Exposed group incidents in repository order.
+    """
+    exposed: list[PairedGroupIncident] = []
+    for group_row in group_rows:
+        incident = await _group_incident(repo, group_row, sid, seq, ts)
+        if _group_is_exposed(incident):
+            exposed.append(incident)
+    return exposed
+
+
+async def _scope_incident(
+    repo: SQLAlchemyRepository,
+    key: _ScopeKey,
+    halt_row: PairedExecutionHaltRow | None,
+    group_rows: list[PairedExecutionGroupRow],
+    sid: str,
+    seq: int,
+    ts: datetime,
+) -> PairedExecutionIncident | None:
+    """Build one scope's incident, or ``None`` when the scope is quiet.
+
+    A scope with neither an active halt nor an exposed group contributes
+    nothing (a halt whose groups all settled to zero-fill breaks is still
+    surfaced via the halt itself). ``halt_missing`` flags an exposed scope
+    whose durable halt row is transiently absent.
+
+    Args:
+        repo: SQL repository for leg lookups.
+        key: The (wallet, strategy, group_key) scope key.
+        halt_row: The scope's active halt row, if any.
+        group_rows: The scope's current exposed-status group rows.
+        sid: REST session id stamped on the incident.
+        seq: REST sequence id stamped on the incident.
+        ts: Snapshot timestamp stamped on the incident.
+
+    Returns:
+        The scope's incident, or ``None`` when nothing is halted or exposed.
+    """
+    wallet_public_id, strategy_id, group_key = key
+    exposed = await _exposed_group_incidents(repo, group_rows, sid, seq, ts)
+    if halt_row is None and not exposed:
+        return None
+    return PairedExecutionIncident(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=str(uuid7()),
+        timestamp=ts,
+        wallet_public_id=wallet_public_id,
+        strategy_id=strategy_id,
+        group_key=group_key,
+        halt=None if halt_row is None else _halt_info(halt_row),
+        halt_missing=halt_row is None and bool(exposed),
+        groups=exposed,
+    )
+
+
 @router.get("/incidents")
 async def list_paired_execution_incidents(
     request: Request,
@@ -198,44 +313,21 @@ async def list_paired_execution_incidents(
     allowed = await resolve_target_wallets(principal, repo)
     halts = await sql_repo.list_active_paired_execution_halts()
     groups = await sql_repo.list_current_paired_execution_groups(_EXPOSED_GROUP_STATUSES)
-    halts_by_scope: dict[_ScopeKey, PairedExecutionHaltRow] = {}
-    groups_by_scope: dict[_ScopeKey, list[PairedExecutionGroupRow]] = {}
-    for halt in halts:
-        halts_by_scope[(halt["wallet_public_id"], halt["strategy_id"], halt["group_key"])] = halt
-    for group in groups:
-        key = (group["wallet_public_id"], group["strategy_id"], group["group_key"])
-        groups_by_scope.setdefault(key, []).append(group)
+    halts_by_scope = _halts_by_scope(halts)
+    groups_by_scope = _groups_by_scope(groups)
     tracker: SequenceTracker = request.app.state.rest_tracker
     sid = tracker.session_id
     seq = tracker.next_sequence(_REST_STREAM)
     ts = dt.datetime.now(dt.UTC)
     items: list[PairedExecutionIncident] = []
     for key in sorted(set(halts_by_scope) | set(groups_by_scope)):
-        wallet_public_id, strategy_id, group_key = key
-        if allowed is not None and wallet_public_id not in allowed:
+        if allowed is not None and key[0] not in allowed:
             continue
-        halt_row = halts_by_scope.get(key)
-        exposed: list[PairedGroupIncident] = []
-        for group_row in groups_by_scope.get(key, []):
-            incident = await _group_incident(sql_repo, group_row, sid, seq, ts)
-            if _group_is_exposed(incident):
-                exposed.append(incident)
-        if halt_row is None and not exposed:
-            continue
-        items.append(
-            PairedExecutionIncident(
-                session_id=sid,
-                sequence_id=seq,
-                public_id=str(uuid7()),
-                timestamp=ts,
-                wallet_public_id=wallet_public_id,
-                strategy_id=strategy_id,
-                group_key=group_key,
-                halt=None if halt_row is None else _halt_info(halt_row),
-                halt_missing=halt_row is None and bool(exposed),
-                groups=exposed,
-            )
+        incident = await _scope_incident(
+            sql_repo, key, halts_by_scope.get(key), groups_by_scope.get(key, []), sid, seq, ts
         )
+        if incident is not None:
+            items.append(incident)
     return PairedExecutionIncidentListResponse(
         session_id=sid,
         sequence_id=seq,

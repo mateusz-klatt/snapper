@@ -2103,35 +2103,79 @@ class KrakenExchangeClient(ExchangeClientBase):
                 logger.warning("Kraken WebSocket client slot holds a dead client - rebuilding")
                 await self._close_ws_client()
             if not self._ws_client:
-                client = SpotWSClient(
-                    key=self.api_key or "",
-                    secret=self.api_secret or "",
-                    callback=self._on_message,
-                )
-                self._ws_client = client
-                logger.info("Kraken WebSocket client initialized")
-                try:
-                    async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
-                        await client.start()
-                    logger.info("Kraken WebSocket client started")
-                    if self._subscription_cache:
-                        await self._replay_subscriptions()
-                    if self._ws_client is not client:
-                        raise RuntimeError(_CONNECT_OWNERSHIP_LOST_MSG)
-                except BaseException:
-                    if self._ws_client is client:
-                        await self._close_ws_client()
-                    else:
-                        try:
-                            async with asyncio.timeout(self._WS_CLOSE_TIMEOUT_SECONDS):
-                                await client.close()
-                        except Exception as exc:
-                            logger.warning(
-                                f"Disowned WebSocket close failed - forcing cleanup: {exc!r}"
-                            )
-                            await force_close_ws_client(client)
-                    raise
+                await self._start_new_ws_client()
             self._ws_connected = True
+
+    async def _start_new_ws_client(self) -> None:
+        """Build, install, and start a fresh SpotWSClient in the slot.
+
+        Must be called with ``_ws_connect_lock`` held and an empty
+        ``_ws_client`` slot. The new client is installed in the slot BEFORE
+        ``start()`` so the teardown paths can compare against it, then any
+        cached subscriptions are replayed. If the slot stops pointing at the
+        new client after the replay (a concurrent path replaced it), this
+        connect no longer owns the connection and must fail rather than
+        report success for a client nobody holds.
+
+        On ANY failure (including cancellation) the client is torn down
+        before the exception propagates: through the compare-and-clear
+        :meth:`_close_ws_client` while the slot is still owned, or through
+        :meth:`_close_disowned_ws_client` when a newer client already took
+        the slot (closing via the slot would tear down the wrong client).
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If the ``_ws_client`` slot was replaced during
+                connect (``_CONNECT_OWNERSHIP_LOST_MSG``).
+            BaseException: Whatever ``start()`` or the subscription replay
+                raised, re-raised after teardown.
+        """
+        client = SpotWSClient(
+            key=self.api_key or "",
+            secret=self.api_secret or "",
+            callback=self._on_message,
+        )
+        self._ws_client = client
+        logger.info("Kraken WebSocket client initialized")
+        try:
+            async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
+                await client.start()
+            logger.info("Kraken WebSocket client started")
+            if self._subscription_cache:
+                await self._replay_subscriptions()
+            if self._ws_client is not client:
+                raise RuntimeError(_CONNECT_OWNERSHIP_LOST_MSG)
+        except BaseException:
+            if self._ws_client is client:
+                await self._close_ws_client()
+            else:
+                await self._close_disowned_ws_client(client)
+            raise
+
+    async def _close_disowned_ws_client(self, client: SpotWSClient) -> None:
+        """Close a client that lost the ``_ws_client`` slot mid-connect.
+
+        The slot already points at a NEWER client, so the regular
+        :meth:`_close_ws_client` path (which closes through the slot) would
+        tear down the wrong connection. The disowned client is closed
+        directly with the same bounded timeout; when that close times out or
+        raises, :func:`force_close_ws_client` finishes the teardown
+        explicitly so no background run task or aiohttp session leaks (#143).
+
+        Args:
+            client: The replaced WebSocket client to tear down.
+
+        Returns:
+            None.
+        """
+        try:
+            async with asyncio.timeout(self._WS_CLOSE_TIMEOUT_SECONDS):
+                await client.close()
+        except Exception as exc:
+            logger.warning(f"Disowned WebSocket close failed - forcing cleanup: {exc!r}")
+            await force_close_ws_client(client)
 
     async def _replay_subscriptions(self) -> None:
         """Replay cached public market-data subscriptions after reconnect.
@@ -2160,28 +2204,49 @@ class KrakenExchangeClient(ExchangeClientBase):
         for index, req in enumerate(requests):
             if self._ws_client is not client:
                 raise RuntimeError(_REPLAY_CLIENT_REPLACED_MSG)
-            params = {
-                "channel": req.channel,
-                "symbol": list(req.symbols),
-                **cast(dict[str, JsonValue], json.loads(req.parameters_json)),
-            }
-            health_channel: str = req.channel
-            if req.channel == "ohlc":
-                raw_interval = params.get("interval", 1)
-                if isinstance(raw_interval, int):
-                    health_channel = f"ohlc:{interval_to_label(raw_interval)}"
-            for symbol in req.symbols:
-                if health_channel == "ticker" and symbol == "*":
-                    self._seed_ticker_health(["*"])
-                    continue
-                self._health_tracker.mark_pending(
-                    health_channel,
-                    symbol,
-                    preserve_retry_count=True,
-                )
-            await client.subscribe(params=params)
+            await self._replay_one_subscription(client, req)
             if index < len(requests) - 1:
                 await asyncio.sleep(_RESUBSCRIBE_CHUNK_DELAY_S)
+
+    async def _replay_one_subscription(
+        self, client: SpotWSClient, req: SubscriptionRequest
+    ) -> None:
+        """Re-arm health tracking and re-issue one cached subscription.
+
+        Per-symbol entries are marked pending (preserving the retry budget)
+        before the subscribe is re-issued. The wildcard ticker sentinel
+        ``"*"`` must never enter the tracker (``_retry_subscribe`` rejects
+        it); its universe is re-seeded as confirmed via
+        :meth:`_seed_ticker_health` instead, so the stale clock is re-armed
+        for the whole wildcard universe.
+
+        Args:
+            client: The WebSocket client the replay is aimed at.
+            req: Cached subscription request to replay.
+
+        Returns:
+            None.
+        """
+        params = {
+            "channel": req.channel,
+            "symbol": list(req.symbols),
+            **cast(dict[str, JsonValue], json.loads(req.parameters_json)),
+        }
+        health_channel: str = req.channel
+        if req.channel == "ohlc":
+            raw_interval = params.get("interval", 1)
+            if isinstance(raw_interval, int):
+                health_channel = f"ohlc:{interval_to_label(raw_interval)}"
+        for symbol in req.symbols:
+            if health_channel == "ticker" and symbol == "*":
+                self._seed_ticker_health(["*"])
+                continue
+            self._health_tracker.mark_pending(
+                health_channel,
+                symbol,
+                preserve_retry_count=True,
+            )
+        await client.subscribe(params=params)
 
     async def _retry_subscribe(self, channel: str, symbol: str) -> None:
         """Retry a single Spot subscription without updating replay cache.

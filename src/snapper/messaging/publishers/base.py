@@ -2045,52 +2045,94 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 await asyncio.sleep(self.settings.zmq_heartbeat_interval_ms / 1000.0)
                 if not self.running:
                     break
-                self.heartbeat_seq += 1
-                current_time = datetime.now(UTC).timestamp() * 1000
-                max_lag_ms = 0
-                for symbol in self.symbols:
-                    last_data_time = self._last_data_timestamps.get(symbol, current_time)
-                    lag_ms = int(current_time - last_data_time)
-                    max_lag_ms = max(max_lag_ms, lag_ms)
-                threshold_s = self._get_liveness_recovery_threshold_s()
-                if threshold_s > 0:
-                    stale_for = monotonic() - self._last_message_at
-                    if stale_for > threshold_s:
-                        self._spawn_recovery(reason=f"no_messages_for_{stale_for:.0f}s")
-                    if stale_for > _DARK_FEED_EXIT_CEILING_S:
-                        logger.error(
-                            f"{self._get_exchange_name()}: feed dark for {stale_for:.0f}s "
-                            f"(> {_DARK_FEED_EXIT_CEILING_S:.0f}s ceiling) despite recovery; "
-                            "exiting for launcher restart"
-                        )
-                        raise FeedDarkTooLongError(
-                            f"{self._get_exchange_name()} dark for {stale_for:.0f}s"
-                        )
-                hb_topic = heartbeat_topic_from_component(component_name)
-                hb_msg = HeartbeatData(
-                    public_id=str(uuid7()),
-                    timestamp=datetime.now(UTC),
-                    session_id=self._tracker.session_id,
-                    sequence_id=self._tracker.next_sequence(hb_topic),
-                    component=component_name,
-                    sequence=self.heartbeat_seq,
-                    status=(
-                        HealthStatusEnum.WARNING
-                        if any(self._flush_errors.values())
-                        else HealthStatusEnum.HEALTHY
-                    ),
-                    lag_ms=max_lag_ms,
-                    meta={
-                        "symbols": list(self.symbols),
-                        "symbol_count": len(self.symbols),
-                        "running": self.running,
-                    },
-                )
-                await self._publish_heartbeat(hb_topic, hb_msg)
+                await self._heartbeat_tick(component_name)
             except FeedDarkTooLongError:
                 raise
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
+
+    async def _heartbeat_tick(self, component_name: str) -> None:
+        """Compute and publish one heartbeat with honest status.
+
+        Runs the full per-tick sequence: bump the sequence counter,
+        compute the data-lag figure, run the dark-feed liveness guard,
+        then build and publish the heartbeat message. Status computation
+        must never be skipped or reordered (#145 P2-1 honest heartbeats).
+
+        Args:
+            component_name: Heartbeat component identity for topic and
+                message provenance.
+
+        Raises:
+            FeedDarkTooLongError: When the liveness guard decides the
+                feed has been dark beyond the exit ceiling.
+        """
+        self.heartbeat_seq += 1
+        max_lag_ms = self._compute_max_lag_ms()
+        self._check_feed_liveness()
+        hb_topic = heartbeat_topic_from_component(component_name)
+        hb_msg = HeartbeatData(
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(hb_topic),
+            component=component_name,
+            sequence=self.heartbeat_seq,
+            status=(
+                HealthStatusEnum.WARNING
+                if any(self._flush_errors.values())
+                else HealthStatusEnum.HEALTHY
+            ),
+            lag_ms=max_lag_ms,
+            meta={
+                "symbols": list(self.symbols),
+                "symbol_count": len(self.symbols),
+                "running": self.running,
+            },
+        )
+        await self._publish_heartbeat(hb_topic, hb_msg)
+
+    def _compute_max_lag_ms(self) -> int:
+        """Compute the worst per-symbol data lag in milliseconds.
+
+        Symbols that have never delivered data count as zero lag (their
+        last-data timestamp defaults to the current time).
+
+        Returns:
+            Maximum lag across all subscribed symbols, in milliseconds.
+        """
+        current_time = datetime.now(UTC).timestamp() * 1000
+        max_lag_ms = 0
+        for symbol in self.symbols:
+            last_data_time = self._last_data_timestamps.get(symbol, current_time)
+            lag_ms = int(current_time - last_data_time)
+            max_lag_ms = max(max_lag_ms, lag_ms)
+        return max_lag_ms
+
+    def _check_feed_liveness(self) -> None:
+        """Run the dark-feed liveness guard for the current tick.
+
+        When the recovery threshold is enabled and no message has
+        arrived for longer than it, spawn a recovery attempt; when the
+        feed stays dark past ``_DARK_FEED_EXIT_CEILING_S`` despite
+        recovery, escalate to a process exit.
+
+        Raises:
+            FeedDarkTooLongError: When the feed has been dark beyond the
+                exit ceiling and the launcher must restart the publisher.
+        """
+        threshold_s = self._get_liveness_recovery_threshold_s()
+        if threshold_s > 0:
+            stale_for = monotonic() - self._last_message_at
+            if stale_for > threshold_s:
+                self._spawn_recovery(reason=f"no_messages_for_{stale_for:.0f}s")
+            if stale_for > _DARK_FEED_EXIT_CEILING_S:
+                logger.error(
+                    f"{self._get_exchange_name()}: feed dark for {stale_for:.0f}s "
+                    f"(> {_DARK_FEED_EXIT_CEILING_S:.0f}s ceiling) despite recovery; "
+                    "exiting for launcher restart"
+                )
+                raise FeedDarkTooLongError(f"{self._get_exchange_name()} dark for {stale_for:.0f}s")
 
     async def _publish_heartbeat(self, topic: str, message: HeartbeatData) -> None:
         """Send a complete heartbeat message to ZMQ.
