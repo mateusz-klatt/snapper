@@ -508,7 +508,7 @@ def broker(
 
 @app.command()
 def feed(
-    symbols: str = typer.Option("BTC/USD", help="Comma-separated list of symbols"),
+    symbols: str = typer.Option("BTC-USD", help="Comma-separated list of native symbols"),
 ) -> None:
     """Run the Kraken market data publisher.
 
@@ -1826,7 +1826,7 @@ def build_continuous(
 @app.command(name="backtest-run")
 def backtest_run(
     strategy: Annotated[str, typer.Option("--strategy", help="Strategy class name")],
-    instrument: Annotated[str, typer.Option("--instrument", help="Instrument public ID")],
+    instrument: Annotated[str, typer.Option("--instrument", help="Native instrument symbol")],
     exchange: Annotated[str, typer.Option("--exchange", help="Exchange name")],
     start: Annotated[str, typer.Option("--start", help="Start date (ISO format)")],
     end: Annotated[str, typer.Option("--end", help="End date (ISO format)")],

@@ -39,11 +39,12 @@ The `/api/mcp` sub-app is always mounted and gated by the
       -d '{"session_id":"cli","sequence_id":1,"public_id":"$(uuidgen)","timestamp":"2026-04-20T00:00:00Z","payload":{"value":"false","category":"system"}}'
     ```
 
-2. The frontend reads `GET /api/settings/features` on mount (no auth
-    required) and surfaces the "AI Integration" navigation entry
-    whenever the flag is on. The MCP endpoint returns
-    `503 feature_disabled` only when the flag is explicitly set to
-    `false`.
+2. The feature endpoint itself is public, but the frontend route and
+    navigation entry are role/permission-gated. After authentication,
+    the AI Integration page reads `GET /api/settings/features` and
+    renders the enabled or disabled state. The MCP endpoint and
+    `/api/ai-delegates/*` return `503 feature_disabled` only when the
+    flag is explicitly set to `false`.
 
 3. Whether the flag is on or off, the MCP endpoint requires every
     request to carry a valid `Authorization: Bearer <jwt>` header.

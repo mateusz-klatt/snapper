@@ -187,7 +187,7 @@ snapper feed [OPTIONS]
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `--symbols` | string | `BTC/USD` | Comma-separated symbols passed to the Kraken publisher. Symbols must be in native dash format (e.g. `BTC-USD`); the literal code default `BTC/USD` is the WebSocket output format, and only native symbols actually subscribe (slash-format inputs are skipped as unknown). |
+| `--symbols` | string | `BTC-USD` | Comma-separated native symbols passed to the Kraken publisher. Symbols must be in native dash format (e.g. `BTC-USD`); slash-format WebSocket symbols are skipped as unknown. |
 
 **Example:**
 
@@ -968,14 +968,14 @@ in-process, and persists results (signals, trades, equity, metrics).
 
 ```bash
 snapper backtest-run \
-    --strategy sma_cross \
+    --strategy MACDCrossover \
     --instrument BTC-USD \
     --exchange kraken \
     --start 2026-01-01 \
     --end 2026-06-01 \
     --timeframe 1h \
     --initial-cash 10000 \
-    --params '{"fast": 10, "slow": 30}'
+    --params '{"fast": 12, "slow": 26, "signal_period": 9}'
 ```
 
 **Options:**
@@ -983,7 +983,7 @@ snapper backtest-run \
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
 | `--strategy` | str | required | Registered strategy class name |
-| `--instrument` | str | required | Instrument public ID |
+| `--instrument` | str | required | Native instrument symbol |
 | `--exchange` | str | required | Exchange name |
 | `--start` | str | required | Start date (ISO format) |
 | `--end` | str | required | End date (ISO format) |

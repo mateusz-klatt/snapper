@@ -500,11 +500,13 @@ Detailed documentation in [docs/](docs/) directory:
 - [API](docs/api.md) — REST API and WebSocket
 - [Messaging](docs/messaging.md) — ZeroMQ architecture
 - [Operations](docs/operations.md) — Multi-instance coordinator runbook
-- [Observability](docs/observability.md) — Process health metrics surface
+- [Observability](docs/observability.md) — Process, notification, retention, and DB table metrics surface
 - [AI integration](docs/ai-integration.md) — MCP endpoint and AI delegate tokens
 - [Development](docs/development.md) — Developer guidelines (incl. [Internationalization](docs/development.md#internationalization))
 - [Paired execution](docs/paired-execution.md) — Multi-leg guard operator runbook
 - [Egress](docs/snapper-egress.md) — WireGuard + SOCKS5 egress sidecar runbook
+
+Regenerate the bundled frontend documentation PDF with `make docs-pdf`.
 
 ## License
 

@@ -588,7 +588,8 @@ snapper/
 │   ├── strategies/        # Trading strategies
 │   └── utils/             # Utilities
 ├── tests/                 # Tests
-├── frontend/              # React dashboard
+├── frontend/              # React dashboard submodule
+├── ios/                   # SwiftUI iOS client submodule
 ├── docs/                  # Documentation
 ├── scripts/               # Helper scripts
 └── data/                  # Local data
@@ -680,3 +681,6 @@ make docs-pdf
 ```
 
 Generates `frontend/public/snapper.pdf` from README + docs/*.md so the docs ship with the frontend bundle and are linked from the login page.
+Because `frontend/` is the `snapper-frontend` submodule, commit and push
+`frontend/public/snapper.pdf` from inside that submodule, then commit the
+updated frontend submodule pointer in the parent Snapper repository.

@@ -14,7 +14,7 @@ mirrors.
 
 ## Endpoints
 
-All five routes are gated by `Permission.READ_SYSTEM_STATUS` (held by
+All metrics routes are gated by `Permission.READ_SYSTEM_STATUS` (held by
 `AI_DELEGATE`, `VIEWER`, `OPERATOR`, `ADMIN`). The two `POST` routes
 also require CSRF (cookie-auth path); `Authorization: Bearer` requests
 bypass CSRF per the project-wide auth contract.
@@ -26,6 +26,8 @@ bypass CSRF per the project-wide auth contract.
 | POST   | `/api/metrics/system/tracemalloc/start?duration_s`  | Arm Python tracemalloc with auto-stop deadline |
 | POST   | `/api/metrics/system/tracemalloc/stop`              | Disarm tracemalloc + cancel pending deadline |
 | GET    | `/api/metrics/notifications`                        | Notify-sidecar outbox delivery counters |
+| GET    | `/api/metrics/retention`                            | Retention scheduler status and policy counters |
+| GET    | `/api/metrics/db/tables`                            | Per-table row-count and SCD2 lifecycle counters |
 
 ### Failure contract
 
