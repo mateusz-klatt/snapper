@@ -73,6 +73,8 @@ from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
+from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenExecutionSubscribeParamsSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenExecutionSubscriptionAckSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenInstrumentPairSchema
@@ -88,6 +90,8 @@ from snapper.infrastructure.symbols.functions import get_available_kraken_symbol
 from snapper.infrastructure.symbols.functions import native_to_ccxt
 from snapper.infrastructure.symbols.functions import native_to_kraken_rest
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
+
+apply_kraken_ws_teardown_hardening()
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
@@ -401,7 +405,10 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         Ensures the process does not hang indefinitely when the Kraken
         SDK fails to close the connection or its underlying aiohttp
-        session in a timely manner.
+        session in a timely manner. When the bounded ``close()`` times out
+        or raises, :func:`force_close_ws_client` finishes the teardown
+        explicitly — cancelling the connector run tasks and closing the
+        aiohttp session the SDK's interrupted ``close()`` left open (#143).
         """
         client = self._ws_client
         if not client:
@@ -410,15 +417,12 @@ class KrakenExchangeClient(ExchangeClientBase):
         try:
             async with asyncio.timeout(self._WS_CLOSE_TIMEOUT_SECONDS):
                 await client.close()
-                if hasattr(client, "_SpotAsyncClient__session"):
-                    session = getattr(client, "_SpotAsyncClient__session", None)
-                    if session and not session.closed:
-                        await session.close()
-                        logger.debug("Closed aiohttp session from kraken websocket client")
         except TimeoutError:
             logger.warning("WebSocket close timed out - forcing cleanup")
+            await force_close_ws_client(client)
         except Exception as exc:
             logger.warning(f"WebSocket close failed - forcing cleanup: {exc!r}")
+            await force_close_ws_client(client)
         finally:
             if self._ws_client is client:
                 self._ws_client = None
@@ -2125,6 +2129,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                             logger.warning(
                                 f"Disowned WebSocket close failed - forcing cleanup: {exc!r}"
                             )
+                            await force_close_ws_client(client)
                     raise
             self._ws_connected = True
 

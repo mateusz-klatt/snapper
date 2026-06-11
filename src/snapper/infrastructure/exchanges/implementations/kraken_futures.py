@@ -70,8 +70,12 @@ from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
+from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
+
+apply_kraken_ws_teardown_hardening()
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for authenticated operations"
 _PUBLIC_WS_NOT_CONNECTED_MSG = "WebSocket client not connected"
@@ -367,8 +371,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                     await client.close()
             except TimeoutError:
                 logger.warning("Kraken Futures WS close timed out - forcing cleanup")
+                await force_close_ws_client(client)
             except Exception as e:
                 logger.warning(f"Error closing Kraken Futures WS: {e}")
+                await force_close_ws_client(client)
             if self._ws_client is client:
                 self._ws_client = None
         private_client = self._private_ws_client
@@ -378,8 +384,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                     await private_client.close()
             except TimeoutError:
                 logger.warning("Kraken Futures private WS close timed out - forcing cleanup")
+                await force_close_ws_client(private_client)
             except Exception as e:
                 logger.warning(f"Error closing Kraken Futures private WS: {e}")
+                await force_close_ws_client(private_client)
             if self._private_ws_client is private_client:
                 self._private_ws_client = None
         logger.info("Kraken Futures connections closed")
@@ -658,6 +666,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                         await client.close()
                 except Exception as exc:
                     logger.warning(f"Error closing partial Kraken Futures WS: {exc!r}")
+                    await force_close_ws_client(client)
                 if self._ws_client is client:
                     self._ws_client = None
                 raise
@@ -736,6 +745,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                         await poisoned.close()
                 except Exception as exc:
                     logger.warning(f"Error closing poisoned Kraken Futures private WS: {exc!r}")
+                    await force_close_ws_client(poisoned)
                 if self._private_ws_client is poisoned:
                     self._private_ws_client = None
             if self._private_ws_client is not None:
@@ -759,6 +769,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                         await client.close()
                 except Exception as exc:
                     logger.warning(f"Error closing partial Kraken Futures private WS: {exc!r}")
+                    await force_close_ws_client(client)
                 if self._private_ws_client is client:
                     self._private_ws_client = None
                 raise

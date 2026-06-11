@@ -366,6 +366,31 @@ class TestConnect:
         await client.disconnect()
         assert client._ws_client is None
 
+    @pytest.mark.asyncio
+    async def test_disconnect_timeout_invokes_force_close(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """A close timeout hands the client to the force teardown (#143).
+
+        Given: WS close exceeds the close timeout (connector stuck in its
+            reconnect backoff),
+        When: disconnect() is called,
+        Then: ``force_close_ws_client`` is awaited with the abandoned client
+            so its run task is cancelled and its aiohttp session closed —
+            the pre-fix behaviour leaked one session per rebuild cycle.
+        """
+        mock_ws = AsyncMock()
+        mock_ws.close.side_effect = TimeoutError
+        client._ws_client = mock_ws
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities."
+            "force_close_ws_client",
+            new_callable=AsyncMock,
+        ) as force_close:
+            await client.disconnect()
+        force_close.assert_awaited_once_with(mock_ws)
+        assert client._ws_client is None
+
 
 class TestOnWsMessage:
     """Tests for the WS callback-to-queue bridge."""

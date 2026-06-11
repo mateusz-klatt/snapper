@@ -71,9 +71,13 @@ from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
+from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscriptionAckSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscriptionAckSchema
 from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
+
+apply_kraken_ws_teardown_hardening()
 
 _NOT_IMPLEMENTED_MSG = "Order execution not available for Kraken Equities (market data only)"
 _QUEUE_DRAIN_TIMEOUT = 0.1
@@ -318,8 +322,10 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                     await client.close()
             except TimeoutError:
                 logger.warning("Kraken Equities WS close timed out - forcing cleanup")
+                await force_close_ws_client(client)
             except Exception as e:
                 logger.warning(f"Error closing Kraken Equities WS: {e}")
+                await force_close_ws_client(client)
             if self._ws_client is client:
                 self._ws_client = None
         logger.info("Kraken Equities connections closed")
@@ -527,6 +533,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                             await client.close()
                     except Exception as exc:
                         logger.warning(f"Error closing disowned Kraken Equities WS: {exc!r}")
+                        await force_close_ws_client(client)
                 raise
 
     async def _replay_subscriptions(self) -> None:

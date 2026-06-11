@@ -2315,7 +2315,14 @@ class TestKrakenCoverageImprovement:
     async def test_close_ws_client_closes_resources(
         self, kraken_client: KrakenExchangeClient
     ) -> None:
-        """Verify close ws client closes resources."""
+        """Verify a successful close defers session ownership to the SDK.
+
+        Given: A WebSocket client whose ``close()`` completes in bound (the
+            real SDK closes its own aiohttp session inside ``close()``),
+        When: ``_close_ws_client`` runs,
+        Then: the venue layer does NOT double-close the session and the
+            client slot is cleared.
+        """
         mock_ws = AsyncMock()
         mock_ws.close = AsyncMock()
         mock_session = AsyncMock()
@@ -2325,7 +2332,7 @@ class TestKrakenCoverageImprovement:
         kraken_client._ws_connected = True
         await kraken_client._close_ws_client()
         mock_ws.close.assert_awaited_once()
-        mock_session.close.assert_awaited_once()
+        mock_session.close.assert_not_awaited()
         assert kraken_client._ws_client is None
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
@@ -2442,20 +2449,37 @@ class TestCloseWsClientBranches:
         assert kraken_client._ws_client is None
 
     @pytest.mark.asyncio
-    async def test_close_ws_client_with_aiohttp_session(
+    async def test_close_ws_client_timeout_force_closes_session(
         self, kraken_client: KrakenExchangeClient
     ) -> None:
-        """Verify close ws client with aiohttp session."""
-        mock_session = MagicMock()
-        mock_session.closed = False
-        mock_session.close = AsyncMock()
-        mock_ws_client = MagicMock()
-        mock_ws_client.close = AsyncMock()
-        mock_ws_client._SpotAsyncClient__session = mock_session
-        kraken_client._ws_client = mock_ws_client
+        """A bounded-close timeout force-closes the leaked session (#143).
+
+        Given: A WebSocket client whose ``close()`` hangs past the bound
+            (the connector stuck in a reconnect backoff) and an open
+            aiohttp session,
+        When: ``_close_ws_client`` runs with a tiny close bound,
+        Then: ``force_close_ws_client`` closes the session directly — the
+            pre-fix behaviour abandoned the client and leaked one session
+            per rebuild cycle.
+        """
+
+        async def _hang() -> None:
+            await asyncio.sleep(999)
+
+        class _StubSession:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        stub_session = _StubSession()
+        stub_ws = SimpleNamespace(close=_hang, _SpotAsyncClient__session=stub_session)
+        kraken_client._ws_client = cast(Any, stub_ws)
         kraken_client._ws_connected = True
+        kraken_client._WS_CLOSE_TIMEOUT_SECONDS = 0.05
         await kraken_client._close_ws_client()
-        mock_session.close.assert_awaited_once()
+        assert stub_session.closed is True
         assert kraken_client._ws_client is None
 
     @pytest.mark.asyncio
@@ -3668,11 +3692,13 @@ class TestEnsureWsConnectedAlreadyConnected:
 
 @pytest.mark.asyncio
 async def test_close_ws_client_closes_session() -> None:
-    """WebSocket session closure.
+    """WebSocket session closure on the close-error fallback path (#143).
 
-    Given a KrakenExchangeClient with an active WebSocket session,
+    Given a KrakenExchangeClient whose WebSocket ``close()`` raises mid-way
+        (the session it owns is left open),
     When _close_ws_client is called,
-    Then the session close method is invoked and client reference is cleared.
+    Then ``force_close_ws_client`` closes the session directly and the
+        client reference is cleared.
     """
     client = KrakenExchangeClient("key", "secret")
     session_closed = {"called": False}
@@ -3686,7 +3712,7 @@ async def test_close_ws_client_closes_session() -> None:
 
     client._ws_connected = True
     client._ws_client = SimpleNamespace(
-        close=AsyncMock(),
+        close=AsyncMock(side_effect=RuntimeError("close boom")),
         _SpotAsyncClient__session=DummySession(),
     )
     await client._close_ws_client()
@@ -5006,7 +5032,12 @@ class TestKrakenAdditionalCoverage:
     async def test_close_ws_client_closes_session(
         self, kraken_client: KrakenExchangeClient
     ) -> None:
-        """Verify close ws client closes session."""
+        """Verify close ws client closes session.
+
+        The stub mirrors the real SDK contract: ``close()`` closes the
+        client's own aiohttp session internally (``super().close()``), so a
+        successful in-bound close needs no venue-layer session handling.
+        """
 
         class _StubSession:
             def __init__(self) -> None:
@@ -5022,6 +5053,7 @@ class TestKrakenAdditionalCoverage:
 
             async def close(self) -> None:
                 self.closed = True
+                await self._SpotAsyncClient__session.close()
 
         ws_client = _StubWsClient()
         kraken_client._ws_client = ws_client

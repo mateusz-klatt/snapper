@@ -20,14 +20,19 @@ import gc
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from kraken.exceptions import MaxReconnectError
+from kraken.futures.websocket import ConnectFuturesWebsocket
+from kraken.spot import SpotWSClient
 from kraken.spot.websocket.connectors import ConnectSpotWebsocket
 from kraken.spot.websocket.connectors import ConnectSpotWebsocketBase
+from kraken.utils.utils import WSState
 from loguru import logger as _logger
 from websockets.exceptions import ConnectionClosedError
 from websockets.exceptions import InvalidStatus
@@ -54,17 +59,24 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _RESUBSCRIBE_PAC
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RESUBSCRIBE_PACE_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MAX_SECONDS
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MIN_SECONDS
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _TEARDOWN_PATCH_APPLIED
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _TEARDOWN_PATCH_LOGGED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_CLOSE_TIMEOUT_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_INTERVAL_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_TIMEOUT_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _consume_task_result
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _drive_reconnect_children
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _interruptible_backoff
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _kraken_futures_ws
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _parse_retry_after
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_futures_reconnect
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_get_reconnect_wait
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_init
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_manage_subscriptions
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_reconnect
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_recover_subscriptions
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_run
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _reap_reconnect_children
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _unregister_connector
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _wrap_connect_factory
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _ws_client
@@ -74,6 +86,8 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import (
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_futures_pool_routing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_resubscribe_pacing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
+from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.exchanges.kraken_sdk_patches import get_registered_publisher
 from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
@@ -535,62 +549,114 @@ class TestPublisherRegistration:
         assert before == _CONNECTOR_PUBLISHERS
 
 
+def _make_spot_connector(wait_s: float = 0.0, *, keep_alive: bool = True) -> ConnectSpotWebsocket:
+    """Build a real Spot connector with a deterministic reconnect wait.
+
+    The reconnect wait function is shadowed with an instance attribute so the
+    hardened reconnect's mangled-name lookup picks the deterministic value
+    instead of the SDK's randomized exponential.
+
+    Args:
+        wait_s: Backoff duration the connector should request.
+        keep_alive: Initial ``keep_alive`` flag value.
+
+    Returns:
+        A ``ConnectSpotWebsocket`` bound to a mock client.
+    """
+    connector = ConnectSpotWebsocket(client=MagicMock(), endpoint="wss://unit-test", callback=None)
+    connector.keep_alive = keep_alive
+    connector._ConnectSpotWebsocketBase__get_reconnect_wait = lambda attempts: wait_s
+    return connector
+
+
+def _make_futures_connector(
+    wait_s: float = 0.0, *, keep_alive: bool = True
+) -> ConnectFuturesWebsocket:
+    """Build a real Futures connector with a deterministic reconnect wait.
+
+    Args:
+        wait_s: Backoff duration the connector should request.
+        keep_alive: Initial ``keep_alive`` flag value.
+
+    Returns:
+        A ``ConnectFuturesWebsocket`` bound to a mock client.
+    """
+    connector = ConnectFuturesWebsocket(client=MagicMock(), endpoint="unit-test", callback=None)
+    connector.keep_alive = keep_alive
+    connector._ConnectFuturesWebsocket__get_reconnect_wait = lambda attempts: wait_s
+    return connector
+
+
+class _CancelTracker:
+    """Child-coroutine factory recording whether each child saw cancellation."""
+
+    def __init__(self) -> None:
+        self.cancelled: dict[str, bool] = {}
+        self.started: dict[str, bool] = {}
+
+    def hanging_child(self, name: str) -> Any:
+        """Return an async callable that hangs until cancelled.
+
+        Args:
+            name: Key under which start/cancel observations are recorded.
+
+        Returns:
+            An async function compatible with the reconnect child signature.
+        """
+        self.cancelled[name] = False
+        self.started[name] = False
+
+        async def _child(event: asyncio.Event) -> None:
+            self.started[name] = True
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled[name] = True
+                raise
+
+        return _child
+
+
 class TestPatchedReconnect:
-    """The ``__reconnect`` override notifies the owning publisher."""
+    """Hardened Spot ``__reconnect``: watchdog notify + #143 teardown safety."""
 
     @pytest.mark.asyncio
-    async def test_notifies_publisher_then_delegates(self) -> None:
+    async def test_notifies_publisher_before_reconnect_body(self) -> None:
         """Spec — full Given/When/Then below.
 
-        Given a connector mapped to a publisher,
+        Given a connector mapped to a publisher with the watchdog hook,
         When ``_patched_reconnect`` is awaited,
         Then ``publisher._on_sdk_reconnect_attempt`` is called and the
-        original SDK reconnect coroutine is awaited.
+        hardened body runs to its keep-alive early return (state CLOSED).
         """
+        connector = _make_spot_connector(keep_alive=False)
         publisher = MagicMock()
         publisher._on_sdk_reconnect_attempt = MagicMock()
-        connector = MagicMock()
         _CONNECTOR_PUBLISHERS[id(connector)] = publisher
-        delegate_called: dict[str, bool] = {"called": False}
-
-        async def fake_original(self_obj: Any) -> None:
-            delegate_called["called"] = True
-
-        original = kraken_sdk_patches._ORIGINAL_RECONNECT
-        kraken_sdk_patches._ORIGINAL_RECONNECT = fake_original
         try:
             await _patched_reconnect(connector)
         finally:
-            kraken_sdk_patches._ORIGINAL_RECONNECT = original
             _CONNECTOR_PUBLISHERS.pop(id(connector), None)
         publisher._on_sdk_reconnect_attempt.assert_called_once_with()
-        assert delegate_called["called"] is True
+        assert connector.state == WSState.CLOSED
 
     @pytest.mark.asyncio
-    async def test_unregistered_connector_still_delegates(self) -> None:
+    async def test_unregistered_connector_still_reconnects(self) -> None:
         """Spec — full Given/When/Then below.
 
-        Given a connector not in the publisher registry,
+        Given a connector not in the publisher registry (e.g. an executor
+        process where no publisher ever registers),
         When ``_patched_reconnect`` is awaited,
-        Then no publisher notification occurs and the SDK reconnect runs.
+        Then no publisher notification occurs and the hardened body still
+        runs without raising.
         """
-        connector = MagicMock()
+        connector = _make_spot_connector(keep_alive=False)
         _CONNECTOR_PUBLISHERS.pop(id(connector), None)
-        delegate_called: dict[str, bool] = {"called": False}
-
-        async def fake_original(self_obj: Any) -> None:
-            delegate_called["called"] = True
-
-        original = kraken_sdk_patches._ORIGINAL_RECONNECT
-        kraken_sdk_patches._ORIGINAL_RECONNECT = fake_original
-        try:
-            await _patched_reconnect(connector)
-        finally:
-            kraken_sdk_patches._ORIGINAL_RECONNECT = original
-        assert delegate_called["called"] is True
+        await _patched_reconnect(connector)
+        assert connector.state == WSState.CLOSED
 
     @pytest.mark.asyncio
-    async def test_publisher_without_reconnect_hook_still_delegates(self) -> None:
+    async def test_publisher_without_reconnect_hook_still_reconnects(self) -> None:
         """Spec — publishers without ``_on_sdk_reconnect_attempt`` do not break reconnect.
 
         Given a connector registered against a publisher that lacks
@@ -599,27 +665,214 @@ class TestPatchedReconnect:
         ``_CURRENT_PUBLISHER`` for egress tagging but does not need
         the reconnect-storm watchdog),
         When ``_patched_reconnect`` is awaited,
-        Then no AttributeError is raised and the SDK reconnect still
-        runs. Regression guard for the live failure where adding
-        Equities to _CURRENT_PUBLISHER broke every reconnect cycle
-        because the patch was calling the hook unconditionally.
+        Then no AttributeError is raised and the hardened body still runs.
+        Regression guard for the live failure where adding Equities to
+        _CURRENT_PUBLISHER broke every reconnect cycle because the patch
+        was calling the hook unconditionally.
         """
-        connector = MagicMock()
+        connector = _make_spot_connector(keep_alive=False)
         publisher_without_hook = MagicMock(spec=[])
         _CONNECTOR_PUBLISHERS[id(connector)] = publisher_without_hook
-        delegate_called: dict[str, bool] = {"called": False}
-
-        async def fake_original(self_obj: Any) -> None:
-            delegate_called["called"] = True
-
-        original = kraken_sdk_patches._ORIGINAL_RECONNECT
-        kraken_sdk_patches._ORIGINAL_RECONNECT = fake_original
         try:
             await _patched_reconnect(connector)
         finally:
-            kraken_sdk_patches._ORIGINAL_RECONNECT = original
             _CONNECTOR_PUBLISHERS.pop(id(connector), None)
-        assert delegate_called["called"] is True
+        assert connector.state == WSState.CLOSED
+
+    @pytest.mark.asyncio
+    async def test_raises_max_reconnect_error_at_budget(self) -> None:
+        """Spec — stock MaxReconnectError semantics are preserved.
+
+        Given a connector whose reconnect counter sits one below the budget,
+        When ``_patched_reconnect`` is awaited,
+        Then ``MaxReconnectError`` is raised before any backoff or child
+        spawn, matching the stock SDK behaviour.
+        """
+        connector = _make_spot_connector()
+        connector._ConnectSpotWebsocketBase__reconnect_num = connector.MAX_RECONNECT_NUM - 1
+        with pytest.raises(MaxReconnectError):
+            await _patched_reconnect(connector)
+
+    @pytest.mark.asyncio
+    async def test_keep_alive_flip_mid_backoff_skips_children(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec — the #143 root cause: teardown during backoff is prompt and clean.
+
+        Given a connector sleeping a long reconnect backoff,
+        When ``keep_alive`` flips False mid-sleep (the ``stop()`` path),
+        Then the reconnect returns within the poll interval WITHOUT spawning
+        any child task — the stock loop slept the full backoff and then
+        orphaned freshly spawned children.
+        """
+        monkeypatch.setattr(kraken_sdk_patches, "_RECONNECT_BACKOFF_POLL_S", 0.01)
+        tracker = _CancelTracker()
+        connector = _make_spot_connector(wait_s=30.0)
+        connector._recover_subscriptions = tracker.hanging_child("recover")
+        connector._ConnectSpotWebsocketBase__run = tracker.hanging_child("run")
+        reconnect_task = asyncio.create_task(_patched_reconnect(connector))
+        await asyncio.sleep(0.05)
+        connector.keep_alive = False
+        await asyncio.wait_for(reconnect_task, timeout=1.0)
+        assert tracker.started == {"recover": False, "run": False}
+        assert connector.state == WSState.CLOSED
+
+    @pytest.mark.asyncio
+    async def test_clean_child_completion_breaks_loop(self) -> None:
+        """Spec — an all-done child set terminates the wait loop.
+
+        Given children that both complete without raising while
+        ``keep_alive`` stays True,
+        When ``_patched_reconnect`` is awaited,
+        Then it returns instead of hot-spinning ``asyncio.wait`` on an
+        already-done task set (latent stock-SDK hazard).
+        """
+
+        async def _instant(event: asyncio.Event) -> None:
+            return None
+
+        connector = _make_spot_connector()
+        connector._recover_subscriptions = _instant
+        connector._ConnectSpotWebsocketBase__run = _instant
+        await asyncio.wait_for(_patched_reconnect(connector), timeout=1.0)
+        assert connector.state == WSState.CLOSED
+
+    @pytest.mark.asyncio
+    async def test_child_exception_cancels_sibling(self) -> None:
+        """Spec — a failing ``__run`` cannot strand ``_recover_subscriptions``.
+
+        Given a ``__run`` child that raises immediately (connect failure
+        during a blackout) and a recover child waiting on the readiness
+        event,
+        When ``_patched_reconnect`` is awaited,
+        Then the recover child is cancelled by the reap instead of waiting
+        on ``event.wait()`` forever, and the connector ends CLOSED.
+        """
+        tracker = _CancelTracker()
+
+        async def _failing_run(event: asyncio.Event) -> None:
+            raise OSError("simulated blackout")
+
+        connector = _make_spot_connector()
+        connector._recover_subscriptions = tracker.hanging_child("recover")
+        connector._ConnectSpotWebsocketBase__run = _failing_run
+        await asyncio.wait_for(_patched_reconnect(connector), timeout=1.0)
+        assert tracker.cancelled["recover"] is True
+        assert connector.state == WSState.CLOSED
+
+    @pytest.mark.asyncio
+    async def test_parent_cancellation_reaps_children(self) -> None:
+        """Spec — THE regression guard for the reverted first #143 fix attempt.
+
+        Given a reconnect invocation whose children both hang (recover on the
+        readiness event, run inside the handshake),
+        When the parent reconnect task is cancelled (the
+        ``force_close_ws_client`` path),
+        Then BOTH children observe cancellation — the stock loop's
+        ``asyncio.wait`` never cancelled its awaitables, which orphaned the
+        children and produced ``Task exception was never retrieved``.
+        """
+        tracker = _CancelTracker()
+        connector = _make_spot_connector()
+        connector._recover_subscriptions = tracker.hanging_child("recover")
+        connector._ConnectSpotWebsocketBase__run = tracker.hanging_child("run")
+        reconnect_task = asyncio.create_task(_patched_reconnect(connector))
+        await asyncio.sleep(0.05)
+        assert tracker.started == {"recover": True, "run": True}
+        reconnect_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reconnect_task
+        assert tracker.cancelled == {"recover": True, "run": True}
+
+
+class TestPatchedFuturesReconnect:
+    """Hardened Futures ``__reconnect``: same #143 teardown safety."""
+
+    @pytest.mark.asyncio
+    async def test_raises_max_reconnect_error_at_budget(self) -> None:
+        """Spec — stock bare MaxReconnectError semantics are preserved.
+
+        Given a Futures connector whose counter sits one below the budget,
+        When ``_patched_futures_reconnect`` is awaited,
+        Then ``MaxReconnectError`` is raised before any backoff.
+        """
+        connector = _make_futures_connector()
+        connector._ConnectFuturesWebsocket__reconnect_num = connector.MAX_RECONNECT_NUM - 1
+        with pytest.raises(MaxReconnectError):
+            await _patched_futures_reconnect(connector)
+
+    @pytest.mark.asyncio
+    async def test_keep_alive_flip_mid_backoff_skips_children(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec — teardown during a Futures backoff is prompt and spawn-free.
+
+        Given a Futures connector sleeping a long reconnect backoff,
+        When ``keep_alive`` flips False mid-sleep,
+        Then the reconnect returns within the poll interval without spawning
+        children.
+        """
+        monkeypatch.setattr(kraken_sdk_patches, "_RECONNECT_BACKOFF_POLL_S", 0.01)
+        tracker = _CancelTracker()
+        connector = _make_futures_connector(wait_s=30.0)
+        connector._ConnectFuturesWebsocket__recover_subscription_req_msg = tracker.hanging_child(
+            "recover"
+        )
+        connector._ConnectFuturesWebsocket__run = tracker.hanging_child("run")
+        reconnect_task = asyncio.create_task(_patched_futures_reconnect(connector))
+        await asyncio.sleep(0.05)
+        connector.keep_alive = False
+        await asyncio.wait_for(reconnect_task, timeout=1.0)
+        assert tracker.started == {"recover": False, "run": False}
+        assert connector.state == WSState.CLOSED
+
+    @pytest.mark.asyncio
+    async def test_child_exception_clears_challenge_and_cancels_sibling(self) -> None:
+        """Spec — stock challenge-flag reset is preserved alongside the reap.
+
+        Given a private Futures connector with a ready challenge and a
+        ``__run`` child that raises,
+        When ``_patched_futures_reconnect`` is awaited,
+        Then the challenge-ready flag is cleared (stock behaviour — the
+        recovered connection must re-authenticate) and the recover sibling
+        is cancelled by the reap.
+        """
+        tracker = _CancelTracker()
+
+        async def _failing_run(event: asyncio.Event) -> None:
+            raise OSError("simulated blackout")
+
+        connector = _make_futures_connector()
+        connector._ConnectFuturesWebsocket__challenge_ready = True
+        connector._ConnectFuturesWebsocket__recover_subscription_req_msg = tracker.hanging_child(
+            "recover"
+        )
+        connector._ConnectFuturesWebsocket__run = _failing_run
+        await asyncio.wait_for(_patched_futures_reconnect(connector), timeout=1.0)
+        assert getattr(connector, "_ConnectFuturesWebsocket__challenge_ready") is False
+        assert tracker.cancelled["recover"] is True
+        assert connector.state == WSState.CLOSED
+
+    @pytest.mark.asyncio
+    async def test_parent_cancellation_reaps_children(self) -> None:
+        """Spec — Futures mirror of the reverted-fix regression guard.
+
+        Given a Futures reconnect whose children both hang,
+        When the parent reconnect task is cancelled,
+        Then both children observe cancellation.
+        """
+        tracker = _CancelTracker()
+        connector = _make_futures_connector()
+        connector._ConnectFuturesWebsocket__recover_subscription_req_msg = tracker.hanging_child(
+            "recover"
+        )
+        connector._ConnectFuturesWebsocket__run = tracker.hanging_child("run")
+        reconnect_task = asyncio.create_task(_patched_futures_reconnect(connector))
+        await asyncio.sleep(0.05)
+        reconnect_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reconnect_task
+        assert tracker.cancelled == {"recover": True, "run": True}
 
 
 class TestCloseCodeBackoff:
@@ -2193,32 +2446,38 @@ class TestLogKrakenSdkPatchesStatus:
             _FUTURES_PATCH_APPLIED[0],
             _ALREADY_SUBSCRIBED_PATCH_APPLIED[0],
             _RESUBSCRIBE_PACE_PATCH_APPLIED[0],
+            _TEARDOWN_PATCH_APPLIED[0],
         )
         saved_logged = (
             _PATCH_LOGGED[0],
             _FUTURES_PATCH_LOGGED[0],
             _ALREADY_SUBSCRIBED_PATCH_LOGGED[0],
             _RESUBSCRIBE_PACE_PATCH_LOGGED[0],
+            _TEARDOWN_PATCH_LOGGED[0],
         )
         saved_sink_ready = _FILE_SINK_READY[0]
         _PATCH_APPLIED[0] = False
         _FUTURES_PATCH_APPLIED[0] = False
         _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] = False
         _RESUBSCRIBE_PACE_PATCH_APPLIED[0] = False
+        _TEARDOWN_PATCH_APPLIED[0] = False
         _PATCH_LOGGED[0] = False
         _FUTURES_PATCH_LOGGED[0] = False
         _ALREADY_SUBSCRIBED_PATCH_LOGGED[0] = False
         _RESUBSCRIBE_PACE_PATCH_LOGGED[0] = False
+        _TEARDOWN_PATCH_LOGGED[0] = False
         _FILE_SINK_READY[0] = True
         yield
         _PATCH_APPLIED[0] = saved_applied[0]
         _FUTURES_PATCH_APPLIED[0] = saved_applied[1]
         _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] = saved_applied[2]
         _RESUBSCRIBE_PACE_PATCH_APPLIED[0] = saved_applied[3]
+        _TEARDOWN_PATCH_APPLIED[0] = saved_applied[4]
         _PATCH_LOGGED[0] = saved_logged[0]
         _FUTURES_PATCH_LOGGED[0] = saved_logged[1]
         _ALREADY_SUBSCRIBED_PATCH_LOGGED[0] = saved_logged[2]
         _RESUBSCRIBE_PACE_PATCH_LOGGED[0] = saved_logged[3]
+        _TEARDOWN_PATCH_LOGGED[0] = saved_logged[4]
         _FILE_SINK_READY[0] = saved_sink_ready
 
     def test_all_flags_false_emits_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -2257,6 +2516,25 @@ class TestLogKrakenSdkPatchesStatus:
         assert "kraken-sdk futures pool routing applied" not in messages
         assert "kraken-sdk Already-subscribed filter applied" not in messages
         assert _PATCH_LOGGED[0] is True
+
+    def test_teardown_flag_emits_matching_line(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Spec — teardown-hardening flag drives exactly one INFO line.
+
+        Given the sink is ready and only ``_TEARDOWN_PATCH_APPLIED[0] = True``,
+        When ``log_kraken_sdk_patches_status`` is invoked,
+        Then exactly one INFO record matching
+            ``"kraken-sdk WS teardown hardening applied"`` is emitted and the
+            logged flag flips so repeats never duplicate it.
+        """
+        _TEARDOWN_PATCH_APPLIED[0] = True
+        handler_id = _logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            log_kraken_sdk_patches_status()
+        finally:
+            _logger.remove(handler_id)
+        messages = [r.getMessage() for r in caplog.records]
+        assert "kraken-sdk WS teardown hardening applied" in messages
+        assert _TEARDOWN_PATCH_LOGGED[0] is True
 
     def test_resubscribe_pacing_flag_emits_line(self, caplog: pytest.LogCaptureFixture) -> None:
         """Spec — the re-subscribe pacing flag drives its own INFO line.
@@ -2560,3 +2838,709 @@ class TestKrakenResubscribePacing:
         before = asyncio.run(_drive())
         assert before == 0
         assert fake.client.subscribe.await_count == 1
+
+
+class TestInterruptibleBackoff:
+    """The hardened backoff sleeps in keep-alive-aware increments."""
+
+    @pytest.mark.asyncio
+    async def test_sleeps_full_duration_while_keep_alive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec — undisturbed backoff serves its full duration.
+
+        Given a connector whose ``keep_alive`` stays True,
+        When ``_interruptible_backoff`` runs for a short wait,
+        Then it returns only after at least that duration elapsed.
+        """
+        monkeypatch.setattr(kraken_sdk_patches, "_RECONNECT_BACKOFF_POLL_S", 0.01)
+        connector = SimpleNamespace(keep_alive=True)
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        await _interruptible_backoff(connector, 0.05)
+        assert loop.time() - started_at >= 0.04
+
+    @pytest.mark.asyncio
+    async def test_returns_early_on_keep_alive_flip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Spec — the #143 teardown-latency bound.
+
+        Given a connector sleeping a long backoff,
+        When ``keep_alive`` flips False mid-sleep,
+        Then the backoff returns within roughly one poll interval instead of
+        serving the remaining minutes.
+        """
+        monkeypatch.setattr(kraken_sdk_patches, "_RECONNECT_BACKOFF_POLL_S", 0.01)
+        connector = SimpleNamespace(keep_alive=True)
+        loop = asyncio.get_running_loop()
+
+        async def _flip() -> None:
+            await asyncio.sleep(0.03)
+            connector.keep_alive = False
+
+        flipper = asyncio.create_task(_flip())
+        started_at = loop.time()
+        await _interruptible_backoff(connector, 60.0)
+        elapsed = loop.time() - started_at
+        await flipper
+        assert elapsed < 1.0
+
+    @pytest.mark.asyncio
+    async def test_zero_wait_returns_immediately(self) -> None:
+        """Spec — a zero-length backoff never enters the sleep loop.
+
+        Given a zero reconnect wait,
+        When ``_interruptible_backoff`` runs,
+        Then it returns without sleeping.
+        """
+        connector = SimpleNamespace(keep_alive=True)
+        await asyncio.wait_for(_interruptible_backoff(connector, 0.0), timeout=0.5)
+
+
+class TestReapReconnectChildren:
+    """Child reaping cancels, drains, and consumes exceptions."""
+
+    @pytest.mark.asyncio
+    async def test_cancels_pending_children(self) -> None:
+        """Spec — hanging children are cancelled and awaited.
+
+        Given a child task stuck on an event,
+        When ``_reap_reconnect_children`` runs,
+        Then the child ends cancelled.
+        """
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        child = asyncio.create_task(_hang())
+        await asyncio.sleep(0)
+        await _reap_reconnect_children([child])
+        assert child.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_consumes_finished_child_exception(self) -> None:
+        """Spec — finished children never leave an unretrieved exception.
+
+        Given a child task that already failed,
+        When ``_reap_reconnect_children`` runs,
+        Then the exception is retrieved (no ``Task exception was never
+        retrieved`` on garbage collection) and the reap returns cleanly.
+        """
+
+        async def _boom() -> None:
+            raise OSError("simulated blackout")
+
+        child = asyncio.create_task(_boom())
+        await asyncio.sleep(0)
+        assert child.done()
+        await _reap_reconnect_children([child])
+        assert isinstance(child.exception(), OSError)
+
+    @pytest.mark.asyncio
+    async def test_warns_on_uncancellable_child(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Spec — a child that survives cancellation is logged, not awaited forever.
+
+        Given a child that swallows the first cancellation and keeps waiting,
+        When ``_reap_reconnect_children`` runs with a tiny drain bound,
+        Then the reap returns (bounded) while the stubborn child is reported;
+        the test then kills the child to keep the loop clean.
+        """
+        monkeypatch.setattr(kraken_sdk_patches, "_RECONNECT_CHILD_REAP_TIMEOUT_S", 0.05)
+
+        async def _stubborn() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.Event().wait()
+
+        child = asyncio.create_task(_stubborn())
+        await asyncio.sleep(0)
+        await asyncio.wait_for(_reap_reconnect_children([child]), timeout=1.0)
+        assert not child.done()
+        child.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await child
+
+
+class TestDriveReconnectChildren:
+    """The wait-loop driver tolerates externally cancelled children."""
+
+    @pytest.mark.asyncio
+    async def test_externally_cancelled_child_is_skipped(self) -> None:
+        """Spec — a cancelled child is not treated as a child exception.
+
+        Given one child cancelled externally and one completing cleanly,
+        When ``_drive_reconnect_children`` runs,
+        Then the loop exits via the all-done break without invoking the
+        exception handler for the cancelled child.
+        """
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        async def _instant() -> None:
+            return None
+
+        cancelled_child = asyncio.create_task(_hang())
+        clean_child = asyncio.create_task(_instant())
+        await asyncio.sleep(0)
+        cancelled_child.cancel()
+        handled: list[Any] = []
+        connector = SimpleNamespace(keep_alive=True)
+        await asyncio.wait_for(
+            _drive_reconnect_children(connector, [cancelled_child, clean_child], handled.append),
+            timeout=1.0,
+        )
+        assert handled == []
+
+    @pytest.mark.asyncio
+    async def test_cancelled_child_with_pending_sibling_loops_again(self) -> None:
+        """Spec — a lone cancelled child does not end the wait loop.
+
+        Given one child cancelled externally while its sibling keeps
+        running,
+        When ``_drive_reconnect_children`` observes the cancelled child,
+        Then the loop waits again for the live sibling (no premature exit,
+        no exception handling) and exits once the sibling completes.
+        """
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        release = asyncio.Event()
+
+        async def _until_released() -> None:
+            await release.wait()
+
+        cancelled_child = asyncio.create_task(_hang())
+        live_child = asyncio.create_task(_until_released())
+        await asyncio.sleep(0)
+        handled: list[Any] = []
+        connector = SimpleNamespace(keep_alive=True)
+        driver = asyncio.create_task(
+            _drive_reconnect_children(connector, [cancelled_child, live_child], handled.append)
+        )
+        await asyncio.sleep(0.02)
+        cancelled_child.cancel()
+        await asyncio.sleep(0.02)
+        assert not driver.done()
+        release.set()
+        await asyncio.wait_for(driver, timeout=1.0)
+        assert handled == []
+
+    @pytest.mark.asyncio
+    async def test_keep_alive_false_at_entry_still_reaps(self) -> None:
+        """Spec — a dead connector at loop entry still drains its children.
+
+        Given ``keep_alive`` already False when the driver starts (a teardown
+        racing the end of the backoff),
+        When ``_drive_reconnect_children`` runs with hanging children,
+        Then the wait loop is skipped and the children are cancelled by the
+        ``finally`` reap — the stock loop orphaned them on this exact path.
+        """
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        first = asyncio.create_task(_hang())
+        second = asyncio.create_task(_hang())
+        await asyncio.sleep(0)
+        connector = SimpleNamespace(keep_alive=False)
+        await asyncio.wait_for(
+            _drive_reconnect_children(connector, [first, second], lambda task: None),
+            timeout=1.0,
+        )
+        assert first.cancelled()
+        assert second.cancelled()
+
+
+class _FakeSession:
+    """Minimal aiohttp-session stand-in with a closable flag."""
+
+    def __init__(self, *, closed: bool = False, fail: bool = False) -> None:
+        self.closed = closed
+        self.fail = fail
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        """Record the call; optionally raise to exercise the guard branch."""
+        self.close_calls += 1
+        if self.fail:
+            raise RuntimeError("session close boom")
+        self.closed = True
+
+
+class _FakeConnector:
+    """Minimal connector stand-in carrying ``keep_alive`` and a run task."""
+
+    def __init__(self, task: Any = None) -> None:
+        self.keep_alive = True
+        if task is not None:
+            self.task = task
+
+
+class _ExplodingConnector:
+    """Connector whose ``keep_alive`` setter raises, for the guard branch."""
+
+    @property
+    def keep_alive(self) -> bool:
+        """Always-True flag whose setter raises."""
+        return True
+
+    @keep_alive.setter
+    def keep_alive(self, value: bool) -> None:
+        raise RuntimeError("keep_alive boom")
+
+
+class TestForceCloseWsClient:
+    """Last-resort teardown cancels run tasks and closes leaked sessions."""
+
+    @pytest.mark.asyncio
+    async def test_spot_shape_cancels_task_and_closes_session(self) -> None:
+        """Spec — the spot-shaped #143 leak is fully reaped.
+
+        Given a spot-shaped client with a hanging public-connector run task
+        and an open session,
+        When ``force_close_ws_client`` runs,
+        Then ``keep_alive`` is flipped, the run task ends cancelled, and the
+        session is closed.
+        """
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        run_task = asyncio.create_task(_hang())
+        await asyncio.sleep(0)
+        connector = _FakeConnector(task=run_task)
+        session = _FakeSession()
+        client = SimpleNamespace(_pub_conn=connector, _priv_conn=None)
+        client._SpotAsyncClient__session = session
+        await force_close_ws_client(client)
+        assert connector.keep_alive is False
+        assert run_task.cancelled()
+        assert session.closed is True
+
+    @pytest.mark.asyncio
+    async def test_futures_shape_cancels_task_and_closes_session(self) -> None:
+        """Spec — the futures-shaped #143 leak is fully reaped.
+
+        Given a futures-shaped client (single ``_conn`` slot, futures-mangled
+        session attribute),
+        When ``force_close_ws_client`` runs,
+        Then the run task ends cancelled and the session is closed.
+        """
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        run_task = asyncio.create_task(_hang())
+        await asyncio.sleep(0)
+        connector = _FakeConnector(task=run_task)
+        session = _FakeSession()
+        client = SimpleNamespace(_conn=connector)
+        client._FuturesAsyncClient__session = session
+        await force_close_ws_client(client)
+        assert run_task.cancelled()
+        assert session.closed is True
+
+    @pytest.mark.asyncio
+    async def test_connector_failure_does_not_block_other_slots(self) -> None:
+        """Spec — one broken connector slot cannot shield the others.
+
+        Given a client whose public connector raises on ``keep_alive``
+        assignment while the private connector holds a hanging run task,
+        When ``force_close_ws_client`` runs,
+        Then the failure is swallowed (logged) and the private run task is
+        still cancelled.
+        """
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        run_task = asyncio.create_task(_hang())
+        await asyncio.sleep(0)
+        healthy = _FakeConnector(task=run_task)
+        client = SimpleNamespace(_pub_conn=_ExplodingConnector(), _priv_conn=healthy)
+        client._SpotAsyncClient__session = _FakeSession(closed=True)
+        await force_close_ws_client(client)
+        assert run_task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_non_task_and_done_task_are_skipped(self) -> None:
+        """Spec — only live ``asyncio.Task`` instances are cancelled.
+
+        Given connectors carrying a non-task attribute and an already-done
+        task,
+        When ``force_close_ws_client`` runs,
+        Then neither is cancelled nor drained and the call returns cleanly.
+        """
+
+        async def _instant() -> None:
+            return None
+
+        done_task = asyncio.create_task(_instant())
+        await asyncio.sleep(0)
+        assert done_task.done()
+        client = SimpleNamespace(
+            _pub_conn=_FakeConnector(task=MagicMock()),
+            _priv_conn=_FakeConnector(task=done_task),
+        )
+        client._SpotAsyncClient__session = _FakeSession(closed=True)
+        await force_close_ws_client(client)
+        assert not done_task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_session_close_failure_is_swallowed(self) -> None:
+        """Spec — a failing session close cannot explode the teardown path.
+
+        Given a client whose session raises on ``close()``,
+        When ``force_close_ws_client`` runs,
+        Then the error is swallowed (logged) and the call returns.
+        """
+        session = _FakeSession(fail=True)
+        client = SimpleNamespace(_pub_conn=None, _priv_conn=None)
+        client._SpotAsyncClient__session = session
+        await force_close_ws_client(client)
+        assert session.close_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_closed_or_absent_session_is_skipped(self) -> None:
+        """Spec — already-closed and absent sessions require no action.
+
+        Given a client whose spot session is already closed and which has no
+        futures session attribute,
+        When ``force_close_ws_client`` runs,
+        Then no close call is made.
+        """
+        session = _FakeSession(closed=True)
+        client = SimpleNamespace(_pub_conn=None, _priv_conn=None)
+        client._SpotAsyncClient__session = session
+        await force_close_ws_client(client)
+        assert session.close_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_drain_consumes_exception_from_cancel_refusing_task(self) -> None:
+        """Spec — a run task dying with its own error is consumed, not leaked.
+
+        Given a run task that converts cancellation into a ``RuntimeError``
+        (so it finishes done-with-exception rather than cancelled),
+        When ``force_close_ws_client`` drains it,
+        Then the exception is retrieved (no ``Task exception was never
+        retrieved`` on garbage collection) and the session is still closed.
+        """
+
+        async def _raise_on_cancel() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise RuntimeError("died during cancellation") from None
+
+        run_task = asyncio.create_task(_raise_on_cancel())
+        await asyncio.sleep(0)
+        connector = _FakeConnector(task=run_task)
+        session = _FakeSession()
+        client = SimpleNamespace(_pub_conn=connector, _priv_conn=None)
+        client._SpotAsyncClient__session = session
+        await force_close_ws_client(client)
+        assert run_task.done()
+        assert isinstance(run_task.exception(), RuntimeError)
+        assert session.closed is True
+
+    @pytest.mark.asyncio
+    async def test_warns_on_run_task_surviving_drain(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Spec — a run task that survives cancellation is reported, not awaited forever.
+
+        Given a run task that swallows the first cancellation,
+        When ``force_close_ws_client`` runs with a tiny drain bound,
+        Then the call still returns (bounded) and the session is closed; the
+        test then kills the stubborn task to keep the loop clean.
+        """
+        monkeypatch.setattr(kraken_sdk_patches, "_RECONNECT_CHILD_REAP_TIMEOUT_S", 0.05)
+
+        async def _stubborn() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.Event().wait()
+
+        run_task = asyncio.create_task(_stubborn())
+        await asyncio.sleep(0)
+        connector = _FakeConnector(task=run_task)
+        session = _FakeSession()
+        client = SimpleNamespace(_pub_conn=connector, _priv_conn=None)
+        client._SpotAsyncClient__session = session
+        await asyncio.wait_for(force_close_ws_client(client), timeout=1.0)
+        assert session.closed is True
+        assert not run_task.done()
+        run_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
+
+    @pytest.mark.asyncio
+    async def test_caller_cancellation_mid_drain_still_closes_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec — a cancelled force-close cannot reintroduce the #143 leak.
+
+        Given a run task that survives cancellation (keeping the drain
+        waiting) and a caller that cancels ``force_close_ws_client``
+        mid-drain,
+        When the cancellation propagates,
+        Then the aiohttp session is STILL closed by the ``finally`` — without
+        it, the named adversarial teardown path would leak the session this
+        helper exists to stop.
+        """
+        monkeypatch.setattr(kraken_sdk_patches, "_RECONNECT_CHILD_REAP_TIMEOUT_S", 5.0)
+
+        async def _stubborn() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.Event().wait()
+
+        run_task = asyncio.create_task(_stubborn())
+        await asyncio.sleep(0)
+        connector = _FakeConnector(task=run_task)
+        session = _FakeSession()
+        client = SimpleNamespace(_pub_conn=connector, _priv_conn=None)
+        client._SpotAsyncClient__session = session
+        force_task = asyncio.create_task(force_close_ws_client(client))
+        await asyncio.sleep(0.05)
+        force_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await force_task
+        assert session.closed is True
+        run_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
+
+    @pytest.mark.asyncio
+    async def test_caller_cancellation_mid_session_close_still_closes(self) -> None:
+        """Spec — cancellation DURING the session close cannot abort it.
+
+        Given a session whose ``close()`` is slow (in flight when the caller
+        is cancelled),
+        When ``force_close_ws_client`` is cancelled mid-close,
+        Then the detached close keeps running in the background and the
+        session still ends closed — a plain ``await session.close()`` died
+        half-way and left the session open (adversarial reviewer's repro).
+        """
+
+        class _SlowSession:
+            def __init__(self) -> None:
+                self.closed = False
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def close(self) -> None:
+                self.entered.set()
+                await self.release.wait()
+                self.closed = True
+
+        session = _SlowSession()
+        client = SimpleNamespace(_pub_conn=None, _priv_conn=None)
+        client._SpotAsyncClient__session = session
+        force_task = asyncio.create_task(force_close_ws_client(client))
+        await asyncio.wait_for(session.entered.wait(), timeout=1.0)
+        force_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await force_task
+        assert session.closed is False
+        session.release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert session.closed is True
+
+    @pytest.mark.asyncio
+    async def test_background_close_failure_after_cancel_is_fully_drained(self) -> None:
+        """Spec — no loop-level exception escapes the cancelled-close path.
+
+        Given a session whose ``close()`` fails AFTER the caller was
+        cancelled mid-close,
+        When the background close task finishes,
+        Then the failure is drained by ``_consume_task_result`` alone and the
+        event loop's exception handler receives NOTHING — the earlier
+        ``asyncio.shield`` shape leaked a loop-level ``exception in shielded
+        future`` report on exactly this path (adversarial reviewer's repro).
+        """
+
+        class _FailingSlowSession:
+            def __init__(self) -> None:
+                self.closed = False
+                self.entered = asyncio.Event()
+
+            async def close(self) -> None:
+                self.entered.set()
+                await asyncio.sleep(0.02)
+                raise RuntimeError("connector close failed after cancellation")
+
+        contexts: list[dict[str, Any]] = []
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda lp, context: contexts.append(dict(context)))
+        try:
+            session = _FailingSlowSession()
+            client = SimpleNamespace(_pub_conn=None, _priv_conn=None)
+            client._SpotAsyncClient__session = session
+            force_task = asyncio.create_task(force_close_ws_client(client))
+            await asyncio.wait_for(session.entered.wait(), timeout=1.0)
+            force_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await force_task
+            await asyncio.sleep(0.05)
+            gc.collect()
+            assert contexts == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    @pytest.mark.asyncio
+    async def test_internally_cancelled_session_close_is_swallowed(self) -> None:
+        """Spec — a self-cancelling close cannot explode the teardown path.
+
+        Given a session whose ``close()`` raises ``CancelledError``
+        internally (the close task ends cancelled without any caller
+        cancellation),
+        When ``force_close_ws_client`` runs,
+        Then the helper logs and returns normally instead of propagating the
+        cancellation to the venue teardown path.
+        """
+
+        class _SelfCancellingSession:
+            closed = False
+
+            async def close(self) -> None:
+                raise asyncio.CancelledError
+
+        client = SimpleNamespace(_pub_conn=None, _priv_conn=None)
+        client._SpotAsyncClient__session = _SelfCancellingSession()
+        await asyncio.wait_for(force_close_ws_client(client), timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_consume_task_result_logs_background_failure(self) -> None:
+        """Spec — a failed background close is drained, not left unretrieved.
+
+        Given a detached task that finished with an exception,
+        When ``_consume_task_result`` runs,
+        Then the exception is retrieved and logged without raising.
+        """
+
+        async def _boom() -> None:
+            raise RuntimeError("background close boom")
+
+        task = asyncio.create_task(_boom())
+        await asyncio.sleep(0)
+        assert task.done()
+        _consume_task_result(task)
+
+    @pytest.mark.asyncio
+    async def test_consume_task_result_ignores_cancelled_task(self) -> None:
+        """Spec — a cancelled background close needs no draining.
+
+        Given a detached task that ended cancelled,
+        When ``_consume_task_result`` runs,
+        Then it returns without touching the (unretrievable) exception.
+        """
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_hang())
+        await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        _consume_task_result(task)
+
+    @pytest.mark.asyncio
+    async def test_end_to_end_real_spot_client_leak_is_reaped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec — the full #143 scenario against a REAL ``SpotWSClient``.
+
+        Given a real spot client whose connector hangs in a long reconnect
+        backoff behind a blackout-simulating ``connect`` (so a tightly
+        bounded ``close()`` times out exactly as in production),
+        When the venue-layer pattern runs (bounded close → timeout →
+        ``force_close_ws_client``),
+        Then the aiohttp session is closed and the connector run task is
+        cancelled — the pre-fix behaviour leaked both.
+        """
+        monkeypatch.setattr(kraken_sdk_patches, "_RECONNECT_BACKOFF_POLL_S", 5.0)
+
+        class _BlackoutCM:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+            async def __aenter__(self) -> Any:
+                raise OSError("simulated blackout")
+
+            async def __aexit__(self, *exc: object) -> bool:
+                return False
+
+        monkeypatch.setattr(
+            kraken_sdk_patches._kraken_connectors,
+            "connect",
+            lambda *a, **k: _BlackoutCM(),
+        )
+
+        async def _callback(message: Any) -> None:
+            return None
+
+        client = SpotWSClient(callback=_callback)
+        connector = client._pub_conn
+        assert connector is not None
+        connector._ConnectSpotWebsocketBase__get_reconnect_wait = lambda attempts: 30.0
+        with contextlib.suppress(TimeoutError, Exception):
+            async with asyncio.timeout(0.2):
+                await client.start()
+        try:
+            async with asyncio.timeout(0.05):
+                await client.close()
+        except TimeoutError:
+            await force_close_ws_client(client)
+        session = getattr(client, "_SpotAsyncClient__session")
+        assert session.closed is True
+        run_task = getattr(connector, "task", None)
+        if isinstance(run_task, asyncio.Task):
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(run_task, timeout=1.0)
+
+
+class TestApplyKrakenWsTeardownHardening:
+    """Installation of the teardown hardening must be idempotent."""
+
+    def test_apply_rebinds_both_connector_classes(self) -> None:
+        """Spec — first call installs both hardened reconnect loops.
+
+        Given the teardown flag is reset,
+        When ``apply_kraken_ws_teardown_hardening`` is called,
+        Then the Spot class carries ``_patched_reconnect``, the Futures class
+        carries ``_patched_futures_reconnect``, and the flag is True.
+        """
+        saved = _TEARDOWN_PATCH_APPLIED[0]
+        _TEARDOWN_PATCH_APPLIED[0] = False
+        try:
+            apply_kraken_ws_teardown_hardening()
+            assert _TEARDOWN_PATCH_APPLIED[0] is True
+            assert (
+                getattr(ConnectSpotWebsocketBase, "_ConnectSpotWebsocketBase__reconnect")
+                is _patched_reconnect
+            )
+            assert (
+                getattr(ConnectFuturesWebsocket, "_ConnectFuturesWebsocket__reconnect")
+                is _patched_futures_reconnect
+            )
+        finally:
+            _TEARDOWN_PATCH_APPLIED[0] = saved
+
+    def test_second_apply_is_noop(self) -> None:
+        """Spec — second call is a no-op.
+
+        Given the hardening is already installed,
+        When ``apply_kraken_ws_teardown_hardening`` is called again,
+        Then the flag stays True and nothing is re-bound.
+        """
+        apply_kraken_ws_teardown_hardening()
+        before = _TEARDOWN_PATCH_APPLIED[0]
+        apply_kraken_ws_teardown_hardening()
+        assert _TEARDOWN_PATCH_APPLIED[0] is True
+        assert before is True

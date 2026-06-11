@@ -27,6 +27,13 @@ Public API:
 
 * :func:`apply_kraken_retry_after_honoring` — idempotently install the
   patches at process startup. Call once after import.
+* :func:`apply_kraken_ws_teardown_hardening` — idempotently install the
+  hardened reconnect loops (interruptible backoff + child reaping) on the
+  Spot AND Futures connector classes. Applied at import time by the Kraken
+  venue implementation modules so executor processes are covered too.
+* :func:`force_close_ws_client` — last-resort teardown for a WS client
+  whose bounded ``close()`` timed out or raised: cancels connector run
+  tasks and closes the leaked aiohttp session directly (#143).
 * :data:`_CURRENT_PUBLISHER` — publishers set this ``ContextVar`` inside
   their startup coroutine so any ``ConnectSpotWebsocketBase`` instance
   constructed during that span is associated with them.
@@ -37,14 +44,18 @@ Public API:
 import asyncio
 import contextvars
 import weakref
+from collections.abc import Callable
 from typing import Any
 from typing import Final
 
 import kraken.futures.websocket as _kraken_futures_ws
 import kraken.spot.websocket.connectors as _kraken_connectors
 import websockets.asyncio.client as _ws_client
+from kraken.exceptions import MaxReconnectError
+from kraken.futures.websocket import ConnectFuturesWebsocket
 from kraken.spot.websocket.connectors import ConnectSpotWebsocket
 from kraken.spot.websocket.connectors import ConnectSpotWebsocketBase
+from kraken.utils.utils import WSState
 from loguru import logger
 from websockets.exceptions import ConnectionClosed
 from websockets.exceptions import InvalidStatus
@@ -141,6 +152,41 @@ _RESUBSCRIBE_PACE_PATCH_LOGGED: list[bool] = [False]
 """Single-element list flag tracking whether the re-subscribe pacing
 patch's ``applied`` INFO confirmation has been emitted post-sink-ready."""
 
+_TEARDOWN_PATCH_APPLIED: list[bool] = [False]
+"""Single-element list flag tracking whether the WS teardown hardening
+(interruptible reconnect backoff + child reaping) is installed."""
+
+_TEARDOWN_PATCH_LOGGED: list[bool] = [False]
+"""Single-element list flag tracking whether the teardown hardening
+patch's ``applied`` INFO confirmation has been emitted post-sink-ready."""
+
+_RECONNECT_BACKOFF_POLL_S: Final[float] = 0.5
+"""Poll interval (seconds) at which the hardened reconnect backoff rechecks
+``keep_alive``. Bounds teardown latency during a pending backoff to this
+value instead of the full exponential wait (up to ~3 minutes late in the
+SDK's schedule), without changing the SDK's stop signalling (a bare bool
+flag with no event to wait on)."""
+
+_RECONNECT_CHILD_REAP_TIMEOUT_S: Final[float] = 5.0
+"""Upper bound (seconds) on draining cancelled reconnect child tasks and
+force-closed connector run tasks. Cancellation of these tasks normally
+completes within one event-loop tick; the bound exists so a pathologically
+uncancellable task cannot wedge a teardown path, and overruns are logged."""
+
+_FORCE_CLOSE_CONNECTOR_ATTRS: Final[tuple[str, str, str]] = ("_pub_conn", "_priv_conn", "_conn")
+"""Connector slot attributes probed by :func:`force_close_ws_client` —
+``_pub_conn``/``_priv_conn`` on ``SpotWSClientBase``, ``_conn`` on
+``FuturesWSClient``."""
+
+_FORCE_CLOSE_SESSION_ATTRS: Final[tuple[str, str]] = (
+    "_SpotAsyncClient__session",
+    "_FuturesAsyncClient__session",
+)
+"""Name-mangled aiohttp session attributes probed by
+:func:`force_close_ws_client` — ``SpotAsyncClient`` and
+``FuturesAsyncClient`` each create one ``aiohttp.ClientSession`` in their
+constructors and only close it in ``close()``."""
+
 _RESUBSCRIBE_PACE_S: Final[float] = 0.2
 """Seconds slept between consecutive per-subscription re-subscribes while
 the kraken-sdk recovers its subscription cache after a reconnect.
@@ -204,7 +250,6 @@ _ORIGINAL_GET_RECONNECT_WAIT: Any = getattr(
 )
 _ORIGINAL_RUN: Any = getattr(ConnectSpotWebsocketBase, "_ConnectSpotWebsocketBase__run")
 _ORIGINAL_INIT: Any = ConnectSpotWebsocketBase.__init__
-_ORIGINAL_RECONNECT: Any = getattr(ConnectSpotWebsocketBase, "_ConnectSpotWebsocketBase__reconnect")
 
 
 def _parse_retry_after(headers: Any) -> float | None:
@@ -590,24 +635,410 @@ def _patched_init(self: ConnectSpotWebsocketBase, *args: Any, **kwargs: Any) -> 
         weakref.finalize(self, _unregister_connector, connector_id)
 
 
-async def _patched_reconnect(self: ConnectSpotWebsocketBase) -> None:
-    """Notify the registered publisher before delegating to the SDK reconnect.
+async def _interruptible_backoff(connector: Any, wait_s: float) -> None:
+    """Sleep up to ``wait_s`` seconds, waking early when the connector stops.
 
-    The publisher hook ``_on_sdk_reconnect_attempt`` is optional —
-    only ``KrakenMarketDataPublisher`` (Spot) implements the
-    reconnect-storm watchdog. Other Kraken publishers
-    (``KrakenEquitiesMarketDataPublisher`` etc.) register themselves
-    via ``_CURRENT_PUBLISHER`` for egress-pool exchange tagging but
-    do not need the watchdog and intentionally omit the hook.
-    Calling unconditionally would raise ``AttributeError`` and break
-    every reconnect cycle for those publishers.
+    The SDK's stock reconnect loop sleeps its full exponential backoff in a
+    single ``asyncio.sleep`` call, so a teardown that flips ``keep_alive``
+    mid-sleep (``stop()``/``close()``) blocks until the backoff expires — up
+    to ~3 minutes late in the schedule, which is what pushed the venue
+    layer's bounded ``close()`` past its deadline and leaked the aiohttp
+    session (#143). Polling ``keep_alive`` every
+    ``_RECONNECT_BACKOFF_POLL_S`` bounds that teardown latency without
+    changing the SDK's stop signalling (a bare bool flag, no event to wait
+    on).
+
+    Args:
+        connector: The SDK connector exposing the ``keep_alive`` bool.
+        wait_s: Total backoff duration requested by the reconnect schedule.
+    """
+    remaining = wait_s
+    while remaining > 0 and connector.keep_alive:
+        step = min(_RECONNECT_BACKOFF_POLL_S, remaining)
+        await asyncio.sleep(step)
+        remaining -= step
+
+
+async def _reap_reconnect_children(tasks: list[asyncio.Task[None]]) -> None:
+    """Cancel and drain reconnect child tasks, consuming their exceptions.
+
+    Runs in the ``finally`` of :func:`_drive_reconnect_children` so children
+    can never outlive their ``__reconnect`` invocation. The SDK's stock loop
+    orphans them in two ways: a ``keep_alive`` flip between child creation
+    and the ``while keep_alive`` recheck skips the wait entirely, and
+    ``asyncio.wait`` never cancels its awaitables when the parent task itself
+    is cancelled — the exact failure that forced the first #143 fix attempt
+    (cancel ``__run_forever`` from teardown) to be reverted. Exceptions are
+    retrieved from every finished child so the event loop never logs
+    ``Task exception was never retrieved``.
+
+    Args:
+        tasks: The reconnect invocation's child tasks.
+    """
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    done, pending = await asyncio.wait(tasks, timeout=_RECONNECT_CHILD_REAP_TIMEOUT_S)
+    for task in done:
+        if not task.cancelled():
+            task.exception()
+    for task in pending:
+        logger.warning(
+            "kraken WS reconnect child {!r} survived cancellation for {}s",
+            task,
+            _RECONNECT_CHILD_REAP_TIMEOUT_S,
+        )
+
+
+async def _drive_reconnect_children(
+    connector: Any,
+    tasks: list[asyncio.Task[None]],
+    on_child_exception: Callable[[asyncio.Task[None]], None],
+) -> None:
+    """Run the SDK reconnect wait semantics with guaranteed child reaping.
+
+    Waits on the children with ``FIRST_EXCEPTION`` semantics — the wait
+    returns either when a child has raised or when every child is done
+    (``asyncio.wait`` does not wake for cancelled-only completions) — then
+    routes each finished child's exception through the venue-specific
+    handler. The stock SDK wrapped this wait in a ``while keep_alive`` loop,
+    but under ``FIRST_EXCEPTION`` semantics the wait can only return with an
+    exception present or with no pending children left, so every stock
+    iteration beyond the first was either unreachable or a hot spin on an
+    already-done task set; a single bounded pass is the faithful shape. The
+    ``finally`` reap guarantees no child survives this invocation regardless
+    of how it exits (``keep_alive`` flip, child exception, clean completion,
+    or cancellation of the parent run task).
+
+    Args:
+        connector: The SDK connector exposing the ``keep_alive`` bool.
+        tasks: The child tasks spawned for this reconnect attempt.
+        on_child_exception: Venue-specific handler invoked once per finished
+            child that holds an exception (state transition + SDK-parity log).
+    """
+    try:
+        if not connector.keep_alive:
+            return
+        finished, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in finished:
+            if task.cancelled():
+                continue
+            if task.exception() is not None:
+                on_child_exception(task)
+    finally:
+        await _reap_reconnect_children(tasks)
+
+
+async def _patched_reconnect(self: ConnectSpotWebsocketBase) -> None:
+    """Hardened replacement for the Spot connector's ``__reconnect``.
+
+    Notifies the registered publisher's reconnect-storm watchdog first. The
+    hook ``_on_sdk_reconnect_attempt`` is optional — only
+    ``KrakenMarketDataPublisher`` (Spot) implements it; other Kraken
+    publishers register via ``_CURRENT_PUBLISHER`` for egress-pool exchange
+    tagging only, and executor processes have no registered publisher at all.
+    Calling unconditionally would raise ``AttributeError`` and break every
+    reconnect cycle for those owners.
+
+    Then mirrors the SDK's reconnect semantics (python-kraken-sdk 3.2.x —
+    version-coupled reimplementation, same precedent as
+    :func:`_patched_recover_subscriptions`) with the #143 teardown hardening:
+
+    * the backoff sleep polls ``keep_alive`` via
+      :func:`_interruptible_backoff` so ``stop()``/``close()`` is not blocked
+      for the full exponential backoff;
+    * a ``keep_alive`` flip during the backoff returns before any child task
+      is spawned (the stock loop spawned and orphaned them);
+    * children are always reaped via :func:`_drive_reconnect_children`,
+      making cancellation of the connector's run task safe — the stock loop
+      leaked ``_recover_subscriptions`` (stuck on ``event.wait()`` forever)
+      and an unobserved ``__run`` exception when cancelled.
+
+    SDK-parity log lines are emitted through the SDK module's own logger so
+    operational log greps keep working across the patch.
+
+    Args:
+        self: The Spot connector instance being reconnected.
+
+    Raises:
+        MaxReconnectError: When the reconnect budget is exhausted, matching
+            stock behaviour (message included).
     """
     publisher = _CONNECTOR_PUBLISHERS.get(id(self))
     if publisher is not None:
         hook = getattr(publisher, "_on_sdk_reconnect_attempt", None)
         if hook is not None:
             hook()
-    await _ORIGINAL_RECONNECT(self)
+    self.state = WSState.RECONNECTING
+    _kraken_connectors.LOG.info("Websocket start connect/reconnect")
+    reconnect_num = getattr(self, "_ConnectSpotWebsocketBase__reconnect_num") + 1
+    setattr(self, "_ConnectSpotWebsocketBase__reconnect_num", reconnect_num)
+    if reconnect_num >= self.MAX_RECONNECT_NUM:
+        raise MaxReconnectError(
+            "The Kraken Spot websocket client encountered to many reconnects!",
+        )
+    wait_s = getattr(self, "_ConnectSpotWebsocketBase__get_reconnect_wait")(reconnect_num)
+    await _interruptible_backoff(self, wait_s)
+    if not self.keep_alive:
+        self.state = WSState.CLOSED
+        return
+    event: asyncio.Event = asyncio.Event()
+    run = getattr(self, "_ConnectSpotWebsocketBase__run")
+    tasks: list[asyncio.Task[None]] = [
+        asyncio.create_task(self._recover_subscriptions(event)),
+        asyncio.create_task(run(event)),
+    ]
+
+    def _on_child_exception(task: asyncio.Task[None]) -> None:
+        self.state = WSState.ERRORHANDLING
+        _kraken_connectors.LOG.warning(
+            "%s got an exception %s\nThe connection will be recovered in the background.",
+            task,
+            task.exception(),
+        )
+
+    await _drive_reconnect_children(self, tasks, _on_child_exception)
+    self.state = WSState.CLOSED
+    _kraken_connectors.LOG.info("Connection closed!")
+
+
+async def _patched_futures_reconnect(self: ConnectFuturesWebsocket) -> None:
+    """Hardened replacement for the Futures connector's ``__reconnect``.
+
+    Mirrors the SDK's reconnect semantics (python-kraken-sdk 3.2.x —
+    version-coupled reimplementation) with the same #143 teardown hardening
+    as :func:`_patched_reconnect`: interruptible backoff, no child spawn
+    after a ``keep_alive`` flip, and guaranteed child reaping so cancelling
+    the connector's run task cannot orphan ``__recover_subscription_req_msg``
+    or leave an unobserved ``__run`` exception. The stock behaviour of
+    clearing the challenge-ready flag on a child exception is preserved so a
+    recovered private connection re-authenticates.
+
+    Args:
+        self: The Futures connector instance being reconnected.
+
+    Raises:
+        MaxReconnectError: When the reconnect budget is exhausted, matching
+            stock behaviour (bare raise).
+    """
+    self.state = WSState.RECONNECTING
+    _kraken_futures_ws.LOG.info("Websocket start connect/reconnect")
+    reconnect_num = getattr(self, "_ConnectFuturesWebsocket__reconnect_num") + 1
+    setattr(self, "_ConnectFuturesWebsocket__reconnect_num", reconnect_num)
+    if reconnect_num >= self.MAX_RECONNECT_NUM:
+        raise MaxReconnectError
+    wait_s = getattr(self, "_ConnectFuturesWebsocket__get_reconnect_wait")(reconnect_num)
+    await _interruptible_backoff(self, wait_s)
+    if not self.keep_alive:
+        self.state = WSState.CLOSED
+        return
+    event: asyncio.Event = asyncio.Event()
+    recover = getattr(self, "_ConnectFuturesWebsocket__recover_subscription_req_msg")
+    run = getattr(self, "_ConnectFuturesWebsocket__run")
+    tasks: list[asyncio.Task[None]] = [
+        asyncio.create_task(recover(event)),
+        asyncio.create_task(run(event)),
+    ]
+
+    def _on_child_exception(task: asyncio.Task[None]) -> None:
+        self.state = WSState.ERRORHANDLING
+        setattr(self, "_ConnectFuturesWebsocket__challenge_ready", False)
+        _kraken_futures_ws.LOG.warning(
+            "%s got an exception %s\nThe connection will be recovered in the background.",
+            task,
+            task.exception(),
+        )
+
+    await _drive_reconnect_children(self, tasks, _on_child_exception)
+    self.state = WSState.CLOSED
+    _kraken_futures_ws.LOG.info("Connection closed!")
+
+
+async def force_close_ws_client(client: Any) -> None:
+    """Last-resort teardown for a kraken-sdk WS client after a failed ``close()``.
+
+    The SDK's ``close()`` awaits each connector's ``__run_forever`` task and
+    only closes the underlying aiohttp ``ClientSession`` afterwards
+    (``super().close()``), so when the venue layer's ``asyncio.timeout``
+    bound fires mid-await the session leaks one ``ClientSession`` per
+    rebuild cycle and the run task keeps living in the background (#143).
+    Venue teardown paths call this helper from their ``TimeoutError`` /
+    ``Exception`` handlers to finish the job explicitly:
+
+    1. flip ``keep_alive`` and cancel each connector's run task — safe
+       because :func:`apply_kraken_ws_teardown_hardening` (re-applied here
+       defensively) guarantees reconnect children are reaped on cancellation;
+    2. drain the cancelled run tasks, consuming their exceptions so the
+       event loop does not log ``Task exception was never retrieved`` (when
+       the caller itself is cancelled mid-drain this consumption is best
+       effort — the session close below still runs, which is the part that
+       matters);
+    3. close the aiohttp session directly through the SDK's name-mangled
+       session attribute.
+
+    Never raises — teardown paths must stay non-explosive, so each step is
+    individually guarded and failures are logged at WARNING. Cancellation of
+    the calling task still propagates, but the session close runs in a
+    ``finally`` so even a caller cancelled mid-drain cannot reintroduce the
+    leak this helper exists to stop.
+
+    Args:
+        client: A ``SpotWSClient`` or ``FuturesWSClient`` instance whose
+            bounded ``close()`` timed out or raised.
+    """
+    apply_kraken_ws_teardown_hardening()
+    run_tasks = _cancel_connector_run_tasks(client)
+    try:
+        await _drain_cancelled_run_tasks(run_tasks)
+    finally:
+        await _close_leaked_sessions(client)
+
+
+def _cancel_connector_run_tasks(client: Any) -> list[asyncio.Task[None]]:
+    """Flip ``keep_alive`` and cancel the run task on every connector slot.
+
+    Probes the spot (``_pub_conn``/``_priv_conn``) and futures (``_conn``)
+    connector attributes; absent slots are skipped. Per-connector failures
+    are logged and swallowed so one broken slot cannot block teardown of the
+    others.
+
+    Args:
+        client: The SDK WS client being force-closed.
+
+    Returns:
+        The cancelled, not-yet-done run tasks to drain.
+    """
+    run_tasks: list[asyncio.Task[None]] = []
+    for connector_attr in _FORCE_CLOSE_CONNECTOR_ATTRS:
+        connector = getattr(client, connector_attr, None)
+        if connector is None:
+            continue
+        try:
+            connector.keep_alive = False
+            task = getattr(connector, "task", None)
+            if isinstance(task, asyncio.Task) and not task.done():
+                task.cancel()
+                run_tasks.append(task)
+        except Exception as exc:
+            logger.warning(
+                "kraken WS force-close: connector {} teardown failed: {!r}",
+                connector_attr,
+                exc,
+            )
+    return run_tasks
+
+
+async def _drain_cancelled_run_tasks(run_tasks: list[asyncio.Task[None]]) -> None:
+    """Await cancelled run tasks, consuming exceptions; log overruns.
+
+    Args:
+        run_tasks: Tasks cancelled by :func:`_cancel_connector_run_tasks`.
+    """
+    if not run_tasks:
+        return
+    done, pending = await asyncio.wait(run_tasks, timeout=_RECONNECT_CHILD_REAP_TIMEOUT_S)
+    for task in done:
+        if not task.cancelled():
+            task.exception()
+    for task in pending:
+        logger.warning(
+            "kraken WS force-close: run task {!r} survived cancellation for {}s",
+            task,
+            _RECONNECT_CHILD_REAP_TIMEOUT_S,
+        )
+
+
+def _consume_task_result(task: asyncio.Task[None]) -> None:
+    """Consume a detached task's outcome so the loop never reports it unretrieved.
+
+    Wired as a done callback on a detached session close that outlived a
+    cancelled caller — the close keeps running in the background and its
+    failure would otherwise surface as ``Task exception was never
+    retrieved`` at garbage collection.
+
+    Args:
+        task: The detached background task to drain.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "kraken WS force-close: background session close failed: {!r}",
+            exc,
+        )
+
+
+async def _close_leaked_sessions(client: Any) -> None:
+    """Close the SDK client's aiohttp session directly if still open.
+
+    Probes both name-mangled session attributes (spot and futures client
+    hierarchies); already-closed or absent sessions are skipped. The close
+    runs as an owned task awaited through ``asyncio.wait`` so a caller
+    cancelled mid-close cannot abort it half-way and reintroduce the leak:
+    ``asyncio.wait`` never cancels its awaitables (the very property that
+    bites the stock SDK reconnect, used deliberately here) and — unlike
+    ``asyncio.shield`` on Python 3.14 — installs no loop-level
+    ``_log_on_exception`` callback, so a background failure after caller
+    cancellation is drained solely by :func:`_consume_task_result` instead
+    of also surfacing as ``exception in shielded future``. A close failure
+    or an internally cancelled close is logged and swallowed — teardown must
+    stay non-explosive.
+
+    Args:
+        client: The SDK WS client being force-closed.
+    """
+    for session_attr in _FORCE_CLOSE_SESSION_ATTRS:
+        session = getattr(client, session_attr, None)
+        if session is None or getattr(session, "closed", True):
+            continue
+        close_task: asyncio.Task[None] = asyncio.ensure_future(session.close())
+        try:
+            await asyncio.wait([close_task])
+        except asyncio.CancelledError:
+            close_task.add_done_callback(_consume_task_result)
+            raise
+        if close_task.cancelled():
+            logger.warning(
+                "kraken WS force-close: aiohttp session close was cancelled internally",
+            )
+        elif close_task.exception() is not None:
+            logger.warning(
+                "kraken WS force-close: aiohttp session close failed: {!r}",
+                close_task.exception(),
+            )
+        else:
+            logger.info("kraken WS force-close: leaked aiohttp session closed")
+
+
+def apply_kraken_ws_teardown_hardening() -> None:
+    """Install the hardened reconnect loops on both connector classes (idempotent).
+
+    Rebinds Spot's ``__reconnect`` to :func:`_patched_reconnect` (the same
+    object :func:`apply_kraken_retry_after_honoring` installs — publisher
+    processes apply both, executor processes reach this one through the
+    Kraken venue implementation modules, which call it at import time) and
+    Futures' ``__reconnect`` to :func:`_patched_futures_reconnect`. Every
+    process that can tear down a kraken-sdk WS client therefore gets
+    interruptible backoffs and reconnect-child reaping, which is the
+    precondition that makes :func:`force_close_ws_client` safe to cancel run
+    tasks (#143 — the first fix attempt was reverted exactly because parent
+    cancellation orphaned the reconnect children).
+    """
+    if _TEARDOWN_PATCH_APPLIED[0]:
+        return
+    setattr(
+        ConnectSpotWebsocketBase,
+        "_ConnectSpotWebsocketBase__reconnect",
+        _patched_reconnect,
+    )
+    setattr(
+        ConnectFuturesWebsocket,
+        "_ConnectFuturesWebsocket__reconnect",
+        _patched_futures_reconnect,
+    )
+    _TEARDOWN_PATCH_APPLIED[0] = True
+    log_kraken_sdk_patches_status()
 
 
 def apply_kraken_retry_after_honoring() -> None:
@@ -618,7 +1049,9 @@ def apply_kraken_retry_after_honoring() -> None:
     * ``__get_reconnect_wait`` — consults ``_PENDING_RETRY_AFTER_S`` first.
     * ``__run`` — stamps the ``_CURRENT_CONNECTOR_ID`` ContextVar.
     * ``__init__`` — registers the connector with its owning publisher.
-    * ``__reconnect`` — notifies the owning publisher's watchdog.
+    * ``__reconnect`` — notifies the owning publisher's watchdog and applies
+      the #143 teardown hardening (interruptible backoff + child reaping;
+      same function :func:`apply_kraken_ws_teardown_hardening` installs).
     * The bare ``connect`` name imported into the SDK's connectors module
       is rebound to a ``_ConnectShim`` factory so the handshake observes
       ``InvalidStatus`` 429 responses.
@@ -873,3 +1306,6 @@ def log_kraken_sdk_patches_status() -> None:
     if _RESUBSCRIBE_PACE_PATCH_APPLIED[0] and not _RESUBSCRIBE_PACE_PATCH_LOGGED[0]:
         logger.info("kraken-sdk reconnect re-subscribe pacing applied")
         _RESUBSCRIBE_PACE_PATCH_LOGGED[0] = True
+    if _TEARDOWN_PATCH_APPLIED[0] and not _TEARDOWN_PATCH_LOGGED[0]:
+        logger.info("kraken-sdk WS teardown hardening applied")
+        _TEARDOWN_PATCH_LOGGED[0] = True
