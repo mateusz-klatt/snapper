@@ -243,6 +243,8 @@ emits); ``emitted`` is asserted from the COMMITTED watermark (advanced
 only on publish success), so a swallowed corrective publish failure
 also reports ``deferred``; ``no_gap`` is the ordinary clean outcome."""
 
+_RecoveryWatermarks = tuple[float, float, list[VenueEventRow], dict[str, float]]
+
 
 @dataclass(frozen=True)
 class _FillSummaryResolution:
@@ -251,6 +253,17 @@ class _FillSummaryResolution:
     fill_price: float | None
     summary: OrderFillSummary | None
     summary_unusable: bool
+
+
+@dataclass(frozen=True)
+class _FillAccounting:
+    """Durable and cumulative-fee accounting derived from one fill frame."""
+
+    is_fill_frame: bool
+    durable_size: float
+    durable_fee: float
+    frame_cum_fee: float | None
+    frame_cum_fee_asset: str
 
 
 _COMMAND_TERMINAL_STATUSES = frozenset(
@@ -786,6 +799,38 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         snapshot, classification = await self._resolve_recovery_snapshot(
             exchange_order_id, db_order, exchange_by_id, exchange_name
         )
+        pending, fill_rows = self._register_recovered_pending(
+            db_order,
+            client_order_id,
+            exchange_order_id,
+            snapshot,
+            seeds,
+            exchange_name,
+        )
+        last_seen = self._absorb_idless_recovery_fills(
+            client_order_id, pending, fill_rows, exchange_name
+        )
+        await self._republish_recovery_fill_rows(
+            fill_rows, last_seen, exchange_order_id, db_order, exchange_name
+        )
+        return await self._finish_recovered_order(
+            client_order_id,
+            exchange_order_id,
+            snapshot,
+            classification,
+            exchange_name,
+        )
+
+    def _register_recovered_pending(
+        self,
+        db_order: OrderRow,
+        client_order_id: str,
+        exchange_order_id: str,
+        snapshot: ExchangeOrderSnapshot | None,
+        seeds: _RecoveryWatermarks | None,
+        exchange_name: OrderExchange,
+    ) -> tuple[PendingOrderState, list[VenueEventRow]]:
+        """Create and register the pending state for one recovery row."""
         fill_rows: list[VenueEventRow]
         if seeds is None:
             venue_filled = float(snapshot.filled or 0.0) if snapshot is not None else 0.0
@@ -810,6 +855,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         self.pending_orders[client_order_id] = pending
         self.client_by_exchange[exchange_order_id] = client_order_id
+        return pending, fill_rows
+
+    def _absorb_idless_recovery_fills(
+        self,
+        client_order_id: str,
+        pending: PendingOrderState,
+        fill_rows: list[VenueEventRow],
+        exchange_name: OrderExchange,
+    ) -> float:
+        """Count id-less recovered fills as shown before id-bearing republish."""
+        last_seen = pending.last_seen_cum_qty
         idless_cum_max = 0.0
         for row in fill_rows:
             row_cum = row["cum_fill_size"]
@@ -828,6 +884,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"cannot re-absorb them; a coordinator that missed their "
                 f"publish heals at its next restart via checkpoint replay"
             )
+        return last_seen
+
+    async def _republish_recovery_fill_rows(
+        self,
+        fill_rows: list[VenueEventRow],
+        last_seen: float,
+        exchange_order_id: str,
+        db_order: OrderRow,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Republish id-bearing recovered rows beyond the shown cumulative."""
         for row in fill_rows:
             row_cum = row["cum_fill_size"]
             if row_cum is None:
@@ -836,6 +903,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 self._register_seen_exec_id(row["exec_id"])
             else:
                 await self._republish_recorded_fill(row, exchange_order_id, db_order, exchange_name)
+
+    async def _finish_recovered_order(
+        self,
+        client_order_id: str,
+        exchange_order_id: str,
+        snapshot: ExchangeOrderSnapshot | None,
+        classification: str,
+        exchange_name: OrderExchange,
+    ) -> bool:
+        """Project recovered terminal state or leave the order tracked."""
         if classification == "unverifiable":
             logger.warning(
                 f"[{exchange_name}] Recovery: order {client_order_id} parked with DB "
@@ -2169,35 +2246,46 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             result = await self.exchange_client.cancel_order(
                 cancel.exchange_order_id, cancel.instrument
             )
-            if result and result.status == ExchangeOrderStatusEnum.CANCELED:
-                client_id = self.client_by_exchange.get(cancel.exchange_order_id)
-                holder = self.pending_orders.get(client_id) if client_id else None
-                if holder is not None:
-                    async with holder.fill_lock:
-                        self.client_by_exchange.pop(cancel.exchange_order_id, None)
-                        pending = self.pending_orders.pop(client_id, None) if client_id else None
-                        if pending and pending.db_order_id is not None:
-                            assert self.exchange_client is not None
-                            await self.exchange_client._log_order_update_to_db(
-                                db_order_id=pending.db_order_id,
-                                status=ExchangeOrderStatusEnum.CANCELED,
-                            )
-                else:
-                    self.client_by_exchange.pop(cancel.exchange_order_id, None)
-                await self._publish_cancel_event(cancel, OrderEventEnum.CANCELLED)
-                logger.info(
-                    f"[{exchange_name}] Order {cancel.exchange_order_id} cancelled successfully"
-                )
-            else:
-                await self._publish_cancel_event(cancel, OrderEventEnum.REJECTED)
-                logger.warning(
-                    f"[{exchange_name}] Cancel request for {cancel.exchange_order_id} failed"
-                )
+            await self._handle_cancel_result(cancel, result, exchange_name)
         except Exception as e:
             logger.error(
                 f"[{exchange_name}] Error cancelling order {cancel.exchange_order_id}: {e}"
             )
             await self._publish_cancel_event(cancel, OrderEventEnum.REJECTED)
+
+    async def _handle_cancel_result(
+        self,
+        cancel: OrderCancelData,
+        result: ExchangeOrderSnapshot,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Publish and persist the result of a venue cancel attempt."""
+        if result and result.status == ExchangeOrderStatusEnum.CANCELED:
+            await self._finalize_successful_cancel(cancel)
+            await self._publish_cancel_event(cancel, OrderEventEnum.CANCELLED)
+            logger.info(
+                f"[{exchange_name}] Order {cancel.exchange_order_id} cancelled successfully"
+            )
+            return
+        await self._publish_cancel_event(cancel, OrderEventEnum.REJECTED)
+        logger.warning(f"[{exchange_name}] Cancel request for {cancel.exchange_order_id} failed")
+
+    async def _finalize_successful_cancel(self, cancel: OrderCancelData) -> None:
+        """Clean tracked order state and persist the terminal cancel status."""
+        assert self.exchange_client is not None
+        client_id = self.client_by_exchange.get(cancel.exchange_order_id)
+        holder = self.pending_orders.get(client_id) if client_id else None
+        if holder is None:
+            self.client_by_exchange.pop(cancel.exchange_order_id, None)
+            return
+        async with holder.fill_lock:
+            self.client_by_exchange.pop(cancel.exchange_order_id, None)
+            pending = self.pending_orders.pop(client_id, None) if client_id else None
+            if pending and pending.db_order_id is not None:
+                await self.exchange_client._log_order_update_to_db(
+                    db_order_id=pending.db_order_id,
+                    status=ExchangeOrderStatusEnum.CANCELED,
+                )
 
     async def _process_replace(self, replace: OrderReplaceData) -> None:
         """Reject an order-replace request (replace is not implemented).
@@ -2517,6 +2605,23 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         exchange_name = self._get_exchange_name()
 
+        await self._retry_pending_reconciliation_work()
+
+        pending_at_snapshot = set(self.pending_orders)
+        exchange_orders = await self.exchange_client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
+        exchange_by_id = {o.id: o for o in exchange_orders}
+
+        await self._resolve_ambiguous_reconciliation_batch(exchange_name)
+        await self._reconcile_tracked_orders(exchange_name, exchange_by_id)
+
+        adopted_this_cycle: set[str] = set()
+        await self._adopt_ghost_orders(exchange_orders, adopted_this_cycle, pending_at_snapshot)
+        await self._verify_unresolved_dispatched(adopted_this_cycle)
+
+        await self._warn_on_balance_mismatches(exchange_name)
+
+    async def _retry_pending_reconciliation_work(self) -> None:
+        """Retry durable work that previous order/recon paths left pending."""
         for client_order_id in tuple(self._unhealed_accept_events):
             await self._retry_accept_event(client_order_id)
 
@@ -2527,10 +2632,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if breaker_entry.breaker_open_pending:
                 await self._retry_breaker_open(breaker_cid)
 
-        pending_at_snapshot = set(self.pending_orders)
-        exchange_orders = await self.exchange_client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
-        exchange_by_id = {o.id: o for o in exchange_orders}
-
+    async def _resolve_ambiguous_reconciliation_batch(self, exchange_name: OrderExchange) -> None:
+        """Resolve a fairness-capped slice of parked ambiguous orders."""
         ambiguous_budget = _AMBIGUOUS_VERIFY_PER_CYCLE_MAX
         ambiguous_cids = [
             cid
@@ -2553,6 +2656,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"{ambiguous_budget}/cycle)"
             )
 
+    async def _reconcile_tracked_orders(
+        self,
+        exchange_name: OrderExchange,
+        exchange_by_id: dict[str, ExchangeOrderSnapshot],
+    ) -> None:
+        """Compare tracked orders against the exchange open-order snapshot."""
         for _eid, pending in tuple(self.pending_orders.items()):
             exchange_oid = pending.exchange_order_id
             if not exchange_oid:
@@ -2564,10 +2673,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 exchange_order = exchange_by_id[exchange_oid]
                 await self._reconcile_fill_gap(exchange_name, exchange_oid, pending, exchange_order)
 
-        adopted_this_cycle: set[str] = set()
-        await self._adopt_ghost_orders(exchange_orders, adopted_this_cycle, pending_at_snapshot)
-        await self._verify_unresolved_dispatched(adopted_this_cycle)
-
+    async def _warn_on_balance_mismatches(self, exchange_name: OrderExchange) -> None:
+        """Log reconciliation balance mismatches beyond the configured threshold."""
+        assert self.exchange_client is not None
         balances = await self.exchange_client.get_balance()
         threshold = self.settings.recon_balance_threshold
         for currency, bal in balances.items():
@@ -2652,79 +2760,164 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         budget = _GHOST_ADOPT_PER_CYCLE_MAX
         for snapshot in exchange_orders:
             cid = snapshot.client_order_id
-            if not cid or cid in self.pending_orders or cid in adopted:
+            if self._should_skip_ghost_snapshot(cid, adopted, pending_at_snapshot):
                 continue
-            if cid in pending_at_snapshot:
-                continue
-            if cid in self._ghost_foreign_warned:
-                continue
+            assert cid is not None
             if budget <= 0:
                 logger.info(
                     f"[{exchange_name}] Recon: ghost-order adoptions deferred to later "
                     f"cycles (cap {_GHOST_ADOPT_PER_CYCLE_MAX}/cycle)"
                 )
                 return
-            try:
-                cmd = await self.repository.get_active_create_command_by_client_order_id(
+            if await self._try_adopt_ghost_order(snapshot, cid, adopted, exchange_name):
+                budget -= 1
+
+    def _should_skip_ghost_snapshot(
+        self,
+        cid: str | None,
+        adopted: set[str],
+        pending_at_snapshot: set[str],
+    ) -> bool:
+        """Return whether an open venue snapshot is not a ghost adoption candidate."""
+        if not cid or cid in self.pending_orders or cid in adopted:
+            return True
+        return cid in pending_at_snapshot or cid in self._ghost_foreign_warned
+
+    async def _lookup_ghost_command(
+        self,
+        snapshot: ExchangeOrderSnapshot,
+        cid: str,
+        exchange_name: OrderExchange,
+    ) -> tuple[TradeCommandRow | None, bool]:
+        """Lookup the command row for a ghost snapshot, returning retryable failure state."""
+        assert isinstance(self.repository, SQLAlchemyRepository)
+        try:
+            return (
+                await self.repository.get_active_create_command_by_client_order_id(
                     cid, exchange_name
-                )
-            except Exception as e:
-                logger.warning(
-                    f"[{exchange_name}] Recon: command lookup failed for ghost order "
-                    f"{snapshot.id} (cid={cid}): {e} — retrying next cycle"
-                )
-                continue
-            if cmd is None:
-                self._mark_foreign_order_warned(cid)
-                logger.warning(
-                    f"[{exchange_name}] Recon: open venue order {snapshot.id} "
-                    f"(cid={cid}) has NO command row — foreign/manual order, leaving "
-                    f"untouched"
-                )
-                continue
-            if cmd["wallet_public_id"] != self.wallet_public_id:
-                continue
-            heal_rejected = cmd["status"] == TradeCommandStatusEnum.REJECTED.value
-            if cmd["status"] in _COMMAND_TERMINAL_STATUSES and not heal_rejected:
-                logger.warning(
-                    f"[{exchange_name}] Recon: venue order {snapshot.id} (cid={cid}) is "
-                    f"OPEN but its command {cmd['public_id']} is durably "
-                    f"{cmd['status']} — refusing to adopt a terminally-accounted "
-                    f"command; operator attention required"
-                )
-                continue
-            budget -= 1
-            if cid in self.pending_orders:
-                continue
-            try:
-                order = order_request_from_command(cmd)
-            except Exception as e:
-                logger.error(
-                    f"[{exchange_name}] Recon: command {cmd['public_id']} cannot be "
-                    f"reconstructed into a dispatch payload ({e}) — skipping adoption "
-                    f"of {cid}; operator attention required (vocabulary mismatch, see "
-                    f"the stop-order pipeline follow-up)"
-                )
-                continue
-            pending = PendingOrderState(request=order)
-            await self._repair_adopted_order_row(order, snapshot, pending)
-            if not await self._seed_adoption_watermarks(pending, cid):
-                continue
-            self.pending_orders[cid] = pending
-            logger.warning(
-                f"[{exchange_name}] Recon: ADOPTING ghost venue order {snapshot.id} "
-                f"(cid={cid}, command {cmd['public_id']}, status={snapshot.status}) — "
-                f"open at the venue with no in-memory entry"
+                ),
+                False,
             )
-            await self._adopt_found_order(order, pending, snapshot)
-            adopted.add(cid)
-            if heal_rejected:
-                restore_cmd = dict(cmd)
-                restore_cmd["exchange_order_id"] = snapshot.id
-                self._pending_rejected_restores[cmd["public_id"]] = cast(
-                    TradeCommandRow, restore_cmd
-                )
-                await self._retry_rejected_restore(cmd["public_id"])
+        except Exception as e:
+            logger.warning(
+                f"[{exchange_name}] Recon: command lookup failed for ghost order "
+                f"{snapshot.id} (cid={cid}): {e} — retrying next cycle"
+            )
+            return None, True
+
+    def _resolve_ghost_heal_mode(
+        self,
+        snapshot: ExchangeOrderSnapshot,
+        cmd: TradeCommandRow,
+        cid: str,
+        exchange_name: OrderExchange,
+    ) -> bool | None:
+        """Return rejected-heal mode when a command row may be adopted."""
+        if cmd["wallet_public_id"] != self.wallet_public_id:
+            return None
+        heal_rejected = cmd["status"] == TradeCommandStatusEnum.REJECTED.value
+        if cmd["status"] in _COMMAND_TERMINAL_STATUSES and not heal_rejected:
+            logger.warning(
+                f"[{exchange_name}] Recon: venue order {snapshot.id} (cid={cid}) is "
+                f"OPEN but its command {cmd['public_id']} is durably "
+                f"{cmd['status']} — refusing to adopt a terminally-accounted "
+                f"command; operator attention required"
+            )
+            return None
+        return heal_rejected
+
+    async def _try_adopt_ghost_order(
+        self,
+        snapshot: ExchangeOrderSnapshot,
+        cid: str,
+        adopted: set[str],
+        exchange_name: OrderExchange,
+    ) -> bool:
+        """Attempt one ghost-order adoption and return whether the cycle budget was used."""
+        cmd, retryable_lookup_failure = await self._lookup_ghost_command(
+            snapshot, cid, exchange_name
+        )
+        if retryable_lookup_failure:
+            return False
+        if cmd is None:
+            self._mark_unknown_ghost_order(snapshot, cid, exchange_name)
+            return False
+        heal_rejected = self._resolve_ghost_heal_mode(snapshot, cmd, cid, exchange_name)
+        if heal_rejected is None:
+            return False
+        await self._consume_ghost_adoption_budget(
+            snapshot, cid, cmd, heal_rejected, adopted, exchange_name
+        )
+        return True
+
+    def _mark_unknown_ghost_order(
+        self,
+        snapshot: ExchangeOrderSnapshot,
+        cid: str,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Remember and log a venue order that has no command row."""
+        self._mark_foreign_order_warned(cid)
+        logger.warning(
+            f"[{exchange_name}] Recon: open venue order {snapshot.id} "
+            f"(cid={cid}) has NO command row — foreign/manual order, leaving "
+            f"untouched"
+        )
+
+    async def _consume_ghost_adoption_budget(
+        self,
+        snapshot: ExchangeOrderSnapshot,
+        cid: str,
+        cmd: TradeCommandRow,
+        heal_rejected: bool,
+        adopted: set[str],
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Run adoption work after a command has consumed the cycle budget."""
+        if cid in self.pending_orders:
+            return
+        order = self._reconstruct_ghost_order(cmd, cid, exchange_name)
+        if order is None:
+            return
+        pending = PendingOrderState(request=order)
+        await self._repair_adopted_order_row(order, snapshot, pending)
+        if not await self._seed_adoption_watermarks(pending, cid):
+            return
+        self.pending_orders[cid] = pending
+        logger.warning(
+            f"[{exchange_name}] Recon: ADOPTING ghost venue order {snapshot.id} "
+            f"(cid={cid}, command {cmd['public_id']}, status={snapshot.status}) — "
+            f"open at the venue with no in-memory entry"
+        )
+        await self._adopt_found_order(order, pending, snapshot)
+        adopted.add(cid)
+        if heal_rejected:
+            await self._queue_rejected_restore(cmd, snapshot.id)
+
+    def _reconstruct_ghost_order(
+        self,
+        cmd: TradeCommandRow,
+        cid: str,
+        exchange_name: OrderExchange,
+    ) -> OrderRequestData | None:
+        """Rebuild the original dispatch payload for a ghost adoption."""
+        try:
+            return order_request_from_command(cmd)
+        except Exception as e:
+            logger.error(
+                f"[{exchange_name}] Recon: command {cmd['public_id']} cannot be "
+                f"reconstructed into a dispatch payload ({e}) — skipping adoption "
+                f"of {cid}; operator attention required (vocabulary mismatch, see "
+                f"the stop-order pipeline follow-up)"
+            )
+            return None
+
+    async def _queue_rejected_restore(self, cmd: TradeCommandRow, exchange_order_id: str) -> None:
+        """Queue and immediately retry a REJECTED command restore."""
+        restore_cmd = dict(cmd)
+        restore_cmd["exchange_order_id"] = exchange_order_id
+        self._pending_rejected_restores[cmd["public_id"]] = cast(TradeCommandRow, restore_cmd)
+        await self._retry_rejected_restore(cmd["public_id"])
 
     async def _repair_adopted_order_row(
         self,
@@ -2997,6 +3190,27 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         exchange_name = self._get_exchange_name()
         cid = cmd["client_order_id"]
+        snapshot, lookup_finished = await self._lookup_dispatched_snapshot(cmd, cid, exchange_name)
+        if lookup_finished:
+            return
+        order = self._reconstruct_dispatched_order(cmd, cid, exchange_name)
+        if order is None:
+            return
+        if snapshot is not None:
+            await self._adopt_dispatched_snapshot(cmd, order, snapshot, cid, exchange_name)
+            return
+        await self._handle_absent_dispatched_command(
+            cmd, order, cid, allow_reject=allow_reject, exchange_name=exchange_name
+        )
+
+    async def _lookup_dispatched_snapshot(
+        self,
+        cmd: TradeCommandRow,
+        cid: str,
+        exchange_name: OrderExchange,
+    ) -> tuple[ExchangeOrderSnapshot | None, bool]:
+        """Lookup a dispatched command by client id and classify terminal lookup states."""
+        assert self.exchange_client is not None
         try:
             async with asyncio.timeout(_AMBIGUOUS_VERIFY_TIMEOUT_S):
                 snapshot = await self.exchange_client.find_order_by_client_id(
@@ -3009,15 +3223,24 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     f"[{exchange_name}] venue cannot verify orders by client id — "
                     f"dispatched-command verification skipped (park-only default)"
                 )
-            return
+            return None, True
         except Exception as e:
             logger.warning(
                 f"[{exchange_name}] Recon: dispatched-command verification failed for "
                 f"{cid}: {e} — retrying next cycle"
             )
-            return
+            return None, True
+        return snapshot, False
+
+    def _reconstruct_dispatched_order(
+        self,
+        cmd: TradeCommandRow,
+        cid: str,
+        exchange_name: OrderExchange,
+    ) -> OrderRequestData | None:
+        """Rebuild the original dispatch payload for a dispatched-command verification."""
         try:
-            order = order_request_from_command(cmd)
+            return order_request_from_command(cmd)
         except Exception as e:
             logger.error(
                 f"[{exchange_name}] Recon: command {cmd['public_id']} cannot be "
@@ -3025,23 +3248,42 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"actions for {cid}; operator attention required (vocabulary mismatch, "
                 f"see the stop-order pipeline follow-up)"
             )
+            return None
+
+    async def _adopt_dispatched_snapshot(
+        self,
+        cmd: TradeCommandRow,
+        order: OrderRequestData,
+        snapshot: ExchangeOrderSnapshot,
+        cid: str,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Adopt an unresolved dispatched command that venue lookup found."""
+        self._dispatched_absence_counts.pop(cid, None)
+        if cid in self.pending_orders:
             return
-        if snapshot is not None:
-            self._dispatched_absence_counts.pop(cid, None)
-            if cid in self.pending_orders:
-                return
-            pending = PendingOrderState(request=order)
-            await self._repair_adopted_order_row(order, snapshot, pending)
-            if not await self._seed_adoption_watermarks(pending, cid):
-                return
-            self.pending_orders[cid] = pending
-            logger.warning(
-                f"[{exchange_name}] Recon: unresolved DISPATCHED command "
-                f"{cmd['public_id']} FOUND on venue as {snapshot.id} "
-                f"(status={snapshot.status}) — adopting"
-            )
-            await self._adopt_found_order(order, pending, snapshot)
+        pending = PendingOrderState(request=order)
+        await self._repair_adopted_order_row(order, snapshot, pending)
+        if not await self._seed_adoption_watermarks(pending, cid):
             return
+        self.pending_orders[cid] = pending
+        logger.warning(
+            f"[{exchange_name}] Recon: unresolved DISPATCHED command "
+            f"{cmd['public_id']} FOUND on venue as {snapshot.id} "
+            f"(status={snapshot.status}) — adopting"
+        )
+        await self._adopt_found_order(order, pending, snapshot)
+
+    async def _handle_absent_dispatched_command(
+        self,
+        cmd: TradeCommandRow,
+        order: OrderRequestData,
+        cid: str,
+        *,
+        allow_reject: bool,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Advance absence evidence and optionally reject an unresolved command."""
         count = self._dispatched_absence_counts.get(cid, 0) + 1
         self._dispatched_absence_counts[cid] = count
         if count < 2:
@@ -3062,6 +3304,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"required"
             )
             return
+        await self._reject_absent_dispatched_command(cmd, order, cid, exchange_name, count)
+
+    async def _reject_absent_dispatched_command(
+        self,
+        cmd: TradeCommandRow,
+        order: OrderRequestData,
+        cid: str,
+        exchange_name: OrderExchange,
+        count: int,
+    ) -> None:
+        """Publish and persist a verified-absent dispatched command rejection."""
         if not await self._publish_order_status(order, OrderEventEnum.REJECTED):
             logger.warning(
                 f"[{exchange_name}] Recon: REJECTED publish failed for {cid} — keeping "
@@ -3605,51 +3858,80 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if self._task_restarts.get(task_label, 0) > 0 and pre_respawn is not None:
                 pre_respawn()
             started = time.monotonic()
-            try:
-                await attempt()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if not self.running:
-                    return
-                logger.warning(
-                    f"[{exchange_name}] {task_label} died ({exc!r}) - "
-                    f"respawn #{self._task_restarts.get(task_label, 0) + 1} "
-                    f"after {backoff:.0f}s backoff"
-                )
-            else:
-                if not self.running:
-                    return
-                logger.warning(
-                    f"[{exchange_name}] {task_label} returned unexpectedly - "
-                    f"respawn #{self._task_restarts.get(task_label, 0) + 1} "
-                    f"after {backoff:.0f}s backoff"
-                )
-            now = time.monotonic()
-            self._task_last_death[task_label] = now
-            if now - started >= _EXEC_STREAM_HEALTHY_RUNTIME_S:
-                backoff = _EXEC_STREAM_BACKOFF_INITIAL_S
-                streak_started = None
-                self._task_streak_started.pop(task_label, None)
-                self._task_deaths_in_streak.pop(task_label, None)
-            if streak_started is None:
-                streak_started = now
-                self._task_streak_started[task_label] = now
-                self._task_deaths_in_streak[task_label] = 1
-            elif now - streak_started >= _TASK_DEATH_ESCALATION_CEILING_S:
-                logger.critical(
-                    f"[{exchange_name}] {task_label} death streak exceeded "
-                    f"{_TASK_DEATH_ESCALATION_CEILING_S:.0f}s - escalating to "
-                    f"a full service restart"
-                )
-                raise ExecutorTaskDeadError(task_label)
-            else:
-                self._task_deaths_in_streak[task_label] = (
-                    self._task_deaths_in_streak.get(task_label, 0) + 1
-                )
-            self._task_restarts[task_label] = self._task_restarts.get(task_label, 0) + 1
+            should_respawn = await self._run_supervised_attempt(
+                task_label, attempt, backoff, exchange_name
+            )
+            if not should_respawn:
+                return
+            streak_started, backoff = self._record_supervised_task_death(
+                task_label, started, streak_started, backoff, exchange_name
+            )
             await self._sleep_with_jitter(backoff)
             backoff = min(backoff * 2.0, _EXEC_STREAM_BACKOFF_CAP_S)
+
+    async def _run_supervised_attempt(
+        self,
+        task_label: str,
+        attempt: Callable[[], Awaitable[None]],
+        backoff: float,
+        exchange_name: OrderExchange,
+    ) -> bool:
+        """Run one supervised attempt and log why it needs respawn."""
+        try:
+            await attempt()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not self.running:
+                return False
+            logger.warning(
+                f"[{exchange_name}] {task_label} died ({exc!r}) - "
+                f"respawn #{self._task_restarts.get(task_label, 0) + 1} "
+                f"after {backoff:.0f}s backoff"
+            )
+            return True
+        if not self.running:
+            return False
+        logger.warning(
+            f"[{exchange_name}] {task_label} returned unexpectedly - "
+            f"respawn #{self._task_restarts.get(task_label, 0) + 1} "
+            f"after {backoff:.0f}s backoff"
+        )
+        return True
+
+    def _record_supervised_task_death(
+        self,
+        task_label: str,
+        started: float,
+        streak_started: float | None,
+        backoff: float,
+        exchange_name: OrderExchange,
+    ) -> tuple[float, float]:
+        """Update restart streak state after a supervised attempt dies."""
+        now = time.monotonic()
+        self._task_last_death[task_label] = now
+        if now - started >= _EXEC_STREAM_HEALTHY_RUNTIME_S:
+            backoff = _EXEC_STREAM_BACKOFF_INITIAL_S
+            streak_started = None
+            self._task_streak_started.pop(task_label, None)
+            self._task_deaths_in_streak.pop(task_label, None)
+        if streak_started is None:
+            streak_started = now
+            self._task_streak_started[task_label] = now
+            self._task_deaths_in_streak[task_label] = 1
+        elif now - streak_started >= _TASK_DEATH_ESCALATION_CEILING_S:
+            logger.critical(
+                f"[{exchange_name}] {task_label} death streak exceeded "
+                f"{_TASK_DEATH_ESCALATION_CEILING_S:.0f}s - escalating to "
+                f"a full service restart"
+            )
+            raise ExecutorTaskDeadError(task_label)
+        else:
+            self._task_deaths_in_streak[task_label] = (
+                self._task_deaths_in_streak.get(task_label, 0) + 1
+            )
+        self._task_restarts[task_label] = self._task_restarts.get(task_label, 0) + 1
+        return streak_started, backoff
 
     async def _supervise_execution_stream(self) -> None:
         """Respawn the private execution stream until shutdown.
@@ -3691,54 +3973,76 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
         backoff = _EXEC_STREAM_BACKOFF_INITIAL_S
         while self.running:
-            client = self.exchange_client
-            if client is None or not client.supports_websocket_executions:
-                logger.warning(
-                    f"[{exchange_name}] Execution stream unavailable on this venue - "
-                    f"supervisor exiting"
-                )
+            if not self._execution_stream_is_available(exchange_name):
                 return
             if self._exec_stream_restarts:
                 await self._post_reconnect_reconcile()
             started = time.monotonic()
-            try:
-                await self._execution_handler()
-            except asyncio.CancelledError:
-                raise
-            except NotImplementedError:
-                logger.info(
-                    f"[{exchange_name}] Exchange client does not support execution "
-                    f"streaming - supervisor exiting"
-                )
+            should_respawn = await self._run_execution_stream_attempt(backoff, exchange_name)
+            if not should_respawn:
                 return
-            except Exception as exc:
-                logger.warning(
-                    f"[{exchange_name}] Execution stream died ({exc!r}) - "
-                    f"respawn #{self._exec_stream_restarts + 1} after {backoff:.0f}s backoff"
-                )
-            else:
-                if not self.running:
-                    return
-                logger.warning(
-                    f"[{exchange_name}] Execution stream returned cleanly - "
-                    f"respawn #{self._exec_stream_restarts + 1} after {backoff:.0f}s backoff"
-                )
-            self._exec_stream_restarts += 1
-            now = time.monotonic()
-            self._task_last_death["execution_stream"] = now
-            if now - started >= _EXEC_STREAM_HEALTHY_RUNTIME_S:
-                backoff = _EXEC_STREAM_BACKOFF_INITIAL_S
-                self._task_streak_started.pop("execution_stream", None)
-                self._task_deaths_in_streak.pop("execution_stream", None)
-            if "execution_stream" not in self._task_streak_started:
-                self._task_streak_started["execution_stream"] = now
-                self._task_deaths_in_streak["execution_stream"] = 1
-            else:
-                self._task_deaths_in_streak["execution_stream"] = (
-                    self._task_deaths_in_streak.get("execution_stream", 0) + 1
-                )
+            backoff = self._record_execution_stream_death(started, backoff)
             await self._sleep_with_jitter(backoff)
             backoff = min(backoff * 2.0, _EXEC_STREAM_BACKOFF_CAP_S)
+
+    def _execution_stream_is_available(self, exchange_name: OrderExchange) -> bool:
+        """Return whether this venue can run the private execution stream."""
+        client = self.exchange_client
+        if client is None or not client.supports_websocket_executions:
+            logger.warning(
+                f"[{exchange_name}] Execution stream unavailable on this venue - "
+                f"supervisor exiting"
+            )
+            return False
+        return True
+
+    async def _run_execution_stream_attempt(
+        self,
+        backoff: float,
+        exchange_name: OrderExchange,
+    ) -> bool:
+        """Run one execution-stream attempt and log its respawn reason."""
+        try:
+            await self._execution_handler()
+        except asyncio.CancelledError:
+            raise
+        except NotImplementedError:
+            logger.info(
+                f"[{exchange_name}] Exchange client does not support execution "
+                f"streaming - supervisor exiting"
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                f"[{exchange_name}] Execution stream died ({exc!r}) - "
+                f"respawn #{self._exec_stream_restarts + 1} after {backoff:.0f}s backoff"
+            )
+            return True
+        if not self.running:
+            return False
+        logger.warning(
+            f"[{exchange_name}] Execution stream returned cleanly - "
+            f"respawn #{self._exec_stream_restarts + 1} after {backoff:.0f}s backoff"
+        )
+        return True
+
+    def _record_execution_stream_death(self, started: float, backoff: float) -> float:
+        """Update execution-stream restart streak state and return next sleep base."""
+        self._exec_stream_restarts += 1
+        now = time.monotonic()
+        self._task_last_death["execution_stream"] = now
+        if now - started >= _EXEC_STREAM_HEALTHY_RUNTIME_S:
+            backoff = _EXEC_STREAM_BACKOFF_INITIAL_S
+            self._task_streak_started.pop("execution_stream", None)
+            self._task_deaths_in_streak.pop("execution_stream", None)
+        if "execution_stream" not in self._task_streak_started:
+            self._task_streak_started["execution_stream"] = now
+            self._task_deaths_in_streak["execution_stream"] = 1
+        else:
+            self._task_deaths_in_streak["execution_stream"] = (
+                self._task_deaths_in_streak.get("execution_stream", 0) + 1
+            )
+        return backoff
 
     async def _execution_handler(self) -> None:
         """Consume one execution-stream pass from the exchange WebSocket.
@@ -4311,8 +4615,26 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         topic, fill = self._build_execution_data(
             execution, exchange_order_id, original_order, exchange_name
         )
-        raw_tid = getattr(execution, "trade_id", None)
         durable_holder = self.pending_orders.get(client_order_id)
+        accounting = self._resolve_fill_accounting(execution, fill, durable_holder)
+        await self._record_correlated_fill_event(
+            execution, fill, accounting, exchange_order_id, original_order, exchange_name
+        )
+        self._advance_durable_fill_watermark(durable_holder, fill, accounting)
+        if not await self._publish_execution(topic, fill):
+            return
+        self._advance_committed_fill_watermark(client_order_id, fill, accounting)
+        self._register_fill_exec_id(execution, accounting)
+        await self._persist_correlated_fill(execution, fill, client_order_id, self.wallet_public_id)
+        self._remove_filled_order(fill, client_order_id, exchange_order_id, exchange_name)
+
+    def _resolve_fill_accounting(
+        self,
+        execution: ExecutionUpdate,
+        fill: ExecutionData,
+        durable_holder: PendingOrderState | None,
+    ) -> _FillAccounting:
+        """Resolve durable quantity and fee deltas for one correlated fill."""
         is_fill_frame = execution.last_qty is not None or execution.cum_qty is not None
         if durable_holder is not None and execution.cum_qty is not None:
             durable_size = max(0.0, fill.size - durable_holder.last_recorded_cum_qty)
@@ -4328,19 +4650,38 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
         else:
             durable_fee = fill.fee
+        return _FillAccounting(
+            is_fill_frame=is_fill_frame,
+            durable_size=durable_size,
+            durable_fee=durable_fee,
+            frame_cum_fee=frame_cum_fee,
+            frame_cum_fee_asset=frame_cum_fee_asset,
+        )
+
+    async def _record_correlated_fill_event(
+        self,
+        execution: ExecutionUpdate,
+        fill: ExecutionData,
+        accounting: _FillAccounting,
+        exchange_order_id: str,
+        original_order: OrderRequestData,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Persist the venue-event row for one correlated fill."""
+        raw_tid = getattr(execution, "trade_id", None)
         await self._record_venue_event(
             {
                 "event_type": "fill_observed",
                 "exchange_name": exchange_name,
                 "instrument": fill.instrument,
                 "exchange_order_id": exchange_order_id,
-                "client_order_id": client_order_id,
+                "client_order_id": fill.client_order_id,
                 "side": fill.side,
                 "status": fill.status,
                 "fill_price": fill.last_price,
-                "fill_size": durable_size,
+                "fill_size": accounting.durable_size,
                 "cum_fill_size": fill.size,
-                "fee": durable_fee,
+                "fee": accounting.durable_fee,
                 "fee_asset": fill.fee_asset,
                 "exec_id": getattr(execution, "exec_id", None),
                 "trade_id": str(raw_tid) if raw_tid else None,
@@ -4349,57 +4690,97 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 "liquidity_role": fill.liquidity_role,
             }
         )
-        if durable_holder is not None and is_fill_frame:
-            durable_holder.last_recorded_cum_qty = max(
-                durable_holder.last_recorded_cum_qty, fill.size
-            )
-            if frame_cum_fee is not None:
-                durable_holder.last_recorded_fee[frame_cum_fee_asset] = frame_cum_fee
-            elif durable_fee and durable_size > 0:
-                fee_key = fill.fee_asset or ""
-                durable_holder.last_recorded_fee[fee_key] = (
-                    durable_holder.last_recorded_fee.get(fee_key, 0.0) + durable_fee
-                )
-        if not await self._publish_execution(topic, fill):
+
+    def _advance_durable_fill_watermark(
+        self,
+        durable_holder: PendingOrderState | None,
+        fill: ExecutionData,
+        accounting: _FillAccounting,
+    ) -> None:
+        """Advance durable fill and fee watermarks after the venue-event write."""
+        if durable_holder is None or not accounting.is_fill_frame:
             return
+        durable_holder.last_recorded_cum_qty = max(durable_holder.last_recorded_cum_qty, fill.size)
+        if accounting.frame_cum_fee is not None:
+            durable_holder.last_recorded_fee[accounting.frame_cum_fee_asset] = (
+                accounting.frame_cum_fee
+            )
+        elif accounting.durable_fee and accounting.durable_size > 0:
+            fee_key = fill.fee_asset or ""
+            durable_holder.last_recorded_fee[fee_key] = (
+                durable_holder.last_recorded_fee.get(fee_key, 0.0) + accounting.durable_fee
+            )
+
+    def _advance_committed_fill_watermark(
+        self,
+        client_order_id: str,
+        fill: ExecutionData,
+        accounting: _FillAccounting,
+    ) -> None:
+        """Advance published fill and fee watermarks after a successful publish."""
         committed = self.pending_orders.get(client_order_id)
-        if committed is not None and (
-            execution.last_qty is not None or execution.cum_qty is not None
-        ):
-            committed.last_seen_cum_qty = max(committed.last_seen_cum_qty, fill.size)
-            if frame_cum_fee is not None:
-                committed.last_published_fee[frame_cum_fee_asset] = frame_cum_fee
-            elif fill.fee:
-                fee_key = fill.fee_asset or ""
-                committed.last_published_fee[fee_key] = (
-                    committed.last_published_fee.get(fee_key, 0.0) + fill.fee
-                )
-        if execution.last_qty is not None or execution.cum_qty is not None:
+        if committed is None or not accounting.is_fill_frame:
+            return
+        committed.last_seen_cum_qty = max(committed.last_seen_cum_qty, fill.size)
+        if accounting.frame_cum_fee is not None:
+            committed.last_published_fee[accounting.frame_cum_fee_asset] = accounting.frame_cum_fee
+        elif fill.fee:
+            fee_key = fill.fee_asset or ""
+            committed.last_published_fee[fee_key] = (
+                committed.last_published_fee.get(fee_key, 0.0) + fill.fee
+            )
+
+    def _register_fill_exec_id(
+        self,
+        execution: ExecutionUpdate,
+        accounting: _FillAccounting,
+    ) -> None:
+        """Register the execution id once a real fill was published."""
+        if accounting.is_fill_frame:
             self._register_seen_exec_id(getattr(execution, "exec_id", None))
+
+    async def _persist_correlated_fill(
+        self,
+        execution: ExecutionUpdate,
+        fill: ExecutionData,
+        client_order_id: str,
+        wallet_public_id: str,
+    ) -> None:
+        """Persist execution and order status rows after a successful publish."""
         pending = self.pending_orders.get(client_order_id)
-        if pending and self.exchange_client is not None:
-            if pending.order_public_id is not None:
-                await self.exchange_client._log_execution_to_db(
-                    order_public_id=pending.order_public_id,
-                    execution=execution,
-                    wallet_public_id=self.wallet_public_id,
-                    operator_public_id=pending.request.operator_public_id,
-                    delta_size=fill.last_size,
-                    delta_price=fill.last_price,
-                    fee=fill.fee,
-                    fee_asset=fill.fee_asset,
-                    status=fill.status,
-                )
-            if pending.db_order_id is not None:
-                db_status = (
-                    ExchangeOrderStatusEnum.CLOSED
-                    if fill.status == FillStatusEnum.FILLED
-                    else ExchangeOrderStatusEnum.OPEN
-                )
-                await self.exchange_client._log_order_update_to_db(
-                    db_order_id=pending.db_order_id,
-                    status=db_status,
-                )
+        if pending is None or self.exchange_client is None:
+            return
+        if pending.order_public_id is not None:
+            await self.exchange_client._log_execution_to_db(
+                order_public_id=pending.order_public_id,
+                execution=execution,
+                wallet_public_id=wallet_public_id,
+                operator_public_id=pending.request.operator_public_id,
+                delta_size=fill.last_size,
+                delta_price=fill.last_price,
+                fee=fill.fee,
+                fee_asset=fill.fee_asset,
+                status=fill.status,
+            )
+        if pending.db_order_id is not None:
+            db_status = (
+                ExchangeOrderStatusEnum.CLOSED
+                if fill.status == FillStatusEnum.FILLED
+                else ExchangeOrderStatusEnum.OPEN
+            )
+            await self.exchange_client._log_order_update_to_db(
+                db_order_id=pending.db_order_id,
+                status=db_status,
+            )
+
+    def _remove_filled_order(
+        self,
+        fill: ExecutionData,
+        client_order_id: str,
+        exchange_order_id: str,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Drop tracking maps after a filled status has been published and persisted."""
         if fill.status == FillStatusEnum.FILLED:
             self.pending_orders.pop(client_order_id, None)
             self.client_by_exchange.pop(exchange_order_id, None)
@@ -4514,50 +4895,74 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             Tuple of (status, lag_ms, human-readable reasons).
         """
         now = time.monotonic()
-        reasons: list[str] = []
-        status = HealthStatusEnum.HEALTHY
         recon_age = now - self._task_last_pass.get("reconciliation", now)
-        active_streaks = {
+        inflight_started = self._order_inflight_started
+        inflight_age = now - inflight_started if inflight_started is not None else 0.0
+        active_streaks = self._active_heartbeat_streaks(now)
+        reasons = self._heartbeat_error_reasons(now, recon_age, inflight_age, active_streaks)
+        status = HealthStatusEnum.ERROR if reasons else HealthStatusEnum.HEALTHY
+        if status is not HealthStatusEnum.ERROR:
+            reasons = self._heartbeat_warning_reasons(recon_age, inflight_age, active_streaks)
+            if reasons:
+                status = HealthStatusEnum.WARNING
+        return status, int(recon_age * 1000), reasons
+
+    def _active_heartbeat_streaks(self, now: float) -> dict[str, float]:
+        """Return death streaks still fresh enough to affect heartbeat status."""
+        return {
             label: streak_start
             for label, streak_start in self._task_streak_started.items()
             if now - self._task_last_death.get(label, now) < _EXEC_STREAM_HEALTHY_RUNTIME_S
         }
+
+    def _heartbeat_error_reasons(
+        self,
+        now: float,
+        recon_age: float,
+        inflight_age: float,
+        active_streaks: dict[str, float],
+    ) -> list[str]:
+        """Build heartbeat ERROR reasons in priority order."""
+        reasons: list[str] = []
         for label, streak_start in active_streaks.items():
             streak_age = now - streak_start
             if streak_age >= _HB_STREAK_ERROR_S:
-                status = HealthStatusEnum.ERROR
                 reasons.append(f"{label}: death streak {streak_age:.0f}s")
         if recon_age >= _HB_RECON_ERROR_S:
-            status = HealthStatusEnum.ERROR
             reasons.append(f"reconciliation: no successful pass for {recon_age:.0f}s")
-        inflight_started = self._order_inflight_started
-        inflight_age = now - inflight_started if inflight_started is not None else 0.0
         if inflight_age >= _HB_INFLIGHT_ERROR_S:
-            status = HealthStatusEnum.ERROR
             reasons.append(f"order command in flight for {inflight_age:.0f}s")
-        if status is not HealthStatusEnum.ERROR:
-            for label, deaths in self._task_deaths_in_streak.items():
-                if label in active_streaks and deaths >= _HB_DEATHS_WARN:
-                    status = HealthStatusEnum.WARNING
-                    reasons.append(f"{label}: {deaths} deaths in active streak")
-            if _HB_RECON_WARN_S <= recon_age < _HB_RECON_ERROR_S:
-                status = HealthStatusEnum.WARNING
-                reasons.append(f"reconciliation: pass age {recon_age:.0f}s")
-            if _HB_INFLIGHT_WARN_S <= inflight_age < _HB_INFLIGHT_ERROR_S:
-                status = HealthStatusEnum.WARNING
-                reasons.append(f"order command in flight for {inflight_age:.0f}s")
-            if self._unhealed_accept_events:
-                status = HealthStatusEnum.WARNING
-                reasons.append(f"unhealed accept events: {len(self._unhealed_accept_events)}")
-            parked = sum(
-                1
-                for entry in self.pending_orders.values()
-                if not entry.exchange_order_id and entry.submit_ambiguous
-            )
-            if parked:
-                status = HealthStatusEnum.WARNING
-                reasons.append(f"parked ambiguous orders: {parked}")
-        return status, int(recon_age * 1000), reasons
+        return reasons
+
+    def _heartbeat_warning_reasons(
+        self,
+        recon_age: float,
+        inflight_age: float,
+        active_streaks: dict[str, float],
+    ) -> list[str]:
+        """Build heartbeat WARNING reasons once no ERROR condition is active."""
+        reasons: list[str] = []
+        for label, deaths in self._task_deaths_in_streak.items():
+            if label in active_streaks and deaths >= _HB_DEATHS_WARN:
+                reasons.append(f"{label}: {deaths} deaths in active streak")
+        if _HB_RECON_WARN_S <= recon_age < _HB_RECON_ERROR_S:
+            reasons.append(f"reconciliation: pass age {recon_age:.0f}s")
+        if _HB_INFLIGHT_WARN_S <= inflight_age < _HB_INFLIGHT_ERROR_S:
+            reasons.append(f"order command in flight for {inflight_age:.0f}s")
+        if self._unhealed_accept_events:
+            reasons.append(f"unhealed accept events: {len(self._unhealed_accept_events)}")
+        parked = self._parked_ambiguous_order_count()
+        if parked:
+            reasons.append(f"parked ambiguous orders: {parked}")
+        return reasons
+
+    def _parked_ambiguous_order_count(self) -> int:
+        """Count parked ambiguous submits awaiting venue verification."""
+        return sum(
+            1
+            for entry in self.pending_orders.values()
+            if not entry.exchange_order_id and entry.submit_ambiguous
+        )
 
     async def _heartbeat_loop(self) -> None:
         """Periodically publish heartbeat messages and cleanup orphans.

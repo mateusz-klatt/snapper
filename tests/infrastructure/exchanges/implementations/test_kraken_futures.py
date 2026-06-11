@@ -5654,6 +5654,16 @@ class TestGetOrderFillSummary:
         assert summary.fee_total is None
         assert summary.fee_currency is None
 
+    def test_summary_rejects_malformed_fee_rows(self) -> None:
+        """Malformed fee rows never enter the fee aggregate."""
+        assert KrakenFuturesExchangeClient._extract_order_fill_fee("garbage", None) is None
+        assert (
+            KrakenFuturesExchangeClient._extract_order_fill_fee(
+                {"fee_paid": "nan", "fee_currency": "USD"}, None
+            )
+            is None
+        )
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "payload",

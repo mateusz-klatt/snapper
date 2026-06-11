@@ -7608,6 +7608,9 @@ class SQLAlchemyRepository(Repository):
             await s.execute(
                 update(TradeCommand).where(TradeCommand.id == existing.id).values(known_to=bus_time)
             )
+            next_terminal_at = terminal_at if terminal_at is not None else existing.terminal_at
+            if clear_terminal_at:
+                next_terminal_at = None
             s.add(
                 TradeCommand(
                     public_id=existing.public_id,
@@ -7633,11 +7636,7 @@ class SQLAlchemyRepository(Repository):
                     created_at=existing.created_at,
                     dispatched_at=existing.dispatched_at,
                     acked_at=acked_at if acked_at is not None else existing.acked_at,
-                    terminal_at=(
-                        None
-                        if clear_terminal_at
-                        else (terminal_at if terminal_at is not None else existing.terminal_at)
-                    ),
+                    terminal_at=next_terminal_at,
                     exchange_order_id=(
                         exchange_order_id
                         if exchange_order_id is not None
@@ -9867,7 +9866,7 @@ class SQLAlchemyRepository(Repository):
         if leg.status not in self._PEL_SETTLED_STATUSES:
             return False
         open_qty = leg.filled_signed_qty - leg.compensated_signed_qty
-        return not abs(open_qty) >= self._PEC_QTY_EPSILON
+        return abs(open_qty) < self._PEC_QTY_EPSILON
 
     def _paired_execution_group_is_settled_for_completion(
         self,

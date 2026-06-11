@@ -1047,6 +1047,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         fills = result.get("fills")
         if not isinstance(fills, list):
             return None
+        return self._summarize_order_fills(fills, order_id)
+
+    def _summarize_order_fills(self, fills: list[object], order_id: str) -> OrderFillSummary | None:
+        """Aggregate usable fills for one order into VWAP and fee totals."""
         notionals: list[float] = []
         quantities: list[float] = []
         fee_amounts: list[float] = []
@@ -1061,21 +1065,11 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             notionals.append(price * size)
             quantities.append(size)
             if fees_consistent:
-                fee_raw = fill.get("fee_paid")
-                currency_raw = fill.get("fee_currency")
-                try:
-                    fee_value = float(fee_raw) if fee_raw is not None else None
-                except (TypeError, ValueError):
-                    fee_value = None
-                if (
-                    fee_value is None
-                    or not math.isfinite(fee_value)
-                    or not currency_raw
-                    or (fee_currency is not None and currency_raw != fee_currency)
-                ):
+                fee_result = self._extract_order_fill_fee(fill, fee_currency)
+                if fee_result is None:
                     fees_consistent = False
                 else:
-                    fee_currency = str(currency_raw)
+                    fee_value, fee_currency = fee_result
                     fee_amounts.append(fee_value)
         quantity = math.fsum(quantities)
         if quantity <= 0.0:
@@ -1087,6 +1081,28 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             fee_total=math.fsum(fee_amounts) if include_fees else None,
             fee_currency=fee_currency if include_fees else None,
         )
+
+    @staticmethod
+    def _extract_order_fill_fee(
+        fill: object, current_currency: str | None
+    ) -> tuple[float, str] | None:
+        """Extract a parseable fee amount in the current single-currency aggregate."""
+        if not isinstance(fill, dict):
+            return None
+        fee_raw = fill.get("fee_paid")
+        currency_raw = fill.get("fee_currency")
+        if fee_raw is None or not currency_raw:
+            return None
+        try:
+            fee_value = float(fee_raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(fee_value):
+            return None
+        currency = str(currency_raw)
+        if current_currency is not None and currency != current_currency:
+            return None
+        return fee_value, currency
 
     @staticmethod
     def _extract_order_fill(
