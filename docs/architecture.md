@@ -209,7 +209,10 @@ pending-order state against the exchange's authoritative view. This
 detects two failure modes that WebSocket streams alone miss: **fill
 gaps** (exchange has more filled quantity than the executor observed)
 and **disappeared orders** (pending orders absent from the open-orders
-snapshot).
+snapshot). The same cycle also works the durable command plane in both
+directions: **ghost orders** (open venue orders no executor is
+tracking) are adopted, and **dispatched commands** with no venue
+evidence are verified against venue truth (see below).
 
 Always-on — runs alongside the executor's order handler, heartbeat,
 and private fill-stream tasks, all of which run as supervised loops
@@ -229,25 +232,86 @@ delta, stamping the synthetic execution with the deterministic
 `exec_id=recon-<exchange_oid>-c<venue_cum>` — re-emitting the same
 gap (after a failed publish, or again at the next startup recovery)
 dedupes at every consumer instead of double-applying, while a gap
-whose venue cumulative advanced gets a fresh id.
+whose venue cumulative advanced gets a fresh id. Correctives carry
+venue-true fees instead of fabricating fee=0: the snapshot's
+order-level running commission, or the venue fills-summary total,
+rides the frame's cumulative `cum_fee`. When a venue-implemented fee
+source is transiently unusable (failed lookup, partial fills page,
+no usable rows yet) the corrective is deferred rather than freezing
+a fee-less emission under its stable exec id; the deferral is
+bounded at five recon cycles, after which the corrective emits
+fee-less with a CRITICAL manual-reconcile signal. A venue reporting
+neither a snapshot-level running commission nor a per-order fills
+summary emits fee-less as before.
 
 **`_reconcile_disappeared_order`** (in `messaging/executors/base.py`)
 calls `get_order()` on orders missing from the open-orders snapshot to
 determine their actual terminal status (CLOSED / CANCELED / EXPIRED),
 emits any residual fill gap first, then publishes the terminal
-`ExecutionUpdate`.
+`ExecutionUpdate`. Walutomat's polling client never guesses
+filled-vs-canceled for a disappeared order whose final-state query
+fails: the order stays tracked and the query retries every poll
+cycle, escalating to a single CRITICAL log after ten consecutive
+failures while still retrying — no terminal state is ever fabricated.
+
+#### Ghost-order adoption and dispatched-command verification
+
+A `DISPATCHED` trade-command row is durable pre-send intent, so the
+recon cycle also works the durable command plane.
+
+**Ghost adoption**: an open venue order absent from the executor's
+pending set is attributed via a strict create/submit command lookup
+by client order id (cancels share the original order's cid; multiple
+active matches raise instead of guessing) and adopted with the
+original request rebuilt from the command row
+(`application/trade/command_request.py`, shared with the outbox
+publish path) so shard attribution survives adoption. Foreign/manual
+orders and other wallets' orders are never touched. Orders whose cid
+was already pending when the open-orders snapshot was taken never
+adopt from that snapshot (a stale snapshot would double-count a
+corrective). Adoption seeds the fill watermarks from the durable
+venue-event rows fail-closed — the engine books corrective deltas,
+so an untrusted zero watermark would double-book — and repairs the
+durable `orders` row so coordinator restart recovery re-arms engine
+intent.
+
+**Dispatched verification**: active dispatched create/submit
+commands past a minimum age whose cid has no resolving venue
+evidence (a lone unknown-submit row does not resolve — parked
+entries lost to an executor restart land exactly here) are verified
+by client id under a per-cycle fairness cap with index rotation. A
+found order is adopted. Venue-verified absence twice in a row
+rejects only under publish-success-before-terminal semantics (the
+durable `order_rejected` row is written only after a confirmed
+REJECTED publish — a premature terminal row would exempt the command
+from the sweep while the engine guard stayed held), only while the
+command is young enough that the venue's bounded closed-order
+lookback keeps absence authoritative (older commands escalate
+WARN-only), and never when the dispatch TTL is disabled — a frame
+can then legitimately be in flight at any age, so absence may never
+auto-reject.
+
+**False-rejection heal**: a command found OPEN on the venue after a
+durable REJECTED is adopted and its rejection durably restored to
+ACCEPTED through a retried restore queue; the coordinator's
+reconciliation loop runs a restart-proof resurrection pass for
+REJECTED rows whose live venue evidence postdates the rejection, and
+the next fold cycle re-derives the true state from the full event
+history.
 
 #### Market orders without price — venue-fills VWAP heal
 
 If a market order's exchange snapshot reports `price=None` (Kraken
 Futures snapshots carry only `limitPrice`), the fill-gap path first
 asks the venue for the order's own fills via
-`ExchangeClientBase.get_order_fill_vwap` and uses the venue-true VWAP
-— but only when the fills page covers the **whole** filled quantity
-within a relative `1e-6` tolerance; a partial page is refused rather
-than silently skewing VWAP. The CCXT snapshot builder additionally
-backfills `price` from the executed `average` when the venue reports
-one. Only when the venue reports neither a price, nor an executed
+`ExchangeClientBase.get_order_fill_summary` (venues with a real
+per-order fills source set the `supports_fill_summary` capability
+flag; the same aggregate also supplies corrective fees) and uses the
+venue-true VWAP — but only when the fills page covers the **whole**
+filled quantity within a relative `1e-6` tolerance; a partial page is
+refused rather than silently skewing VWAP. The CCXT snapshot builder
+additionally backfills `price` from the executed `average` when the
+venue reports one. Only when the venue reports neither a price, nor an executed
 average, nor whole-coverage per-order fills does the path log an
 ERROR (`"no price on market order, skipping corrective fill"`) and
 skip the corrective emission — recovery then depends on a later
@@ -296,7 +360,13 @@ cumulative watermarks are kept per order: `last_seen_cum_qty`
 to what the engine actually received) and `last_recorded_cum_qty`
 (durable — advances on venue-event write success, so additive
 checkpoint replay of the durable rows sums to venue truth whichever
-prior step failed).
+prior step failed). The same dual-plane pattern covers fees:
+per-currency signed fee watermarks (`last_recorded_fee` durable,
+`last_published_fee` published) anchor fee attribution — cumulative
+`cum_fee` frames set their currency's entry, per-fill fee frames add
+— so successive gap correctives attribute exactly the
+not-yet-attributed remainder and never re-charge fees that live
+per-fill frames already booked.
 
 #### Executor loop supervision and escalation
 
@@ -345,7 +415,11 @@ Business logic:
   funding accrual application, and reconciliation halt feedback),
   `balance_service.py` (cash/equity/exposure projection), `outbox.py`
   (outbox-driven publishing with wake-up + polling fallback),
-  `reconciler.py` (stale-command scan and reconciliation failure feedback)
+  `reconciler.py` (trade-command lifecycle fold, evidence-scoped
+  stale-command scan, and reconciliation failure feedback),
+  `command_request.py` (rebuilds the original order request from a
+  durable command row — shared by the outbox publish path and the
+  executor's adoption sweeps)
 - **Process Manager** (`process_manager/`) — Process management
 - **Services** (`services/`) — Application services, including
   `market_cache.py` (in-process 1m candle cache and pair-stat snapshots)
@@ -601,9 +675,30 @@ acknowledges the venue event. Once the venue has accepted an order
 aborts the flow: it is logged CRITICAL, the entry is flagged
 `accept_event_pending` and queued, ACCEPTED is still published (the
 venue state is the truth), and the executor's recon loop retries the
-durable write each cycle until it sticks.
+durable write each cycle until it sticks — probing for an existing
+row first, so a timeout after a committed write cannot insert a
+duplicate accept event.
 
-Three order-safety layers sit on the dispatch path:
+`trade_commands` rows are a fold of the `venue_events` truth plane.
+The coordinator's per-exchange `ReconciliationLoop` folds each active
+command's venue events into a durable status advance through a
+lifecycle CAS (`advance_trade_command_lifecycle`): the first accept
+supplies `acked_at` and the exchange order id, the max cumulative
+fill decides partial-vs-filled, and the last terminal-class event
+maps to the terminal status. The fold is rank-monotonic — a command
+status never regresses, so duplicate and out-of-order events collapse
+idempotently. A later accept or fill supersedes an earlier REJECTED
+(rejections are legally retried by the outbox, and a resurrection
+pass restores durably-REJECTED rows whose live venue evidence
+postdates the rejection); other terminals are never resurrected. The
+fold covers create/submit commands past the outbox's territory
+(`created` rows stay the outbox's), and stale-command reporting is
+scoped by evidence: an aged active command with zero venue evidence
+WARNs, unknown-only evidence reports INFO, real evidence is silent —
+the fold advances it. Cancels keep the legacy stale WARN because they
+share the original order's cid.
+
+Four order-safety layers sit on the dispatch path:
 
 - **Dispatch max-age TTL** (`TRADE_COMMAND_DISPATCH_TTL_S`, default
   30 s): the outbox CAS-expires a stale `CREATED` create/submit
@@ -618,6 +713,9 @@ Three order-safety layers sit on the dispatch path:
   outbox replays of an already-evidenced `client_order_id` (live
   pending entry, unhealed-accept queue, or a durable venue-event
   evidence probe) — fail-closed on probe failure, publishing nothing.
+  A replay whose evidence includes a breaker-open event instead
+  reruns the breaker disposition (below) so a crash between the
+  evidence write and the REJECTED publish cannot strand engine intent.
 - **UNKNOWN submit state**: when a venue submit outcome is ambiguous
   (timeout, connection drop mid-send), the executor parks the order
   as non-terminal `OrderEventEnum.UNKNOWN` instead of fabricating a
@@ -633,6 +731,17 @@ Three order-safety layers sit on the dispatch path:
   until resolution.
   An `order_unknown` safety-critical alert (user-scoped, with admin
   fan-out for strategy orders) fires while an order is parked.
+- **Breaker-open disposition**: a submit refused by the venue circuit
+  breaker (typed `CircuitBreakerOpenError`) is authoritative
+  not-submitted but NOT a venue rejection, and it must not blind-retry
+  — the breaker may have closed, and a late redispatched frame would
+  place an order the engine no longer tracks. The executor writes a
+  probe-guarded durable `order_breaker_open` venue event (which counts
+  as duplicate-submit evidence), CAS-fails the command row to terminal
+  `FAILED` so the outbox can never re-fetch it, and only then
+  publishes REJECTED with reason `circuit_breaker_open` so the engine
+  releases intent. Any step failing parks the entry and the recon loop
+  reruns the sequence until it completes.
 
 Spot (Kraken) `create_order` is additionally excluded from blind
 network retry — an ambiguous network failure may have placed the
@@ -655,11 +764,15 @@ restarts and publish retries converge instead of double-applying.
 Orders that went terminal during the downtime get their fill gap
 healed before the terminal event is projected; orders the venue
 cannot verify at startup are parked with DB-derived seeds and retried
-each recon cycle. Fills without a venue exec id (Walutomat-class
-cumulative polls) are never republished — they dedupe on an
-identity-shaped fallback key shared by the live engine and checkpoint
-replay, count toward the committed seed as already shown, and the
-durable rows heal a coordinator that missed them at its next restart.
+each recon cycle. Fills without a venue exec id are never
+republished — they dedupe on an identity-shaped fallback key shared
+by the live engine and checkpoint replay, count toward the committed
+seed as already shown, and the durable rows heal a coordinator that
+missed them at its next restart. This class is shrinking: Walutomat's
+cumulative polls now stamp deterministic `wal-{oid}-c{basis_units}`
+exec ids on every emission (the disappeared-order terminal upgrade
+gets a `-t` suffix so a same-cumulative status upgrade is never
+identity-dropped), so only rows recorded before that carry no id.
 Operator notes are in [`docs/operations.md`](operations.md)
 "Recovery-time corrective fills".
 
@@ -667,7 +780,8 @@ The `TraderCoordinator` class acts as the trade runtime coordinator
 and integrates `TradeService` (command lifecycle) and `BalanceService`
 (balance tracking). It spawns the outbox dispatcher (when a
 `SQLAlchemyRepository` is wired) plus per-exchange reconciliation
-loops that feed the circuit breaker. Canonical `Order` and `Execution`
+loops that drive the trade-command lifecycle fold and feed the
+circuit breaker. Canonical `Order` and `Execution`
 rows are persisted on the exchange/executor path.
 
 Multiple `TraderCoordinator` processes can run against the same DB

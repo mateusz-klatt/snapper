@@ -124,7 +124,7 @@ execution safety.
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
-| `TRADE_COMMAND_DISPATCH_TTL_S` | `30.0` | Max age, in seconds, for trade commands. Stale `CREATED` submits expire in the outbox before publishing; executor stale-frame handling verifies venue state before any order placement. Values `<= 0` disable the cap. Keep this below the engine's 60 s in-flight valve. |
+| `TRADE_COMMAND_DISPATCH_TTL_S` | `30.0` | Max age, in seconds, for trade commands. Stale `CREATED` submits expire in the outbox before publishing; executor stale-frame handling verifies venue state before any order placement; the executor's reconciliation sweep auto-rejects an unresolved `DISPATCHED` command on verified venue absence only after `max(120 s, 2 × TTL)`. Values `<= 0` disable the cap and the absence auto-reject. Keep this below the engine's 60 s in-flight valve. |
 | `PAIRED_EXECUTION_GUARD_ENABLED` | `false` | Fail-closed live multi-leg strategy gate. With the default, live exchanges refuse multi-leg groups while paper multi-leg remains allowed. Enable only after the paired-execution guard is deployed. |
 | `PAIRED_EXECUTION_ASSEMBLY_TIMEOUT_S` | `5.0` | Seconds a paired-execution group waits for all sibling legs to register durable commands before the guard can break the group. |
 | `PAIRED_EXECUTION_FILL_TIMEOUT_S` | `30.0` | Seconds an armed paired-execution group waits for fills before the guard treats a lagging leg as breakage and compensates. |

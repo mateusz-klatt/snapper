@@ -386,7 +386,15 @@ symbols) — does the executor park the order, record a non-terminal
 - failures that provably happened *before* any send (circuit breaker
   open, credentials, symbol/order-type validation) and authoritative
   venue answers (4xx, `success=false`, exhausted 429) still reject
-  immediately on every venue — only genuine ambiguity parks. Connection
+  immediately on every venue — only genuine ambiguity parks. A
+  breaker-open refusal additionally lands a durable terminal
+  disposition before its REJECTED — a venue event recording the
+  refusal plus the command row moved to FAILED — and publishes the
+  rejection with reason `circuit_breaker_open`, so consumers can tell
+  an infra refusal from a venue rejection and a redispatched frame can
+  never resubmit the command after the breaker closes; if any step
+  fails, the entry parks and the 60s reconciliation loop reruns the
+  disposition until engine intent is released. Connection
   refused rejects immediately only on Walutomat, where httpx surfaces
   connection-setup errors distinctly; on Kraken Spot and Futures
   connection-setup failures park as UNKNOWN by design, because the ccxt
@@ -405,12 +413,32 @@ across cycles, check the venue's open and closed orders for the client
 id from the alert before taking any manual action.
 The same 60s loop also heals fill gaps: when the venue reports more
 filled quantity than the executor has recorded, it emits a corrective
-fill, pricing market orders that lack a snapshot price from the
-venue's own per-order fills VWAP (`get_order_fill_vwap`). Only when no
-venue price resolves at all does it log
+fill, pricing market orders that lack a snapshot price from the VWAP
+in the venue's own per-order fills summary (`get_order_fill_summary`).
+Only when no venue price resolves at all does it log
 `Recon: fill gap ... no price on market order, skipping corrective fill`
 — a fill mismatch needs manual reconciliation against the venue's fill
 history only if that ERROR persists across cycles.
+Correctives also carry the venue's real cumulative fee — the order
+snapshot's running commission, or the fills-summary total — instead of
+fabricating a zero fee. When the snapshot carries no fee and the fills
+summary cannot answer (failed lookup, partial page, an implemented
+source with no rows), the corrective is deferred with a WARNING for at
+most 5 cycles, then emitted fee-less under a single CRITICAL log so
+the order can still reach its terminal state. After that CRITICAL the
+quantity is healed but the fee is not — reconcile the fee manually
+against the venue's fill history.
+
+On Walutomat, where fills come from polling, an order that disappears
+from the active list is never guessed terminal: a failed final-state
+query keeps the order tracked and retries every poll cycle (a wrong
+FILLED would create phantom position; a wrong CANCELED would free
+engine intent while the order may have filled). Each failed attempt
+logs a WARNING; the 10th consecutive failure escalates to a single
+CRITICAL and the retries continue. On that CRITICAL, check the order
+on the venue — no manual terminal injection is needed, and the 60s
+reconciliation loop converges the pending entry independently once
+the venue answers.
 
 ### Duplicate-dispatch guard and dispatch TTL
 
@@ -421,8 +449,11 @@ Two executor/outbox gates close the remaining order-flow loss windows:
   re-publishes the same `client_order_id`. The executor now drops such
   replays silently: an entry already pending, an accepted order
   awaiting its durable-event heal, or durable venue-event evidence
-  (accepted/fill/terminal/unknown — rejections excluded so legitimate
-  retries still flow) all block the re-submit before any venue call.
+  (accepted/fill/terminal/unknown/breaker-open — rejections excluded
+  so legitimate retries still flow) all block the re-submit before any
+  venue call. A replay carrying breaker-open evidence is the one
+  exception to the silent drop: it reruns the breaker disposition
+  (above) so a crash mid-disposition cannot leave engine intent held.
   A failed evidence check drops FAIL-CLOSED.
 - **Dispatch max-age TTL** (`TRADE_COMMAND_DISPATCH_TTL_S`, default
   30s, `<= 0` disables). Stale CREATED create/submit commands expire
@@ -432,14 +463,43 @@ Two executor/outbox gates close the remaining order-flow loss windows:
   high-water mark) are resolved at the executor against venue truth: a
   frame whose order EXISTS under the client id is adopted as accepted
   (a crash-window replay that actually placed), an unverifiable frame
-  drops silently (the reconciler WARN and engine valve cover it), and
-  only a venue-verified-absent frame rejects. A stale row that DOES
+  drops silently (the row stays DISPATCHED for the verification sweep
+  below and the engine valve), and only a venue-verified-absent frame
+  rejects. A stale row that DOES
   carry submit evidence publishes anyway and is absorbed by the
   duplicate guard — expiring it would fabricate a terminal state for a
   possibly-live order. Cancels and replaces are exempt: expiring a
   stale cancel would strand a live order, and replace outcomes are
   reported on the lightweight cancel/replace event path. Keep the TTL
   below the engine's 60s in-flight valve.
+
+Behind the two gates, the durable command plane reconciles itself. The
+coordinator's reconciliation loop folds the append-only `venue_events`
+rows into `trade_commands` status advances (ack, partial/full fill,
+terminal), which rescopes its stale-command logging: a
+`stale command ... no venue evidence` WARN fires only for an over-age
+create/submit command with ZERO venue evidence (a real anomaly);
+unknown-only evidence logs at INFO (executor verification is already
+working it); a command with real evidence is silent — an old open
+limit order is healthy, not stale. Cancel commands keep the legacy
+WARN. The executor's 60s cycle works the zero-evidence queue from the
+venue side: each unresolved DISPATCHED command gets a client-id lookup
+— a found order is adopted under its original request (this also
+recovers parked-UNKNOWN entries lost to an executor restart; the
+DISPATCHED row is the durable record of the send intent), and only two
+consecutive authoritative absences on a command younger than an hour
+auto-REJECT to release engine intent. Absence never auto-rejects when
+the dispatch TTL is disabled (nothing expires frames, so one may
+legitimately still be in flight at any age) or past the hour bound
+(venue closed-order lookback makes absence non-authoritative) — those
+cases WARN for operator attention instead. The same cycle adopts ghost
+orders — open at the venue under our client id with no in-memory entry
+— by rebuilding the request from the command row; an open order with
+NO command row is foreign/manual, warned about once and never touched.
+A durably REJECTED command later found open (or with live venue
+evidence postdating the rejection) is healed loudly: the order is
+adopted and the command resurrected to ACCEPTED, so a false rejection
+cannot silently strand a live order.
 
 ### Private fill-stream supervision
 
@@ -777,8 +837,8 @@ contracts (`MNQM6-CME` = Jun 26, etc.) and must be rotated before the
   `can_trade=True` instrument (crypto/xStocks) for execution.
 - **Fragmented Kraken Equities 1m candles** (a settled minute holding
   more than one historical candle version, written from partial trade
-  sets): the live-synthesis builder fix (`065463de`, 2026-06-10) stops
-  new fragmentation, and the historical damage window
+  sets): the live-synthesis builder fix (`065463de`, live since
+  2026-06-10) stops new fragmentation, and the historical damage window
   (2026-05-24 → 2026-06-10) was repaired in full on 2026-06-11
   (158 444 candles rebuilt from raw trades, rerun-idempotent). The
   one-off repair tooling was removed after execution; if fragmentation

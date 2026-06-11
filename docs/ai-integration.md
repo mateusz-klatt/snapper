@@ -384,8 +384,8 @@ optional; `null` means "unbounded on this axis".
 - `max_order_quantity_per_instrument` — JSON dict `{instrument:
     max_qty}` OR a scalar applied to every instrument.
 - `max_open_orders` — all-time count of the delegate's in-flight
-    commands (statuses in `created/dispatched/acked/accepted/
-    partially_filled`).
+    commands (every non-terminal status: `created/dispatched/
+    direct_dispatched/accepted/partially_filled`).
 - `max_daily_notional_usd` — rolling 24h sum of `submit_quantity *
     submit_price_usd` across non-rejected commands (submit-time
     commitment basis; partial fills don't change accounting).

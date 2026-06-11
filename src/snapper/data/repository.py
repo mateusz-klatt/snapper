@@ -2291,10 +2291,10 @@ class Repository(ABC):
         """Count user's non-terminal trade-commands (``max_open_orders`` cap).
 
         All-time count.
-        Non-terminal statuses: ``created``, ``dispatched``
-        ``acked``, ``accepted``, ``partially_filled``. Only
-        command_type ``submit`` / ``replace`` rows count — cancels
-        are not in-flight exposure.
+        Non-terminal statuses: ``created``, ``dispatched``,
+        ``direct_dispatched``, ``accepted``, ``partially_filled``.
+        Only command_type ``create`` / ``submit`` / ``replace`` rows
+        count — cancels are not in-flight exposure.
 
         Args:
             user_public_id: UUID of the user to count for.

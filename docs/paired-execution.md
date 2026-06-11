@@ -45,6 +45,17 @@ trade again — typically within one scanner cycle of the last fill settling.
 If you see a `broken` or `compensating` incident with automation still in
 flight, the correct action is usually to wait one cycle.
 
+A submit the executor refuses locally because its venue circuit breaker is
+open counts as a leg rejection too: the order is rejected with reason
+`circuit_breaker_open` and its command is durably FAILED, so it can never
+fire late once the breaker closes. A flatten refused the same way counts as
+that flatten's terminal — the leg reopens to `filled` and the sweep
+re-flattens it next cycle, retrying until the breaker closes. Breakage does
+not depend on live messages alone: the coordinator's reconciliation loop
+folds durable venue events into command statuses, and the scanner projects
+a durably-terminal original command onto its stuck leg, so a lost
+reject/cancel message still breaks the group within a cycle.
+
 ## When the guard hands off to you: `manual_intervention`
 
 The guard escalates a leg (and its group) to `manual_intervention` instead
@@ -130,14 +141,24 @@ re-attestation path accepts a `compensating` group with a manual leg).
     scanner cycle; the next cycle re-halts. Self-healing, no action.
 - **Missed not-tradeable reject**: a flatten rejected locally as
     not-tradeable (a delisted instrument) writes no durable venue event; if
-    its live message is also lost, the leg stays `compensating` + halted.
-    In this window the group is NOT attestable: terminalize requires every
-    non-manual leg settled, a `compensating` leg is not, and the scanner's
-    compensating sweep only reprojects from durable venue events (it finds
-    none here), so POST terminalize returns 409 indefinitely. Resolution is
-    reconciliation territory — the scope stays halted (fail-safe) until a
-    durable venue event for the flatten appears or the rows are reconciled
-    by hand.
+    its live message is also lost, the leg stays `compensating` + halted,
+    and the group is NOT attestable while it does (terminalize requires
+    every non-manual leg settled, so POST terminalize returns 409). The
+    executor's dispatched-command verification sweep normally heals this:
+    the flatten's command row is still `dispatched` with no venue evidence,
+    so on a venue that can look an order up by its client order id the
+    sweep verifies it absent twice (no earlier than
+    `max(120 s, 2 × dispatch TTL)` after creation), publishes the REJECTED
+    status, and records the durable `order_rejected` event — the
+    compensating sweep then settles the leg, and the residual re-flattens
+    or escalates to `manual_intervention` under the normal sweep rules.
+    The sweep does NOT auto-reject when the dispatch TTL is disabled (a
+    frame may then legally be in flight at any age), when the command has
+    aged past one hour (venue closed-order lookback makes absence
+    non-authoritative — WARN-only escalation), or when the venue has no
+    client-order-id lookup; in those cases the scope stays halted
+    (fail-safe) until a durable venue event for the flatten appears or the
+    rows are reconciled by hand.
 - **Dispatch max-age TTL applies to paired commands too**: a paired
     `CREATED` command older than `TRADE_COMMAND_DISPATCH_TTL_S`
     (default 30 s) is CAS-expired by the outbox instead of dispatched —

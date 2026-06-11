@@ -158,13 +158,24 @@ max-age TTL (`TRADE_COMMAND_DISPATCH_TTL_S`, default 30 s): the outbox
 CAS-expires stale CREATED create/submit commands to EXPIRED instead of
 publishing them, so an outage backlog cannot fire orders priced off
 old signals. Cancels are exempt — expiring a stale cancel would strand
-a live order.
+a live order. A submit refused by an open venue circuit breaker is
+neither left ambiguous nor blind-retried: the executor records durable
+breaker-open evidence (counted as duplicate-submit evidence), marks
+the command FAILED, and publishes a rejection with reason
+`circuit_breaker_open` so the engine releases its in-flight intent;
+if any step fails, the order is parked and the reconciliation loop
+reruns the disposition.
 
 Private fill streams are supervised: a dead venue execution stream is
 respawned with capped backoff, each respawn reconciles fills missed
 during the dark window before resubscribing, and executor startup
 recovery emits corrective fills for anything filled while the executor
 was down instead of re-baselining to the venue's current cumulative.
+Corrective fills carry venue-reported fees rather than fabricating
+fee-less executions; when the venue's fee source is transiently
+unavailable, the corrective is deferred for a bounded number of
+reconciliation cycles before degrading to a fee-less emission with a
+critical alert.
 The same supervision wraps every executor core loop (order handling,
 reconciliation, heartbeat): a died loop respawns with capped backoff,
 and a persistent death streak escalates by crashing the executor so

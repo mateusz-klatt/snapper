@@ -839,7 +839,10 @@ Executor:
     trade outbox, and accepts direct `OrderReplaceData` command frames
     from compatible publishers
 3.  Executes order via exchange API
-4.  Persists `VenueEvent` rows for accepted, fill, and terminal observations
+4.  Persists `VenueEvent` rows for accepted (`order_accepted`), fill
+    (`fill_observed`), terminal (`order_terminal`), rejected
+    (`order_rejected`), ambiguous-submit (`order_submit_unknown`), and
+    breaker-open (`order_breaker_open`) observations
 5.  Publishes `ExecutionData`, `OrderData`, or lightweight `OrderEventData`
 
 Before any venue call, each submit passes two gates. The duplicate-submit
@@ -848,13 +851,19 @@ checking the live pending entry, the unhealed-accept queue, and the durable
 `has_order_submit_evidence` probe (which excludes `order_rejected` rows so
 a legitimate retry after a definitive reject still flows). A failed durable
 probe is fail-closed — the command is dropped as if duplicate — and dropped
-duplicates publish nothing. The staleness gate then handles commands older
-than the dispatch TTL (`TRADE_COMMAND_DISPATCH_TTL_S`, default 30 s,
+duplicates publish nothing, with one exception: a replay whose durable
+evidence includes `order_breaker_open` reruns the breaker-open disposition
+described below instead of dropping silently, so an executor crash
+mid-disposition cannot leave the engine's intent held forever. The
+staleness gate then handles commands older than the dispatch TTL
+(`TRADE_COMMAND_DISPATCH_TTL_S`, default 30 s,
 measured from the command's `signaled_at`) with venue-truth-backed
 outcomes: a single client-id lookup runs first; an order found on the venue
 is adopted as accepted, an unverifiable venue (lookup unsupported or
 unreachable) makes the frame drop silently, and only a verified absence
-publishes `rejected` and records an `order_rejected` venue event.
+publishes `rejected` and records an `order_rejected` venue event — the
+durable row is written only after a confirmed publish, so a failed publish
+leaves the command for the reconciliation loop to release durably.
 
 When a submit fails ambiguously (the order may exist on the venue), the
 executor never fabricates a rejection. It parks the pending entry and
@@ -866,6 +875,17 @@ resolve, the executor publishes `OrderData` on
 `orders.events.{exchange}.{instrument}.unknown` (non-terminal; the engine
 holds its in-flight guard) and the reconciliation loop re-verifies parked
 entries each cycle until the order resolves to accepted or rejected.
+
+A submit refused because the venue circuit breaker is open gets a distinct
+disposition instead of a fabricated venue rejection: the executor records a
+durable `order_breaker_open` venue event (counted as duplicate-submit
+evidence, so a late redispatch of the same command never resubmits), marks
+the durable command FAILED, and only then publishes `rejected` with
+`reason="circuit_breaker_open"` in the `OrderData` payload — subscribers
+can distinguish the local infrastructure refusal from a venue rejection.
+If any step fails, the pending entry is parked and the reconciliation loop
+reruns the sequence; the engine releases its in-flight intent only on the
+confirmed publish.
 
 Fills arrive on the venue's private execution WebSocket stream. A
 supervisor task owns the stream's lifecycle: any termination — SDK
@@ -917,7 +937,24 @@ exec ids (every consumer dedupes by exec id), and the remaining
 venue-ahead gap is emitted as corrective fills with deterministic
 synthetic ids — fills that landed while the executor was down are
 projected instead of being silently re-baselined away (see
-docs/operations.md → Recovery-time corrective fills).
+docs/operations.md → Recovery-time corrective fills). Corrective fills
+carry real venue fees: the venue's cumulative commission is tracked per
+fee currency against what was already published, and each corrective's
+`fee`/`fee_asset` carries exactly the not-yet-attributed remainder, so
+per-fill live fees are never re-charged. A corrective emits fee-less only
+when the venue exposes no usable fee source, or after the bounded
+deferral for a transiently unavailable source expires with a CRITICAL
+log.
+
+Because parked entries are in-memory, the executor's reconciliation loop
+also closes restart gaps against venue truth: open venue orders carrying
+our client order ids but missing from pending state are adopted under the
+original request rebuilt from the durable command row, and dispatched
+commands with no resolving venue evidence are verified by client id — a
+found order is adopted, while repeated authoritative absence (only with
+the dispatch TTL enabled, and bounded by an age cutoff) publishes
+`rejected`. Subscribers may therefore see `accepted` or `rejected` events
+for orders the current executor process never submitted.
 
 `PlanExecutorService` (see docs/architecture.md → Execution Plans) also
 subscribes to `orders.events.` and `market.` on the broker XPUB, routes
