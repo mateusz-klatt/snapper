@@ -212,11 +212,16 @@ and **disappeared orders** (pending orders absent from the open-orders
 snapshot).
 
 Always-on — runs alongside the executor's order handler, heartbeat,
-and supervised private fill-stream tasks (no feature flag; the
-defensive polling is cheap enough that gating it provided no value).
-Reconciliation cycles are serialized on an executor-level lock: the
-periodic 60s cycle and the fill-stream supervisor's post-reconnect
-heal cannot run concurrently and double-emit the same corrective.
+and private fill-stream tasks, all of which run as supervised loops
+(no feature flag; the defensive polling is cheap enough that gating
+it provided no value). Reconciliation cycles are serialized on an
+executor-level lock: the periodic 60s cycle and the fill-stream
+supervisor's post-reconnect heal cannot run concurrently and
+double-emit the same corrective. Each cycle — including lock
+acquisition — is bounded by a 300s timeout, so a hung venue call
+cannot hold the lock forever and wedge both loops; a cancelled cycle
+is safely recomputed next period because correctives carry stable
+synthetic ids.
 
 **`_reconcile_fill_gap`** (in `messaging/executors/base.py`)
 emits a corrective `ExecutionUpdate` covering the observed cum-qty
@@ -293,6 +298,43 @@ to what the engine actually received) and `last_recorded_cum_qty`
 checkpoint replay of the durable rows sums to venue truth whichever
 prior step failed).
 
+#### Executor loop supervision and escalation
+
+The same supervisor pattern covers every executor loop, not just the
+fill stream: a generic `_supervise_loop` (in
+`messaging/executors/base.py`) wraps the order handler, the heartbeat
+loop, and the reconciliation loop with the identical capped jittered
+exponential backoff (1 s → 60 s, reset after 300 s of healthy
+runtime). Before respawning the order handler the supervisor rebuilds
+its SUB socket — re-entering on a poisoned socket would just die
+again. Previously a died order-handler task was a permanent invisible
+order-execution outage while the process kept reporting RUNNING.
+
+A `_supervise_loop`-wrapped loop that keeps dying for 1500 s without
+a 300 s healthy run escalates: the supervisor raises
+`ExecutorTaskDeadError` out of `start()`, sibling tasks are
+cancelled, ZMQ sockets are closed, and the process launcher rebuilds
+a fresh service instance — safe because startup recovery emits
+corrective fills. The fill stream's dedicated supervisor backs off
+indefinitely and never escalates. The ceiling deliberately
+exceeds the launcher's 1200 s healthy-uptime budget reset, so
+escalation-driven restarts retry slowly forever instead of exhausting
+the restart budget; only fast startup crash-loops exhaust it.
+
+Executor heartbeats report honest status derived from these
+supervision seams instead of a hardcoded HEALTHY: active death
+streaks, a reconciliation progress clock (recon swallows its
+per-cycle failures by design, so it can fail forever without dying —
+only progress age shows that), the age of the order command currently
+in flight (a command wedged inside its venue call never dies and
+never progresses), an unhealed accept-event backlog, and parked
+ambiguous submits all degrade the published status to WARNING or
+ERROR. The computation is crash-proofed: a raising status read
+degrades to WARNING with the failure in the reasons, never heartbeat
+absence or false HEALTHY. Restart-budget exhaustion at the launcher
+is paged through the same heartbeat pipeline (see "Restart watchdog
+and parking" under Processes).
+
 ### Application (`src/snapper/application/`)
 
 Business logic:
@@ -310,6 +352,11 @@ Business logic:
   and `market_persist_policy.py` (runtime policy deciding which
   market-data streams are persisted to DB versus cache-only)
 - **Updaters** (`updaters/`) — Data updates (symbols, historical)
+- **Maintenance** (`maintenance/`) — Offline repair services:
+  `equity_candle_repair.py` rebuilds fragmented Kraken Equities
+  one-minute candles from persisted raw trades (chunked, idempotent,
+  dry-run by default, writes through the candle SCD2 value guard);
+  invoked via the CLI — see [`docs/cli.md`](cli.md)
 - **Risk** (`risk/`) — Risk defaults and sizing models
 - **Portfolio** (`portfolio/`) — Signed long/short portfolio accounting
 
@@ -571,8 +618,11 @@ Three order-safety layers sit on the dispatch path:
   (`find_order_by_client_id`: could-not-check never counts as
   venue-says-no); a found order is adopted, two consecutive
   authoritative absences reject safely, anything else stays parked.
-  The recon loop gives every parked entry a verification round each
-  cycle, and the engine holds the in-flight guard until resolution.
+  The recon loop verifies parked entries each cycle under a per-cycle
+  fairness cap with index-based rotation (a large parked set rotates
+  through verification rounds instead of starving its tail or blowing
+  the cycle's time budget), and the engine holds the in-flight guard
+  until resolution.
   An `order_unknown` safety-critical alert (user-scoped, with admin
   fan-out for strategy orders) fires while an order is parked.
 
@@ -762,6 +812,30 @@ Processes can be:
 
 - `long_running` — Run continuously (services)
 - `one_shot` — Execute once (tasks)
+
+### Restart watchdog and parking
+
+`ProcessLauncherService` reconciles died processes toward their
+desired state with backoff and two restart budgets (consecutive
+short-lived FAILED deaths, plus a lifetime backstop; both reset by
+healthy uptime). The watchdog drives native subprocesses and
+in-process async-task/thread processes through the same machinery —
+a died per-wallet executor task is respawned with the same backoff,
+budget, and stop-race guards as a native feed subprocess instead of
+being finalized FAILED and silently never restarted.
+
+When a process exhausts its restart budget, a CORE market-data
+publisher escalates to a feed-container restart; any other process is
+parked. Parking is level-triggered and visible: `/health` reports
+ERROR while any process is parked (checked before every other branch,
+including the API-only early return and the TTL cache), and for
+per-wallet executor instances the launcher bursts synthetic ERROR
+heartbeats on the instance's own per-wallet heartbeat topic,
+re-bursting hourly while parked, so the existing
+critical-system-error alert pipeline pages the operator without any
+new alert type or topic family. A successful (re)start or a
+successful deliberate stop unparks the name; a failed stop or a
+failed manual restart keeps the marker.
 
 ### Deployment Modes
 

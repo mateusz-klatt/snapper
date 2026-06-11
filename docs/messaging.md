@@ -125,6 +125,32 @@ executor heartbeat envelope additionally carries `meta.wallet_public_id` so
 subscribers that prefix-match the 4-segment parent topic can still
 disambiguate by reading the payload.
 
+Executor heartbeats derive `status` from supervised-loop health instead of
+reporting a fixed healthy value. ERROR fires on an active loop death streak
+of at least 600 s, no successful reconciliation pass for 900 s, or an order
+command in flight for 600 s; WARNING fires on 2+ deaths within an active
+streak, reconciliation progress age of at least 300 s, a command in flight
+for 120 s, an unhealed accept-event backlog, or parked ambiguous submits
+awaiting venue verification. A death streak counts as active only while its
+last death is younger than 300 s, so a loop that died once and then
+self-healed never ages into a false alarm. `lag_ms` carries the
+reconciliation progress age and `meta.status_reasons` lists the
+human-readable reasons; if the status computation itself raises, the frame
+still publishes as WARNING with the failure recorded in `status_reasons` —
+a broken computation can cause neither heartbeat absence nor a false
+healthy report.
+
+The launcher also publishes on the per-wallet executor topics: when a
+per-wallet executor exhausts its restart budget and is parked, the launcher
+emits bursts of three synthetic ERROR heartbeats on the instance's own
+topic, spaced 2 s apart so every frame clears the bridge's
+per-subscription forwarding throttle, re-bursting hourly while the name
+stays parked. These frames are recognizable by `meta.synthetic: true`,
+`meta.origin: "launcher"`, and `meta.reason: "restart_budget_exhausted"`;
+they drive the existing critical-system-error alert pipeline without any
+new topic family. A successful restart or stop unparks the name and cancels
+the burst mid-flight.
+
 ### Admin
 
 Cross-cutting administrative notifications fanned out to every
@@ -920,7 +946,11 @@ Bridge automatically:
 - Applies per-frame scope filters for `ai_reviews.*`, `orders.events.*`, and
   `alerts.*`; malformed scoped frames fail closed before fan-out
 - Forwards messages via `_forward_to_clients` with per-subscription backpressure
-- Throttles market data per subscriber (configurable `throttle_ms`)
+- Throttles forwarding per subscriber: the live WebSocket subscribe path
+  registers every subscription with a flat 100 ms interval, regardless of
+  topic (topic schemas carry per-prefix `throttle_ms` metadata, but only the
+  schema-aware registration path reads it, and the WebSocket handler does
+  not use that path)
 - Drops market data when a client exceeds `MAX_PENDING_MESSAGES_MARKET` (100)
 - Disconnects slow clients on trade topics when exceeding `MAX_PENDING_MESSAGES_TRADE` (1000)
 - Unsubscribes when last client disconnects

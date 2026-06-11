@@ -840,13 +840,14 @@ snapper repair-equity-candle-fragmentation --start 2026-04-01 --dry-run
 # Apply, bounded window, smaller upsert batches.
 snapper repair-equity-candle-fragmentation \
     --start 2026-04-01 --end 2026-07-01 \
-    --no-dry-run --batch-size 500 --chunk-hours 1
+    --no-dry-run --batch-size 200 --chunk-hours 1
 ```
 
 Options: `--start` (inclusive UTC, required), `--end` (exclusive UTC,
 defaults to now), `--dry-run/--no-dry-run` (dry by default),
-`--batch-size` (rows per upsert call), `--chunk-hours` (raw-trade scan
-window per chunk; must be a whole number of minutes).
+`--batch-size` (rows per upsert call, default `500`), `--chunk-hours`
+(raw-trade scan window per chunk, default `1`; must be a whole number
+of minutes).
 
 The service floors `--start` and `--end` down to whole UTC minutes, so
 the wall-clock `--end` default never rebuilds the still-in-progress

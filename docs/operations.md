@@ -494,7 +494,7 @@ gap for it stays unhealed — fix the DB and restart).
 ### Executor task supervision and service restarts
 
 Every executor core loop (order handler, reconciliation, heartbeat —
-plus the fill stream, supervised since P1-1) runs under an in-process
+plus the fill stream covered above) runs under an in-process
 supervisor: a loop that dies (exception or unexpected clean return)
 respawns with capped jittered backoff (1s doubling to 60s; a 5-minute
 healthy run resets it), preserving all in-memory order state. The order
@@ -503,7 +503,9 @@ frames (already consumed by ZMQ) are logged and skipped, never
 respawn-looped. Reconciliation cycles are bounded (300s) so a hung
 venue call cannot hold the recon lock forever, and parked-UNKNOWN
 verification is fairness-capped (3 per cycle, index-rotated) so a large
-parked set cannot starve its tail. A death streak older than 25 minutes
+parked set cannot starve its tail. On the core loops (order handler,
+reconciliation, heartbeat — the fill stream's supervisor only backs
+off, it never escalates), a death streak older than 25 minutes
 escalates: the whole service crashes out of `start()` (siblings
 cancelled, sockets closed) and the process launcher — whose
 task-completion handler now drives the same restart watchdog as native
@@ -512,7 +514,38 @@ corrective fills. The escalation ceiling deliberately exceeds the
 launcher's healthy-uptime reset, so escalations retry forever at a slow
 cadence instead of exhausting the restart budget; only fast startup
 crash-loops (bad credentials, DB down at boot) park the executor after
-the budget, with ERROR logs as the operator signal.
+the budget.
+
+Executor heartbeats report derived health, not a hardcoded HEALTHY:
+each beat is computed from the supervised-loop seams, so degradation
+pages operators through the existing system-degradation alert
+(`critical_system_error`: 3 consecutive non-HEALTHY beats, deduped to
+about one page per hour per instance) instead of staying green while a
+loop is dead. An active death streak reports WARNING from its second
+death and ERROR once the streak is 10 minutes old (well before the
+25-minute escalation); a reconciliation loop with no completed pass
+for 5 / 15 minutes reports WARNING / ERROR (recon swallows per-cycle
+faults by design, so only its progress clock can expose a recon that
+fails forever without dying); an order command stuck in flight for
+2 / 10 minutes reports WARNING / ERROR (a wedged handler neither dies
+nor progresses); an unhealed accept-event backlog or parked-UNKNOWN
+submits report WARNING. The executor heartbeat's `lag_ms` is the age
+of the last successful reconciliation pass. Per-wallet executor
+instances publish on per-wallet heartbeat topics
+(`system.heartbeats.executor.{exchange}.{wallet_short}`), and the
+alert rule parses those — previously per-wallet executor heartbeats
+were silently discarded, so a degraded executor could never page.
+
+A parked executor is paged, not just logged: on giving up, the
+launcher speaks for the dead instance on its own per-wallet heartbeat
+topic with a synthetic 3-frame ERROR burst, re-bursting hourly while
+the instance stays parked — the page is level-triggered (a notify
+restart that loses one burst is healed by the next) while the alert
+dedup still caps it at about one page per hour. A successful (re)start
+or a successful deliberate stop unparks the instance and cancels the
+burst. `GET /health` additionally reports ERROR while any process is
+parked — checked before every other branch, including API-only mode —
+as the backstop for a lost burst.
 
 ### Fault-injection testing
 
@@ -726,3 +759,12 @@ contracts (`MNQM6-CME` = Jun 26, etc.) and must be rotated before the
 - **Submit returns `422 instrument_market_data_only`**: expected.
   TradFi is observation-only. Point the strategy at a
   `can_trade=True` instrument (crypto/xStocks) for execution.
+- **Fragmented Kraken Equities 1m candles** (a settled minute holding
+  more than one historical candle version, written from partial trade
+  sets): rebuild from persisted raw trades with
+  `snapper repair-equity-candle-fragmentation` — dry-run by default,
+  with `--end` capped to one hour before now (the settled horizon for
+  this delayed feed). The full runbook, including the
+  `ix_trades_executed_at` migration prerequisite, is in the
+  Maintenance section of `docs/cli.md`. Never run it in parallel with
+  an equities candle backfill.

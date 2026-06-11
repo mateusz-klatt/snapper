@@ -165,6 +165,15 @@ respawned with capped backoff, each respawn reconciles fills missed
 during the dark window before resubscribing, and executor startup
 recovery emits corrective fills for anything filled while the executor
 was down instead of re-baselining to the venue's current cumulative.
+The same supervision wraps every executor core loop (order handling,
+reconciliation, heartbeat): a died loop respawns with capped backoff,
+and a persistent death streak escalates by crashing the executor so
+the process launcher rebuilds a fresh instance. Executor heartbeats
+report status derived from actual loop health — death streaks,
+reconciliation progress, stuck in-flight commands — instead of a
+hardcoded healthy, and an executor parked after exhausting its restart
+budget is alerted through launcher-published synthetic error
+heartbeats rather than vanishing silently.
 
 ### Process-Managed Executors
 
