@@ -31,6 +31,7 @@ from snapper.application.engine.trader import TraderCoordinator
 from snapper.config.app import AppSettings
 from snapper.core.partitioning import ShardOwnership
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import SignalData
 
@@ -603,3 +604,42 @@ class TestRecoveryOwnershipFilters:
         coord.repository = cast(Any, mock_repo)
         await coord._recover_engine_state()
         assert coord.engines == {}
+
+
+@pytest.mark.asyncio
+async def test_adopted_accepted_with_unknown_cid_under_n2_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An adopted re-arm frame for an unregistered cid is dropped under N>1 (#155).
+
+    Given: a two-instance coordinator that never registered the cid
+        (re-arm targets engines that ONCE HELD intent; those registered
+        the cid at dispatch and never popped it on the false reject),
+    When: an adoption-shaped ACCEPTED (reason="adopted") arrives,
+    Then: admission drops the frame before the status handler runs —
+        the cold-coordinator path is restart recovery, not the bus.
+    """
+    coord = _make_coordinator_with_ownership(monkeypatch, instance_id=0, instance_count=2)
+    handled_status = MagicMock()
+    monkeypatch.setattr(coord, "_handle_order_status", handled_status)
+    msg = OrderData(
+        type="order",
+        public_id="os-1",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        session_id="",
+        sequence_id=0,
+        client_order_id="never-registered",
+        exchange_order_id="x-1",
+        instrument="BTC-USD",
+        exchange="kraken",
+        side="buy",
+        status="accepted",
+        reason="adopted",
+        order_type="market",
+        size=0.5,
+        filled_size=0.0,
+        created_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    payload = msg.to_json().encode("utf-8")
+    await coord._dispatch_order_event("orders.events.kraken.BTC-USD.accepted", payload)
+    assert handled_status.call_count == 0

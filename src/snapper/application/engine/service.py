@@ -507,6 +507,49 @@ class TradingEngineService:
         self._pending_unknown = False
         return True
 
+    def rearm_pending_intent(self, client_order_id: str) -> bool:
+        """Re-arm the in-flight guard for a venue-live adopted order (#155).
+
+        A released engine (it consumed a false REJECTED, or the lazy
+        timeout valve cleared the guard) never learns the order is live
+        again — the next signal would emit a NEW order while the adopted
+        one still works the book. Called by the coordinator on an
+        adoption-shaped ACCEPTED (``reason="adopted"``). Deliberately NOT
+        the restart-only ``_mark_order_in_flight`` semantics: that helper
+        overwrites ``pending_client_order_id`` unconditionally, which on
+        a running engine would clobber a newer live intent.
+
+        Dispositions:
+            - in flight for a DIFFERENT order: no-op, returns False
+              (clobber guard — the newer intent wins; the residual is
+              the coordinator's WARN).
+            - in flight for the SAME order: refresh ``_in_flight_since``
+              (a live venue observation must not let a near-expired
+              valve clear right after adoption), returns True.
+            - released: arm with a FRESH timeout window — parity with
+              restart recovery, NOT the never-released timeline; after
+              the fresh window lapses with the order still live the
+              valve clears again (accepted residual, see task #155).
+              ``_pending_unknown`` resets: a venue-confirmed-live order
+              is by definition no longer ambiguous.
+
+        Args:
+            client_order_id: The adopted order's client id.
+
+        Returns:
+            True when the guard was re-armed or refreshed.
+        """
+        if self.order_in_flight:
+            if self.pending_client_order_id != client_order_id:
+                return False
+            self._in_flight_since = time.monotonic()
+            return True
+        self.order_in_flight = True
+        self.pending_client_order_id = client_order_id
+        self._in_flight_since = time.monotonic()
+        self._pending_unknown = False
+        return True
+
     @property
     def mode(self) -> ExecutionMode:
         """Get execution mode based on exchange type.

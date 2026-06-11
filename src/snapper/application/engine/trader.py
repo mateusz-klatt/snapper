@@ -59,6 +59,7 @@ from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.core.paired_execution import paired_halt_reason
 from snapper.core.partitioning import ShardOwnership
+from snapper.core.types import ORDER_STATUS_REASON_ADOPTED
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import FillStatusEnum
@@ -114,6 +115,12 @@ from snapper.messaging.topics.builders import parse_order_event_topic
 from snapper.messaging.topics.builders import parse_signal_topic
 
 _bootstrap_settings = get_bootstrap_settings()
+
+_REARM_RETIRED_CIDS_MAX = 10_000
+"""Bound of the retired-cid LRU guarding late adopted re-arm frames (#155).
+
+Mirrors the engine exec-id dedupe bound; at one order per second this
+covers hours of lookback while capping memory."""
 
 _COMPLETED_GROUP_REPLAY_WINDOW = timedelta(days=7)
 """How far back startup recovery replays fills into COMPLETED paired groups.
@@ -298,6 +305,7 @@ class TraderCoordinator(RegisterableProcess):
         self.outbox: OutboxDispatcher | None = None
         self.guard_scanner: PairedExecutionGuardScanner | None = None
         self._order_shard_keys: dict[str, str] = {}
+        self._rearm_retired_cids: OrderedDict[str, None] = OrderedDict()
         self._wallet_short_to_id: dict[str, str] = {}
         self._ownership: ShardOwnership | None = None
         self._caps_enforcer: TradingCapsEnforcer | None = None
@@ -2180,34 +2188,49 @@ class TraderCoordinator(RegisterableProcess):
     def _find_engine_by_fill_scope(self, fill: ExecutionData) -> TradingEngineService | None:
         """Match a fill by wallet-aware or legacy instrument scope.
 
+        Delegates to :py:meth:`_find_engine_by_scope_values` — one source
+        of truth for the walleted-frames-never-fall-back-to-legacy rule.
+        """
+        return self._find_engine_by_scope_values(
+            fill.exchange, fill.instrument, fill.wallet_public_id
+        )
+
+    def _find_engine_by_scope_values(
+        self,
+        exchange: str,
+        instrument: str,
+        wallet_public_id: str | None,
+    ) -> TradingEngineService | None:
+        """Match an engine by wallet-aware or legacy instrument scope.
+
         O(1) lookup against scope indices populated when an engine is
         registered via :py:meth:`_register_engine_for_lookup`. The
         wallet-aware path requires a non-empty ``wallet_public_id`` on
-        both the fill and the engine — when the fill is wallet-scoped
-        no fallback to the legacy (exchange, instrument) lookup runs,
-        matching the prior linear-scan semantics. Falls back to a
-        linear scan only when ``self.engines`` is no longer the
-        auto-indexing :py:class:`_EngineRegistry` instance.
+        both the frame and the engine — a WALLET-SCOPED frame never
+        falls back to the legacy (exchange, instrument) lookup (the
+        legacy index is populated unconditionally, so a fallback could
+        match wallet A's engine for wallet B's order), matching the
+        prior linear-scan semantics. Falls back to a linear scan only
+        when ``self.engines`` is no longer the auto-indexing
+        :py:class:`_EngineRegistry` instance.
         """
         if isinstance(self.engines, _EngineRegistry):
-            if fill.wallet_public_id:
-                return self._engines_by_scope.get(
-                    (fill.exchange, fill.instrument, fill.wallet_public_id)
-                )
-            return self._engines_by_scope_legacy.get((fill.exchange, fill.instrument))
-        if fill.wallet_public_id:
+            if wallet_public_id:
+                return self._engines_by_scope.get((exchange, instrument, wallet_public_id))
+            return self._engines_by_scope_legacy.get((exchange, instrument))
+        if wallet_public_id:
             for engine in self.engines.values():
                 if (
-                    getattr(engine, "instrument", None) == fill.instrument
-                    and getattr(engine, "exchange", None) == fill.exchange
-                    and getattr(engine, "wallet_public_id", None) == fill.wallet_public_id
+                    getattr(engine, "instrument", None) == instrument
+                    and getattr(engine, "exchange", None) == exchange
+                    and getattr(engine, "wallet_public_id", None) == wallet_public_id
                 ):
                     return engine
             return None
         for engine in self.engines.values():
             if (
-                getattr(engine, "instrument", None) == fill.instrument
-                and getattr(engine, "exchange", None) == fill.exchange
+                getattr(engine, "instrument", None) == instrument
+                and getattr(engine, "exchange", None) == exchange
             ):
                 return engine
         return None
@@ -2239,6 +2262,8 @@ class TraderCoordinator(RegisterableProcess):
                 f"{fill.instrument} on {fill.exchange}"
             )
             return
+        if fill.status == FillStatusEnum.FILLED:
+            self._retire_rearmable_cid(fill.client_order_id)
         applied = engine.apply_fill(fill)
         if applied:
             logger.info(
@@ -2311,6 +2336,121 @@ class TraderCoordinator(RegisterableProcess):
                 )
                 break
 
+    def _rearm_adopted_order_intent(
+        self, parsed: ParsedOrderTopic, order_status: OrderData
+    ) -> bool:
+        """Re-arm a released engine's guard for a venue-live adopted order (#155).
+
+        The executor's adoption paths (ghost adoption, ambiguous-submit
+        verification, false-reject heal, startup recovery of a
+        venue-verified-open row) publish ACCEPTED with
+        ``reason="adopted"``. A RUNNING engine that already released its
+        in-flight intent (it consumed the false REJECTED, or the lazy
+        timeout valve cleared the guard) would otherwise emit a NEW
+        order on the next signal while the adopted one still works the
+        book — double exposure.
+
+        Routing mirrors fill routing exactly: exact pending-coid index
+        first (engine still tracks the cid), then the wallet-aware scope
+        index — a WALLETED frame never falls back to the legacy
+        (exchange, instrument) index. Dispositions:
+
+        - no engine in scope: WARN + drop (foreign wallet, or not this
+          coordinator's scope; under N>1 the admission gate in
+          ``_dispatch_order_event`` already dropped unregistered cids —
+          re-arm targets engines that ONCE HELD intent, and those
+          coordinators registered the cid at dispatch and never popped
+          it on the false reject).
+        - registered shard key mismatching the routed engine's shard:
+          WARN + skip BEFORE any engine mutation.
+        - engine in flight for a DIFFERENT order: WARN + skip (never
+          clobber the newer live intent — the inverse failure of the
+          bug; documented #155 residual).
+        - engine in flight for the SAME order: refresh the in-flight
+          window (a live venue observation must not let a near-expired
+          valve clear right after adoption).
+        - engine released: re-arm with a fresh window and re-register
+          the cid->shard mapping via the conflict-dropping helper.
+
+        Returns True only when the frame was honored (re-arm or
+        refresh) — the caller SUPPRESSES the TradeService shadow-write
+        for every refused/stale adopted frame, because the shard
+        command projection tracks the CURRENT command and a stale
+        adopted ACCEPTED would overwrite a newer command's identity or
+        regress a FILLED projection back to ACCEPTED.
+
+        A cid retired by an honest terminal (FILLED fill,
+        cancelled/expired confirm) is refused outright: a late
+        duplicate adopted frame (parked retry, recovery republish)
+        re-arming a DEAD order's guard would block honest emission
+        until the lazy valve clears it.
+        """
+        cid = order_status.client_order_id
+        if cid in self._rearm_retired_cids:
+            logger.info(
+                f"ZMQTrader: adopted frame for {cid} arrived after its honest "
+                f"terminal — stale duplicate dropped (no re-arm, no shadow-write)"
+            )
+            return False
+        engine = self._find_engine_by_pending_client_order_id(cid)
+        if engine is None:
+            engine = self._find_engine_by_scope_values(
+                order_status.exchange, order_status.instrument, order_status.wallet_public_id
+            )
+        if engine is None:
+            logger.warning(
+                f"ZMQTrader: adopted order {cid} on {parsed.exchange}/"
+                f"{order_status.instrument} (wallet={order_status.wallet_public_id!r}) "
+                f"has no engine in scope — re-arm dropped"
+            )
+            return False
+        known_shard = self._order_shard_keys.get(cid)
+        if known_shard is not None and known_shard != engine._shard_key:
+            logger.warning(
+                f"ZMQTrader: adopted order {cid} maps to shard {known_shard} but the "
+                f"scope-routed engine owns {engine._shard_key} — re-arm skipped before "
+                f"any engine mutation"
+            )
+            return False
+        was_in_flight = engine.order_in_flight
+        if not engine.rearm_pending_intent(cid):
+            logger.warning(
+                f"ZMQTrader: adopted order {cid} is live at the venue but engine "
+                f"{engine._shard_key} already holds intent for "
+                f"{engine.pending_client_order_id} — NOT clobbering the newer order "
+                f"(#155 residual: both orders are live; fills of the adopted one "
+                f"still book position)"
+            )
+            return False
+        if was_in_flight:
+            logger.info(
+                f"ZMQTrader: adopted order {cid} confirmed live — refreshed the "
+                f"in-flight window on {engine._shard_key}"
+            )
+            return True
+        self._register_order_shard_key(cid, engine._shard_key)
+        logger.warning(
+            f"ZMQTrader: RE-ARMED in-flight intent for adopted order {cid} on "
+            f"{engine._shard_key} — the engine had released it (false reject or "
+            f"timeout valve) while the order stayed live at the venue"
+        )
+        return True
+
+    def _retire_rearmable_cid(self, client_order_id: str) -> None:
+        """Record an honest terminal so late adopted frames cannot re-arm it.
+
+        Fed by FILLED fills and cancelled/expired confirms — NOT by
+        rejections (the false-reject heal is exactly the case the
+        re-arm exists for). LRU-bounded like the engine's exec-id
+        dedupe; cids are uuid7-unique so retirement never needs
+        clearing.
+        """
+        if not client_order_id:
+            return
+        self._rearm_retired_cids[client_order_id] = None
+        while len(self._rearm_retired_cids) > _REARM_RETIRED_CIDS_MAX:
+            self._rearm_retired_cids.popitem(last=False)
+
     @staticmethod
     def _log_order_status(parsed: ParsedOrderTopic, order_status: OrderData) -> None:
         """Log an accepted, rejected, or ordinary order status."""
@@ -2349,14 +2489,18 @@ class TraderCoordinator(RegisterableProcess):
         parsed = self._parse_valid_order_status_topic(topic, order_status)
         if parsed is None:
             return
+        suppress_shadow_write = False
         if parsed.suffix == "rejected":
             self._clear_rejected_order_intent(parsed, order_status)
         elif parsed.suffix == "unknown":
             self._mark_unknown_order_intent(parsed, order_status)
         elif parsed.suffix == "accepted":
             self._clear_unknown_order_intent(parsed, order_status)
+            if order_status.reason == ORDER_STATUS_REASON_ADOPTED:
+                suppress_shadow_write = not self._rearm_adopted_order_intent(parsed, order_status)
         self._log_order_status(parsed, order_status)
-        self._sync_status_to_trade_service(order_status, parsed)
+        if not suppress_shadow_write:
+            self._sync_status_to_trade_service(order_status, parsed)
         if parsed.suffix == "rejected":
             await self._project_paired_execution_leg_terminal(
                 order_status.client_order_id,
@@ -2400,6 +2544,7 @@ class TraderCoordinator(RegisterableProcess):
             )
             return
         if parsed.suffix in ("cancelled", "expired"):
+            self._retire_rearmable_cid(order_event.client_order_id)
             for engine in self.engines.values():
                 if engine.clear_pending_intent(order_event.client_order_id):
                     logger.info(

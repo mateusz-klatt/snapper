@@ -40,6 +40,7 @@ from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
+from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderReplaceData
 from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.schemas.data import SettingChangedData
@@ -2923,7 +2924,7 @@ class TestExecutorCoverage:
         order = self._create_order(mode="live")
         await service_any._process_order(order)
         service_any._publish_order_status.assert_any_await(order, "submitted")
-        service_any._publish_order_status.assert_any_await(order, "accepted", "abc123")
+        service_any._publish_order_status.assert_any_await(order, "accepted", "abc123", reason=None)
         assert service_any._publish_order_status.await_count == 2
         service_any._publish_execution.assert_not_awaited()
         service_any._execute_live_order.assert_awaited_once_with(order)
@@ -7051,6 +7052,8 @@ class TestStaleCommandGate:
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["accepted"]
+        accepted_kwargs = ex._publish_order_status.await_args_list[0].kwargs
+        assert accepted_kwargs.get("reason") == "adopted"
         assert ex.client_by_exchange["ex-stale-live"] == order.client_order_id
         ex._execute_live_order.assert_not_awaited()
 
@@ -8020,6 +8023,21 @@ def _fill_row(
     }
 
 
+def _recovery_sent_fills(ex: Any) -> list[Any]:
+    """Sent recovery emissions EXCLUDING the adopted ACCEPTED republish (#155).
+
+    Startup recovery republishes one adoption-shaped ACCEPTED (OrderData,
+    reason="adopted") per venue-verified-open recovered order BEFORE any
+    fill emission; the watermark-seeding assertions below pin the FILL
+    plane only, so they filter that frame out.
+    """
+    return [
+        c.args[1]
+        for c in ex.msg_publisher.send.await_args_list
+        if not isinstance(c.args[1], OrderData)
+    ]
+
+
 class TestRecoveryWatermarkSeeding:
     """Dual-watermark seeding and downtime healing at recovery."""
 
@@ -8069,7 +8087,7 @@ class TestRecoveryWatermarkSeeding:
         pending = ex.pending_orders["c1"]
         assert pending.last_seen_cum_qty == pytest.approx(0.5)
         assert pending.last_recorded_cum_qty == pytest.approx(0.5)
-        ex.msg_publisher.send.assert_not_awaited()
+        assert _recovery_sent_fills(ex) == []
 
     @pytest.mark.asyncio
     async def test_recorded_tail_republished_under_original_ids(self) -> None:
@@ -8092,7 +8110,7 @@ class TestRecoveryWatermarkSeeding:
             fill_rows=rows, exec_sizes=[0.3], snap_filled=1.0, db_order=_make_db_order(size=2.0)
         )
         await ex._recover_pending_orders("kraken")
-        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        sent = _recovery_sent_fills(ex)
         assert [f.trade_id for f in sent] == ["f2", "f3"]
         assert [f.size for f in sent] == [pytest.approx(0.7), pytest.approx(1.0)]
         assert sent[0].last_price == pytest.approx(101.0)
@@ -8120,7 +8138,7 @@ class TestRecoveryWatermarkSeeding:
             db_order=_make_db_order(size=2.0),
         )
         await ex._recover_pending_orders("kraken")
-        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        sent = _recovery_sent_fills(ex)
         assert len(sent) == 1
         assert sent[0].trade_id == "recon-ex-1-c1.0"
         assert sent[0].last_size == pytest.approx(0.5)
@@ -8143,7 +8161,7 @@ class TestRecoveryWatermarkSeeding:
             db_order=_make_db_order(size=2.0),
         )
         await ex._recover_pending_orders("kraken")
-        ex.msg_publisher.send.assert_not_awaited()
+        assert _recovery_sent_fills(ex) == []
         pending = ex.pending_orders["c1"]
         assert pending.last_seen_cum_qty == pytest.approx(1.0)
         assert pending.last_recorded_cum_qty == pytest.approx(1.0)
@@ -8166,7 +8184,7 @@ class TestRecoveryWatermarkSeeding:
         )
         ex._publish_cancel_event = AsyncMock()
         await ex._recover_pending_orders("kraken")
-        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        sent = _recovery_sent_fills(ex)
         assert len(sent) == 1
         assert sent[0].trade_id == "recon-ex-1-c0.5"
         assert sent[0].last_size == pytest.approx(0.5)
@@ -8198,7 +8216,7 @@ class TestRecoveryWatermarkSeeding:
         pending = ex.pending_orders["c1"]
         assert pending.last_seen_cum_qty == pytest.approx(0.7)
         assert pending.last_recorded_cum_qty == pytest.approx(0.7)
-        ex.msg_publisher.send.assert_not_awaited()
+        assert _recovery_sent_fills(ex) == []
 
     @pytest.mark.asyncio
     async def test_executions_unreadable_republishes_full_tail(self) -> None:
@@ -8220,7 +8238,7 @@ class TestRecoveryWatermarkSeeding:
         )
         ex.repository.get_executions_for_order = AsyncMock(side_effect=RuntimeError("db down"))
         await ex._recover_pending_orders("kraken")
-        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        sent = _recovery_sent_fills(ex)
         assert [f.trade_id for f in sent] == ["f1", "recon-ex-1-c1.0"]
         assert ex.pending_orders["c1"].last_seen_cum_qty == pytest.approx(1.0)
 
@@ -8249,7 +8267,7 @@ class TestRecoveryWatermarkSeeding:
             db_order=_make_db_order(size=2.0),
         )
         await ex._recover_pending_orders("kraken")
-        ex.msg_publisher.send.assert_not_awaited()
+        assert _recovery_sent_fills(ex) == []
         pending = ex.pending_orders["c1"]
         assert pending.last_seen_cum_qty == pytest.approx(0.8)
         assert pending.last_recorded_cum_qty == pytest.approx(0.8)
@@ -8276,7 +8294,7 @@ class TestRecoveryWatermarkSeeding:
             db_order=_make_db_order(size=2.0),
         )
         await ex._recover_pending_orders("kraken")
-        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        sent = _recovery_sent_fills(ex)
         assert [f.trade_id for f in sent] == ["f-big"]
         assert ex.pending_orders["c1"].last_seen_cum_qty == pytest.approx(0.8)
 
@@ -8304,7 +8322,7 @@ class TestRecoveryWatermarkSeeding:
             db_order=_make_db_order(size=2.0),
         )
         await ex._recover_pending_orders("kraken")
-        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        sent = _recovery_sent_fills(ex)
         assert [f.trade_id for f in sent] == ["recon-ex-1-c0.8"]
         assert sent[0].last_size == pytest.approx(0.3)
         assert sent[0].size == pytest.approx(0.8)
@@ -8327,7 +8345,7 @@ class TestRecoveryWatermarkSeeding:
             db_order=_make_db_order(size=2.0),
         )
         await ex._recover_pending_orders("kraken")
-        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        sent = _recovery_sent_fills(ex)
         assert len(sent) == 1
         assert sent[0].trade_id == "recon-ex-1-c0.8"
         assert sent[0].last_size == pytest.approx(0.3)
@@ -8357,7 +8375,7 @@ class TestRecoveryWatermarkSeeding:
         await ex._recover_pending_orders("kraken")
         assert ex.pending_orders["c1"].last_seen_cum_qty == pytest.approx(0.0)
         assert "c2" in ex.pending_orders
-        ex.msg_publisher.send.assert_not_awaited()
+        assert _recovery_sent_fills(ex) == []
 
     @pytest.mark.asyncio
     async def test_null_cum_rows_are_skipped_everywhere(self) -> None:
@@ -8370,7 +8388,7 @@ class TestRecoveryWatermarkSeeding:
         await ex._recover_pending_orders("kraken")
         pending = ex.pending_orders["c1"]
         assert pending.last_recorded_cum_qty == pytest.approx(0.5)
-        ex.msg_publisher.send.assert_not_awaited()
+        assert _recovery_sent_fills(ex) == []
 
     @pytest.mark.asyncio
     async def test_terminal_full_fill_pops_before_terminal_emission(self) -> None:
@@ -8390,7 +8408,7 @@ class TestRecoveryWatermarkSeeding:
         )
         await ex._recover_pending_orders("kraken")
         assert "c1" not in ex.pending_orders
-        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        sent = _recovery_sent_fills(ex)
         assert [f.trade_id for f in sent] == ["recon-ex-1-c1.0"]
 
     @pytest.mark.asyncio
@@ -9479,3 +9497,255 @@ class TestCoreToWireOrderRequest:
         assert recorded and recorded[0]["event_type"] == "order_rejected"
         assert "without stop_price" in recorded[0]["error"]
         assert order.client_order_id not in service_any.pending_orders
+
+
+@pytest.mark.asyncio
+class TestAdoptedAcceptedMarker:
+    """Adoption-shaped ACCEPTED publishes carry the re-arm reason (#155)."""
+
+    def _executor_for_adopt(self) -> tuple[Any, Any, Any]:
+        """Executor + order + pending wired for a direct _adopt_found_order call."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex._record_venue_event = AsyncMock()
+        ex._publish_order_status = AsyncMock(return_value=True)
+        ex._try_process_orphaned = MagicMock()
+        ex._flush_orphaned_inline = AsyncMock()
+        ex._reconcile_disappeared_order = AsyncMock()
+        order = make_order()
+        pending = base_module.PendingOrderState(request=order)
+        ex.pending_orders[order.client_order_id] = pending
+        return ex, order, pending
+
+    async def test_live_adoption_publishes_adopted_reason(self) -> None:
+        """A live snapshot adoption marks the ACCEPTED for engine re-arm.
+
+        Given: a venue snapshot in a LIVE status,
+        When: _adopt_found_order runs,
+        Then: the ACCEPTED publish carries reason="adopted".
+        """
+        ex, order, _pending = self._executor_for_adopt()
+        snapshot = SimpleNamespace(id="ex-adopt-1", status=ExchangeOrderStatusEnum.OPEN)
+        await ex._adopt_found_order(order, ex.pending_orders[order.client_order_id], snapshot)
+        kwargs = ex._publish_order_status.await_args.kwargs
+        assert kwargs.get("reason") == "adopted"
+
+    async def test_terminal_adoption_publishes_plain_accepted(self) -> None:
+        """A terminal snapshot adoption must NOT carry the re-arm marker.
+
+        Given: a venue snapshot already CANCELED,
+        When: _adopt_found_order runs,
+        Then: the ACCEPTED publish is reason-less — marking it would
+            re-arm an engine for a dead order with no clearing publish
+            behind it.
+        """
+        ex, order, _pending = self._executor_for_adopt()
+        snapshot = SimpleNamespace(id="ex-adopt-2", status=ExchangeOrderStatusEnum.CANCELED)
+        await ex._adopt_found_order(order, ex.pending_orders[order.client_order_id], snapshot)
+        kwargs = ex._publish_order_status.await_args.kwargs
+        assert kwargs.get("reason") is None
+
+    async def test_ordinary_submit_finalize_stays_reasonless(self) -> None:
+        """The normal submit acceptance keeps the historical shape.
+
+        Given: an ordinary (non-adoption) accepted submit,
+        When: _finalize_accepted_submit runs without the adopted flag,
+        Then: the publish carries reason=None and no retry flag parks.
+        """
+        ex, order, pending = self._executor_for_adopt()
+        await ex._finalize_accepted_submit(order, "ex-norm-1")
+        kwargs = ex._publish_order_status.await_args.kwargs
+        assert kwargs.get("reason") is None
+        assert pending.adopted_accept_publish_pending is False
+
+    async def test_failed_adopted_publish_parks_retry_flag(self) -> None:
+        """A failed adopted ACCEPTED publish parks for the recon loop.
+
+        Given: a live adoption whose publish returns False,
+        When: _adopt_found_order runs,
+        Then: adopted_accept_publish_pending is set on the entry.
+        """
+        ex, order, pending = self._executor_for_adopt()
+        ex._publish_order_status = AsyncMock(return_value=False)
+        snapshot = SimpleNamespace(id="ex-adopt-3", status=ExchangeOrderStatusEnum.OPEN)
+        await ex._adopt_found_order(order, pending, snapshot)
+        assert pending.adopted_accept_publish_pending is True
+
+    async def test_failed_adopted_publish_after_pending_pop_is_safe(self) -> None:
+        """A missing pending entry cannot park a retry flag.
+
+        Given: an adopted finalize whose publish fails after the pending
+            entry has already been popped by fill handling,
+        When: _finalize_accepted_submit runs,
+        Then: the executor records acceptance and exits without raising.
+        """
+        ex, order, _pending = self._executor_for_adopt()
+        ex._publish_order_status = AsyncMock(return_value=False)
+        ex.pending_orders.pop(order.client_order_id)
+        await ex._finalize_accepted_submit(order, "ex-adopt-popped", adopted=True)
+        ex._publish_order_status.assert_awaited_once()
+        assert order.client_order_id not in ex.pending_orders
+
+    async def test_retry_clears_flag_on_success_and_stops(self) -> None:
+        """The recon retry lands the publish ONCE and stops.
+
+        Given: an entry parked with adopted_accept_publish_pending,
+        When: the retry sweep runs twice with a healthy publisher,
+        Then: the first pass publishes with reason="adopted" and clears
+            the flag; the second pass publishes NOTHING (no periodic
+            refresh that would starve the engine's timeout valve).
+        """
+        ex, order, pending = self._executor_for_adopt()
+        pending.adopted_accept_publish_pending = True
+        pending.exchange_order_id = "ex-adopt-4"
+        await ex._retry_adopted_accept_publish(order.client_order_id)
+        kwargs = ex._publish_order_status.await_args.kwargs
+        assert kwargs.get("reason") == "adopted"
+        assert pending.adopted_accept_publish_pending is False
+        ex._publish_order_status.reset_mock()
+        await ex._retry_adopted_accept_publish(order.client_order_id)
+        ex._publish_order_status.assert_not_awaited()
+
+    async def test_retry_keeps_flag_on_repeat_failure(self) -> None:
+        """A still-failing publish keeps the entry parked.
+
+        Given: a parked entry and a publisher that keeps failing,
+        When: the retry sweep runs,
+        Then: the flag survives for the next cycle.
+        """
+        ex, order, pending = self._executor_for_adopt()
+        ex._publish_order_status = AsyncMock(return_value=False)
+        pending.adopted_accept_publish_pending = True
+        await ex._retry_adopted_accept_publish(order.client_order_id)
+        assert pending.adopted_accept_publish_pending is True
+
+    async def test_retry_for_missing_entry_is_noop(self) -> None:
+        """A popped entry makes the retry a safe no-op.
+
+        Given: a cid with no pending entry,
+        When: the retry runs,
+        Then: nothing publishes and nothing raises.
+        """
+        ex, _order, _pending = self._executor_for_adopt()
+        await ex._retry_adopted_accept_publish("gone-cid")
+        ex._publish_order_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+class TestRecoveryAdoptedRepublish:
+    """Startup recovery republishes the re-arm signal for open orders (#155)."""
+
+    def _recovery_executor(
+        self,
+        snap_status: ExchangeOrderStatusEnum = ExchangeOrderStatusEnum.OPEN,
+        *,
+        unverifiable: bool = False,
+        send_fails: bool = False,
+    ) -> Any:
+        """Executor wired for a one-order recovery with no fill history."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        mock_client = AsyncMock()
+        mock_client.get_order_fill_summary = AsyncMock(return_value=None)
+        mock_client.supports_fill_summary = False
+        snap = SimpleNamespace(id="ex-1", filled=0.0, price=100.0, status=snap_status)
+        if unverifiable:
+            mock_client.get_orders = AsyncMock(return_value=[])
+            mock_client.get_order = AsyncMock(side_effect=RuntimeError("venue down"))
+        elif snap_status == ExchangeOrderStatusEnum.OPEN:
+            mock_client.get_orders = AsyncMock(return_value=[snap])
+        else:
+            mock_client.get_orders = AsyncMock(return_value=[])
+            mock_client.get_order = AsyncMock(return_value=snap)
+        ex.exchange_client = mock_client
+        repo = AsyncMock(spec=SQLAlchemyRepository)
+        repo.get_active_orders_for_recovery = AsyncMock(return_value=[_make_db_order()])
+        repo.get_fill_venue_events_for_order = AsyncMock(return_value=[])
+        repo.get_executions_for_order = AsyncMock(return_value=[])
+        ex.repository = repo
+        ex._record_venue_event = AsyncMock()
+        send = AsyncMock(side_effect=RuntimeError("publisher down")) if send_fails else AsyncMock()
+        ex.msg_publisher = SimpleNamespace(send=send)
+        return ex
+
+    async def test_open_recovered_order_republishes_adopted_accepted(self) -> None:
+        """The crash-recovery path: recovery itself is the republisher.
+
+        Given: a DB-active order venue-verified OPEN at startup (the
+            real _recover_pending_orders sequence — recovery re-inserts
+            the pending entry BEFORE the ghost sweep, which then skips
+            it, so no other path would ever republish),
+        When: recovery runs,
+        Then: exactly one adoption-shaped ACCEPTED publishes
+            (OrderData, reason="adopted") and no retry flag parks.
+        """
+        ex = self._recovery_executor()
+        await ex._recover_pending_orders("kraken")
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        accepted = [p for p in sent if isinstance(p, OrderData)]
+        assert len(accepted) == 1
+        assert accepted[0].reason == "adopted"
+        assert accepted[0].status == "accepted"
+        assert ex.pending_orders["c1"].adopted_accept_publish_pending is False
+
+    async def test_unverifiable_recovered_order_stays_silent(self) -> None:
+        """No re-arm signal for an order the venue could not confirm.
+
+        Given: a DB-active order whose venue verification failed,
+        When: recovery runs,
+        Then: NO adopted ACCEPTED publishes — re-arming a possibly-dead
+            order's guard would block honest emission.
+        """
+        ex = self._recovery_executor(unverifiable=True)
+        await ex._recover_pending_orders("kraken")
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert [p for p in sent if isinstance(p, OrderData)] == []
+
+    async def test_terminal_recovered_order_stays_silent(self) -> None:
+        """No re-arm signal for an order that went terminal in downtime.
+
+        Given: a DB-active order the venue reports CANCELED,
+        When: recovery runs,
+        Then: NO adopted ACCEPTED publishes.
+        """
+        ex = self._recovery_executor(snap_status=ExchangeOrderStatusEnum.CANCELED)
+        await ex._recover_pending_orders("kraken")
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert [p for p in sent if isinstance(p, OrderData)] == []
+
+    async def test_failed_recovery_republish_parks_retry_flag(self) -> None:
+        """A failed recovery republish parks for the recon loop.
+
+        Given: an OPEN recovered order with a dead publisher,
+        When: recovery runs,
+        Then: the entry parks adopted_accept_publish_pending so the
+            recon cycle keeps retrying the re-arm signal.
+        """
+        ex = self._recovery_executor(send_fails=True)
+        await ex._recover_pending_orders("kraken")
+        assert ex.pending_orders["c1"].adopted_accept_publish_pending is True
+
+
+@pytest.mark.asyncio
+async def test_retry_sweep_routes_parked_adopted_publishes() -> None:
+    """The recon retry sweep picks up parked adopted publishes (#155).
+
+    Given: one entry parked with adopted_accept_publish_pending among
+        ordinary entries,
+    When: _retry_pending_reconciliation_work runs,
+    Then: exactly the parked entry's publish retries (reason="adopted")
+        and the flag clears.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex._publish_order_status = AsyncMock(return_value=True)
+    parked = make_order(client_order_id="parked-1")
+    ordinary = make_order(client_order_id="ordinary-1")
+    parked_entry = base_module.PendingOrderState(request=parked, exchange_order_id="ex-p1")
+    parked_entry.adopted_accept_publish_pending = True
+    ex.pending_orders["parked-1"] = parked_entry
+    ex.pending_orders["ordinary-1"] = base_module.PendingOrderState(request=ordinary)
+    await ex._retry_pending_reconciliation_work()
+    ex._publish_order_status.assert_awaited_once()
+    assert ex._publish_order_status.await_args.kwargs.get("reason") == "adopted"
+    assert parked_entry.adopted_accept_publish_pending is False

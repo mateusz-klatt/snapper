@@ -38,6 +38,7 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.core.json_types import JsonValue
+from snapper.core.types import ORDER_STATUS_REASON_ADOPTED
 from snapper.core.types import CancelEventType
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
@@ -300,6 +301,9 @@ path yields an unbounded slow restart-and-retry cadence that self-heals
 when the cause clears, never a permanent park (publisher dark-feed
 precedent)."""
 
+_ADOPTED_REARM_REASON = ORDER_STATUS_REASON_ADOPTED
+"""Local alias for the shared #155 re-arm reason (see core.types)."""
+
 _SEEN_EXEC_IDS_MAX = 10_000
 """Bound of the executor-level seen-exec-id LRU (mirrors the engine's
 apply_fill LRU). At one fill per second this covers ~3 hours of
@@ -433,6 +437,13 @@ class PendingOrderState:
             REJECTED publish) could not complete; the recon loop reruns
             the sequence until it sticks — intent must never release
             before the durable terminal (#145 P2-5 §2d).
+        adopted_accept_publish_pending: True when an adoption-shaped
+            ACCEPTED publish (``reason="adopted"``, the running
+            engine's only re-arm signal, #155) failed; the recon loop
+            retries the publish and clears the flag on success —
+            without the clear, periodic republish would keep
+            refreshing the engine's in-flight window and starve the
+            timeout valve.
         fill_lock: Serializes fill booking for this order across the live
             stream task and the recon task — dedupe gate, delta build,
             durable write, publish, and committed-cumulative advance form
@@ -453,6 +464,7 @@ class PendingOrderState:
     unknown_published: bool = field(default=False)
     accept_event_pending: bool = field(default=False)
     breaker_open_pending: bool = field(default=False)
+    adopted_accept_publish_pending: bool = field(default=False)
     fill_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -912,7 +924,23 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         classification: str,
         exchange_name: OrderExchange,
     ) -> bool:
-        """Project recovered terminal state or leave the order tracked."""
+        """Project recovered terminal state or leave the order tracked.
+
+        Venue-verified-OPEN recovered orders additionally republish the
+        adoption-shaped ACCEPTED (``reason="adopted"``, #155) BEFORE any
+        fill-gap emission: startup recovery re-inserts DB-active orders
+        into ``pending_orders`` ahead of the ghost sweep (which then
+        skips them), so without this publish an executor crash would
+        permanently strand the running engine's re-arm signal. The
+        publish precedes the fill-gap corrective so accepted/fill
+        ordering stays coherent and the entry cannot have been popped by
+        a completing gap emission. Duplicates are absorbed engine-side
+        (exact-match refresh / in-flight skip), and the one-shot-per-
+        restart cadence cannot starve the timeout valve. UNVERIFIABLE
+        rows stay silent — re-arming a possibly-dead order's guard would
+        block honest emission; they remain on the ambiguous-verify
+        track.
+        """
         if classification == "unverifiable":
             logger.warning(
                 f"[{exchange_name}] Recovery: order {client_order_id} parked with DB "
@@ -921,6 +949,19 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return True
         assert snapshot is not None
         live_pending = self.pending_orders.get(client_order_id)
+        if classification == "open" and live_pending is not None:
+            republished = await self._publish_order_status(
+                live_pending.request,
+                OrderEventEnum.ACCEPTED,
+                exchange_order_id,
+                reason=_ADOPTED_REARM_REASON,
+            )
+            if not republished:
+                live_pending.adopted_accept_publish_pending = True
+                logger.warning(
+                    f"[{exchange_name}] Recovery: adoption ACCEPTED republish failed "
+                    f"for {client_order_id} — parked for the recon loop"
+                )
         if (
             live_pending is not None
             and float(snapshot.filled or 0.0) > live_pending.last_seen_cum_qty
@@ -1932,6 +1973,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_order_id: str,
         *,
         flush_orphans: bool = True,
+        adopted: bool = False,
     ) -> None:
         """Record and publish acceptance of a venue-confirmed live order.
 
@@ -1959,6 +2001,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange_order_id: Venue-assigned order id from the submit.
             flush_orphans: When False, skip orphaned-execution flushing
                 for this order (caller projects fills from REST).
+            adopted: When True the ACCEPTED publish carries
+                ``reason="adopted"`` — the running engine's re-arm
+                signal (#155) — and a FAILED publish parks
+                ``adopted_accept_publish_pending`` for the recon loop
+                to retry (an ordinary acceptance keeps the historical
+                fire-and-forget publish: the engine already holds the
+                intent it armed at submit time).
         """
         exchange_name = self._get_exchange_name()
         self.client_by_exchange[exchange_order_id] = order.client_order_id
@@ -1985,7 +2034,21 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 pending.accept_event_pending = True
         if flush_orphans:
             self._try_process_orphaned(exchange_order_id, order.client_order_id)
-        await self._publish_order_status(order, OrderEventEnum.ACCEPTED, exchange_order_id)
+        published = await self._publish_order_status(
+            order,
+            OrderEventEnum.ACCEPTED,
+            exchange_order_id,
+            reason=_ADOPTED_REARM_REASON if adopted else None,
+        )
+        if adopted and not published:
+            adopted_pending = self.pending_orders.get(order.client_order_id)
+            if adopted_pending is not None:
+                adopted_pending.adopted_accept_publish_pending = True
+                logger.warning(
+                    f"[{exchange_name}] adoption ACCEPTED publish failed for "
+                    f"{order.client_order_id} — the running engine's re-arm signal "
+                    f"is parked; recon retries until it lands"
+                )
         logger.info(
             f"[{exchange_name}] Order {order.client_order_id} "
             f"accepted as {exchange_order_id}, waiting for execution"
@@ -2103,6 +2166,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         disappeared-order reconciler (full WS fidelity, no background
         interleaving).
 
+        LIVE snapshots finalize with ``adopted=True`` so the ACCEPTED
+        publish carries the running-engine re-arm marker (#155);
+        TERMINAL snapshots keep the plain reason-less ACCEPTED — marking
+        them would re-arm an engine for a cancelled/expired order with
+        no clearing publish behind it.
+
         Args:
             order: The original order request.
             pending: The pending entry tracking the order.
@@ -2118,7 +2187,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             ExchangeOrderStatusEnum.OPEN,
             ExchangeOrderStatusEnum.PARTIALLY_FILLED,
         )
-        await self._finalize_accepted_submit(order, snapshot.id, flush_orphans=is_live)
+        await self._finalize_accepted_submit(
+            order, snapshot.id, flush_orphans=is_live, adopted=is_live
+        )
         if not is_live:
             await self._flush_orphaned_inline(snapshot.id)
             await self._reconcile_disappeared_order(exchange_name, snapshot.id, pending)
@@ -2631,6 +2702,37 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         for breaker_cid, breaker_entry in tuple(self.pending_orders.items()):
             if breaker_entry.breaker_open_pending:
                 await self._retry_breaker_open(breaker_cid)
+
+        for adopted_cid, adopted_entry in tuple(self.pending_orders.items()):
+            if adopted_entry.adopted_accept_publish_pending:
+                await self._retry_adopted_accept_publish(adopted_cid)
+
+    async def _retry_adopted_accept_publish(self, client_order_id: str) -> None:
+        """Retry a parked adoption-shaped ACCEPTED publish (#155).
+
+        The adopted ACCEPTED frame is the running engine's ONLY re-arm
+        signal, so a failed publish may not be dropped while this
+        executor lives (an executor restart self-heals differently: the
+        startup recovery republishes for every venue-verified-open
+        recovered order). Success CLEARS the flag — periodic republish
+        would keep refreshing the engine's in-flight window and starve
+        the lazy timeout valve.
+        """
+        pending = self.pending_orders.get(client_order_id)
+        if pending is None or not pending.adopted_accept_publish_pending:
+            return
+        published = await self._publish_order_status(
+            pending.request,
+            OrderEventEnum.ACCEPTED,
+            pending.exchange_order_id,
+            reason=_ADOPTED_REARM_REASON,
+        )
+        if published:
+            pending.adopted_accept_publish_pending = False
+            logger.info(
+                f"[{self._get_exchange_name()}] parked adoption ACCEPTED publish "
+                f"landed for {client_order_id} — engine re-arm signal delivered"
+            )
 
     async def _resolve_ambiguous_reconciliation_batch(self, exchange_name: OrderExchange) -> None:
         """Resolve a fairness-capped slice of parked ambiguous orders."""

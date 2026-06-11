@@ -2590,6 +2590,21 @@ class TestFillApplication:
         await coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
         engine.apply_fill.assert_called_once_with(fill)
 
+    async def test_partial_fill_does_not_retire_rearm_cid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Partial fills keep adopted re-arm protection available.
+
+        Given: Coordinator with an engine tracking order-123,
+        When: A partial fill arrives for that order,
+        Then: The fill is applied but the cid is not retired as terminal.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        fill = _make_fill(client_order_id="order-123", status="partial")
+        await coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
+        engine.apply_fill.assert_called_once_with(fill)
+        assert "order-123" not in coord._rearm_retired_cids
+
     async def test_fill_matched_by_instrument_exchange_fallback(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5432,3 +5447,558 @@ class TestUnknownEventRouting:
         engine.mark_pending_unknown.assert_not_called()
         engine.clear_pending_unknown.assert_not_called()
         engine.clear_pending_intent.assert_not_called()
+
+
+class TestRearmPendingIntent:
+    """TradingEngineService.rearm_pending_intent (#155)."""
+
+    def test_rearm_on_released_engine_arms_fresh_window(self) -> None:
+        """A released engine re-arms with a fresh in-flight window.
+
+        Given: an engine whose intent was released (false REJECTED or
+            timeout valve) and whose order resurfaced UNKNOWN-flagged,
+        When: rearm_pending_intent runs for the adopted cid,
+        Then: the guard arms, pending tracks the cid, the window is
+            fresh, and the UNKNOWN flag resets (venue-confirmed-live is
+            by definition no longer ambiguous).
+        """
+        engine = TradingEngineService.__new__(TradingEngineService)
+        engine.order_in_flight = False
+        engine.pending_client_order_id = None
+        engine._in_flight_since = None
+        engine._pending_unknown = True
+        before = time.monotonic()
+        assert engine.rearm_pending_intent("adopted-1") is True
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id == "adopted-1"
+        assert engine._in_flight_since is not None
+        assert engine._in_flight_since >= before
+        assert engine._pending_unknown is False
+
+    def test_rearm_never_clobbers_newer_intent(self) -> None:
+        """An in-flight engine refuses a re-arm for a different order.
+
+        Given: an engine already in flight for order B,
+        When: a late adopted re-arm arrives for order A,
+        Then: False is returned and ALL state stays with order B.
+        """
+        engine = TradingEngineService.__new__(TradingEngineService)
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "order-B"
+        engine._in_flight_since = 100.0
+        engine._pending_unknown = False
+        assert engine.rearm_pending_intent("order-A") is False
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id == "order-B"
+        assert engine._in_flight_since == pytest.approx(100.0)
+
+    def test_rearm_exact_match_refreshes_window_only(self) -> None:
+        """A live observation of the SAME order refreshes the valve window.
+
+        Given: an engine in flight for the adopted cid with a
+            near-expired window,
+        When: rearm_pending_intent runs for that cid,
+        Then: True is returned, the window refreshes, and the UNKNOWN
+            flag is left for the existing accepted-branch resolution.
+        """
+        engine = TradingEngineService.__new__(TradingEngineService)
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "adopted-1"
+        engine._in_flight_since = 100.0
+        engine._pending_unknown = True
+        assert engine.rearm_pending_intent("adopted-1") is True
+        assert engine.order_in_flight is True
+        assert engine._in_flight_since != pytest.approx(100.0)
+        assert engine._pending_unknown is True
+
+
+@pytest.mark.asyncio
+class TestAdoptedRearmRouting:
+    """Coordinator routing for adoption-shaped ACCEPTED frames (#155)."""
+
+    def _make_released_engine(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        wallet: str = "wallet-1",
+        shard_key: str = "kraken.BTC-USD.live",
+    ) -> tuple[TraderCoordinator, Any]:
+        """Coordinator plus a RELEASED MagicMock engine in the registry."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        engine = MagicMock()
+        engine.instrument = "BTC-USD"
+        engine.exchange = "kraken"
+        engine.pending_client_order_id = None
+        engine.order_in_flight = False
+        engine.wallet_public_id = wallet
+        engine._shard_key = shard_key
+        engine.clear_pending_unknown = MagicMock(return_value=False)
+        engine.clear_pending_intent = MagicMock(return_value=False)
+        engine.rearm_pending_intent = MagicMock(return_value=True)
+        coord.engines["BTC-USD@kraken-live"] = engine
+        return coord, engine
+
+    async def _dispatch_accepted(
+        self,
+        coord: TraderCoordinator,
+        *,
+        reason: str | None,
+        wallet: str = "wallet-1",
+        client_order_id: str = "order-123",
+    ) -> None:
+        """Send an accepted OrderData built like the executor publishes it."""
+        order_status = OrderData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            client_order_id=client_order_id,
+            exchange_order_id="ex-1",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            status="accepted",
+            reason=reason,
+            order_type="market",
+            size=0.5,
+            filled_size=0.0,
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            wallet_public_id=wallet,
+        )
+        await coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
+
+    async def test_adopted_accepted_rearms_released_engine(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The headline path: a released engine re-arms on the marker.
+
+        Given: a released wallet-scoped engine,
+        When: an accepted frame with reason="adopted" arrives,
+        Then: rearm_pending_intent runs for the cid and the cid->shard
+            mapping is registered.
+        """
+        coord, engine = self._make_released_engine(monkeypatch)
+        await self._dispatch_accepted(coord, reason="adopted")
+        engine.rearm_pending_intent.assert_called_once_with("order-123")
+        assert coord._order_shard_keys.get("order-123") == "kraken.BTC-USD.live"
+
+    async def test_ordinary_accepted_never_rearms(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A reason-less acceptance keeps the historical no-op semantics.
+
+        Given: a released engine,
+        When: an ordinary accepted frame (reason=None) arrives,
+        Then: rearm_pending_intent is never called and intent stays
+            untouched (the 5404 invariant, revised consciously).
+        """
+        coord, engine = self._make_released_engine(monkeypatch)
+        await self._dispatch_accepted(coord, reason=None)
+        engine.rearm_pending_intent.assert_not_called()
+        engine.clear_pending_intent.assert_not_called()
+
+    async def test_wallet_scoped_routing_picks_matching_wallet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two engines on one instrument: only the wallet match re-arms.
+
+        Given: two released engines, same instrument+exchange,
+            different wallets,
+        When: an adopted frame for wallet-2 arrives,
+        Then: ONLY wallet-2's engine re-arms.
+        """
+        coord, engine_one = self._make_released_engine(monkeypatch, wallet="wallet-1")
+        engine_two = MagicMock()
+        engine_two.instrument = "BTC-USD"
+        engine_two.exchange = "kraken"
+        engine_two.pending_client_order_id = None
+        engine_two.order_in_flight = False
+        engine_two.wallet_public_id = "wallet-2"
+        engine_two._shard_key = "kraken.BTC-USD.live.w2"
+        engine_two.clear_pending_unknown = MagicMock(return_value=False)
+        engine_two.rearm_pending_intent = MagicMock(return_value=True)
+        coord.engines["BTC-USD@kraken-live-w2"] = engine_two
+        await self._dispatch_accepted(coord, reason="adopted", wallet="wallet-2")
+        engine_two.rearm_pending_intent.assert_called_once_with("order-123")
+        engine_one.rearm_pending_intent.assert_not_called()
+
+    async def test_walleted_frame_never_falls_back_to_legacy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A walleted frame with no wallet match is dropped, not legacied.
+
+        Given: a released engine under wallet-1 (legacy index populated
+            unconditionally),
+        When: an adopted frame for FOREIGN wallet-9 arrives,
+        Then: no engine re-arms — a legacy fallback would arm wallet-1's
+            engine for wallet-9's order.
+        """
+        coord, engine = self._make_released_engine(monkeypatch, wallet="wallet-1")
+        await self._dispatch_accepted(coord, reason="adopted", wallet="wallet-9")
+        engine.rearm_pending_intent.assert_not_called()
+
+    async def test_walletless_frame_uses_legacy_scope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wallet-less frame resolves through the legacy index.
+
+        Given: a released engine,
+        When: an adopted frame with an empty wallet arrives,
+        Then: the legacy (exchange, instrument) index re-arms it.
+        """
+        coord, engine = self._make_released_engine(monkeypatch)
+        await self._dispatch_accepted(coord, reason="adopted", wallet="")
+        engine.rearm_pending_intent.assert_called_once_with("order-123")
+
+    async def test_shard_mismatch_skips_before_any_mutation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A registered foreign shard key vetoes the re-arm pre-mutation.
+
+        Given: the cid maps to a DIFFERENT shard than the routed engine,
+        When: the adopted frame arrives,
+        Then: rearm_pending_intent is never called and the mapping is
+            untouched.
+        """
+        coord, engine = self._make_released_engine(monkeypatch)
+        coord._order_shard_keys["order-123"] = "kraken.ETH-USD.live"
+        await self._dispatch_accepted(coord, reason="adopted")
+        engine.rearm_pending_intent.assert_not_called()
+        assert coord._order_shard_keys["order-123"] == "kraken.ETH-USD.live"
+
+    async def test_clobber_refusal_skips_registration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An engine refusing the re-arm (newer intent) registers nothing.
+
+        Given: a scope-routed engine whose rearm_pending_intent returns
+            False (in flight for a NEWER order),
+        When: a late adopted frame arrives for the old order,
+        Then: no shard registration happens for the adopted cid.
+        """
+        coord, engine = self._make_released_engine(monkeypatch)
+        engine.order_in_flight = True
+        engine.rearm_pending_intent = MagicMock(return_value=False)
+        await self._dispatch_accepted(coord, reason="adopted")
+        engine.rearm_pending_intent.assert_called_once_with("order-123")
+        assert "order-123" not in coord._order_shard_keys
+
+    async def test_exact_pending_match_refreshes_without_registration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An engine still tracking the cid takes the refresh path.
+
+        Given: an engine in flight for the adopted cid (exact
+            pending-coid index hit),
+        When: the adopted frame arrives,
+        Then: rearm_pending_intent runs (refresh) and no NEW shard
+            registration is made.
+        """
+        coord, engine = self._make_released_engine(monkeypatch)
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "order-123"
+        coord._engines_by_pending_coid["order-123"] = engine
+        await self._dispatch_accepted(coord, reason="adopted")
+        engine.rearm_pending_intent.assert_called_once_with("order-123")
+        assert "order-123" not in coord._order_shard_keys
+
+    async def test_no_engine_in_scope_drops_with_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No engine anywhere in scope: the frame is dropped safely.
+
+        Given: a coordinator with no engines,
+        When: an adopted frame arrives,
+        Then: the handler completes without raising.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        await self._dispatch_accepted(coord, reason="adopted")
+
+
+@pytest.mark.asyncio
+class TestAdoptedRearmDoubleExposure:
+    """End-to-end double-exposure regression on a REAL engine (#155)."""
+
+    def _make_real_released_engine(self) -> tuple[TradingEngineService, Any]:
+        """Real engine whose intent was released by a false REJECTED."""
+        socket = MagicMock()
+        socket.tracker = SequenceTracker()
+        socket.send = AsyncMock()
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "adopted-1"
+        engine._in_flight_since = time.monotonic()
+        assert engine.clear_pending_intent("adopted-1") is True
+        return engine, socket
+
+    async def test_rearmed_guard_blocks_new_emission(self) -> None:
+        """The headline regression: re-arm prevents the double order.
+
+        Given: a real engine that consumed a false REJECTED (intent
+            released) and was then re-armed for the adopted order,
+        When: the next signal arrives,
+        Then: NO new order is emitted — the adopted order still works
+            the book.
+        """
+        engine, socket = self._make_real_released_engine()
+        assert engine.rearm_pending_intent("adopted-1") is True
+        await engine.execute_desired_units(1.0, current_price=100.0)
+        socket.send.assert_not_awaited()
+        assert engine.pending_client_order_id == "adopted-1"
+
+    async def test_released_engine_without_rearm_double_emits(self) -> None:
+        """The pre-fix behavior, pinned as the counterfactual.
+
+        Given: the same released engine WITHOUT a re-arm,
+        When: the next signal arrives,
+        Then: a new order IS emitted — the exposure-doubling residual
+            the re-arm closes.
+        """
+        engine, socket = self._make_real_released_engine()
+        await engine.execute_desired_units(1.0, current_price=100.0)
+        socket.send.assert_awaited_once()
+
+    async def test_rearmed_guard_still_honors_timeout_valve(self) -> None:
+        """The accepted residual: a re-armed guard self-clears after 60s.
+
+        Given: a re-armed engine whose fresh window has fully lapsed,
+        When: the next signal arrives,
+        Then: the lazy valve clears the guard and a new order emits —
+            identical to an original guard (documented #155 residual).
+        """
+        engine, socket = self._make_real_released_engine()
+        assert engine.rearm_pending_intent("adopted-1") is True
+        engine._in_flight_since = time.monotonic() - 120.0
+        await engine.execute_desired_units(1.0, current_price=100.0)
+        socket.send.assert_awaited_once()
+        assert engine.pending_client_order_id != "adopted-1"
+
+    async def test_full_fill_clears_rearmed_guard(self) -> None:
+        """A FULL fill releases a re-armed guard; a PARTIAL holds it.
+
+        Given: a re-armed engine,
+        When: a partial then a full fill arrive for the adopted cid,
+        Then: the guard survives the partial and clears on the full.
+        """
+        engine, _socket = self._make_real_released_engine()
+        assert engine.rearm_pending_intent("adopted-1") is True
+        partial = ExecutionData(
+            session_id="",
+            sequence_id=0,
+            public_id="fill-1",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            client_order_id="adopted-1",
+            exchange_order_id="ex-1",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            size=1.0,
+            last_size=0.4,
+            price=100.0,
+            last_price=100.0,
+            fee=0.0,
+            fee_asset="USD",
+            status="partial",
+            executed_at=datetime(2024, 1, 1, tzinfo=UTC),
+            trade_id="t-1",
+        )
+        assert engine.apply_fill(partial) is True
+        assert engine.order_in_flight is True
+        full = partial.model_copy(
+            update={"public_id": "fill-2", "trade_id": "t-2", "last_size": 0.6, "status": "filled"}
+        )
+        assert engine.apply_fill(full) is True
+        assert engine.order_in_flight is False
+        assert engine.pending_client_order_id is None
+
+    async def test_unknown_reject_adopt_chain_restores_guard(self) -> None:
+        """The full E2 sequence: UNKNOWN -> false REJECTED -> adopted.
+
+        Given: an in-flight engine flagged UNKNOWN whose order is then
+            falsely rejected (release) and later adopted live,
+        When: each transition applies in order,
+        Then: the guard ends re-armed for the adopted cid with the
+            UNKNOWN flag reset.
+        """
+        engine, _socket = self._make_real_released_engine()
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "adopted-1"
+        engine._in_flight_since = time.monotonic()
+        assert engine.mark_pending_unknown("adopted-1") is True
+        assert engine.clear_pending_intent("adopted-1") is True
+        assert engine._pending_unknown is False
+        assert engine.rearm_pending_intent("adopted-1") is True
+        assert engine.order_in_flight is True
+        assert engine._pending_unknown is False
+
+
+@pytest.mark.asyncio
+class TestAdoptedRearmTerminalGuards:
+    """Stale adopted frames vs honest terminals + projection safety (#155 review)."""
+
+    async def test_duplicate_adopted_frame_after_full_fill_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A late adopted duplicate cannot re-arm a FILLED order's guard.
+
+        Given: an engine whose order fully filled (the coordinator
+            retired the cid on the FILLED fill),
+        When: a late duplicate adopted ACCEPTED arrives (parked retry or
+            recovery republish landing after the fill),
+        Then: no re-arm happens AND the TradeService shadow-write is
+            suppressed — a FILLED projection must not regress to
+            ACCEPTED.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        engine.rearm_pending_intent = MagicMock(return_value=True)
+        engine.clear_pending_unknown = MagicMock(return_value=False)
+        engine.order_in_flight = False
+        engine.pending_client_order_id = None
+        coord._sync_status_to_trade_service = MagicMock()
+        fill = _make_fill(client_order_id="order-123", status="filled")
+        await coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
+        assert "order-123" in coord._rearm_retired_cids
+        order_status = OrderData(
+            session_id="",
+            sequence_id=0,
+            public_id="late-dup",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            client_order_id="order-123",
+            exchange_order_id="ex-1",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            status="accepted",
+            reason="adopted",
+            order_type="market",
+            size=0.5,
+            filled_size=0.0,
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        await coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
+        engine.rearm_pending_intent.assert_not_called()
+        coord._sync_status_to_trade_service.assert_not_called()
+
+    async def test_cancelled_confirm_retires_the_cid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A venue cancel confirm retires the cid for future adopted frames.
+
+        Given: an in-flight engine receiving a cancelled confirm,
+        When: the order event is handled,
+        Then: the cid lands in the retired LRU so a later adopted frame
+            cannot re-arm a dead order.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        event = OrderEventData(
+            session_id="",
+            sequence_id=0,
+            public_id="cancel-1",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            event="cancelled",
+            client_order_id="order-123",
+            exchange_order_id="ex-1",
+            instrument="BTC-USD",
+            exchange="kraken",
+        )
+        await coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", event)
+        assert "order-123" in coord._rearm_retired_cids
+
+    async def test_clobber_refusal_suppresses_shadow_write(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A refused adopted frame never reaches the TradeService projection.
+
+        Given: an engine in flight for a NEWER order B,
+        When: a stale adopted ACCEPTED for old order A arrives,
+        Then: the re-arm is refused AND the shadow-write is suppressed —
+            the shard command projection must keep tracking B.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch, client_order_id="order-B")
+        engine.rearm_pending_intent = MagicMock(return_value=False)
+        engine.clear_pending_unknown = MagicMock(return_value=False)
+        engine.wallet_public_id = "wallet-1"
+        coord._engines_by_scope[("kraken", "BTC-USD", "wallet-1")] = engine
+        coord._sync_status_to_trade_service = MagicMock()
+        order_status = OrderData(
+            session_id="",
+            sequence_id=0,
+            public_id="stale-a",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            client_order_id="order-A",
+            exchange_order_id="ex-A",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            status="accepted",
+            reason="adopted",
+            order_type="market",
+            size=0.5,
+            filled_size=0.0,
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            wallet_public_id="wallet-1",
+        )
+        await coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
+        engine.rearm_pending_intent.assert_called_once_with("order-A")
+        coord._sync_status_to_trade_service.assert_not_called()
+
+    async def test_honored_rearm_still_shadow_writes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An HONORED adopted frame keeps the normal projection write.
+
+        Given: a released engine whose re-arm succeeds,
+        When: the adopted ACCEPTED arrives,
+        Then: the TradeService shadow-write happens exactly as for any
+            ordinary accepted frame.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        engine.rearm_pending_intent = MagicMock(return_value=True)
+        engine.clear_pending_unknown = MagicMock(return_value=False)
+        engine.order_in_flight = False
+        engine.pending_client_order_id = None
+        engine.wallet_public_id = "wallet-1"
+        engine._shard_key = "kraken.BTC-USD.live"
+        coord._engines_by_scope[("kraken", "BTC-USD", "wallet-1")] = engine
+        coord._sync_status_to_trade_service = MagicMock()
+        order_status = OrderData(
+            session_id="",
+            sequence_id=0,
+            public_id="honored",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            client_order_id="order-123",
+            exchange_order_id="ex-1",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            status="accepted",
+            reason="adopted",
+            order_type="market",
+            size=0.5,
+            filled_size=0.0,
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            wallet_public_id="wallet-1",
+        )
+        await coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
+        engine.rearm_pending_intent.assert_called_once_with("order-123")
+        coord._sync_status_to_trade_service.assert_called_once()
+
+    async def test_retired_lru_is_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The retired-cid LRU evicts oldest entries past the bound.
+
+        Given: a tiny monkeypatched bound,
+        When: more cids retire than the bound allows,
+        Then: the oldest entry evicts and the newest survive.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        monkeypatch.setattr(trader_module, "_REARM_RETIRED_CIDS_MAX", 2)
+        coord._retire_rearmable_cid("cid-1")
+        coord._retire_rearmable_cid("cid-2")
+        coord._retire_rearmable_cid("cid-3")
+        assert "cid-1" not in coord._rearm_retired_cids
+        assert "cid-2" in coord._rearm_retired_cids
+        assert "cid-3" in coord._rearm_retired_cids
+        coord._retire_rearmable_cid("")
+        assert "" not in coord._rearm_retired_cids

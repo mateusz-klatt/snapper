@@ -606,6 +606,17 @@ CancelEventType = Literal[OrderEventEnum.CANCELLED, OrderEventEnum.REJECTED]
 ReplaceEventType = Literal[OrderEventEnum.REPLACED, OrderEventEnum.REJECTED]
 """Event types for replace command responses."""
 
+ORDER_STATUS_REASON_ADOPTED = "adopted"
+"""``OrderData.reason`` marker on adoption-shaped ACCEPTED publishes (#155).
+
+The executor sets it when adopting a venue-live order (ghost adoption,
+ambiguous-submit verification, false-reject heal, startup recovery of a
+venue-verified-open row); the trader coordinator re-arms a RELEASED
+engine's in-flight guard ONLY on frames carrying this reason — ordinary
+acceptances stay reason-less so normal submit semantics are untouched.
+Shared constant (not a per-module literal) because the value is a wire
+contract between two processes."""
+
 OrderEventType = Literal[
     OrderEventEnum.SUBMITTED,
     OrderEventEnum.ACCEPTED,

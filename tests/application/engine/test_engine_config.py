@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -3264,6 +3265,7 @@ async def test_on_command_expired_releases_engine_intent() -> None:
     engine.clear_pending_intent = MagicMock(return_value=True)
     coord.engines = {"BTC-USD@kraken-live": engine}
     coord._order_shard_keys = {}
+    coord._rearm_retired_cids = OrderedDict()
     coord._sync_order_event_to_trade_service = MagicMock()
     coord._project_paired_execution_leg_terminal = AsyncMock()
     cmd: dict[str, Any] = {
