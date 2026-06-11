@@ -195,8 +195,8 @@ class TestBacktestTradfiObservationOnly:
             ),
             patch("snapper.strategies.models.is_tradeable", return_value=True),
             patch(
-                "snapper.messaging.topics.validation.get_available_symbols",
-                return_value=[_TRADFI_SYMBOL],
+                "snapper.messaging.topics.validation.get_available_symbols_set",
+                return_value=frozenset({_TRADFI_SYMBOL}),
             ),
         ):
             collector = ResultCollector()
@@ -226,8 +226,8 @@ class TestBacktestTradfiObservationOnly:
             ),
             patch("snapper.strategies.models.is_tradeable", return_value=True),
             patch(
-                "snapper.messaging.topics.validation.get_available_symbols",
-                return_value=[_TRADFI_SYMBOL],
+                "snapper.messaging.topics.validation.get_available_symbols_set",
+                return_value=frozenset({_TRADFI_SYMBOL}),
             ),
         ):
             collector = ResultCollector()

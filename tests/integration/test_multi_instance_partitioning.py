@@ -1,10 +1,15 @@
 """Integration tests — N=2 partitioning end-to-end.
 
 Covers:
-    1. ``test_two_coordinators_split_signals``: two coordinators,
-       10 signals precomputed to split ~50/50 across instance_id 0/1,
-       assert each instance's engines set is disjoint + the union
-       covers all dispatched shards.
+    1. ``test_paper_signals_under_partitioning_are_refused``: two
+       coordinators, 10 paper signals spanning both instances' shards,
+       assert NEITHER builds an engine — the trader refuses paper
+       signals under N>1 because paper orders are not durable (no
+       Order-table persistence), so an in-flight paper order could not
+       be recovered after a crash. Positive broker-path hash-split
+       coverage lives in ``test_live_signals_split_across_coordinators``
+       (live-mode signals are not subject to the exclusion), scenario
+       #3, and the engine unit tests.
     2. ``test_coordinator_restart_only_recovers_owned``: after the
        split, stop coordinator 1 and start a fresh one with the same
        settings. Assert it recovers ONLY its own shards from
@@ -108,6 +113,84 @@ def _pick_instruments_per_instance() -> tuple[list[str], list[str]]:
     return for_0, for_1
 
 
+_LIVE_TEST_INSTRUMENTS: tuple[str, ...] = (
+    "BTC-USD",
+    "ETH-USD",
+    "BTC-EUR",
+    "EUR-USD",
+)
+
+
+def _make_live_signal(instrument: str, price: float = 100.0) -> SignalData:
+    """Build a minimal kraken live-mode BUY signal for the given instrument.
+
+    Args:
+        instrument: Native instrument symbol.
+        price: Signal price (must be positive for routing validation).
+
+    Returns:
+        SignalData targeting the kraken exchange.
+    """
+    now = datetime.now(UTC)
+    return SignalData(
+        type="signal",
+        public_id=f"sig-live-{instrument}",
+        timestamp=now,
+        session_id="s-phase4",
+        sequence_id=1,
+        instrument=instrument,
+        exchange="kraken",
+        side="buy",
+        strength=0.5,
+        reason="phase4-integration-live",
+        price=price,
+        strategy_name="phase4-integration",
+        fired_at=now,
+    )
+
+
+def _pick_live_instruments_per_instance() -> tuple[list[str], list[str]]:
+    """Partition the live test instruments across the two coordinator instances.
+
+    Live (non-paper) signals with an empty wallet shard on the plain
+    ``kraken.{instrument}.live`` key (no strategy tag, no wallet
+    segment), so the split is computed over exactly that key shape.
+
+    Returns:
+        Two instrument lists: those owned by instance 0 and instance 1.
+    """
+    for_0: list[str] = []
+    for_1: list[str] = []
+    for instrument in _LIVE_TEST_INSTRUMENTS:
+        shard_key = f"kraken.{instrument}.live"
+        bucket = ShardOwnership._hash(shard_key) % 2
+        if bucket == 0:
+            for_0.append(instrument)
+        else:
+            for_1.append(instrument)
+    return for_0, for_1
+
+
+async def _publish_live_signal(
+    ctx: zmq.asyncio.Context, xsub_endpoint: str, signal: SignalData
+) -> None:
+    """Publish a single ``signals.kraken.{instrument}.live`` frame.
+
+    Args:
+        ctx: ZMQ context owned by the test.
+        xsub_endpoint: Broker XSUB endpoint to connect the publisher to.
+        signal: Live-mode signal payload to publish.
+    """
+    pub = ctx.socket(zmq.PUB)
+    pub.connect(xsub_endpoint)
+    await asyncio.sleep(0.15)
+    topic = f"signals.kraken.{signal.instrument}.live".encode()
+    await pub.send_multipart([topic, signal.to_json().encode()])
+    await asyncio.sleep(0.05)
+    pub.setsockopt(zmq.LINGER, 0)
+    pub.close()
+
+
 async def _publish_signal(ctx: zmq.asyncio.Context, xsub_endpoint: str, signal: SignalData) -> None:
     """Publish a single ``signals.paper.{instrument}.live`` frame."""
     pub = ctx.socket(zmq.PUB)
@@ -133,20 +216,25 @@ async def _wait_for_engines(
 
 
 class TestTwoCoordinatorsSplitSignals:
-    """Scenario #1 — split signals across two instances."""
+    """Scenario #1 — paper signals under N>1 partitioning are refused."""
 
-    async def test_two_coordinators_split_signals(
+    async def test_paper_signals_under_partitioning_are_refused(
         self, two_coordinator_stack: TwoCoordinatorStack
     ) -> None:
-        """10 signals hash-partition across two coordinators.
+        """Paper signals under N=2 never build engines on either instance.
 
-        Asserts:
-            - Each coordinator's engines dict has the exact 5 keys
-              whose shards the hash assigns to its instance.
-            - The union of both engines sets equals all 10 dispatched
-              shards.
-            - No duplicates (each shard is owned by exactly one
-              coordinator).
+        Given: a healthy two-coordinator stack (N=2) and 10 paper
+            signals spanning shards owned by both instances,
+        When: all signals are published and a delivery grace period
+            elapses,
+        Then: NEITHER coordinator builds an engine. The trader refuses
+            paper signals under N>1 partitioning by design: paper
+            orders have no Order-table persistence, so an in-flight
+            paper order could not be recovered after a crash and its
+            fills would be silently lost. This e2e locks that
+            money-safety contract end-to-end (broker pipeline included);
+            the positive hash-split math is covered by scenario #3 and
+            the engine unit tests.
         """
         trader_0, trader_1 = two_coordinator_stack.traders
         instruments_0, instruments_1 = _pick_instruments_per_instance()
@@ -157,8 +245,41 @@ class TestTwoCoordinatorsSplitSignals:
                 two_coordinator_stack.xsub_endpoint,
                 _make_signal(inst),
             )
-        expected_0 = {f"{inst}@paper-live" for inst in instruments_0}
-        expected_1 = {f"{inst}@paper-live" for inst in instruments_1}
+        any_key = {f"{all_instruments[0]}@paper-live"}
+        await _wait_for_engines(trader_0, any_key, timeout=3.0)
+        engines_0 = set(trader_0.engines.keys())
+        engines_1 = set(trader_1.engines.keys())
+        assert engines_0 == set(), f"trader_0 must refuse paper signals under N>1: {engines_0}"
+        assert engines_1 == set(), f"trader_1 must refuse paper signals under N>1: {engines_1}"
+
+    async def test_live_signals_split_across_coordinators(
+        self, two_coordinator_stack: TwoCoordinatorStack
+    ) -> None:
+        """Live-mode signals hash-partition across two coordinators e2e.
+
+        Given: a two-coordinator stack (N=2) and live-mode kraken
+            signals spanning shards owned by both instances,
+        When: all signals are published through the real broker,
+        Then: each coordinator builds engines for exactly its owned
+            shards (subset present, no foreign keys). This is the
+            POSITIVE broker-path dispatch coverage complementing the
+            paper-refusal test above: live signals shard on the plain
+            ``kraken.{instrument}.live`` key and are NOT subject to the
+            paper N>1 exclusion. No live executor runs in this stack —
+            engine creation on the coordinator is the assertion target,
+            not order execution.
+        """
+        trader_0, trader_1 = two_coordinator_stack.traders
+        instruments_0, instruments_1 = _pick_live_instruments_per_instance()
+        assert instruments_0 and instruments_1, "live instrument set must span both instances"
+        for inst in instruments_0 + instruments_1:
+            await _publish_live_signal(
+                two_coordinator_stack.client_context,
+                two_coordinator_stack.xsub_endpoint,
+                _make_live_signal(inst),
+            )
+        expected_0 = {f"{inst}@kraken-live" for inst in instruments_0}
+        expected_1 = {f"{inst}@kraken-live" for inst in instruments_1}
         await _wait_for_engines(trader_0, expected_0, timeout=10.0)
         await _wait_for_engines(trader_1, expected_1, timeout=10.0)
         engines_0 = set(trader_0.engines.keys())
@@ -324,8 +445,9 @@ class TestCoordinatorRestartOnlyRecoversOwned:
     ) -> None:
         """Restart does not recover foreign-shard state from the DB.
 
-        Step 1: publish signals for all test instruments. Wait until
-        the expected engines show up in both coordinators.
+        Step 1: publish signals for all test instruments (refused
+        under N>1 paper mode — engines stay empty; the wait is a
+        bounded grace period, not an arrival guarantee).
         Step 2: stop trader_1 and start a fresh trader_1_new with
         the same settings (instance_id=1, instance_count=2).
 

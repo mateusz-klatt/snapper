@@ -29,6 +29,7 @@ import snapper.application.engine.trader as snapper_trader
 import snapper.config.settings as snapper_settings
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.config.app import AppSettings
+from snapper.config.settings import get_bootstrap_settings
 from snapper.messaging.executors.paper import PaperOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
 
@@ -137,7 +138,12 @@ def _patch_settings_for_e2e(
     monkeypatch.setattr(
         snapper_trader,
         "_bootstrap_settings",
-        SimpleNamespace(zmq_broker_xpub=xpub_endpoint, zmq_broker_xsub=xsub_endpoint),
+        get_bootstrap_settings().model_copy(
+            update={
+                "zmq_broker_xpub": xpub_endpoint,
+                "zmq_broker_xsub": xsub_endpoint,
+            }
+        ),
     )
 
 
