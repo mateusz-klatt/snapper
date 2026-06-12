@@ -239,7 +239,7 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    The interface should be `UP` and the rule should pin `from
    <tunnel_addr>` → table N.
 
-4. **Kraken WS uses the tunnel?** The pool is a process-local
+5. **Kraken WS uses the tunnel?** The pool is a process-local
    singleton inside each feed-publisher process — `get_egress_pool()`
    in a fresh `docker compose exec` interpreter returns `None`, and
    quarantining inside the API process would not touch the publisher
@@ -252,7 +252,7 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    source IP should match the VPN exit. Restore the normal direct-route
    priority when done.
 
-5. **Stable tick flow?**
+6. **Stable tick flow?**
    ```sql
    SELECT i.exchange, COUNT(*) AS n
    FROM ticks t JOIN instruments i ON i.public_id = t.instrument_public_id

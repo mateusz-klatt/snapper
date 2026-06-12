@@ -57,6 +57,18 @@ MASTER_PASSWORD=...
 SNAPPER_COORDINATOR_INSTANCE_COUNT=2
 ```
 
+`SNAPPER_ENV=production` (also `prod` / `staging`) arms the
+placeholder-secret gate: every process loading this env file —
+coordinators included — refuses to start while `MASTER_PASSWORD` is
+unset or still the development placeholder
+(`snapper_default_master_password_v1`); `BootstrapSettingsLoader`
+raises `ValueError` naming the variable before anything binds. The
+API server additionally refuses the placeholder `auth_secret_key` /
+`csrf_secret_key` DB settings with a `RuntimeError` naming the key.
+Remediation: set a real `MASTER_PASSWORD` in the env file (and real
+secret rows in the settings table) before flipping `SNAPPER_ENV` to a
+production-like value — see `docs/configuration.md`.
+
 `SNAPPER_COORDINATOR_INSTANCE_COUNT >= 2` requires a PostgreSQL
 `DB_URL`. On a SQLite backend the coordinator refuses to start with a
 count above 1, raising `ValueError` before any signal is dispatched:
@@ -545,6 +557,25 @@ evidence postdating the rejection) is healed loudly: the order is
 adopted and the command resurrected to ACCEPTED, so a false rejection
 cannot silently strand a live order.
 
+Adoption also re-arms the engine. Every adoption of a venue-LIVE
+order — ghost adoption, ambiguous-submit verification, the
+false-reject heal, startup recovery of a venue-verified-open row —
+publishes its ACCEPTED with `reason="adopted"`; terminal-snapshot
+adoptions stay reason-less (re-arming for a dead order would block
+honest emission). On that marker the coordinator re-arms a running
+engine's RELEASED in-flight guard (it consumed the false REJECTED, or
+the 60s timeout valve had already cleared it), so the next signal
+cannot emit a second order while the adopted one still works the
+book. A `RE-ARMED in-flight intent for adopted order ...` WARN in the
+coordinator log is that guard working, not a fault. An engine already
+in flight for a DIFFERENT order is never clobbered (WARN — both
+orders stay live and fills of the adopted one still book position),
+and a client id retired by an honest terminal (FILLED fill or
+cancelled/expired confirm; rejections never retire) refuses late
+duplicate adopted frames. A failed adopted ACCEPTED publish parks on
+the executor and the 60s reconciliation loop retries it until it
+lands.
+
 ### Private fill-stream supervision
 
 The private execution (fills) WebSocket in each executor is supervised,
@@ -773,8 +804,14 @@ sqlite3 data/snapper.db \
 #    persist a new config row, and it does NOT go through
 #    `ProcessRegistrySyncer`. (Persistent enable/autostart state
 #    lives on the create / configure path: `POST /api/processes` or
-#    the Settings page; the registry syncer reconciles that
-#    persisted state onto the launcher.)
+#    the Settings page; the launcher reads that persisted state at
+#    startup, while the registry syncer only seeds and updates the
+#    DB rows from the code registry.) With
+#    SNAPPER_COORDINATOR_INSTANCE_COUNT >= 2 only coordinator
+#    instance 0 runs the startup registry sync; other instances log
+#    "Skipping process registry sync on coordinator instance
+#    <id>/<count>; instance 0 owns it" so replicas never race the
+#    same temporal Setting rows.
 #    The body is the full request envelope: `json_body` calls
 #    `ProcessStartRequest.model_validate_json` on the raw body, and the
 #    envelope (StrictDataSchema, extra="forbid") REQUIRES session_id,

@@ -428,8 +428,9 @@ operator deactivation:
     `invalidate_user_cache`.
 6. Every lifespan-wired `WebSocketAuthManager` and `TokenManager`
     also runs a DB-backed fallback scan against the SCD2-active
-    `users.is_active` row, so broker outages delay fanout by the scan
-    interval rather than by token expiry or reconnect.
+    `users.is_active` row, so broker outages delay fanout by the
+    5-second scan interval (`DEACTIVATION_FALLBACK_SCAN_INTERVAL_S`)
+    rather than by token expiry or reconnect.
 
 Latency: the token inventory is revoked before the deactivated-user
 bus event is published. Existing positive verify-cache entries are

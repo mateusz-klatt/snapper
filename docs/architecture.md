@@ -53,6 +53,7 @@ Two-layer configuration:
     Settings from environment variables required before database connection:
 
     - Database URL
+    - Deployment environment (`SNAPPER_ENV`)
     - Master password for encryption
     - HTTP and ZMQ server endpoints
 
@@ -63,6 +64,12 @@ Two-layer configuration:
     - Exchange API keys
     - Trading parameters
     - Authentication configuration
+
+    Production-like `SNAPPER_ENV` values (`production`, `prod`,
+    `staging`) fail fast on placeholder secrets: bootstrap refuses the
+    default `MASTER_PASSWORD` at load time, and `AppSettings` raises on
+    the placeholder `auth_secret_key` / `csrf_secret_key` DB defaults
+    instead of silently signing tokens with development values.
 
 ### Data (`src/snapper/data/`)
 
@@ -298,6 +305,23 @@ reconciliation loop runs a restart-proof resurrection pass for
 REJECTED rows whose live venue evidence postdates the rejection, and
 the next fold cycle re-derives the true state from the full event
 history.
+
+**Adopted-order intent re-arm**: every adoption-shaped ACCEPTED
+publish (ghost adoption, ambiguous-submit verification, false-reject
+heal, startup recovery of a venue-verified-open row) carries
+`reason="adopted"` (`ORDER_STATUS_REASON_ADOPTED`, a shared wire
+constant), and the running coordinator re-arms a RELEASED engine's
+in-flight guard on exactly those frames — an engine that consumed a
+false REJECTED, or whose lazy timeout valve cleared, would otherwise
+emit a new order on the next signal while the adopted one still works
+the book. The re-arm never clobbers a newer live intent, skips frames
+whose registered shard mismatches the routed engine, and refuses cids
+already retired by an honest terminal (FILLED fill,
+cancelled/expired confirm); a refused or stale adopted frame also
+suppresses the TradeService shadow-write so it cannot regress a
+FILLED projection back to ACCEPTED. A failed adopted publish is
+retried each recon cycle because that frame is the running engine's
+only re-arm signal.
 
 #### Market orders without price — venue-fills VWAP heal
 
@@ -1107,6 +1131,10 @@ classes running inside `PlanExecutorService`.
 
 **Tables:** `execution_plans` (plan state + lifecycle), `execution_plan_checkpoints`
 (high-churn evaluator state), `execution_plan_decisions` (tiered decision log),
+`execution_plan_decision_outbox` (durable retry state for the `plans.decisions`
+ZMQ fanout — written in the same transaction as each decision row the plan
+executor logs, drained with capped exponential backoff after publish failures;
+REST-surface decision rows are logged without an outbox entry),
 `instrument_order_capabilities` (capability matrix), `venue_fee_schedules` (fee tiers),
 `position_cycles` (one open→close lifetime per shard, brackets attach by `position_cycle_public_id`).
 

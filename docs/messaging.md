@@ -207,9 +207,12 @@ Bracket / trailing-stop / execution-plan decisions, emitted by the
 `PlanExecutorService` through a durable outbox written in the same
 transaction as each `ExecutionPlanDecision` SCD2 insert. The service
 attempts the ZMQ publish immediately, marks the outbox row `sent` after
-success, and retries pending rows with exponential backoff from a
-background drain loop after broker outages. The notify sidecar subscribes
-to turn stop-loss / take-profit fires into iOS pushes.
+success, and retries pending rows with capped exponential backoff from a
+background drain loop after broker outages; the same drain also runs once
+at startup, so decisions that never published before a restart replay
+from their durable rows. A row whose third publish attempt fails is
+marked `failed` terminally. The notify sidecar subscribes to turn
+stop-loss / take-profit fires into iOS pushes.
 
 | Topic | Description |
 | ----- | ----------- |
@@ -968,8 +971,12 @@ original request rebuilt from the durable command row, and dispatched
 commands with no resolving venue evidence are verified by client id — a
 found order is adopted, while repeated authoritative absence (only with
 the dispatch TTL enabled, and bounded by an age cutoff) publishes
-`rejected`. Subscribers may therefore see `accepted` or `rejected` events
-for orders the current executor process never submitted.
+`rejected`. Adoption-shaped `accepted` events carry `reason="adopted"` in
+the `OrderData` payload — the engine uses it to re-arm its in-flight
+guard for the adopted order — and a failed adoption publish is parked
+and retried by the reconciliation loop until it lands. Subscribers may
+therefore see `accepted` or `rejected` events for orders the current
+executor process never submitted.
 
 `PlanExecutorService` (see docs/architecture.md → Execution Plans) also
 subscribes to `orders.events.` and `market.` on the broker XPUB, routes
@@ -998,9 +1005,11 @@ Bridge automatically:
 - Applies per-frame scope filters for `ai_reviews.*`, `orders.events.*`, and
   `alerts.*`; malformed scoped frames fail closed before fan-out
 - Forwards messages via `_forward_to_clients` with per-subscription backpressure
-- Throttles forwarding per subscriber using the matching
-  `TOPIC_REGISTRY` prefix's `throttle_ms`, falling back to 100 ms for
-  unconfigured concrete topics
+- Throttles forwarding per subscriber: the live WebSocket subscribe path
+  registers every subscription with a flat 100 ms interval, regardless of
+  topic (`TOPIC_REGISTRY` carries per-prefix `throttle_ms` metadata, but
+  only the bridge's schema-aware registration path reads it, and the
+  WebSocket subscribe handler does not use that path)
 - Drops market data when a client exceeds `MAX_PENDING_MESSAGES_MARKET` (100)
 - Disconnects slow clients on trade topics when exceeding `MAX_PENDING_MESSAGES_TRADE` (1000)
 - Unsubscribes when last client disconnects

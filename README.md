@@ -89,6 +89,10 @@ Edit `.env` file:
 # Database (SQLite dev, PostgreSQL prod)
 DB_URL=sqlite+aiosqlite:///./data/snapper.db
 
+# Deployment environment — production/prod/staging refuse placeholder
+# secrets (MASTER_PASSWORD, auth_secret_key, csrf_secret_key)
+SNAPPER_ENV=development
+
 # Settings encryption in database
 MASTER_PASSWORD=your_master_password
 
@@ -124,8 +128,8 @@ snapper server
 
 Two ways to bring up the dashboard:
 
-- **Backend-served (production / single port).** Run `make ui-setup`
-  + `make ui-build` to produce `frontend/dist/`, then start the
+- **Backend-served (production / single port).** Run `make ui-setup` +
+  `make ui-build` to produce `frontend/dist/`, then start the
   server. The FastAPI app mounts the static UI at `/` only when
   `frontend/dist/` exists; the dashboard is then at
   `http://localhost:8000/`.
@@ -185,6 +189,12 @@ reconciliation progress, stuck in-flight commands — instead of a
 hardcoded healthy, and an executor parked after exhausting its restart
 budget is alerted through launcher-published synthetic error
 heartbeats rather than vanishing silently.
+
+Execution-plan decision events (`plans.decisions.*`) get the same
+durability: each decision row the plan executor logs commits together
+with an outbox row in one transaction, the plan executor publishes
+immediately, and a background drain loop replays unsent rows with
+capped exponential backoff after broker outages.
 
 ### Process-Managed Executors
 

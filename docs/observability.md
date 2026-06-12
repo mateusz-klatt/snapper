@@ -26,6 +26,7 @@ bypass CSRF per the project-wide auth contract.
 | POST   | `/api/metrics/system/tracemalloc/start?duration_s`  | Arm Python tracemalloc with auto-stop deadline |
 | POST   | `/api/metrics/system/tracemalloc/stop`              | Disarm tracemalloc + cancel pending deadline |
 | GET    | `/api/metrics/notifications`                        | Notify-sidecar outbox delivery counters |
+| GET    | `/api/metrics/rest-rate`                            | Rolling REST call rates + rate-limit utilization per exchange |
 | GET    | `/api/metrics/retention`                            | Retention scheduler status and policy counters |
 | GET    | `/api/metrics/db/tables`                            | Per-table row-count and SCD2 lifecycle counters |
 
@@ -56,7 +57,8 @@ for the `NotificationMetricsResponse` wire schema.
 
 ## Snapshot fields
 
-Each sample captures eight nested groups plus two top-level flags. All
+Each sample captures eight nested groups, a top-level `bus_time`
+timestamp, and two top-level flags. All
 field names are stable; downstream consumers (frontend, iOS) regenerate
 from the backend OpenAPI / JSON-Schema export and pin the wire shape.
 
@@ -106,7 +108,8 @@ from the backend OpenAPI / JSON-Schema export and pin the wire shape.
 The fields below describe the API/wire shape returned by
 `/api/metrics/system`. Internally, the snapshotter stores the
 generation counters as a tuple (`collections_per_gen:
-tuple[int, int, int]` on `SystemMetricsSnapshot`); the route
+tuple[int, int, int]` on the `GcMetrics` group reached via
+`SystemMetricsSnapshot.gc`); the route
 mapper flattens that tuple into the three `collections_gen{N}`
 fields below before serializing.
 
