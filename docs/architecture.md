@@ -590,6 +590,7 @@ signals             -- Strategy signals
 execution_plans     -- Plan envelopes (brackets, trailing stops, manual)
 execution_plan_checkpoints -- Materialized plan state snapshots
 execution_plan_decisions   -- Per-tick plan decisions (audit trail)
+execution_plan_decision_outbox -- Durable retry state for plans.decisions fanout
 
 -- Trade runtime (durable command path)
 trade_commands              -- Durable trade intent (engine writes before execution)

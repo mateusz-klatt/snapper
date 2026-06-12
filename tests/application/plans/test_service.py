@@ -2378,6 +2378,10 @@ class TestLogDecisionPublishesEvent:
         call_kwargs = fake_publisher.send_multipart.await_args.kwargs
         assert call_kwargs["topic"] == "plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60307"
         assert b'"reason":"sl_hit"' in call_kwargs["payload"]
+        mock_repo.mark_execution_plan_decision_outbox_sent.assert_awaited_once()
+        insert_kwargs = mock_repo.insert_execution_plan_decision.await_args.kwargs
+        assert insert_kwargs["outbox_event"]["status"] == "pending"
+        assert insert_kwargs["outbox_event"]["payload_json"].startswith("{")
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -2486,6 +2490,8 @@ class TestLogDecisionPublishesEvent:
         )
 
         fake_publisher.send_multipart.assert_awaited_once()
+        mock_repo.schedule_execution_plan_decision_outbox_retry.assert_awaited_once()
+        mock_repo.mark_execution_plan_decision_outbox_sent.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -2507,6 +2513,302 @@ class TestLogDecisionPublishesEvent:
             reason="sl_hit",
             importance="action",
         )
+
+        mock_repo.mark_execution_plan_decision_outbox_sent.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_drain_decision_outbox_publishes_ready_row(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Ready outbox rows are republished and marked sent."""
+        mock_repo = AsyncMock()
+        mock_repo.list_execution_plan_decision_outbox_ready = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "outbox-1",
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "decision_public_id": "decision-1",
+                    "plan_public_id": "plan-1",
+                    "topic": "plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60311",
+                    "payload_json": '{"type":"execution_plan_decision_event"}',
+                    "status": "pending",
+                    "attempt_count": 0,
+                    "last_attempt_at": None,
+                    "next_attempt_at": None,
+                    "sent_at": None,
+                    "error_reason": None,
+                    "created_at": datetime.now(UTC),
+                }
+            ]
+        )
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        fake_publisher = AsyncMock()
+        service._publisher = fake_publisher
+
+        await service._drain_decision_outbox_once()
+
+        fake_publisher.send_multipart.assert_awaited_once()
+        send_kwargs = fake_publisher.send_multipart.await_args.kwargs
+        assert send_kwargs["topic"] == "plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60311"
+        assert send_kwargs["payload"] == b'{"type":"execution_plan_decision_event"}'
+        mock_repo.mark_execution_plan_decision_outbox_sent.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_start_decision_outbox_drainer_skips_existing_task(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Starting the drainer is idempotent when a task is already alive."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        service._publisher = AsyncMock()
+        task = MagicMock()
+        task.done.return_value = False
+        service._decision_outbox_task = task
+
+        service._start_decision_outbox_drainer()
+
+        assert service._decision_outbox_task is task
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_stop_decision_outbox_drainer_cancels_task(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Stopping the drainer cancels and clears a live retry task."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        task = asyncio.create_task(asyncio.sleep(60.0))
+        service._decision_outbox_task = task
+
+        await service._stop_decision_outbox_drainer()
+
+        assert service._decision_outbox_task is None
+        assert task.cancelled()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_stop_decision_outbox_drainer_clears_done_task(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Stopping the drainer clears a task that already completed."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        task = asyncio.create_task(asyncio.sleep(0.0))
+        await task
+        service._decision_outbox_task = task
+
+        await service._stop_decision_outbox_drainer()
+
+        assert service._decision_outbox_task is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_process_decision_outbox_loop_invokes_drain(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """The retry loop sleeps and then drains pending rows."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        service._drain_decision_outbox_once = AsyncMock(side_effect=asyncio.CancelledError)
+
+        with (
+            patch("snapper.application.plans.service.asyncio.sleep", new=AsyncMock()),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await service._process_decision_outbox_loop()
+
+        service._drain_decision_outbox_once.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_drain_decision_outbox_tolerates_missing_repo_method(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Legacy test doubles without the outbox method are ignored."""
+        mock_repo = AsyncMock()
+        mock_repo.list_execution_plan_decision_outbox_ready = AsyncMock(
+            side_effect=AttributeError("missing")
+        )
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        service._publisher = AsyncMock()
+
+        await service._drain_decision_outbox_once()
+
+        service._publisher.send_multipart.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_drain_decision_outbox_logs_read_error(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Repository read failures do not stop the plan executor."""
+        mock_repo = AsyncMock()
+        mock_repo.list_execution_plan_decision_outbox_ready = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        service._publisher = AsyncMock()
+
+        await service._drain_decision_outbox_once()
+
+        service._publisher.send_multipart.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_publish_decision_outbox_row_skips_without_publisher(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Outbox row publish short-circuits when no publisher is configured."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        await service._publish_decision_outbox_row(
+            {
+                "public_id": "outbox-1",
+                "timestamp": datetime.now(UTC),
+                "session_id": "s1",
+                "sequence_id": 1,
+                "decision_public_id": "decision-1",
+                "plan_public_id": "plan-1",
+                "topic": "plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60311",
+                "payload_json": "{}",
+                "status": "pending",
+                "attempt_count": 0,
+                "last_attempt_at": None,
+                "next_attempt_at": None,
+                "sent_at": None,
+                "error_reason": None,
+                "created_at": datetime.now(UTC),
+            }
+        )
+
+        mock_repo_fn.return_value.mark_execution_plan_decision_outbox_sent.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_publish_decision_outbox_row_schedules_retry_on_send_error(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """A retry-drain publish failure schedules the row again."""
+        mock_repo = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        fake_publisher = AsyncMock()
+        fake_publisher.send_multipart = AsyncMock(side_effect=RuntimeError("broker down"))
+        service._publisher = fake_publisher
+
+        await service._publish_decision_outbox_row(
+            {
+                "public_id": "outbox-1",
+                "timestamp": datetime.now(UTC),
+                "session_id": "s1",
+                "sequence_id": 1,
+                "decision_public_id": "decision-1",
+                "plan_public_id": "plan-1",
+                "topic": "plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60311",
+                "payload_json": "{}",
+                "status": "pending",
+                "attempt_count": 1,
+                "last_attempt_at": None,
+                "next_attempt_at": None,
+                "sent_at": None,
+                "error_reason": None,
+                "created_at": datetime.now(UTC),
+            }
+        )
+
+        mock_repo.schedule_execution_plan_decision_outbox_retry.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_mark_decision_outbox_sent_tolerates_repo_edges(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Sent marking degrades on missing, failing, and race-lost repo methods."""
+        mock_repo = AsyncMock()
+        mock_repo.mark_execution_plan_decision_outbox_sent = AsyncMock(
+            side_effect=[
+                AttributeError("missing"),
+                RuntimeError("db down"),
+                False,
+            ]
+        )
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        for _ in range(3):
+            await service._mark_decision_outbox_sent(
+                public_id="outbox-1",
+                decision_public_id="decision-1",
+                plan_public_id="plan-1",
+            )
+
+        assert mock_repo.mark_execution_plan_decision_outbox_sent.await_count == 3
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_schedule_decision_outbox_retry_tolerates_repo_edges(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Retry scheduling degrades on missing, failing, and race-lost repo methods."""
+        mock_repo = AsyncMock()
+        mock_repo.schedule_execution_plan_decision_outbox_retry = AsyncMock(
+            side_effect=[
+                AttributeError("missing"),
+                RuntimeError("db down"),
+                False,
+            ]
+        )
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        for _ in range(3):
+            await service._schedule_decision_outbox_retry(
+                public_id="outbox-1",
+                decision_public_id="decision-1",
+                plan_public_id="plan-1",
+                current_attempt_count=0,
+                error_reason="broker down",
+            )
+
+        assert mock_repo.schedule_execution_plan_decision_outbox_retry.await_count == 3
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_drain_decision_outbox_failure_marks_failed_after_budget(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Exhausted retry rows transition to failed on another publish error."""
+        mock_repo = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+
+        await service._schedule_decision_outbox_retry(
+            public_id="outbox-1",
+            decision_public_id="decision-1",
+            plan_public_id="plan-1",
+            current_attempt_count=2,
+            error_reason="broker down",
+        )
+
+        mock_repo.mark_execution_plan_decision_outbox_failed.assert_awaited_once()
+        mock_repo.schedule_execution_plan_decision_outbox_retry.assert_not_awaited()
 
 
 class TestCheckCapabilitiesWithRows:

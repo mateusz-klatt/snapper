@@ -1287,6 +1287,7 @@ class ExecutionPlanDecisionInsertRow(TypedDict):
     reason: str
     decision_importance: str
     source_surface: str
+    public_id: NotRequired[str]
 
 
 class ExecutionPlanDecisionRow(TypedDict):
@@ -1306,6 +1307,43 @@ class ExecutionPlanDecisionRow(TypedDict):
     reason: str
     decision_importance: str
     source_surface: str
+
+
+class ExecutionPlanDecisionOutboxInsertRow(TypedDict):
+    """Insert params for the durable plan-decision publish outbox."""
+
+    public_id: str
+    decision_public_id: str
+    plan_public_id: str
+    topic: str
+    payload_json: str
+    status: str
+    attempt_count: int
+    last_attempt_at: datetime | None
+    next_attempt_at: datetime | None
+    sent_at: datetime | None
+    error_reason: str | None
+    created_at: datetime
+
+
+class ExecutionPlanDecisionOutboxRow(TypedDict):
+    """Active row projection for plan-decision outbox drains."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    decision_public_id: str
+    plan_public_id: str
+    topic: str
+    payload_json: str
+    status: str
+    attempt_count: int
+    last_attempt_at: datetime | None
+    next_attempt_at: datetime | None
+    sent_at: datetime | None
+    error_reason: str | None
+    created_at: datetime
 
 
 class PositionCycleRow(TypedDict):

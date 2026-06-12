@@ -18,6 +18,7 @@ from snapper.data.models import Execution
 from snapper.data.models import ExecutionPlan
 from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import ExecutionPlanDecision
+from snapper.data.models import ExecutionPlanDecisionOutbox
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import MarketSnapshot
@@ -1159,6 +1160,34 @@ class TestExecutionPlanDecisionModel:
         )
         assert dec.decision_importance == "routine"
         assert dec.evidence["skip_count"] == 60
+
+
+class TestExecutionPlanDecisionOutboxModel:
+    """Tests for ExecutionPlanDecisionOutbox ORM model."""
+
+    def test_creation_pending(self) -> None:
+        """Verify pending outbox row stores publish payload and retry state."""
+        now = datetime.now(UTC)
+        row = ExecutionPlanDecisionOutbox(
+            decision_public_id="decision-1",
+            plan_public_id="plan-1",
+            topic="plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60307",
+            payload_json='{"type":"execution_plan_decision_event"}',
+            status="pending",
+            attempt_count=0,
+            last_attempt_at=None,
+            next_attempt_at=None,
+            sent_at=None,
+            error_reason=None,
+            created_at=now,
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert row.status == "pending"
+        assert row.attempt_count == 0
+        assert row.sent_at is None
+        assert row.payload_json.startswith("{")
 
 
 class TestPositionCycleModel:

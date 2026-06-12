@@ -40,6 +40,7 @@ from snapper.core.partitioning import ShardOwnershipError
 from snapper.data import repository as repo_module
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import ExecutionPlanCheckpoint
+from snapper.data.models import ExecutionPlanDecisionOutbox
 from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Position
@@ -8698,6 +8699,267 @@ async def test_insert_decision_persists_source_surface(tmp_path: Path) -> None:
     rows = await r.list_execution_plan_decisions("plan-mcp", as_of=now)
     assert len(rows) == 1
     assert rows[0].get("source_surface") == "mcp"
+
+
+@pytest.mark.asyncio
+async def test_insert_execution_plan_decision_with_outbox(tmp_path: Path) -> None:
+    """Decision insert and publish outbox row commit atomically."""
+    db_path = tmp_path / "decision_outbox.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    decision_public_id = "019dbb34-f439-77bd-afa8-ee5321d60307"
+    outbox_public_id = "019dbb34-f439-77bd-afa8-ee5321d60308"
+    returned = await r.insert_execution_plan_decision(
+        row={
+            "public_id": decision_public_id,
+            "plan_public_id": "019dbb34-f439-77bd-afa8-ee5321d60309",
+            "decision_type": "evaluator",
+            "decided_at": now,
+            "trigger_type": "tick",
+            "evidence": {},
+            "emitted_command_public_id": None,
+            "new_status": None,
+            "reason": "sl_hit",
+            "decision_importance": "action",
+            "source_surface": "strategy",
+        },
+        bus_time=now,
+        session_id="s1",
+        sequence_id=1,
+        outbox_event={
+            "public_id": outbox_public_id,
+            "decision_public_id": decision_public_id,
+            "plan_public_id": "019dbb34-f439-77bd-afa8-ee5321d60309",
+            "topic": "plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60309",
+            "payload_json": '{"type":"execution_plan_decision_event"}',
+            "status": "pending",
+            "attempt_count": 0,
+            "last_attempt_at": None,
+            "next_attempt_at": None,
+            "sent_at": None,
+            "error_reason": None,
+            "created_at": now,
+        },
+    )
+    assert returned == decision_public_id
+    outbox_rows = await r.list_execution_plan_decision_outbox_ready(now)
+    assert len(outbox_rows) == 1
+    assert outbox_rows[0]["public_id"] == outbox_public_id
+    assert outbox_rows[0]["decision_public_id"] == decision_public_id
+    assert outbox_rows[0]["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_execution_plan_decision_outbox_sent_transition(tmp_path: Path) -> None:
+    """A sent transition removes the row from retry-ready queries."""
+    db_path = tmp_path / "decision_outbox_sent.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    outbox_public_id = "019dbb34-f439-77bd-afa8-ee5321d60318"
+    decision_public_id = "019dbb34-f439-77bd-afa8-ee5321d60317"
+    await r.insert_execution_plan_decision(
+        row={
+            "public_id": decision_public_id,
+            "plan_public_id": "019dbb34-f439-77bd-afa8-ee5321d60319",
+            "decision_type": "evaluator",
+            "decided_at": now,
+            "trigger_type": "tick",
+            "evidence": {},
+            "emitted_command_public_id": None,
+            "new_status": None,
+            "reason": "sl_hit",
+            "decision_importance": "action",
+            "source_surface": "strategy",
+        },
+        bus_time=now,
+        session_id="s1",
+        sequence_id=1,
+        outbox_event={
+            "public_id": outbox_public_id,
+            "decision_public_id": decision_public_id,
+            "plan_public_id": "019dbb34-f439-77bd-afa8-ee5321d60319",
+            "topic": "plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60319",
+            "payload_json": '{"type":"execution_plan_decision_event"}',
+            "status": "pending",
+            "attempt_count": 0,
+            "last_attempt_at": None,
+            "next_attempt_at": None,
+            "sent_at": None,
+            "error_reason": None,
+            "created_at": now,
+        },
+    )
+    sent_at = now + timedelta(seconds=1)
+    applied = await r.mark_execution_plan_decision_outbox_sent(
+        outbox_public_id,
+        transition_at=sent_at,
+        session_id="s1",
+        sequence_id=2,
+    )
+    assert applied is True
+    duplicate = await r.mark_execution_plan_decision_outbox_sent(
+        outbox_public_id,
+        transition_at=sent_at + timedelta(seconds=1),
+        session_id="s1",
+        sequence_id=3,
+    )
+    assert duplicate is False
+    assert await r.list_execution_plan_decision_outbox_ready(sent_at) == []
+    async with r.session() as session:
+        row = (
+            await session.execute(
+                _sa_select(ExecutionPlanDecisionOutbox).where(
+                    ExecutionPlanDecisionOutbox.public_id == outbox_public_id,
+                    ExecutionPlanDecisionOutbox.known_to == KNOWN_TO_MAX,
+                )
+            )
+        ).scalar_one()
+    assert row.status == "sent"
+    assert row.attempt_count == 1
+    assert row.sent_at == sent_at
+
+
+@pytest.mark.asyncio
+async def test_insert_execution_plan_decision_outbox_requires_matching_decision(
+    tmp_path: Path,
+) -> None:
+    """Outbox rows must reference the decision inserted in the same transaction."""
+    db_path = tmp_path / "decision_outbox_mismatch.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    with pytest.raises(ValueError, match="decision outbox row"):
+        await r.insert_execution_plan_decision(
+            row={
+                "public_id": "019dbb34-f439-77bd-afa8-ee5321d60417",
+                "plan_public_id": "019dbb34-f439-77bd-afa8-ee5321d60419",
+                "decision_type": "evaluator",
+                "decided_at": now,
+                "trigger_type": "tick",
+                "evidence": {},
+                "emitted_command_public_id": None,
+                "new_status": None,
+                "reason": "sl_hit",
+                "decision_importance": "action",
+                "source_surface": "strategy",
+            },
+            bus_time=now,
+            session_id="s1",
+            sequence_id=1,
+            outbox_event={
+                "public_id": "019dbb34-f439-77bd-afa8-ee5321d60418",
+                "decision_public_id": "019dbb34-f439-77bd-afa8-ee5321d60420",
+                "plan_public_id": "019dbb34-f439-77bd-afa8-ee5321d60419",
+                "topic": "plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60419",
+                "payload_json": '{"type":"execution_plan_decision_event"}',
+                "status": "pending",
+                "attempt_count": 0,
+                "last_attempt_at": None,
+                "next_attempt_at": None,
+                "sent_at": None,
+                "error_reason": None,
+                "created_at": now,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_execution_plan_decision_outbox_missing_transition_returns_false(
+    tmp_path: Path,
+) -> None:
+    """Transition methods return False when no active pending row exists."""
+    db_path = tmp_path / "decision_outbox_missing.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    applied = await r.mark_execution_plan_decision_outbox_sent(
+        "019dbb34-f439-77bd-afa8-ee5321d60428",
+        transition_at=now,
+        session_id="s1",
+        sequence_id=1,
+    )
+    assert applied is False
+
+
+@pytest.mark.asyncio
+async def test_execution_plan_decision_outbox_retry_and_failed(tmp_path: Path) -> None:
+    """Retry scheduling hides a row until due and failed terminalizes it."""
+    db_path = tmp_path / "decision_outbox_retry.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    outbox_public_id = "019dbb34-f439-77bd-afa8-ee5321d60328"
+    decision_public_id = "019dbb34-f439-77bd-afa8-ee5321d60327"
+    await r.insert_execution_plan_decision(
+        row={
+            "public_id": decision_public_id,
+            "plan_public_id": "019dbb34-f439-77bd-afa8-ee5321d60329",
+            "decision_type": "evaluator",
+            "decided_at": now,
+            "trigger_type": "tick",
+            "evidence": {},
+            "emitted_command_public_id": None,
+            "new_status": None,
+            "reason": "sl_hit",
+            "decision_importance": "action",
+            "source_surface": "strategy",
+        },
+        bus_time=now,
+        session_id="s1",
+        sequence_id=1,
+        outbox_event={
+            "public_id": outbox_public_id,
+            "decision_public_id": decision_public_id,
+            "plan_public_id": "019dbb34-f439-77bd-afa8-ee5321d60329",
+            "topic": "plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60329",
+            "payload_json": '{"type":"execution_plan_decision_event"}',
+            "status": "pending",
+            "attempt_count": 0,
+            "last_attempt_at": None,
+            "next_attempt_at": None,
+            "sent_at": None,
+            "error_reason": None,
+            "created_at": now,
+        },
+    )
+    retry_at = now + timedelta(seconds=30)
+    applied = await r.schedule_execution_plan_decision_outbox_retry(
+        outbox_public_id,
+        transition_at=now + timedelta(seconds=1),
+        session_id="s1",
+        sequence_id=2,
+        next_attempt_at=retry_at,
+        error_reason="broker down",
+    )
+    assert applied is True
+    assert await r.list_execution_plan_decision_outbox_ready(retry_at - timedelta(seconds=1)) == []
+    ready = await r.list_execution_plan_decision_outbox_ready(retry_at)
+    assert len(ready) == 1
+    assert ready[0]["attempt_count"] == 1
+    assert ready[0]["error_reason"] == "broker down"
+    failed = await r.mark_execution_plan_decision_outbox_failed(
+        outbox_public_id,
+        transition_at=retry_at + timedelta(seconds=1),
+        session_id="s1",
+        sequence_id=3,
+        error_reason="exhausted",
+    )
+    assert failed is True
+    assert await r.list_execution_plan_decision_outbox_ready(retry_at + timedelta(seconds=2)) == []
+    async with r.session() as session:
+        row = (
+            await session.execute(
+                _sa_select(ExecutionPlanDecisionOutbox).where(
+                    ExecutionPlanDecisionOutbox.public_id == outbox_public_id,
+                    ExecutionPlanDecisionOutbox.known_to == KNOWN_TO_MAX,
+                )
+            )
+        ).scalar_one()
+    assert row.status == "failed"
+    assert row.attempt_count == 2
+    assert row.error_reason == "exhausted"
 
 
 @pytest.mark.asyncio
