@@ -345,3 +345,50 @@ def test_ws_token_store_cleanup_removes_expired_tokens() -> None:
     store.mark_used("active-token", exp=150)
     assert store.is_used("expired-token", now_ts=100) is False
     assert store.is_used("active-token", now_ts=100) is True
+
+
+def test_ws_token_store_ignores_stale_heap_entries_for_reused_jti() -> None:
+    """Verify stale expiry heap entries do not remove refreshed JTI state.
+
+    Given: A JTI marked used twice with a later expiration,
+    When: The first expiration is cleaned up,
+    Then: The token remains marked used until its latest expiration.
+    """
+    store = WsTokenStore()
+    store.mark_used("token-1", exp=50)
+    store.mark_used("token-1", exp=200)
+    assert store.is_used("token-1", now_ts=100) is True
+    assert store.is_used("token-1", now_ts=200) is False
+
+
+def test_ws_token_store_cleanup_is_bounded_per_lookup() -> None:
+    """Verify lookup cleanup does not scan all expired tokens.
+
+    Given: More expired tokens than the store cleanup batch,
+    When: Checking an active token,
+    Then: The active token is detected and some expired entries remain queued.
+    """
+    store = WsTokenStore()
+    for index in range(100):
+        store.mark_used(f"expired-{index}", exp=index)
+    store.mark_used("active-token", exp=500)
+
+    assert store.is_used("active-token", now_ts=200) is True
+    remaining_expired = [jti for jti, exp in store._used_tokens.items() if exp <= 200]
+    assert remaining_expired
+
+
+def test_ws_token_store_queried_expired_token_is_removed_after_bounded_cleanup() -> None:
+    """Verify the queried JTI is checked directly after bounded cleanup.
+
+    Given: Expired tokens exceed the cleanup batch and the queried token is expired,
+    When: The queried token is checked before global cleanup drains all entries,
+    Then: The queried token is treated as unused and removed immediately.
+    """
+    store = WsTokenStore()
+    for index in range(100):
+        store.mark_used(f"expired-{index}", exp=index)
+    store.mark_used("queried-token", exp=150)
+
+    assert store.is_used("queried-token", now_ts=200) is False
+    assert "queried-token" not in store._used_tokens
