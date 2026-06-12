@@ -111,6 +111,8 @@ from snapper.core.types import PairedFillProjection
 from snapper.core.types import PairedGroupTerminalizeOutcome
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.core.types import TradeSideEnum
+from snapper.core.wallet_short import compute_legacy_wallet_short
+from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.db_stats_types import TableCounters
 from snapper.data.db_stats_types import TableEntry
@@ -3412,6 +3414,21 @@ class Repository(ABC):
             List of active credential rows. Empty list when no
             credentials are seeded yet (e.g. fresh DB before
             ``seed_default_multi_tenant`` runs).
+        """
+        ...
+
+    @abstractmethod
+    async def resolve_wallet_public_id_by_short(
+        self,
+        wallet_short: str,
+        as_of: datetime,
+    ) -> str | None:
+        """Resolve a checkpoint ``wallet_short`` at a temporal ``as_of`` time.
+
+        This mirrors the coordinator's canonical last-12 wallet-short
+        format and legacy first-12 alias support, but reads the
+        ``wallet_credentials`` SCD2 table at the caller's recovery time
+        anchor instead of relying on a process-local boot cache.
         """
         ...
 
@@ -13525,6 +13542,48 @@ class SQLAlchemyRepository(Repository):
                 .order_by(WalletCredential.exchange, WalletCredential.wallet_public_id)
             )
             return [self._credential_row_from(row) for row in result.scalars().all()]
+
+    async def resolve_wallet_public_id_by_short(
+        self,
+        wallet_short: str,
+        as_of: datetime,
+    ) -> str | None:
+        """Resolve canonical or legacy wallet-short aliases at ``as_of``.
+
+        Args:
+            wallet_short: Twelve lowercase hex characters parsed from a
+                persisted shard key's ``w{wallet_short}`` segment.
+            as_of: Temporal read anchor for ``wallet_credentials``.
+
+        Returns:
+            Matching wallet public ID, or ``None`` when no active
+            credential owns the short at ``as_of``.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(distinct(WalletCredential.wallet_public_id))
+                .where(*where_active(WalletCredential, as_of))
+                .order_by(WalletCredential.wallet_public_id)
+            )
+            wallet_public_ids = [row[0] for row in result.all()]
+        return self._wallet_public_id_from_short(wallet_short, wallet_public_ids)
+
+    @staticmethod
+    def _wallet_public_id_from_short(
+        wallet_short: str,
+        wallet_public_ids: Sequence[str],
+    ) -> str | None:
+        """Resolve a short wallet alias from ordered wallet public IDs."""
+        legacy_match: str | None = None
+        for wallet_public_id in wallet_public_ids:
+            if compute_wallet_short(wallet_public_id) == wallet_short:
+                return wallet_public_id
+            if (
+                legacy_match is None
+                and compute_legacy_wallet_short(wallet_public_id) == wallet_short
+            ):
+                legacy_match = wallet_public_id
+        return legacy_match
 
     @staticmethod
     def _credential_row_from(cred: WalletCredential) -> WalletCredentialRow:

@@ -815,6 +815,12 @@ depend on — is a no-op there. See
 [`docs/operations.md`](operations.md) for the systemd template
 recipe and scale-up / scale-down / crash-recovery procedures.
 
+Checkpoint recovery resolves wallet-aware shard keys from
+`wallet_credentials` at the checkpoint's `checkpoint_at` timestamp
+before falling back to the boot-time `wallet_short` cache. This keeps
+rolling restarts and credential rotations from recovering old
+`.w{wallet_short}` checkpoints into an empty or stale wallet scope.
+
 The coordinator also spawns the **paired-execution guard scanner**
 (`PairedExecutionGuardScanner`) as a background task: a DB-only
 liveness loop that assembles and arms multi-leg signal groups behind

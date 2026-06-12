@@ -16,6 +16,8 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from snapper.core.wallet_short import compute_legacy_wallet_short
+from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Wallet
 from snapper.data.repository import CredentialConflictError
@@ -23,7 +25,7 @@ from snapper.data.repository import CredentialNotFoundError
 from snapper.data.repository import SQLAlchemyRepository
 
 
-async def _seed_wallet(repo: SQLAlchemyRepository) -> str:
+async def _seed_wallet(repo: SQLAlchemyRepository, public_id: str | None = None) -> str:
     """Insert a wallet and return its ``public_id``."""
     base_ts = datetime.now(UTC) - timedelta(minutes=5)
     async with repo.session() as s:
@@ -36,6 +38,8 @@ async def _seed_wallet(repo: SQLAlchemyRepository) -> str:
             timestamp=base_ts,
             known_to=KNOWN_TO_MAX,
         )
+        if public_id is not None:
+            wallet.public_id = public_id
         s.add(wallet)
         await s.commit()
         await s.refresh(wallet)
@@ -331,3 +335,135 @@ class TestListWalletCredentialsForWallet:
 
         assert len(rows) == 1
         assert rows[0]["wallet_public_id"] == wallet_id
+
+
+class TestResolveWalletPublicIdByShort:
+    """Temporal wallet-short resolution for checkpoint recovery."""
+
+    @pytest.mark.asyncio
+    async def test_resolves_canonical_short(self, repo: SQLAlchemyRepository) -> None:
+        """Canonical last-12 wallet-short resolves through active credentials.
+
+        Given: A wallet with an active credential at the query time,
+        When: The canonical wallet-short is resolved,
+        Then: The wallet public ID is returned.
+        """
+        wallet_id = "018f0000-0000-7000-8000-abcdefabcdef"
+        base_ts = datetime.now(UTC) - timedelta(minutes=1)
+        await _seed_wallet(repo, wallet_id)
+        await repo.create_wallet_credential(
+            wallet_public_id=wallet_id,
+            exchange="kraken",
+            credential_type="api_key_secret",
+            encrypted_payload="gAAAAABcanonical",
+            label=None,
+            session_id="test-session",
+            sequence_id=10,
+            timestamp=base_ts,
+        )
+
+        result = await repo.resolve_wallet_public_id_by_short(
+            compute_wallet_short(wallet_id),
+            datetime.now(UTC),
+        )
+
+        assert result == wallet_id
+
+    @pytest.mark.asyncio
+    async def test_resolves_legacy_short(self, repo: SQLAlchemyRepository) -> None:
+        """Legacy first-12 wallet-short remains recoverable.
+
+        Given: A wallet whose persisted shard key used the old first-12 alias,
+        When: The legacy wallet-short is resolved,
+        Then: The wallet public ID is returned.
+        """
+        wallet_id = "018f1111-2222-7333-8444-555566667777"
+        base_ts = datetime.now(UTC) - timedelta(minutes=1)
+        await _seed_wallet(repo, wallet_id)
+        await repo.create_wallet_credential(
+            wallet_public_id=wallet_id,
+            exchange="kraken",
+            credential_type="api_key_secret",
+            encrypted_payload="gAAAAABlegacy",
+            label=None,
+            session_id="test-session",
+            sequence_id=10,
+            timestamp=base_ts,
+        )
+
+        result = await repo.resolve_wallet_public_id_by_short(
+            compute_legacy_wallet_short(wallet_id),
+            datetime.now(UTC),
+        )
+
+        assert result == wallet_id
+
+    @pytest.mark.asyncio
+    async def test_honors_temporal_activation(self, repo: SQLAlchemyRepository) -> None:
+        """Wallet-short resolution reads credentials at the supplied time.
+
+        Given: A credential that becomes active at ``base_ts``,
+        When: The resolver reads before and after that timestamp,
+        Then: Only the later read resolves the wallet.
+        """
+        wallet_id = "018f9999-0000-7000-8000-999999999999"
+        base_ts = datetime.now(UTC)
+        await _seed_wallet(repo, wallet_id)
+        await repo.create_wallet_credential(
+            wallet_public_id=wallet_id,
+            exchange="kraken",
+            credential_type="api_key_secret",
+            encrypted_payload="gAAAAABtemporal",
+            label=None,
+            session_id="test-session",
+            sequence_id=10,
+            timestamp=base_ts,
+        )
+        wallet_short = compute_wallet_short(wallet_id)
+
+        before = await repo.resolve_wallet_public_id_by_short(
+            wallet_short,
+            base_ts - timedelta(microseconds=1),
+        )
+        after = await repo.resolve_wallet_public_id_by_short(
+            wallet_short,
+            base_ts + timedelta(microseconds=1),
+        )
+
+        assert before is None
+        assert after == wallet_id
+
+    def test_canonical_match_preempts_earlier_legacy_candidate(self) -> None:
+        """Canonical matches win even after an earlier legacy candidate.
+
+        Given: Ordered wallet IDs where the first row has a legacy alias
+            equal to the second row's canonical short,
+        When: The in-memory resolver scans the rows,
+        Then: The canonical owner is returned.
+        """
+        legacy_candidate = "abcdefab-cdef-7000-8000-111111111111"
+        canonical_owner = "018f0000-0000-7000-8000-abcdefabcdef"
+
+        result = SQLAlchemyRepository._wallet_public_id_from_short(
+            compute_wallet_short(canonical_owner),
+            [legacy_candidate, canonical_owner],
+        )
+
+        assert result == canonical_owner
+
+    def test_first_legacy_match_wins_when_alias_is_duplicated(self) -> None:
+        """Duplicate legacy aliases keep the first deterministic owner.
+
+        Given: Two ordered wallet IDs with the same legacy first-12 alias,
+        When: The resolver scans both rows,
+        Then: The first row remains the legacy owner.
+        """
+        first = "abcdefab-cdef-7000-8000-111111111111"
+        second = "abcdefab-cdef-7000-8000-222222222222"
+
+        result = SQLAlchemyRepository._wallet_public_id_from_short(
+            compute_legacy_wallet_short(first),
+            [first, second],
+        )
+
+        assert result == first

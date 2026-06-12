@@ -909,7 +909,11 @@ class TraderCoordinator(RegisterableProcess):
         if exchange_str not in get_args(OrderExchange):
             logger.warning(f"ZMQTrader: Checkpoint exchange {exchange_str} not valid, skipping")
             return None
-        wallet_public_id = self._resolve_checkpoint_wallet_public_id(shard_key, wallet_short)
+        wallet_public_id = await self._resolve_checkpoint_wallet_public_id(
+            shard_key,
+            wallet_short,
+            checkpoint["checkpoint_at"] or now,
+        )
         delta_events = await self._load_checkpoint_delta_events(checkpoint, shard_key)
         if delta_events is None:
             return None
@@ -983,10 +987,21 @@ class TraderCoordinator(RegisterableProcess):
             if client_order_id and command["shard_key"] == shard_key:
                 self._register_order_shard_key(client_order_id, shard_key)
 
-    def _resolve_checkpoint_wallet_public_id(self, shard_key: str, wallet_short: str) -> str:
-        """Resolve checkpoint wallet attribution from the cached short-id map."""
+    async def _resolve_checkpoint_wallet_public_id(
+        self,
+        shard_key: str,
+        wallet_short: str,
+        as_of: datetime,
+    ) -> str:
+        """Resolve checkpoint wallet attribution from temporal DB state."""
         if not wallet_short:
             return ""
+        temporal_wallet_public_id = await self._lookup_checkpoint_wallet_public_id(
+            wallet_short,
+            as_of,
+        )
+        if temporal_wallet_public_id:
+            return temporal_wallet_public_id
         wallet_public_id = self._wallet_short_to_id.get(wallet_short, "")
         if wallet_public_id:
             return wallet_public_id
@@ -999,6 +1014,25 @@ class TraderCoordinator(RegisterableProcess):
             f"is confirmed."
         )
         return ""
+
+    async def _lookup_checkpoint_wallet_public_id(
+        self,
+        wallet_short: str,
+        as_of: datetime,
+    ) -> str:
+        """Resolve a checkpoint wallet short through the repository at ``as_of``."""
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return ""
+        try:
+            return (
+                await self.repository.resolve_wallet_public_id_by_short(wallet_short, as_of) or ""
+            )
+        except Exception as exc:
+            logger.warning(
+                f"ZMQTrader: failed temporal wallet_short lookup for "
+                f"'{wallet_short}' at {as_of.isoformat()}: {exc}"
+            )
+            return ""
 
     async def _load_checkpoint_delta_events(
         self,
