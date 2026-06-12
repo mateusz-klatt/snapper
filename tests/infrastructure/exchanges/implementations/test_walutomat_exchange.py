@@ -895,6 +895,87 @@ def _make_order_snapshot(
     )
 
 
+@pytest.mark.asyncio()
+async def test_find_order_by_client_id_returns_active_match() -> None:
+    """Active Walutomat submitId match resolves as venue-confirmed found.
+
+    Given: The active-order scan returns orders including one whose
+        client_order_id matches the requested submitId,
+    When: find_order_by_client_id is called,
+    Then: The matching snapshot is returned and the optional symbol
+        narrows the active scan.
+    """
+    client = WalutomatExchangeClient()
+    match = _make_order_snapshot(order_id="ord-hit", client_order_id="cid-hit")
+    calls: list[tuple[str | None, ExchangeOrderStatusEnum | None, int | None]] = []
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        calls.append((symbol, status, limit))
+        return [_make_order_snapshot(order_id="ord-other", client_order_id="cid-other"), match]
+
+    client.get_orders = _mock_get_orders
+
+    found = await client.find_order_by_client_id("cid-hit", "EUR-PLN")
+
+    assert found is match
+    assert calls == [("EUR-PLN", None, None)]
+
+
+@pytest.mark.asyncio()
+async def test_find_order_by_client_id_miss_is_not_authoritative() -> None:
+    """Active Walutomat submitId miss keeps UNKNOWN rather than returning None.
+
+    Given: The active-order scan succeeds but contains no matching
+        submitId,
+    When: find_order_by_client_id is called,
+    Then: NotImplementedError is raised because active-order absence
+        cannot prove the order was not fast-filled or otherwise
+        terminal.
+    """
+    client = WalutomatExchangeClient()
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        _ = (symbol, status, limit)
+        return [_make_order_snapshot(order_id="ord-other", client_order_id="cid-other")]
+
+    client.get_orders = _mock_get_orders
+
+    with pytest.raises(NotImplementedError, match="cannot authoritatively verify absence"):
+        await client.find_order_by_client_id("cid-missing", "EUR-PLN")
+
+
+@pytest.mark.asyncio()
+async def test_find_order_by_client_id_query_failure_propagates() -> None:
+    """Walutomat active-order query failure remains could-not-verify.
+
+    Given: The active-order query raises a transport error,
+    When: find_order_by_client_id is called,
+    Then: The error propagates instead of being converted to absence.
+    """
+    client = WalutomatExchangeClient()
+
+    async def _failing_get_orders(
+        symbol: str | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        _ = (symbol, status, limit)
+        raise httpx.ConnectTimeout("down")
+
+    client.get_orders = _failing_get_orders
+
+    with pytest.raises(httpx.ConnectTimeout):
+        await client.find_order_by_client_id("cid-transport", "EUR-PLN")
+
+
 def _build_polling_client(
     execution_poll_interval: float = 0.0,
 ) -> WalutomatExchangeClient:
