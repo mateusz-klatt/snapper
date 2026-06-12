@@ -38,6 +38,8 @@ def _fresh_manager() -> TokenManager:
     TokenManager._initialized = False
     manager = TokenManager()
     manager._blacklisted_tokens.clear()
+    manager._blacklist_cleanup_heap.clear()
+    manager._next_blacklist_cleanup_ts = float("inf")
     manager._verify_cache.clear()
     manager._user_cache_generations.clear()
     return manager
@@ -161,6 +163,21 @@ class TestVerifyTokenWithReasonBranches:
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(return_value=None)
         outcome = await manager.verify_token_with_reason("not.a.jwt", repo)
+        assert outcome.claims is None
+        assert outcome.rejection_reason == REJECTION_REASON_INVALID
+        repo.get_active_token_by_hash.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_blacklisted_token_returns_invalid_without_db_lookup(self) -> None:
+        """Post-grace blacklist rejection short-circuits before DB lookup."""
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        token_data = manager.verify_token(token)
+        assert token_data is not None
+        manager.blacklist_token_immediately(token_data.jti)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(return_value=_make_verification_row())
+        outcome = await manager.verify_token_with_reason(token, repo)
         assert outcome.claims is None
         assert outcome.rejection_reason == REJECTION_REASON_INVALID
         repo.get_active_token_by_hash.assert_not_awaited()

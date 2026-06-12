@@ -49,6 +49,9 @@ BLACKLIST_GRACE_PERIOD_SECONDS: Final[float] = 10.0
 BLACKLIST_CLEANUP_MULTIPLIER: Final[int] = 2
 """Factor applied to grace period when deciding when to purge old entries."""
 
+BLACKLIST_CLEANUP_BATCH_SIZE: Final[int] = 64
+"""Maximum stale blacklist heap entries processed during one cleanup pass."""
+
 VERIFY_CACHE_TTL_SECONDS: Final[float] = 30.0
 """Seconds a verify_token_with_db verdict is reused from the LRU."""
 
@@ -212,6 +215,8 @@ class TokenManager:
         self._initialized = True
         self._settings: AppSettings | None = None
         self._blacklisted_tokens: dict[str, float] = {}
+        self._blacklist_cleanup_heap: list[tuple[float, str, float]] = []
+        self._next_blacklist_cleanup_ts = float("inf")
         self._blacklist_grace_period = BLACKLIST_GRACE_PERIOD_SECONDS
         self._verify_cache: dict[str, _VerifyCacheEntry] = {}
         self._user_cache_generations: dict[str, int] = {}
@@ -603,19 +608,49 @@ class TokenManager:
             logger.debug(f"Token {jti} in grace period, allowing use")
             return False
 
+    def _blacklist_cleanup_deadline(self, blacklist_time: float) -> float:
+        """Return the timestamp when a blacklist entry can be purged.
+
+        Args:
+            blacklist_time: Unix timestamp when the JTI was blacklisted.
+
+        Returns:
+            Unix timestamp when cleanup may remove the entry.
+        """
+        return blacklist_time + (self._blacklist_grace_period * BLACKLIST_CLEANUP_MULTIPLIER)
+
+    def _record_blacklisted_token(self, jti: str, blacklist_time: float) -> None:
+        """Record a JTI blacklist entry and index its cleanup deadline.
+
+        Args:
+            jti: JWT ID to blacklist.
+            blacklist_time: Unix timestamp when the JTI was blacklisted.
+        """
+        self._blacklisted_tokens[jti] = blacklist_time
+        cleanup_at = self._blacklist_cleanup_deadline(blacklist_time)
+        heapq.heappush(self._blacklist_cleanup_heap, (cleanup_at, jti, blacklist_time))
+        if cleanup_at < self._next_blacklist_cleanup_ts:
+            self._next_blacklist_cleanup_ts = cleanup_at
+
     def _cleanup_old_blacklist_entries(self) -> None:
-        """Remove expired entries from blacklist."""
+        """Remove an indexed batch of expired entries from blacklist."""
         current_time = datetime.now(UTC).timestamp()
-        expired_tokens: list[str] = []
-        for jti, blacklist_time in self._blacklisted_tokens.items():
-            if (
-                current_time - blacklist_time
-                >= self._blacklist_grace_period * BLACKLIST_CLEANUP_MULTIPLIER
-            ):
-                expired_tokens.append(jti)
-        for jti in expired_tokens:
-            del self._blacklisted_tokens[jti]
-            logger.debug(f"Cleaned up expired blacklist entry: {jti}")
+        if current_time < self._next_blacklist_cleanup_ts:
+            return
+        popped = 0
+        while (
+            self._blacklist_cleanup_heap
+            and self._blacklist_cleanup_heap[0][0] <= current_time
+            and popped < BLACKLIST_CLEANUP_BATCH_SIZE
+        ):
+            _cleanup_at, jti, blacklist_time = heapq.heappop(self._blacklist_cleanup_heap)
+            popped += 1
+            if self._blacklisted_tokens.get(jti) == blacklist_time:
+                del self._blacklisted_tokens[jti]
+                logger.debug(f"Cleaned up expired blacklist entry: {jti}")
+        self._next_blacklist_cleanup_ts = (
+            self._blacklist_cleanup_heap[0][0] if self._blacklist_cleanup_heap else float("inf")
+        )
 
     def verify_token(self, token: str) -> TokenClaims | None:
         """Verify and decode a JWT token.
@@ -1012,7 +1047,7 @@ class TokenManager:
             jti: JWT ID to blacklist.
         """
         current_time = datetime.now(UTC).timestamp()
-        self._blacklisted_tokens[jti] = current_time
+        self._record_blacklisted_token(jti, current_time)
         self._enforce_blacklist_cap()
         logger.info(f"Blacklisted token with grace period: {jti}")
 
@@ -1025,7 +1060,7 @@ class TokenManager:
             jti: JWT ID to blacklist.
         """
         past_time = datetime.now(UTC).timestamp() - self._blacklist_grace_period - 1
-        self._blacklisted_tokens[jti] = past_time
+        self._record_blacklisted_token(jti, past_time)
         self._enforce_blacklist_cap()
         logger.info(f"Immediately blacklisted token: {jti}")
 

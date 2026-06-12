@@ -37,6 +37,8 @@ def _fresh_manager() -> TokenManager:
     TokenManager._initialized = False
     manager = TokenManager()
     manager._blacklisted_tokens.clear()
+    manager._blacklist_cleanup_heap.clear()
+    manager._next_blacklist_cleanup_ts = float("inf")
     manager._verify_cache.clear()
     return manager
 
