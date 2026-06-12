@@ -1293,6 +1293,39 @@ class WalutomatExchangeClient(ExchangeClientBase):
             raise ValueError(f"Order {order_id} not found")
         return self._parse_walutomat_order(result["result"][0])
 
+    async def find_order_by_client_id(
+        self, client_order_id: str, symbol: str | None = None
+    ) -> ExchangeOrderSnapshot | None:
+        """Verify an ambiguous submit by scanning Walutomat active orders.
+
+        Walutomat echoes the submit ``submitId`` as ``client_order_id``
+        on active order details, so an active hit is authoritative:
+        the order exists and can be adopted as ACCEPTED. Absence from
+        the active set is NOT authoritative because a fast-filled order
+        leaves that endpoint and the available history/order-id
+        endpoints do not provide a proven submitId lookup. Therefore
+        misses raise ``NotImplementedError`` instead of returning
+        ``None``; the executor must keep the command parked UNKNOWN.
+
+        Args:
+            client_order_id: Submit id sent with the original order.
+            symbol: Optional native symbol to narrow the active-order
+                scan.
+
+        Returns:
+            The matching active order snapshot.
+
+        Raises:
+            NotImplementedError: When the active set contains no match
+                and absence cannot be proven authoritatively.
+            Exception: If the active-order query fails.
+        """
+        orders = await self.get_orders(symbol=symbol)
+        for order in orders:
+            if order.client_order_id == client_order_id:
+                return order
+        raise NotImplementedError("Walutomat cannot authoritatively verify absence by submitId")
+
     @staticmethod
     def _parse_walutomat_order(order_data: dict[str, Any]) -> ExchangeOrderSnapshot:
         """Parse a single Walutomat order response into an ExchangeOrderSnapshot.
