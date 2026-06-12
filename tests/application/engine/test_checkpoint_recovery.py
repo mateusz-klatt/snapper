@@ -15,6 +15,7 @@ import pytest
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.trade.trade_service import TradeService
+from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import VenueEventRow
@@ -117,6 +118,9 @@ def _make_coord(monkeypatch: pytest.MonkeyPatch) -> TraderCoordinator:
 def _set_sqlalchemy_repo(coord: TraderCoordinator, mock_repo: AsyncMock) -> None:
     """Assign an AsyncMock with SQLAlchemyRepository spec to the coordinator."""
     mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+    mock_repo.resolve_wallet_public_id_by_short = AsyncMock(return_value=None)
+    mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
+    mock_repo.insert_position_cycle = AsyncMock(return_value=(1, "cycle-pid"))
     coord.repository = mock_repo
 
 
@@ -373,6 +377,46 @@ class TestCheckpointRecovery:
 
         engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.seen_exec_ids == OrderedDict()
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_wallet_short_prefers_temporal_repository_lookup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Checkpoint recovery resolves wallet_short at checkpoint time.
+
+        Given: A checkpoint shard key with a wallet_short and a stale
+            process-local cache entry,
+        When: Recovery rebuilds the engine,
+        Then: The repository temporal lookup at ``checkpoint_at`` wins
+            over the stale cache.
+        """
+        coord = _make_coord(monkeypatch)
+        wallet_id = "018f0000-0000-7000-8000-abcdefabcdef"
+        wallet_short = compute_wallet_short(wallet_id)
+        stale_wallet_id = "018f1111-2222-7333-8444-555566667777"
+        coord._wallet_short_to_id = {wallet_short: stale_wallet_id}
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        checkpoint_at = datetime(2024, 6, 1, 2, tzinfo=UTC)
+        cp = _make_checkpoint(
+            shard_key=f"kraken.BTC-USD.live.w{wallet_short}",
+            checkpoint_at=checkpoint_at,
+        )
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[cp])
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.resolve_wallet_public_id_by_short = AsyncMock(return_value=wallet_id)
+
+        await coord._recover_engine_state()
+
+        mock_repo.resolve_wallet_public_id_by_short.assert_awaited_once_with(
+            wallet_short,
+            checkpoint_at,
+        )
+        assert "BTC-USD@kraken-live-wabcdefabcdef" in coord.engines
+        assert coord.engines["BTC-USD@kraken-live-wabcdefabcdef"].wallet_public_id == wallet_id
 
     @pytest.mark.asyncio
     async def test_engine_state_restored_from_checkpoint(
@@ -714,19 +758,47 @@ class TestCheckpointRecovery:
 
         assert "BTC-USD@kraken-live" in coord.engines
 
-    def test_resolve_checkpoint_wallet_public_id_returns_cached_public_id(
+    @pytest.mark.asyncio
+    async def test_resolve_checkpoint_wallet_public_id_returns_cached_public_id(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Cached wallet_short values resolve to their public wallet id."""
         coord = _make_coord(monkeypatch)
         coord._wallet_short_to_id = {"01975a8b3c7d": "wallet-public-id"}
 
-        wallet_public_id = coord._resolve_checkpoint_wallet_public_id(
+        wallet_public_id = await coord._resolve_checkpoint_wallet_public_id(
             "kraken.BTC-USD.live.w01975a8b3c7d",
             "01975a8b3c7d",
+            datetime(2024, 6, 1, tzinfo=UTC),
         )
 
         assert wallet_public_id == "wallet-public-id"
+
+    @pytest.mark.asyncio
+    async def test_lookup_checkpoint_wallet_public_id_returns_empty_on_repository_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Temporal wallet-short lookup fails soft on repository errors.
+
+        Given: The repository raises while resolving a wallet_short,
+        When: Checkpoint recovery asks for temporal wallet attribution,
+        Then: The helper returns an empty wallet id so the caller can
+            continue through the existing degraded recovery path.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.resolve_wallet_public_id_by_short = AsyncMock(
+            side_effect=RuntimeError("db unavailable")
+        )
+        coord.repository = mock_repo
+
+        wallet_public_id = await coord._lookup_checkpoint_wallet_public_id(
+            "01975a8b3c7d",
+            datetime(2024, 6, 1, tzinfo=UTC),
+        )
+
+        assert wallet_public_id == ""
 
     @pytest.mark.asyncio
     async def test_load_checkpoint_delta_events_returns_none_for_non_sqlalchemy_repository(
