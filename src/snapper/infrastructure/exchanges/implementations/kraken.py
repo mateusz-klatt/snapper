@@ -98,6 +98,7 @@ _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _STOP_ORDER_TYPES = frozenset(
     {ExchangeOrderTypeEnum.STOP_LOSS, ExchangeOrderTypeEnum.STOP_LOSS_LIMIT}
 )
+_retry_sleep = asyncio.sleep
 
 
 def _require_stop_price(request: ExchangeOrderRequest) -> float:
@@ -2463,7 +2464,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         logger.warning(f"Rate limit exceeded, retrying in {base_delay * (2**attempt)}s")
         if attempt < max_retries - 1:
             attempt += 1
-            await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            await _retry_sleep(base_delay * (2 ** (attempt - 1)))
             return attempt
         raise ccxt.RateLimitExceeded("Rate limit exceeded after max retries")
 
@@ -2508,7 +2509,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._circuit_failures += 1
         if attempt < max_retries - 1:
             attempt += 1
-            await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            await _retry_sleep(base_delay * (2 ** (attempt - 1)))
             return attempt
         if self._circuit_failures >= self._max_failures:
             self._circuit_open_until = time.time() + self._circuit_timeout

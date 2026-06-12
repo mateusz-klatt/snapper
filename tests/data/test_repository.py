@@ -1682,6 +1682,11 @@ class DummyRepository(Repository):
         """Return dummy dialect name."""
         return "dummy"
 
+    async def list_inactive_user_public_ids(self, user_public_ids: list[str]) -> list[str]:
+        """Return no inactive users for dummy repository tests."""
+        del user_public_ids
+        return []
+
     async def ensure_instrument(
         self,
         symbol_public_id: str,
@@ -2808,6 +2813,10 @@ class _MinimalRepository(Repository):
     @property
     def dialect_name(self) -> str:
         return "sqlite"
+
+    async def list_inactive_user_public_ids(self, user_public_ids: list[str]) -> list[str]:
+        del user_public_ids
+        return []
 
     async def get_latest_candle_ids(
         self, as_of: datetime

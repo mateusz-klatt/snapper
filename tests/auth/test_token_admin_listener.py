@@ -14,6 +14,7 @@ are individually testable without a running broker.
 import asyncio
 from datetime import UTC
 from datetime import datetime
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -22,7 +23,12 @@ import pytest
 
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import _VerifyCacheEntry
+from snapper.data.repository import Repository
 from snapper.messaging.schemas.data import UserDeactivatedData
+from tests.auth.deactivation_fallback_helpers import FailingInactiveUserLookupRepo
+from tests.auth.deactivation_fallback_helpers import InactiveUserLookupRepo
+from tests.auth.deactivation_fallback_helpers import assert_fallback_loop_propagates_scan_cancelled
+from tests.auth.deactivation_fallback_helpers import assert_fallback_loop_propagates_sleep_cancelled
 
 
 def _fresh_manager() -> TokenManager:
@@ -159,6 +165,30 @@ class TestStartStopAdminListener:
         await manager.start_admin_listener("")
         assert manager._admin_listen_task is None
         assert manager._admin_subscriber is None
+        assert manager._deactivation_scan_task is None
+
+    @pytest.mark.asyncio
+    async def test_empty_endpoint_starts_db_fallback_when_repo_factory_configured(self) -> None:
+        """Broker-less startup still runs the DB-backed deactivation fallback."""
+        manager = _fresh_manager()
+        repo = InactiveUserLookupRepo([])
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        invocations: list[int] = []
+
+        async def _never() -> None:
+            invocations.append(1)
+            await asyncio.Event().wait()
+
+        with patch.object(manager, "_deactivation_fallback_scan_loop", side_effect=_never):
+            await manager.start_admin_listener("")
+            await asyncio.sleep(0)
+            first_task = manager._deactivation_scan_task
+            await manager.start_admin_listener("")
+            assert manager._deactivation_scan_task is first_task
+            assert first_task is not None
+            assert len(invocations) == 1
+        await manager.stop_admin_listener()
+        assert manager._deactivation_scan_task is None
 
     @pytest.mark.asyncio
     async def test_second_start_is_noop_while_listener_healthy(self) -> None:
@@ -280,6 +310,81 @@ class TestAdminListenLoop:
         ):
             await manager._admin_listen_loop()
         assert "hash-evicted" not in manager._verify_cache
+
+
+class TestDeactivationFallbackScan:
+    """DB-backed fallback evicts cached users even without broker delivery."""
+
+    @pytest.mark.asyncio
+    async def test_scan_evicts_inactive_cached_users_only(self) -> None:
+        """Only inactive candidates returned by the repo are evicted."""
+        manager = _fresh_manager()
+        repo = InactiveUserLookupRepo(["target-user"])
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        _seed_cache_entry(manager, "hash-target", "target-user")
+        _seed_cache_entry(manager, "hash-bystander", "bystander-user")
+        await manager._scan_deactivated_cached_users_once()
+        assert repo.queries == [["bystander-user", "target-user"]]
+        assert "hash-target" not in manager._verify_cache
+        assert "hash-bystander" in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_scan_without_factory_is_noop(self) -> None:
+        """No repository factory means the fallback scanner is disabled."""
+        manager = _fresh_manager()
+        _seed_cache_entry(manager, "hash-target", "target-user")
+        await manager._scan_deactivated_cached_users_once()
+        assert "hash-target" in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_scan_with_empty_cache_does_not_query_repo(self) -> None:
+        """Empty cache avoids a pointless DB query."""
+        manager = _fresh_manager()
+        repo = InactiveUserLookupRepo(["target-user"])
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        await manager._scan_deactivated_cached_users_once()
+        assert repo.queries == []
+
+    @pytest.mark.asyncio
+    async def test_scan_tolerates_repo_without_lookup_method(self) -> None:
+        """Older repository doubles do not break the fallback path."""
+        manager = _fresh_manager()
+        _seed_cache_entry(manager, "hash-target", "target-user")
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, object()))
+        await manager._scan_deactivated_cached_users_once()
+        assert "hash-target" in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_scan_tolerates_lookup_error(self) -> None:
+        """DB read failures are logged and leave cache state unchanged."""
+        manager = _fresh_manager()
+        _seed_cache_entry(manager, "hash-target", "target-user")
+        repo = FailingInactiveUserLookupRepo()
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        await manager._scan_deactivated_cached_users_once()
+        assert "hash-target" in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_scan_loop_propagates_cancelled_error(self) -> None:
+        """Cancellation still unwinds the fallback loop cleanly."""
+        manager = _fresh_manager()
+        repo = InactiveUserLookupRepo([])
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        await assert_fallback_loop_propagates_scan_cancelled(
+            manager._deactivation_fallback_scan_loop,
+            manager,
+            "_scan_deactivated_cached_users_once",
+        )
+
+    @pytest.mark.asyncio
+    async def test_scan_loop_propagates_sleep_cancelled_error(self) -> None:
+        """Cancellation during the scan interval also unwinds cleanly."""
+        manager = _fresh_manager()
+        repo = InactiveUserLookupRepo([])
+        manager.set_deactivation_repository_factory(lambda: cast(Repository, repo))
+        await assert_fallback_loop_propagates_sleep_cancelled(
+            manager._deactivation_fallback_scan_loop
+        )
 
 
 class TestAdminRecvHappyPath:

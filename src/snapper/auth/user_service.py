@@ -460,7 +460,7 @@ class UserService:
         """Deactivate a user as the SOLE publisher of `admin.user_deactivated`.
 
         Implements the canonical kill-switch flow:
-        1. SCD2 close+insert on the active `users` row with `is_active=False`.
+        1. SCD2 close+insert on the active `users` row with an inactive state.
         2. `TokenManager.revoke_user_sessions(...)` — direct in-process call
            that revokes every active token row in the `user_active_tokens`
            inventory and seeds the local fast-path blacklist. The token
@@ -537,17 +537,18 @@ class UserService:
     ) -> None:
         """Emit `admin.user_deactivated` after the deactivation commit.
 
-        Best-effort: a missing publisher (singleton spun up before the
-        FastAPI lifespan attached one) logs a warning instead of
-        raising — the local in-process kill switch has already fired
-        and is sufficient for single-instance deployments. A send
-        failure also degrades to a logged exception so a transient
-        broker hiccup never rolls back a committed deactivation.
+        Best-effort fast path: a missing publisher or send failure
+        logs instead of raising because the committed
+        inactive SCD2-active ``users`` row is the durable deactivation
+        registry. Every lifespan-wired auth listener also polls that
+        registry, so a broker hiccup delays cross-instance fanout by
+        the fallback scan interval instead of rolling back the kill
+        switch.
         """
         if self._msg_publisher is None:
             logger.warning(
                 "admin.user_deactivated NOT broadcast for user_public_id={}: "
-                "UserService publisher unavailable (multi-instance kill-switch fanout disabled)",
+                "UserService publisher unavailable; DB fallback scanners will converge",
                 user_public_id,
             )
             return
@@ -565,13 +566,14 @@ class UserService:
             await self._msg_publisher.send(topic, payload)
         except Exception as exc:
             logger.exception(
-                "Failed to broadcast admin.user_deactivated for user_public_id={}: {}",
+                "Failed to broadcast admin.user_deactivated for user_public_id={}; "
+                "DB fallback scanners will converge: {}",
                 user_public_id,
                 exc,
             )
 
     async def delete_user(self, user_id: str) -> bool:
-        """Soft-delete user via SCD Type 2 close+insert with is_active=False.
+        """Soft-delete user via SCD Type 2 close+insert with inactive state.
 
         Args:
             user_id: User's username.

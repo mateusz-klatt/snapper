@@ -2549,6 +2549,21 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def list_inactive_user_public_ids(self, user_public_ids: list[str]) -> list[str]:
+        """Return currently inactive users from ``user_public_ids``.
+
+        Args:
+            user_public_ids: Candidate user UUIDs to check against the
+                SCD2-active ``users`` row.
+
+        Returns:
+            Public ids whose active ``users`` row exists with
+            ``is_active=False``. Unknown ids and active users are
+            omitted.
+        """
+        ...
+
+    @abstractmethod
     async def list_active_user_token_jtis(self, user_public_id: str) -> list[str]:
         """Return every unrevoked JTI for a user's active tokens.
 
@@ -7340,6 +7355,23 @@ class SQLAlchemyRepository(Repository):
                 expires_at=expires_at,
                 user_is_active=bool(user_is_active),
             )
+
+    async def list_inactive_user_public_ids(self, user_public_ids: list[str]) -> list[str]:
+        """Return currently inactive users from the candidate set.
+
+        See :meth:`Repository.list_inactive_user_public_ids` for contract.
+        """
+        if not user_public_ids:
+            return []
+        async with self.session() as s:
+            result = await s.execute(
+                select(User.public_id).where(
+                    User.public_id.in_(user_public_ids),
+                    User.is_active.is_(False),
+                    *where_active_now(User),
+                )
+            )
+            return [user_public_id for (user_public_id,) in result.all()]
 
     async def get_plan_public_id_for_client_order_id(
         self,

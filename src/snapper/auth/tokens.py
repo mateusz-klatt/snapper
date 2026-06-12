@@ -11,6 +11,7 @@ import heapq
 import json as json_mod
 import secrets
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -24,6 +25,10 @@ from loguru import logger
 from pydantic import ValidationError
 
 from snapper.application.services.settings import SettingsService
+from snapper.auth.deactivation_fallback import list_inactive_user_public_ids
+from snapper.auth.deactivation_fallback import run_deactivation_fallback_loop
+from snapper.auth.deactivation_fallback import start_deactivation_fallback_task
+from snapper.auth.deactivation_fallback import stop_deactivation_fallback_task
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -85,7 +90,7 @@ class _VerifyCacheEntry:
 
 
 REJECTION_REASON_USER_DEACTIVATED: Final[str] = "user_deactivated"
-"""Rejection reason emitted when ``users.is_active=False`` for the token's owner."""
+"""Rejection reason emitted when the token owner's active user row is inactive."""
 
 REJECTION_REASON_INVALID: Final[str] = "invalid"
 """Rejection reason for every other failure mode (signature, expiry, blacklist, missing row, revoked)."""
@@ -215,6 +220,8 @@ class TokenManager:
         self._admin_subscriber: ValidatedSubscriber | None = None
         self._admin_zmq_context: zmq.asyncio.Context | None = None
         self._admin_running = False
+        self._deactivation_repository_factory: Callable[[], Repository] | None = None
+        self._deactivation_scan_task: asyncio.Task[None] | None = None
 
     def set_settings_service(self, settings_service: SettingsService) -> None:
         """Set settings service for configuration.
@@ -223,6 +230,19 @@ class TokenManager:
             settings_service: Settings service instance.
         """
         self._settings = get_settings_with_service(settings_service)
+
+    def set_deactivation_repository_factory(
+        self,
+        repository_factory: Callable[[], Repository] | None,
+    ) -> None:
+        """Inject repository factory for broker-independent deactivation scans.
+
+        Args:
+            repository_factory: Callable that returns a fresh
+                repository for fallback deactivation lookups, or
+                ``None`` to disable the fallback scanner.
+        """
+        self._deactivation_repository_factory = repository_factory
 
     @property
     def settings(self) -> AppSettings:
@@ -688,11 +708,11 @@ class TokenManager:
                (positive AND negative — bounded cost for replayed
                invalid tokens) and return the claims when every
                gate passes.
-        Cross-instance invariant: the 30-second TTL is a staleness
-        ceiling; the admin-bus subscriber calls
-        meth:`invalidate_user_cache` on ``admin.user_deactivated``
-        so kill-switch latency collapses to one bus-message-round
-        trip instead of 30 s.
+        Cross-instance invariant: the DB-backed deactivation
+        fallback scanner is the staleness ceiling; the admin-bus
+        subscriber calls meth:`invalidate_user_cache` on
+        ``admin.user_deactivated`` so kill-switch latency collapses
+        to one bus-message round trip when the broker is healthy.
 
         Args:
             token: JWT string presented by the client.
@@ -1137,11 +1157,15 @@ class TokenManager:
 
         Subscribes to ``admin.user_deactivated`` so a cross-instance
         kill-switch event published by ``UserService.deactivate_user``
-        collapses the 30-second LRU TTL ceiling to one bus-message
-        round-trip.
+        collapses the fallback DB-scan ceiling to one bus-message
+        round-trip when the broker is healthy.
         On receipt, :meth:`invalidate_user_cache` walks
         ``_verify_cache`` and drops every entry whose cached
         ``user_public_id`` matches the deactivated user's UUID.
+        When lifespan injected a repository factory, a companion DB
+        fallback scanner also walks cached users and evicts those whose
+        SCD2-active ``users`` row is inactive, so broker outages cannot
+        leave stale positive verdicts resident until token expiry.
         Idempotent + restart-safe via ``_admin_listener_lock``
         a second call while a healthy listener is running is a
         no-op; a second call after the previous task finished
@@ -1157,9 +1181,11 @@ class TokenManager:
         """
         async with self._admin_listener_lock:
             if self._admin_listen_task is not None and not self._admin_listen_task.done():
+                self._start_deactivation_fallback_unlocked()
                 return
             if self._admin_listen_task is not None:
                 await self._reap_admin_listener_unlocked()
+            self._start_deactivation_fallback_unlocked()
             if not zmq_broker_xpub:
                 logger.info("TokenManager: empty broker XPUB, skipping admin listener")
                 return
@@ -1176,6 +1202,15 @@ class TokenManager:
                 _ADMIN_USER_DEACTIVATED_TOPIC,
                 zmq_broker_xpub,
             )
+
+    def _start_deactivation_fallback_unlocked(self) -> None:
+        """Start the DB-backed deactivation fallback scanner when configured."""
+        if self._deactivation_repository_factory is None:
+            return
+        self._deactivation_scan_task = start_deactivation_fallback_task(
+            self._deactivation_scan_task,
+            self._deactivation_fallback_scan_loop,
+        )
 
     async def stop_admin_listener(self) -> None:
         """Cancel the dispatch task, close the subscriber, terminate the context.
@@ -1199,15 +1234,18 @@ class TokenManager:
         """
         self._admin_running = False
         task = self._admin_listen_task
+        scan_task = self._deactivation_scan_task
         subscriber = self._admin_subscriber
         context = self._admin_zmq_context
         self._admin_listen_task = None
+        self._deactivation_scan_task = None
         self._admin_subscriber = None
         self._admin_zmq_context = None
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        await stop_deactivation_fallback_task(scan_task)
         if subscriber is not None:
             with contextlib.suppress(Exception):
                 subscriber.close()
@@ -1236,6 +1274,26 @@ class TokenManager:
         except asyncio.CancelledError:
             logger.info("TokenManager: admin listen loop cancelled")
             raise
+
+    async def _deactivation_fallback_scan_loop(self) -> None:
+        """Periodically evict cached users whose DB row is inactive."""
+        await run_deactivation_fallback_loop(
+            self._scan_deactivated_cached_users_once,
+            component_name="TokenManager",
+        )
+
+    async def _scan_deactivated_cached_users_once(self) -> None:
+        """Cross-check cached user ids against the DB-backed deactivation registry."""
+        user_public_ids = sorted(
+            {entry.user_public_id for entry in self._verify_cache.values() if entry.user_public_id}
+        )
+        inactive_user_public_ids = await list_inactive_user_public_ids(
+            self._deactivation_repository_factory,
+            user_public_ids,
+            component_name="TokenManager",
+        )
+        for user_public_id in inactive_user_public_ids:
+            self.invalidate_user_cache(user_public_id)
 
     async def _admin_recv_one_frame(
         self, subscriber: ValidatedSubscriber

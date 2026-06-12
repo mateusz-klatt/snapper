@@ -345,6 +345,66 @@ class TestRevokeUserActiveTokenByJti:
         assert second == 0
 
 
+class TestListInactiveUserPublicIds:
+    """Coverage for :meth:`Repository.list_inactive_user_public_ids`."""
+
+    @pytest.mark.asyncio
+    async def test_returns_only_inactive_active_scd2_rows(self, repo: SQLAlchemyRepository) -> None:
+        """Active users and unknown ids are omitted from the inactive lookup."""
+        await _seed_user(repo, public_id="user-active", username="active", is_active=True)
+        await _seed_user(repo, public_id="user-inactive", username="inactive", is_active=False)
+        result = await repo.list_inactive_user_public_ids(
+            ["user-active", "user-inactive", "missing-user"]
+        )
+        assert result == ["user-inactive"]
+
+    @pytest.mark.asyncio
+    async def test_empty_candidates_is_noop(self, repo: SQLAlchemyRepository) -> None:
+        """Empty candidate list avoids SQL and returns empty result."""
+        result = await repo.list_inactive_user_public_ids([])
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_uses_latest_scd2_row(self, repo: SQLAlchemyRepository) -> None:
+        """Closed historical rows do not make the current active user inactive."""
+        seed_time = datetime(2026, 1, 1, tzinfo=UTC)
+        close_time = datetime(2026, 1, 2, tzinfo=UTC)
+        async with repo.session() as s:
+            s.add(
+                User(
+                    public_id="user-reactivated",
+                    session_id="seed",
+                    sequence_id=1,
+                    timestamp=seed_time,
+                    known_to=close_time,
+                    username="reactivated",
+                    email="reactivated@example.com",
+                    password_hash=_BCRYPT_FAKE_DIGEST,
+                    role="viewer",
+                    is_active=False,
+                    created_at=seed_time,
+                )
+            )
+            s.add(
+                User(
+                    public_id="user-reactivated",
+                    session_id="current",
+                    sequence_id=2,
+                    timestamp=close_time,
+                    known_to=KNOWN_TO_MAX,
+                    username="reactivated",
+                    email="reactivated@example.com",
+                    password_hash=_BCRYPT_FAKE_DIGEST,
+                    role="viewer",
+                    is_active=True,
+                    created_at=seed_time,
+                )
+            )
+            await s.commit()
+        result = await repo.list_inactive_user_public_ids(["user-reactivated"])
+        assert result == []
+
+
 class TestGetActiveTokenByHash:
     """Coverage for :meth:`Repository.get_active_token_by_hash`."""
 

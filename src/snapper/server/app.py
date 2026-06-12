@@ -723,7 +723,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             repository_factory=lambda: get_repository(settings.db_url),
         )
         await ws_auth_manager.start_admin_listener(settings.zmq_broker_xpub)
-        await get_token_manager().start_admin_listener(settings.zmq_broker_xpub)
+        token_manager = get_token_manager()
+        token_manager.set_deactivation_repository_factory(lambda: get_repository(settings.db_url))
+        await token_manager.start_admin_listener(settings.zmq_broker_xpub)
         ai_review_service = get_ai_review_service()
         ai_review_service.set_repository_factory(lambda: get_repository(settings.db_url))
         ai_review_service.set_shard_ownership(

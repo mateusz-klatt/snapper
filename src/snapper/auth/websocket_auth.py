@@ -21,6 +21,10 @@ from fastapi import WebSocket
 from loguru import logger
 
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
+from snapper.auth.deactivation_fallback import list_inactive_user_public_ids
+from snapper.auth.deactivation_fallback import run_deactivation_fallback_loop
+from snapper.auth.deactivation_fallback import start_deactivation_fallback_task
+from snapper.auth.deactivation_fallback import stop_deactivation_fallback_task
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -158,6 +162,7 @@ class WebSocketAuthManager:
         self._pending_offline_tasks: dict[str, asyncio.Task[None]] = {}
         self._delegate_offline_grace_seconds: int = DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS
         self._delegate_locks: dict[str, asyncio.Lock] = {}
+        self._deactivation_scan_task: asyncio.Task[None] | None = None
 
     def set_wiring(
         self,
@@ -244,12 +249,13 @@ class WebSocketAuthManager:
               a reconnect attempt with a revoked token is
               rejected even when a stale positive verdict is
               still resident in cache.
-            **Cross-instance** — bounded by the 30-second LRU
-              TTL until the admin-bus subscriber calls
-              meth:`TokenManager.invalidate_user_cache` on
-              receipt of ``admin.user_deactivated``.
-        The effective ceiling drops from the 15-minute access
-        token TTL to 30 s.
+            **Cross-instance** — bounded by the DB-backed
+              deactivation fallback scan when the broker is down;
+              the admin-bus subscriber still collapses latency to
+              one bus round-trip when ``admin.user_deactivated``
+              is delivered.
+        The effective ceiling drops from the 15-minute access token
+        TTL to the fallback scan interval.
         The method name is preserved for call-site stability — the
         semantics are now "verify session token transport, header or
         cookie", not strictly "cookie".
@@ -676,9 +682,12 @@ class WebSocketAuthManager:
         and ``admin.scope_revoked`` (mid-session wallet-scope
         revalidation from ``ScopeGrantService.revoke_grant`` — sole
         publisher). The deactivation branch closes affected WebSockets
-        with code 4003; the scope-revoked branch narrows affected
-        AI_DELEGATE subscriptions in place without closing the WS (see
-        ``_handle_scope_revoked``).
+        with code 4003; the same close path is also driven by a
+        DB-backed fallback scanner when lifespan wiring provides a
+        repository factory, so broker outages cannot leave existing
+        sessions alive until reconnect. The scope-revoked branch
+        narrows affected AI_DELEGATE subscriptions in place without
+        closing the WS (see ``_handle_scope_revoked``).
         Idempotent + restart-safe via `_admin_listener_lock`: a second
         call while a healthy listener is already running is a no-op
         a second call after the previous task finished early (e.g.
@@ -692,9 +701,11 @@ class WebSocketAuthManager:
         """
         async with self._admin_listener_lock:
             if self._admin_listen_task is not None and not self._admin_listen_task.done():
+                self._start_deactivation_fallback_unlocked()
                 return
             if self._admin_listen_task is not None:
                 await self._reap_admin_listener_unlocked()
+            self._start_deactivation_fallback_unlocked()
             if not zmq_broker_xpub:
                 logger.info("WebSocketAuthManager: empty broker XPUB, skipping admin listener")
                 return
@@ -717,6 +728,15 @@ class WebSocketAuthManager:
                 _ADMIN_SCOPE_HANDED_OVER_TOPIC,
                 zmq_broker_xpub,
             )
+
+    def _start_deactivation_fallback_unlocked(self) -> None:
+        """Start the DB-backed deactivation fallback scanner when configured."""
+        if self.repository_factory is None:
+            return
+        self._deactivation_scan_task = start_deactivation_fallback_task(
+            self._deactivation_scan_task,
+            self._deactivation_fallback_scan_loop,
+        )
 
     async def stop_admin_listener(self) -> None:
         """Cancel the dispatch task, close the subscriber, terminate the context.
@@ -746,15 +766,18 @@ class WebSocketAuthManager:
         """
         self._admin_running = False
         task = self._admin_listen_task
+        scan_task = self._deactivation_scan_task
         subscriber = self._admin_subscriber
         context = self._admin_zmq_context
         self._admin_listen_task = None
+        self._deactivation_scan_task = None
         self._admin_subscriber = None
         self._admin_zmq_context = None
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        await stop_deactivation_fallback_task(scan_task)
         if subscriber is not None:
             with contextlib.suppress(Exception):
                 subscriber.close()
@@ -784,6 +807,33 @@ class WebSocketAuthManager:
         except asyncio.CancelledError:
             logger.info("WebSocketAuthManager: admin listen loop cancelled")
             raise
+
+    async def _deactivation_fallback_scan_loop(self) -> None:
+        """Periodically close connected users whose DB row is inactive."""
+        await run_deactivation_fallback_loop(
+            self._scan_deactivated_connections_once,
+            component_name="WebSocketAuthManager",
+        )
+
+    async def _scan_deactivated_connections_once(self) -> None:
+        """Cross-check connected principals against the DB-backed deactivation registry."""
+        user_public_ids = sorted(
+            {
+                principal.user_public_id
+                for principal in self.authenticated_connections.values()
+                if principal.user_public_id
+            }
+        )
+        inactive_user_public_ids = await list_inactive_user_public_ids(
+            self.repository_factory,
+            user_public_ids,
+            component_name="WebSocketAuthManager",
+        )
+        for user_public_id in inactive_user_public_ids:
+            await self.close_user_connections(
+                user_public_id=user_public_id,
+                reason=_KILL_SWITCH_REASON_FALLBACK,
+            )
 
     async def _admin_recv_one_frame(
         self, subscriber: ValidatedSubscriber
