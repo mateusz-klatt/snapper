@@ -31,6 +31,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.tokens import TokenPair
+from snapper.auth.tokens import BLACKLIST_CLEANUP_BATCH_SIZE
 from snapper.auth.tokens import BLACKLIST_GRACE_PERIOD_SECONDS
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import WebSocketTokenRotator
@@ -627,6 +628,8 @@ class TestTokenManager:
         assert token_manager.settings is not None
         assert isinstance(token_manager._blacklisted_tokens, dict)
         assert len(token_manager._blacklisted_tokens) == 0
+        assert token_manager._blacklist_cleanup_heap == []
+        assert token_manager._next_blacklist_cleanup_ts == float("inf")
         assert token_manager._blacklist_grace_period == pytest.approx(
             BLACKLIST_GRACE_PERIOD_SECONDS
         )
@@ -766,14 +769,45 @@ class TestTokenManager:
         token_manager = TokenManager()
         token_manager._blacklist_grace_period = 0.1
         now = datetime.now(UTC).timestamp()
-        token_manager._blacklisted_tokens["jti-new"] = now
-        token_manager._blacklisted_tokens["jti-old"] = now - 1.0
+        token_manager._record_blacklisted_token("jti-new", now)
+        token_manager._record_blacklisted_token("jti-old", now - 1.0)
         assert token_manager._is_token_blacklisted("jti-new") is False
         assert token_manager._is_token_blacklisted("jti-old") is True
         token_manager._cleanup_old_blacklist_entries()
         assert "jti-old" not in token_manager._blacklisted_tokens
         result = token_manager.verify_token(None)
         assert result is None
+
+    def test_blacklist_cleanup_ignores_stale_heap_entries_for_reused_jti(self) -> None:
+        """Verify stale cleanup heap entries do not remove refreshed JTI state.
+
+        Given: A JTI recorded twice with a newer blacklist timestamp,
+        When: The old cleanup deadline is processed,
+        Then: The current blacklist entry remains in its grace period.
+        """
+        token_manager = TokenManager()
+        token_manager._blacklist_grace_period = 0.1
+        now = datetime.now(UTC).timestamp()
+        token_manager._record_blacklisted_token("jti-reused", now - 1.0)
+        token_manager._record_blacklisted_token("jti-reused", now)
+        token_manager._cleanup_old_blacklist_entries()
+        assert "jti-reused" in token_manager._blacklisted_tokens
+        assert token_manager._is_token_blacklisted("jti-reused") is False
+
+    def test_blacklist_cleanup_is_bounded_per_pass(self) -> None:
+        """Verify blacklist cleanup removes only a fixed expired batch.
+
+        Given: More expired blacklist entries than the cleanup batch size,
+        When: Cleanup runs once,
+        Then: Expired entries remain for subsequent cleanup passes.
+        """
+        token_manager = TokenManager()
+        token_manager._blacklist_grace_period = 0.1
+        old_time = datetime.now(UTC).timestamp() - 1.0
+        for index in range(BLACKLIST_CLEANUP_BATCH_SIZE + 3):
+            token_manager._record_blacklisted_token(f"jti-old-{index}", old_time)
+        token_manager._cleanup_old_blacklist_entries()
+        assert len(token_manager._blacklisted_tokens) == 3
 
     def test_verify_token_missing_required_claim(self) -> None:
         """Verify verify_token returns None for token missing sid claim.
@@ -951,6 +985,8 @@ class TestTokenManager:
         assert test_jti not in token_manager._blacklisted_tokens
         token_manager.blacklist_token(test_jti)
         assert test_jti in token_manager._blacklisted_tokens
+        assert token_manager._blacklist_cleanup_heap
+        assert token_manager._next_blacklist_cleanup_ts < float("inf")
 
     def test_invalidate_token(self) -> None:
         """Verify invalidate_token blocks token verification.

@@ -140,6 +140,8 @@ class TestRevokeUserSessions:
         TokenManager._initialized = False
         manager = TokenManager()
         manager._blacklisted_tokens.clear()
+        manager._blacklist_cleanup_heap.clear()
+        manager._next_blacklist_cleanup_ts = float("inf")
         return manager
 
     @pytest.mark.asyncio
