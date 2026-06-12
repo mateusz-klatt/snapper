@@ -2532,8 +2532,9 @@ wallet scope.
 
 Before the WebSocket token expires, the server sends a `reauth_required`
 message. Clients may also refresh proactively before that deadline. In both
-cases they obtain a new `ws_token` via `POST /api/auth/refresh` and send it as
-a `reauth` message.
+cases they obtain a new one-shot `ws_token` via `POST /api/auth/ws_token` and
+send it as a `reauth` message. Use `POST /api/auth/refresh` only when the HTTP
+access/refresh token session itself needs rotation.
 
 **Server warning:**
 
@@ -2965,9 +2966,9 @@ async def main():
             },
         )
 
-        refresh_resp = await client.post(f"{BASE_URL}/auth/refresh")
-        # RefreshResponse envelope: ws_token lives under .payload
-        ws_token = refresh_resp.json()["payload"]["ws_token"]
+        ws_token_resp = await client.post(f"{BASE_URL}/auth/ws_token")
+        # WsTokenResponse envelope: ws_token lives under .payload
+        ws_token = ws_token_resp.json()["payload"]["ws_token"]
 
         candles_resp = await client.get(
             f"{BASE_URL}/candles",
@@ -2989,13 +2990,17 @@ sends heartbeat pings every 5 seconds.
 
 ```javascript
 async function connect() {
-    const refreshResp = await fetch("/api/auth/refresh", {
-        method: "POST",
-        credentials: "include",
-    });
-    // RefreshResponse envelope wraps the data in `.payload`.
-    const { payload } = await refreshResp.json();
-    const { ws_token } = payload;
+    async function mintWsToken() {
+        const wsTokenResp = await fetch("/api/auth/ws_token", {
+            method: "POST",
+            credentials: "include",
+        });
+        // WsTokenResponse envelope wraps the data in `.payload`.
+        const { payload } = await wsTokenResp.json();
+        return payload.ws_token;
+    }
+
+    let wsToken = await mintWsToken();
 
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${protocol}//${location.host}/api/ws`);
@@ -3015,12 +3020,12 @@ async function connect() {
         console.log("Connected, waiting for auth_required...");
     };
 
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
         const msg = JSON.parse(event.data);
 
         if (msg.type === "auth_required") {
             ws.send(JSON.stringify(controlFrame("authenticate", {
-                ws_token,
+                ws_token: wsToken,
             })));
         }
 
@@ -3036,7 +3041,10 @@ async function connect() {
         }
 
         if (msg.type === "reauth_required") {
-            refreshAndReauth(ws);
+            wsToken = await mintWsToken();
+            ws.send(JSON.stringify(controlFrame("reauth", {
+                ws_token: wsToken,
+            })));
         }
     };
 

@@ -27,7 +27,7 @@ DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
-| `SNAPPER_ENV` | `development` | Deployment environment: `development`, `dev`, `test`, `testing`, and `ci` allow local placeholders; `production`, `prod`, and `staging` refuse placeholder secrets at startup/runtime |
+| `SNAPPER_ENV` | `development` | Deployment environment: `development`, `dev`, `test`, `testing`, and `ci` allow local placeholders; `production`, `prod`, and `staging` refuse placeholder secrets at startup/runtime. Any other value fails startup; matching is case-insensitive |
 | `MASTER_PASSWORD` | `snapper_default_master_password_v1` | Password for encrypting settings in database (salt derived automatically) |
 
 **Important**: Set `SNAPPER_ENV=production` and change default secret
@@ -114,6 +114,9 @@ uvicorn deployments and parallel `trade-zmq` instances.
 Multi-instance coordinator deployments require PostgreSQL; startup
 fails fast on SQLite when `SNAPPER_COORDINATOR_INSTANCE_COUNT > 1`
 because SQLite does not enforce `SELECT ... FOR UPDATE` row claims.
+Process-registry DB sync at server startup runs only on instance `0`
+(or when the count is `1`); other instances skip it with a log line so
+concurrent workers do not race on the registry setting rows.
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |

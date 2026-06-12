@@ -871,13 +871,14 @@ described below instead of dropping silently, so an executor crash
 mid-disposition cannot leave the engine's intent held forever. The
 staleness gate then handles commands older than the dispatch TTL
 (`TRADE_COMMAND_DISPATCH_TTL_S`, default 30 s,
-measured from the command's `signaled_at`) with venue-truth-backed
-outcomes: a single client-id lookup runs first; an order found on the venue
-is adopted as accepted, an unverifiable venue (lookup unsupported or
-unreachable) makes the frame drop silently, and only a verified absence
-publishes `rejected` and records an `order_rejected` venue event — the
-durable row is written only after a confirmed publish, so a failed publish
-leaves the command for the reconciliation loop to release durably.
+measured from the published frame's `signaled_at`, which the outbox derives
+from the durable trade-command row's `created_at`) with venue-truth-backed
+outcomes: a single client-id lookup runs first; an order found on the venue is
+adopted as accepted, an unverifiable venue (lookup unsupported or unreachable)
+makes the frame drop silently, and only a verified absence publishes
+`rejected` and records an `order_rejected` venue event — the durable row is
+written only after a confirmed publish, so a failed publish leaves the command
+for the reconciliation loop to release durably.
 
 When a submit fails ambiguously (the order may exist on the venue), the
 executor never fabricates a rejection. It parks the pending entry and
