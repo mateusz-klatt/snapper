@@ -27,9 +27,13 @@ DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
+| `SNAPPER_ENV` | `development` | Deployment environment: `development`, `dev`, `test`, `testing`, and `ci` allow local placeholders; `production`, `prod`, and `staging` refuse placeholder secrets at startup/runtime |
 | `MASTER_PASSWORD` | `snapper_default_master_password_v1` | Password for encrypting settings in database (salt derived automatically) |
 
-**Important**: Change default values in production environment.
+**Important**: Set `SNAPPER_ENV=production` and change default secret
+values in production. Production-like modes fail fast when
+`MASTER_PASSWORD`, `auth_secret_key`, or `csrf_secret_key` still use
+development placeholders.
 
 ### HTTP Server
 
@@ -357,6 +361,10 @@ restart to take effect.
 | `session_domain` | `""` | Session cookie domain override |
 | `ui_origin` | `""` | Additional allowed UI origins for CORS and WS origin validation |
 
+When `SNAPPER_ENV` is `production`, `prod`, or `staging`, these
+database-backed placeholders are refused. Configure real values in the
+settings table before switching a deployment into production mode.
+
 ## `.env.example` File
 
 The block below mirrors the variables documented in
@@ -368,6 +376,7 @@ lives in `.env.example` itself.
 ```bash
 # Database connection
 DB_URL=sqlite+aiosqlite:///./data/snapper.db
+SNAPPER_ENV=development
 
 # Encryption settings for sensitive data (API keys, secrets)
 # IMPORTANT: Change this default in production!
@@ -553,6 +562,7 @@ Content-Type: application/json
 ```bash
 # .env.development
 DB_URL=sqlite+aiosqlite:///./data/snapper.db
+SNAPPER_ENV=development
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8000
 SERVER_RELOAD=true
@@ -565,6 +575,7 @@ SERVER_FORWARDED_ALLOW_IPS=127.0.0.1
 ```bash
 # .env.production
 DB_URL=postgresql+asyncpg://user:pass@db.example.com/snapper
+SNAPPER_ENV=production
 MASTER_PASSWORD=<strong_random_password>
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
@@ -611,3 +622,6 @@ each subsystem's exported `ENV_VARS` set. Unknown keys fail startup
 with suggestions, so typos such as `MASTER_PASWORD` do not silently
 fall back to defaults. When adding a new env var, register it on the
 owning module's `ENV_VARS` or add it as a bootstrap settings field.
+Production-like `SNAPPER_ENV` values additionally reject placeholder
+secret material so a typo cannot silently sign tokens or encrypt
+settings with development defaults.

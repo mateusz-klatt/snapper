@@ -46,6 +46,10 @@ from snapper.core.types import ProcessAutostartProfileEnum
 __all__ = ["AppSettings"]
 
 
+DEFAULT_AUTH_SECRET_KEY = "change-me-in-production-use-openssl-rand-hex-32"
+DEFAULT_CSRF_SECRET_KEY = "change-me-in-production-csrf-key"
+
+
 class AppSettings:
     """Unified application settings facade.
 
@@ -81,6 +85,33 @@ class AppSettings:
             Database connection URL string.
         """
         return self._bootstrap.db_url
+
+    @property
+    def snapper_env(self) -> str:
+        """Return normalized deployment environment from bootstrap settings.
+
+        Returns:
+            Deployment environment string.
+        """
+        return self._bootstrap.snapper_env
+
+    @property
+    def requires_explicit_secrets(self) -> bool:
+        """Return whether placeholder secrets are refused.
+
+        Returns:
+            True for production-like environments.
+        """
+        return self._bootstrap.requires_explicit_secrets
+
+    @property
+    def master_password(self) -> str:
+        """Return the encryption master password from bootstrap settings.
+
+        Returns:
+            Master password string.
+        """
+        return self._bootstrap.master_password
 
     @property
     def server_host(self) -> str:
@@ -319,6 +350,16 @@ class AppSettings:
         result = self._settings_service.get_setting(key, default)
         return result if result is not None else default
 
+    def _get_required_secret_setting(self, key: str, default: str) -> str:
+        """Retrieve a DB-backed secret while refusing placeholders in production."""
+        value = self._get_db_setting(key, default)
+        if self.requires_explicit_secrets and value == default:
+            raise RuntimeError(
+                f"{key} must be configured in the settings table when SNAPPER_ENV is "
+                f"{self.snapper_env!r}; refusing the development placeholder"
+            )
+        return value
+
     @property
     def polygon_api_key(self) -> str:
         """Return Polygon.io API key from database settings.
@@ -340,9 +381,7 @@ class AppSettings:
         Returns:
             JWT secret key string for token signing.
         """
-        return self._get_db_setting(
-            "auth_secret_key", "change-me-in-production-use-openssl-rand-hex-32"
-        )
+        return self._get_required_secret_setting("auth_secret_key", DEFAULT_AUTH_SECRET_KEY)
 
     @property
     def csrf_secret_key(self) -> str:
@@ -351,7 +390,7 @@ class AppSettings:
         Returns:
             CSRF secret key string for token generation.
         """
-        return self._get_db_setting("csrf_secret_key", "change-me-in-production-csrf-key")
+        return self._get_required_secret_setting("csrf_secret_key", DEFAULT_CSRF_SECRET_KEY)
 
     @property
     def ws_token_ttl_seconds(self) -> int:

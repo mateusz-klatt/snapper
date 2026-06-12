@@ -48,8 +48,10 @@ Example:
 """
 
 from typing import Any
+from typing import Self
 
 from pydantic import Field
+from pydantic import field_validator
 from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
@@ -58,6 +60,12 @@ from snapper.config.env_contract import validate_env_file
 from snapper.core.types import ProcessAutostartProfileEnum
 
 __all__ = ["BootstrapSettingsLoader"]
+
+
+DEFAULT_MASTER_PASSWORD = "snapper_default_master_password_v1"
+DEVELOPMENT_ENVIRONMENTS = frozenset({"development", "dev", "test", "testing", "ci"})
+PRODUCTION_ENVIRONMENTS = frozenset({"production", "prod", "staging"})
+SUPPORTED_ENVIRONMENTS = DEVELOPMENT_ENVIRONMENTS | PRODUCTION_ENVIRONMENTS
 
 
 class BootstrapSettingsLoader(BaseSettings):
@@ -69,6 +77,9 @@ class BootstrapSettingsLoader(BaseSettings):
 
     Attributes:
         db_url: SQLAlchemy async database URL.
+        snapper_env: Deployment environment. Development/test-like modes
+            allow local defaults; production-like modes fail fast on
+            placeholder secrets.
         master_password: Password for encrypting sensitive settings in DB.
         server_host: HTTP server bind address.
         server_port: HTTP server port.
@@ -158,9 +169,8 @@ class BootstrapSettingsLoader(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
     db_url: str = Field(default="sqlite+aiosqlite:///./data/snapper.db", alias="DB_URL")
-    master_password: str = Field(
-        default="snapper_default_master_password_v1", alias="MASTER_PASSWORD"
-    )
+    snapper_env: str = Field(default="development", alias="SNAPPER_ENV")
+    master_password: str = Field(default=DEFAULT_MASTER_PASSWORD, alias="MASTER_PASSWORD")
     server_host: str = Field(default="127.0.0.1", alias="SERVER_HOST")
     server_port: int = Field(default=8000, alias="SERVER_PORT")
     server_reload: bool = Field(default=False, alias="SERVER_RELOAD")
@@ -217,3 +227,32 @@ class BootstrapSettingsLoader(BaseSettings):
         """
         validate_env_file()
         return data
+
+    @field_validator("snapper_env")
+    @classmethod
+    def _normalize_snapper_env(cls, value: str) -> str:
+        """Normalize and validate the deployment environment switch."""
+        normalized = value.strip().lower()
+        if normalized not in SUPPORTED_ENVIRONMENTS:
+            supported = ", ".join(sorted(SUPPORTED_ENVIRONMENTS))
+            raise ValueError(f"SNAPPER_ENV must be one of {supported}, got {value!r}")
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_production_secret_defaults(self) -> Self:
+        """Refuse bootstrap placeholder secrets in production-like modes."""
+        if self.requires_explicit_secrets and self.master_password == DEFAULT_MASTER_PASSWORD:
+            raise ValueError(
+                "MASTER_PASSWORD must be explicitly set when SNAPPER_ENV is "
+                f"{self.snapper_env!r}; refusing the development placeholder"
+            )
+        return self
+
+    @property
+    def requires_explicit_secrets(self) -> bool:
+        """Return whether this environment must reject placeholder secrets.
+
+        Returns:
+            True when placeholder secrets are refused.
+        """
+        return self.snapper_env not in DEVELOPMENT_ENVIRONMENTS

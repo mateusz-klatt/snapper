@@ -6,11 +6,57 @@ for ``coordinator_outbox_max_scan_rows`` (``str | None`` on bootstrap →
 ``tests/config/test_app_settings.py``.
 """
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.types import ProcessAutostartProfileEnum
+
+
+class TestSnapperEnvironment:
+    """``SNAPPER_ENV`` controls production secret hardening."""
+
+    def test_default_is_development(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The loader defaults to the development environment."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SNAPPER_ENV", raising=False)
+        loader = BootstrapSettingsLoader()
+        assert loader.snapper_env == "development"
+        assert loader.requires_explicit_secrets is False
+
+    def test_env_normalizes_supported_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Supported values are normalized to lowercase."""
+        monkeypatch.setenv("SNAPPER_ENV", "TEST")
+        loader = BootstrapSettingsLoader()
+        assert loader.snapper_env == "test"
+
+    def test_invalid_env_value_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unknown environment labels fail validation."""
+        monkeypatch.setenv("SNAPPER_ENV", "prd")
+        with pytest.raises(ValidationError, match="SNAPPER_ENV"):
+            BootstrapSettingsLoader()
+
+    def test_production_rejects_default_master_password(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Production-like environments refuse the development master password."""
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValidationError, match="MASTER_PASSWORD"):
+            BootstrapSettingsLoader(SNAPPER_ENV="production")
+
+    def test_production_accepts_custom_master_password(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A custom master password satisfies the production secret gate."""
+        monkeypatch.chdir(tmp_path)
+        loader = BootstrapSettingsLoader(
+            SNAPPER_ENV="production",
+            MASTER_PASSWORD="custom-master-password",
+        )
+        assert loader.snapper_env == "production"
+        assert loader.requires_explicit_secrets is True
 
 
 class TestCoordinatorInstanceId:

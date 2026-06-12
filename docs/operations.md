@@ -50,6 +50,7 @@ operation:
 
 ```bash
 DB_URL=postgresql+asyncpg://snapper:...@db.internal/snapper
+SNAPPER_ENV=production
 ZMQ_BROKER_XSUB=tcp://broker.internal:7500
 ZMQ_BROKER_XPUB=tcp://broker.internal:7501
 MASTER_PASSWORD=...

@@ -138,6 +138,32 @@ class TestAppSettingsAuthProperties:
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.auth_secret_key == "custom-secret"
 
+    def test_auth_secret_key_production_rejects_missing_value(self) -> None:
+        """Production mode refuses the development JWT placeholder."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_ENV="production",
+            MASTER_PASSWORD="custom-master-password",
+        )
+        service = MockSettingsService({})
+        settings = AppSettings(bootstrap, settings_service=service)
+        with pytest.raises(RuntimeError, match="auth_secret_key"):
+            _ = settings.auth_secret_key
+
+    def test_auth_secret_key_production_rejects_placeholder_value(self) -> None:
+        """Production mode refuses an explicitly stored JWT placeholder."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_ENV="production",
+            MASTER_PASSWORD="custom-master-password",
+        )
+        service = MockSettingsService(
+            {"auth_secret_key": "change-me-in-production-use-openssl-rand-hex-32"}
+        )
+        settings = AppSettings(bootstrap, settings_service=service)
+        with pytest.raises(RuntimeError, match="auth_secret_key"):
+            _ = settings.auth_secret_key
+
     def test_csrf_secret_key_returns_value(self) -> None:
         """Verify csrf_secret_key returns configured value.
 
@@ -149,6 +175,27 @@ class TestAppSettingsAuthProperties:
         service = MockSettingsService({"csrf_secret_key": "csrf-secret"})
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.csrf_secret_key == "csrf-secret"
+
+    def test_csrf_secret_key_production_rejects_missing_value(self) -> None:
+        """Production mode refuses the development CSRF placeholder."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_ENV="production",
+            MASTER_PASSWORD="custom-master-password",
+        )
+        service = MockSettingsService({})
+        settings = AppSettings(bootstrap, settings_service=service)
+        with pytest.raises(RuntimeError, match="csrf_secret_key"):
+            _ = settings.csrf_secret_key
+
+    def test_master_password_returns_bootstrap_value(self) -> None:
+        """The facade exposes the validated bootstrap master password."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            MASTER_PASSWORD="custom-master-password",
+        )
+        settings = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert settings.master_password == "custom-master-password"
 
     def test_ws_token_ttl_seconds_returns_value(self) -> None:
         """Verify ws_token_ttl_seconds returns configured value.
