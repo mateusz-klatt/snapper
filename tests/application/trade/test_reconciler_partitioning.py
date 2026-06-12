@@ -116,3 +116,37 @@ async def test_all_foreign_no_success_recorded() -> None:
     )
     await recon._reconcile_cycle()
     trade_svc.record_recon_success.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failure_targets_only_owned_known_shards() -> None:
+    """Failure recording respects shard ownership for real known shards.
+
+    Given: known in-memory shards for this exchange include one owned
+        shard and one sibling-owned shard,
+    When: the reconciliation cycle fails before command scan,
+    Then: only the owned shard receives a failure count.
+    """
+    owned_shard = "kraken.MINE.live"
+    foreign_shard = "kraken.FOREIGN.live"
+    owner_id = ShardOwnership._hash(owned_shard) % 2
+    candidate_index = 0
+    while ShardOwnership._hash(foreign_shard) % 2 == owner_id:
+        candidate_index += 1
+        foreign_shard = f"kraken.FOREIGN{candidate_index}.live"
+    ownership = ShardOwnership(instance_id=owner_id, instance_count=2)
+    repo = AsyncMock()
+    repo.get_active_commands_for_exchange = AsyncMock(side_effect=RuntimeError("DB down"))
+    trade_svc = MagicMock(spec=TradeService)
+    trade_svc.known_shard_keys.return_value = {owned_shard, foreign_shard}
+    trade_svc.record_recon_failure = MagicMock(return_value=False)
+    recon = ReconciliationLoop(
+        exchange_name="kraken",
+        repository=repo,
+        trade_service=trade_svc,
+        interval_seconds=60.0,
+        ownership=ownership,
+    )
+    await recon._reconcile_cycle()
+    recorded_shards = {call.args[0] for call in trade_svc.record_recon_failure.call_args_list}
+    assert recorded_shards == {owned_shard}

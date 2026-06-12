@@ -722,7 +722,11 @@ fold covers create/submit commands past the outbox's territory
 scoped by evidence: an aged active command with zero venue evidence
 WARNs, unknown-only evidence reports INFO, real evidence is silent —
 the fold advances it. Cancels keep the legacy stale WARN because they
-share the original order's cid.
+share the original order's cid. Coordinator-side reconciliation scan
+failures are recorded only against known or last-seen real shard keys
+owned by that coordinator. Executor heartbeat venue-health metadata
+can also halt known real shard keys for an exchange/wallet scope and
+drop new cold-path signals for that scope.
 
 Four order-safety layers sit on the dispatch path:
 

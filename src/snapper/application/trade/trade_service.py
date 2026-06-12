@@ -132,6 +132,14 @@ class TradeService:
             )
         return self._shards[shard_key]
 
+    def known_shard_keys(self) -> set[str]:
+        """Return shard keys that already have in-memory state.
+
+        Returns:
+            Snapshot of materialized trading shard keys.
+        """
+        return set(self._shards)
+
     def get_position(self, shard_key: str) -> PositionProjection:
         """Read model: current position for engine sizing/risk decisions.
 

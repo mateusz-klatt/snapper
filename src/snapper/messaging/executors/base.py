@@ -178,6 +178,9 @@ A single death that respawns clean stays HEALTHY — that is the P1-3
 self-heal working as designed, not a page. Dying twice in the same
 streak is a condition the operator should see building."""
 
+_VENUE_RECON_FAILURE_HALT_THRESHOLD = 3
+"""Consecutive reconciliation failures that recommend venue-scope halting."""
+
 _AMBIGUOUS_VERIFY_PER_CYCLE_MAX = 3
 """Fairness cap on parked-ambiguous verifications per recon cycle.
 
@@ -525,6 +528,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._task_last_death: dict[str, float] = {}
         self._task_streak_started: dict[str, float] = {}
         self._task_deaths_in_streak: dict[str, int] = {}
+        self._venue_recon_failure_count = 0
+        self._last_venue_recon_error = ""
         self._order_inflight_started: float | None = None
         self._ambiguous_rotation_offset: int = 0
         self._dispatched_rotation_offset: int = 0
@@ -2651,22 +2656,32 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await asyncio.sleep(interval)
             try:
                 await self._reconcile_with_exchange()
+                self._venue_recon_failure_count = 0
+                self._last_venue_recon_error = ""
                 self._task_last_pass["reconciliation"] = time.monotonic()
-            except TimeoutError:
+            except TimeoutError as exc:
+                self._record_venue_recon_failure(exc)
                 logger.error(
                     f"[{exchange_name}] Reconciliation cycle exceeded "
                     f"{_RECON_CYCLE_TIMEOUT_S:.0f}s and was cancelled (wedged venue "
                     f"call?) - lock released, retrying next cycle"
                 )
             except httpx.HTTPError as exc:
+                self._record_venue_recon_failure(exc)
                 logger.warning(
                     "[{}] Reconciliation cycle transient HTTP error — will retry "
                     "on next cycle: {}",
                     exchange_name,
                     exc,
                 )
-            except Exception:
+            except Exception as exc:
+                self._record_venue_recon_failure(exc)
                 logger.exception(f"[{exchange_name}] Reconciliation cycle failed")
+
+    def _record_venue_recon_failure(self, exc: BaseException) -> None:
+        """Record a venue REST reconciliation failure for heartbeat consumers."""
+        self._venue_recon_failure_count += 1
+        self._last_venue_recon_error = str(exc) or exc.__class__.__name__
 
     async def _reconcile_with_exchange(self) -> None:
         """Run one reconciliation cycle, serialized on ``_recon_lock``.
@@ -5167,6 +5182,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "broker_xsub": self.settings.zmq_broker_xsub,
                     "broker_xpub": self.settings.zmq_broker_xpub,
                     "status_reasons": cast("list[JsonValue]", list(reasons)),
+                    "venue_recon_failure_count": self._venue_recon_failure_count,
+                    "venue_rest_reachable": self._venue_recon_failure_count == 0,
+                    "venue_health_halt_recommended": (
+                        self._venue_recon_failure_count >= _VENUE_RECON_FAILURE_HALT_THRESHOLD
+                    ),
+                    "last_venue_recon_error": self._last_venue_recon_error,
                     "task_restarts": cast("dict[str, JsonValue]", dict(self._task_restarts)),
                     "exec_stream_restarts": self._exec_stream_restarts,
                     "unhealed_accept_events": len(self._unhealed_accept_events),

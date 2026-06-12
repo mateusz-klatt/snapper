@@ -548,7 +548,14 @@ auto-REJECT to release engine intent. Absence never auto-rejects when
 the dispatch TTL is disabled (nothing expires frames, so one may
 legitimately still be in flight at any age) or past the hour bound
 (venue closed-order lookback makes absence non-authoritative) — those
-cases WARN for operator attention instead. The same cycle adopts ghost
+cases WARN for operator attention instead. Consecutive executor venue
+reconciliation failures are exposed on executor heartbeats; after
+three failures, the coordinator halts known real shard keys for that
+exchange/wallet scope and drops new cold-path signals for the same
+scope until a healthy heartbeat clears the scope gate. Existing shard
+halts remain explicit operator/release decisions.
+
+The same cycle adopts ghost
 orders — open at the venue under our client id with no in-memory entry
 — by rebuilding the request from the command row; an open order with
 NO command row is foreign/manual, warned about once and never touched.
