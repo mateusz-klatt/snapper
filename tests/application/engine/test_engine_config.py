@@ -26,9 +26,11 @@ from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.trade.balance_service import BalanceService
+from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderCancelData
@@ -1417,6 +1419,37 @@ async def test_send_order_writes_trade_command_without_outbox() -> None:
     await engine._send_order(side="sell", size=0.5, price=20.0, reason="test")
     repo_mock.insert_trade_command.assert_called_once()
     assert socket.sent
+
+
+@pytest.mark.asyncio
+async def test_insert_strategy_trade_command_requires_repository() -> None:
+    """The trade-command insert helper fails fast without a repository.
+
+    Given: A TradingEngine whose repository has not been initialized,
+    When: The strategy insert helper is called directly,
+    Then: RuntimeError replaces the prior debug-only assertion.
+    """
+    engine, _socket = _make_engine()
+    submission = TradeCommandSubmission(
+        user_public_id=None,
+        operator_public_id=None,
+        wallet_public_id=None,
+        instrument_public_id=None,
+        command_type="submit",
+        side="buy",
+        order_type="market",
+        quantity=Decimal("1.0"),
+        price=None,
+        source_surface="strategy",
+        idempotency_key=None,
+    )
+    with pytest.raises(RuntimeError, match="repository not initialized"):
+        await engine._insert_strategy_trade_command(
+            submission,
+            cast(TradeCommandInsertRow, {}),
+            ai_review_public_id=None,
+            ai_review_dispatch_version=None,
+        )
 
 
 def _engine_with_caps_capture() -> tuple[TradingEngineService, list[Any]]:

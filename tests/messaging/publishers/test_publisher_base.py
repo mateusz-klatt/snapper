@@ -184,6 +184,18 @@ class StubValidatedSubscriber(SimpleNamespace):
         self.close = lambda: None
 
 
+def test_require_repository_raises_when_uninitialized() -> None:
+    """Verify publisher repository access fails fast before startup wiring.
+
+    Given: A publisher whose repository has not been initialized,
+    When: Repository access is required by a persistence path,
+    Then: A RuntimeError replaces the optimized-out assertion failure.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    with pytest.raises(RuntimeError, match="Repository not initialized"):
+        pub._require_repository()
+
+
 @pytest.mark.asyncio
 async def test_start_logs_warning_when_running(caplog: pytest.LogCaptureFixture) -> None:
     """Test start returns when already running.

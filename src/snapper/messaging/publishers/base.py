@@ -470,6 +470,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._persist_skipped_counters: dict[tuple[str, PersistDataType], list[float]] = {}
         self._feed_health_loop_task: asyncio.Task[None] | None = None
 
+    def _require_repository(self) -> Repository:
+        """Return initialized repository or raise an explicit runtime error.
+
+        Returns:
+            Initialized repository instance.
+
+        Raises:
+            RuntimeError: If repository setup has not completed.
+        """
+        repository = self.repository
+        if repository is None:
+            raise RuntimeError(_REPO_NOT_INIT_MSG)
+        return repository
+
     def set_persist_policy(self, policy: MarketPersistPolicy | None) -> None:
         """Inject the :class:`MarketPersistPolicy` for selective DB-write gating.
 
@@ -1124,13 +1138,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         cached = self._instrument_cache.get(native_symbol)
         if cached is not None:
             return cached
-        assert self.repository is not None, _REPO_NOT_INIT_MSG
+        repository = self._require_repository()
         now = datetime.now(UTC)
-        symbol_pid = await resolve_symbol_public_id(self.repository, native_symbol, as_of=now)
+        symbol_pid = await resolve_symbol_public_id(repository, native_symbol, as_of=now)
         if symbol_pid is None:
             logger.warning(f"MarketDataPublisherService: No active Symbol row for {native_symbol}")
             return None
-        _id, instrument_public_id = await self.repository.ensure_instrument(
+        _id, instrument_public_id = await repository.ensure_instrument(
             symbol_public_id=symbol_pid,
             exchange=self._get_exchange_name(),
             session_id=self._tracker.session_id,
@@ -2236,14 +2250,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         if not batch:
             return
-        assert self.repository is not None, _REPO_NOT_INIT_MSG
+        repository = self._require_repository()
         try:
             writer_session = self._candle_writer_session
             if writer_session is not None:
-                await self.repository.upsert_candles(batch, session=writer_session)
+                await repository.upsert_candles(batch, session=writer_session)
                 await writer_session.commit()
             else:
-                await self.repository.upsert_candles(batch)
+                await repository.upsert_candles(batch)
             self._flush_errors["candle"] = 0
         except IntegrityError:
             writer_session = self._candle_writer_session
@@ -2275,14 +2289,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             _WriterSessionLostError: If the row failure indicates a lost
                 writer session.
         """
-        assert self.repository is not None, _REPO_NOT_INIT_MSG
+        repository = self._require_repository()
         writer_session = self._candle_writer_session
         try:
             if writer_session is not None:
-                await self.repository.upsert_candles([row], session=writer_session)
+                await repository.upsert_candles([row], session=writer_session)
                 await writer_session.commit()
             else:
-                await self.repository.upsert_candles([row])
+                await repository.upsert_candles([row])
             return False
         except IntegrityError as exc:
             logger.warning(
@@ -2356,7 +2370,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 Mutated in place on disconnect: rebuilt from rows
                 whose index was NOT in the committed-or-skipped set.
         """
-        assert self.repository is not None, _REPO_NOT_INIT_MSG
+        self._require_repository()
         had_generic_error = False
         committed_or_skipped: set[int] = set()
         snapshot = list(batch)
@@ -2384,14 +2398,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         if not batch:
             return
-        assert self.repository is not None, _REPO_NOT_INIT_MSG
+        repository = self._require_repository()
         try:
             writer_session = self._tick_writer_session
             if writer_session is not None:
-                await self.repository.upsert_ticks(batch, session=writer_session)
+                await repository.upsert_ticks(batch, session=writer_session)
                 await writer_session.commit()
             else:
-                await self.repository.upsert_ticks(batch)
+                await repository.upsert_ticks(batch)
             self._flush_errors["tick"] = 0
         except Exception as e:
             self._flush_errors["tick"] += 1
@@ -2423,16 +2437,16 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         if not batch:
             return
-        assert self.repository is not None, _REPO_NOT_INIT_MSG
+        repository = self._require_repository()
         trade_probe = get_trade_probe()
         t_start = perf_counter_ns()
         try:
             writer_session = self._trade_writer_session
             if writer_session is not None:
-                await self.repository.upsert_trades(batch, session=writer_session)
+                await repository.upsert_trades(batch, session=writer_session)
                 await writer_session.commit()
             else:
-                await self.repository.upsert_trades(batch)
+                await repository.upsert_trades(batch)
             self._flush_errors["trade"] = 0
             trade_probe.record("writer_upsert_call", perf_counter_ns() - t_start)
         except Exception as e:

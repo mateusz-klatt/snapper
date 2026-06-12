@@ -1003,6 +1003,21 @@ class TestGhostOrderAdoption:
         assert "cid-1" in ex._ghost_foreign_warned
 
     @pytest.mark.asyncio
+    async def test_missing_client_order_id_candidate_raises(self) -> None:
+        """A ghost-adoption candidate must carry its client order id.
+
+        Given: A snapshot that reaches adoption despite lacking client_order_id,
+        When: The ghost sweep processes it,
+        Then: A RuntimeError replaces the prior assert-only invariant.
+        """
+        ex = _make_sweep_executor()
+        ex._should_skip_ghost_snapshot = MagicMock(return_value=False)
+        snapshot = _make_order_snapshot(client_order_id=None)
+        with pytest.raises(RuntimeError, match="client_order_id"):
+            await ex._adopt_ghost_orders([snapshot], set(), set())
+        ex.repository.get_active_create_command_by_client_order_id.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_other_wallet_command_is_skipped_silently(self) -> None:
         """Another wallet's command belongs to its own executor.
 

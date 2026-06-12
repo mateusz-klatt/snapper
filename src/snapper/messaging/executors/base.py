@@ -536,6 +536,63 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._recon_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
 
+    def _require_context(self) -> zmq.asyncio.Context:
+        """Return initialized ZMQ context or raise an explicit runtime error.
+
+        Returns:
+            Initialized ZMQ context.
+
+        Raises:
+            RuntimeError: If socket setup has not initialized the context.
+        """
+        context = self.context
+        if context is None:
+            raise RuntimeError("ZMQ context must exist before subscriber setup")
+        return context
+
+    def _require_exchange_client(self) -> T:
+        """Return initialized exchange client or raise an explicit runtime error.
+
+        Returns:
+            Initialized exchange client.
+
+        Raises:
+            RuntimeError: If exchange-client setup has not completed.
+        """
+        exchange_client = self.exchange_client
+        if exchange_client is None:
+            raise RuntimeError(_EXCHANGE_NOT_INIT_MSG)
+        return exchange_client
+
+    def _require_repository(self) -> Repository:
+        """Return initialized repository or raise an explicit runtime error.
+
+        Returns:
+            Initialized repository.
+
+        Raises:
+            RuntimeError: If repository setup has not completed.
+        """
+        repository = self.repository
+        if repository is None:
+            raise RuntimeError("Repository not initialized")
+        return repository
+
+    def _require_sqlalchemy_repository(self) -> SQLAlchemyRepository:
+        """Return initialized SQLAlchemy repository or raise explicit type error.
+
+        Returns:
+            Initialized SQLAlchemy repository.
+
+        Raises:
+            RuntimeError: If repository setup has not completed.
+            TypeError: If the configured repository is not SQLAlchemy-backed.
+        """
+        repository = self._require_repository()
+        if not isinstance(repository, SQLAlchemyRepository):
+            raise TypeError("SQLAlchemyRepository required")
+        return repository
+
     @abstractmethod
     def _create_exchange_client(self) -> T:
         """Create and return the exchange client instance.
@@ -641,8 +698,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Args:
             exchange_name: Exchange name for topic prefix construction.
         """
-        assert self.context is not None, "ZMQ context must exist before subscriber setup"
-        raw_sub_socket = self.context.socket(zmq.SUB)
+        context = self._require_context()
+        raw_sub_socket = context.socket(zmq.SUB)
         apply_hwm(raw_sub_socket, rcvhwm=HWM_ORDER_FLOW)
         raw_sub_socket.connect(self.settings.zmq_broker_xpub)
         self.subscriber = ValidatedSubscriber(raw_sub_socket)
@@ -707,14 +764,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Args:
             exchange_name: Exchange name for logging and DB queries.
         """
-        assert self.exchange_client is not None
+        exchange_client = self._require_exchange_client()
         if self.repository is None:
             logger.warning(f"[{exchange_name}] No repository, skipping recovery")
             return
         try:
-            exchange_open = await self.exchange_client.get_orders(
-                status=ExchangeOrderStatusEnum.OPEN
-            )
+            exchange_open = await exchange_client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
         except Exception as e:
             logger.error(f"[{exchange_name}] Failed to query exchange open orders: {e}")
             exchange_open = []
@@ -800,7 +855,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             True if order was recovered into (or parked in) pending state;
             False for skipped rows and orders that went terminal.
         """
-        assert self.exchange_client is not None
+        self._require_exchange_client()
         exchange_order_id = db_order.get("exchange_order_id")
         client_order_id = db_order.get("client_order_id", "")
         if not exchange_order_id or not client_order_id:
@@ -947,7 +1002,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"seeds - venue unverifiable, recon will retry"
             )
             return True
-        assert snapshot is not None
+        if snapshot is None:
+            raise RuntimeError("Recovery classification requires a venue snapshot")
         live_pending = self.pending_orders.get(client_order_id)
         if classification == "open" and live_pending is not None:
             republished = await self._publish_order_status(
@@ -1083,11 +1139,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             Non-SQLAlchemy repositories have no durable plane: both seeds
             come from the executions sum and no rows exist to republish.
         """
-        assert self.repository is not None
+        repository = self._require_repository()
         now = datetime.now(UTC)
-        if not isinstance(self.repository, SQLAlchemyRepository):
+        if not isinstance(repository, SQLAlchemyRepository):
             try:
-                execs = await self.repository.get_executions_for_order(order_public_id, now)
+                execs = await repository.get_executions_for_order(order_public_id, now)
                 exec_sum = sum(e["size"] for e in execs)
                 exec_fees = self._sum_execution_fees(execs)
             except Exception as e:
@@ -1099,7 +1155,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 exec_fees = {}
             return exec_sum, exec_sum, [], exec_fees
         try:
-            fill_rows = await self.repository.get_fill_venue_events_for_order(client_order_id)
+            fill_rows = await repository.get_fill_venue_events_for_order(client_order_id)
         except Exception as e:
             logger.error(
                 f"[{exchange_name}] Recovery: venue_events unreadable for "
@@ -1112,7 +1168,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if row_cum is not None and row_cum > durable_max:
                 durable_max = row_cum
         try:
-            execs = await self.repository.get_executions_for_order(order_public_id, now)
+            execs = await repository.get_executions_for_order(order_public_id, now)
             exec_sum = sum(e["size"] for e in execs)
             exec_fees = self._sum_execution_fees(execs)
         except Exception as e:
@@ -1138,13 +1194,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             ``"open"`` / ``"terminal"`` / ``"unverifiable"`` (snapshot is
             None only for unverifiable).
         """
-        assert self.exchange_client is not None
+        exchange_client = self._require_exchange_client()
         if exchange_order_id in exchange_by_id:
             return exchange_by_id[exchange_order_id], "open"
         try:
-            snap = await self.exchange_client.get_order(
-                exchange_order_id, symbol=db_order["instrument"]
-            )
+            snap = await exchange_client.get_order(exchange_order_id, symbol=db_order["instrument"])
         except Exception as e:
             logger.warning(
                 f"[{exchange_name}] Recovery: cannot verify order "
@@ -2313,10 +2367,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         exchange_name = self._get_exchange_name()
         try:
-            assert self.exchange_client is not None, _EXCHANGE_NOT_INIT_MSG
-            result = await self.exchange_client.cancel_order(
-                cancel.exchange_order_id, cancel.instrument
-            )
+            exchange_client = self._require_exchange_client()
+            result = await exchange_client.cancel_order(cancel.exchange_order_id, cancel.instrument)
             await self._handle_cancel_result(cancel, result, exchange_name)
         except Exception as e:
             logger.error(
@@ -2343,7 +2395,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
     async def _finalize_successful_cancel(self, cancel: OrderCancelData) -> None:
         """Clean tracked order state and persist the terminal cancel status."""
-        assert self.exchange_client is not None
+        exchange_client = self._require_exchange_client()
         client_id = self.client_by_exchange.get(cancel.exchange_order_id)
         holder = self.pending_orders.get(client_id) if client_id else None
         if holder is None:
@@ -2353,7 +2405,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             self.client_by_exchange.pop(cancel.exchange_order_id, None)
             pending = self.pending_orders.pop(client_id, None) if client_id else None
             if pending and pending.db_order_id is not None:
-                await self.exchange_client._log_order_update_to_db(
+                await exchange_client._log_order_update_to_db(
                     db_order_id=pending.db_order_id,
                     status=ExchangeOrderStatusEnum.CANCELED,
                 )
@@ -2470,8 +2522,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         exchange_name = self._get_exchange_name()
         order_request = _exchange_order_request_from_core(order, self.wallet_public_id)
-        assert self.exchange_client is not None, _EXCHANGE_NOT_INIT_MSG
-        result = await self.exchange_client.create_order(order_request)
+        exchange_client = self._require_exchange_client()
+        result = await exchange_client.create_order(order_request)
         exchange_order_id = result.id if result else None
         if exchange_order_id:
             pending = self.pending_orders.get(order.client_order_id)
@@ -2777,8 +2829,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
     async def _warn_on_balance_mismatches(self, exchange_name: OrderExchange) -> None:
         """Log reconciliation balance mismatches beyond the configured threshold."""
-        assert self.exchange_client is not None
-        balances = await self.exchange_client.get_balance()
+        exchange_client = self._require_exchange_client()
+        balances = await exchange_client.get_balance()
         threshold = self.settings.recon_balance_threshold
         for currency, bal in balances.items():
             if abs(bal.free + bal.used - bal.total) > threshold:
@@ -2864,7 +2916,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             cid = snapshot.client_order_id
             if self._should_skip_ghost_snapshot(cid, adopted, pending_at_snapshot):
                 continue
-            assert cid is not None
+            if cid is None:
+                raise RuntimeError("Ghost-order adoption requires client_order_id")
             if budget <= 0:
                 logger.info(
                     f"[{exchange_name}] Recon: ghost-order adoptions deferred to later "
@@ -2892,12 +2945,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name: OrderExchange,
     ) -> tuple[TradeCommandRow | None, bool]:
         """Lookup the command row for a ghost snapshot, returning retryable failure state."""
-        assert isinstance(self.repository, SQLAlchemyRepository)
+        repository = self._require_sqlalchemy_repository()
         try:
             return (
-                await self.repository.get_active_create_command_by_client_order_id(
-                    cid, exchange_name
-                ),
+                await repository.get_active_create_command_by_client_order_id(cid, exchange_name),
                 False,
             )
         except Exception as e:
@@ -3312,12 +3363,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name: OrderExchange,
     ) -> tuple[ExchangeOrderSnapshot | None, bool]:
         """Lookup a dispatched command by client id and classify terminal lookup states."""
-        assert self.exchange_client is not None
+        exchange_client = self._require_exchange_client()
         try:
             async with asyncio.timeout(_AMBIGUOUS_VERIFY_TIMEOUT_S):
-                snapshot = await self.exchange_client.find_order_by_client_id(
-                    cid, cmd["instrument"]
-                )
+                snapshot = await exchange_client.find_order_by_client_id(cid, cmd["instrument"])
         except NotImplementedError:
             if not self._verify_unsupported_logged:
                 self._verify_unsupported_logged = True
@@ -3511,11 +3560,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Calls get_order() to determine actual status. Emits any
         remaining fill gap before the terminal event.
         """
-        assert self.exchange_client is not None
+        exchange_client = self._require_exchange_client()
         try:
-            snapshot = await self.exchange_client.get_order(
-                exchange_oid, pending.request.instrument
-            )
+            snapshot = await exchange_client.get_order(exchange_oid, pending.request.instrument)
         except Exception:
             logger.warning(
                 f"[{exchange_name}] Recon: get_order failed for {exchange_oid}, "
@@ -3619,9 +3666,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self, exchange_name: str, exchange_oid: str
     ) -> tuple[OrderFillSummary | None, bool]:
         """Fetch a per-order fill summary and classify lookup failures."""
-        assert self.exchange_client is not None
+        exchange_client = self._require_exchange_client()
         try:
-            return await self.exchange_client.get_order_fill_summary(exchange_oid), False
+            return await exchange_client.get_order_fill_summary(exchange_oid), False
         except Exception as exc:
             logger.warning(
                 f"[{exchange_name}] Recon: fill-summary lookup failed for "

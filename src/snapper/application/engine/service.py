@@ -661,24 +661,26 @@ class TradingEngineService:
             ai_review_dispatch_version: Companion to the citation
                 (transport-only).
         """
-        assert self._repository is not None
+        repository = self._repository
+        if repository is None:
+            raise RuntimeError("TradingEngineService repository not initialized")
         if self._caps_enforcer is not None and ai_review_public_id is not None:
             async with self._caps_enforcer.guard_with_ai_review_attribution(
                 submission,
                 ai_review_public_id=ai_review_public_id,
                 ai_review_dispatch_version=ai_review_dispatch_version,
             ):
-                _, command_public_id = await self._repository.insert_trade_command(
+                _, command_public_id = await repository.insert_trade_command(
                     insert_row, ownership=self._ownership
                 )
             return command_public_id
         if self._caps_enforcer is not None:
             async with self._caps_enforcer.guard_service_principal(submission):
-                _, command_public_id = await self._repository.insert_trade_command(
+                _, command_public_id = await repository.insert_trade_command(
                     insert_row, ownership=self._ownership
                 )
             return command_public_id
-        _, command_public_id = await self._repository.insert_trade_command(
+        _, command_public_id = await repository.insert_trade_command(
             insert_row, ownership=self._ownership
         )
         return command_public_id

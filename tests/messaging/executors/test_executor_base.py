@@ -26,6 +26,7 @@ import zmq
 
 import snapper.application.process_manager.launcher as launcher_module
 import snapper.messaging.executors.base as base_module
+from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
@@ -84,6 +85,50 @@ class DummyExecutor(ExchangeExecutorService[Any]):
 
     def _get_exchange_name(self) -> Literal["paper"]:
         return "paper"
+
+
+def test_runtime_dependency_guards_raise_when_uninitialized() -> None:
+    """Missing executor runtime dependencies raise explicit RuntimeErrors.
+
+    Given: An executor that has not completed startup wiring,
+    When: Runtime dependencies are required directly,
+    Then: Each guard raises a named RuntimeError instead of relying on assert.
+    """
+    executor = DummyExecutor(SimpleNamespace())
+    with pytest.raises(RuntimeError, match="ZMQ context"):
+        executor._require_context()
+    with pytest.raises(RuntimeError, match="Exchange client not initialized"):
+        executor._require_exchange_client()
+    with pytest.raises(RuntimeError, match="Repository not initialized"):
+        executor._require_repository()
+    with pytest.raises(RuntimeError, match="Repository not initialized"):
+        executor._require_sqlalchemy_repository()
+
+
+def test_require_sqlalchemy_repository_rejects_plain_repository() -> None:
+    """SQL-specific paths reject non-SQL repositories explicitly.
+
+    Given: An executor with a repository that is not SQLAlchemy-backed,
+    When: A SQLAlchemy-only helper is required,
+    Then: A TypeError replaces the prior debug-only type assertion.
+    """
+    executor = DummyExecutor(SimpleNamespace())
+    executor.repository = cast(Repository, SimpleNamespace())
+    with pytest.raises(TypeError, match="SQLAlchemyRepository required"):
+        executor._require_sqlalchemy_repository()
+
+
+def test_require_sqlalchemy_repository_returns_sql_repository() -> None:
+    """SQL-specific paths return the initialized SQLAlchemy repository.
+
+    Given: An executor with a SQLAlchemy-backed repository,
+    When: The typed repository guard is called,
+    Then: It returns the configured repository instance unchanged.
+    """
+    executor = DummyExecutor(SimpleNamespace())
+    repository = MagicMock(spec=SQLAlchemyRepository)
+    executor.repository = repository
+    assert executor._require_sqlalchemy_repository() is repository
 
 
 @pytest.mark.asyncio
@@ -9700,6 +9745,17 @@ class TestRecoveryAdoptedRepublish:
         await ex._recover_pending_orders("kraken")
         sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
         assert [p for p in sent if isinstance(p, OrderData)] == []
+
+    async def test_verified_recovery_classification_requires_snapshot(self) -> None:
+        """Verified recovery states must carry the venue snapshot.
+
+        Given: A recovery classification that claims venue verification,
+        When: The venue snapshot is missing,
+        Then: Recovery raises a RuntimeError instead of relying on assert.
+        """
+        ex = self._recovery_executor()
+        with pytest.raises(RuntimeError, match="venue snapshot"):
+            await ex._finish_recovered_order("c1", "ex-1", None, "open", "kraken")
 
     async def test_terminal_recovered_order_stays_silent(self) -> None:
         """No re-arm signal for an order that went terminal in downtime.
