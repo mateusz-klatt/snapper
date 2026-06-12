@@ -661,6 +661,26 @@ async def _shutdown_zmq_bridge(app: FastAPI) -> None:
         logger.warning(f"ZMQ bridge task failed during shutdown: {e}")
 
 
+async def _sync_process_registry_for_instance(
+    process_factory: ProcessLauncherService,
+    settings: AppSettings,
+) -> None:
+    """Run process registry DB sync from one coordinator instance per deployment.
+
+    Args:
+        process_factory: Process launcher whose registry sync mutates setting rows.
+        settings: Runtime settings carrying coordinator partition identity.
+    """
+    if settings.coordinator_instance_count == 1 or settings.coordinator_instance_id == 0:
+        await process_factory.sync_registry_to_database()
+        return
+    logger.info(
+        "Skipping process registry sync on coordinator instance {}/{}; instance 0 owns it",
+        settings.coordinator_instance_id,
+        settings.coordinator_instance_count,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Application lifespan context manager.
@@ -775,7 +795,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         )
         app.state.process_factory = process_factory
         logger.info("Starting application lifespan - checking autostart settings")
-        await process_factory.sync_registry_to_database()
+        await _sync_process_registry_for_instance(process_factory, settings)
         if settings.server_api_only:
             logger.info("API-only mode (SERVER_API_ONLY=true) — skipping process autostart")
         else:

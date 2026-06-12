@@ -1039,6 +1039,9 @@ Deploy notes (see `docker-compose.yml` `snapper-feed` service):
   deployment whose broker config already carries `tcp://127.0.0.1:7500`
   must have that row re-synced (or the `parameters` cleared) so the broker
   picks up `tcp://0.0.0.0:*`; otherwise the feed container cannot reach it.
+  In multi-instance deployments only coordinator instance `0` runs this
+  replicated registry sync; non-zero instances skip it during FastAPI
+  lifespan startup to avoid racing the same temporal `Setting` rows.
 - By default feed publishers dial exchanges directly. To verify egress
   routing, set `feed_egress_enabled=true`, restart `snapper-feed`, then
   confirm publisher connections use the configured `snapper-egress` SOCKS

@@ -43,6 +43,7 @@ from snapper.server.app import _clear_runtime_singletons
 from snapper.server.app import _reconcile_stale_backtests
 from snapper.server.app import _safe_get_caps_enforcer
 from snapper.server.app import _shutdown_user_service_publisher
+from snapper.server.app import _sync_process_registry_for_instance
 from snapper.server.app import _warn_on_tradfi_near_expiry
 from snapper.server.app import create_api_router
 from snapper.server.app import create_app
@@ -137,6 +138,54 @@ class TestLifespan:
     """Tests for application lifespan management."""
 
     @pytest.mark.asyncio
+    async def test_sync_process_registry_runs_in_single_instance_mode(self) -> None:
+        """Single-instance deployments keep the previous unconditional registry sync.
+
+        Given: coordinator instance count is one,
+        When: the process registry sync gate runs,
+        Then: registry sync is awaited.
+        """
+        process_factory = MagicMock()
+        process_factory.sync_registry_to_database = AsyncMock()
+        settings = MagicMock()
+        settings.coordinator_instance_id = 0
+        settings.coordinator_instance_count = 1
+        await _sync_process_registry_for_instance(process_factory, settings)
+        process_factory.sync_registry_to_database.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_sync_process_registry_runs_on_instance_zero_when_partitioned(self) -> None:
+        """Instance zero owns replicated registry sync in multi-instance deployments.
+
+        Given: coordinator instance count is greater than one and this instance is zero,
+        When: the process registry sync gate runs,
+        Then: registry sync is awaited once.
+        """
+        process_factory = MagicMock()
+        process_factory.sync_registry_to_database = AsyncMock()
+        settings = MagicMock()
+        settings.coordinator_instance_id = 0
+        settings.coordinator_instance_count = 3
+        await _sync_process_registry_for_instance(process_factory, settings)
+        process_factory.sync_registry_to_database.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_sync_process_registry_skips_nonzero_instance_when_partitioned(self) -> None:
+        """Non-owner instances skip replicated registry sync at N greater than one.
+
+        Given: coordinator instance count is greater than one and this instance is not zero,
+        When: the process registry sync gate runs,
+        Then: registry sync is not awaited.
+        """
+        process_factory = MagicMock()
+        process_factory.sync_registry_to_database = AsyncMock()
+        settings = MagicMock()
+        settings.coordinator_instance_id = 2
+        settings.coordinator_instance_count = 3
+        await _sync_process_registry_for_instance(process_factory, settings)
+        process_factory.sync_registry_to_database.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_lifespan_startup_and_shutdown(self) -> None:
         """Test application lifespan manages startup and shutdown.
 
@@ -153,6 +202,13 @@ class TestLifespan:
         mock_manager.zmq_bridge = mock_zmq_bridge
         mock_app.state.manager = mock_manager
         mock_app.state.mcp_sub_app.router.lifespan_context = _noop_lifespan
+        lifespan_settings = MagicMock()
+        lifespan_settings.db_url = TEST_DB_URL
+        lifespan_settings.zmq_broker_xsub = "tcp://broker.xsub"
+        lifespan_settings.zmq_broker_xpub = "tcp://broker.xpub"
+        lifespan_settings.server_api_only = False
+        lifespan_settings.coordinator_instance_id = 0
+        lifespan_settings.coordinator_instance_count = 1
         with (
             patch("snapper.server.app.discover_processes") as mock_discover,
             patch(
@@ -161,6 +217,10 @@ class TestLifespan:
             ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app.get_settings_with_service",
+                return_value=lifespan_settings,
+            ),
             patch(
                 "snapper.server.app._build_user_service_publisher",
                 return_value=(MagicMock(), MagicMock()),
