@@ -206,17 +206,28 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
     async def _fetch_ccxt_markets(self) -> tuple[Any, dict[str, Any]]:
         """Connect to Kraken and fetch CCXT markets data.
 
+        The blocking CCXT call rides the client-owned bounded REST pool
+        (audit P1-5) — never the loop's shared default executor — so a
+        stalled Kraken REST round-trip cannot starve unrelated
+        ``to_thread`` users process-wide. The client is the updater's
+        cached singleton; its lifecycle (connect at run start,
+        disconnect in the run ``finally``) is owned by
+        ``SymbolUpdaterService.run``.
+
         Returns:
             Tuple of (ccxt_client, markets dict).
         """
         client = self._create_exchange_client()
         await client.connect()
         ccxt_client = client.get_ccxt_client()
-        markets = await asyncio.to_thread(ccxt_client.load_markets)
+        markets = await client._dispatch_blocking(ccxt_client.load_markets)
         return ccxt_client, markets
 
     async def _fetch_tokenized_result(self, ccxt_client: Any) -> dict[str, Any]:
         """Fetch tokenized asset pairs from Kraken REST API.
+
+        Dispatches through the cached client's bounded REST pool — see
+        ``_fetch_ccxt_markets`` for the rationale.
 
         Args:
             ccxt_client: CCXT Kraken client instance.
@@ -227,7 +238,8 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         Raises:
             RuntimeError: If response result is not a dict.
         """
-        tokenized_response: dict[str, Any] = await asyncio.to_thread(
+        client = self._create_exchange_client()
+        tokenized_response: dict[str, Any] = await client._dispatch_blocking(
             ccxt_client.publicGetAssetPairs,
             {"aclass_base": "tokenized_asset"},
         )

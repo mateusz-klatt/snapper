@@ -72,12 +72,15 @@ def _client() -> KrakenExchangeClient:
     client = KrakenExchangeClient.__new__(KrakenExchangeClient)
     client.api_key = "key"
     client.api_secret = "secret"
+    client.exchange_name = "kraken"
     client._ws_connected = True
     client._tick_queue = asyncio.Queue[TickerUpdate]()
     client._candle_queues = {}
     client._ccxt_client = SimpleNamespace()
     client._subscription_cache = {}
     client._health_tracker = SubscriptionHealthTracker()
+    client._rest_pool = None
+    client._rest_pool_closed = False
 
     async def _with_retry(fn: Any, *args: Any, **kwargs: Any) -> Any:
         return await fn(*args, **kwargs)
@@ -1901,8 +1904,13 @@ class TestKrakenCoverageImprovement:
     async def test_connect_failure_raises_exception(
         self, kraken_client: KrakenExchangeClient
     ) -> None:
-        """Verify connect failure raises exception."""
-        mock_client = AsyncMock()
+        """Verify connect failure raises exception.
+
+        The mock session is synchronous (MagicMock): the connect-failure
+        cleanup calls ``session.close()`` without awaiting, and an
+        AsyncMock attribute there would leave an un-awaited coroutine.
+        """
+        mock_client = AsyncMock(session=MagicMock())
         mock_client.load_markets.side_effect = Exception("Connection failed")
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
@@ -1911,6 +1919,7 @@ class TestKrakenCoverageImprovement:
             mock_retry.side_effect = Exception("Connection failed")
             with pytest.raises(Exception, match="Connection failed"):
                 await kraken_client.connect()
+        mock_client.session.close.assert_called_once_with()
 
     async def test_disconnect_no_websocket(self, kraken_client: KrakenExchangeClient) -> None:
         """Verify disconnect no websocket."""
@@ -6719,39 +6728,46 @@ class TestInvokeFuncOffloadsSyncCalls:
     """Pin the event-loop-unblock contract for ``_invoke_func``.
 
     The CCXT sync API and the native Kraken Trade REST SDK are
-    blocking. Routing them through ``asyncio.to_thread`` means a slow
-    Kraken REST round-trip cannot stall the executor coroutine.
-    These tests fail loudly if a regression reintroduces a direct
-    sync call on the event-loop thread.
+    blocking. Routing them through the client-owned bounded REST pool
+    means a slow Kraken REST round-trip cannot stall the executor
+    coroutine, and cannot saturate the loop's shared default executor
+    either (audit P1-5). These tests fail loudly if a regression
+    reintroduces a direct sync call on the event-loop thread.
     """
 
     @pytest.mark.asyncio
-    async def test_sync_callable_runs_on_worker_thread(self) -> None:
-        """Sync callables go through asyncio.to_thread → worker pool.
+    async def test_sync_callable_runs_on_client_pool_thread(self) -> None:
+        """Sync callables go through the client's bounded REST pool.
 
         Given: A KrakenExchangeClient and a sync callable that records
-        the OS thread id it executes on,
+        the OS thread it executes on,
         When: ``_invoke_func(callable)`` is awaited,
-        Then: The callable's thread id differs from the event-loop
-        thread id, proving the call did not block the loop.
+        Then: The callable runs off the event-loop thread, on a thread
+        carrying the client's ``kraken-rest`` pool prefix — proving the
+        dispatch went to the client-owned pool, not the shared default
+        executor.
         """
         client = KrakenExchangeClient()
         main_loop = asyncio.get_running_loop()
         main_thread_id = threading.get_ident()
-        executor_thread_id: list[int | None] = []
+        seen: list[tuple[int, str]] = []
 
         def sync_call() -> str:
-            executor_thread_id.append(threading.get_ident())
+            seen.append((threading.get_ident(), threading.current_thread().name))
             return "ok"
 
         result = await client._invoke_func(sync_call)
         assert result == "ok"
-        assert executor_thread_id[0] is not None
-        assert executor_thread_id[0] != main_thread_id, (
-            "sync callables must run on a worker thread (asyncio.to_thread),"
+        assert seen[0][0] != main_thread_id, (
+            "sync callables must run on a worker thread (client REST pool),"
             " not the asyncio event loop thread"
         )
+        assert seen[0][1].startswith("kraken-rest"), (
+            "sync callables must run on the client-owned bounded pool,"
+            " not the loop's shared default executor"
+        )
         assert main_loop.is_running(), "event loop must still be running after the call"
+        client._shutdown_rest_pool()
 
     @pytest.mark.asyncio
     async def test_async_callable_awaited_directly(self) -> None:
@@ -6759,7 +6775,7 @@ class TestInvokeFuncOffloadsSyncCalls:
 
         Given: A coroutine function,
         When: ``_invoke_func(coro_func)`` is awaited,
-        Then: It runs on the event loop thread (no to_thread dispatch).
+        Then: It runs on the event loop thread (no pool dispatch).
         """
         client = KrakenExchangeClient()
         main_thread_id = threading.get_ident()
@@ -6772,6 +6788,157 @@ class TestInvokeFuncOffloadsSyncCalls:
         result = await client._invoke_func(async_call)
         assert result == "ok"
         assert async_thread_id[0] == main_thread_id
+
+
+class TestRestPoolLifecycle:
+    """Pin the REST-pool lifecycle contract on the spot client.
+
+    A pool created during a failed ``connect()`` must never outlive the
+    failure: ``__aexit__`` only runs after a successful ``__aenter__``,
+    so connect itself owns the cleanup. Disconnect must close the pool
+    and a same-instance reconnect must reopen it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_shuts_rest_pool(self) -> None:
+        """A failed load_markets leaves no live pool behind.
+
+        Given: A client whose ``_with_retry`` raises,
+        When: ``connect()`` is awaited,
+        Then: The error propagates and the pool slot is cleared with
+        the closed flag set — no stranded worker threads.
+        """
+        client = KrakenExchangeClient()
+        with (
+            patch.object(client, "_with_retry", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await client.connect()
+        assert client._rest_pool is None
+        assert client._rest_pool_closed
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_closes_rest_session(self) -> None:
+        """A failed connect closes the ccxt REST session.
+
+        Given: A client whose ``_with_retry`` raises,
+        When: ``connect()`` is awaited,
+        Then: The session is closed — manual ``connect()`` callers
+        (publishers, updaters) have no ``__aexit__``/stop path that
+        would release it after a failed connect.
+        """
+        client = KrakenExchangeClient()
+        client._ccxt_client = MagicMock()
+        with (
+            patch.object(client, "_with_retry", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await client.connect()
+        client._ccxt_client.session.close.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_session_close_error_suppressed(self) -> None:
+        """A failing session close cannot mask the connect failure.
+
+        Given: A failing connect whose session close also raises,
+        When: ``connect()`` is awaited,
+        Then: The ORIGINAL connect error propagates.
+        """
+        client = KrakenExchangeClient()
+        client._ccxt_client = MagicMock()
+        client._ccxt_client.session.close.side_effect = RuntimeError("already closed")
+        with (
+            patch.object(client, "_with_retry", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await client.connect()
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_without_session_attribute(self) -> None:
+        """Connect-failure cleanup tolerates session-less ccxt clients.
+
+        Given: A ccxt client without a ``session`` attribute,
+        When: ``connect()`` fails,
+        Then: The error propagates and the pool is still shut down.
+        """
+        client = KrakenExchangeClient()
+        client._ccxt_client = SimpleNamespace(load_markets=lambda: None)
+        with (
+            patch.object(client, "_with_retry", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await client.connect()
+        assert client._rest_pool_closed
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_shuts_real_pool(self) -> None:
+        """The REAL pool built during a failing connect is shut down.
+
+        Given: A ``_with_retry`` that performs a real pool dispatch and
+        then fails (models load_markets dying after the pool exists),
+        When: ``connect()`` is awaited,
+        Then: The captured executor refuses new work — proving actual
+        ``shutdown()`` ran, not just flag bookkeeping.
+        """
+        client = KrakenExchangeClient()
+        captured: list[Any] = []
+
+        async def _dispatch_then_fail(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            await client._dispatch_blocking(lambda: None)
+            captured.append(client._rest_pool)
+            raise RuntimeError("boom")
+
+        with (
+            patch.object(client, "_with_retry", side_effect=_dispatch_then_fail),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await client.connect()
+        assert client._rest_pool is None
+        assert client._rest_pool_closed
+        with pytest.raises(RuntimeError):
+            captured[0].submit(lambda: None)
+
+    @pytest.mark.asyncio
+    async def test_connect_cancellation_shuts_rest_pool(self) -> None:
+        """A cancelled connect cleans up exactly like a failed one.
+
+        Given: A client whose ``_with_retry`` raises ``CancelledError``,
+        When: ``connect()`` is awaited,
+        Then: The cancellation propagates (BaseException path) and the
+        pool is shut down — crash-restart cycles cannot strand threads.
+        """
+        client = KrakenExchangeClient()
+        with (
+            patch.object(client, "_with_retry", side_effect=asyncio.CancelledError()),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await client.connect()
+        assert client._rest_pool is None
+        assert client._rest_pool_closed
+
+    @pytest.mark.asyncio
+    async def test_disconnect_shuts_pool_and_reconnect_reopens(self) -> None:
+        """Disconnect closes the pool; a later connect reopens it.
+
+        Given: A connected client with a live pool,
+        When: ``disconnect()`` then ``connect()`` run on the same instance,
+        Then: Dispatch fails loudly between the two and works again after
+        the reconnect (publisher rebuild cycles reuse instances).
+        """
+        client = KrakenExchangeClient()
+        with patch.object(client, "_with_retry", new_callable=AsyncMock):
+            await client.connect()
+            await client._dispatch_blocking(lambda: "ok")
+            assert client._rest_pool is not None
+            await client.disconnect()
+            assert client._rest_pool is None
+            assert client._rest_pool_closed
+            with pytest.raises(RuntimeError, match="REST thread pool is closed"):
+                await client._dispatch_blocking(lambda: "ok")
+            await client.connect()
+            result = await client._dispatch_blocking(lambda: "again")
+        assert result == "again"
+        client._shutdown_rest_pool()
 
 
 class TestRawTickerCapture:

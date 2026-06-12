@@ -284,42 +284,51 @@ class WalutomatExchangeClient(ExchangeClientBase):
             logger.warning("WalutomatExchangeClient already connected")
             return
         logger.info("Connecting to Walutomat API...")
-        self._http_client = httpx.AsyncClient(
+        http_client = httpx.AsyncClient(
             transport=PooledAsyncTransport(),
             timeout=httpx.Timeout(self.timeout),
             follow_redirects=True,
         )
+        self._http_client = http_client
         try:
             data = await self._fetch_market_data()
             self._last_data = data
             pair_count = len(data)
             logger.info(f"Walutomat API connected - {pair_count} pairs available")
-        except Exception as e:
-            await self._http_client.aclose()
+        except BaseException as e:
             self._http_client = None
-            raise ConnectionError(f"Failed to connect to Walutomat API: {e}") from e
+            with contextlib.suppress(Exception):
+                await http_client.aclose()
+            if isinstance(e, Exception):
+                raise ConnectionError(f"Failed to connect to Walutomat API: {e}") from e
+            raise
         self._running = True
 
     async def disconnect(self) -> None:
-        """Disconnect from Walutomat and stop polling tasks."""
-        if not self._running:
-            return
-        logger.info("Disconnecting from Walutomat API...")
-        self._running = False
-        if self._polling_task:
-            self._polling_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._polling_task
-            self._polling_task = None
-        if self._candle_builder_task:
-            self._candle_builder_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._candle_builder_task
-            self._candle_builder_task = None
+        """Disconnect from Walutomat and stop polling tasks.
+
+        The HTTP client close is NOT gated on ``_running``: a cancelled
+        ``connect()`` leaves ``_running`` False with the client object
+        already allocated, and the ``__aenter__`` failure cleanup calls
+        this method expecting it to release that client.
+        """
+        if self._running:
+            logger.info("Disconnecting from Walutomat API...")
+            self._running = False
+            if self._polling_task:
+                self._polling_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._polling_task
+                self._polling_task = None
+            if self._candle_builder_task:
+                self._candle_builder_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._candle_builder_task
+                self._candle_builder_task = None
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
-        logger.info("Disconnected from Walutomat API")
+            logger.info("Disconnected from Walutomat API")
 
     async def _fetch_market_data(self) -> dict[str, WalutomatMarketPair]:
         """Fetch current market data from Walutomat public API.

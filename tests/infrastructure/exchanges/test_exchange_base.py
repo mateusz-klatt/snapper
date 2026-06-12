@@ -1,5 +1,7 @@
 """Tests for ExchangeClientBase abstract class."""
 
+import asyncio
+import threading
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
@@ -209,6 +211,174 @@ async def test_context_manager_calls_connect_and_disconnect() -> None:
         assert not client.disconnected
     assert client.connected
     assert client.disconnected
+
+
+class _FailingConnectClient(DummyExchangeClient):
+    """Client whose connect always fails, recording cleanup calls."""
+
+    def __init__(self, exc: BaseException) -> None:
+        """Initialize with the exception connect should raise."""
+        super().__init__()
+        self._exc = exc
+
+    async def connect(self) -> None:
+        """Raise the configured failure."""
+        raise self._exc
+
+
+class _FailingCleanupClient(_FailingConnectClient):
+    """Client whose connect AND disconnect both fail."""
+
+    async def disconnect(self) -> None:
+        """Raise from cleanup to prove the original error wins."""
+        raise ValueError("cleanup also failed")
+
+
+@pytest.mark.asyncio()
+async def test_aenter_failed_connect_triggers_disconnect() -> None:
+    """A failed connect inside ``async with`` still cleans up the client.
+
+    Given: A client whose connect raises,
+    When: It is used as an async context manager,
+    Then: The error propagates AND disconnect ran — ``__aexit__`` never
+    fires after a failed ``__aenter__`` and no caller reliably stops a
+    process that died inside connect, so this is the only cleanup seam.
+    """
+    client = _FailingConnectClient(RuntimeError("connect failed"))
+    with pytest.raises(RuntimeError, match="connect failed"):
+        async with client:
+            pytest.fail("context body must not run")
+    assert client.disconnected
+
+
+@pytest.mark.asyncio()
+async def test_aenter_cancelled_connect_triggers_disconnect() -> None:
+    """A cancelled connect cleans up exactly like a failed one.
+
+    Given: A client whose connect raises CancelledError,
+    When: It is used as an async context manager,
+    Then: The cancellation propagates (BaseException path) and
+    disconnect ran.
+    """
+    client = _FailingConnectClient(asyncio.CancelledError())
+    with pytest.raises(asyncio.CancelledError):
+        async with client:
+            pytest.fail("context body must not run")
+    assert client.disconnected
+
+
+@pytest.mark.asyncio()
+async def test_aenter_cleanup_error_does_not_mask_connect_failure() -> None:
+    """The ORIGINAL connect failure propagates even when cleanup fails.
+
+    Given: A client whose connect and disconnect both raise,
+    When: It is used as an async context manager,
+    Then: The connect error (not the cleanup error) reaches the caller.
+    """
+    client = _FailingCleanupClient(RuntimeError("connect failed"))
+    with pytest.raises(RuntimeError, match="connect failed"):
+        async with client:
+            pytest.fail("context body must not run")
+
+
+@pytest.mark.asyncio()
+async def test_dispatch_blocking_runs_on_named_pool_thread() -> None:
+    """Blocking dispatch leaves the event loop and uses the client's pool.
+
+    Given: A client and a sync callable recording its thread identity,
+    When: ``_dispatch_blocking(callable)`` is awaited twice,
+    Then: The callable runs off the loop thread, on a thread named with
+    the per-exchange prefix, and the lazily created pool is reused.
+    """
+    client = DummyExchangeClient(exchange_name="dummyx")
+    main_thread_id = threading.get_ident()
+    seen: list[tuple[int, str]] = []
+
+    def sync_call() -> str:
+        seen.append((threading.get_ident(), threading.current_thread().name))
+        return "ok"
+
+    assert client._rest_pool is None
+    result = await client._dispatch_blocking(sync_call)
+    first_pool = client._rest_pool
+    assert result == "ok"
+    assert first_pool is not None
+    assert seen[0][0] != main_thread_id
+    assert seen[0][1].startswith("dummyx-rest")
+    await client._dispatch_blocking(sync_call)
+    assert client._rest_pool is first_pool
+
+
+@pytest.mark.asyncio()
+async def test_dispatch_blocking_passes_kwargs() -> None:
+    """Keyword arguments reach the dispatched callable via partial.
+
+    Given: A sync callable with positional and keyword parameters,
+    When: ``_dispatch_blocking`` is awaited with both kinds of arguments,
+    Then: The callable receives them unchanged (run_in_executor itself
+    accepts no kwargs, so the partial path is load-bearing).
+    """
+    client = DummyExchangeClient()
+
+    def sync_call(left: str, *, right: str) -> str:
+        return f"{left}:{right}"
+
+    result = await client._dispatch_blocking(sync_call, "a", right="b")
+    assert result == "a:b"
+
+
+@pytest.mark.asyncio()
+async def test_shutdown_rest_pool_idempotent_and_blocks_dispatch() -> None:
+    """Shutdown closes the pool, clears the slot, and stays idempotent.
+
+    Given: A client whose pool was created by a successful dispatch,
+    When: ``_shutdown_rest_pool`` runs twice and dispatch is retried,
+    Then: The slot is cleared, the second shutdown is a no-op, and the
+    retry fails loudly instead of resurrecting a pool nobody cleans up.
+    """
+    client = DummyExchangeClient(exchange_name="dummyx")
+    await client._dispatch_blocking(lambda: "ok")
+    assert client._rest_pool is not None
+    client._shutdown_rest_pool()
+    assert client._rest_pool is None
+    assert client._rest_pool_closed
+    client._shutdown_rest_pool()
+    assert client._rest_pool is None
+    with pytest.raises(RuntimeError, match="REST thread pool is closed"):
+        await client._dispatch_blocking(lambda: "ok")
+
+
+def test_shutdown_rest_pool_without_pool_is_noop() -> None:
+    """Shutdown before any dispatch only flips the closed flag.
+
+    Given: A fresh client that never dispatched (lazy pool not built),
+    When: ``_shutdown_rest_pool`` runs,
+    Then: No pool exists and the closed flag is set.
+    """
+    client = DummyExchangeClient()
+    client._shutdown_rest_pool()
+    assert client._rest_pool is None
+    assert client._rest_pool_closed
+
+
+@pytest.mark.asyncio()
+async def test_reopen_rest_pool_builds_fresh_pool_after_shutdown() -> None:
+    """Reopen restores dispatch with a brand-new pool.
+
+    Given: A client shut down after building a pool,
+    When: ``_reopen_rest_pool`` runs and dispatch is awaited again,
+    Then: A fresh pool is created and the call succeeds — the
+    same-instance reconnect contract used by ``connect()``.
+    """
+    client = DummyExchangeClient(exchange_name="dummyx")
+    await client._dispatch_blocking(lambda: "ok")
+    client._shutdown_rest_pool()
+    client._reopen_rest_pool()
+    assert not client._rest_pool_closed
+    result = await client._dispatch_blocking(lambda: "again")
+    assert result == "again"
+    assert client._rest_pool is not None
+    client._shutdown_rest_pool()
 
 
 @pytest.mark.asyncio()

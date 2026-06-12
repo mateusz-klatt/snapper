@@ -514,6 +514,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.running = False
         self.heartbeat_seq = 0
         self.exchange_client: T | None = None
+        self._client_context_active: bool = False
         self.repository: Repository | None = None
         self.pending_orders: dict[str, PendingOrderState] = {}
         self.client_by_exchange: dict[str, str] = {}
@@ -1319,66 +1320,105 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         await self._initialize_settings()
         await self._resolve_credentials(exchange_name)
+        self._client_context_active = False
         self.exchange_client = self._create_exchange_client()
         self.exchange_client.set_tracker(self._tracker)
         self._setup_zmq_sockets(exchange_name)
         supports_ws = self.exchange_client.supports_websocket_executions
-        async with self.exchange_client:
-            logger.info(
-                f"ExchangeExecutorService[{exchange_name}]: "
-                f"Exchange client initialized with WebSocket"
-            )
-            self.running = True
-            self._task_last_pass["reconciliation"] = time.monotonic()
-            await self._recover_pending_orders(exchange_name)
-            try:
-                tasks = [
-                    asyncio.create_task(
-                        self._supervise_loop(
-                            "order_handler",
-                            self._order_handler,
-                            pre_respawn=self._rebuild_order_subscriber,
-                        )
-                    ),
-                    asyncio.create_task(self._supervise_loop("heartbeat", self._heartbeat_loop)),
-                ]
-                if supports_ws:
-                    tasks.append(asyncio.create_task(self._supervise_execution_stream()))
-                tasks.append(
-                    asyncio.create_task(
-                        self._supervise_loop("reconciliation", self._reconciliation_handler)
-                    )
+        self._client_context_active = True
+        try:
+            async with self.exchange_client:
+                logger.info(
+                    f"ExchangeExecutorService[{exchange_name}]: "
+                    f"Exchange client initialized with WebSocket"
                 )
+                self.running = True
+                self._task_last_pass["reconciliation"] = time.monotonic()
+                await self._recover_pending_orders(exchange_name)
                 try:
-                    await asyncio.gather(*tasks)
+                    tasks = [
+                        asyncio.create_task(
+                            self._supervise_loop(
+                                "order_handler",
+                                self._order_handler,
+                                pre_respawn=self._rebuild_order_subscriber,
+                            )
+                        ),
+                        asyncio.create_task(
+                            self._supervise_loop("heartbeat", self._heartbeat_loop)
+                        ),
+                    ]
+                    if supports_ws:
+                        tasks.append(asyncio.create_task(self._supervise_execution_stream()))
+                    tasks.append(
+                        asyncio.create_task(
+                            self._supervise_loop("reconciliation", self._reconciliation_handler)
+                        )
+                    )
+                    try:
+                        await asyncio.gather(*tasks)
+                    except asyncio.CancelledError:
+                        logger.info(f"ExchangeExecutorService[{exchange_name}] tasks cancelled")
+                        raise
+                    finally:
+                        for task in tasks:
+                            task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
                 except asyncio.CancelledError:
-                    logger.info(f"ExchangeExecutorService[{exchange_name}] tasks cancelled")
                     raise
-                finally:
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                await self.stop()
-                raise
+                except Exception:
+                    await self.stop()
+                    raise
+        finally:
+            self._client_context_active = False
 
     async def stop(self) -> None:
-        """Stop the execution service and close ZMQ connections."""
-        if not self.running:
-            return
-        self.running = False
-        if self.subscriber:
-            self.subscriber.setsockopt(zmq.LINGER, 0)
-            self.subscriber.close()
-        if self.publisher:
-            self.publisher.setsockopt(zmq.LINGER, 0)
-            self.publisher.close()
-        if self.context:
-            self.context.term()
-        exchange_name = self._get_exchange_name()
-        logger.info(f"ExchangeExecutorService[{exchange_name}] stopped")
+        """Stop the execution service and close ZMQ connections.
+
+        ZMQ teardown runs first so blocked consumers unwind, then the
+        exchange client is disconnected as an idempotent FALLBACK — but
+        ONLY when ``start()`` does not currently own the client
+        (``_client_context_active`` False). ``start()`` claims ownership
+        BEFORE entering ``async with`` — i.e. before ``connect()`` even
+        begins — and releases it in a ``finally`` after the context has
+        fully unwound. Disconnecting here while ownership is held would
+        either close the REST pool under an in-flight ``connect()``
+        (whose success would then leave the service running with a
+        permanently closed pool) or tear the pool and ccxt session
+        under an order handler or reconciliation cycle mid-call — a
+        transport-class error on a live submit must classify as
+        ambiguous (parked UNKNOWN), never be provoked by our own
+        teardown. The fallback exists because without it a crash
+        between client creation and ownership claim, or a start that
+        never ran, would leak the client's ccxt session, WebSocket
+        client, and bounded REST thread pool on every launcher
+        fresh-instance restart (P1-3 multiplier). It runs even when
+        ``running`` is already False, provided a client object exists;
+        ``disconnect()`` is idempotent on both venues. Accepted
+        residual: a wedged unwind that never reaches ``__aexit__`` is
+        not healed here — loop supervision and bounded cycles own that.
+        """
+        if self.running:
+            self.running = False
+            if self.subscriber:
+                self.subscriber.setsockopt(zmq.LINGER, 0)
+                self.subscriber.close()
+            if self.publisher:
+                self.publisher.setsockopt(zmq.LINGER, 0)
+                self.publisher.close()
+            if self.context:
+                self.context.term()
+            exchange_name = self._get_exchange_name()
+            logger.info(f"ExchangeExecutorService[{exchange_name}] stopped")
+        client = self.exchange_client
+        if client is not None and not self._client_context_active:
+            try:
+                await client.disconnect()
+            except Exception as exc:
+                logger.warning(
+                    f"ExchangeExecutorService[{self._get_exchange_name()}]: "
+                    f"fallback exchange-client disconnect failed: {exc!r}"
+                )
 
     async def _dispatch_command(
         self, parsed_suffix: str, payload_str: str, exchange_name: OrderExchange, instrument: str

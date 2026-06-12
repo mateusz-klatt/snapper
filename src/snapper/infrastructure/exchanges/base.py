@@ -14,17 +14,22 @@ must inherit from this base class and implement its abstract methods.
 """
 
 import asyncio
+import concurrent.futures
 import contextlib
+import functools
 import time
 from abc import ABC
 from abc import abstractmethod
 from collections import Counter
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from types import TracebackType
 from typing import Any
+from typing import ParamSpec
 from typing import Self
+from typing import TypeVar
 
 from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
@@ -50,6 +55,22 @@ from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 __all__ = ["ExchangeClientBase"]
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+_REST_POOL_MAX_WORKERS = 4
+"""Per-client cap on concurrent blocking REST threads.
+
+Sized for the realistic concurrency of one (venue, wallet) client —
+submit + cancel + reconciliation verification + balance/funding probe.
+Do not shrink: a cancelled await does not stop an already-running SDK
+call, so even sequential caller code can temporarily occupy multiple
+workers. Saturation queues inside the pool (FIFO), which is the
+desired backpressure: a dead venue consumes at most this many threads
+of ITS OWN pool and none of any other client's or of the event loop's
+shared default executor.
+"""
 
 
 class ExchangeClientBase(ABC):
@@ -85,6 +106,8 @@ class ExchangeClientBase(ABC):
         self._health_tracker: SubscriptionHealthTracker | None = None
         self._health_loop_running: bool = False
         self._health_loop_task: asyncio.Task[None] | None = None
+        self._rest_pool: concurrent.futures.ThreadPoolExecutor | None = None
+        self._rest_pool_closed: bool = False
 
     def set_tracker(self, tracker: SequenceTracker) -> None:
         """Inject the component-level SequenceTracker for provenance stamping.
@@ -119,6 +142,85 @@ class ExchangeClientBase(ABC):
         ``_with_retry`` / ccxt handlers still catch upstream 429s).
         """
         await get_rest_call_tracker().acquire(self.exchange_name)
+
+    def _ensure_rest_pool(self) -> concurrent.futures.ThreadPoolExecutor:
+        """Return this client's bounded REST thread pool, creating it lazily.
+
+        Returns:
+            The client-owned executor for blocking REST dispatch.
+
+        Raises:
+            RuntimeError: When the pool has been shut down and not
+                reopened via ``connect()`` — a post-disconnect REST call
+                indicates a lifecycle bug and must fail loudly instead
+                of resurrecting a pool nobody will clean up.
+        """
+        if self._rest_pool_closed:
+            raise RuntimeError(f"{self.exchange_name}: REST thread pool is closed")
+        pool = self._rest_pool
+        if pool is None:
+            pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_REST_POOL_MAX_WORKERS,
+                thread_name_prefix=f"{self.exchange_name}-rest",
+            )
+            self._rest_pool = pool
+        return pool
+
+    async def _dispatch_blocking(
+        self, func: Callable[_P, _R], /, *args: _P.args, **kwargs: _P.kwargs
+    ) -> _R:
+        """Run a blocking (synchronous) REST callable on the client's own pool.
+
+        Replaces ``asyncio.to_thread`` for venue REST so that dead-network
+        stalls saturate at most this client's bounded pool instead of the
+        loop's shared default executor (audit P1-5). Unlike
+        ``asyncio.to_thread`` this does NOT propagate contextvars into the
+        worker thread; no REST path consumes them (``_CURRENT_PUBLISHER``
+        is read only on WebSocket handshake paths). Cancelling the await
+        abandons the result but the thread keeps running — same semantics
+        the default-executor dispatch had.
+
+        Args:
+            func: Synchronous callable to execute (never a coroutine
+                function — async callables are awaited by callers directly).
+            *args: Positional arguments for ``func``.
+            **kwargs: Keyword arguments for ``func``.
+
+        Returns:
+            The callable's result.
+
+        Raises:
+            RuntimeError: When the pool is closed (see ``_ensure_rest_pool``).
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._ensure_rest_pool(), functools.partial(func, *args, **kwargs)
+        )
+
+    def _reopen_rest_pool(self) -> None:
+        """Re-enable blocking REST dispatch on this client instance.
+
+        Called as the FIRST step of each implementation's ``connect()``
+        so same-instance reconnect cycles (publisher rebuilds) get a
+        fresh lazily-created pool after a prior ``disconnect()``.
+        """
+        self._rest_pool_closed = False
+
+    def _shutdown_rest_pool(self) -> None:
+        """Shut down the client's REST pool without waiting for stragglers.
+
+        Idempotent. Uses ``shutdown(wait=False, cancel_futures=True)`` so
+        queued-but-not-started work is dropped and the interpreter's
+        atexit join only ever waits on calls already in flight (bounded
+        by their HTTP timeouts). Clears the pool slot so a later
+        ``connect()`` builds a fresh pool rather than touching a
+        shut-down executor.
+        """
+        self._rest_pool_closed = True
+        pool = self._rest_pool
+        self._rest_pool = None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def subscription_health_snapshot(self) -> dict[tuple[str, str], _SymbolEntry]:
         """Return a point-in-time copy of subscription-health state.
@@ -505,10 +607,23 @@ class ExchangeClientBase(ABC):
     async def __aenter__(self) -> Self:
         """Async context manager entry point.
 
+        A failed or cancelled ``connect()`` triggers a best-effort
+        ``disconnect()`` before re-raising: ``__aexit__`` never runs
+        when ``__aenter__`` raises, and no caller reliably stops a
+        process whose start died inside connect — without this, the
+        client's REST session (created eagerly in ``__init__``) leaks
+        on every failed start/respawn cycle. Cleanup errors are
+        suppressed so the ORIGINAL connect failure always propagates.
+
         Returns:
             Self: The connected exchange client instance.
         """
-        await self.connect()
+        try:
+            await self.connect()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await self.disconnect()
+            raise
         return self
 
     async def __aexit__(

@@ -25,6 +25,7 @@ patterns for real-time data streaming.
 """
 
 import asyncio
+import contextlib
 import inspect
 import json
 import time
@@ -464,17 +465,30 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         Loads markets and configures nonce generation for authenticated
         requests. Resets circuit breaker state on successful connection.
+        Reopens the bounded REST pool first (same-instance reconnects)
+        and on ANY failure — including cancellation — shuts the pool
+        back down AND closes the ccxt REST session, because manual
+        ``connect()`` callers (publisher start, symbol updaters,
+        snapshot utilities) have no ``__aexit__``/stop path that would
+        release either resource after a failed connect. A later
+        ``connect()`` on the same instance still works: requests
+        recreates a closed session's connection pools lazily.
 
         Raises:
             Exception: If connection or market loading fails.
         """
+        self._reopen_rest_pool()
         try:
             self._ccxt_client.nonce = lambda: int(time.time() * 100_000_000)
             await self._with_retry(self._ccxt_client.load_markets)
             logger.info("Kraken REST connection established")
             self._circuit_failures = 0
             self._circuit_open_until = 0.0
-        except Exception as e:
+        except BaseException as e:
+            self._shutdown_rest_pool()
+            with contextlib.suppress(Exception):
+                if self._ccxt_client and hasattr(self._ccxt_client, "session"):
+                    self._ccxt_client.session.close()
             logger.error(f"Failed to connect to Kraken: {e}")
             raise
 
@@ -535,7 +549,9 @@ class KrakenExchangeClient(ExchangeClientBase):
     async def disconnect(self) -> None:
         """Disconnect from Kraken exchange.
 
-        Closes both WebSocket and REST client sessions.
+        Closes both WebSocket and REST client sessions, then shuts down
+        the bounded REST thread pool (idempotent; a later ``connect()``
+        on the same instance rebuilds it).
         """
         try:
             await self._close_ws_client()
@@ -544,6 +560,8 @@ class KrakenExchangeClient(ExchangeClientBase):
                 logger.info("Kraken REST client session closed")
         except Exception as e:
             logger.warning(f"Error during disconnect: {e}")
+        finally:
+            self._shutdown_rest_pool()
 
     async def get_ticker(self, symbol: str) -> TickerSnapshot:
         """Fetch current ticker data for a symbol.
@@ -785,7 +803,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             if kraken_rest_symbol.endswith(("x/USD", "x/EUR")):
                 extra_params["asset_class"] = "tokenized_asset"
             try:
-                result = await asyncio.to_thread(
+                result = await self._dispatch_blocking(
                     trade_client.create_order,
                     **kraken_params,
                     extra_params=extra_params or None,
@@ -842,7 +860,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.info(f"Symbol {symbol} not supported by CCXT, using native Kraken API fallback")
             try:
                 trade_client = self._get_trade_client()
-                await asyncio.to_thread(trade_client.cancel_order, txid=order_id)
+                await self._dispatch_blocking(trade_client.cancel_order, txid=order_id)
                 return ExchangeOrderSnapshot(
                     id=order_id,
                     client_order_id=None,
@@ -2595,15 +2613,15 @@ class KrakenExchangeClient(ExchangeClientBase):
                 logger.error(f"Unexpected error: {e}")
                 raise
 
-    @staticmethod
-    async def _invoke_func(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    async def _invoke_func(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Invoke a function, awaiting if it is a coroutine.
 
         Synchronous callables (CCXT REST helpers, native Kraken Trade
-        REST SDK) are dispatched via ``asyncio.to_thread`` so a slow
-        Kraken REST round-trip (2–5s under network jitter has been
-        observed) no longer blocks the executor event loop. Async
-        callables are awaited directly.
+        REST SDK) are dispatched via the client-owned bounded REST pool
+        (``_dispatch_blocking``) so a slow Kraken REST round-trip (2–5s
+        under network jitter has been observed) neither blocks the
+        executor event loop nor competes for the loop's shared default
+        executor (audit P1-5). Async callables are awaited directly.
 
         Args:
             func: Function to call.
@@ -2615,7 +2633,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         if inspect.iscoroutinefunction(func):
             return await func(*args, **kwargs)
-        return await asyncio.to_thread(func, *args, **kwargs)
+        return await self._dispatch_blocking(func, *args, **kwargs)
 
     @staticmethod
     async def _handle_rate_limit(attempt: int, max_retries: int, base_delay: float) -> int:

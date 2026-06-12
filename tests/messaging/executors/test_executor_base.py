@@ -426,6 +426,109 @@ async def test_stop_when_not_running() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_disconnects_exchange_client_after_zmq_teardown() -> None:
+    """Fallback disconnect runs LAST, after ZMQ teardown.
+
+    Given: A running executor with ZMQ sockets and an exchange client,
+    When: stop() is called,
+    Then: Sockets close and the context terminates BEFORE the client
+    disconnects — consumers unwind before their transport is torn —
+    and the disconnect is awaited exactly once.
+    """
+    order: list[str] = []
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.subscriber = zmq_socket_stub(close=lambda: order.append("sub"))
+    ex.publisher = zmq_socket_stub(close=lambda: order.append("pub"))
+    ex.context = SimpleNamespace(term=lambda: order.append("term"))
+
+    async def _disconnect() -> None:
+        order.append("disconnect")
+
+    ex.exchange_client = SimpleNamespace(disconnect=_disconnect)
+    await ex.stop()
+    assert order == ["sub", "pub", "term", "disconnect"]
+    assert not ex.running
+
+
+@pytest.mark.asyncio
+async def test_stop_skips_disconnect_while_client_context_active() -> None:
+    """No fallback disconnect while start()'s context manager owns the client.
+
+    Given: A running executor whose ``async with exchange_client`` block
+    is active (``_client_context_active`` True),
+    When: stop() is called directly,
+    Then: The client is NOT disconnected here — tearing the REST pool
+    and ccxt session under a mid-call order handler could turn a live
+    submit into a spurious venue error; ``__aexit__`` owns the
+    disconnect once the tasks unwind.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.subscriber = zmq_socket_stub(close=lambda: None)
+    ex.publisher = zmq_socket_stub(close=lambda: None)
+    ex.context = SimpleNamespace(term=lambda: None)
+    ex._client_context_active = True
+    disconnects: list[bool] = []
+
+    async def _disconnect() -> None:
+        disconnects.append(True)
+
+    ex.exchange_client = SimpleNamespace(disconnect=_disconnect)
+    await ex.stop()
+    assert disconnects == []
+    assert not ex.running
+
+
+@pytest.mark.asyncio
+async def test_stop_fallback_disconnect_runs_when_not_running() -> None:
+    """The fallback disconnect covers crash paths outside the context manager.
+
+    Given: A non-running executor that still holds a client object
+    (a crash between client creation and context entry leaves exactly
+    this state, and ``__aexit__`` never runs there),
+    When: stop() is called,
+    Then: The client is disconnected anyway — otherwise its ccxt
+    session, WS client, and bounded REST pool leak on every launcher
+    fresh-instance restart.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = False
+    disconnects: list[bool] = []
+
+    async def _disconnect() -> None:
+        disconnects.append(True)
+
+    ex.exchange_client = SimpleNamespace(disconnect=_disconnect)
+    await ex.stop()
+    assert disconnects == [True]
+    assert not ex.running
+
+
+@pytest.mark.asyncio
+async def test_stop_swallows_exchange_client_disconnect_failure() -> None:
+    """A failing disconnect cannot break stop().
+
+    Given: A running executor whose client disconnect raises,
+    When: stop() is called,
+    Then: stop() completes, ZMQ teardown already happened, and the
+    failure is only logged.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.subscriber = zmq_socket_stub(close=lambda: None)
+    ex.publisher = zmq_socket_stub(close=lambda: None)
+    ex.context = SimpleNamespace(term=lambda: None)
+
+    async def _disconnect() -> None:
+        raise RuntimeError("disconnect failed")
+
+    ex.exchange_client = SimpleNamespace(disconnect=_disconnect)
+    await ex.stop()
+    assert not ex.running
+
+
+@pytest.mark.asyncio
 async def test_stop_with_none_subscriber(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test stop handles None subscriber gracefully.
 

@@ -129,13 +129,12 @@ class TestKrakenSymbolUpdater:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_to_thread(func: Any, *args: Any) -> Any:
-            return func(*args)
+        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
+            return func(*args, **kwargs)
 
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch("asyncio.to_thread", side_effect=mock_to_thread),
-        ):
+        mock_client._dispatch_blocking = mock_dispatch
+
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
         assert len(result) == 3
         assert "XXBTZUSD" in result
@@ -342,6 +341,10 @@ class DummyKrakenClient(SimpleNamespace):
     async def connect(self) -> None:
         """No-op connect for mock client."""
         ...
+
+    async def _dispatch_blocking(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        """Call func inline instead of dispatching to a REST pool."""
+        return func(*args, **kwargs)
 
 
 def _market(ccxt_symbol: str, rest_id: str, base: str, quote: str) -> dict[str, Any]:
@@ -734,13 +737,12 @@ class TestLoadKrakenRestSymbolsFallback:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_to_thread(func: Any, *args: Any) -> Any:
-            return func(*args)
+        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
+            return func(*args, **kwargs)
 
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch("asyncio.to_thread", side_effect=mock_to_thread),
-        ):
+        mock_client._dispatch_blocking = mock_dispatch
+
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
         assert "XXBTZUSD" in result
         assert result["XXBTZUSD"]["base"] == "BTC"
@@ -771,13 +773,12 @@ class TestLoadKrakenRestSymbolsFallback:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_to_thread(func: Any, *args: Any) -> Any:
-            return func(*args)
+        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
+            return func(*args, **kwargs)
 
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch("asyncio.to_thread", side_effect=mock_to_thread),
-        ):
+        mock_client._dispatch_blocking = mock_dispatch
+
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
         assert "XETHZEUR" in result
         assert result["XETHZEUR"]["base"] == "ETH"
@@ -1510,13 +1511,12 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_to_thread(func: Any, *args: Any) -> Any:
-            return func(*args)
+        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
+            return func(*args, **kwargs)
 
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch("asyncio.to_thread", side_effect=mock_to_thread),
-        ):
+        mock_client._dispatch_blocking = mock_dispatch
+
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
         assert len(result) == 0
 
@@ -1543,13 +1543,12 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_to_thread(func: Any, *args: Any) -> Any:
-            return func(*args)
+        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
+            return func(*args, **kwargs)
 
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch("asyncio.to_thread", side_effect=mock_to_thread),
-        ):
+        mock_client._dispatch_blocking = mock_dispatch
+
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
         assert len(result) == 0
 
@@ -1576,13 +1575,12 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_to_thread(func: Any, *args: Any) -> Any:
-            return func(*args)
+        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
+            return func(*args, **kwargs)
 
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch("asyncio.to_thread", side_effect=mock_to_thread),
-        ):
+        mock_client._dispatch_blocking = mock_dispatch
+
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
         assert len(result) == 0
 
@@ -1612,13 +1610,12 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_to_thread(func: Any, *args: Any) -> Any:
-            return func(*args)
+        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
+            return func(*args, **kwargs)
 
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch("asyncio.to_thread", side_effect=mock_to_thread),
-        ):
+        mock_client._dispatch_blocking = mock_dispatch
+
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
         assert len(result) == 0
 
@@ -1636,12 +1633,13 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_to_thread(func: Any, *args: Any) -> Any:
-            return func(*args)
+        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
+            return func(*args, **kwargs)
+
+        mock_client._dispatch_blocking = mock_dispatch
 
         with (
             patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch("asyncio.to_thread", side_effect=mock_to_thread),
             pytest.raises(ConnectionError, match="API error"),
         ):
             await updater.load_kraken_rest_symbols()
@@ -1665,12 +1663,13 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_to_thread(func: Any, *args: Any) -> Any:
-            return func(*args)
+        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
+            return func(*args, **kwargs)
+
+        mock_client._dispatch_blocking = mock_dispatch
 
         with (
             patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch("asyncio.to_thread", side_effect=mock_to_thread),
             pytest.raises(RuntimeError, match="Unexpected tokenized result type"),
         ):
             await updater.load_kraken_rest_symbols()

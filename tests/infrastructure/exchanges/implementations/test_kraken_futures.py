@@ -9,6 +9,7 @@ from datetime import datetime
 from datetime import datetime as _dt
 from datetime import timedelta
 from datetime import timedelta as _td
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -21,6 +22,7 @@ from loguru import logger
 import snapper.infrastructure.exchanges._subscription_health as health_mod
 import snapper.infrastructure.exchanges.implementations.kraken_futures as mod
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
+from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
@@ -89,18 +91,22 @@ def _patch_sdk() -> Generator[None]:
         yield
 
 
-async def _sync_to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
-    """Call func directly instead of spawning a thread.
+async def _sync_dispatch_blocking(
+    self: KrakenFuturesExchangeClient, func: Any, /, *args: Any, **kwargs: Any
+) -> Any:
+    """Call func directly instead of dispatching to the REST pool.
 
-    Replaces asyncio.to_thread so coverage can track the executed code.
+    Replaces ``_dispatch_blocking`` so coverage can track the executed
+    code without spawning worker threads; the real pool dispatch is
+    covered by dedicated tests in test_exchange_base.py.
     """
     return func(*args, **kwargs)
 
 
 @pytest.fixture(autouse=True)
-def _patch_to_thread(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run asyncio.to_thread synchronously for coverage tracking."""
-    monkeypatch.setattr(mod.asyncio, "to_thread", _sync_to_thread)
+def _patch_dispatch_blocking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run blocking REST dispatch synchronously for coverage tracking."""
+    monkeypatch.setattr(KrakenFuturesExchangeClient, "_dispatch_blocking", _sync_dispatch_blocking)
 
 
 class _DeterministicClock:
@@ -943,6 +949,213 @@ class TestConnect:
         client._ccxt_client.load_markets = MagicMock(side_effect=RuntimeError("network"))
         with pytest.raises(RuntimeError, match="network"):
             await client.connect()
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_shuts_rest_pool(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A failed load_markets leaves no live REST pool behind.
+
+        Given: CCXT load_markets raises,
+        When: connect() is called,
+        Then: The pool slot is cleared and the closed flag set —
+        ``__aexit__`` never runs after a failed ``__aenter__``, so
+        connect owns this cleanup (audit P1-5).
+        """
+        client._ccxt_client.load_markets = MagicMock(side_effect=RuntimeError("network"))
+        with pytest.raises(RuntimeError, match="network"):
+            await client.connect()
+        assert client._rest_pool is None
+        assert client._rest_pool_closed
+
+    @pytest.mark.asyncio
+    async def test_connect_cancellation_shuts_rest_pool(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A cancelled connect cleans up exactly like a failed one.
+
+        Given: CCXT load_markets raises CancelledError,
+        When: connect() is called,
+        Then: The cancellation propagates (BaseException path) and the
+        pool is shut down — crash-restart cycles cannot strand threads.
+        """
+        client._ccxt_client.load_markets = MagicMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await client.connect()
+        assert client._rest_pool is None
+        assert client._rest_pool_closed
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_shuts_real_pool(
+        self, client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The REAL pool built during a failing connect is shut down.
+
+        Given: Real (unshimmed) blocking dispatch and a pre-existing pool,
+        When: connect() fails in load_markets,
+        Then: The captured executor refuses new work — proving actual
+        ``shutdown()`` ran, not just flag bookkeeping.
+        """
+        monkeypatch.setattr(
+            KrakenFuturesExchangeClient,
+            "_dispatch_blocking",
+            ExchangeClientBase._dispatch_blocking,
+        )
+        pool = client._ensure_rest_pool()
+        client._ccxt_client.load_markets = MagicMock(side_effect=RuntimeError("network"))
+        with pytest.raises(RuntimeError, match="network"):
+            await client.connect()
+        assert client._rest_pool is None
+        assert client._rest_pool_closed
+        with pytest.raises(RuntimeError):
+            pool.submit(lambda: None)
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_closes_rest_session(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A failed connect closes the ccxt REST session.
+
+        Given: CCXT load_markets raises,
+        When: connect() is called,
+        Then: The session is closed — manual ``connect()`` callers have
+        no ``__aexit__``/stop path after a failed connect.
+        """
+        client._ccxt_client.load_markets = MagicMock(side_effect=RuntimeError("network"))
+        with pytest.raises(RuntimeError, match="network"):
+            await client.connect()
+        client._ccxt_client.session.close.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_without_session_attribute(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Connect-failure cleanup tolerates session-less ccxt clients.
+
+        Given: A ccxt client without a ``session`` attribute,
+        When: connect() fails,
+        Then: The error propagates and the pool is still shut down.
+        """
+        client._ccxt_client = SimpleNamespace(
+            load_markets=MagicMock(side_effect=RuntimeError("network"))
+        )
+        with pytest.raises(RuntimeError, match="network"):
+            await client.connect()
+        assert client._rest_pool_closed
+
+    @pytest.mark.asyncio
+    async def test_aenter_failure_closes_rest_session(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A failed ``async with`` entry closes the ccxt REST session.
+
+        Given: load_markets raising inside ``__aenter__``,
+        When: The client is used as an async context manager,
+        Then: The base-class cleanup runs disconnect, closing the REST
+        session — no caller stops a process that died inside connect.
+        """
+        client._ccxt_client.load_markets = MagicMock(side_effect=RuntimeError("network"))
+        with pytest.raises(RuntimeError, match="network"):
+            async with client:
+                pytest.fail("context body must not run")
+        assert client._ccxt_client.session.close.called, (
+            "failed __aenter__ must close the ccxt REST session"
+            " (connect cleanup + base disconnect are both idempotent)"
+        )
+        assert client._rest_pool_closed
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancellation_still_shuts_rest_pool(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A cancellation mid WS-teardown cannot strand the REST pool.
+
+        Given: A WS client whose close raises CancelledError and a live pool,
+        When: disconnect() is awaited,
+        Then: The cancellation propagates but the ``finally`` still shuts
+        the pool down.
+        """
+        ws = AsyncMock()
+        ws.close.side_effect = asyncio.CancelledError()
+        client._ws_client = ws
+        client._ensure_rest_pool()
+        with pytest.raises(asyncio.CancelledError):
+            await client.disconnect()
+        assert client._rest_pool is None
+        assert client._rest_pool_closed
+
+    @pytest.mark.asyncio
+    async def test_disconnect_closes_ccxt_rest_session(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Disconnect closes the ccxt REST session (spot-client parity).
+
+        Given: A client whose ccxt client exposes a session,
+        When: disconnect() is called,
+        Then: The session is closed — without this the requests.Session
+        leaked on every executor fresh-instance restart.
+        """
+        await client.disconnect()
+        client._ccxt_client.session.close.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_without_session_attribute(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Disconnect tolerates session-less ccxt clients.
+
+        Given: A ccxt client without a ``session`` attribute,
+        When: disconnect() is called,
+        Then: It completes and the pool is still shut down.
+        """
+        client._ccxt_client = SimpleNamespace()
+        await client.disconnect()
+        assert client._rest_pool_closed
+
+    @pytest.mark.asyncio
+    async def test_disconnect_session_close_error_swallowed(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A failing session close cannot break disconnect.
+
+        Given: A ccxt session whose close raises,
+        When: disconnect() is called,
+        Then: Disconnect completes and the pool is still shut down.
+        """
+        client._ccxt_client.session.close.side_effect = RuntimeError("already closed")
+        await client.disconnect()
+        assert client._rest_pool_closed
+
+    @pytest.mark.asyncio
+    async def test_connect_reopens_rest_pool_after_disconnect(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Same-instance reconnect re-enables REST dispatch.
+
+        Given: A client whose pool was shut down by disconnect(),
+        When: connect() runs again on the same instance,
+        Then: The closed flag is cleared (publisher rebuild cycles
+        reuse instances).
+        """
+        await client.disconnect()
+        assert client._rest_pool_closed
+        with patch("snapper.infrastructure.exchanges.implementations.kraken_futures.Market"):
+            await client.connect()
+        assert not client._rest_pool_closed
+
+    @pytest.mark.asyncio
+    async def test_disconnect_shuts_rest_pool(self, client: KrakenFuturesExchangeClient) -> None:
+        """Disconnect closes the bounded REST pool.
+
+        Given: A client with an open pool state,
+        When: disconnect() is called,
+        Then: The pool slot is cleared and the closed flag set.
+        """
+        client._ensure_rest_pool()
+        assert client._rest_pool is not None
+        await client.disconnect()
+        assert client._rest_pool is None
+        assert client._rest_pool_closed
 
     @pytest.mark.asyncio
     async def test_disconnect_without_ws(self, client: KrakenFuturesExchangeClient) -> None:

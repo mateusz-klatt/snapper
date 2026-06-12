@@ -343,16 +343,29 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """Establish REST connection to Kraken Futures.
 
         Loads markets via CCXT and creates the Market REST client.
+        Reopens the bounded REST pool first (same-instance reconnects)
+        and on ANY failure — including cancellation — shuts the pool
+        back down AND closes the ccxt REST session, because manual
+        ``connect()`` callers (publisher start, symbol updaters,
+        snapshot utilities) have no ``__aexit__``/stop path that would
+        release either resource after a failed connect. A later
+        ``connect()`` on the same instance still works: requests
+        recreates a closed session's connection pools lazily.
 
         Raises:
             RuntimeError: If connection fails.
         """
+        self._reopen_rest_pool()
         try:
             self._record_rest_call()
-            await asyncio.to_thread(self._ccxt_client.load_markets)
+            await self._dispatch_blocking(self._ccxt_client.load_markets)
             self._market_client = Market(sandbox=self.sandbox)
             logger.info("Kraken Futures REST connection established")
-        except Exception as e:
+        except BaseException as e:
+            self._shutdown_rest_pool()
+            with contextlib.suppress(Exception):
+                if self._ccxt_client and hasattr(self._ccxt_client, "session"):
+                    self._ccxt_client.session.close()
             logger.error(f"Failed to connect to Kraken Futures: {e}")
             raise
 
@@ -367,33 +380,48 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         close was in flight, and unconditionally nulling the slot here would
         detach that live client (callback still attached, no owner — the
         orphan pattern from the 2026-06-09 incident).
+
+        The REST pool shutdown sits in a ``finally`` so a cancellation
+        mid WS-teardown cannot strand the pool's worker threads, and the
+        ccxt REST session is closed explicitly (mirrors the spot client —
+        without it the session leaked on every executor fresh-instance
+        restart).
         """
-        client = self._ws_client
-        if client:
+        try:
+            client = self._ws_client
+            if client:
+                try:
+                    async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                        await client.close()
+                except TimeoutError:
+                    logger.warning("Kraken Futures WS close timed out - forcing cleanup")
+                    await force_close_ws_client(client)
+                except Exception as e:
+                    logger.warning(f"Error closing Kraken Futures WS: {e}")
+                    await force_close_ws_client(client)
+                if self._ws_client is client:
+                    self._ws_client = None
+            private_client = self._private_ws_client
+            if private_client:
+                try:
+                    async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                        await private_client.close()
+                except TimeoutError:
+                    logger.warning("Kraken Futures private WS close timed out - forcing cleanup")
+                    await force_close_ws_client(private_client)
+                except Exception as e:
+                    logger.warning(f"Error closing Kraken Futures private WS: {e}")
+                    await force_close_ws_client(private_client)
+                if self._private_ws_client is private_client:
+                    self._private_ws_client = None
             try:
-                async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
-                    await client.close()
-            except TimeoutError:
-                logger.warning("Kraken Futures WS close timed out - forcing cleanup")
-                await force_close_ws_client(client)
+                if self._ccxt_client and hasattr(self._ccxt_client, "session"):
+                    self._ccxt_client.session.close()
+                    logger.info("Kraken Futures REST client session closed")
             except Exception as e:
-                logger.warning(f"Error closing Kraken Futures WS: {e}")
-                await force_close_ws_client(client)
-            if self._ws_client is client:
-                self._ws_client = None
-        private_client = self._private_ws_client
-        if private_client:
-            try:
-                async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
-                    await private_client.close()
-            except TimeoutError:
-                logger.warning("Kraken Futures private WS close timed out - forcing cleanup")
-                await force_close_ws_client(private_client)
-            except Exception as e:
-                logger.warning(f"Error closing Kraken Futures private WS: {e}")
-                await force_close_ws_client(private_client)
-            if self._private_ws_client is private_client:
-                self._private_ws_client = None
+                logger.warning(f"Error closing Kraken Futures REST session: {e}")
+        finally:
+            self._shutdown_rest_pool()
         logger.info("Kraken Futures connections closed")
 
     async def _on_ws_message(self, message: dict[str, Any]) -> None:
@@ -788,7 +816,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             TickerSnapshot with current price data.
         """
         self._record_rest_call()
-        data = await asyncio.to_thread(self._ccxt_client.fetch_ticker, symbol)
+        data = await self._dispatch_blocking(self._ccxt_client.fetch_ticker, symbol)
         return TickerSnapshot(
             symbol=symbol,
             bid=float(data.get("bid") or 0),
@@ -816,7 +844,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             List of OhlcvSnapshot objects.
         """
         self._record_rest_call()
-        raw = await asyncio.to_thread(
+        raw = await self._dispatch_blocking(
             self._ccxt_client.fetch_ohlcv, symbol, timeframe, since, limit
         )
         return [
@@ -903,7 +931,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             kwargs["reduceOnly"] = True
         self._record_rest_call()
         try:
-            result = await asyncio.to_thread(cast(Trade, self._trade_client).create_order, **kwargs)
+            result = await self._dispatch_blocking(
+                cast(Trade, self._trade_client).create_order, **kwargs
+            )
         except requests.exceptions.RequestException as e:
             raise AmbiguousOrderSubmitError(
                 client_order_id=request.client_order_id or "",
@@ -948,7 +978,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await asyncio.to_thread(
+        result = await self._dispatch_blocking(
             cast(Trade, self._trade_client).cancel_order, order_id=order_id
         )
         cancel_status = result.get("cancelStatus", {})
@@ -995,7 +1025,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await asyncio.to_thread(
+        result = await self._dispatch_blocking(
             cast(Trade, self._trade_client).get_orders_status, orderIds=[order_id]
         )
         orders = result.get("orders", [])
@@ -1043,7 +1073,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await asyncio.to_thread(cast(Trade, self._trade_client).get_fills)
+        result = await self._dispatch_blocking(cast(Trade, self._trade_client).get_fills)
         fills = result.get("fills")
         if not isinstance(fills, list):
             return None
@@ -1222,7 +1252,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await asyncio.to_thread(
+        result = await self._dispatch_blocking(
             cast(Trade, self._trade_client).get_orders_status, cliOrdIds=[client_order_id]
         )
         orders = result.get("orders")
@@ -1274,7 +1304,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await asyncio.to_thread(cast(User, self._user_client).get_open_orders)
+        result = await self._dispatch_blocking(cast(User, self._user_client).get_open_orders)
         raw_orders: list[dict[str, Any]] = result.get("openOrders", [])
         snapshots = [self._convert_sdk_order(o) for o in raw_orders]
         if symbol:
@@ -1356,7 +1386,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await asyncio.to_thread(cast(User, self._user_client).get_wallets)
+        result = await self._dispatch_blocking(cast(User, self._user_client).get_wallets)
         accounts: dict[str, Any] = result.get("accounts", {})
         balances: dict[str, AccountBalance] = {}
         for acct_name, acct_data in accounts.items():
@@ -1384,7 +1414,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await asyncio.to_thread(cast(User, self._user_client).get_open_positions)
+        result = await self._dispatch_blocking(cast(User, self._user_client).get_open_positions)
         raw_positions: list[dict[str, Any]] = result.get("openPositions", [])
         positions: list[OpenPositionSnapshot] = []
         for pos in raw_positions:
@@ -1431,7 +1461,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if not self._market_client:
             self._market_client = Market(sandbox=self.sandbox)
         self._record_rest_call()
-        result = await asyncio.to_thread(
+        result = await self._dispatch_blocking(
             self._market_client.get_historical_funding_rates,
             symbol,
         )
@@ -1500,7 +1530,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if not self._market_client:
             self._market_client = Market(sandbox=self.sandbox)
         self._record_rest_call()
-        result = await asyncio.to_thread(self._market_client.get_tickers)
+        result = await self._dispatch_blocking(self._market_client.get_tickers)
         if not isinstance(result, dict):
             logger.warning(f"Unexpected SDK response type for tickers: {type(result)}")
             return None
@@ -2003,7 +2033,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if not self._market_client:
             self._market_client = Market(sandbox=self.sandbox)
         self._record_rest_call()
-        result = await asyncio.to_thread(self._market_client.get_instruments)
+        result = await self._dispatch_blocking(self._market_client.get_instruments)
         instruments: list[dict[str, Any]] = result.get("instruments", [])
         for inst in instruments:
             yield inst

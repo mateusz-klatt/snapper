@@ -3037,6 +3037,54 @@ async def test_get_balance_requires_api_key_when_connected() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_connect_cancellation_closes_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify a cancelled connect closes the HTTP client unwrapped.
+
+    Given: A connect whose market-data fetch raises CancelledError,
+    When: connect() is awaited,
+    Then: The CancelledError propagates AS-IS (never wrapped into
+    ConnectionError) and the HTTP client is closed — a cancelled
+    executor start used to strand it because disconnect() was gated
+    on ``_running``.
+    """
+    stub_client = StubAsyncClient()
+
+    def client_factory(*_args: Any, **_kwargs: Any) -> StubAsyncClient:
+        return stub_client
+
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.implementations.walutomat.httpx.AsyncClient",
+        client_factory,
+    )
+    client = WalutomatExchangeClient()
+    monkeypatch.setattr(
+        client, "_fetch_market_data", AsyncMock(side_effect=asyncio.CancelledError())
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await client.connect()
+    assert stub_client.closed is True
+    assert client._http_client is None
+
+
+@pytest.mark.asyncio()
+async def test_disconnect_closes_http_client_when_not_running() -> None:
+    """Verify disconnect releases the HTTP client even when not running.
+
+    Given: A non-running client that still holds an HTTP client (the
+    state a cancelled connect leaves behind),
+    When: disconnect() is called,
+    Then: The client is closed and the slot cleared — ``__aenter__``
+    failure cleanup depends on this.
+    """
+    client = WalutomatExchangeClient()
+    stub_client = StubAsyncClient()
+    client._http_client = cast(httpx.AsyncClient, stub_client)
+    await client.disconnect()
+    assert stub_client.closed is True
+    assert client._http_client is None
+
+
+@pytest.mark.asyncio()
 async def test_disconnect_without_running() -> None:
     """Verify disconnect is no-op when not running.
 
