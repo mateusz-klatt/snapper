@@ -62,6 +62,7 @@ SUGGESTION_CUTOFF: float = 0.7
 BOOTSTRAP_ENV_VARS: frozenset[str] = frozenset(
     {
         "DB_URL",
+        "SNAPPER_ENV",
         "MASTER_PASSWORD",
         "SERVER_HOST",
         "SERVER_PORT",

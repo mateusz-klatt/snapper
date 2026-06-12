@@ -58,6 +58,7 @@ class TestKnownEnvKeys:
     def test_includes_bootstrap_aliases(self) -> None:
         """Every aliased field on bootstrap appears in the allowlist."""
         assert "DB_URL" in KNOWN_ENV_KEYS
+        assert "SNAPPER_ENV" in KNOWN_ENV_KEYS
         assert "MASTER_PASSWORD" in KNOWN_ENV_KEYS
         assert "SERVER_PORT" in KNOWN_ENV_KEYS
         assert "SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS" in KNOWN_ENV_KEYS
