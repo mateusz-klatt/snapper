@@ -25,9 +25,9 @@ Stale reporting policy:
   stale.
 - A successful scan clears the failure counter for every shard seen in
   the active command set.
-- A scan exception records a reconciliation failure on the exchange
-  fallback shard; repeated failures halt that shard via
-  :class:`TradeService`.
+- A scan exception records reconciliation failures only on real shard
+  keys known to the coordinator or seen by a prior successful cycle;
+  repeated failures halt those shards via :class:`TradeService`.
 """
 
 import asyncio
@@ -37,10 +37,9 @@ from datetime import datetime
 
 from loguru import logger
 
+from snapper.application.trade.command_request import parse_shard_key
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
-from snapper.core.types import ExchangeEnum
-from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeCommandRow
@@ -295,6 +294,7 @@ class ReconciliationLoop:
         self._interval = interval_seconds
         self._ownership = ownership
         self._running = False
+        self._last_seen_shards: set[str] = set()
 
     async def run(self) -> None:
         """Run the reconciliation loop until cancelled.
@@ -364,6 +364,15 @@ class ReconciliationLoop:
         if self._ownership is None:
             return commands
         return [cmd for cmd in commands if self._ownership.owns(cmd["shard_key"])]
+
+    def _owns_shard(self, shard_key: str) -> bool:
+        """Return whether this loop instance owns a shard key."""
+        return self._ownership is None or self._ownership.owns(shard_key)
+
+    def _is_exchange_shard(self, shard_key: str) -> bool:
+        """Return whether a shard key belongs to this loop's exchange."""
+        parsed = parse_shard_key(shard_key)
+        return parsed is not None and parsed[0] == self._exchange
 
     async def _load_active_commands(self, now: datetime) -> list[TradeCommandRow]:
         """Load active exchange commands visible to this loop instance."""
@@ -546,28 +555,36 @@ class ReconciliationLoop:
 
     def _record_cycle_successes(self, seen_shards: set[str]) -> None:
         """Record reconciliation success for every shard seen this cycle."""
+        self._last_seen_shards.update(seen_shards)
         for shard_key in seen_shards:
             self._trade_service.record_recon_success(shard_key)
 
-    def _fallback_failure_shard(self) -> str:
-        """Return the synthetic shard used when a cycle fails before command scan."""
-        mode = (
-            ExecutionModeEnum.PAPER
-            if self._exchange == ExchangeEnum.PAPER
-            else ExecutionModeEnum.LIVE
-        )
-        return f"{self._exchange}.unknown.{mode}"
+    def _failure_shards(self) -> set[str]:
+        """Return real shard keys that should receive a cycle failure."""
+        candidates = self._last_seen_shards | self._trade_service.known_shard_keys()
+        return {
+            shard_key
+            for shard_key in candidates
+            if self._is_exchange_shard(shard_key) and self._owns_shard(shard_key)
+        }
 
     def _record_cycle_failure(self) -> None:
         """Record a reconciliation failure and log shard halt transitions."""
         logger.exception(f"ReconciliationLoop[{self._exchange}] cycle failed")
-        fallback_shard = self._fallback_failure_shard()
-        halted = self._trade_service.record_recon_failure(fallback_shard)
-        if halted:
+        failure_shards = self._failure_shards()
+        if not failure_shards:
             logger.error(
-                f"ReconciliationLoop[{self._exchange}] shard {fallback_shard} HALTED "
-                f"due to consecutive reconciliation failures"
+                f"ReconciliationLoop[{self._exchange}] cycle failed with no known real shard "
+                f"to mark"
             )
+            return
+        for shard_key in sorted(failure_shards):
+            halted = self._trade_service.record_recon_failure(shard_key)
+            if halted:
+                logger.error(
+                    f"ReconciliationLoop[{self._exchange}] shard {shard_key} HALTED "
+                    f"due to consecutive reconciliation failures"
+                )
 
     async def _reconcile_cycle(self) -> None:
         """Execute one reconciliation cycle.

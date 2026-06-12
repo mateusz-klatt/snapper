@@ -88,6 +88,21 @@ def test_get_command_state_returns_default() -> None:
     assert cmd.command_public_id is None
 
 
+def test_known_shard_keys_returns_materialized_shards() -> None:
+    """Known shard keys returns already materialized in-memory shards.
+
+    Given: a fresh TradeService with two shards touched by read-model calls,
+    When: known_shard_keys is called,
+    Then: the returned set contains those shard keys and is a snapshot copy.
+    """
+    svc = TradeService()
+    svc.get_position("kraken.BTC-USD.live")
+    svc.get_command_state("kraken.ETH-USD.live")
+    keys = svc.known_shard_keys()
+    keys.add("mutated")
+    assert svc.known_shard_keys() == {"kraken.BTC-USD.live", "kraken.ETH-USD.live"}
+
+
 def test_apply_fill_buy() -> None:
     """Apply venue event processes a buy fill into position state.
 

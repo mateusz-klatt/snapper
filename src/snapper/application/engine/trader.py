@@ -100,6 +100,7 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedSubscribe
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import FundingAccrualData
+from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
@@ -307,6 +308,7 @@ class TraderCoordinator(RegisterableProcess):
         self._order_shard_keys: dict[str, str] = {}
         self._rearm_retired_cids: OrderedDict[str, None] = OrderedDict()
         self._wallet_short_to_id: dict[str, str] = {}
+        self._unhealthy_executor_scopes: set[str] = set()
         self._ownership: ShardOwnership | None = None
         self._caps_enforcer: TradingCapsEnforcer | None = None
 
@@ -3364,6 +3366,8 @@ class TraderCoordinator(RegisterableProcess):
         self.signal_subscriber.subscribe("system.settings")
         logger.info("ZMQTrader: Subscribing to orders.events. (fills and status updates)")
         self.signal_subscriber.subscribe("orders.events.")
+        logger.info("ZMQTrader: Subscribing to system.heartbeats.executor.")
+        self.signal_subscriber.subscribe("system.heartbeats.executor.")
 
     def _setup_trade_services(self) -> None:
         """Initialize trade domain services + outbox dispatcher.
@@ -3736,6 +3740,9 @@ class TraderCoordinator(RegisterableProcess):
                 if topic_str.startswith("orders.events."):
                     await self._dispatch_order_event(topic_str, msg_bytes)
                     continue
+                if topic_str.startswith("system.heartbeats.executor."):
+                    self._handle_executor_heartbeat(topic_str, msg_bytes)
+                    continue
                 signal = SignalData.from_json(msg_bytes.decode())
                 self._gap_detector.check(
                     topic_str,
@@ -3766,6 +3773,8 @@ class TraderCoordinator(RegisterableProcess):
         if context is None:
             return
         if self._should_drop_signal_for_foreign_shard(context.shard_key):
+            return
+        if self._should_drop_signal_for_unhealthy_executor(context):
             return
         halt_key = self._resolve_signal_halt_key(context)
         if self.trade_service.is_halted(halt_key):
@@ -4042,6 +4051,69 @@ class TraderCoordinator(RegisterableProcess):
             self._ownership.instance_count,
         )
         return True
+
+    def _executor_health_scope(self, exchange: OrderExchange, wallet_short: str) -> str:
+        """Return the stable executor venue-health scope key."""
+        if wallet_short:
+            return f"{exchange}:{wallet_short}"
+        return f"{exchange}:legacy"
+
+    def _signal_executor_health_scope(self, context: SignalRoutingContext) -> str:
+        """Return the executor venue-health scope for a routed signal."""
+        wallet_short = (
+            compute_wallet_short(context.wallet_public_id) if context.wallet_public_id else ""
+        )
+        return self._executor_health_scope(context.exchange, wallet_short)
+
+    def _should_drop_signal_for_unhealthy_executor(self, context: SignalRoutingContext) -> bool:
+        """Return whether executor health has fail-closed this exchange wallet."""
+        scope = self._signal_executor_health_scope(context)
+        if scope not in self._unhealthy_executor_scopes:
+            return False
+        self.trade_service.halt_shard(context.shard_key, f"venue-health:{scope}")
+        logger.warning(
+            f"ZMQTrader: executor venue health halted {scope}, dropping signal "
+            f"for shard {context.shard_key}"
+        )
+        return True
+
+    def _handle_executor_heartbeat(self, topic: str, payload: bytes) -> None:
+        """Apply executor venue-health heartbeat metadata to real shard halts."""
+        parts = topic.split(".")
+        if len(parts) not in (4, 5):
+            logger.warning(f"ZMQTrader: invalid executor heartbeat topic {topic}")
+            return
+        exchange = self._validate_signal_exchange(parts[3])
+        if exchange is None:
+            return
+        wallet_short = parts[4] if len(parts) == 5 else ""
+        try:
+            heartbeat = HeartbeatData.from_json(payload.decode())
+        except Exception as exc:
+            logger.warning(f"ZMQTrader: invalid executor heartbeat payload on {topic}: {exc}")
+            return
+        scope = self._executor_health_scope(exchange, wallet_short)
+        if heartbeat.meta.get("venue_health_halt_recommended") is True:
+            self._unhealthy_executor_scopes.add(scope)
+            self._halt_known_executor_scope_shards(exchange, wallet_short, f"venue-health:{scope}")
+            return
+        if heartbeat.meta.get("venue_rest_reachable") is True:
+            self._unhealthy_executor_scopes.discard(scope)
+
+    def _halt_known_executor_scope_shards(
+        self,
+        exchange: OrderExchange,
+        wallet_short: str,
+        reason: str,
+    ) -> None:
+        """Halt known real shards matching an executor exchange wallet scope."""
+        for shard_key in sorted(self.trade_service.known_shard_keys()):
+            parsed = parse_shard_key(shard_key)
+            if parsed is None:
+                continue
+            shard_exchange, _instrument, _mode, shard_wallet_short, _strategy_tag = parsed
+            if shard_exchange == exchange and shard_wallet_short == wallet_short:
+                self.trade_service.halt_shard(shard_key, reason)
 
     def _resolve_signal_halt_key(self, context: SignalRoutingContext) -> str:
         """Resolve the shard key used by the halt guard."""

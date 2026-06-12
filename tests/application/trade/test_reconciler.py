@@ -630,6 +630,7 @@ async def test_reconcile_cycle_records_failure_on_error() -> None:
     repo = AsyncMock()
     repo.get_active_commands_for_exchange = AsyncMock(side_effect=RuntimeError("DB error"))
     trade_svc = MagicMock(spec=TradeService)
+    trade_svc.known_shard_keys.return_value = {"kraken.BTC-USD.live"}
     trade_svc.record_recon_failure = MagicMock(return_value=False)
     recon = ReconciliationLoop(
         exchange_name="kraken", repository=repo, trade_service=trade_svc, interval_seconds=0.01
@@ -638,7 +639,7 @@ async def test_reconcile_cycle_records_failure_on_error() -> None:
     await asyncio.sleep(0.05)
     recon.stop()
     await asyncio.wait_for(task, timeout=1.0)
-    trade_svc.record_recon_failure.assert_called()
+    trade_svc.record_recon_failure.assert_called_with("kraken.BTC-USD.live")
 
 
 @pytest.mark.asyncio
@@ -718,6 +719,7 @@ async def test_reconcile_failure_triggers_halt() -> None:
     repo = AsyncMock()
     repo.get_active_commands_for_exchange = AsyncMock(side_effect=RuntimeError("DB down"))
     trade_svc = MagicMock(spec=TradeService)
+    trade_svc.known_shard_keys.return_value = {"kraken.BTC-USD.live"}
     trade_svc.record_recon_failure = MagicMock(return_value=True)
     recon = ReconciliationLoop(
         exchange_name="kraken", repository=repo, trade_service=trade_svc, interval_seconds=0.01
@@ -726,7 +728,76 @@ async def test_reconcile_failure_triggers_halt() -> None:
     await asyncio.sleep(0.05)
     recon.stop()
     await asyncio.wait_for(task, timeout=1.0)
-    trade_svc.record_recon_failure.assert_called()
+    trade_svc.record_recon_failure.assert_called_with("kraken.BTC-USD.live")
+
+
+@pytest.mark.asyncio
+async def test_reconcile_failure_does_not_target_unknown_phantom_shard() -> None:
+    """Failure recording targets known real shards, never the legacy unknown shard.
+
+    Given: known in-memory shards for kraken and kraken_futures,
+    When: the kraken reconciliation scan fails before loading commands,
+    Then: only the kraken real shard receives a failure count.
+    """
+    repo = AsyncMock()
+    repo.get_active_commands_for_exchange = AsyncMock(side_effect=RuntimeError("DB down"))
+    trade_svc = MagicMock(spec=TradeService)
+    trade_svc.known_shard_keys.return_value = {
+        "kraken.BTC-USD.live",
+        "kraken_futures.PF_XBTUSD.live",
+    }
+    trade_svc.record_recon_failure = MagicMock(return_value=False)
+    recon = ReconciliationLoop(
+        exchange_name="kraken",
+        repository=repo,
+        trade_service=trade_svc,
+        interval_seconds=60.0,
+    )
+    await recon._reconcile_cycle()
+    recorded = {call.args[0] for call in trade_svc.record_recon_failure.call_args_list}
+    assert recorded == {"kraken.BTC-USD.live"}
+    assert "kraken.unknown.live" not in recorded
+
+
+@pytest.mark.asyncio
+async def test_reconcile_failure_without_known_real_shards_records_nothing() -> None:
+    """Failure recording does not fabricate a shard when none is known.
+
+    Given: no known shards and no prior successful cycle,
+    When: the reconciliation scan fails before loading commands,
+    Then: no reconciliation failure is recorded on a phantom shard.
+    """
+    repo = AsyncMock()
+    repo.get_active_commands_for_exchange = AsyncMock(side_effect=RuntimeError("DB down"))
+    trade_svc = MagicMock(spec=TradeService)
+    trade_svc.known_shard_keys.return_value = set()
+    trade_svc.record_recon_failure = MagicMock(return_value=False)
+    recon = ReconciliationLoop(
+        exchange_name="kraken",
+        repository=repo,
+        trade_service=trade_svc,
+        interval_seconds=60.0,
+    )
+    await recon._reconcile_cycle()
+    trade_svc.record_recon_failure.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_failure_uses_last_seen_real_shards() -> None:
+    """A scan failure still marks shards seen in the previous successful cycle.
+
+    Given: a successful scan previously observed a real kraken shard,
+    When: a later cycle fails and the trade service reports no known shards,
+    Then: the previously seen real shard receives the failure count.
+    """
+    repo = _make_repo(cmds=[_make_cmd(shard_key="kraken.ETH-USD.live")])
+    recon, trade_svc = _make_loop(repo)
+    trade_svc.known_shard_keys.return_value = set()
+    await recon._reconcile_cycle()
+    repo.get_active_commands_for_exchange = AsyncMock(side_effect=RuntimeError("DB down"))
+    trade_svc.record_recon_failure = MagicMock(return_value=False)
+    await recon._reconcile_cycle()
+    trade_svc.record_recon_failure.assert_called_with("kraken.ETH-USD.live")
 
 
 @pytest.mark.asyncio

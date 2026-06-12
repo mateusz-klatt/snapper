@@ -138,7 +138,12 @@ reconciliation progress age and `meta.status_reasons` lists the
 human-readable reasons; if the status computation itself raises, the frame
 still publishes as WARNING with the failure recorded in `status_reasons` —
 a broken computation can cause neither heartbeat absence nor a false
-healthy report.
+healthy report. Executor heartbeats also carry venue REST reconciliation
+health in `meta.venue_recon_failure_count`, `meta.venue_rest_reachable`,
+`meta.venue_health_halt_recommended`, and `meta.last_venue_recon_error`.
+After three consecutive venue reconciliation failures, the coordinator
+uses the heartbeat to halt known real shard keys for the matching
+exchange/wallet scope and to drop new cold-path signals for that scope.
 
 The launcher also publishes on the per-wallet executor topics: when a
 per-wallet executor exhausts its restart budget and is parked, the launcher

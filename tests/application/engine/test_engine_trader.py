@@ -41,6 +41,7 @@ from snapper.data.repository_types import InstrumentSpecRow
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import SignalData
@@ -1069,8 +1070,102 @@ async def test_setup_signal_subscriber_subscribes_topics(monkeypatch: pytest.Mon
         "system.symbol_aliases",
         "system.settings",
         "orders.events.",
+        "system.heartbeats.executor.",
     ]
     assert cast(Any, coord.signal_subscriber) is subscriber
+
+
+def test_executor_heartbeat_halts_known_real_shards(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Executor health heartbeats halt known real shards for that venue scope.
+
+    Given: known in-memory shards for multiple executor scopes,
+    When: a kraken executor heartbeat recommends a venue-health halt,
+    Then: only the matching real shard is halted and later healthy heartbeats
+        clear the cold-path scope without auto-unhalting the shard.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    coord.trade_service.get_position("kraken.BTC-USD.live")
+    coord.trade_service.get_position("malformed")
+    coord.trade_service.get_position("kraken.ETH-USD.live.waaaaaaaaaaaa")
+    coord.trade_service.get_position("kraken_futures.PF_XBTUSD.live")
+    heartbeat = HeartbeatData(
+        public_id="hb-1",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        session_id="session",
+        sequence_id=1,
+        component="executor.kraken",
+        sequence=1,
+        status="error",
+        lag_ms=0,
+        meta={
+            "venue_health_halt_recommended": True,
+            "venue_rest_reachable": False,
+        },
+    )
+    coord._handle_executor_heartbeat(
+        "system.heartbeats.executor.kraken",
+        heartbeat.to_json().encode("utf-8"),
+    )
+    assert coord.trade_service.is_halted("kraken.BTC-USD.live") is True
+    assert coord.trade_service.is_halted("kraken.ETH-USD.live.waaaaaaaaaaaa") is False
+    assert coord.trade_service.is_halted("kraken_futures.PF_XBTUSD.live") is False
+    assert coord._unhealthy_executor_scopes == {"kraken:legacy"}
+    healthy = heartbeat.model_copy(
+        update={
+            "public_id": "hb-2",
+            "meta": {
+                "venue_health_halt_recommended": False,
+                "venue_rest_reachable": True,
+            },
+        }
+    )
+    coord._handle_executor_heartbeat(
+        "system.heartbeats.executor.kraken",
+        healthy.to_json().encode("utf-8"),
+    )
+    assert coord._unhealthy_executor_scopes == set()
+    assert coord.trade_service.is_halted("kraken.BTC-USD.live") is True
+
+
+def test_executor_heartbeat_ignores_invalid_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid executor heartbeat frames are ignored.
+
+    Given: invalid executor heartbeat topics and payloads,
+    When: the coordinator handles them,
+    Then: no venue-health scope is recorded and no shard is halted.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    neutral = HeartbeatData(
+        public_id="hb-neutral",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        session_id="session",
+        sequence_id=1,
+        component="executor.kraken",
+        sequence=1,
+        status="healthy",
+        lag_ms=0,
+        meta={},
+    )
+    coord._handle_executor_heartbeat(
+        "system.heartbeats.executor.kraken.extra.segment",
+        neutral.to_json().encode("utf-8"),
+    )
+    coord._handle_executor_heartbeat(
+        "system.heartbeats.executor.not_an_exchange",
+        neutral.to_json().encode("utf-8"),
+    )
+    coord._handle_executor_heartbeat(
+        "system.heartbeats.executor.kraken",
+        b"not-json",
+    )
+    coord._handle_executor_heartbeat(
+        "system.heartbeats.executor.kraken",
+        neutral.to_json().encode("utf-8"),
+    )
+    assert coord._unhealthy_executor_scopes == set()
+    assert coord.trade_service.known_shard_keys() == set()
 
 
 @pytest.mark.asyncio
@@ -1450,6 +1545,41 @@ async def test_listen_signals_handles_settings_update(
         await cast(Any, coord)._listen_signals()
     assert len(cache_updates) == 1
     assert cache_updates[0]["value"] == "bar"
+
+
+@pytest.mark.asyncio
+async def test_listen_signals_routes_executor_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify executor heartbeats route to the heartbeat handler.
+
+    Given: a TraderCoordinator with one executor heartbeat frame queued,
+    When: _listen_signals processes the message,
+    Then: the executor heartbeat handler receives the topic and payload.
+    """
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    subscriber_socket = _SocketStub()
+    subscriber = _SubscriberStub(subscriber_socket)
+    heartbeat = HeartbeatData(
+        public_id="hb-route",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        session_id="session",
+        sequence_id=1,
+        component="executor.kraken",
+        sequence=1,
+        status="healthy",
+        lag_ms=0,
+        meta={"venue_rest_reachable": True},
+    )
+    payload = heartbeat.to_json().encode("utf-8")
+    subscriber.messages.append(("system.heartbeats.executor.kraken", payload))
+    coord.signal_subscriber = cast(Any, subscriber)
+    handler = MagicMock()
+    coord._handle_executor_heartbeat = handler
+    with pytest.raises(asyncio.CancelledError):
+        await cast(Any, coord)._listen_signals()
+    handler.assert_called_once_with("system.heartbeats.executor.kraken", payload)
 
 
 @pytest.mark.asyncio
@@ -2491,6 +2621,40 @@ async def test_on_signal_drops_when_shard_halted(monkeypatch: pytest.MonkeyPatch
     )
     await coord._on_signal(signal)
     assert len(coord.engines) == 0
+
+
+@pytest.mark.asyncio
+async def test_on_signal_drops_when_executor_scope_unhealthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Executor venue-health scopes fail closed before an engine exists.
+
+    Given: an unhealthy kraken executor scope with no existing BTC engine,
+    When: a signal arrives for BTC-USD,
+    Then: the coordinator halts the real signal shard and creates no engine.
+    """
+    _configure_settings(monkeypatch)
+    monkeypatch.setattr(trader_module, "is_tradeable", lambda _i, _e: True)
+    coord = TraderCoordinator()
+    coord._current_topic = "signals.kraken.BTC-USD.live"
+    coord._unhealthy_executor_scopes.add("kraken:legacy")
+    signal = SignalData(
+        type="signal",
+        public_id="test-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        session_id="",
+        sequence_id=0,
+        instrument="BTC-USD",
+        exchange="kraken",
+        side="buy",
+        strength=1.0,
+        reason="test",
+        price=50000.0,
+        fired_at=datetime.now(UTC),
+    )
+    await coord._on_signal(signal)
+    assert len(coord.engines) == 0
+    assert coord.trade_service.is_halted("kraken.BTC-USD.live") is True
 
 
 def test_gap_detector_initialized_on_coordinator() -> None:

@@ -8856,6 +8856,37 @@ class TestReconCycleTimeout:
         )
         await ex._reconciliation_handler()
         assert calls == 2
+        assert ex._venue_recon_failure_count == 0
+        assert ex._last_venue_recon_error == ""
+
+    @pytest.mark.asyncio
+    async def test_handler_counts_consecutive_venue_failures(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The periodic handler exposes consecutive venue recon failures."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        calls = 0
+
+        async def recon() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                ex.running = False
+            raise RuntimeError("venue down")
+
+        ex._reconcile_with_exchange = AsyncMock(side_effect=recon)
+
+        async def fake_sleep(_delay: float) -> None:
+            return None
+
+        monkeypatch.setattr(
+            base_module, "asyncio", SimpleNamespace(sleep=fake_sleep, timeout=asyncio.timeout)
+        )
+        await ex._reconciliation_handler()
+        assert calls == 3
+        assert ex._venue_recon_failure_count == 3
+        assert ex._last_venue_recon_error == "venue down"
 
 
 class TestStartSiblingContainment:
@@ -9276,6 +9307,8 @@ class TestHonestHeartbeatStatus:
         )
         ex._task_last_pass["reconciliation"] = 0.0
         ex._task_restarts["order_handler"] = 3
+        ex._venue_recon_failure_count = 3
+        ex._last_venue_recon_error = "venue down"
         captured: list[Any] = []
 
         async def capture(topic: str, message: Any) -> None:
@@ -9302,6 +9335,10 @@ class TestHonestHeartbeatStatus:
         assert frame.meta["task_restarts"] == {"order_handler": 3}
         assert frame.meta["status_reasons"]
         assert frame.meta["running"] is True
+        assert frame.meta["venue_recon_failure_count"] == 3
+        assert frame.meta["venue_rest_reachable"] is False
+        assert frame.meta["venue_health_halt_recommended"] is True
+        assert frame.meta["last_venue_recon_error"] == "venue down"
 
     @pytest.mark.asyncio
     async def test_crashing_status_computation_degrades_not_kills(
