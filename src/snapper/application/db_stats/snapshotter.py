@@ -39,11 +39,14 @@ from datetime import datetime
 from typing import Final
 from typing import Literal
 
+from sqlalchemy.orm import DeclarativeBase
+
 from snapper.application.retention.policies import RETENTION_POLICIES
 from snapper.application.retention.window import compute_retention_window
 from snapper.data.archiver import EVENT_TABLES
 from snapper.data.archiver import STATE_TABLES
 from snapper.data.db_stats_types import TableEntry
+from snapper.data.models import Candle
 from snapper.data.repository import Repository
 
 logger = logging.getLogger(__name__)
@@ -115,10 +118,24 @@ def resolve_disabled(env_value: str | None) -> bool:
     return env_value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
+_STATE_MODELS: Final[dict[str, type[DeclarativeBase]]] = {
+    **{name: spec.model for name, spec in STATE_TABLES.items()},
+    "candles": Candle,
+}
+"""State-kind tables to sample: the archiver registry plus ``candles``.
+
+``candles`` deliberately lives outside the archiver's ``STATE_TABLES`` /
+``EVENT_TABLES`` registries — those dicts also drive archive/purge
+behavior and candles has a bespoke per-instrument export path — but
+operators still need its row counts on the #health dashboard. It samples
+as ``state``: the model is SCD2-versioned via ``TemporalMixin``, so
+``current`` / ``closed`` derive from ``known_to``.
+"""
+
 TABLES_TO_SAMPLE: Final[tuple[TableEntry, ...]] = (
     *(
-        TableEntry(name=name, kind="state", model=spec.model)
-        for name, spec in sorted(STATE_TABLES.items())
+        TableEntry(name=name, kind="state", model=model)
+        for name, model in sorted(_STATE_MODELS.items())
     ),
     *(
         TableEntry(name=name, kind="event", model=spec.model)

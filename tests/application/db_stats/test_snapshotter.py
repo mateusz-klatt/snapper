@@ -18,6 +18,7 @@ from snapper.application.db_stats.snapshotter import resolve_disabled
 from snapper.application.db_stats.snapshotter import resolve_interval
 from snapper.data.db_stats_types import TableCounters
 from snapper.data.db_stats_types import TableEntry
+from snapper.data.models import Candle
 
 
 class _FakeRepo:
@@ -133,6 +134,12 @@ class TestRegistryComposition:
         names = {entry.name for entry in TABLES_TO_SAMPLE}
         assert {"orders", "instruments"} <= names
         assert {"telemetry", "ticks", "trades", "control"} <= names
+
+    def test_candles_sampled_as_state(self) -> None:
+        """``candles`` is sampled explicitly (it lives outside the archiver registries) as SCD2 state."""
+        entry = next(e for e in TABLES_TO_SAMPLE if e.name == "candles")
+        assert entry.kind == "state"
+        assert entry.model is Candle
 
 
 class TestConstructorAndProperties:
