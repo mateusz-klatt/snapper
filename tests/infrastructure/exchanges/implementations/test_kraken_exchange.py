@@ -7280,6 +7280,406 @@ class TestFindOrderByClientId:
         ):
             await kraken_client.find_order_by_client_id("cid-find-7", "BTC-USD")
 
+    @pytest.mark.asyncio
+    async def test_no_symbol_queries_ccxt_unfiltered(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A symbol-less lookup stays on the CCXT path with no pair filter.
+
+        Given: No symbol argument and both queries succeeding empty,
+        When: find_order_by_client_id is called,
+        Then: The CCXT fetchers run with a None symbol and None is the
+            authoritative-absence answer.
+        """
+        mock_client = AsyncMock()
+        mock_client.fetch_open_orders.return_value = []
+        mock_client.fetch_closed_orders.return_value = []
+        with patch.object(kraken_client, "_ccxt_client", mock_client):
+            snapshot = await kraken_client.find_order_by_client_id("cid-find-8")
+        assert snapshot is None
+        assert mock_client.fetch_open_orders.call_args.args[0] is None
+
+
+class TestFindOrderByClientIdNativeFallback:
+    """Native cl_ord_id verification for CCXT-unmapped (native-only) symbols.
+
+    P0-1 slice 5: a symbol without a CCXT mapping used to raise
+    ``ValueError`` out of the verifier (entry stayed parked forever);
+    it now falls back to the native ``kraken.spot.User`` open/closed
+    endpoints under the same authority contract as the CCXT path.
+    """
+
+    @pytest.fixture
+    def kraken_client(self) -> KrakenExchangeClient:
+        """Provide a client whose symbol has no CCXT mapping."""
+        client = KrakenExchangeClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            sandbox=False,
+        )
+        return client
+
+    def _native_order(self, client_order_id: str, status: str = "open") -> dict[str, Any]:
+        """Build a native open/closed-orders entry echoing the client id."""
+        return {
+            "cl_ord_id": client_order_id,
+            "status": status,
+            "vol": "0.25",
+            "vol_exec": "0.10",
+            "price": "104.50",
+            "fee": "0.20",
+            "oflags": "fciq",
+            "opentm": 1718000000.5,
+            "descr": {
+                "pair": "FOOEUR",
+                "type": "sell",
+                "ordertype": "stop-loss",
+                "price": "105.00",
+            },
+        }
+
+    def _patched(self, kraken_client: KrakenExchangeClient, user_mock: MagicMock) -> tuple[
+        contextlib.AbstractContextManager[MagicMock],
+        contextlib.AbstractContextManager[MagicMock],
+    ]:
+        """Patch the symbol mapper to native-only and inject the User client."""
+        return (
+            patch.object(kr, "native_to_ccxt", side_effect=ValueError("Unknown native symbol")),
+            patch.object(kraken_client, "_user_client", user_mock),
+        )
+
+    @pytest.mark.asyncio
+    async def test_found_in_native_open_orders(self, kraken_client: KrakenExchangeClient) -> None:
+        """An open native order resolves with full field fidelity.
+
+        Given: The native open-orders answer containing the order,
+        When: find_order_by_client_id is called with a native-only symbol,
+        Then: The snapshot carries txid, echoed client id, the requested
+            native symbol, the RAW stop-loss ordertype, the executed
+            average as price (descr.price is the TRIGGER on stop types,
+            never a usable price), and the cl_ord_id filter reached the
+            venue call; the closed endpoint and the CCXT client are
+            never queried.
+        """
+        user_mock = MagicMock()
+        user_mock.get_open_orders.return_value = {"open": {"TXID-N1": self._native_order("cid-n1")}}
+        ccxt_mock = AsyncMock()
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch, patch.object(kraken_client, "_ccxt_client", ccxt_mock):
+            snapshot = await kraken_client.find_order_by_client_id("cid-n1", "FOO-EUR")
+        assert snapshot is not None
+        assert snapshot.id == "TXID-N1"
+        assert snapshot.client_order_id == "cid-n1"
+        assert snapshot.symbol == "FOO-EUR"
+        assert snapshot.side == OrderSideEnum.SELL
+        assert snapshot.type == ExchangeOrderTypeEnum.STOP_LOSS
+        assert snapshot.status == ExchangeOrderStatusEnum.OPEN
+        assert snapshot.amount == pytest.approx(0.25)
+        assert snapshot.filled == pytest.approx(0.10)
+        assert snapshot.remaining == pytest.approx(0.15)
+        assert snapshot.price == pytest.approx(104.50)
+        assert snapshot.fee == pytest.approx(0.20)
+        assert snapshot.fee_currency == "EUR"
+        assert snapshot.timestamp == pytest.approx(1718000000.5)
+        assert user_mock.get_open_orders.call_args.kwargs["extra_params"] == {"cl_ord_id": "cid-n1"}
+        user_mock.get_closed_orders.assert_not_called()
+        ccxt_mock.fetch_open_orders.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_limit_uses_price2_leg(self, kraken_client: KrakenExchangeClient) -> None:
+        """A stop-loss-limit order takes its price from the price2 leg.
+
+        Given: An open stop-loss-limit whose descr carries trigger
+            price=105 and limit leg price2=104,
+        When: find_order_by_client_id is called,
+        Then: The snapshot price is the executable limit leg, never the
+            trigger.
+        """
+        payload = self._native_order("cid-n10")
+        descr = dict(payload["descr"])
+        descr["ordertype"] = "stop-loss-limit"
+        descr["price2"] = "104.00"
+        payload["descr"] = descr
+        user_mock = MagicMock()
+        user_mock.get_open_orders.return_value = {"open": {"TXID-N10": payload}}
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch:
+            snapshot = await kraken_client.find_order_by_client_id("cid-n10", "FOO-EUR")
+        assert snapshot is not None
+        assert snapshot.type == ExchangeOrderTypeEnum.STOP_LOSS_LIMIT
+        assert snapshot.price == pytest.approx(104.00)
+
+    @pytest.mark.asyncio
+    async def test_found_in_native_closed_orders_market_defaults(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A descr-less closed order falls back to executed-average pricing.
+
+        Given: An empty open answer and a closed order without a descr
+            block (no limit price, no ordertype) but with executed volume,
+        When: find_order_by_client_id is called,
+        Then: The snapshot uses the average price, the LIMIT type
+            fallback, a wall-clock timestamp, BUY side default, and no fee.
+        """
+        payload = {
+            "cl_ord_id": "cid-n2",
+            "status": "closed",
+            "vol": "1.0",
+            "vol_exec": "1.0",
+            "price": "99.5",
+        }
+        user_mock = MagicMock()
+        user_mock.get_open_orders.return_value = {"open": {}}
+        user_mock.get_closed_orders.return_value = {"closed": {"TXID-N2": payload}}
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch:
+            snapshot = await kraken_client.find_order_by_client_id("cid-n2", "FOO-EUR")
+        assert snapshot is not None
+        assert snapshot.status == ExchangeOrderStatusEnum.CLOSED
+        assert snapshot.type == ExchangeOrderTypeEnum.LIMIT
+        assert snapshot.side == OrderSideEnum.BUY
+        assert snapshot.price == pytest.approx(99.5)
+        assert snapshot.fee is None
+        assert snapshot.timestamp > 1718000000.5
+        assert user_mock.get_closed_orders.call_args.kwargs["extra_params"] == {
+            "cl_ord_id": "cid-n2"
+        }
+
+    @pytest.mark.asyncio
+    async def test_unfilled_priceless_order_has_none_price(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """An unfilled order without a limit price keeps price=None.
+
+        Given: An open market order with zero executed volume and no
+            limit price,
+        When: find_order_by_client_id is called,
+        Then: The snapshot price is None rather than a fabricated zero.
+        """
+        payload = {
+            "cl_ord_id": "cid-n3",
+            "status": "open",
+            "vol": "1.0",
+            "vol_exec": "0",
+            "price": "0.00000",
+            "opentm": 1718000001.0,
+            "descr": {"type": "buy", "ordertype": "market"},
+        }
+        user_mock = MagicMock()
+        user_mock.get_open_orders.return_value = {"open": {"TXID-N3": payload}}
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch:
+            snapshot = await kraken_client.find_order_by_client_id("cid-n3", "FOO-EUR")
+        assert snapshot is not None
+        assert snapshot.price is None
+        assert snapshot.type == ExchangeOrderTypeEnum.MARKET
+
+    @pytest.mark.asyncio
+    async def test_absent_in_both_returns_none(self, kraken_client: KrakenExchangeClient) -> None:
+        """None is returned only after BOTH native queries succeed empty.
+
+        Given: Open and closed answers both well-formed and empty,
+        When: find_order_by_client_id is called,
+        Then: None signals authoritative absence and both endpoints ran.
+        """
+        user_mock = MagicMock()
+        user_mock.get_open_orders.return_value = {"open": {}}
+        user_mock.get_closed_orders.return_value = {"closed": {}, "count": 0}
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch:
+            snapshot = await kraken_client.find_order_by_client_id("cid-n4", "FOO-EUR")
+        assert snapshot is None
+        user_mock.get_closed_orders.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_paged_closed_answer_cannot_prove_absence(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A closed-orders page smaller than count refuses to claim absence.
+
+        Given: A closed answer whose count exceeds the returned rows
+            (the venue paged or ignored the cl_ord_id filter) and no
+            entry matching the client id,
+        When: find_order_by_client_id is called,
+        Then: RuntimeError propagates — a non-exhaustive answer may hide
+            the order, so it must never read as venue-confirmed absence.
+        """
+        user_mock = MagicMock()
+        user_mock.get_open_orders.return_value = {"open": {}}
+        user_mock.get_closed_orders.return_value = {
+            "closed": {"TX-B": self._native_order("other-cid", status="closed")},
+            "count": 2,
+        }
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch, pytest.raises(RuntimeError, match="provably exhaustive"):
+            await kraken_client.find_order_by_client_id("cid-n11", "FOO-EUR")
+
+    @pytest.mark.asyncio
+    async def test_mismatched_echo_is_not_a_match(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A venue ignoring the cl_ord_id filter cannot false-match.
+
+        Given: Both answers containing orders with a different echoed
+            client id,
+        When: find_order_by_client_id is called,
+        Then: None is returned — only an exact echo counts as found.
+        """
+        user_mock = MagicMock()
+        user_mock.get_open_orders.return_value = {"open": {"TX-A": self._native_order("other-cid")}}
+        user_mock.get_closed_orders.return_value = {
+            "closed": {"TX-B": self._native_order("another-cid", status="closed")},
+            "count": 1,
+        }
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch:
+            snapshot = await kraken_client.find_order_by_client_id("cid-n5", "FOO-EUR")
+        assert snapshot is None
+
+    @pytest.mark.asyncio
+    async def test_countless_closed_answer_cannot_prove_absence(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A closed answer without a count field refuses to claim absence.
+
+        Given: A well-formed but count-less closed answer with no match
+            (a shape anomaly — Kraken always returns count),
+        When: find_order_by_client_id is called,
+        Then: RuntimeError propagates — exhaustiveness cannot be proven.
+        """
+        user_mock = MagicMock()
+        user_mock.get_open_orders.return_value = {"open": {}}
+        user_mock.get_closed_orders.return_value = {"closed": {}}
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch, pytest.raises(RuntimeError, match="provably exhaustive"):
+            await kraken_client.find_order_by_client_id("cid-n14", "FOO-EUR")
+
+    def test_native_fee_currency_resolution(self) -> None:
+        """Oflags drive fee currency exactly like the vendored ccxt parser."""
+        assert kr._native_fee_currency("FOO-EUR", "fciq,post") == "EUR"
+        assert kr._native_fee_currency("FOO-EUR", "fcib") == "FOO"
+        assert kr._native_fee_currency("FOO-EUR", "post") is None
+        assert kr._native_fee_currency("WEIRD", "fciq") is None
+
+    @pytest.mark.asyncio
+    async def test_malformed_orders_set_raises(self, kraken_client: KrakenExchangeClient) -> None:
+        """A non-dict orders set is could-not-verify, never absence.
+
+        Given: get_open_orders returning a dict whose open member is a list,
+        When: find_order_by_client_id is called,
+        Then: RuntimeError propagates instead of an absence claim.
+        """
+        user_mock = MagicMock()
+        user_mock.get_open_orders.return_value = {"open": ["not-a-dict"]}
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch, pytest.raises(RuntimeError, match="malformed open-orders"):
+            await kraken_client.find_order_by_client_id("cid-n6", "FOO-EUR")
+
+    @pytest.mark.asyncio
+    async def test_malformed_order_entry_raises(self, kraken_client: KrakenExchangeClient) -> None:
+        """A non-dict order entry is could-not-verify, never absence.
+
+        Given: A well-formed open set whose entry payload is a string,
+        When: find_order_by_client_id is called,
+        Then: RuntimeError propagates instead of skipping the entry.
+        """
+        user_mock = MagicMock()
+        user_mock.get_open_orders.return_value = {"open": {"TX-X": "garbage"}}
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with (
+            mapper_patch,
+            user_patch,
+            pytest.raises(RuntimeError, match="malformed open order entry"),
+        ):
+            await kraken_client.find_order_by_client_id("cid-n7", "FOO-EUR")
+
+    @pytest.mark.asyncio
+    async def test_unknown_status_raises(self, kraken_client: KrakenExchangeClient) -> None:
+        """An uninterpretable status raises instead of guessing.
+
+        Given: A matched order whose status is outside the known map,
+        When: find_order_by_client_id is called,
+        Then: KeyError propagates — could-not-verify, never a fabricated
+            state.
+        """
+        payload = self._native_order("cid-n8", status="mystery")
+        user_mock = MagicMock()
+        user_mock.get_open_orders.return_value = {"open": {"TX-Y": payload}}
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch, pytest.raises(KeyError):
+            await kraken_client.find_order_by_client_id("cid-n8", "FOO-EUR")
+
+    @pytest.mark.asyncio
+    async def test_query_failure_propagates(self, kraken_client: KrakenExchangeClient) -> None:
+        """A failing native query raises instead of claiming absence.
+
+        Given: get_open_orders raising a transport error,
+        When: find_order_by_client_id is called,
+        Then: The error propagates (could-not-verify, never absence).
+        """
+        user_mock = MagicMock()
+        user_mock.get_open_orders.side_effect = requests.exceptions.ConnectionError("down")
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch, pytest.raises(requests.exceptions.ConnectionError):
+            await kraken_client.find_order_by_client_id("cid-n9", "FOO-EUR")
+
+    def test_get_user_client_requires_credentials(self) -> None:
+        """Missing credentials raise before any native client is built."""
+        client = KrakenExchangeClient(api_key="", api_secret="", sandbox=False)
+        with pytest.raises(RuntimeError, match="API credentials"):
+            client._get_user_client()
+
+    def test_get_user_client_is_cached(self, kraken_client: KrakenExchangeClient) -> None:
+        """The native User client is built once and reused."""
+        sentinel = MagicMock()
+        with patch.object(kr, "User", return_value=sentinel) as user_ctor:
+            first = kraken_client._get_user_client()
+            second = kraken_client._get_user_client()
+        assert first is sentinel
+        assert second is sentinel
+        user_ctor.assert_called_once_with(key="test_key", secret="test_secret")
+
+    @pytest.mark.asyncio
+    async def test_get_order_native_fallback(self, kraken_client: KrakenExchangeClient) -> None:
+        """get_order re-fetches native-only orders through orders-info.
+
+        Given: A native-only symbol (no CCXT mapping) and an orders-info
+            answer keyed by the requested txid,
+        When: get_order is called,
+        Then: The snapshot comes from the native converter with the
+            requested symbol stamped, and the CCXT fetch_order path is
+            never used — post-adoption reconciliation of natively
+            adopted orders cannot wedge on the symbol mapping.
+        """
+        payload = self._native_order("cid-n12", status="closed")
+        user_mock = MagicMock()
+        user_mock.get_orders_info.return_value = {"TXID-N12": payload}
+        ccxt_mock = AsyncMock()
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch, patch.object(kraken_client, "_ccxt_client", ccxt_mock):
+            snapshot = await kraken_client.get_order("TXID-N12", "FOO-EUR")
+        assert snapshot.id == "TXID-N12"
+        assert snapshot.symbol == "FOO-EUR"
+        assert snapshot.status == ExchangeOrderStatusEnum.CLOSED
+        assert user_mock.get_orders_info.call_args.args == ("TXID-N12",)
+        ccxt_mock.fetch_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_order_native_malformed_answer_raises(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A malformed orders-info answer raises instead of guessing.
+
+        Given: An orders-info answer lacking the requested txid entry,
+        When: get_order is called for a native-only symbol,
+        Then: RuntimeError propagates (could-not-interpret).
+        """
+        user_mock = MagicMock()
+        user_mock.get_orders_info.return_value = {"SOMETHING-ELSE": {}}
+        mapper_patch, user_patch = self._patched(kraken_client, user_mock)
+        with mapper_patch, user_patch, pytest.raises(RuntimeError, match="malformed orders-info"):
+            await kraken_client.get_order("TXID-N13", "FOO-EUR")
+
 
 class TestStopOrderTranslation:
     """Spot stop-order translation at the venue boundary (#156).

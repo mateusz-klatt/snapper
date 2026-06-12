@@ -40,6 +40,7 @@ import ccxt
 import requests
 from kraken.spot import SpotWSClient
 from kraken.spot import Trade
+from kraken.spot import User
 from loguru import logger
 from pydantic import ValidationError
 
@@ -279,6 +280,50 @@ _CCXT_TYPE_MAP: Final[dict[str, ExchangeOrderTypeEnum]] = {
     "take-profit": ExchangeOrderTypeEnum.TAKE_PROFIT,
 }
 
+_TRIGGER_ORDER_TYPES: Final[frozenset[ExchangeOrderTypeEnum]] = frozenset(
+    {
+        ExchangeOrderTypeEnum.STOP_LOSS,
+        ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+        ExchangeOrderTypeEnum.TAKE_PROFIT,
+        ExchangeOrderTypeEnum.TAKE_PROFIT_LIMIT,
+        ExchangeOrderTypeEnum.TRAILING_STOP,
+        ExchangeOrderTypeEnum.TRAILING_STOP_LIMIT,
+    }
+)
+"""Order types whose native ``descr.price`` is a TRIGGER, not a price.
+
+For these, the executable limit leg lives in ``descr.price2`` (absent on
+pure market-leg stops) — reading ``descr.price`` as a limit/fill price
+would leak the trigger into snapshots.
+"""
+
+
+def _native_fee_currency(native_symbol: str, oflags: str) -> str | None:
+    """Infer the fee currency of a native spot order from its oflags.
+
+    Mirrors the vendored ccxt ``parse_order`` exactly: the currency is
+    resolved ONLY when ``oflags`` explicitly carries ``fciq`` (quote) or
+    ``fcib`` (base); otherwise it stays None and downstream fee
+    accounting treats the snapshot as fee-less — the same behavior the
+    CCXT-mapped path already has. The native symbol is ``BASE-QUOTE``.
+
+    Args:
+        native_symbol: Native symbol the order was placed on.
+        oflags: Raw comma-delimited order flags from the payload.
+
+    Returns:
+        The fee currency code, or None when not explicitly flagged or
+        the symbol shape is not BASE-QUOTE.
+    """
+    base, separator, quote = native_symbol.partition("-")
+    if not separator or not base or not quote:
+        return None
+    if "fciq" in oflags:
+        return quote
+    if "fcib" in oflags:
+        return base
+    return None
+
 
 def _resolve_ccxt_order_type(ccxt_order: dict[str, Any]) -> ExchangeOrderTypeEnum:
     """Resolve the wire order type of a fetched ccxt order.
@@ -386,6 +431,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._ws_connect_lock: asyncio.Lock = asyncio.Lock()
         self._ws_connected = False
         self._trade_client: Trade | None = None
+        self._user_client: User | None = None
         self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_TICK_QUEUE_MAX_SIZE)
         self._candle_queues: dict[int, asyncio.Queue[CandleUpdate]] = {}
         self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
@@ -835,7 +881,12 @@ class KrakenExchangeClient(ExchangeClientBase):
         if not self.api_key or not self.api_secret:
             raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
-            ccxt_symbol = native_to_ccxt(symbol) if symbol else None
+            ccxt_symbol: str | None = None
+            if symbol is not None:
+                try:
+                    ccxt_symbol = native_to_ccxt(symbol)
+                except ValueError:
+                    return await self._get_order_native(order_id, symbol)
             order_data = await self._with_retry(
                 self._ccxt_client.fetch_order,
                 order_id,
@@ -845,6 +896,36 @@ class KrakenExchangeClient(ExchangeClientBase):
         except Exception as e:
             logger.error(f"Failed to get order {order_id}: {e}")
             raise
+
+    async def _get_order_native(self, order_id: str, symbol: str) -> ExchangeOrderSnapshot:
+        """Fetch one order via the native User REST API.
+
+        Fallback for CCXT-unmapped (native-only) symbols so an order
+        adopted through the native client-id verification can still be
+        re-fetched by post-adoption reconciliation — the CCXT
+        ``fetch_order`` path would raise out of the symbol mapping
+        forever.
+
+        Args:
+            order_id: Venue order id (txid).
+            symbol: Native symbol to stamp on the snapshot.
+
+        Returns:
+            The converted order snapshot.
+
+        Raises:
+            RuntimeError: If the answer shape is not interpretable.
+            Exception: If the venue query fails.
+        """
+        user_client = self._get_user_client()
+        response = await self._with_retry(user_client.get_orders_info, order_id)
+        entry = response.get(order_id) if isinstance(response, dict) else None
+        if not isinstance(entry, dict):
+            raise RuntimeError(
+                f"Kraken returned a malformed orders-info answer for {order_id}: "
+                f"cannot interpret the order state"
+            )
+        return self._convert_kraken_user_order(order_id, entry, symbol)
 
     async def find_order_by_client_id(
         self, client_order_id: str, symbol: str | None = None
@@ -857,7 +938,10 @@ class KrakenExchangeClient(ExchangeClientBase):
         ``clientOrderId`` param maps to the integer ``userref`` field —
         a silent wrong-identifier query for our uuid7 client ids. The
         echoed client id on each result is double-checked so a venue
-        ignoring the filter cannot produce a false match.
+        ignoring the filter cannot produce a false match. Symbols
+        without a CCXT mapping (native-only instruments) verify through
+        the native ``kraken.spot.User`` endpoints instead, under the
+        same echo and shape strictness.
 
         Args:
             client_order_id: Client order id the submit was sent with.
@@ -870,14 +954,17 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         Raises:
             RuntimeError: If API credentials are missing.
-            ValueError: If the symbol has no CCXT mapping (native-only
-                instruments cannot be verified on this path).
             Exception: If either venue query fails — the caller must
                 treat this as could-not-verify, never as absence.
         """
         if not self.api_key or not self.api_secret:
             raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
-        ccxt_symbol = native_to_ccxt(symbol) if symbol else None
+        ccxt_symbol: str | None = None
+        if symbol is not None:
+            try:
+                ccxt_symbol = native_to_ccxt(symbol)
+            except ValueError:
+                return await self._find_order_by_client_id_native(client_order_id, symbol)
         params = {"clientOrderId": client_order_id}
         for fetch in (self._ccxt_client.fetch_open_orders, self._ccxt_client.fetch_closed_orders):
             orders = await self._with_retry(fetch, ccxt_symbol, None, None, params)
@@ -890,6 +977,70 @@ class KrakenExchangeClient(ExchangeClientBase):
                 snapshot = self._convert_ccxt_order(order_data)
                 if snapshot.client_order_id == client_order_id:
                     return snapshot
+        return None
+
+    async def _find_order_by_client_id_native(
+        self, client_order_id: str, symbol: str
+    ) -> ExchangeOrderSnapshot | None:
+        """Client-id lookup via the native User REST API.
+
+        Fallback for CCXT-unmapped (native-only) symbols, which the
+        CCXT path cannot verify. Mirrors its authority contract:
+        queries open AND closed orders through ``kraken.spot.User``
+        with the ``cl_ord_id`` filter (``extra_params`` merges into the
+        signed request body), demands well-formed dict shapes, and
+        double-checks the echoed ``cl_ord_id`` on every order — so a
+        venue ignoring the filter or a misbehaving transport can never
+        read as venue-confirmed absence.
+
+        Args:
+            client_order_id: Client order id the submit was sent with.
+            symbol: Native symbol of the original request, stamped on
+                the returned snapshot — identity is established by the
+                echoed client id, and CCXT-unmapped pairs by definition
+                have no reverse mapping through the CCXT tables.
+
+        Returns:
+            The order snapshot when found; None only after BOTH queries
+            succeeded with well-formed shapes and neither contains the
+            client id (authoritative absence).
+
+        Raises:
+            RuntimeError: If a response shape is not interpretable.
+            Exception: If either venue query fails — could-not-verify,
+                never absence.
+        """
+        user_client = self._get_user_client()
+        extra_params = {"cl_ord_id": client_order_id}
+        queries: tuple[tuple[Callable[..., dict[str, Any]], str], ...] = (
+            (user_client.get_open_orders, "open"),
+            (user_client.get_closed_orders, "closed"),
+        )
+        for fetch, key in queries:
+            response = await self._with_retry(fetch, extra_params=extra_params)
+            orders = response.get(key) if isinstance(response, dict) else None
+            if not isinstance(orders, dict):
+                raise RuntimeError(
+                    f"Kraken returned a malformed {key}-orders set for "
+                    f"{client_order_id}: cannot answer authoritatively"
+                )
+            for txid, payload in orders.items():
+                if not isinstance(payload, dict):
+                    raise RuntimeError(
+                        f"Kraken returned a malformed {key} order entry for "
+                        f"{client_order_id}: cannot answer authoritatively"
+                    )
+                if payload.get("cl_ord_id") == client_order_id:
+                    return self._convert_kraken_user_order(str(txid), payload, symbol)
+            if key == "closed":
+                count = response.get("count")
+                if not isinstance(count, int) or count > len(orders):
+                    raise RuntimeError(
+                        f"Kraken closed-orders answer for {client_order_id} is not "
+                        f"provably exhaustive (count={count!r}, rows={len(orders)}): "
+                        f"a paged or count-less answer that may hide the order "
+                        f"cannot prove absence"
+                    )
         return None
 
     async def _fetch_orders_from_exchange(
@@ -2366,6 +2517,26 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.debug("Initialized native Kraken Trade REST API client")
         return self._trade_client
 
+    def _get_user_client(self) -> User:
+        """Return the lazily-initialized native Kraken User REST client.
+
+        Mirrors :meth:`_get_trade_client`: the ``kraken.spot.User``
+        endpoints (open/closed orders) are needed for client-id
+        verification of CCXT-unmapped native-only symbols.
+
+        Returns:
+            The cached ``User`` client instance.
+
+        Raises:
+            RuntimeError: If API credentials are missing.
+        """
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError("API credentials required for native Kraken User API")
+        if self._user_client is None:
+            self._user_client = User(key=self.api_key, secret=self.api_secret)
+            logger.debug("Initialized native Kraken User REST API client")
+        return self._user_client
+
     async def _with_retry(
         self,
         func: Callable[..., Any],
@@ -2542,6 +2713,79 @@ class KrakenExchangeClient(ExchangeClientBase):
             fee_currency=(
                 str(ccxt_order["fee"]["currency"])
                 if ccxt_order.get("fee") and ccxt_order["fee"].get("currency")
+                else None
+            ),
+        )
+
+    def _convert_kraken_user_order(
+        self, txid: str, payload: dict[str, Any], native_symbol: str
+    ) -> ExchangeOrderSnapshot:
+        """Convert a native open/closed-orders entry to a snapshot.
+
+        Field semantics follow :meth:`_convert_ccxt_order`: the raw
+        ``descr.ordertype`` is authoritative for the order type (the
+        unified ccxt type would collapse stop orders to their base
+        type, #156) and an unknown ``status`` raises so the caller
+        treats the answer as could-not-verify instead of guessing.
+        Price: for trigger-bearing types (stop/take-profit/trailing)
+        ``descr.price`` is the TRIGGER, so the executable limit leg
+        ``descr.price2`` is used instead; plain orders use
+        ``descr.price``; the executed average (``price``) is the
+        fallback once something filled, never a fabricated zero. Fee
+        currency resolves from ``oflags`` via
+        :func:`_native_fee_currency` (ccxt parity).
+
+        Args:
+            txid: Venue order id (the key of the orders dict entry).
+            payload: Raw order dict from ``get_open_orders`` /
+                ``get_closed_orders``.
+            native_symbol: Native symbol to stamp on the snapshot.
+
+        Returns:
+            The converted snapshot.
+
+        Raises:
+            KeyError: If the order ``status`` is missing or unknown.
+        """
+        descr_raw = payload.get("descr")
+        descr: dict[str, Any] = descr_raw if isinstance(descr_raw, dict) else {}
+        amount = float(payload.get("vol") or 0)
+        filled = float(payload.get("vol_exec") or 0)
+        raw_type = str(descr.get("ordertype") or "")
+        try:
+            order_type = ExchangeOrderTypeEnum(raw_type)
+        except ValueError:
+            logger.warning(f"Unknown raw Kraken ordertype {raw_type!r}; falling back to limit")
+            order_type = ExchangeOrderTypeEnum.LIMIT
+        if order_type in _TRIGGER_ORDER_TYPES:
+            limit_price = float(descr.get("price2") or 0)
+        else:
+            limit_price = float(descr.get("price") or 0)
+        average_price = float(payload.get("price") or 0)
+        if limit_price > 0:
+            price: float | None = limit_price
+        elif filled > 0 and average_price > 0:
+            price = average_price
+        else:
+            price = None
+        opentm = payload.get("opentm")
+        fee = float(payload["fee"]) if payload.get("fee") else None
+        return ExchangeOrderSnapshot(
+            id=txid,
+            client_order_id=payload.get("cl_ord_id"),
+            symbol=native_symbol,
+            side=_CCXT_SIDE_MAP.get(str(descr.get("type") or ""), OrderSideEnum.BUY),
+            type=order_type,
+            amount=amount,
+            price=price,
+            status=_CCXT_STATUS_MAP[str(payload["status"])],
+            filled=filled,
+            remaining=max(0.0, amount - filled),
+            timestamp=float(opentm) if opentm else time.time(),
+            fee=fee,
+            fee_currency=(
+                _native_fee_currency(native_symbol, str(payload.get("oflags") or ""))
+                if fee is not None
                 else None
             ),
         )

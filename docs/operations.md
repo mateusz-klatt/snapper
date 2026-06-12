@@ -386,8 +386,8 @@ order finalizes as accepted (an already-terminal one additionally
 projects its fills through the disappeared-order reconciler); two
 consecutive authoritative not-found answers make the rejection
 venue-truth-based and safe. Only when verification cannot resolve —
-venue unreachable, lookup unsupported (Walutomat, Spot native-only
-symbols) — does the executor park the order, record a non-terminal
+venue unreachable or lookup unsupported (Walutomat active-order miss)
+— does the executor park the order, record a non-terminal
 `order_submit_unknown` venue event, and publish a single
 `orders.events.*.unknown` message:
 
