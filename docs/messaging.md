@@ -158,7 +158,7 @@ backend subscriber that cares about user/operator state changes.
 
 | Topic | Description |
 | ----- | ----------- |
-| `admin.user_deactivated` | A user (or AI delegate) was deactivated; revocation hook for in-process token caches + APNs push fan-out via the notify sidecar |
+| `admin.user_deactivated` | A user (or AI delegate) was deactivated; immediate revocation hook for in-process token caches, WebSocket close fanout, and APNs push fan-out via the notify sidecar. Auth listeners also poll the DB-backed `users.is_active=False` registry as broker-outage fallback |
 | `admin.scope_granted` | `create_grant` published a new active scope row (instrument-exclusive grant just inserted) |
 | `admin.scope_handed_over` | `handover` finalized a scope handover (old row closed, new row open, both committed) |
 | `admin.scope_revoked` | `revoke_grant` closed an active scope row; revoke hook for any subscriber holding cached principal state |

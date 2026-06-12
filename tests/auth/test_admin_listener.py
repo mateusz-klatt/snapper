@@ -16,6 +16,7 @@ running listener.
 import asyncio
 from datetime import UTC
 from datetime import datetime
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -25,7 +26,12 @@ import pytest
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.websocket_auth import WebSocketAuthManager
+from snapper.data.repository import Repository
 from snapper.messaging.schemas.data import UserDeactivatedData
+from tests.auth.deactivation_fallback_helpers import FailingInactiveUserLookupRepo
+from tests.auth.deactivation_fallback_helpers import InactiveUserLookupRepo
+from tests.auth.deactivation_fallback_helpers import assert_fallback_loop_propagates_scan_cancelled
+from tests.auth.deactivation_fallback_helpers import assert_fallback_loop_propagates_sleep_cancelled
 
 
 def _make_manager() -> WebSocketAuthManager:
@@ -377,6 +383,30 @@ class TestAdminListenerLifecycle:
         assert manager._admin_listen_task is None
         assert manager._admin_subscriber is None
         assert manager._admin_zmq_context is None
+        assert manager._deactivation_scan_task is None
+
+    @pytest.mark.asyncio
+    async def test_empty_xpub_starts_db_fallback_when_repo_factory_configured(self) -> None:
+        """Broker-less startup still runs the DB-backed deactivation fallback."""
+        manager = _make_manager()
+        repo = InactiveUserLookupRepo([])
+        manager.repository_factory = lambda: cast(Repository, repo)
+        invocations: list[int] = []
+
+        async def _never() -> None:
+            invocations.append(1)
+            await asyncio.Event().wait()
+
+        with patch.object(manager, "_deactivation_fallback_scan_loop", side_effect=_never):
+            await manager.start_admin_listener("")
+            await asyncio.sleep(0)
+            first_task = manager._deactivation_scan_task
+            await manager.start_admin_listener("")
+            assert manager._deactivation_scan_task is first_task
+            assert first_task is not None
+            assert len(invocations) == 1
+        await manager.stop_admin_listener()
+        assert manager._deactivation_scan_task is None
 
     @pytest.mark.asyncio
     async def test_start_then_stop_creates_and_disposes_resources(self) -> None:
@@ -503,6 +533,93 @@ class TestAdminListenerLifecycle:
         assert manager._admin_listen_task is None
         assert manager._admin_subscriber is None
         assert manager._admin_zmq_context is None
+
+
+class TestDeactivationFallbackScan:
+    """DB-backed fallback closes matching WebSocket sessions without broker delivery."""
+
+    @pytest.mark.asyncio
+    async def test_scan_closes_inactive_connected_users_only(self) -> None:
+        """Only connections for inactive users returned by the repo are closed."""
+        manager = _make_manager()
+        repo = InactiveUserLookupRepo(["user-a"])
+        manager.repository_factory = lambda: cast(Repository, repo)
+        ws_a = MagicMock()
+        ws_a.close = AsyncMock()
+        ws_b = MagicMock()
+        ws_b.close = AsyncMock()
+        manager.authenticated_connections[ws_a] = _make_principal("user-a")
+        manager.authenticated_connections[ws_b] = _make_principal("user-b")
+        await manager._scan_deactivated_connections_once()
+        assert repo.queries == [["user-a", "user-b"]]
+        ws_a.close.assert_awaited_once_with(code=4003, reason="account_deactivated")
+        ws_b.close.assert_not_awaited()
+        assert ws_a not in manager.authenticated_connections
+        assert ws_b in manager.authenticated_connections
+
+    @pytest.mark.asyncio
+    async def test_scan_without_factory_is_noop(self) -> None:
+        """No repository factory means the fallback scanner is disabled."""
+        manager = _make_manager()
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal("user-a")
+        await manager._scan_deactivated_connections_once()
+        ws.close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scan_with_no_connections_does_not_query_repo(self) -> None:
+        """No authenticated connections avoids a pointless DB query."""
+        manager = _make_manager()
+        repo = InactiveUserLookupRepo(["user-a"])
+        manager.repository_factory = lambda: cast(Repository, repo)
+        await manager._scan_deactivated_connections_once()
+        assert repo.queries == []
+
+    @pytest.mark.asyncio
+    async def test_scan_tolerates_repo_without_lookup_method(self) -> None:
+        """Older repository doubles do not break the fallback path."""
+        manager = _make_manager()
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal("user-a")
+        manager.repository_factory = lambda: cast(Repository, object())
+        await manager._scan_deactivated_connections_once()
+        ws.close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scan_tolerates_lookup_error(self) -> None:
+        """DB read failures are logged and leave connections untouched."""
+        manager = _make_manager()
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal("user-a")
+        repo = FailingInactiveUserLookupRepo()
+        manager.repository_factory = lambda: cast(Repository, repo)
+        await manager._scan_deactivated_connections_once()
+        ws.close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scan_loop_propagates_cancelled_error(self) -> None:
+        """Cancellation still unwinds the fallback loop cleanly."""
+        manager = _make_manager()
+        repo = InactiveUserLookupRepo([])
+        manager.repository_factory = lambda: cast(Repository, repo)
+        await assert_fallback_loop_propagates_scan_cancelled(
+            manager._deactivation_fallback_scan_loop,
+            manager,
+            "_scan_deactivated_connections_once",
+        )
+
+    @pytest.mark.asyncio
+    async def test_scan_loop_propagates_sleep_cancelled_error(self) -> None:
+        """Cancellation during the scan interval also unwinds cleanly."""
+        manager = _make_manager()
+        repo = InactiveUserLookupRepo([])
+        manager.repository_factory = lambda: cast(Repository, repo)
+        await assert_fallback_loop_propagates_sleep_cancelled(
+            manager._deactivation_fallback_scan_loop
+        )
 
 
 class TestAdminListenLoop:

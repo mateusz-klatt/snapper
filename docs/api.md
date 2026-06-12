@@ -414,7 +414,9 @@ Deactivate a user through the canonical kill-switch flow. Requires
 `manage:users` and CSRF for cookie auth. The path segment is resolved as
 the target username; self-deactivation returns `400`, unknown active
 users return `404`. The service also revokes active sessions and emits
-`admin.user_deactivated` for verify-cache eviction.
+`admin.user_deactivated` for immediate verify-cache eviction and
+WebSocket close fanout; auth listeners also poll the committed
+`users.is_active=False` row as broker-outage fallback.
 
 ### POST /api/auth/users/{user_id}/change-password
 

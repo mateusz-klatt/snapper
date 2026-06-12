@@ -4002,7 +4002,7 @@ async def test_with_retry_rate_limit_backoff() -> None:
         raise ccxt.RateLimitExceeded("rate")
 
     with (
-        patch("asyncio.sleep", new_callable=AsyncMock) as sleeper,
+        patch("snapper.infrastructure.exchanges.implementations.kraken._retry_sleep") as sleeper,
         pytest.raises(ccxt.RateLimitExceeded),
     ):
         await client._with_retry(always_rate_limited)

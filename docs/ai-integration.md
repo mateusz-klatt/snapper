@@ -133,9 +133,10 @@ Other endpoints on `/api/ai-delegates`:
 - `PATCH /api/ai-delegates/{id}` — update caps (SCD2 close+insert).
     `label`/`username` are immutable post-mint.
 - `POST /api/ai-delegates/{id}/deactivate` — kill switch. Publishes
-    `admin.user_deactivated` on the bus; every Snapper instance
-    disconnects matching WebSocket sessions and evicts the token from
-    every LRU within one bus round-trip.
+    `admin.user_deactivated` on the bus for immediate fanout; every
+    Snapper instance also polls the DB-backed deactivation registry so
+    matching WebSocket sessions close and token LRU entries are evicted
+    even if the broker is unavailable.
 
 ---
 
@@ -148,11 +149,11 @@ optional push-wakeup watch monitor. Revocation is server-side:
 `users.is_active=False`, revokes the delegate's `user_active_tokens`
 row, publishes `admin.user_deactivated` on the bus, and each
 Snapper instance evicts matching verify-cache entries on receipt
-(or lets them expire at the 30-second LRU ceiling). The local JTI
-blacklist uses a 10-second grace window for requests that raced the
-kill switch. The 90-day `exp` is a ceiling, not a commitment;
-operators are expected to rotate delegate tokens on the cadence
-that fits their key-management hygiene.
+or through the DB-backed fallback scanner. The local JTI blacklist
+uses a 10-second grace window for requests that raced the kill
+switch. The 90-day `exp` is a ceiling, not a commitment; operators
+are expected to rotate delegate tokens on the cadence that fits
+their key-management hygiene.
 
 ---
 
@@ -419,20 +420,25 @@ operator deactivation:
     in one SQL UPDATE, and seeds the in-memory JTI blacklist with a
     10-second grace period.
 3. `UserService.deactivate_user` publishes `admin.user_deactivated`
-    on the bus (sole publisher).
+    on the bus as the immediate fanout path (sole publisher).
 4. Every Snapper instance's `WebSocketAuthManager` subscribes to the
     topic and closes matching WebSocket connections with code `4003`.
 5. Every Snapper instance's `TokenManager` subscribes to the topic
     and evicts matching verify-cache entries via
     `invalidate_user_cache`.
+6. Every lifespan-wired `WebSocketAuthManager` and `TokenManager`
+    also runs a DB-backed fallback scan against the SCD2-active
+    `users.is_active` row, so broker outages delay fanout by the scan
+    interval rather than by token expiry or reconnect.
 
 Latency: the token inventory is revoked before the deactivated-user
 bus event is published. Existing positive verify-cache entries are
 evicted when each instance receives `admin.user_deactivated`; if the
-bus listener is unavailable, the cache TTL is the 30-second ceiling.
-The local JTI blacklist is consulted before the LRU but has a
-10-second grace window, so requests that race deactivation can still
-complete.
+bus listener is unavailable, the fallback scanner evicts cache entries
+and closes matching WebSockets by reading the committed
+`users.is_active=False` row. The local JTI blacklist is consulted
+before the LRU but has a 10-second grace window, so requests that race
+deactivation can still complete.
 
 In-flight MCP tool handlers are **not** force-cancelled. The
 guarantee is narrowly "later MCP requests are rejected once the
@@ -530,10 +536,10 @@ with DB read rights cannot brute-force the hash.
 
 `UserService.deactivate_user` is the SOLE publisher of
 `admin.user_deactivated` across the entire process. `TokenManager`
-and `WebSocketAuthManager` are pure subscribers — they evict + close
-on receipt but never emit the event themselves. This holds for
-operator deactivation AND delegate deactivation (the route reuses
-`UserService.deactivate_user`).
+and `WebSocketAuthManager` are pure subscribers/fallback readers: they
+evict + close on receipt or on DB scan, but never emit the event
+themselves. This holds for operator deactivation AND delegate
+deactivation (the route reuses `UserService.deactivate_user`).
 
 ### MCP transport = Streamable HTTP
 
