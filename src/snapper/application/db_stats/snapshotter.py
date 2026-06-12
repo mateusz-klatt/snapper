@@ -146,7 +146,16 @@ TABLES_TO_SAMPLE: Final[tuple[TableEntry, ...]] = (
 
 @dataclass(frozen=True, slots=True)
 class TableStats:
-    """One row in :class:`DbStatsSnapshot.tables`."""
+    """One row in :class:`DbStatsSnapshot.tables`.
+
+    ``total`` is dialect-aware: on PostgreSQL it is a planner ESTIMATE
+    (``pg_class.reltuples``, accurate within autovacuum drift), on
+    SQLite an exact count. ``current`` and ``archivable`` are always
+    exact; ``closed`` on state tables is derived as
+    ``max(0, total - current)``, clamping the case where the exact
+    ``current`` temporarily exceeds a stale PG estimate. Consumers must
+    not treat ``total`` (or ``closed``) as exact on PostgreSQL.
+    """
 
     table: str
     table_kind: Literal["event", "state"]

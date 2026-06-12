@@ -26,12 +26,15 @@ class TableStatsItem(StrictBody):
         table: Table name (key in ``EVENT_TABLES`` or ``STATE_TABLES``).
         table_kind: ``"event"`` (append-only) or ``"state"``
             (SCD2-versioned).
-        total: Total row count. ``None`` only on per-table query
+        total: Total row count — on PostgreSQL a planner ESTIMATE
+            (``pg_class.reltuples``, accurate within autovacuum
+            drift), on SQLite exact. ``None`` only on per-table query
             failure with no prior sample to clone.
-        current: Active SCD2 versions for state tables; ``None`` for
-            event tables.
-        closed: Superseded SCD2 versions for state tables; ``None``
-            for event tables.
+        current: Active SCD2 versions for state tables (always exact);
+            ``None`` for event tables.
+        closed: Superseded SCD2 versions for state tables, derived as
+            ``max(0, total - current)`` — inherits the PG estimate
+            error; ``None`` for event tables.
         archivable: Row count in the policy retention window when a
             policy is registered; ``None`` when no policy applies.
         is_stale: ``True`` when the row was reused from a prior sample

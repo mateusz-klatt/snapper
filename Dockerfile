@@ -83,7 +83,12 @@ COPY *proprietary/data/migrations ./proprietary/data/migrations
 
 RUN mkdir -p /app/data && chown snapper:snapper /app/data
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+# start-period must cover a legitimate slow boot: the DB readiness gate
+# alone may wait up to 120s for Postgres after a host reboot, plus
+# migrations and process spawning. Within the start period a SUCCESSFUL
+# probe still flips the container healthy immediately, so fast boots are
+# unaffected; only failure detection during startup is delayed.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=180s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
 USER snapper

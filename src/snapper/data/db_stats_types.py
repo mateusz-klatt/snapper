@@ -13,8 +13,8 @@ truth, no circular dependency.
 ``TableKind`` distinguishes append-only event tables (``current`` /
 ``closed`` are semantically null — these tables have no SCD2 lifecycle)
 from SCD2 state tables (``current`` counts rows whose ``known_to`` equals
-the SCD2 sentinel; ``closed`` counts rows whose ``known_to`` is below
-the sentinel).
+the SCD2 sentinel; ``closed`` is derived as ``max(0, total - current)``
+rather than counted directly — see :class:`TableCounters`).
 """
 
 from dataclasses import dataclass
@@ -48,15 +48,17 @@ class TableCounters:
     """Four-counter result from :meth:`Repository.count_table_stats`.
 
     Attributes:
-        total: Total row count. ``None`` only on per-table query failure
-            (the snapshotter then reuses prior values via
-            ``dataclasses.replace(prior, is_stale=True)``).
+        total: Total row count — dialect-aware: on PostgreSQL a planner
+            ESTIMATE (``pg_class.reltuples``, accurate within
+            autovacuum drift), on SQLite exact. ``None`` only on
+            per-table query failure (the snapshotter then reuses prior
+            values via ``dataclasses.replace(prior, is_stale=True)``).
         current: Active SCD2 versions (rows whose ``known_to`` equals
-            the SCD2 sentinel) for state tables; ``None`` for event
-            tables (semantics).
-        closed: Superseded SCD2 versions (rows whose ``known_to`` is
-            below the sentinel) for state tables; ``None`` for event
-            tables.
+            the SCD2 sentinel; always an exact count) for state tables;
+            ``None`` for event tables (semantics).
+        closed: Superseded SCD2 versions for state tables, derived as
+            ``max(0, total - current)`` to skip a slow full scan —
+            inherits the PG estimate error; ``None`` for event tables.
         archivable: Row count in the policy retention window when a
             policy is registered for the table; ``None`` when no policy
             applies (semantically distinct from ``0``).

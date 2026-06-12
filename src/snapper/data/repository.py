@@ -4393,18 +4393,23 @@ class Repository(ABC):
         Returns ``TableCounters(total, current, closed, archivable)`` for
         a single table. Per-kind semantics:
 
-        * ``entry.kind == "event"`` (append-only): ``total`` = ``COUNT(*)``;
-          ``current`` and ``closed`` are ``None`` (no SCD2 lifecycle —
-          ``0`` would imply the dimension exists). ``archivable`` is
+        * ``entry.kind == "event"`` (append-only): ``total`` is
+          dialect-aware — PostgreSQL returns a planner ESTIMATE
+          (``pg_class.reltuples``, accurate within autovacuum drift),
+          SQLite an exact ``COUNT(*)``; ``current`` and ``closed`` are
+          ``None`` (no SCD2 lifecycle — ``0`` would imply the dimension
+          exists). ``archivable`` is
           ``COUNT(timestamp >= window_start AND timestamp < window_end + 1d)``
           when ``archivable_window`` is provided, else ``None``.
         * ``entry.kind == "state"`` (SCD2-versioned):
-          ``current = COUNT(known_to == KNOWN_TO_MAX)``,
-          ``closed = COUNT(known_to != KNOWN_TO_MAX)``,
-          ``total = current + closed`` (Python addition trusted on the
-          SCD2 invariant). ``archivable`` is the closed-only count over
-          the same half-open ``timestamp`` window when
-          ``archivable_window`` is provided, else ``None``.
+          ``current = COUNT(known_to == KNOWN_TO_MAX)`` (always exact),
+          ``total`` dialect-aware as above, and
+          ``closed = max(0, total - current)`` — derived rather than
+          counted to skip a slow full scan; it inherits the PG estimate
+          error, and the clamp absorbs stale estimates where the exact
+          ``current`` exceeds ``total``. ``archivable`` is the
+          closed-only count over the same half-open ``timestamp``
+          window when ``archivable_window`` is provided, else ``None``.
 
         Args:
             entry: Table descriptor (name, kind, ORM model).
