@@ -158,6 +158,25 @@ def test_apply_fill_dedup() -> None:
     assert pos.position_qty == 0.5
 
 
+def test_apply_fill_dedup_cross_plane_trade_id() -> None:
+    """A fill replayed across planes dedupes on the shared trade_id.
+
+    Given: a fill first applied from the execution plane (trade_id only,
+        exec_id None — the full-replay shape),
+    When: the SAME fill is replayed from the venue-events plane carrying
+        BOTH an exec_id and the same trade_id (the delta-replay shape after
+        a conservative recovery watermark replays it),
+    Then: position_qty stays 0.5 — the shared trade_id catches the duplicate
+        even though the preferred exec_id key was never recorded by the
+        execution-plane application.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(_make_venue_event(event_id=1, exec_id=None, trade_id="T-1"))
+    svc.apply_venue_event(_make_venue_event(event_id=2, exec_id="E-1", trade_id="T-1"))
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.5
+
+
 def test_apply_fill_idless_fallback_key_is_identity_shaped() -> None:
     """Id-less fills dedupe by (client order, size, price), not row PK.
 

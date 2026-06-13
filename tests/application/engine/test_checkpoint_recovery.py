@@ -232,6 +232,37 @@ class TestCheckpointRecovery:
         assert shard is not None
         assert shard.last_venue_event_id == 11
 
+    def test_recovery_seeds_consumed_watermark_from_delta(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Recovery seeds the consumed watermark to the max applied DB event id.
+
+        Given: a checkpoint at watermark 10 plus delta events 11 and 13,
+        When: the shard is restored,
+        Then: the per-shard consumed watermark is 13 (max of checkpoint and
+            delta ids) so the next checkpoint can never persist a watermark
+            below what was recovered and silently drop a fill.
+        """
+        coord = _make_coord(monkeypatch)
+        shard = "kraken.BTC-USD.live"
+        coord._restore_trade_service_from_checkpoint(
+            _make_checkpoint(last_venue_event_id=10),
+            shard,
+            [_make_venue_event(event_id=11), _make_venue_event(event_id=13)],
+        )
+        assert coord._consumed_venue_event_watermarks[shard] == 13
+
+    def test_recovery_seeds_consumed_watermark_without_delta(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With no delta events the consumed watermark seeds to the checkpoint id."""
+        coord = _make_coord(monkeypatch)
+        shard = "kraken.BTC-USD.live"
+        coord._restore_trade_service_from_checkpoint(
+            _make_checkpoint(last_venue_event_id=10), shard, []
+        )
+        assert coord._consumed_venue_event_watermarks[shard] == 10
+
     @pytest.mark.asyncio
     async def test_checkpoint_recovery_restores_seen_exec_ids(
         self, monkeypatch: pytest.MonkeyPatch
@@ -303,6 +334,95 @@ class TestCheckpointRecovery:
         assert "BTC-USD@kraken-live" in coord.engines
         engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.position_qty == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
+    async def test_full_replay_seeds_consumed_watermark_to_db_max(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Full-replay recovery seeds the consumed watermark to the shard DB-max.
+
+        Given: no checkpoint but one execution to full-replay, with the shard's
+            latest durable venue event id = 42,
+        When: _recover_engine_state runs,
+        Then: the per-shard consumed watermark is seeded to 42 so a later
+            non-fill (funding) checkpoint cannot persist 0 and re-replay the
+            whole shard on the next restart.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-1",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t1",
+                    "exchange_order_id": "ex-1",
+                    "client_order_id": "c1",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.5,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                }
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_latest_venue_event_id = AsyncMock(return_value=42)
+        _set_sqlalchemy_repo(coord, mock_repo)
+
+        await coord._recover_engine_state()
+
+        assert coord._consumed_venue_event_watermarks["kraken.BTC-USD.live"] == 42
+
+    @pytest.mark.asyncio
+    async def test_full_replay_seed_skipped_when_no_venue_events(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A full-replay shard with no durable venue events leaves the watermark unset.
+
+        Given: full replay of a shard whose ``get_latest_venue_event_id`` is None,
+        When: _recover_engine_state runs,
+        Then: no watermark entry is seeded (it defaults to 0 at next checkpoint).
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-1",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t1",
+                    "exchange_order_id": "ex-1",
+                    "client_order_id": "c1",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.5,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                }
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_latest_venue_event_id = AsyncMock(return_value=None)
+        _set_sqlalchemy_repo(coord, mock_repo)
+
+        await coord._recover_engine_state()
+
+        assert "kraken.BTC-USD.live" not in coord._consumed_venue_event_watermarks
 
     @pytest.mark.asyncio
     async def test_checkpoint_snapshot_includes_seen_exec_ids(

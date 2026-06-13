@@ -306,6 +306,7 @@ class TraderCoordinator(RegisterableProcess):
         self.outbox: OutboxDispatcher | None = None
         self.guard_scanner: PairedExecutionGuardScanner | None = None
         self._order_shard_keys: dict[str, str] = {}
+        self._consumed_venue_event_watermarks: dict[str, int] = {}
         self._rearm_retired_cids: OrderedDict[str, None] = OrderedDict()
         self._wallet_short_to_id: dict[str, str] = {}
         self._unhealthy_executor_scopes: set[str] = set()
@@ -1094,6 +1095,10 @@ class TraderCoordinator(RegisterableProcess):
             self.trade_service.apply_venue_event(event)
         if delta_events:
             logger.info(f"ZMQTrader: Replayed {len(delta_events)} delta events for {shard_key}")
+        seed = checkpoint["last_venue_event_id"] or 0
+        if delta_events:
+            seed = max(seed, *(event["id"] for event in delta_events))
+        self._consumed_venue_event_watermarks[shard_key] = seed
 
     async def _replay_checkpoint_accruals(
         self,
@@ -1370,6 +1375,10 @@ class TraderCoordinator(RegisterableProcess):
             self.trade_service.apply_venue_event(event)
         self._restore_engine_from_shard(engine, shard_key, engine.instrument)
         self._register_recovered_engine(engine_key, engine)
+        if isinstance(self.repository, SQLAlchemyRepository):
+            db_max = await self.repository.get_latest_venue_event_id(shard_key)
+            if db_max is not None:
+                self._consumed_venue_event_watermarks[shard_key] = db_max
         logger.info(
             f"ZMQTrader: Recovered {engine_key} via full-replay shadow: "
             f"pos={engine.position_qty:.6f}, "
@@ -2649,7 +2658,7 @@ class TraderCoordinator(RegisterableProcess):
             realized_pnl=pos.realized_pnl,
         )
         await self._sync_position_cycle_on_fill(engine, old_qty, new_qty, fill)
-        await self._persist_checkpoint(shard_key)
+        await self._persist_checkpoint(shard_key, consumed_fill=fill)
 
     async def _project_paired_execution_leg_fill(
         self, fill: ExecutionData, venue_event: VenueEventRow
@@ -3189,14 +3198,34 @@ class TraderCoordinator(RegisterableProcess):
         self.trade_service.apply_venue_event(venue_event)
         self._order_shard_keys.pop(order_event.client_order_id, None)
 
-    async def _persist_checkpoint(self, shard_key: str) -> None:
+    async def _persist_checkpoint(
+        self,
+        shard_key: str,
+        *,
+        consumed_fill: ExecutionData | None = None,
+    ) -> None:
         """Write trade projection checkpoint to DB.
 
         Persists the current shard state for durable recovery. Silent
         no-op if repository is not SQLAlchemyRepository.
 
+        The recovery watermark is bounded to the fills this coordinator has
+        actually CONSUMED, never the shard's DB-max venue event. The executor
+        commits a ``fill_observed`` venue event BEFORE publishing it, so the
+        DB-max can be ahead of what the in-memory snapshot has folded in;
+        persisting the DB-max would let recovery skip an unconsumed fill and
+        under-apply it. When a fill is checkpointed its durable venue event id
+        is resolved and folded into the per-shard consumed watermark (kept on
+        the coordinator because the live path applies fills with synthetic ids).
+        A conservative (never-over-claiming) watermark is safe because replay
+        dedupes already-applied fills.
+
         Args:
             shard_key: Shard to checkpoint.
+            consumed_fill: The fill just applied to the snapshot when this
+                checkpoint follows a fill; its durable venue event id advances
+                the consumed watermark. ``None`` for non-fill checkpoints (e.g.
+                funding accrual), which must not advance the watermark.
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return
@@ -3204,7 +3233,25 @@ class TraderCoordinator(RegisterableProcess):
         now = datetime.now(UTC)
         ep = snap["entry_price"]
         oci = snap["open_command_ids"]
-        real_watermark = await self.repository.get_latest_venue_event_id(shard_key)
+        if consumed_fill is not None:
+            resolved_id = await self.repository.get_consumed_fill_venue_event_id(
+                shard_key=shard_key,
+                client_order_id=consumed_fill.client_order_id,
+                exec_id=consumed_fill.trade_id,
+                cum_fill_size=consumed_fill.size,
+            )
+            if resolved_id is None:
+                logger.warning(
+                    f"TraderCoordinator: could not resolve durable venue event id for "
+                    f"consumed fill {consumed_fill.client_order_id} on {shard_key}; "
+                    f"checkpoint watermark left unadvanced"
+                )
+            else:
+                self._consumed_venue_event_watermarks[shard_key] = max(
+                    self._consumed_venue_event_watermarks.get(shard_key, 0),
+                    resolved_id,
+                )
+        watermark = self._consumed_venue_event_watermarks.get(shard_key, 0)
         parsed_shard = self._parse_shard_key(shard_key)
         wallet_short = parsed_shard[3] if parsed_shard else ""
         wallet_public_id = self._wallet_short_to_id.get(wallet_short, "") if wallet_short else ""
@@ -3229,8 +3276,8 @@ class TraderCoordinator(RegisterableProcess):
                     "peak_equity": cast(float, snap["peak_equity"]),
                     "realized_pnl": cast(float, snap["realized_pnl"]),
                     "turnover": cast(float, snap["turnover"]),
-                    "last_venue_event_id": real_watermark,
-                    "last_venue_event_at": now if real_watermark is not None else None,
+                    "last_venue_event_id": watermark,
+                    "last_venue_event_at": now if watermark else None,
                     "open_command_ids": cast(str, oci) if oci is not None else None,
                     "seen_exec_ids": cast(str, snap["seen_exec_ids"]),
                     "checkpoint_at": now,

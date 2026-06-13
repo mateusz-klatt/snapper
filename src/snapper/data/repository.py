@@ -10466,6 +10466,73 @@ class SQLAlchemyRepository(Repository):
             )
             return [self._venue_event_to_row(ve) for ve in result.scalars().all()]
 
+    async def get_consumed_fill_venue_event_id(
+        self,
+        *,
+        shard_key: str,
+        client_order_id: str,
+        exec_id: str | None,
+        cum_fill_size: float,
+    ) -> int | None:
+        """Return the durable id of a consumed ``fill_observed`` venue event.
+
+        Checkpoint uses this to bound the recovery watermark to the fill the
+        coordinator just applied, never the shard DB-max (which can be ahead of
+        the in-memory snapshot because the executor commits a venue event BEFORE
+        publishing it). Matches by ``exec_id`` when the fill carries one
+        (``ExecutionData.trade_id`` is the venue exec id, persisted as
+        ``VenueEvent.exec_id``); id-less venues fall back to the cumulative fill
+        size within the order. Scoped to the shard and order, returning the
+        LOWEST matching id so a later duplicate can never inflate the watermark.
+        Returns ``None`` when no matching event exists, so the caller leaves the
+        watermark unadvanced and recovery re-applies the fill idempotently.
+
+        Args:
+            shard_key: Shard the fill belongs to.
+            client_order_id: Client order id of the fill.
+            exec_id: Venue execution id when present (``ExecutionData.trade_id``).
+            cum_fill_size: Cumulative fill size, used for id-less venues.
+
+        Returns:
+            Lowest matching ``VenueEvent.id``, or ``None`` if no match.
+        """
+        async with self.session() as s:
+            query = select(func.min(VenueEvent.id)).where(
+                VenueEvent.shard_key == shard_key,
+                VenueEvent.client_order_id == client_order_id,
+                VenueEvent.event_type == "fill_observed",
+            )
+            if exec_id is not None:
+                query = query.where(VenueEvent.exec_id == exec_id)
+            else:
+                query = query.where(
+                    VenueEvent.cum_fill_size.isnot(None),
+                    func.abs(VenueEvent.cum_fill_size - cum_fill_size) < 1e-9,
+                )
+            result = await s.execute(query)
+            return result.scalar()
+
+    async def get_latest_venue_event_id(self, shard_key: str) -> int | None:
+        """Return the highest VenueEvent.id for a shard, or None if empty.
+
+        Full-replay recovery seeds its consumed watermark from this: the
+        replayed snapshot is built from the durable execution plane (DB truth,
+        not an in-memory projection), so the shard DB-max is the honest
+        watermark there and a later non-fill checkpoint must not regress it to
+        zero and re-replay the whole shard.
+
+        Args:
+            shard_key: Shard to query.
+
+        Returns:
+            Highest id value, or None if no events exist.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(func.max(VenueEvent.id)).where(VenueEvent.shard_key == shard_key)
+            )
+            return result.scalar()
+
     async def has_order_submit_evidence(self, client_order_id: str) -> bool:
         """Return True when durable evidence shows the submit may have reached the venue.
 
@@ -10851,21 +10918,6 @@ class SQLAlchemyRepository(Repository):
                 if row[1]:
                     ids.add(row[1])
             return ids
-
-    async def get_latest_venue_event_id(self, shard_key: str) -> int | None:
-        """Return the highest VenueEvent.id for a shard, or None if empty.
-
-        Args:
-            shard_key: Shard to query.
-
-        Returns:
-            Highest id value, or None if no events exist.
-        """
-        async with self.session() as s:
-            result = await s.execute(
-                select(func.max(VenueEvent.id)).where(VenueEvent.shard_key == shard_key)
-            )
-            return result.scalar()
 
     async def get_underlying_assets(
         self,

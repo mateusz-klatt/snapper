@@ -6229,43 +6229,95 @@ async def test_get_fill_exec_ids_for_shard(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_latest_venue_event_id(tmp_path: Path) -> None:
-    """Get latest venue event ID returns highest id for shard.
+async def test_get_consumed_fill_venue_event_id(tmp_path: Path) -> None:
+    """Resolve the durable id of a consumed fill_observed venue event.
 
-    Given: a database with two venue events for the same shard,
-    When: get_latest_venue_event_id is called,
-    Then: the highest id is returned.
+    Given: fill_observed venue events for a shard/order, some carrying an
+        exec_id and some id-less,
+    When: get_consumed_fill_venue_event_id is called,
+    Then: it matches by exec_id when present, falls back to the cumulative
+        fill size for id-less venues, returns the LOWEST matching id, excludes
+        other shards, and returns None when nothing matches.
     """
-    db_path = tmp_path / "latest.db"
+    db_path = tmp_path / "consumed.db"
     r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await r.create_all()
     now = datetime.now(UTC)
-    await r.insert_venue_event(
-        {
+
+    async def _insert(
+        client_order_id: str,
+        cum: float,
+        exec_id: str | None,
+        shard: str = "kraken.BTC-USD.live",
+    ) -> int:
+        row: VenueEventInsertRow = {
             "event_type": "fill_observed",
-            "shard_key": "kraken.BTC-USD.live",
+            "shard_key": shard,
             "exchange": "kraken",
             "instrument": "BTC-USD",
             "mode": "live",
+            "client_order_id": client_order_id,
+            "cum_fill_size": cum,
+            "exec_id": exec_id,
             "received_at": now,
             "session_id": "s1",
             "sequence_id": 1,
             "timestamp": now,
         }
+        return await r.insert_venue_event(row)
+
+    id_exec = await _insert(client_order_id="c1", cum=0.3, exec_id="exec-7")
+    id_idless = await _insert(client_order_id="c2", cum=0.9, exec_id=None)
+    await _insert(client_order_id="c1", cum=0.3, exec_id="exec-7", shard="kraken.ETH-USD.live")
+    id_low = await _insert(client_order_id="c3", cum=1.5, exec_id=None)
+    await _insert(client_order_id="c3", cum=1.5, exec_id=None)
+
+    by_exec = await r.get_consumed_fill_venue_event_id(
+        shard_key="kraken.BTC-USD.live", client_order_id="c1", exec_id="exec-7", cum_fill_size=0.3
     )
-    await r.insert_venue_event(
-        {
-            "event_type": "fill_observed",
-            "shard_key": "kraken.BTC-USD.live",
-            "exchange": "kraken",
-            "instrument": "BTC-USD",
-            "mode": "live",
-            "received_at": now,
-            "session_id": "s1",
-            "sequence_id": 2,
-            "timestamp": now,
-        }
+    assert by_exec == id_exec
+
+    by_cum = await r.get_consumed_fill_venue_event_id(
+        shard_key="kraken.BTC-USD.live", client_order_id="c2", exec_id=None, cum_fill_size=0.9
     )
+    assert by_cum == id_idless
+
+    lowest = await r.get_consumed_fill_venue_event_id(
+        shard_key="kraken.BTC-USD.live", client_order_id="c3", exec_id=None, cum_fill_size=1.5
+    )
+    assert lowest == id_low
+
+    none_match = await r.get_consumed_fill_venue_event_id(
+        shard_key="kraken.BTC-USD.live", client_order_id="c1", exec_id="nope", cum_fill_size=0.3
+    )
+    assert none_match is None
+
+
+@pytest.mark.asyncio
+async def test_get_latest_venue_event_id(tmp_path: Path) -> None:
+    """Get latest venue event ID returns highest id for shard.
+
+    Given: a database with two venue events for the same shard,
+    When: get_latest_venue_event_id is called,
+    Then: the highest id is returned, and None for an empty shard.
+    """
+    db_path = tmp_path / "latest.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    base: VenueEventInsertRow = {
+        "event_type": "fill_observed",
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "received_at": now,
+        "session_id": "s1",
+        "sequence_id": 1,
+        "timestamp": now,
+    }
+    await r.insert_venue_event(base)
+    await r.insert_venue_event({**base, "sequence_id": 2})
     result = await r.get_latest_venue_event_id("kraken.BTC-USD.live")
     assert result is not None
     assert result >= 2

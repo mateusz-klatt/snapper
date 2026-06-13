@@ -334,7 +334,14 @@ class TradeService:
     def _dedup_fill(self, shard: ShardState, event: VenueEventRow) -> bool:
         """Return True if the fill is new and should be applied.
 
-        Adds exec_id and trade_id to the seen set for subsequent dedup.
+        A fill is a duplicate if EITHER its ``exec_id`` OR its ``trade_id``
+        was already seen, not merely the preferred key. The execution plane
+        (full replay) carries only ``trade_id`` (its ``exec_id`` is ``None``)
+        while the venue-events plane (delta replay) carries both, so probing
+        only the preferred key let the SAME fill re-apply across planes once a
+        conservative recovery watermark replayed it again. Both keys are
+        recorded on apply and both are probed on dedup so cross-plane
+        re-replay is idempotent regardless of which plane recorded it first.
 
         The id-less fallback key mirrors the live engine's apply_fill
         fallback shape (client_order_id + fill size + fill price) instead
@@ -347,22 +354,23 @@ class TradeService:
         """
         exec_id = event.get("exec_id")
         trade_id = event.get("trade_id")
-        dedup_key = (
-            exec_id
-            or trade_id
-            or (
+        if exec_id and exec_id in shard.seen_exec_ids:
+            return False
+        if trade_id and trade_id in shard.seen_exec_ids:
+            return False
+        if not exec_id and not trade_id:
+            fallback = (
                 f"fallback-{event.get('client_order_id')}"
                 f"-{event.get('fill_size')}-{event.get('fill_price')}"
             )
-        )
-        if dedup_key in shard.seen_exec_ids:
-            return False
-        if exec_id:
-            shard.seen_exec_ids[exec_id] = None
-        if trade_id:
-            shard.seen_exec_ids[trade_id] = None
-        if not exec_id and not trade_id:
-            shard.seen_exec_ids[dedup_key] = None
+            if fallback in shard.seen_exec_ids:
+                return False
+            shard.seen_exec_ids[fallback] = None
+        else:
+            if exec_id:
+                shard.seen_exec_ids[exec_id] = None
+            if trade_id:
+                shard.seen_exec_ids[trade_id] = None
         while len(shard.seen_exec_ids) > 10_000:
             shard.seen_exec_ids.popitem(last=False)
         return True

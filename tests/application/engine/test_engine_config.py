@@ -2175,9 +2175,9 @@ async def test_persist_checkpoint_writes_to_db() -> None:
     unrelated_engine._shard_key = "kraken.ETH-USD.live"
     coord.engines = {"ETH-USD@kraken-live": unrelated_engine}
     coord._wallet_short_to_id = {}
+    coord._consumed_venue_event_watermarks = {}
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     mock_repo.upsert_checkpoint = AsyncMock(return_value=1)
-    mock_repo.get_latest_venue_event_id = AsyncMock(return_value=1)
     coord.repository = mock_repo
 
     venue_ts = datetime(2026, 4, 6, 12, 30, 0, tzinfo=UTC)
@@ -2236,15 +2236,16 @@ async def test_persist_checkpoint_writes_none_when_position_flat() -> None:
     coord._tracker.next_sequence = MagicMock(return_value=1)
     coord.engines = {}
     coord._wallet_short_to_id = {}
+    coord._consumed_venue_event_watermarks = {}
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     mock_repo.upsert_checkpoint = AsyncMock(return_value=1)
-    mock_repo.get_latest_venue_event_id = AsyncMock(return_value=None)
     coord.repository = mock_repo
     coord.trade_service._get_or_create_shard("kraken.BTC-USD.live")
     await coord._persist_checkpoint("kraken.BTC-USD.live")
     mock_repo.upsert_checkpoint.assert_called_once()
     call_row = mock_repo.upsert_checkpoint.call_args.args[0]
     assert call_row["position_opened_at"] is None
+    assert call_row["last_venue_event_id"] == 0
 
 
 @pytest.mark.asyncio
@@ -2269,9 +2270,9 @@ async def test_persist_checkpoint_carries_operator_from_matching_engine() -> Non
     mock_engine._shard_key = "kraken.BTC-USD.live"
     mock_engine.operator_public_id = "01975a8b-3c7d-7000-8000-000000000aa1"
     coord.engines = {"BTC-USD@kraken-live": mock_engine}
+    coord._consumed_venue_event_watermarks = {}
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     mock_repo.upsert_checkpoint = AsyncMock(return_value=1)
-    mock_repo.get_latest_venue_event_id = AsyncMock(return_value=None)
     coord.repository = mock_repo
     coord.trade_service._get_or_create_shard("kraken.BTC-USD.live")
     await coord._persist_checkpoint("kraken.BTC-USD.live")
@@ -2309,10 +2310,105 @@ async def test_persist_checkpoint_handles_db_error() -> None:
     coord._tracker.next_sequence = MagicMock(return_value=1)
     coord.engines = {}
     coord._wallet_short_to_id = {}
+    coord._consumed_venue_event_watermarks = {}
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     mock_repo.upsert_checkpoint = AsyncMock(side_effect=RuntimeError("DB down"))
     coord.repository = mock_repo
     await coord._persist_checkpoint("any.shard")
+
+
+def _consumed_fill_for_watermark() -> ExecutionData:
+    """Build a minimal consumed fill for checkpoint watermark tests."""
+    return ExecutionData(
+        public_id="pub-1",
+        timestamp=datetime.now(UTC),
+        session_id="s1",
+        sequence_id=1,
+        trade_id="exec-7",
+        exchange_order_id="ex-1",
+        client_order_id="c1",
+        instrument="BTC-USD",
+        exchange="kraken",
+        side="buy",
+        size=0.5,
+        price=50000.0,
+        last_size=0.5,
+        last_price=50000.0,
+        fee=0.0,
+        fee_asset="USD",
+        status="filled",
+        executed_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_persist_checkpoint_watermark_from_consumed_fill() -> None:
+    """Checkpoint persists the consumed fill's durable id, never the shard DB-max.
+
+    Given: a checkpoint following a consumed fill whose durable venue event id
+        resolves to 5,
+    When: ``_persist_checkpoint`` is called with that ``consumed_fill``,
+    Then: the persisted ``last_venue_event_id`` is 5, the per-shard consumed
+        watermark advances to 5, the resolver is called with the fill's keys,
+        and a later lower-id resolution does not regress the watermark (max).
+    """
+    shard = "kraken.BTC-USD.live"
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord._tracker = MagicMock()
+    coord._tracker.session_id = "s-test"
+    coord._tracker.next_sequence = MagicMock(return_value=1)
+    coord.engines = {}
+    coord._wallet_short_to_id = {}
+    coord._consumed_venue_event_watermarks = {}
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.upsert_checkpoint = AsyncMock(return_value=1)
+    mock_repo.get_consumed_fill_venue_event_id = AsyncMock(side_effect=[5, 2])
+    coord.repository = mock_repo
+    coord.trade_service._get_or_create_shard(shard)
+    fill = _consumed_fill_for_watermark()
+    await coord._persist_checkpoint(shard, consumed_fill=fill)
+    mock_repo.get_consumed_fill_venue_event_id.assert_called_with(
+        shard_key=shard,
+        client_order_id="c1",
+        exec_id="exec-7",
+        cum_fill_size=0.5,
+    )
+    call_row = mock_repo.upsert_checkpoint.call_args.args[0]
+    assert call_row["last_venue_event_id"] == 5
+    assert coord._consumed_venue_event_watermarks[shard] == 5
+    await coord._persist_checkpoint(shard, consumed_fill=fill)
+    assert coord._consumed_venue_event_watermarks[shard] == 5
+
+
+@pytest.mark.asyncio
+async def test_persist_checkpoint_unresolved_consumed_fill_keeps_watermark() -> None:
+    """An unresolvable consumed fill leaves the watermark unadvanced (fail-closed).
+
+    Given: a shard whose consumed watermark is already 3 and a fill whose
+        durable id cannot be resolved (resolver returns None),
+    When: ``_persist_checkpoint`` is called with that ``consumed_fill``,
+    Then: the watermark stays 3 and the persisted ``last_venue_event_id`` is 3
+        (recovery will re-apply the fill idempotently).
+    """
+    shard = "kraken.BTC-USD.live"
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord._tracker = MagicMock()
+    coord._tracker.session_id = "s-test"
+    coord._tracker.next_sequence = MagicMock(return_value=1)
+    coord.engines = {}
+    coord._wallet_short_to_id = {}
+    coord._consumed_venue_event_watermarks = {shard: 3}
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.upsert_checkpoint = AsyncMock(return_value=1)
+    mock_repo.get_consumed_fill_venue_event_id = AsyncMock(return_value=None)
+    coord.repository = mock_repo
+    coord.trade_service._get_or_create_shard(shard)
+    await coord._persist_checkpoint(shard, consumed_fill=_consumed_fill_for_watermark())
+    assert coord._consumed_venue_event_watermarks[shard] == 3
+    call_row = mock_repo.upsert_checkpoint.call_args.args[0]
+    assert call_row["last_venue_event_id"] == 3
 
 
 @pytest.mark.asyncio
