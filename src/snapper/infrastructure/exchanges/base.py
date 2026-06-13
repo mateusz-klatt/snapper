@@ -28,9 +28,7 @@ from datetime import UTC
 from datetime import datetime
 from types import TracebackType
 from typing import Any
-from typing import ParamSpec
 from typing import Self
-from typing import TypeVar
 
 from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
@@ -57,9 +55,6 @@ from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 __all__ = ["ExchangeClientBase"]
-
-_P = ParamSpec("_P")
-_R = TypeVar("_R")
 
 _REST_POOL_MAX_WORKERS = 4
 """Per-client cap on concurrent blocking REST threads.
@@ -168,9 +163,9 @@ class ExchangeClientBase(ABC):
             self._rest_pool = pool
         return pool
 
-    async def _dispatch_blocking(
-        self, func: Callable[_P, _R], /, *args: _P.args, **kwargs: _P.kwargs
-    ) -> _R:
+    async def _dispatch_blocking[**P, R](
+        self, func: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
+    ) -> R:
         """Run a blocking (synchronous) REST callable on the client's own pool.
 
         Replaces ``asyncio.to_thread`` for venue REST so that dead-network

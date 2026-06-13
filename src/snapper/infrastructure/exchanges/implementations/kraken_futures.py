@@ -390,40 +390,56 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         try:
             client = self._ws_client
-            if client:
-                try:
-                    async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
-                        await client.close()
-                except TimeoutError:
-                    logger.warning("Kraken Futures WS close timed out - forcing cleanup")
-                    await force_close_ws_client(client)
-                except Exception as e:
-                    logger.warning(f"Error closing Kraken Futures WS: {e}")
-                    await force_close_ws_client(client)
+            if client and await self._bounded_ws_close(client, "WS"):
                 if self._ws_client is client:
                     self._ws_client = None
             private_client = self._private_ws_client
-            if private_client:
-                try:
-                    async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
-                        await private_client.close()
-                except TimeoutError:
-                    logger.warning("Kraken Futures private WS close timed out - forcing cleanup")
-                    await force_close_ws_client(private_client)
-                except Exception as e:
-                    logger.warning(f"Error closing Kraken Futures private WS: {e}")
-                    await force_close_ws_client(private_client)
+            if private_client and await self._bounded_ws_close(private_client, "private WS"):
                 if self._private_ws_client is private_client:
                     self._private_ws_client = None
-            try:
-                if self._ccxt_client and hasattr(self._ccxt_client, "session"):
-                    self._ccxt_client.session.close()
-                    logger.info("Kraken Futures REST client session closed")
-            except Exception as e:
-                logger.warning(f"Error closing Kraken Futures REST session: {e}")
+            self._close_ccxt_session()
         finally:
             self._shutdown_rest_pool()
         logger.info("Kraken Futures connections closed")
+
+    @staticmethod
+    async def _bounded_ws_close(client: FuturesWSClient, label: str) -> bool:
+        """Close one WS client bounded by ``_WS_CLOSE_TIMEOUT_S``, force on failure.
+
+        On timeout or close error, :func:`force_close_ws_client` finishes the
+        teardown so a blackholed socket cannot hang shutdown.
+
+        Args:
+            client: The WS client to close.
+            label: Human label for the log line (e.g. ``"private WS"``).
+
+        Returns:
+            True always — the caller compare-and-clears its own slot, which
+            must NOT happen for a slot a concurrent reconnect already replaced.
+        """
+        try:
+            async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                await client.close()
+        except TimeoutError:
+            logger.warning(f"Kraken Futures {label} close timed out - forcing cleanup")
+            await force_close_ws_client(client)
+        except Exception as e:
+            logger.warning(f"Error closing Kraken Futures {label}: {e}")
+            await force_close_ws_client(client)
+        return True
+
+    def _close_ccxt_session(self) -> None:
+        """Close the ccxt REST session if present (spot-client parity).
+
+        Without this the requests.Session leaked on every executor
+        fresh-instance restart.
+        """
+        try:
+            if self._ccxt_client and hasattr(self._ccxt_client, "session"):
+                self._ccxt_client.session.close()
+                logger.info("Kraken Futures REST client session closed")
+        except Exception as e:
+            logger.warning(f"Error closing Kraken Futures REST session: {e}")
 
     async def _on_ws_message(self, message: dict[str, Any]) -> None:
         """Route incoming WS messages to the appropriate queue.
