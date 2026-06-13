@@ -5,6 +5,7 @@ into a single continuous price series using configurable adjustment
 methods (unadjusted, ratio, panama canal).
 """
 
+import bisect
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -252,6 +253,11 @@ class ContinuousContractBuilder:
         a matching bar (same timestamp) in new_candles. Falls back to
         nearest pair within one bar width.
 
+        Sorts each side once and binary-searches the fallback nearest-bar
+        lookup, so a many-bar historical build (e.g. minute timeframe over
+        the 3-day cutoff window) costs O(old log new) rather than the
+        O(old * new log new) of re-sorting the new side inside the scan.
+
         Returns:
             (old_close, new_close) or None if no match within 3 days.
         """
@@ -259,16 +265,25 @@ class ContinuousContractBuilder:
         old_by_time = {c["open_at"]: c["close"] for c in old_candles if c["open_at"] <= roll_at}
         new_by_time = {c["open_at"]: c["close"] for c in new_candles}
 
-        for t in sorted(old_by_time.keys(), reverse=True):
+        old_times_desc = sorted(old_by_time, reverse=True)
+        for t in old_times_desc:
             if t in new_by_time:
                 return old_by_time[t], new_by_time[t]
 
         cutoff = roll_at - timedelta(days=3)
-        old_near = {t: v for t, v in old_by_time.items() if t >= cutoff}
-        for t in sorted(old_near.keys(), reverse=True):
-            for nt in sorted(new_by_time.keys(), reverse=True):
-                if abs((t - nt).total_seconds()) <= tf_seconds:
-                    return old_near[t], new_by_time[nt]
+        new_times = sorted(new_by_time)
+        try:
+            window = timedelta(seconds=tf_seconds)
+        except OverflowError:
+            window = timedelta.max
+        for t in old_times_desc:
+            if t < cutoff:
+                continue
+            upper = _shift_clamped(t, window, subtract=False)
+            lower = _shift_clamped(t, window, subtract=True)
+            idx = bisect.bisect_right(new_times, upper) - 1
+            if idx >= 0 and new_times[idx] >= lower:
+                return old_by_time[t], new_by_time[new_times[idx]]
 
         return None
 
@@ -597,6 +612,31 @@ class ContinuousContractBuilder:
         if method == "ratio":
             return value * cum_factor
         return value + cum_factor
+
+
+def _shift_clamped(moment: datetime, delta: timedelta, *, subtract: bool) -> datetime:
+    """Shift a datetime forward/backward by a delta, clamping at the bounds.
+
+    A naive ``moment +/- delta`` raises ``OverflowError`` when ``moment``
+    is within ``delta`` of ``datetime.max``/``datetime.min``. The
+    nearest-bar window check only needs the shifted value as a comparison
+    bound, and every representable timestamp lies inside the clamped
+    bound, so saturating to the min/max for the moment's timezone
+    preserves the inclusive-window semantics without crashing on extreme
+    dates or an extreme window. ``subtract`` is taken as a flag (rather
+    than negating ``delta`` at the call site) because negating an extreme
+    ``delta`` such as ``timedelta.max`` itself overflows.
+
+    The saturated bound is stamped UTC (not the moment's own offset) so
+    that, for an extreme non-UTC ``moment``, the bound is the maximal
+    representable UTC instant rather than an offset-shifted earlier one
+    that could wrongly exclude an in-window UTC-stamped bar.
+    """
+    try:
+        return moment - delta if subtract else moment + delta
+    except OverflowError:
+        bound = datetime.min if subtract else datetime.max
+        return bound.replace(tzinfo=UTC)
 
 
 def _timeframe_to_seconds(timeframe: str) -> float:

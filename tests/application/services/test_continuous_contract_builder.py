@@ -3,6 +3,7 @@
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -613,6 +614,118 @@ class TestFindCommonBarFallback:
 
         result = ContinuousContractBuilder._find_common_bar(old_candles, new_candles, roll_at, "1h")
         assert result is not None
+        assert result == (100.0, 110.0)
+
+    @pytest.mark.asyncio
+    async def test_fallback_picks_largest_new_bar_within_window(self) -> None:
+        """Fallback returns the LARGEST new timestamp inside the bar window.
+
+        Given: An old bar with no exact match, and two new bars both
+               within one bar width of it (one earlier, one later),
+        When: _find_common_bar falls back to the nearest-bar search,
+        Then: It returns the later (largest-timestamp) new bar — pinning
+              the descending-scan tie-break the bisect rewrite preserves.
+        """
+        roll_at = datetime(2026, 1, 10, tzinfo=UTC)
+        cutoff = roll_at - timedelta(days=3)
+        old_t = cutoff + timedelta(hours=2)
+        earlier_new = old_t - timedelta(minutes=20)
+        later_new = old_t + timedelta(minutes=20)
+
+        old_candles = [_candle(old_t, 100.0)]
+        new_candles = [_candle(earlier_new, 110.0), _candle(later_new, 120.0)]
+
+        result = ContinuousContractBuilder._find_common_bar(old_candles, new_candles, roll_at, "1h")
+        assert result == (100.0, 120.0)
+
+    @pytest.mark.asyncio
+    async def test_fallback_scans_older_bar_when_newest_has_no_neighbour(self) -> None:
+        """Fallback walks old bars descending until one has a new neighbour.
+
+        Given: The newest old bar (closest to the roll) has no new bar
+               within one bar width, but an older old bar does,
+        When: _find_common_bar falls back,
+        Then: It skips the unmatched newest old bar and returns the pair
+              for the older one — pinning the outer descending walk.
+        """
+        roll_at = datetime(2026, 1, 10, tzinfo=UTC)
+        cutoff = roll_at - timedelta(days=3)
+        newest_old = roll_at - timedelta(hours=1)
+        older_old = cutoff + timedelta(hours=2)
+        matched_new = older_old + timedelta(minutes=15)
+
+        old_candles = [_candle(older_old, 100.0), _candle(newest_old, 105.0)]
+        new_candles = [_candle(matched_new, 120.0)]
+
+        result = ContinuousContractBuilder._find_common_bar(old_candles, new_candles, roll_at, "1h")
+        assert result == (100.0, 120.0)
+
+    @pytest.mark.asyncio
+    async def test_fallback_handles_oversized_timeframe_window(self) -> None:
+        """An astronomically large timeframe saturates the window, not raises.
+
+        Given: A timeframe whose second-count overflows ``timedelta``
+               construction, with one old and one new bar inside the
+               3-day cutoff,
+        When: _find_common_bar falls back,
+        Then: The window saturates so every bar is in range and the pair
+              is returned, matching the old float-seconds comparison
+              (which tolerated any magnitude) instead of raising.
+        """
+        roll_at = datetime(2026, 1, 10, tzinfo=UTC)
+        old_t = roll_at - timedelta(days=1)
+        new_t = roll_at - timedelta(days=2)
+
+        old_candles = [_candle(old_t, 100.0)]
+        new_candles = [_candle(new_t, 110.0)]
+
+        result = ContinuousContractBuilder._find_common_bar(
+            old_candles, new_candles, roll_at, "1000000000d"
+        )
+        assert result == (100.0, 110.0)
+
+    @pytest.mark.asyncio
+    async def test_fallback_handles_roll_near_datetime_max(self) -> None:
+        """Fallback bounds do not overflow when the roll is near datetime.max.
+
+        Given: A roll point within one bar width of ``datetime.max`` and a
+               new bar just below the old bar (the bisect upper bound
+               ``t + window`` would overflow a naive datetime addition),
+        When: _find_common_bar falls back,
+        Then: The clamped bound still returns the in-window pair instead
+              of raising OverflowError.
+        """
+        roll_at = datetime.max.replace(tzinfo=UTC)
+        old_t = roll_at - timedelta(minutes=30)
+        new_t = old_t - timedelta(minutes=10)
+
+        old_candles = [_candle(old_t, 100.0)]
+        new_candles = [_candle(new_t, 110.0)]
+
+        result = ContinuousContractBuilder._find_common_bar(old_candles, new_candles, roll_at, "1h")
+        assert result == (100.0, 110.0)
+
+    @pytest.mark.asyncio
+    async def test_fallback_clamp_is_utc_not_offset_shifted(self) -> None:
+        """Near datetime.max, the overflow clamp uses the maximal UTC instant.
+
+        Given: A roll/old bar in a large positive offset (+14:00) near
+               datetime.max and a UTC-stamped new bar within one bar
+               width — the upper bound overflows and must clamp to the
+               maximal UTC instant, not the offset-shifted (earlier)
+               datetime.max in +14:00 that would exclude the new bar,
+        When: _find_common_bar falls back,
+        Then: The in-window pair is still returned.
+        """
+        plus_14 = timezone(timedelta(hours=14))
+        roll_at = datetime.max.replace(tzinfo=plus_14)
+        old_t = roll_at - timedelta(minutes=30)
+        new_t = old_t.astimezone(UTC) + timedelta(minutes=45)
+
+        old_candles = [_candle(old_t, 100.0)]
+        new_candles = [_candle(new_t, 110.0)]
+
+        result = ContinuousContractBuilder._find_common_bar(old_candles, new_candles, roll_at, "1h")
         assert result == (100.0, 110.0)
 
     @pytest.mark.asyncio
