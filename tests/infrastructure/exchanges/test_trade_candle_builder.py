@@ -350,6 +350,124 @@ class TestTradeCandleBuilderEventWatermark:
         assert c.close == pytest.approx(110.0)
 
 
+class TestLateTradesAfterClose:
+    """Tests for the late-trade-after-close counter and re-open WARNING.
+
+    A trade landing in an already-emitted ``(symbol, minute)`` produces
+    a corrective candle that re-fragments the SCD2 row — the 2026-06
+    Kraken Equities fragmentation class. The counter is the agreed
+    trigger for widening the grace/idle-flush bound, so these tests pin
+    every accounting path: fresh re-open, fold into a re-opened bucket,
+    idle flush as a close, per-symbol independence, and the zero
+    steady-state.
+    """
+
+    def test_counter_zero_in_steady_state(self) -> None:
+        """On-time trades never touch the late counter.
+
+        Given: Trades folding into open minutes and a normal
+            watermark-driven pop,
+        When: No trade targets an already-emitted minute,
+        Then: ``late_trades_after_close`` stays 0.
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        b.update(_trade("X-USD", 100.0, 1.0, m + timedelta(seconds=10)))
+        b.update(_trade("X-USD", 101.0, 1.0, m + timedelta(seconds=40)))
+        b.update(_trade("X-USD", 102.0, 1.0, m + timedelta(minutes=3)))
+        b.pop_completed_by_event_watermark(60.0)
+        assert b.late_trades_after_close == 0
+
+    def test_late_trade_reopens_bucket_counts_and_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A late trade for an emitted minute counts and WARNs once.
+
+        Given: Minute M emitted via the event-watermark pop,
+        When: A trade for M arrives afterwards,
+        Then: The counter increments, a fresh bucket exists for M (the
+            corrective candle is not lost), and the re-open WARNING was
+            logged exactly once.
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        b.update(_trade("X-USD", 100.0, 1.0, m + timedelta(seconds=10)))
+        b.update(_trade("X-USD", 102.0, 1.0, m + timedelta(minutes=3)))
+        emitted = b.pop_completed_by_event_watermark(60.0)
+        assert [c.interval_begin for c in emitted] == [m]
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            b.update(_trade("X-USD", 99.0, 1.0, m + timedelta(seconds=50)))
+        finally:
+            logger.remove(sink_id)
+        assert b.late_trades_after_close == 1
+        assert b.active_buckets() == 2
+        reopens = [rec for rec in caplog.records if "re-opens bucket" in rec.message]
+        assert len(reopens) == 1
+
+    def test_fold_into_reopened_bucket_counts_without_second_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Subsequent late trades count but do not spam the log.
+
+        Given: A re-opened bucket for an emitted minute,
+        When: Another late trade folds into the SAME re-opened bucket,
+        Then: The counter increments again but no second re-open
+            WARNING fires (the bucket already exists).
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        b.update(_trade("X-USD", 100.0, 1.0, m + timedelta(seconds=10)))
+        b.update(_trade("X-USD", 102.0, 1.0, m + timedelta(minutes=3)))
+        b.pop_completed_by_event_watermark(60.0)
+        b.update(_trade("X-USD", 99.0, 1.0, m + timedelta(seconds=50)))
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            b.update(_trade("X-USD", 98.0, 1.0, m + timedelta(seconds=55)))
+        finally:
+            logger.remove(sink_id)
+        assert b.late_trades_after_close == 2
+        reopens = [rec for rec in caplog.records if "re-opens bucket" in rec.message]
+        assert len(reopens) == 0
+        final = b.pop_all()
+        corrective = [c for c in final if c.interval_begin == m][0]
+        assert corrective.trades == 2
+        assert corrective.close == pytest.approx(98.0)
+
+    def test_idle_flush_counts_as_close(self) -> None:
+        """``pop_all`` closes minutes for late-trade accounting.
+
+        Given: A bucket flushed by the idle path (``pop_all``), the
+            exact bypass that can re-fragment after a delivery pause,
+        When: A trade for the flushed minute arrives later,
+        Then: The counter increments — the idle flush must not be
+            invisible to the early-close signal.
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        b.update(_trade("X-USD", 100.0, 1.0, m + timedelta(seconds=10)))
+        b.pop_all()
+        b.update(_trade("X-USD", 99.0, 1.0, m + timedelta(seconds=50)))
+        assert b.late_trades_after_close == 1
+
+    def test_late_accounting_is_per_symbol(self) -> None:
+        """Closing one symbol's minute does not mark another's late.
+
+        Given: Symbol A's minute M emitted while symbol B never traded,
+        When: B trades in minute M and A trades in a LATER minute,
+        Then: Neither counts as late — the closed-minute watermark is
+            per symbol and only minutes at or before it count.
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        b.update(_trade("A-USD", 100.0, 1.0, m + timedelta(seconds=10)))
+        b.update(_trade("A-USD", 102.0, 1.0, m + timedelta(minutes=3)))
+        b.pop_completed_by_event_watermark(60.0)
+        b.update(_trade("B-USD", 50.0, 1.0, m + timedelta(seconds=20)))
+        b.update(_trade("A-USD", 103.0, 1.0, m + timedelta(minutes=4)))
+        assert b.late_trades_after_close == 0
+
+
 class TestEnqueueOrDropOldestCandle:
     """Tests for the bounded candle queue helper."""
 
