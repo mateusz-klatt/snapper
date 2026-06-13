@@ -50,6 +50,7 @@ from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.contracts import to_fill_status
+from snapper.infrastructure.exchanges.errors import RestPoolDispatchError
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -190,12 +191,26 @@ class ExchangeClientBase(ABC):
             The callable's result.
 
         Raises:
-            RuntimeError: When the pool is closed (see ``_ensure_rest_pool``).
+            RuntimeError: When the pool is closed (see
+                ``_ensure_rest_pool``) or the stdlib refuses the submit
+                pre-enqueue during a shutdown race — both mean the
+                callable was definitively NOT sent.
+            RestPoolDispatchError: When scheduling fails AFTER the work
+                item may have been enqueued (``ThreadPoolExecutor.submit``
+                enqueues before spawning a worker, so e.g. "can't start
+                new thread" leaves the callable queued and it may still
+                run on a freed worker) — submit paths classify this as
+                ambiguous, never as a definitive reject.
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            self._ensure_rest_pool(), functools.partial(func, *args, **kwargs)
-        )
+        pool = self._ensure_rest_pool()
+        try:
+            future = loop.run_in_executor(pool, functools.partial(func, *args, **kwargs))
+        except RuntimeError as exc:
+            if "after shutdown" in str(exc) or "after interpreter shutdown" in str(exc):
+                raise
+            raise RestPoolDispatchError(str(exc)) from exc
+        return await future
 
     def _reopen_rest_pool(self) -> None:
         """Re-enable blocking REST dispatch on this client instance.

@@ -49,6 +49,22 @@ class AmbiguousOrderSubmitError(RuntimeError):
         self.instrument = instrument
 
 
+class RestPoolDispatchError(RuntimeError):
+    """Scheduling onto the bounded REST pool failed after possible enqueue.
+
+    Raised by ``ExchangeClientBase._dispatch_blocking`` when the
+    synchronous scheduling step fails with anything OTHER than the
+    pre-submit refusals (closed-pool lifecycle guard, executor-shutdown
+    race): ``ThreadPoolExecutor.submit`` enqueues the work item BEFORE
+    spawning a worker thread, so a failure like ``can't start new
+    thread`` leaves the callable queued and it may still execute once a
+    busy worker frees. Submit paths must therefore treat this as an
+    ambiguous outcome (wrap in :class:`AmbiguousOrderSubmitError`), never
+    as a definitive reject; read-only paths may treat it as an ordinary
+    failure because a delayed duplicate read is harmless.
+    """
+
+
 class CircuitBreakerOpenError(RuntimeError):
     """Order submit refused locally because the venue circuit breaker is open.
 

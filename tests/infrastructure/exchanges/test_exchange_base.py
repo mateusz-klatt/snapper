@@ -29,6 +29,7 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.errors import RestPoolDispatchError
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
@@ -346,6 +347,88 @@ async def test_shutdown_rest_pool_idempotent_and_blocks_dispatch() -> None:
     assert client._rest_pool is None
     with pytest.raises(RuntimeError, match="REST thread pool is closed"):
         await client._dispatch_blocking(lambda: "ok")
+
+
+@pytest.mark.asyncio()
+async def test_dispatch_spawn_failure_raises_ambiguous_dispatch_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-enqueue scheduling failure surfaces as RestPoolDispatchError.
+
+    Given: An executor submit that ENQUEUES the work item and then fails
+        with "can't start new thread" (the stdlib enqueues before
+        spawning a worker, so the callable stays queued and may still
+        drain on a freed worker),
+    When: A blocking call is dispatched,
+    Then: RestPoolDispatchError surfaces after exactly ONE scheduling
+        attempt — submit paths classify it as ambiguous instead of a
+        false definitive reject, and nothing retries the enqueued work.
+    """
+    client = DummyExchangeClient()
+    loop = asyncio.get_running_loop()
+    attempts: list[Any] = []
+
+    def enqueue_then_fail(_pool: Any, fn: Any) -> Any:
+        attempts.append(fn)
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(loop, "run_in_executor", enqueue_then_fail)
+    with pytest.raises(RestPoolDispatchError, match="can't start new thread"):
+        await client._dispatch_blocking(lambda: "queued-order")
+    assert len(attempts) == 1
+    client._shutdown_rest_pool()
+
+
+@pytest.mark.asyncio()
+async def test_dispatch_shutdown_race_keeps_plain_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-enqueue shutdown refusal keeps its loud native type.
+
+    Given: An executor submit refused with "cannot schedule new futures
+        after shutdown" (raised BEFORE the work item is enqueued — the
+        callable was definitively NOT sent),
+    When: A blocking call is dispatched,
+    Then: Plain RuntimeError propagates (lifecycle-bug semantics), NOT
+        the ambiguous RestPoolDispatchError.
+    """
+    client = DummyExchangeClient()
+    loop = asyncio.get_running_loop()
+
+    def refuse_pre_enqueue(_pool: Any, fn: Any) -> Any:
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(loop, "run_in_executor", refuse_pre_enqueue)
+    with pytest.raises(RuntimeError, match="after shutdown") as exc_info:
+        await client._dispatch_blocking(lambda: "never")
+    assert not isinstance(exc_info.value, RestPoolDispatchError)
+    client._shutdown_rest_pool()
+
+
+@pytest.mark.asyncio()
+async def test_worker_raised_runtime_error_stays_plain() -> None:
+    """A RuntimeError raised INSIDE the worker keeps its native type.
+
+    Given: A callable that raises RuntimeError while running on the
+        pool (a venue SDK error during the call itself, not a
+        scheduling failure),
+    When: It is dispatched,
+    Then: The error propagates unchanged — never reclassified as the
+        ambiguous RestPoolDispatchError — and the callee ran exactly
+        once.
+    """
+    client = DummyExchangeClient()
+    calls: list[int] = []
+
+    def sdk_failure() -> None:
+        calls.append(1)
+        raise RuntimeError("venue SDK failure")
+
+    with pytest.raises(RuntimeError, match="venue SDK failure") as exc_info:
+        await client._dispatch_blocking(sdk_failure)
+    assert not isinstance(exc_info.value, RestPoolDispatchError)
+    assert calls == [1]
+    client._shutdown_rest_pool()
 
 
 def test_shutdown_rest_pool_without_pool_is_noop() -> None:

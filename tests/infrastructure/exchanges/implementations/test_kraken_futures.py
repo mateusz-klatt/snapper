@@ -35,6 +35,7 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
+from snapper.infrastructure.exchanges.errors import RestPoolDispatchError
 from snapper.infrastructure.exchanges.implementations import kraken_futures as kf
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
@@ -1730,6 +1731,43 @@ class TestOrderMethods:
         """
         with pytest.raises(RuntimeError, match="API credentials required"):
             await client.create_order(MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_create_order_pool_dispatch_failure_is_wrapped(
+        self, auth_client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A REST-pool dispatch failure wraps as ambiguous, not rejected.
+
+        Given: The bounded-pool dispatch raising RestPoolDispatchError
+            (the submit work item may already sit in the executor queue
+            and could still run on a freed worker),
+        When: create_order is called,
+        Then: AmbiguousOrderSubmitError surfaces with the dispatch error
+            chained and the submit identity attached.
+        """
+        assert auth_client._trade_client is not None
+
+        async def failing_dispatch(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+            raise RestPoolDispatchError("can't start new thread")
+
+        monkeypatch.setattr(auth_client, "_dispatch_blocking", failing_dispatch)
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.MARKET,
+            amount=1.0,
+            client_order_id="amb-fut-pool",
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
+        ):
+            await auth_client.create_order(request)
+        assert isinstance(exc_info.value.__cause__, RestPoolDispatchError)
+        assert exc_info.value.client_order_id == "amb-fut-pool"
 
     @pytest.mark.asyncio
     async def test_create_order_transport_failure_is_ambiguous(

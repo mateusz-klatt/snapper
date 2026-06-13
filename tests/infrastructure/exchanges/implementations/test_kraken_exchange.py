@@ -36,6 +36,7 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
+from snapper.infrastructure.exchanges.errors import RestPoolDispatchError
 from snapper.infrastructure.exchanges.implementations import kraken as kr
 from snapper.infrastructure.exchanges.implementations.kraken import (
     _OHLC_DEPRECATED_TIMESTAMP_NOTICE,
@@ -3286,6 +3287,61 @@ class TestAmbiguousSubmitClassification:
             amount=float("0.1"),
             client_order_id="client_tax",
         )
+
+    @pytest.mark.asyncio
+    async def test_ccxt_pool_dispatch_failure_is_wrapped(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A REST-pool dispatch failure on the ccxt path wraps as ambiguous.
+
+        Given: The bounded-pool dispatch raising RestPoolDispatchError
+            beneath _with_retry/_invoke_func (the submit work item may
+            already sit in the executor queue and could still run on a
+            freed worker),
+        When: create_order is called,
+        Then: AmbiguousOrderSubmitError surfaces with the dispatch error
+            chained and the submit identity attached — never a definitive
+            reject for a possibly-live order.
+        """
+        mock_client = MagicMock()
+
+        async def failing_dispatch(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+            raise RestPoolDispatchError("can't start new thread")
+
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch.object(kraken_client, "_dispatch_blocking", failing_dispatch),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
+        ):
+            await kraken_client.create_order(self._request())
+        assert isinstance(exc_info.value.__cause__, RestPoolDispatchError)
+        assert exc_info.value.client_order_id == "client_tax"
+
+    @pytest.mark.asyncio
+    async def test_native_pool_dispatch_failure_is_wrapped(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A REST-pool dispatch failure on the native path wraps as ambiguous.
+
+        Given: The bounded-pool dispatch raising RestPoolDispatchError
+            beneath the native Trade API send,
+        When: _create_order_via_native is called,
+        Then: AmbiguousOrderSubmitError surfaces with the dispatch error
+            chained and the original venue call never re-executed.
+        """
+        trade_client = MagicMock()
+
+        async def failing_dispatch(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+            raise RestPoolDispatchError("can't start new thread")
+
+        with (
+            patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
+            patch.object(kraken_client, "_dispatch_blocking", failing_dispatch),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
+        ):
+            await kraken_client._create_order_via_native(self._request())
+        assert isinstance(exc_info.value.__cause__, RestPoolDispatchError)
+        trade_client.create_order.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_exhausted_rate_limit_is_not_wrapped(

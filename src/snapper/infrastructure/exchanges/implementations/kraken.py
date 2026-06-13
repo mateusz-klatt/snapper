@@ -76,6 +76,7 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
+from snapper.infrastructure.exchanges.errors import RestPoolDispatchError
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenExecutionSubscribeParamsSchema
@@ -731,6 +732,12 @@ class KrakenExchangeClient(ExchangeClientBase):
             )
         except ccxt.RateLimitExceeded:
             raise
+        except RestPoolDispatchError as e:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=request.client_order_id or "",
+                instrument=request.symbol,
+                message=f"Kraken Spot create_order pool dispatch failure (order may exist): {e}",
+            ) from e
         except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
             raise AmbiguousOrderSubmitError(
                 client_order_id=request.client_order_id or "",
@@ -808,7 +815,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                     **kraken_params,
                     extra_params=extra_params or None,
                 )
-            except requests.exceptions.RequestException as e:
+            except (requests.exceptions.RequestException, RestPoolDispatchError) as e:
                 raise AmbiguousOrderSubmitError(
                     client_order_id=request.client_order_id or "",
                     instrument=request.symbol,
