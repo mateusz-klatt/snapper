@@ -247,13 +247,15 @@ class ExecutionPlanStatusEnum(StrEnum):
     """Lifecycle state of an ExecutionPlan row.
 
     Covers every state the PlanExecutorService transitions through
-    ``armed`` (waiting for first tick / command), ``active`` (has
-    in-flight child commands), ``paused`` (operator intervention)
-    ``cancel_requested`` (cancel issued but children still racing)
-    terminal states ``completed`` / ``cancelled`` / ``failed`` /
-    ``expired``.
+    ``pending`` (created, not yet armed — written by the REST/MCP submit
+    routes before the executor picks it up), ``armed`` (waiting for first
+    tick / command), ``active`` (has in-flight child commands),
+    ``paused`` (operator intervention), ``cancel_requested`` (cancel
+    issued but children still racing), terminal states ``completed`` /
+    ``cancelled`` / ``failed`` / ``expired``.
     """
 
+    PENDING = "pending"
     ARMED = "armed"
     ACTIVE = "active"
     PAUSED = "paused"

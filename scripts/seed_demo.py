@@ -14,7 +14,7 @@ Demo set as of 2026-05-05 (entries chosen to match REAL Kraken Futures
 - SHORT ETH-USD-PERP opened 2026-04-25 @ $2,820.40 (pre-crash level);
   current mark $2,345.60 → unrealized +$2,231.56 on 4.7 ETH = +16.8% on
   notional $13,256. Relative-value: ETH lagged BTC's bounce hard.
-- One open limit buy BTC + one cancelled stop sell ETH
+- One open limit buy BTC + one canceled stop sell ETH
 - Two completed BTC futures backtest runs, plus CLM6/GCM6 Kraken Equities
   backtest rows when those instruments are available, so the
   Backtests/Compare page renders meaningful rows.
@@ -849,7 +849,7 @@ def main() -> int:
             order_type="stop",
             price=2950.0,
             size=2.5,
-            status="cancelled",
+            status="canceled",
             filled_size=0.0,
             average_price=None,
             created_at=order4_t,

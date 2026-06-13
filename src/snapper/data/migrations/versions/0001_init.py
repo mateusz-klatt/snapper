@@ -1534,7 +1534,6 @@ def upgrade() -> None:
             "known_to",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default="9999-12-31 23:59:59.000000",
         ),
         sa.Column("underlying_public_id", _uuid_col(), nullable=False),
         sa.Column("exchange", sa.String(32), nullable=False),

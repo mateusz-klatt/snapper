@@ -185,6 +185,39 @@ __all__ = [
 
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _CK_MODE_LIVE_PAPER = "mode IN ('live', 'paper')"
+_CK_SIDE_BUY_SELL = "side IN ('buy', 'sell')"
+_CK_ORDER_TYPE_VALUES = (
+    "order_type IN ('market', 'limit', 'stop', 'stop_limit', 'stop-loss', "
+    "'stop-loss-limit', 'take-profit', 'trailing-stop', 'iceberg', 'settle-position')"
+)
+"""order_type vocabulary CHECK shared by orders + trade_commands.
+
+Dual-era and varchar(16)-bounded: post-#156 writers emit CORE values
+(market/limit/stop/stop_limit), pre-#156 persisted raw wire
+ExchangeOrderTypeEnum spellings. The two over-length wire members
+(``take-profit-limit``/``trailing-stop-limit``) cannot fit the
+``String(16)`` column on PostgreSQL, so column width — not this CHECK —
+excludes them; the CHECK lists only the ten that fit.
+"""
+_CK_ORDERS_STATUS_WIRE = (
+    "status IN ('pending', 'open', 'closed', 'canceled', 'expired', "
+    "'pending_new', 'new', 'partially_filled', 'filled')"
+)
+"""orders.status carries WIRE values (ExchangeOrderStatusEnum, American
+spelling — ``canceled`` not ``cancelled``), persisted from
+``order.status.value`` where order is an ExchangeOrderSnapshot."""
+_CK_EXECUTIONS_STATUS = "status IN ('filled', 'partial')"
+"""executions.status carries DOMAIN FillStatusEnum values."""
+_CK_TRADE_COMMAND_TYPE = "command_type IN ('create', 'submit', 'cancel', 'replace')"
+"""Intentional dual vocabulary: REST/MCP/plan write 'create', engine/guard
+write 'submit', cancel paths 'cancel', OrderCommandEnum 'replace'."""
+_CK_TRADE_COMMAND_STATUS = (
+    "status IN ('created', 'dispatched', 'direct_dispatched', 'accepted', "
+    "'filled', 'partially_filled', 'rejected', 'cancelled', 'expired', 'failed')"
+)
+"""trade_commands.status carries TradeCommandStatusEnum (DOMAIN spelling —
+``cancelled``, distinct from the wire ``canceled`` in orders.status)."""
+_CK_PAIRING_MODE = "pairing_mode IN ('auto', 'manual')"
 _KNOWN_TO_ACTIVE_PG = text("known_to = '9999-12-31T23:59:59+00:00'")
 _KNOWN_TO_ACTIVE_SQLITE = text("known_to = '9999-12-31 23:59:59.000000'")
 _PAIRED_GROUP_ID_NOT_NULL = text("paired_group_id IS NOT NULL")
@@ -430,6 +463,10 @@ class Order(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_orders_mode"),
+        CheckConstraint(_CK_SIDE_BUY_SELL, name="ck_orders_side"),
+        CheckConstraint(_CK_ORDER_TYPE_VALUES, name="ck_orders_order_type"),
+        CheckConstraint(_CK_ORDERS_STATUS_WIRE, name="ck_orders_status"),
     )
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
@@ -492,6 +529,15 @@ class Execution(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        Index(
+            "ix_executions_wallet_ts",
+            "wallet_public_id",
+            "timestamp",
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(_CK_SIDE_BUY_SELL, name="ck_executions_side"),
+        CheckConstraint(_CK_EXECUTIONS_STATUS, name="ck_executions_status"),
     )
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
@@ -817,7 +863,15 @@ class SymbolExchangeCapability(TemporalMixin, Base):
 
 
 class ProcessRun(TemporalMixin, Base):
-    """SQLAlchemy model for background process execution records."""
+    """SQLAlchemy model for background process execution records.
+
+    ``parameters`` / ``result`` / ``tags`` use ``JSON`` (text-with-
+    validation on PostgreSQL), NOT ``JSONB``. They are written and read
+    as whole documents; no query path uses key-indexed access. If a
+    future query needs containment / key operators (e.g. PostgreSQL
+    ``tags @> '[...]'``), migrate the affected column to ``JSONB`` in a
+    dedicated migration — a blanket JSONB switch is deferred.
+    """
 
     __tablename__ = "process_runs"
     __table_args__ = (
@@ -1064,6 +1118,11 @@ class TradeCommand(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        CheckConstraint(_CK_TRADE_COMMAND_TYPE, name="ck_trade_commands_command_type"),
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_trade_commands_mode"),
+        CheckConstraint(_CK_SIDE_BUY_SELL, name="ck_trade_commands_side"),
+        CheckConstraint(_CK_ORDER_TYPE_VALUES, name="ck_trade_commands_order_type"),
+        CheckConstraint(_CK_TRADE_COMMAND_STATUS, name="ck_trade_commands_status"),
     )
     command_type: Mapped[str] = mapped_column(String(16))
     shard_key: Mapped[str] = mapped_column(String(256))
@@ -2533,6 +2592,7 @@ class BacktestComparison(TemporalMixin, Base):
             "run_a_public_id <> run_b_public_id",
             name="ck_bc_runs_distinct",
         ),
+        CheckConstraint(_CK_PAIRING_MODE, name="ck_bc_pairing_mode"),
     )
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)

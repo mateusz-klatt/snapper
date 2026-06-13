@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 
@@ -2754,7 +2755,11 @@ async def test_compensation_recompute_raises_on_unexpected_flatten_side(
     """A flatten command with a non-buy/sell side fails closed.
 
     Given: a compensating leg whose reduce-only flatten command carries a
-        malformed side,
+        malformed side that BYPASSED the ``ck_trade_commands_side`` DB
+        CHECK (the recompute's ValueError is defense-in-depth for a row
+        written by raw SQL or predating migration 0010 — the CHECK now
+        rejects such a side on normal inserts, so the test plants it with
+        ``PRAGMA ignore_check_constraints=ON`` to reach the guard),
     When: the compensation recompute runs,
     Then: it raises ValueError rather than silently treating the side as a buy
         (which would invert the compensation sign).
@@ -2771,13 +2776,36 @@ async def test_compensation_recompute_raises_on_unexpected_flatten_side(
             filled_signed_qty=10.0,
         )
     )
-    await _insert_flatten_command(
-        _repo,
-        public_id=_pid(822),
-        supersedes_command_id=_pid(721),
-        client_order_id="flat-bad",
-        side="hold",
-    )
+    async with _repo.session() as session:
+        await session.execute(text("PRAGMA ignore_check_constraints=ON"))
+        session.add(
+            TradeCommand(
+                public_id=_pid(822),
+                command_type="submit",
+                shard_key="kraken:BTC-USD:live",
+                exchange="kraken",
+                instrument="BTC-USD",
+                mode="live",
+                strategy_id="engine",
+                client_order_id="flat-bad",
+                venue_client_id="flat-bad",
+                side="hold",
+                order_type="market",
+                quantity=1.0,
+                price=None,
+                reduce_only=True,
+                status=TradeCommandStatusEnum.CREATED.value,
+                created_at=_T0,
+                correlation_id=_pid(100),
+                supersedes_command_id=_pid(721),
+                idempotency_key="flatten:flat-bad",
+                wallet_public_id="",
+                session_id=_SESSION_ID,
+                sequence_id=1,
+                timestamp=_T0,
+            )
+        )
+        await session.commit()
     with pytest.raises(ValueError, match="unexpected side"):
         await _repo.reproject_paired_execution_leg_compensation(leg_id, _T1, _NEXT_SESSION_ID, 2)
 

@@ -3535,7 +3535,7 @@ async def test_get_active_orders_for_recovery(tmp_path: Path) -> None:
     later = now + timedelta(seconds=1)
     await r.update_order(
         row_id,
-        status="cancelled",
+        status="canceled",
         updated_at=later,
         session_id="s1",
         sequence_id=22,
@@ -9690,7 +9690,7 @@ async def test_get_executions_for_order_filters_in_sql(tmp_path: Path) -> None:
             price=50000.0,
             fee=0.0,
             fee_asset="USD",
-            status="ok",
+            status="filled",
             session_id="s-test",
             sequence_id=500 + i,
             timestamp=now + timedelta(seconds=i),
