@@ -585,17 +585,14 @@ async def test_subscribe_instruments_downloads_when_stale(
 
     monkeypatch.setattr(stubbed_client, "_save_symbols_to_cache", fake_save)
 
-    async def fake_to_thread(
+    async def fake_dispatch_blocking(
         func: Callable[..., Any],
         *args: Any,
         **kwargs: Any,
     ) -> Any:
         return func(*args, **kwargs)
 
-    monkeypatch.setattr(
-        "snapper.infrastructure.exchanges.implementations.polygon.asyncio.to_thread",
-        fake_to_thread,
-    )
+    monkeypatch.setattr(stubbed_client, "_dispatch_blocking", fake_dispatch_blocking)
     results = [symbol async for symbol in stubbed_client.subscribe_instruments()]
     assert results[0]["ticker"] == "X:BTCUSD"
     assert saved["symbols"][0]["ticker"] == "X:BTCUSD"

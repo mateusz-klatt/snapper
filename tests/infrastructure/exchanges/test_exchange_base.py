@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
+import snapper.utils.logging as logging_module
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
@@ -31,6 +32,7 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.errors import RestPoolDispatchError
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.utils.logging import set_log_context
 
 
 class DummyExchangeClient(ExchangeClientBase):
@@ -428,6 +430,28 @@ async def test_worker_raised_runtime_error_stays_plain() -> None:
         await client._dispatch_blocking(sdk_failure)
     assert not isinstance(exc_info.value, RestPoolDispatchError)
     assert calls == [1]
+    client._shutdown_rest_pool()
+
+
+@pytest.mark.asyncio()
+async def test_dispatch_blocking_propagates_log_context_var() -> None:
+    """ContextVars set by the caller are visible in the worker.
+
+    Given: The snapper log-context ContextVar set in the calling task,
+    When: A blocking callable reads it on the pool thread,
+    Then: It observes the caller's value (asyncio.to_thread parity —
+        the Polygon client logs inside worker callables and the log
+        formatter reads this var there).
+    """
+    client = DummyExchangeClient()
+    set_log_context("ctx-probe")
+    seen: list[str] = []
+
+    def read_context() -> None:
+        seen.append(logging_module._log_context.get())
+
+    await client._dispatch_blocking(read_context)
+    assert seen == ["ctx-probe"]
     client._shutdown_rest_pool()
 
 

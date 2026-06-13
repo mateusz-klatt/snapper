@@ -321,18 +321,20 @@ class TestPolygonRetryLogic:
     async def test_request_runs_in_worker_thread_not_event_loop(
         self, polygon_client: PolygonExchangeClient
     ) -> None:
-        """Verify request_func runs via asyncio.to_thread to avoid blocking the event loop.
+        """Verify request_func runs on the bounded venue REST pool off-loop.
 
         Given: A request_func that performs blocking work (time.sleep inside SDK pagination),
         When: _make_request_with_retry invokes it,
-        Then: asyncio.to_thread is used so the blocking work runs on a worker thread.
+        Then: The work runs on a ``polygon-rest``-named pool thread, not the event loop.
         """
         main_loop = asyncio.get_running_loop()
         main_thread_id = threading.get_ident()
         executor_thread_id: list[int | None] = []
+        executor_thread_name: list[str] = []
 
         def blocking_request() -> str:
             executor_thread_id.append(threading.get_ident())
+            executor_thread_name.append(threading.current_thread().name)
             return "ok"
 
         polygon_client._wait_for_rate_limit = AsyncMock()
@@ -342,7 +344,9 @@ class TestPolygonRetryLogic:
         assert (
             executor_thread_id[0] != main_thread_id
         ), "request_func must run on a worker thread, not the asyncio event loop thread"
+        assert executor_thread_name[0].startswith("polygon-rest")
         assert main_loop.is_running(), "event loop must still be running after the call"
+        polygon_client._shutdown_rest_pool()
 
 
 class TestPolygonAggregatesPagination:
@@ -735,15 +739,15 @@ async def test_subscribe_instruments_downloads_all(
         client=None,
     )
 
-    async def fake_to_thread(func: Any) -> Any:
-        return func()
+    async def fake_dispatch_blocking(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
 
     sleeps: list[float] = []
 
     async def fake_sleep(seconds: float) -> None:
         sleeps.append(seconds)
 
-    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(client, "_dispatch_blocking", fake_dispatch_blocking)
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     yielded: list[dict[str, Any]] = []
     async for s in client.subscribe_instruments():
@@ -916,3 +920,81 @@ class TestPolygonCreateCancelOrder:
         """
         with pytest.raises(NotImplementedError, match="market data only"):
             await polygon_client.cancel_order("order123")
+
+
+class TestRestPoolLifecycle:
+    """Polygon client lifecycle for the dedicated REST pool (P1-5)."""
+
+    @pytest.mark.asyncio
+    async def test_disconnect_releases_rest_pool(
+        self, polygon_client: PolygonExchangeClient
+    ) -> None:
+        """Verify disconnect frees the pool for this REST-only client.
+
+        Given: A client whose pool was created by a blocking dispatch,
+        When: ``disconnect()`` runs,
+        Then: The pool is shut down and cleared.
+        """
+        polygon_client._ensure_rest_pool()
+        await polygon_client.disconnect()
+        assert polygon_client._rest_pool is None
+
+    @pytest.mark.asyncio
+    async def test_disconnect_connect_cycle_reopens_dispatch(
+        self, polygon_client: PolygonExchangeClient
+    ) -> None:
+        """Verify the cached-client reuse path survives a full cycle.
+
+        Given: A client that dispatched, disconnected (pool closed),
+            then reconnected — the polygon symbol updater caches its
+            client across update cycles and goes through exactly this
+            connect/disconnect lifecycle,
+        When: A blocking call is dispatched after the reconnect,
+        Then: A fresh pool serves it instead of the closed-pool error.
+        """
+        assert await polygon_client._dispatch_blocking(lambda: "first") == "first"
+        await polygon_client.disconnect()
+        with pytest.raises(RuntimeError, match="closed"):
+            await polygon_client._dispatch_blocking(lambda: "blocked")
+        await polygon_client.connect()
+        assert await polygon_client._dispatch_blocking(lambda: "again") == "again"
+        polygon_client._shutdown_rest_pool()
+
+    @pytest.mark.asyncio
+    async def test_instrument_pages_materialize_on_worker_thread(
+        self, polygon_client: PolygonExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify lazy SDK paging is consumed on the pool, not the loop.
+
+        Given: A lazily-evaluated ticker iterator that records the
+            thread consuming each item,
+        When: ``subscribe_instruments`` drains it,
+        Then: Every item was pulled on a ``polygon-rest`` pool thread —
+            lazy pagination network I/O never runs on the event loop.
+        """
+        main_thread_id = threading.get_ident()
+        consuming_threads: list[tuple[int, str]] = []
+
+        def lazy_tickers() -> Any:
+            for idx in range(3):
+                consuming_threads.append((threading.get_ident(), threading.current_thread().name))
+                yield SimpleNamespace(
+                    ticker=f"X:LAZY{idx}", name=f"Lazy {idx}", market="crypto", locale="global"
+                )
+
+        polygon_client._client = SimpleNamespace(
+            list_tickers=lambda **_kwargs: lazy_tickers(),
+            headers={},
+            client=None,
+        )
+        monkeypatch.setattr(polygon_client, "_is_cache_valid", lambda: False)
+        monkeypatch.setattr(polygon_client, "_save_symbols_to_cache", lambda symbols: None)
+        yielded: list[dict[str, Any]] = []
+        async for item in polygon_client.subscribe_instruments():
+            yielded.append(item)
+        assert len(yielded) == 3
+        assert consuming_threads, "lazy iterator was never consumed"
+        for thread_id, thread_name in consuming_threads:
+            assert thread_id != main_thread_id
+            assert thread_name.startswith("polygon-rest")
+        polygon_client._shutdown_rest_pool()

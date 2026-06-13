@@ -16,6 +16,7 @@ must inherit from this base class and implement its abstract methods.
 import asyncio
 import concurrent.futures
 import contextlib
+import contextvars
 import functools
 import time
 from abc import ABC
@@ -174,12 +175,13 @@ class ExchangeClientBase(ABC):
 
         Replaces ``asyncio.to_thread`` for venue REST so that dead-network
         stalls saturate at most this client's bounded pool instead of the
-        loop's shared default executor (audit P1-5). Unlike
-        ``asyncio.to_thread`` this does NOT propagate contextvars into the
-        worker thread; no REST path consumes them (``_CURRENT_PUBLISHER``
-        is read only on WebSocket handshake paths). Cancelling the await
-        abandons the result but the thread keeps running — same semantics
-        the default-executor dispatch had.
+        loop's shared default executor (audit P1-5). Contextvars are
+        propagated via ``copy_context`` for full ``asyncio.to_thread``
+        parity: the Polygon client logs inside its worker-thread
+        callables and the log-context ``ContextVar`` is read by record
+        formatting there. Cancelling the await abandons the result but
+        the thread keeps running — same semantics the default-executor
+        dispatch had.
 
         Args:
             func: Synchronous callable to execute (never a coroutine
@@ -204,8 +206,10 @@ class ExchangeClientBase(ABC):
         """
         loop = asyncio.get_running_loop()
         pool = self._ensure_rest_pool()
+        ctx = contextvars.copy_context()
+        call = functools.partial(ctx.run, functools.partial(func, *args, **kwargs))
         try:
-            future = loop.run_in_executor(pool, functools.partial(func, *args, **kwargs))
+            future = loop.run_in_executor(pool, call)
         except RuntimeError as exc:
             if "after shutdown" in str(exc) or "after interpreter shutdown" in str(exc):
                 raise

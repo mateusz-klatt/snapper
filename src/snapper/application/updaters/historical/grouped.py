@@ -117,11 +117,14 @@ class PolygonGroupedDailyBackfillService(RegisterableProcess):
         if not api_key:
             raise ValueError("Polygon API key not configured in settings")
         client = PolygonExchangeClient(api_key=api_key)
-        self._loader = PolygonHistoricalLoader(client, cache_root=_CACHE_ROOT)
-        end_day = datetime.now(UTC).date()
-        for offset in range(1, self._days + 2):
-            target_day = end_day - timedelta(days=offset)
-            await self._fetch_day(target_day)
+        try:
+            self._loader = PolygonHistoricalLoader(client, cache_root=_CACHE_ROOT)
+            end_day = datetime.now(UTC).date()
+            for offset in range(1, self._days + 2):
+                target_day = end_day - timedelta(days=offset)
+                await self._fetch_day(target_day)
+        finally:
+            await client.disconnect()
 
     async def _fetch_day(self, target_day: date) -> None:
         """Fetch grouped daily data for a specific day.

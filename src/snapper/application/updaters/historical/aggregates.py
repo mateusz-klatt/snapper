@@ -182,6 +182,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         mode. Never writes to the database.
         """
         set_log_context("bf:poly_agg")
+        client: PolygonExchangeClient | None = None
         try:
             settings_service = await get_settings_service(
                 self.settings.db_url,
@@ -226,6 +227,8 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                     continue
                 await self._process_symbol(context)
         finally:
+            if client is not None:
+                await client.disconnect()
             self._dispose_resources()
 
     def _dispose_resources(self) -> None:

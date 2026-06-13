@@ -404,6 +404,43 @@ class TestStart:
         assert mock_process.call_count == 2
 
     @pytest.mark.asyncio
+    async def test_start_disconnects_client_when_symbol_processing_raises(self) -> None:
+        """Client is disconnected in finally even when a symbol fetch fails.
+
+        Given: A client whose first symbol processing raises,
+        When: start() propagates the error,
+        Then: The client's disconnect was awaited exactly once, so the
+            dedicated REST pool (P1-5) cannot leak from a failed backfill.
+        """
+        svc = KrakenFuturesFundingBackfillService(symbols=["BTC-USD-PERP"])
+        svc._db = AsyncMock()
+        mock_client = MagicMock(disconnect=AsyncMock())
+        with (
+            patch.object(svc, "_resolve_symbols", return_value=["BTC-USD-PERP"]),
+            patch.object(
+                svc,
+                "_process_symbol",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("venue down"),
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_funding.get_repository",
+                return_value=AsyncMock(),
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_funding.set_log_context",
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_funding"
+                ".KrakenFuturesExchangeClient",
+                return_value=mock_client,
+            ),
+            pytest.raises(RuntimeError, match="venue down"),
+        ):
+            await svc.start()
+        mock_client.disconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_start_no_symbols_returns_early(self) -> None:
         """No resolved symbols logs warning and returns.
 

@@ -134,6 +134,9 @@ class TestPolygonSmallBranches:
         """
         client = PolygonExchangeClient.__new__(PolygonExchangeClient)
         client.rate_limit = 120
+        client._rest_pool = None
+        client._rest_pool_closed = False
+        client.exchange_name = "polygon"
         client.symbols_cache_file = Path("/tmp/polygon_cache.json")
         client._is_cache_valid = lambda: False
         client._load_symbols_from_cache = MagicMock()
@@ -203,6 +206,9 @@ class TestPolygonSmallBranches:
         """
         client = PolygonExchangeClient.__new__(PolygonExchangeClient)
         client.rate_limit = 120
+        client._rest_pool = None
+        client._rest_pool_closed = False
+        client.exchange_name = "polygon"
         client.symbols_cache_file = Path("/tmp/polygon_cache.json")
         client._is_cache_valid = lambda: False
         client._save_symbols_to_cache = MagicMock()

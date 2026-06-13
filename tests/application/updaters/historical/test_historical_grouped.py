@@ -84,7 +84,7 @@ def service_fixture(
     loader = _LoaderStub()
     monkeypatch.setattr(
         "snapper.application.updaters.historical.grouped.PolygonExchangeClient",
-        MagicMock,
+        lambda *args, **kwargs: MagicMock(disconnect=AsyncMock()),
     )
     monkeypatch.setattr(
         "snapper.application.updaters.historical.grouped.PolygonHistoricalLoader",

@@ -21,6 +21,7 @@ limiting behavior, sleeping 24 seconds on 429 responses.
 
 import asyncio
 import csv
+import itertools
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -111,8 +112,7 @@ class PolygonRetryPolicy(Retry):
         if backoff > 0:
             retry_num = len(self.history)
             logger.warning(
-                f"Polygon API retry #{retry_num}: sleeping {backoff:.1f}s "
-                f"(likely 429 rate limit)"
+                f"Polygon API retry #{retry_num}: sleeping {backoff:.1f}s (likely 429 rate limit)"
             )
         super().sleep(response)
 
@@ -181,12 +181,23 @@ class PolygonExchangeClient(ExchangeClientBase):
             logger.debug("Patched Polygon SDK retry: PolygonRetryPolicy (24s, 24s, 48s, 96s, 120s)")
 
     async def connect(self) -> None:
-        """No-op connect for REST-only client."""
-        pass
+        """Re-enable REST dispatch for this REST-only client.
+
+        There is no connection to establish, but the base lifecycle
+        contract requires ``connect()`` to reopen the bounded REST pool
+        as its first step so a client reused after ``disconnect()`` can
+        dispatch again.
+        """
+        self._reopen_rest_pool()
 
     async def disconnect(self) -> None:
-        """No-op disconnect for REST-only client."""
-        pass
+        """Release the dedicated REST pool for this REST-only client.
+
+        There is no connection to tear down, but blocking SDK calls run
+        on the per-client bounded pool (P1-5), which must be freed when
+        an owner finishes with the client.
+        """
+        self._shutdown_rest_pool()
 
     async def _wait_for_rate_limit(self) -> None:
         """Wait if necessary to comply with rate limiting.
@@ -228,7 +239,7 @@ class PolygonExchangeClient(ExchangeClientBase):
             try:
                 await self._wait_for_rate_limit()
                 self._record_rest_call()
-                response = await asyncio.to_thread(request_func)
+                response = await self._dispatch_blocking(request_func)
                 return response
             except Exception as e:
                 error_str = str(e)
@@ -320,8 +331,7 @@ class PolygonExchangeClient(ExchangeClientBase):
                 items_in_page += 1
                 if items_in_page >= page_size:
                     logger.info(
-                        f"Fetched {len(results)} bars. "
-                        f"Sleeping 12s before next page (5 req/min)..."
+                        f"Fetched {len(results)} bars. Sleeping 12s before next page (5 req/min)..."
                     )
                     time.sleep(12)
                     items_in_page = 0
@@ -833,13 +843,32 @@ class PolygonExchangeClient(ExchangeClientBase):
                 limit=1000,
             )
 
-        ticker_iterator = await asyncio.to_thread(_fetch_tickers)
-        for ticker in ticker_iterator:
-            ticker_dict = self._extract_ticker_fields(ticker, self._TICKER_FIELDS)
-            symbols_list.append(ticker_dict)
-            yield ticker_dict
-            total_yielded += 1
-            if total_yielded % 1000 == 0:
+        ticker_iterator = iter(await self._dispatch_blocking(_fetch_tickers))
+
+        def _next_page() -> list[Any]:
+            """Materialize one page of the lazy SDK iterator off-loop.
+
+            ``list_tickers`` returns a lazily-paging iterator whose
+            ``next()`` performs synchronous network I/O, so consuming it
+            on the event loop would both block the loop and bypass the
+            bounded REST pool (P1-5). One page per pool call preserves
+            the 12s-per-page pacing below exactly as before. The outer
+            ``iter()`` normalizes list-returning fakes/SDKs to a single
+            stateful iterator — repeated ``islice`` over a plain list
+            would re-read the same first page forever.
+            """
+            return list(itertools.islice(ticker_iterator, 1000))
+
+        while True:
+            page = await self._dispatch_blocking(_next_page)
+            if not page:
+                break
+            for ticker in page:
+                ticker_dict = self._extract_ticker_fields(ticker, self._TICKER_FIELDS)
+                symbols_list.append(ticker_dict)
+                yield ticker_dict
+                total_yielded += 1
+            if len(page) == 1000:
                 page_count += 1
                 sleep_time = 12
                 logger.info(

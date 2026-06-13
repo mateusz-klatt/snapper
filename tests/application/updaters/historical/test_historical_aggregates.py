@@ -1318,7 +1318,8 @@ async def test_all_mapped_no_results_returns_early() -> None:
             return_value=MagicMock(),
         ),
         patch(
-            "snapper.application.updaters.historical.aggregates.PolygonExchangeClient"
+            "snapper.application.updaters.historical.aggregates.PolygonExchangeClient",
+            return_value=MagicMock(disconnect=AsyncMock()),
         ) as mock_client_cls,
         patch(
             "snapper.application.updaters.historical.aggregates.PolygonHistoricalLoader"
@@ -1327,7 +1328,7 @@ async def test_all_mapped_no_results_returns_early() -> None:
         mock_settings_service = AsyncMock()
         mock_get_settings_service.return_value = mock_settings_service
         mock_get_settings_with_service.return_value = stub_settings
-        mock_client = MagicMock()
+        mock_client = MagicMock(disconnect=AsyncMock())
         mock_client_cls.return_value = mock_client
         mock_loader = _StubLoader()
         mock_loader_cls.return_value = mock_loader
@@ -1375,7 +1376,10 @@ async def test_no_candles_returned_skips_quietly() -> None:
             "snapper.application.updaters.historical.aggregates.DatabaseRepository",
             return_value=SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
         ),
-        patch("snapper.application.updaters.historical.aggregates.PolygonExchangeClient"),
+        patch(
+            "snapper.application.updaters.historical.aggregates.PolygonExchangeClient",
+            return_value=MagicMock(disconnect=AsyncMock()),
+        ),
         patch(
             "snapper.application.updaters.historical.aggregates.PolygonHistoricalLoader",
             return_value=stub_loader,
@@ -1427,7 +1431,10 @@ async def test_730_day_limit_enforced() -> None:
             "snapper.application.updaters.historical.aggregates.DatabaseRepository",
             return_value=service._db_sync,
         ),
-        patch("snapper.application.updaters.historical.aggregates.PolygonExchangeClient"),
+        patch(
+            "snapper.application.updaters.historical.aggregates.PolygonExchangeClient",
+            return_value=MagicMock(disconnect=AsyncMock()),
+        ),
         patch(
             "snapper.application.updaters.historical.aggregates.PolygonHistoricalLoader",
             return_value=stub_loader,
@@ -1494,7 +1501,10 @@ async def test_chunk_optimization_skip_when_all_csv_exist() -> None:
             "snapper.application.updaters.historical.aggregates.DatabaseRepository",
             return_value=service._db_sync,
         ),
-        patch("snapper.application.updaters.historical.aggregates.PolygonExchangeClient"),
+        patch(
+            "snapper.application.updaters.historical.aggregates.PolygonExchangeClient",
+            return_value=MagicMock(disconnect=AsyncMock()),
+        ),
         patch(
             "snapper.application.updaters.historical.aggregates.PolygonHistoricalLoader",
             return_value=stub_loader,
@@ -1546,7 +1556,7 @@ async def test_start_without_symbols_returns(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         aggregates_module,
         "PolygonExchangeClient",
-        lambda api_key: SimpleNamespace(),
+        lambda api_key: SimpleNamespace(disconnect=AsyncMock()),
     )
     monkeypatch.setattr(
         aggregates_module,
@@ -1599,7 +1609,7 @@ async def test_start_all_mapped_without_results(
     monkeypatch.setattr(
         aggregates_module,
         "PolygonExchangeClient",
-        lambda api_key: SimpleNamespace(),
+        lambda api_key: SimpleNamespace(disconnect=AsyncMock()),
     )
     monkeypatch.setattr(
         aggregates_module,
@@ -1653,7 +1663,7 @@ async def test_start_skips_symbol_without_context(
     monkeypatch.setattr(
         aggregates_module,
         "PolygonExchangeClient",
-        lambda api_key: SimpleNamespace(),
+        lambda api_key: SimpleNamespace(disconnect=AsyncMock()),
     )
     monkeypatch.setattr(
         aggregates_module,
