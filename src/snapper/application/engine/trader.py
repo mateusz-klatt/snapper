@@ -608,22 +608,19 @@ class TraderCoordinator(RegisterableProcess):
         Step 1: Full-replay for shards without checkpoints (legacy path).
         Step 2: Query active orders across ALL exchanges, create engines
             for orders that have no executions yet, set order_in_flight.
-        Step 3: Detect fill gaps (DB filled_size vs order filled_size)
-            and enter degraded read-only mode if cost basis is unrecoverable.
-        Step 4: Reconcile position_cycles against recovered engine state
+        Step 3: Reconcile position_cycles against recovered engine state
             so non-flat shards always have an active cycle row and the
             ShardState cycle cache is populated before live fills arrive.
         """
         now = datetime.now(UTC)
         recovered_shards = await self._recover_from_checkpoints(now)
-        executions = await self._recover_from_executions(now, recovered_shards)
-        await self._recover_active_orders(now, executions)
+        await self._recover_from_executions(now, recovered_shards)
+        await self._recover_active_orders(now)
         await self._reconcile_position_cycles()
         logger.info(
             f"ZMQTrader: Engine recovery complete: "
             f"{len(self.engines)} engines, "
-            f"{sum(1 for e in self.engines.values() if e.order_in_flight)} in-flight, "
-            f"{sum(1 for e in self.engines.values() if e.read_only)} degraded"
+            f"{sum(1 for e in self.engines.values() if e.order_in_flight)} in-flight"
         )
 
     async def _recover_paired_execution_leg_fills(self) -> None:
@@ -1439,12 +1436,11 @@ class TraderCoordinator(RegisterableProcess):
             "received_at": fill_row["timestamp"],
         }
 
-    async def _recover_active_orders(self, now: datetime, executions: list[ExecutionRow]) -> None:
+    async def _recover_active_orders(self, now: datetime) -> None:
         """Process active orders across all exchanges."""
         active_orders = await self._load_active_orders_for_recovery(now)
-        execution_fill_sizes = self._build_execution_fill_sizes(executions)
         for db_order in active_orders:
-            await self._recover_active_order_row(db_order, execution_fill_sizes)
+            await self._recover_active_order_row(db_order)
 
     async def _load_active_orders_for_recovery(self, now: datetime) -> list[OrderRow]:
         """Load active orders across all supported exchanges.
@@ -1464,18 +1460,9 @@ class TraderCoordinator(RegisterableProcess):
             logger.error(f"ZMQTrader: Failed to query active orders: {e}")
             return []
 
-    def _build_execution_fill_sizes(self, executions: list[ExecutionRow]) -> dict[str, float]:
-        """Sum replayed execution sizes by ``client_order_id``."""
-        fill_sizes: dict[str, float] = {}
-        for execution in executions:
-            client_order_id = execution["client_order_id"]
-            fill_sizes[client_order_id] = fill_sizes.get(client_order_id, 0.0) + execution["size"]
-        return fill_sizes
-
     async def _recover_active_order_row(
         self,
         db_order: OrderRow,
-        execution_fill_sizes: dict[str, float],
     ) -> None:
         """Recover one active order row into engine state."""
         active_order_group = self._classify_active_order_recovery_row(db_order)
@@ -1493,16 +1480,6 @@ class TraderCoordinator(RegisterableProcess):
         self._sync_active_order_operator(engine_key, engine, db_order, operator_public_id)
         client_order_id = db_order["client_order_id"]
         self._mark_order_in_flight(engine, client_order_id)
-        db_filled = float(db_order.get("filled_size", 0.0))
-        exec_filled = execution_fill_sizes.get(client_order_id, 0.0)
-        if db_filled > 0 and abs(db_filled - exec_filled) > 1e-9:
-            engine.read_only = True
-            logger.warning(
-                f"ZMQTrader: DEGRADED MODE for {engine_key} - fill gap detected: "
-                f"order filled_size={db_filled}, replayed executions={exec_filled}. "
-                f"Cost basis cannot be reconstructed. Manual resolution required."
-            )
-            return
         logger.info(
             f"ZMQTrader: Recovered in-flight order "
             f"{client_order_id} for {engine_key} "

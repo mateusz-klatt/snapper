@@ -3810,56 +3810,6 @@ class TestRecovery:
         assert engine.position_qty == pytest.approx(0.0)
 
     @pytest.mark.asyncio
-    async def test_recover_fill_gap_enters_degraded_mode(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Verify fill gap between order and executions triggers degraded mode.
-
-        Given: Order shows filled_size=0.5 but no executions exist,
-        When: _recover_engine_state runs,
-        Then: Engine enters read_only=True (degraded mode).
-        """
-        _configure_settings(monkeypatch)
-        coord = TraderCoordinator()
-        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
-        mock_repo = AsyncMock()
-        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
-        mock_repo.get_active_orders_for_recovery = AsyncMock(
-            return_value=[
-                {
-                    "public_id": "ord-gap",
-                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
-                    "session_id": "s1",
-                    "sequence_id": 1,
-                    "instrument": "BTC-USD",
-                    "exchange": "kraken",
-                    "client_order_id": "c-gap",
-                    "exchange_order_id": "ex-gap",
-                    "status": "open",
-                    "side": "buy",
-                    "order_type": "market",
-                    "size": 1.0,
-                    "price": None,
-                    "filled_size": 0.5,
-                    "average_price": 50000.0,
-                    "time_in_force": None,
-                    "error": None,
-                    "created_at": datetime(2024, 1, 1, tzinfo=UTC),
-                    "updated_at": None,
-                }
-            ]
-        )
-        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
-        mock_repo.get_open_position_cycle = AsyncMock(return_value=None)
-        mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
-        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
-        coord.repository = mock_repo
-        await coord._recover_engine_state()
-        engine = coord.engines["BTC-USD@kraken-live"]
-        assert engine.read_only is True
-        assert engine.order_in_flight is True
-
-    @pytest.mark.asyncio
     async def test_recover_skips_invalid_exchange(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify executions with unknown exchange are skipped.
 
@@ -3990,54 +3940,6 @@ class TestRecovery:
         assert "BTC-USD@kraken-live" in coord.engines
         engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.order_in_flight is False
-
-    @pytest.mark.asyncio
-    async def test_degraded_mode_blocks_signals(self) -> None:
-        """Verify read_only engine drops all signals.
-
-        Given: Engine in degraded read-only mode,
-        When: Signal arrives,
-        Then: Signal is dropped.
-        """
-        socket = MagicMock()
-        socket.tracker = Mock(session_id="s1")
-        socket.send = AsyncMock()
-        engine = TradingEngineService(
-            "BTC-USD",
-            cast(Any, socket),
-            cfg=EngineConfigModel(initial_cash=10000.0),
-            exchange="kraken",
-        )
-        engine.read_only = True
-        await engine.execute_desired_units(1.0, current_price=100.0)
-        socket.send.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_degraded_mode_blocks_stop_loss(self) -> None:
-        """Verify read_only engine does not trigger stop-loss.
-
-        Given: Engine in degraded mode with position,
-        When: Stop-loss condition is met,
-        Then: No order sent, returns False.
-        """
-        socket = MagicMock()
-        socket.tracker = Mock(session_id="s1")
-        socket.send = AsyncMock()
-        engine = TradingEngineService(
-            "BTC-USD",
-            cast(Any, socket),
-            risk=RiskEvaluator(RiskConfigModel()),
-            cfg=EngineConfigModel(initial_cash=5000.0),
-        )
-        engine.position_qty = 1.0
-        engine.entry_price = 110.0
-        engine.portfolio.positions["BTC-USD"] = PositionStateModel(
-            quantity=1.0, average_price=110.0
-        )
-        engine.read_only = True
-        triggered = await engine._maybe_stop(last_close=50.0, prev_close=120.0)
-        assert triggered is False
-        socket.send.assert_not_awaited()
 
 
 def test_build_engine_key_flat_when_wallet_empty() -> None:

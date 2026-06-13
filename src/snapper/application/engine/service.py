@@ -250,7 +250,6 @@ class TradingEngineService:
         self._in_flight_since: float | None = None
         self._pending_unknown = False
         self.seen_exec_ids: OrderedDict[str, None] = OrderedDict()
-        self.read_only = False
         self._repository = repository
         self._outbox = outbox
         self._strategy_tag = strategy_tag
@@ -597,7 +596,7 @@ class TradingEngineService:
         """
         if abs(self.position_qty) < 1e-12:
             return False
-        if self.read_only or self.order_in_flight:
+        if self.order_in_flight:
             return False
         stop_ref = self.entry_price
         if stop_ref is None:
@@ -937,12 +936,8 @@ class TradingEngineService:
         Returns:
             The durable command ``public_id`` when an order was dispatched
             (for the coordinator to bind a paired-execution leg), else
-            ``None`` (read-only, an order already in flight, or no order
-            needed).
+            ``None`` (an order already in flight, or no order needed).
         """
-        if self.read_only:
-            logger.warning(f"Engine {self.instrument} in degraded read-only mode, dropping signal")
-            return None
         self._check_in_flight_timeout()
         if self.order_in_flight:
             logger.warning(
