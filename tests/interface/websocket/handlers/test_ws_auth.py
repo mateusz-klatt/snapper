@@ -4792,28 +4792,37 @@ class TestAuthRoutesCoverage:
         assert data["payload"]["username"] == "admin"
         assert data["payload"]["role"] == "admin"
 
-    def test_me_endpoint_no_token(self, auth_routes_app: FastAPI) -> None:
+    def test_me_endpoint_no_token(self, client: TestClient) -> None:
         """Me endpoint returns 401 without token.
 
-        Given: No authentication,
+        Given: No authentication (the autouse ``_clear_cookies`` fixture
+        guarantees a cookie-less client),
         When: Calling /me endpoint,
         Then: Returns 401 error.
-        """
-        with TestClient(auth_routes_app) as fresh_client:
-            response = fresh_client.get("/api/auth/me")
-            assert response.status_code == 401
 
-    def test_me_endpoint_invalid_token(self, auth_routes_app: FastAPI) -> None:
+        Reuses the module-scoped client on purpose: a fresh nested
+        ``TestClient`` here spun a second anyio portal whose lifespan
+        startup could hang under xdist+coverage scheduling, and
+        pytest-timeout's thread method turns any such hang into a hard
+        ``os._exit`` worker death (the long-standing "gw crash on
+        test_ws_auth" flake).
+        """
+        response = client.get("/api/auth/me")
+        assert response.status_code == 401
+
+    def test_me_endpoint_invalid_token(self, client: TestClient) -> None:
         """Me endpoint returns 401 with invalid token.
 
         Given: Invalid access token cookie,
         When: Calling /me endpoint,
         Then: Returns 401 error.
+
+        Reuses the module-scoped client — see ``test_me_endpoint_no_token``
+        for why a fresh nested ``TestClient`` is forbidden here.
         """
-        with TestClient(auth_routes_app) as fresh_client:
-            fresh_client.cookies.set("access_token", "invalid_token")
-            response = fresh_client.get("/api/auth/me")
-            assert response.status_code == 401
+        client.cookies.set("access_token", "invalid_token")
+        response = client.get("/api/auth/me")
+        assert response.status_code == 401
 
 
 class TestTokenManager:

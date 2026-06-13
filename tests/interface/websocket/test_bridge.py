@@ -846,6 +846,29 @@ class TestStartStopCoverage:
         mock_context_cls.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_start_reuses_existing_context(self) -> None:
+        """Verify start keeps an already-created ZMQ context.
+
+        Given: A bridge whose context was already created (same-instance
+            restart),
+        When: Starting the bridge,
+        Then: No new ZMQ context is constructed.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge.context = MagicMock()
+
+        async def stop_after_delay() -> None:
+            await asyncio.sleep(0.05)
+            await bridge.stop()
+
+        with patch("zmq.asyncio.Context") as mock_context_cls:
+            await asyncio.gather(
+                bridge.start(),
+                stop_after_delay(),
+            )
+        mock_context_cls.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_start_cancellation(self) -> None:
         """Verify start handles task cancellation.
 

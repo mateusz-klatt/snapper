@@ -368,6 +368,84 @@ class TestLifespan:
                     pass
 
     @pytest.mark.asyncio
+    async def test_lifespan_tolerates_mcp_sub_app_reentry(self) -> None:
+        """Lifespan swallows the known MCP session-manager re-entry error.
+
+        Background: FastMCP's session manager raises
+        ``RuntimeError("... can only be called once ...")`` when its
+        lifespan is entered a second time on the same app object —
+        historically hit by module-scoped test fixtures spawning nested
+        ``TestClient`` instances. The parent lifespan must treat that
+        signature as benign (warn + continue serving) instead of
+        failing startup.
+
+        Given: the MCP sub-app's ``lifespan_context`` raises the
+            re-entry RuntimeError at startup,
+        When: the parent lifespan enters,
+        Then: startup completes (the body runs) and shutdown proceeds
+            normally — the guard yielded instead of re-raising.
+        """
+
+        class _ReentryLifespanCtx:
+            async def __aenter__(self) -> None:
+                raise RuntimeError("StreamableHTTPSessionManager .run() can only be called once")
+
+            async def __aexit__(self, *_: object) -> None:
+                return None
+
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        mock_app.state.mcp_sub_app.router.lifespan_context = MagicMock(
+            return_value=_ReentryLifespanCtx(),
+        )
+        with (
+            patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
+            patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+            patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
+                ),
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            mock_factory = _build_mock_process_factory(started_processes={})
+            mock_factory_cls.return_value = mock_factory
+            body_ran: list[bool] = []
+            async with lifespan(mock_app):
+                body_ran.append(True)
+            assert body_ran == [True]
+        mock_manager.cleanup.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_lifespan_passes_xsub_endpoint_to_user_service_publisher(
         self,
     ) -> None:

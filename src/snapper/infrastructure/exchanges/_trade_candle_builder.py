@@ -117,6 +117,8 @@ class TradeCandleBuilder:
         self._builders: dict[str, _CandleAccumulator] = {}
         self._watermark: datetime | None = None
         self._update_count: int = 0
+        self._closed_minute: dict[str, int] = {}
+        self._late_trades_after_close: int = 0
 
     def update(self, trade: TradeUpdate) -> None:
         """Fold a single trade into its symbol's open minute-bucket.
@@ -130,6 +132,10 @@ class TradeCandleBuilder:
         watermark (the highest ``trade.timestamp`` folded so far, consumed by
         :meth:`pop_completed_by_event_watermark`) and the activity counter
         (consumed by the idle-flush driver — see :meth:`update_count`).
+        A trade whose minute was ALREADY emitted increments
+        :attr:`late_trades_after_close` (and WARNs once per re-opened
+        bucket) but is still folded — its corrective candle must not be
+        lost; the counter exists so the early close is visible.
 
         Args:
             trade: The :class:`TradeUpdate` to fold into the
@@ -143,6 +149,18 @@ class TradeCandleBuilder:
         minute_ts = int(floor.timestamp())
         key = f"{trade.symbol}_{minute_ts}"
         existing = self._builders.get(key)
+        closed = self._closed_minute.get(trade.symbol)
+        if closed is not None and minute_ts <= closed:
+            self._late_trades_after_close += 1
+            if existing is None:
+                logger.warning(
+                    f"late trade after candle close re-opens bucket: "
+                    f"symbol={trade.symbol} minute={floor.isoformat()} "
+                    f"trade_ts={trade.timestamp.isoformat()} "
+                    f"(will emit a corrective candle that re-fragments the "
+                    f"SCD2 row — widen the grace/idle-flush bound if this "
+                    f"recurs; counter={self._late_trades_after_close})"
+                )
         if existing is None:
             self._builders[key] = _CandleAccumulator(
                 symbol=trade.symbol,
@@ -254,6 +272,26 @@ class TradeCandleBuilder:
         return self._watermark
 
     @property
+    def late_trades_after_close(self) -> int:
+        """Return how many trades arrived for an already-emitted minute.
+
+        Each such trade lands in (or re-opens) a bucket whose
+        ``(symbol, minute)`` was already emitted by one of the pop
+        methods, so its eventual emission is a CORRECTIVE candle that
+        re-fragments the SCD2 row — the failure class behind the
+        2026-06 Kraken Equities candle-fragmentation incident. A fresh
+        re-open additionally logs a WARNING with the symbol and minute.
+        This counter is the agreed trigger for widening the
+        event-watermark grace or the idle-flush bound: zero in steady
+        state; any growth means the close predicate fired too early for
+        the feed's real delay.
+
+        Returns:
+            Count of late trades since construction (monotonic).
+        """
+        return self._late_trades_after_close
+
+    @property
     def update_count(self) -> int:
         """Return the total number of trades folded so far.
 
@@ -276,7 +314,10 @@ class TradeCandleBuilder:
 
         Shared kernel behind :meth:`pop_completed`,
         :meth:`pop_completed_by_event_watermark`, and :meth:`pop_all` so the
-        OHLCV-to-:class:`CandleUpdate` projection lives in one place.
+        OHLCV-to-:class:`CandleUpdate` projection lives in one place. Also
+        advances the per-symbol closed-minute watermark that feeds
+        :attr:`late_trades_after_close` — every pop path (including the
+        idle flush) counts as a close for late-trade accounting.
 
         Args:
             should_emit: Predicate over a bucket's minute-start UNIX
@@ -307,6 +348,10 @@ class TradeCandleBuilder:
                 )
             )
             to_remove.append(key)
+            begin_ts = int(b.interval_begin.timestamp())
+            prev_closed = self._closed_minute.get(b.symbol)
+            if prev_closed is None or begin_ts > prev_closed:
+                self._closed_minute[b.symbol] = begin_ts
         for key in to_remove:
             del self._builders[key]
         return out
