@@ -144,6 +144,35 @@ class RSIReversion(BaseStrategy):
 | `wallet_public_id` | string | Wallet that will execute orders for this strategy. Still defaults to empty and is NOT validated by `StrategyConfig` itself (the dataclass keeps an empty default pending the NOT NULL tightening migration). Process routes validate active operator/wallet grant coverage when both this field and `operator_public_id` are populated; a wallet without an operator is rejected. The non-empty requirement applies at runtime via the caps guard for any strategy that uses `create_ai_review_and_await()` — see "AI delegate consultation" below. |
 | `operator_public_id` | string | Trading-identity operator that owns this strategy instance. Empty default; validated against the launching principal's `operator_public_ids` when populated, and used with `wallet_public_id` for active grant and live-output coverage checks. |
 
+### Candle history warm-up (A3-smoke)
+
+A strategy that needs historical bars before it can compute indicators overrides
+`required_candle_history() -> int` (e.g. `CointegrationPairs` returns its
+`lookback_window`). When that value is > 0, `BaseStrategy.start()` prefills the
+candle buffer from history BEFORE subscribing to the live feed, so the strategy is
+indicator-ready from a cold start instead of waiting that many live periods (a
+restart re-warms the same way).
+
+The current (A3-smoke) source is the local Polygon **crypto daily** cache and is
+**opt-in + crypto-scoped**:
+
+- Set `params["warmup_market_type"] = "crypto"` to enable it (without it, warm-up
+  is skipped and the buffer fills live-only). This keeps a non-crypto strategy
+  from ever loading a crypto ticker.
+- Set `params["buffer_size"]` (default 100) `>=` the lookback, or warm-up is
+  skipped with a warning (no silent under-warm).
+- Optional `params["polygon_cache_root"]` (default `data/polygon/cache`).
+- Only `1d` candle inputs are warmed (others rely on live fill).
+- **Aligned all-or-nothing for multi-leg strategies**: a pair (e.g. cointegration)
+  is warmed only if every leg shares at least the required number of common UTC
+  days; on any shortfall NO leg is warmed (symmetric live-only fill), so the
+  spread can never start date-misaligned. A warm-up error never crashes startup.
+
+Note: warm-up does NOT arm a strategy. For the FET/RENDER daily cointegration
+forward-test, the spread's per-leg positional alignment is a separate hard
+pre-arming gate (it must align legs by `open_at`, not list position) — see the A3
+plan.
+
 ### AI delegate consultation
 
 Strategies that consult an AI delegate via

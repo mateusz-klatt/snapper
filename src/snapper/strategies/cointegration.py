@@ -123,6 +123,19 @@ class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
             f"beta={self.beta}, entry_threshold={self.entry_threshold}sigma"
         )
 
+    def required_candle_history(self) -> int:
+        """Return the spread lookback window as the warm-up bar requirement.
+
+        The spread z-score needs ``lookback_window`` closes per leg before it can
+        fire (`:meth:`_compute_spread_signal``); declaring it here lets
+        :meth:`BaseStrategy._warmup_candle_buffer` prefill that many historical
+        bars at startup instead of waiting ``lookback_window`` live periods.
+
+        Returns:
+            The configured ``lookback_window``.
+        """
+        return self.lookback_window
+
     @staticmethod
     def _extract_instrument(topic: str) -> str:
         """Compatibility alias for :func:`_extract_instrument_from_topic`.

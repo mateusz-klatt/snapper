@@ -1,6 +1,7 @@
 """Tests for strategy framework and trading signal generation."""
 
 import asyncio
+import csv
 import gc
 import json
 import time
@@ -8,7 +9,10 @@ import warnings
 from collections.abc import Callable
 from collections.abc import Coroutine
 from datetime import UTC
+from datetime import date
 from datetime import datetime
+from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,6 +32,7 @@ from snapper.cli.app import _alembic_cfg
 from snapper.core.types import AiReviewStatusEnum
 from snapper.core.types import PairedExecutionPolicyEnum
 from snapper.core.types import TradeSideEnum
+from snapper.infrastructure.historical.polygon.loader import GroupedDailyRow
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
@@ -50,6 +55,8 @@ from snapper.strategies.base import CompositeStrategy
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.base import StrategySignal
 from snapper.strategies.base import StrategySignalResult
+from snapper.strategies.base import _grouped_row_to_warmup_candle
+from snapper.strategies.base import _native_to_polygon_crypto_ticker
 from snapper.strategies.cointegration import CointegrationPairs
 from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.factory import StrategyNotFoundError
@@ -4436,6 +4443,15 @@ class TestCointegrationInitialization:
         assert strategy.min_data_points == 30
         assert strategy.instrument1 == "BTC-USD"
         assert strategy.instrument2 == "ETH-USD"
+
+    def test_required_candle_history_is_lookback_window(self, strategy: CointegrationPairs) -> None:
+        """required_candle_history reports the lookback window for warmup prefill.
+
+        Given: a cointegration strategy with lookback_window 50,
+        When: required_candle_history() is queried,
+        Then: it returns 50 so the warmup prefetches a full spread window.
+        """
+        assert strategy.required_candle_history() == 50
         assert strategy._position is None
         assert len(strategy.candle_buffer) == 0
 
@@ -6473,3 +6489,355 @@ class TestPairedGroupEmission:
         live = _PairedTestStrategy(_strategy_config(exchange="kraken", name="l"))
         assert paper._execution_mode() == "paper"
         assert live._execution_mode() == "live"
+
+
+def _grouped_row(close: float, *, ticker: str = "X:FETUSD", day: date) -> GroupedDailyRow:
+    """Build a GroupedDailyRow whose close == open == high == low for tests."""
+    return GroupedDailyRow(
+        ticker=ticker,
+        open=Decimal(str(close)),
+        high=Decimal(str(close)),
+        low=Decimal(str(close)),
+        close=Decimal(str(close)),
+        volume=Decimal("10"),
+        vwap=Decimal(str(close)),
+        total_trades=5,
+        closing_timestamp=datetime(day.year, day.month, day.day, 23, 59, 59, 999000, tzinfo=UTC),
+    )
+
+
+def _warmup_candle(close: float, *, day: date, instrument: str = "FET-USD") -> CandleData:
+    """Project a grouped row to a warmup CandleData with the given day's open_at."""
+    return _grouped_row_to_warmup_candle(
+        _grouped_row(close, day=day), instrument=instrument, exchange="kraken", sequence_id=0
+    )
+
+
+def _write_warmup_cache(
+    cache_root: Path, days: int, *, tickers: tuple[str, ...] = ("X:FETUSD",), end: date
+) -> None:
+    """Write `days` grouped-daily cache CSVs (all `tickers` per day) ending at `end`."""
+    for offset in range(days):
+        current = end - timedelta(days=offset)
+        path = cache_root / "grouped" / "crypto" / str(current.year) / f"{current.isoformat()}.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        closing = datetime(current.year, current.month, current.day, 23, 59, 59, 999000, tzinfo=UTC)
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, lineterminator="\n")
+            writer.writerow(
+                [
+                    "ticker",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "vwap",
+                    "total_trades",
+                    "closing_timestamp",
+                ]
+            )
+            for ticker in tickers:
+                writer.writerow([ticker, 1.0, 1.0, 1.0, 1.0, 10.0, 1.0, 5, closing.isoformat()])
+
+
+class _WarmupStrategy(MockStrategy):
+    """MockStrategy that declares a warm-up requirement via the ``warmup_n`` param."""
+
+    def required_candle_history(self) -> int:
+        """Return the configured warm-up bar count (0 when unset)."""
+        return int(self.params.get("warmup_n", 0))
+
+
+class TestWarmupPrefill:
+    """A3-smoke: strategy candle-buffer warmup from the Polygon daily cache."""
+
+    def test_native_to_polygon_crypto_ticker(self) -> None:
+        """A BASE-QUOTE symbol maps to X:{BASE}{QUOTE}; non-pairs map to None."""
+        assert _native_to_polygon_crypto_ticker("FET-USD") == "X:FETUSD"
+        assert _native_to_polygon_crypto_ticker("RENDER-USD") == "X:RENDERUSD"
+        assert _native_to_polygon_crypto_ticker("BTCUSD") is None
+        assert _native_to_polygon_crypto_ticker("A-B-C") is None
+        assert _native_to_polygon_crypto_ticker("FET-") is None
+
+    def test_grouped_row_projection_floors_open_at_to_utc_day(self) -> None:
+        """The projection floors closing_timestamp to 00:00 UTC and stamps fields."""
+        candle = _warmup_candle(2.5, day=date(2024, 2, 16))
+        assert candle.open_at == datetime(2024, 2, 16, tzinfo=UTC)
+        assert candle.timeframe == "1d"
+        assert candle.exchange == "kraken"
+        assert candle.instrument == "FET-USD"
+        assert candle.close == 2.5
+        assert candle.vwap == 2.5
+        assert candle.trades == 5
+        assert isinstance(candle.public_id, str)
+        assert candle.session_id == "warmup"
+
+    def test_buffer_candle_upserts_same_open_at(self) -> None:
+        """A candle with an existing open_at replaces it; distinct ones append."""
+        strat = _WarmupStrategy(_strategy_config(name="w"))
+        first = _warmup_candle(1.0, day=date(2024, 2, 1))
+        replacement = _warmup_candle(9.0, day=date(2024, 2, 1))
+        second = _warmup_candle(2.0, day=date(2024, 2, 2))
+        strat._buffer_candle("FET-USD", first)
+        strat._buffer_candle("FET-USD", second)
+        strat._buffer_candle("FET-USD", replacement)
+        buffer = strat.candle_buffer["FET-USD"]
+        assert [c.close for c in buffer] == [9.0, 2.0]
+
+    def test_buffer_candle_prunes_to_buffer_size(self) -> None:
+        """Appending beyond buffer_size drops the oldest bar."""
+        strat = _WarmupStrategy(_strategy_config(name="w", params={"buffer_size": 2}))
+        for offset in range(4):
+            strat._buffer_candle(
+                "FET-USD", _warmup_candle(float(offset), day=date(2024, 2, 1 + offset))
+            )
+        buffer = strat.candle_buffer["FET-USD"]
+        assert [c.close for c in buffer] == [2.0, 3.0]
+
+    def test_buffer_candle_inserts_out_of_order_ascending(self) -> None:
+        """A stale older bar is inserted in order, keeping the buffer ascending."""
+        strat = _WarmupStrategy(_strategy_config(name="w"))
+        strat._buffer_candle("FET-USD", _warmup_candle(2.0, day=date(2024, 2, 2)))
+        strat._buffer_candle("FET-USD", _warmup_candle(3.0, day=date(2024, 2, 3)))
+        strat._buffer_candle("FET-USD", _warmup_candle(1.0, day=date(2024, 2, 1)))
+        buffer = strat.candle_buffer["FET-USD"]
+        assert [c.open_at for c in buffer] == sorted(c.open_at for c in buffer)
+        assert [c.close for c in buffer] == [1.0, 2.0, 3.0]
+
+    def _warmup_config(self, **params: Any) -> StrategyConfig:
+        """Build a crypto-opt-in warmup strategy config with the given params."""
+        base = {"warmup_n": 3, "warmup_market_type": "crypto"}
+        base.update(params)
+        return _strategy_config(
+            name="w",
+            exchange="paper",
+            inputs=["market.paper.kraken.FET-USD.candles.1d"],
+            params=base,
+        )
+
+    @pytest.mark.asyncio
+    async def test_warmup_fills_buffer_for_paper_1d_input(self, tmp_path: Path) -> None:
+        """A 1d paper input warms the buffer with source-exchange candles."""
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        _write_warmup_cache(tmp_path, 3, end=end)
+        strat = _WarmupStrategy(self._warmup_config(polygon_cache_root=str(tmp_path)))
+        await strat._warmup_candle_buffer()
+        buffer = strat.candle_buffer["FET-USD"]
+        assert len(buffer) == 3
+        assert all(c.exchange == "kraken" for c in buffer)
+        assert all(c.timeframe == "1d" for c in buffer)
+
+    @pytest.mark.asyncio
+    async def test_warmup_aligns_multi_leg_buffers(self, tmp_path: Path) -> None:
+        """A two-leg pair warms both legs to the SAME aligned UTC days."""
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        _write_warmup_cache(tmp_path, 3, tickers=("X:FETUSD", "X:RENDERUSD"), end=end)
+        strat = _WarmupStrategy(
+            _strategy_config(
+                name="w",
+                exchange="paper",
+                inputs=[
+                    "market.paper.kraken.FET-USD.candles.1d",
+                    "market.paper.kraken.RENDER-USD.candles.1d",
+                ],
+                params={
+                    "warmup_n": 3,
+                    "warmup_market_type": "crypto",
+                    "polygon_cache_root": str(tmp_path),
+                },
+            )
+        )
+        await strat._warmup_candle_buffer()
+        fet = [c.open_at for c in strat.candle_buffer["FET-USD"]]
+        render = [c.open_at for c in strat.candle_buffer["RENDER-USD"]]
+        assert len(fet) == 3
+        assert fet == render
+
+    @pytest.mark.asyncio
+    async def test_warmup_uneven_multi_leg_installs_nothing(self, tmp_path: Path) -> None:
+        """If one leg has no cache, NO leg is warmed (keeps the spread aligned)."""
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        _write_warmup_cache(tmp_path, 3, tickers=("X:FETUSD",), end=end)
+        strat = _WarmupStrategy(
+            _strategy_config(
+                name="w",
+                exchange="paper",
+                inputs=[
+                    "market.paper.kraken.FET-USD.candles.1d",
+                    "market.paper.kraken.RENDER-USD.candles.1d",
+                ],
+                params={
+                    "warmup_n": 3,
+                    "warmup_market_type": "crypto",
+                    "polygon_cache_root": str(tmp_path),
+                },
+            )
+        )
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_warmup_insufficient_aligned_installs_nothing(self, tmp_path: Path) -> None:
+        """Legs with fewer than `count` common days warm nothing (live-only)."""
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        _write_warmup_cache(tmp_path, 2, tickers=("X:FETUSD",), end=end)
+        _write_warmup_cache(tmp_path, 2, tickers=("X:RENDERUSD",), end=end - timedelta(days=5))
+        strat = _WarmupStrategy(
+            _strategy_config(
+                name="w",
+                exchange="paper",
+                inputs=[
+                    "market.paper.kraken.FET-USD.candles.1d",
+                    "market.paper.kraken.RENDER-USD.candles.1d",
+                ],
+                params={
+                    "warmup_n": 2,
+                    "warmup_market_type": "crypto",
+                    "polygon_cache_root": str(tmp_path),
+                },
+            )
+        )
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_warmup_requires_opt_in_market_type(self, tmp_path: Path) -> None:
+        """Without warmup_market_type the cache is never read (opt-in, crypto-scoped)."""
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        _write_warmup_cache(tmp_path, 3, end=end)
+        strat = _WarmupStrategy(
+            _strategy_config(
+                name="w",
+                exchange="paper",
+                inputs=["market.paper.kraken.FET-USD.candles.1d"],
+                params={"warmup_n": 3, "polygon_cache_root": str(tmp_path)},
+            )
+        )
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_warmup_skips_when_buffer_smaller_than_lookback(self, tmp_path: Path) -> None:
+        """A buffer_size below the required count skips warmup (no silent truncation)."""
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        _write_warmup_cache(tmp_path, 5, end=end)
+        strat = _WarmupStrategy(
+            self._warmup_config(warmup_n=5, buffer_size=3, polygon_cache_root=str(tmp_path))
+        )
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_warmup_bad_buffer_size_type_is_caught(self, tmp_path: Path) -> None:
+        """A misconfigured (non-int) buffer_size never crashes startup (fail-open)."""
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        _write_warmup_cache(tmp_path, 3, end=end)
+        strat = _WarmupStrategy(
+            self._warmup_config(buffer_size="oops", polygon_cache_root=str(tmp_path))
+        )
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_warmup_skips_non_1d_input(self, tmp_path: Path) -> None:
+        """A non-1d candle input is not warmed (relies on live fill)."""
+        strat = _WarmupStrategy(
+            _strategy_config(
+                name="w",
+                inputs=["market.kraken.FET-USD.candles.1h"],
+                params={
+                    "warmup_n": 3,
+                    "warmup_market_type": "crypto",
+                    "polygon_cache_root": str(tmp_path),
+                },
+            )
+        )
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_warmup_missing_cache_warns_no_crash(self, tmp_path: Path) -> None:
+        """A missing cache leaves the buffer empty and does not raise."""
+        strat = _WarmupStrategy(
+            _strategy_config(
+                name="w",
+                inputs=["market.kraken.FET-USD.candles.1d"],
+                params={
+                    "warmup_n": 5,
+                    "warmup_market_type": "crypto",
+                    "polygon_cache_root": str(tmp_path / "empty"),
+                },
+            )
+        )
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_warmup_unknown_symbol_warns_no_crash(self, tmp_path: Path) -> None:
+        """An instrument that is not a BASE-QUOTE pair is skipped without crashing."""
+        strat = _WarmupStrategy(
+            _strategy_config(
+                name="w",
+                inputs=["market.kraken.BTCUSD.candles.1d"],
+                params={
+                    "warmup_n": 5,
+                    "warmup_market_type": "crypto",
+                    "polygon_cache_root": str(tmp_path),
+                },
+            )
+        )
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_warmup_skips_non_market_input(self, tmp_path: Path) -> None:
+        """A non-market input topic is skipped by the warmup loop."""
+        strat = _WarmupStrategy(
+            _strategy_config(
+                name="w",
+                inputs=["candles.kraken.synthetic.1d"],
+                params={
+                    "warmup_n": 3,
+                    "warmup_market_type": "crypto",
+                    "polygon_cache_root": str(tmp_path),
+                },
+            )
+        )
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_warmup_loader_exception_is_caught(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unexpected loader error is caught (live-only fallback), never raised."""
+
+        def _boom(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("cache read blew up")
+
+        monkeypatch.setattr("snapper.strategies.base.load_recent_grouped_daily", _boom)
+        strat = _WarmupStrategy(self._warmup_config(polygon_cache_root=str(tmp_path)))
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_warmup_zero_history_is_noop(self, tmp_path: Path) -> None:
+        """A zero warm-up requirement skips the cache entirely."""
+        strat = _WarmupStrategy(self._warmup_config(warmup_n=0, polygon_cache_root=str(tmp_path)))
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}
+
+    @pytest.mark.asyncio
+    async def test_start_warms_before_subscribe(self) -> None:
+        """start() warms the candle buffer BEFORE subscribing (no live-frame race)."""
+        strat = _WarmupStrategy(_strategy_config(name="w"))
+        order: list[str] = []
+        strat._warmup_candle_buffer = AsyncMock(side_effect=lambda: order.append("warmup"))
+        strat._subscribe_inputs = AsyncMock(side_effect=lambda: order.append("subscribe"))
+        strat._setup_publisher = AsyncMock(side_effect=lambda: order.append("publisher"))
+        strat._heartbeat_loop = AsyncMock()
+        await strat.start()
+        await strat.stop()
+        assert order[0] == "warmup"
+        assert order.index("warmup") < order.index("subscribe")

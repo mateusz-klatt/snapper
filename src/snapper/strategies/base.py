@@ -15,8 +15,14 @@ import time
 from abc import ABC
 from abc import abstractmethod
 from datetime import UTC
+from datetime import date
 from datetime import datetime
+from datetime import timedelta
+from pathlib import Path
 from typing import Any
+from typing import cast
+from uuid import NAMESPACE_DNS
+from uuid import uuid5
 from uuid import uuid7
 
 import zmq
@@ -29,7 +35,11 @@ from snapper.core.paired_execution import compute_paired_group_key
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionMode
 from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import MarketDataExchange
+from snapper.core.types import MarketDataTypeEnum
 from snapper.core.types import PairedExecutionPolicy
+from snapper.infrastructure.historical.polygon.loader import GroupedDailyRow
+from snapper.infrastructure.historical.polygon.loader import load_recent_grouped_daily
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -63,6 +73,80 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 _bootstrap_settings = get_bootstrap_settings()
+
+_WARMUP_CANDLE_NAMESPACE = uuid5(NAMESPACE_DNS, "snapper.strategies.warmup.candle")
+"""Namespace for deterministic warmup-candle ``public_id`` values."""
+
+_WARMUP_SESSION_ID = "warmup"
+"""``session_id`` stamped on warmup-prefilled candles (provenance marker)."""
+
+_DEFAULT_POLYGON_CACHE_ROOT = "data/polygon/cache"
+"""Default Polygon cache root for warmup prefill (override via params)."""
+
+
+def _native_to_polygon_crypto_ticker(native_symbol: str) -> str | None:
+    """Derive the Polygon REST crypto ticker for a native ``BASE-QUOTE`` symbol.
+
+    Pure transform (``FET-USD`` -> ``X:FETUSD``) — the live ``SymbolMapperService``
+    is populated from ``system.symbol_aliases`` and is empty at warmup time, so
+    the ticker must be derived without it.
+
+    Args:
+        native_symbol: Native ``BASE-QUOTE`` symbol.
+
+    Returns:
+        The ``X:{BASE}{QUOTE}`` ticker, or ``None`` if the symbol is not a single
+        ``BASE-QUOTE`` pair.
+    """
+    parts = native_symbol.split("-")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    return f"X:{parts[0].upper()}{parts[1].upper()}"
+
+
+def _grouped_row_to_warmup_candle(
+    row: GroupedDailyRow, *, instrument: str, exchange: str, sequence_id: int
+) -> CandleData:
+    """Project a cached grouped-daily row to a warmup :class:`CandleData`.
+
+    ``open_at`` is the UTC day START (``closing_timestamp`` floored to 00:00 UTC),
+    matching the synthesized live 1d boundary so the warmup series is continuous
+    with live bars. The envelope fields are synthetic (this bar never crossed the
+    bus): a deterministic ``public_id`` keyed by ``exchange|instrument|1d|open_at``,
+    ``session_id="warmup"``.
+
+    Args:
+        row: Cached grouped-daily row.
+        instrument: Native instrument symbol (the candle-buffer key).
+        exchange: Market-data exchange for the candle envelope (source exchange
+            for paper inputs).
+        sequence_id: Monotonic sequence id within the warmup batch.
+
+    Returns:
+        A 1d :class:`CandleData` suitable for the strategy candle buffer.
+    """
+    open_at = row.closing_timestamp.astimezone(UTC).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    open_at_ms = int(open_at.timestamp() * 1000)
+    public_id = str(uuid5(_WARMUP_CANDLE_NAMESPACE, f"{exchange}|{instrument}|1d|{open_at_ms}"))
+    return CandleData(
+        public_id=public_id,
+        timestamp=open_at,
+        session_id=_WARMUP_SESSION_ID,
+        sequence_id=sequence_id,
+        instrument=instrument,
+        exchange=cast(MarketDataExchange, exchange),
+        timeframe="1d",
+        open_at=open_at,
+        open=float(row.open),
+        high=float(row.high),
+        low=float(row.low),
+        close=float(row.close),
+        volume=float(row.volume),
+        vwap=float(row.vwap) if row.vwap is not None else None,
+        trades=row.total_trades,
+    )
 
 
 async def _close_resource_async(resource: Any) -> None:
@@ -334,6 +418,7 @@ class BaseStrategy(ABC):
         if not self.zmq_context:
             self.zmq_context = zmq.asyncio.Context()
             logger.info(f"Strategy {self.name}: ZMQ context created")
+        await self._warmup_candle_buffer()
         await self._subscribe_inputs()
         await self._setup_publisher()
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -579,13 +664,158 @@ class BaseStrategy(ABC):
         """
         candle = CandleData.from_json(payload)
         self._last_data_ts = candle.open_at.timestamp()
-        if instrument not in self.candle_buffer:
-            self.candle_buffer[instrument] = []
-        self.candle_buffer[instrument].append(candle)
-        max_buffer_size = self.params.get("buffer_size", 100)
-        if len(self.candle_buffer[instrument]) > max_buffer_size:
-            self.candle_buffer[instrument].pop(0)
+        self._buffer_candle(instrument, candle)
         return self._normalize_signal_group(await self.on_candle(instrument, candle))
+
+    def _buffer_candle(self, instrument: str, candle: CandleData) -> None:
+        """Insert a candle into the per-instrument buffer, upserting by ``open_at``.
+
+        A candle whose ``open_at`` already exists in the buffer REPLACES the
+        existing bar (the live synthesized day-D bar collides with the warmup's
+        last day-D bar; a re-emit of an existing window collides too), so the
+        indicator series never carries a duplicate ``open_at``. Otherwise the
+        candle is appended and the buffer is pruned to ``params["buffer_size"]``.
+        Used by both live candle handling and warmup prefill.
+
+        Args:
+            instrument: Buffer key (native instrument symbol).
+            candle: The candle to insert.
+        """
+        buffer = self.candle_buffer.setdefault(instrument, [])
+        for index, existing in enumerate(buffer):
+            if existing.open_at == candle.open_at:
+                buffer[index] = candle
+                return
+            if existing.open_at > candle.open_at:
+                buffer.insert(index, candle)
+                break
+        else:
+            buffer.append(candle)
+        max_buffer_size = self.params.get("buffer_size", 100)
+        if len(buffer) > max_buffer_size:
+            buffer.pop(0)
+
+    async def _warmup_candle_buffer(self) -> None:
+        """Prefill the candle buffer with date-aligned historical bars before live.
+
+        Called from :meth:`start` BEFORE :meth:`_subscribe_inputs` (so no live
+        frame can race the buffer). OPT-IN and crypto-scoped: runs only when the
+        strategy declares :meth:`required_candle_history` > 0 AND configures
+        ``params["warmup_market_type"] == "crypto"`` — the A3-smoke source is the
+        Polygon crypto daily cache (the DB holds too little daily history for these
+        legs today; the DB single-source path is a follow-up). The opt-in keeps a
+        non-crypto strategy from ever loading a crypto ``X:`` ticker.
+
+        ALIGNED ALL-OR-NOTHING across legs: every 1d candle input is loaded, and
+        buffers are installed ONLY if all legs share at least ``count`` common UTC
+        days. A multi-leg strategy whose spread aligns legs BY POSITION (e.g. a
+        cointegration PAIR) would otherwise get a date-MISALIGNED spread — and
+        false signals on a live money path — if one leg warmed and another did
+        not, so on any shortfall the warmup installs NOTHING and falls back to
+        symmetric live-only fill (the pre-A3 behaviour). A warmup error never
+        crashes startup. Requires ``buffer_size >= required_candle_history`` so the
+        warmed window is not silently truncated below the lookback.
+        """
+        count = self.required_candle_history()
+        if count <= 0:
+            return
+        if self.params.get("warmup_market_type") != "crypto":
+            return
+        try:
+            buffer_cap = int(self.params.get("buffer_size", 100))
+            if buffer_cap < count:
+                logger.warning(
+                    f"Strategy {self.name}: buffer_size {buffer_cap} < required warmup {count}; "
+                    "skipping warmup (live-only) — raise buffer_size to at least the lookback"
+                )
+                return
+            legs: list[Any] = []
+            for topic in self.inputs:
+                if not topic.startswith("market."):
+                    continue
+                parsed = parse_market_topic(topic)
+                if (
+                    parsed is None
+                    or parsed.data_type != MarketDataTypeEnum.CANDLES
+                    or parsed.timeframe != "1d"
+                ):
+                    continue
+                legs.append(parsed)
+            if not legs:
+                return
+            self._install_aligned_warmup(legs, count, buffer_cap)
+        except Exception as exc:
+            logger.warning(
+                f"Strategy {self.name}: candle warmup failed ({exc}); "
+                "continuing with live-only warmup"
+            )
+
+    def _install_aligned_warmup(self, legs: list[Any], count: int, buffer_cap: int) -> None:
+        """Load all 1d legs and install date-aligned buffers, or install nothing.
+
+        Args:
+            legs: Parsed 1d candle-input topics.
+            count: Required (aligned) warm-up bar count per leg.
+            buffer_cap: Maximum buffered bars per instrument.
+        """
+        cache_root = Path(self.params.get("polygon_cache_root", _DEFAULT_POLYGON_CACHE_ROOT))
+        as_of = (datetime.now(UTC) - timedelta(days=1)).date()
+        loaded: dict[str, list[CandleData]] = {}
+        for parsed in legs:
+            bars = self._load_warmup_leg(parsed, cache_root, count, as_of)
+            if not bars:
+                logger.warning(
+                    f"Strategy {self.name}: no cached daily warmup for {parsed.instrument}; "
+                    "skipping warmup for ALL legs (live-only) to keep the spread aligned"
+                )
+                return
+            loaded[parsed.instrument] = bars
+        open_at_sets = [{bar.open_at for bar in bars} for bars in loaded.values()]
+        common = set.intersection(*open_at_sets)
+        if len(common) < count:
+            logger.warning(
+                f"Strategy {self.name}: only {len(common)} aligned warmup days across "
+                f"{len(loaded)} leg(s) (need {count}); skipping warmup (live-only)"
+            )
+            return
+        keep = set(sorted(common)[-buffer_cap:])
+        for instrument, bars in loaded.items():
+            self.candle_buffer[instrument] = [bar for bar in bars if bar.open_at in keep]
+        logger.info(
+            f"Strategy {self.name}: warmed {len(keep)} aligned daily bars for "
+            f"{sorted(loaded)} from the Polygon cache"
+        )
+
+    def _load_warmup_leg(
+        self, parsed: Any, cache_root: Path, count: int, as_of: date
+    ) -> list[CandleData]:
+        """Load one leg's warm-up candles from the Polygon crypto cache.
+
+        Args:
+            parsed: Parsed 1d candle-input topic.
+            cache_root: Polygon cache root path.
+            count: Number of daily bars to load.
+            as_of: Last complete UTC day to load up to (inclusive).
+
+        Returns:
+            Ascending warm-up candles (empty when the symbol is not a crypto pair
+            or the cache has no matching rows).
+        """
+        instrument = parsed.instrument
+        if parsed.exchange == ExchangeEnum.PAPER and parsed.source_exchange:
+            exchange = parsed.source_exchange
+        else:
+            exchange = parsed.exchange
+        ticker = _native_to_polygon_crypto_ticker(instrument)
+        if ticker is None:
+            return []
+        rows = load_recent_grouped_daily(cache_root, ticker, count, as_of)
+        return [
+            _grouped_row_to_warmup_candle(
+                row, instrument=instrument, exchange=str(exchange), sequence_id=index
+            )
+            for index, row in enumerate(rows)
+        ]
 
     async def _dispatch_market_data(
         self, topic: str, instrument: str, payload: str

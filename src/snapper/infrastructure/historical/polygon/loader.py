@@ -46,6 +46,7 @@ __all__ = [
     "AggregateCandle",
     "GroupedDailyRow",
     "PolygonHistoricalLoader",
+    "load_recent_grouped_daily",
     "read_aggregate_csv",
 ]
 
@@ -218,6 +219,96 @@ class GroupedDailyRow:
     vwap: Decimal | None
     total_trades: int | None
     closing_timestamp: datetime
+
+
+def _read_grouped_row_for_ticker(path: Path, ticker: str) -> GroupedDailyRow | None:
+    """Read one ticker's row from a grouped-daily CSV file.
+
+    Cache-only reader for the format written by
+    :meth:`PolygonHistoricalLoader._write_grouped_csv` (a day's market-wide
+    snapshot, one row per ticker). Never touches the network.
+
+    Args:
+        path: Grouped-daily CSV file path.
+        ticker: Polygon REST ticker to extract (e.g. ``X:FETUSD``).
+
+    Returns:
+        The matching :class:`GroupedDailyRow`, or ``None`` if the file has no row
+        for ``ticker`` (or is a header-only marker).
+    """
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for record in csv.DictReader(handle):
+            if record.get("ticker") != ticker:
+                continue
+            raw_timestamp = record.get("closing_timestamp")
+            if not raw_timestamp:
+                return None
+            closing_timestamp = datetime.fromisoformat(raw_timestamp)
+            if closing_timestamp.tzinfo is None:
+                closing_timestamp = closing_timestamp.replace(tzinfo=UTC)
+            raw_trades = record.get("total_trades")
+            raw_vwap = record.get("vwap")
+            return GroupedDailyRow(
+                ticker=ticker,
+                open=Decimal(record["open"]),
+                high=Decimal(record["high"]),
+                low=Decimal(record["low"]),
+                close=Decimal(record["close"]),
+                volume=Decimal(record["volume"]),
+                vwap=Decimal(raw_vwap) if raw_vwap else None,
+                total_trades=int(raw_trades) if raw_trades else None,
+                closing_timestamp=closing_timestamp,
+            )
+    return None
+
+
+def load_recent_grouped_daily(
+    cache_root: Path,
+    polygon_ticker: str,
+    count: int,
+    as_of: date,
+    *,
+    market_type: str = "crypto",
+    max_lookback_days: int | None = None,
+) -> list[GroupedDailyRow]:
+    """Load up to ``count`` most-recent cached grouped-daily rows for a ticker.
+
+    Walks UTC days backward from ``as_of`` (inclusive), reading each existing
+    ``{cache_root}/grouped/{market_type}/{year}/{day}.csv`` and collecting the
+    ``polygon_ticker`` row, until ``count`` rows are gathered or the look-back
+    bound is reached. Pure sync, cache-only (offline) — used by the strategy
+    warmup prefill. Builds paths directly (does NOT create cache directories).
+
+    Args:
+        cache_root: Polygon cache root (e.g. ``data/polygon/cache``).
+        polygon_ticker: Polygon REST ticker (e.g. ``X:FETUSD``).
+        count: Maximum number of daily rows to return.
+        as_of: Last (inclusive) UTC day to consider — pass the last COMPLETE day
+            so the current incomplete day never enters the warmup.
+        market_type: Cache market segment (``crypto`` for FET/RENDER).
+        max_lookback_days: Calendar-day cap on the backward walk (default
+            ``count * 4``) so a sparse cache cannot scan unboundedly.
+
+    Returns:
+        Matching rows ASCENDING by ``closing_timestamp`` (oldest first); empty if
+        ``count <= 0`` or no cached rows are found within the look-back bound.
+    """
+    if count <= 0:
+        return []
+    limit_days = max_lookback_days if max_lookback_days is not None else count * 4
+    collected: list[GroupedDailyRow] = []
+    day = as_of
+    for _ in range(limit_days):
+        path = cache_root / "grouped" / market_type / str(day.year) / f"{day.isoformat()}.csv"
+        if path.exists():
+            row = _read_grouped_row_for_ticker(path, polygon_ticker)
+            if row is not None:
+                collected.append(row)
+                if len(collected) >= count:
+                    break
+        day = day - timedelta(days=1)
+    collected.reverse()
+    return collected
 
 
 class PolygonHistoricalLoader:

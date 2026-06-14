@@ -4,6 +4,7 @@ import csv
 from datetime import UTC
 from datetime import date
 from datetime import datetime
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +17,170 @@ from snapper.infrastructure.exchanges.implementations.polygon import PolygonExch
 from snapper.infrastructure.historical.polygon.loader import AggregateCandle
 from snapper.infrastructure.historical.polygon.loader import PolygonHistoricalLoader
 from snapper.infrastructure.historical.polygon.loader import _format_decimal
+from snapper.infrastructure.historical.polygon.loader import load_recent_grouped_daily
 from snapper.infrastructure.historical.polygon.loader import read_aggregate_csv
+
+
+def _write_grouped_day(
+    cache_root: Path, day: date, rows: list[tuple[str, float]], *, market_type: str = "crypto"
+) -> None:
+    """Write a grouped-daily cache CSV for one UTC day (ticker, close per row)."""
+    path = cache_root / "grouped" / market_type / str(day.year) / f"{day.isoformat()}.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    closing = datetime(day.year, day.month, day.day, 23, 59, 59, 999000, tzinfo=UTC)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(
+            [
+                "ticker",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "vwap",
+                "total_trades",
+                "closing_timestamp",
+            ]
+        )
+        for ticker, close in rows:
+            writer.writerow(
+                [ticker, close, close, close, close, 10.0, close, 5, closing.isoformat()]
+            )
+
+
+def test_load_recent_grouped_daily_returns_last_n_ascending(tmp_path: Path) -> None:
+    """Return the most-recent N grouped-daily rows in ascending order.
+
+    Given: Five cached grouped-daily days for X:FETUSD,
+    When: Loading the last 3 as of the final day,
+    Then: The 3 most-recent FET rows are returned oldest-first.
+    """
+    for offset in range(5):
+        day = date(2024, 2, 1) + timedelta(days=offset)
+        _write_grouped_day(tmp_path, day, [("X:FETUSD", 1.0 + offset), ("X:BTCUSD", 99.0)])
+    rows = load_recent_grouped_daily(tmp_path, "X:FETUSD", 3, date(2024, 2, 5))
+    assert [r.closing_timestamp.date() for r in rows] == [
+        date(2024, 2, 3),
+        date(2024, 2, 4),
+        date(2024, 2, 5),
+    ]
+    assert [float(r.close) for r in rows] == [3.0, 4.0, 5.0]
+    assert all(r.ticker == "X:FETUSD" for r in rows)
+
+
+def test_load_recent_grouped_daily_skips_missing_days(tmp_path: Path) -> None:
+    """Skip a missing-day file while still collecting the requested count.
+
+    Given: A cache with a gap day between two present days,
+    When: Loading 2 rows,
+    Then: The gap is skipped and both present rows are returned.
+    """
+    _write_grouped_day(tmp_path, date(2024, 2, 1), [("X:FETUSD", 1.0)])
+    _write_grouped_day(tmp_path, date(2024, 2, 3), [("X:FETUSD", 3.0)])
+    rows = load_recent_grouped_daily(tmp_path, "X:FETUSD", 2, date(2024, 2, 3))
+    assert [float(r.close) for r in rows] == [1.0, 3.0]
+
+
+def test_load_recent_grouped_daily_excludes_after_as_of(tmp_path: Path) -> None:
+    """Exclude any cached day after as_of (the incomplete current day).
+
+    Given: Cached days for an as_of day and the day after it,
+    When: Loading as of the earlier day,
+    Then: Only the as_of day's row is returned.
+    """
+    _write_grouped_day(tmp_path, date(2024, 2, 4), [("X:FETUSD", 4.0)])
+    _write_grouped_day(tmp_path, date(2024, 2, 5), [("X:FETUSD", 5.0)])
+    rows = load_recent_grouped_daily(tmp_path, "X:FETUSD", 5, date(2024, 2, 4))
+    assert [float(r.close) for r in rows] == [4.0]
+
+
+def test_load_recent_grouped_daily_zero_count_returns_empty(tmp_path: Path) -> None:
+    """Short-circuit to an empty list for a non-positive count.
+
+    Given: Any cache,
+    When: Loading with count 0,
+    Then: An empty list is returned without reading files.
+    """
+    assert load_recent_grouped_daily(tmp_path, "X:FETUSD", 0, date(2024, 2, 5)) == []
+
+
+def test_load_recent_grouped_daily_caps_lookback(tmp_path: Path) -> None:
+    """Bound the backward walk by max_lookback_days on a sparse cache.
+
+    Given: A single row far older than the as_of day,
+    When: Loading with a max_lookback_days shorter than that gap,
+    Then: The walk stops within the bound and returns nothing.
+    """
+    _write_grouped_day(tmp_path, date(2024, 1, 1), [("X:FETUSD", 1.0)])
+    rows = load_recent_grouped_daily(tmp_path, "X:FETUSD", 5, date(2024, 2, 5), max_lookback_days=3)
+    assert rows == []
+
+
+def test_load_recent_grouped_daily_filters_other_tickers(tmp_path: Path) -> None:
+    """Return only the requested ticker's rows from a multi-ticker day.
+
+    Given: A day file containing only a different ticker,
+    When: Loading the requested (absent) ticker,
+    Then: An empty list is returned.
+    """
+    _write_grouped_day(tmp_path, date(2024, 2, 5), [("X:BTCUSD", 99.0)])
+    rows = load_recent_grouped_daily(tmp_path, "X:FETUSD", 3, date(2024, 2, 5))
+    assert rows == []
+
+
+def _write_grouped_raw(cache_root: Path, day: date, rows: list[list[str]]) -> None:
+    """Write a grouped-daily CSV with raw (possibly malformed) row values."""
+    path = cache_root / "grouped" / "crypto" / str(day.year) / f"{day.isoformat()}.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(
+            [
+                "ticker",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "vwap",
+                "total_trades",
+                "closing_timestamp",
+            ]
+        )
+        for row in rows:
+            writer.writerow(row)
+
+
+def test_load_recent_grouped_daily_row_without_timestamp_is_dropped(tmp_path: Path) -> None:
+    """Drop a matching row that has an empty closing_timestamp.
+
+    Given: A day file whose ticker row has a blank closing_timestamp,
+    When: Loading that ticker,
+    Then: No row is produced for the day.
+    """
+    _write_grouped_raw(
+        tmp_path, date(2024, 2, 5), [["X:FETUSD", "1", "1", "1", "1", "10", "1", "5", ""]]
+    )
+    rows = load_recent_grouped_daily(tmp_path, "X:FETUSD", 1, date(2024, 2, 5))
+    assert rows == []
+
+
+def test_load_recent_grouped_daily_naive_timestamp_coerced_to_utc(tmp_path: Path) -> None:
+    """Coerce a naive closing_timestamp to UTC on read.
+
+    Given: A day file whose closing_timestamp has no timezone,
+    When: Loading that ticker,
+    Then: The returned row's closing_timestamp is tz-aware UTC.
+    """
+    _write_grouped_raw(
+        tmp_path,
+        date(2024, 2, 5),
+        [["X:FETUSD", "1", "1", "1", "1", "10", "1", "5", "2024-02-05T23:59:59.999000"]],
+    )
+    rows = load_recent_grouped_daily(tmp_path, "X:FETUSD", 1, date(2024, 2, 5))
+    assert len(rows) == 1
+    assert rows[0].closing_timestamp.tzinfo == UTC
 
 
 def test_format_decimal_preserves_very_small_values() -> None:
