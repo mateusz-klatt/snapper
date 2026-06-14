@@ -323,6 +323,7 @@ def _build_mock_settings() -> Mock:
         "polygon": [],
     }
     mock_settings.timeframes = ["1m"]
+    mock_settings.candle_forward_fill = False
     mock_settings.backfill_days = 30
     mock_settings.risk_max_leverage = 1.0
     mock_settings.risk_max_drawdown = 0.15

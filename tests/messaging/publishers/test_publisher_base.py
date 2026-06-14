@@ -7123,6 +7123,185 @@ async def test_unsupported_higher_timeframe_is_filtered(
 
 
 @pytest.mark.asyncio
+async def test_forward_fill_flag_starts_and_stops_flush_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the flush loop is started only when forward-fill is enabled.
+
+    Given: higher timeframes and candle_forward_fill=True,
+    When: the publisher starts and stops,
+    Then: a flush loop task is created on start and cleared on stop.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    _mock_start_runtime(pub, monkeypatch)
+    pub.settings.timeframes = ["1m", "1h"]
+    pub.settings.candle_forward_fill = True
+    pub._seed_aggregator_from_db = AsyncMock()
+    await pub.start()
+    assert pub._candle_flush_loop_task is not None
+    assert pub._candle_aggregator.forward_fill is True
+    await pub.stop()
+    assert pub._candle_flush_loop_task is None
+
+
+@pytest.mark.asyncio
+async def test_forward_fill_off_does_not_start_flush_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the flush loop is NOT started when forward-fill is disabled.
+
+    Given: higher timeframes but candle_forward_fill=False,
+    When: the publisher starts,
+    Then: no flush loop task is created (Phase-1 behaviour unchanged).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    _mock_start_runtime(pub, monkeypatch)
+    pub.settings.timeframes = ["1m", "1h"]
+    pub.settings.candle_forward_fill = False
+    pub._seed_aggregator_from_db = AsyncMock()
+    await pub.start()
+    assert pub._candle_flush_loop_task is None
+    await pub.stop()
+
+
+@pytest.mark.asyncio
+async def test_candle_flush_loop_publishes_filled_bars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the flush loop publishes each forward-filled bar (publish-only).
+
+    Given: an aggregator whose flush yields one higher-TF bar,
+    When: the flush loop ticks once,
+    Then: the bar is published to the synthesized topic and the loop exits.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._publish_synthesized_candle = AsyncMock()
+    synth = _candle_update(begin=_candle_minute(10, 0))
+    aggregator = MagicMock()
+
+    def _flush(_now: datetime) -> list[tuple[str, Any]]:
+        pub.running = False
+        return [("1h", synth)]
+
+    aggregator.flush = MagicMock(side_effect=_flush)
+    pub._candle_aggregator = aggregator
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep", AsyncMock(return_value=None)
+    )
+    await pub._candle_flush_loop(cast(Any, "kraken"))
+    pub._publish_synthesized_candle.assert_awaited_once_with(synth, cast(Any, "kraken"), "1h")
+
+
+@pytest.mark.asyncio
+async def test_candle_flush_loop_skips_when_aggregator_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the flush loop is a no-op when the aggregator is absent.
+
+    Given: no aggregator,
+    When: the flush loop ticks,
+    Then: nothing is published and the loop exits cleanly.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._publish_synthesized_candle = AsyncMock()
+    pub._candle_aggregator = None
+    ticks = {"count": 0}
+
+    async def _sleep(_seconds: float) -> None:
+        ticks["count"] += 1
+        if ticks["count"] >= 2:
+            pub.running = False
+
+    monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", _sleep)
+    await pub._candle_flush_loop(cast(Any, "kraken"))
+    pub._publish_synthesized_candle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_candle_flush_loop_logs_and_survives_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a flush error is logged and does not crash the loop.
+
+    Given: an aggregator whose flush raises,
+    When: the flush loop ticks,
+    Then: the error is swallowed and the loop exits on the running flag.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._publish_synthesized_candle = AsyncMock()
+    aggregator = MagicMock()
+
+    def _flush(_now: datetime) -> list[tuple[str, Any]]:
+        pub.running = False
+        raise RuntimeError("boom")
+
+    aggregator.flush = MagicMock(side_effect=_flush)
+    pub._candle_aggregator = aggregator
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep", AsyncMock(return_value=None)
+    )
+    await pub._candle_flush_loop(cast(Any, "kraken"))
+    pub._publish_synthesized_candle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_candle_loop_folds_synchronously_before_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the 1m frame is folded BEFORE the _process_candle await (anti-race).
+
+    Given: an aggregator and a 1m frame,
+    When: the candle loop processes it,
+    Then: fold() is invoked before _process_candle, so the separate flush task
+        cannot interleave at that await and drop the in-hand frame as late.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub._publish_synthesized_candle = AsyncMock()
+    pub._should_persist_row = lambda *_a, **_k: False
+    manager = Mock()
+    manager.process = AsyncMock(return_value=None)
+    manager.fold = Mock(return_value=[])
+    pub._candle_aggregator = SimpleNamespace(fold=manager.fold)
+    pub._process_candle = manager.process
+    feed = [_candle_update(begin=_candle_minute(10, 0))]
+
+    async def gen() -> AsyncIterator[Any]:
+        for candle in feed:
+            yield candle
+
+    pub._exchange_client = SimpleNamespace(subscribe_candles=lambda _s, _tf: gen())
+    await pub._candle_loop(["BTC-USD"], "1m")
+    call_names = [call[0] for call in manager.mock_calls]
+    assert call_names.index("fold") < call_names.index("process")
+
+
+@pytest.mark.asyncio
+async def test_candle_flush_loop_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the flush loop re-raises CancelledError so shutdown can await it.
+
+    Given: a flush loop whose sleep is cancelled,
+    When: the loop ticks,
+    Then: CancelledError propagates (not swallowed by the error handler).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_aggregator = MagicMock()
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await pub._candle_flush_loop(cast(Any, "kraken"))
+
+
+@pytest.mark.asyncio
 async def test_candle_loop_publishes_synthesized_higher_timeframe() -> None:
     """Verify the candle loop publishes a synthesized higher-TF bar.
 

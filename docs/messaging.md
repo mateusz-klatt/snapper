@@ -825,6 +825,18 @@ Key properties:
     rebuilt from the persisted `1m` history (excluding the current open minute,
     which the live stream finalizes), so a mid-window restart does not truncate
     that window's bar.
+- **Forward-fill (opt-in, default off)** — with `candle_forward_fill` enabled, a
+    time-driven flush (every 30s) seals a wall-clock-ended window that no later
+    1m arrived to close, and forward-fills empty windows with a flat bar
+    (`open = high = low = close = vwap = prior close`, `volume = 0`, `trades = 0`)
+    so a thin instrument still yields a contiguous series. It operates only on the
+    live region (windows that opened at or after the publisher's live epoch), so
+    seeded/restart windows stay owned by the data path, and a late 1m for an
+    already-sealed window is dropped (counted in `late_rolls_after_close`), never
+    re-emitted. Enable it ONLY where the warm-up corpus is contiguous at the
+    timeframe — 24/7 crypto qualifies; session-based equities (and 24/5 FX without
+    verified weekend rows) must leave it off, or the live series would carry bars
+    the strategy was never validated on.
 
 ### Micro-Batch DB Persistence
 

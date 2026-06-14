@@ -22,6 +22,11 @@ def _at(hour: int, minute: int, *, day: int = 14) -> datetime:
     return datetime(2026, 6, day, hour, minute, tzinfo=UTC)
 
 
+def _at_s(hour: int, minute: int, second: int, *, day: int = 14) -> datetime:
+    """Return a UTC datetime on the test day at the given hour/minute/second."""
+    return datetime(2026, 6, day, hour, minute, second, tzinfo=UTC)
+
+
 def _candle(
     symbol: str,
     begin: datetime,
@@ -351,3 +356,279 @@ class TestSeed:
         _label, bar = emitted[0]
         assert bar.interval_begin == _at(10, 0)
         assert bar.volume == 7.0
+
+
+class TestCeil:
+    """Canonical boundary ceiling used to clamp forward-fill to the live region."""
+
+    def test_ceil_returns_boundary_or_next(self) -> None:
+        """Given a timestamp, when ceiling, then the first boundary at or above."""
+        assert CandleAggregator._ceil(300, 300) == 300
+        assert CandleAggregator._ceil(301, 300) == 600
+        assert CandleAggregator._ceil(0, 300) == 0
+
+
+class TestForwardFillFlush:
+    """Time-driven flush: trailing-window sealing and empty-window forward-fill."""
+
+    def test_flag_off_flush_is_noop(self) -> None:
+        """With forward-fill off, flush returns nothing regardless of state."""
+        agg = CandleAggregator(["5m"], forward_fill=False)
+        agg.fold(_candle("A", _at(10, 0)))
+        agg.fold(_candle("A", _at(10, 1)))
+        assert agg.flush(_at(10, 30)) == []
+        assert agg.forward_fill is False
+
+    def test_forward_fill_property_reflects_flag(self) -> None:
+        """The forward_fill property reflects the constructor flag."""
+        assert CandleAggregator(["5m"], forward_fill=True).forward_fill is True
+
+    def test_trailing_real_window_sealed_at_wall_clock(self) -> None:
+        """A complete window with no later 1m is sealed by flush at wall clock."""
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(5):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        emitted = agg.flush(_at_s(10, 6, 30))
+        assert [label for label, _bar in emitted] == ["5m"]
+        _label, bar = emitted[0]
+        assert bar.interval_begin == _at(10, 0)
+        assert bar.volume == 5.0
+
+    def test_empty_window_forward_filled_with_carried_close(self) -> None:
+        """An empty window after real data is filled flat at the prior close."""
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(5):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        emitted = agg.flush(_at_s(10, 11, 30))
+        bars = {bar.interval_begin: bar for _label, bar in emitted}
+        assert _at(10, 0) in bars
+        fill = bars[_at(10, 5)]
+        assert fill.open == fill.high == fill.low == fill.close == fill.vwap == 50.0
+        assert fill.volume == 0.0
+        assert fill.trades == 0
+        assert fill.interval == 300
+
+    def test_gap_preserved_when_real_data_resumes(self) -> None:
+        """After a forward-filled gap, a resumed window keeps its own real open."""
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(5):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        agg.flush(_at_s(10, 11, 30))
+        for minute in range(10, 16):
+            agg.fold(_candle("A", _at(10, minute), open_=60.0, close=60.0))
+        emitted = agg.fold(_candle("A", _at(10, 16), close=60.0))
+        assert len(emitted) == 1
+        _label, bar = emitted[0]
+        assert bar.interval_begin == _at(10, 10)
+        assert bar.open == 60.0
+
+    def test_multiple_consecutive_empty_windows_filled_chronologically(self) -> None:
+        """Several empty windows fill in order, each carrying the same close."""
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(5):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        emitted = agg.flush(_at_s(10, 21, 30))
+        begins = [bar.interval_begin for _label, bar in emitted]
+        assert begins == [_at(10, 0), _at(10, 5), _at(10, 10), _at(10, 15)]
+        fills = [bar for _label, bar in emitted][1:]
+        assert all(bar.volume == 0.0 and bar.close == 50.0 for bar in fills)
+
+    def test_flush_does_not_finalize_current_minute(self) -> None:
+        """The in-progress current minute is never finalized by flush."""
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        agg.fold(_candle("A", _at(10, 5)))
+        assert agg.flush(_at_s(10, 5, 30)) == []
+        assert int(_at(10, 5).timestamp()) in agg._open_minutes["A"]
+
+    def test_flush_does_not_seal_seeded_current_window(self) -> None:
+        """A seeded current window is left to the data path, not sealed by flush."""
+        agg = CandleAggregator(["1h"], live_epoch=_at(10, 31), forward_fill=True)
+        for minute in range(31):
+            agg.seed_1m("1h", _candle("A", _at(10, minute)))
+        assert agg.flush(_at_s(10, 35, 30)) == []
+        assert ("A", "1h", int(_at(10, 0).timestamp())) in agg._buckets
+
+    def test_seeded_previous_window_emitted_by_flush_step_one(self) -> None:
+        """A seeded just-closed previous window emits via flush's data-path step."""
+        agg = CandleAggregator(["1h"], live_epoch=_at(11, 0), forward_fill=True)
+        for minute in range(60):
+            agg.seed_1m("1h", _candle("A", _at(10, minute), close=50.0))
+        agg.fold(_candle("A", _at(11, 0)))
+        emitted = agg.flush(_at_s(11, 1, 30))
+        assert [label for label, _bar in emitted] == ["1h"]
+        _label, bar = emitted[0]
+        assert bar.interval_begin == _at(10, 0)
+
+    def test_late_frame_for_filled_window_dropped_not_double_emitted(self) -> None:
+        """A late 1m mapping into a flush-sealed window is dropped, not folded."""
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(5):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        agg.flush(_at_s(10, 11, 30))
+        before = agg.late_rolls_after_close
+        agg.fold(_candle("A", _at(10, 6)))
+        emitted = agg.fold(_candle("A", _at(10, 7)))
+        assert emitted == []
+        assert agg.late_rolls_after_close == before + 1
+        assert ("A", "5m", int(_at(10, 5).timestamp())) not in agg._buckets
+
+    def test_data_path_emit_then_flush_does_not_re_emit(self) -> None:
+        """A window the data path already emitted is not re-emitted by flush."""
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(7):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        emitted = agg.flush(_at_s(10, 7, 30))
+        begins = [bar.interval_begin for _label, bar in emitted]
+        assert _at(10, 0) not in begins
+
+    def test_no_baseline_incomplete_window_not_filled(self) -> None:
+        """A symbol with only an incomplete pre-epoch window is never filled."""
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 3), forward_fill=True)
+        agg.fold(_candle("A", _at(10, 2)))
+        agg.fold(_candle("A", _at(10, 3)))
+        assert agg.flush(_at_s(10, 11, 30)) == []
+        assert ("A", "5m") not in agg._closed_window
+
+    def test_empty_window_without_baseline_advances_frontier_no_fill(self) -> None:
+        """An empty window with no carried close advances the frontier silently."""
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 3), forward_fill=True)
+        for minute in (2, 3, 4, 11, 12):
+            agg.fold(_candle("A", _at(10, minute)))
+        assert agg.flush(_at_s(10, 13, 30)) == []
+        assert agg._closed_window[("A", "5m")] == int(_at(10, 5).timestamp())
+        assert ("A", "5m") not in agg._last_close
+
+    def test_partial_live_window_missing_open_emits_real_bar(self) -> None:
+        """In forward-fill mode a fully-live window missing its open minute is real.
+
+        Its missing 1m frames are no-trade minutes (the corpus is contiguous), so
+        the partially-filled window is the true bar — not a stale flat fill.
+        """
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in (0, 1, 2, 3, 4, 7):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        emitted = agg.flush(_at_s(10, 11, 30))
+        bars = {bar.interval_begin: bar for _label, bar in emitted}
+        assert set(bars) == {_at(10, 0), _at(10, 5)}
+        partial = bars[_at(10, 5)]
+        assert partial.volume == 1.0
+        assert partial.close == 50.0
+
+    def test_fill_after_partial_window_carries_its_close(self) -> None:
+        """A fill after a partial real window carries that window's real close."""
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(5):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        agg.flush(_at_s(10, 6, 30))
+        agg.fold(_candle("A", _at(10, 7), close=99.0))
+        agg.flush(_at_s(10, 11, 30))
+        emitted = agg.flush(_at_s(10, 16, 30))
+        bars = {bar.interval_begin: bar for _label, bar in emitted}
+        assert bars[_at(10, 10)].close == 99.0
+
+    def test_stranded_pre_epoch_bucket_does_not_rewind_frontier(self) -> None:
+        """Removing a stranded pre-epoch bucket never rewinds the frontier.
+
+        A mid-window-epoch restart strands the epoch-straddle bucket; when a later
+        finalize removes it, a non-monotone frontier would rewind and re-emit
+        already-filled windows. The frontier must only advance.
+        """
+        agg = CandleAggregator(["5m"], live_epoch=_at_s(10, 0, 30), forward_fill=True)
+        for minute in range(55, 60):
+            agg.seed_1m("5m", _candle("A", _at(9, minute), close=50.0))
+        agg.fold(_candle("A", _at(10, 0), close=60.0))
+        seen: list[datetime] = []
+        for when in (_at_s(10, 1, 0), _at_s(10, 10, 0), _at_s(10, 15, 0)):
+            seen += [bar.interval_begin for _label, bar in agg.flush(when)]
+        agg.fold(_candle("A", _at(10, 16), close=70.0))
+        agg.fold(_candle("A", _at(10, 17), close=71.0))
+        seen += [bar.interval_begin for _label, bar in agg.flush(_at_s(10, 18, 0))]
+        assert len(seen) == len(set(seen))
+        assert _at(10, 5) in seen
+        assert _at(10, 10) in seen
+
+    def test_forward_fill_clamps_to_canonical_boundary(self) -> None:
+        """A mid-window live epoch clamps the first fill to a TF boundary."""
+        agg = CandleAggregator(["5m"], live_epoch=_at_s(10, 2, 30), forward_fill=True)
+        for minute in range(55, 60):
+            agg.seed_1m("5m", _candle("A", _at(9, minute), close=50.0))
+        agg.fold(_candle("A", _at(10, 2), close=60.0))
+        emitted = agg.flush(_at_s(10, 16, 30))
+        begins = [int(bar.interval_begin.timestamp()) for _label, bar in emitted]
+        assert all(begin % 300 == 0 for begin in begins)
+        labels = [bar.interval_begin for _label, bar in emitted]
+        assert _at(9, 55) in labels
+        assert _at(10, 5) in labels
+
+
+class TestForwardFillBounds:
+    """The forward-fill window count is bounded to avoid unbounded synthesis."""
+
+    def test_overflow_jumps_frontier_purges_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A gap beyond the bound jumps the frontier, purges, and warns once."""
+        monkeypatch.setattr(
+            "snapper.messaging.publishers.candle_aggregator._FORWARD_FILL_MAX_WINDOWS", 2
+        )
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(5):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        emitted = agg.flush(_at_s(10, 31, 30))
+        assert emitted == []
+        assert ("A", "5m", int(_at(10, 0).timestamp())) not in agg._buckets
+        assert ("A", "5m") in agg._warned_fill_overflow
+
+    def test_dead_symbol_stops_filling_after_max_then_resumes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dark symbol forward-fills at most MAX windows past its last real bar.
+
+        After the bound it stops manufacturing bars (no unbounded synthesis); when
+        real data returns it resets and resumes without back-filling the dead gap.
+        """
+        monkeypatch.setattr(
+            "snapper.messaging.publishers.candle_aggregator._FORWARD_FILL_MAX_WINDOWS", 2
+        )
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(5):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        agg.flush(_at_s(10, 6, 30))
+        fills: list[datetime] = []
+        for end_minute in (11, 16, 21, 26):
+            fills += [bar.interval_begin for _label, bar in agg.flush(_at_s(10, end_minute, 30))]
+        assert fills == [_at(10, 5), _at(10, 10)]
+        for minute in range(30, 36):
+            agg.fold(_candle("A", _at(10, minute), close=60.0))
+        resumed = [bar.interval_begin for _label, bar in agg.flush(_at_s(10, 41, 30))]
+        assert _at(10, 30) in resumed
+        assert _at(10, 20) not in resumed
+
+    def test_overflow_warns_once_per_symbol_timeframe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repeated overflow for the same (symbol, timeframe) warns only once."""
+        monkeypatch.setattr(
+            "snapper.messaging.publishers.candle_aggregator._FORWARD_FILL_MAX_WINDOWS", 2
+        )
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(5):
+            agg.fold(_candle("A", _at(10, minute), close=50.0))
+        agg.flush(_at_s(10, 6, 30))
+        agg.flush(_at_s(10, 31, 30))
+        agg.flush(_at_s(11, 31, 30))
+        assert agg._warned_fill_overflow == {("A", "5m")}
+
+    def test_warn_fill_overflow_set_is_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The overflow warn-dedupe set clears at its cap so memory stays bounded."""
+        monkeypatch.setattr(
+            "snapper.messaging.publishers.candle_aggregator._FORWARD_FILL_MAX_WINDOWS", 2
+        )
+        monkeypatch.setattr("snapper.messaging.publishers.candle_aggregator._WARNED_LATE_CAP", 1)
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for sym in ("A", "B"):
+            for minute in range(5):
+                agg.fold(_candle(sym, _at(10, minute), close=50.0))
+            agg.flush(_at_s(10, 6, 30))
+        agg.flush(_at_s(11, 31, 30))
+        assert len(agg._warned_fill_overflow) <= 1

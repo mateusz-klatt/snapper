@@ -177,6 +177,13 @@ the current state into ``instrument_feed_health`` so operators can query
 which symbols are dark, when each last received data, and why — after the
 fact."""
 
+_CANDLE_FLUSH_INTERVAL_S = 30.0
+"""Cadence for the time-driven higher-TF candle flush (Phase 1b forward-fill).
+
+Only started when ``candle_forward_fill`` is enabled. Well under the 300s
+smallest synthesizable timeframe, so a wall-clock-sealed or forward-filled
+higher-TF bar is at most ~one interval late."""
+
 _PERSIST_SKIPPED_LOG_INTERVAL_S = 60.0
 """Cadence for the rate-limited ``persist_skipped_total`` log line.
 
@@ -462,6 +469,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         )
         self._candle_consumer_tasks: list[asyncio.Task[None]] = []
         self._candle_aggregator: CandleAggregator | None = None
+        self._candle_flush_loop_task: asyncio.Task[None] | None = None
         self._candle_writer_task: asyncio.Task[None] | None = None
         self._candle_writer_session: AsyncSession | None = None
         self._trade_write_queue: asyncio.Queue[TradeUpsertRow] = asyncio.Queue(
@@ -777,12 +785,19 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     f"synthesizable and will NOT be published (supported higher TFs: "
                     f"{sorted(SUPPORTED_SYNTHESIS_TIMEFRAMES)})"
                 )
-            self._candle_aggregator = CandleAggregator(higher_timeframes)
+            self._candle_aggregator = CandleAggregator(
+                higher_timeframes, forward_fill=self.settings.candle_forward_fill
+            )
             await self._seed_aggregator_from_db(
                 symbols_to_subscribe, higher_timeframes, datetime.now(UTC)
             )
             self._candle_aggregator.set_live_epoch(datetime.now(UTC))
             candle_consumer_timeframes = ["1m"]
+            if self._candle_aggregator.forward_fill:
+                self._candle_flush_loop_task = asyncio.create_task(
+                    self._candle_flush_loop(self._get_data_exchange())
+                )
+                tasks.append(self._candle_flush_loop_task)
         else:
             candle_consumer_timeframes = timeframes
         self._candle_consumer_tasks = [
@@ -918,7 +933,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._tick_writer_task = None
 
     async def _stop_candle_pipeline(self) -> None:
-        """Stop and drain candle consumers and the candle writer pipeline."""
+        """Stop and drain candle consumers, the flush loop, and the writer pipeline."""
+        if self._candle_flush_loop_task is not None:
+            self._candle_flush_loop_task.cancel()
+        await self._await_shutdown_task(self._candle_flush_loop_task)
+        self._candle_flush_loop_task = None
         for task in self._candle_consumer_tasks:
             task.cancel()
         await self._await_shutdown_tasks(self._candle_consumer_tasks)
@@ -1438,6 +1457,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         used on ZMQ and in the database for a given (instrument,
         timeframe, open_at) window.
 
+        Each 1m frame is folded into the higher-timeframe aggregator
+        SYNCHRONOUSLY, before the first ``await`` after receiving it, so the
+        time-driven :meth:`_candle_flush_loop` (a separate task) cannot interleave
+        at an intermediate await and finalize/seal a window before this frame is
+        folded — which would otherwise drop the in-hand frame as late. The
+        synthesized bars are published after the native 1m to preserve outbound
+        ordering.
+
         Args:
             symbols: List of symbols to subscribe to for candle data.
             timeframe: Candle timeframe interval (e.g., '1m', '5m', '1h').
@@ -1459,6 +1486,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 candle = done.pop().result()
                 if candle is _STREAM_END:
                     break
+                synthesized: list[tuple[str, CandleUpdate]] = []
+                if self._candle_aggregator is not None and timeframe == "1m":
+                    synthesized = self._candle_aggregator.fold(cast(CandleUpdate, candle))
                 row = await self._process_candle(cast(CandleUpdate, candle), exchange, timeframe)
                 if row is not None and self._should_persist_row(
                     "candles", exchange, cast(CandleUpdate, candle).symbol
@@ -1466,15 +1496,41 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     _enqueue_or_drop_oldest_candle_write(
                         self._candle_write_queue, row, exchange_label
                     )
-                if self._candle_aggregator is not None and timeframe == "1m":
-                    for tf_label, synth in self._candle_aggregator.fold(cast(CandleUpdate, candle)):
-                        await self._publish_synthesized_candle(synth, exchange, tf_label)
+                for tf_label, synth in synthesized:
+                    await self._publish_synthesized_candle(synth, exchange, tf_label)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"Candle loop error for {symbols}: {e}")
         finally:
             _cleanup_pending_future(next_fut)
+
+    async def _candle_flush_loop(self, exchange: MarketDataExchange) -> None:
+        """Drive the time-driven higher-TF candle flush (Phase 1b forward-fill).
+
+        Started only when ``candle_forward_fill`` is enabled and higher
+        timeframes are synthesized. Every :data:`_CANDLE_FLUSH_INTERVAL_S` it asks
+        the aggregator to seal any wall-clock-ended higher-TF window and
+        forward-fill empty windows, then publishes each resulting bar exactly like
+        the live fold path (publish-only, no persist). One bad tick is logged and
+        never kills the loop, mirroring :meth:`_heartbeat_loop`.
+
+        Args:
+            exchange: Exchange name for message provenance.
+        """
+        while self.running:
+            try:
+                await asyncio.sleep(_CANDLE_FLUSH_INTERVAL_S)
+                if not self.running:
+                    break
+                if self._candle_aggregator is None:
+                    continue
+                for tf_label, synth in self._candle_aggregator.flush(datetime.now(UTC)):
+                    await self._publish_synthesized_candle(synth, exchange, tf_label)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Candle flush loop error: {e}")
 
     async def _candle_writer_loop(self) -> None:
         """Drain :attr:`_candle_write_queue` and flush candles to the database.

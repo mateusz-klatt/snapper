@@ -190,7 +190,11 @@ Components:
   the higher timeframes (5m/15m/1h/4h/1d) client-side at UTC boundaries,
   publishing them on the same `market.*.candles.{timeframe}` topic family. The
   current phase is publish-only (synthesized bars are not persisted; see
-  `docs/messaging.md` "Higher-Timeframe Candle Synthesis").
+  `docs/messaging.md` "Higher-Timeframe Candle Synthesis"). An optional,
+  default-off `candle_forward_fill` setting enables a time-driven flush that
+  seals a wall-clock-ended window with no later 1m and forward-fills empty
+  windows with a flat carried-close bar — for instruments whose warmup corpus is
+  contiguous at the timeframe (24/7 crypto), never for session-based equities.
 - **Executors** (`executors/`) — Per-wallet order execution on
   exchanges. One executor process per `(exchange, wallet)` pair is
   spawned at boot from active `wallet_credentials` rows; each

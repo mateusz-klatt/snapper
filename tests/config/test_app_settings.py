@@ -324,6 +324,21 @@ class TestAppSettingsTradingProperties:
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.timeframes == ["1m", "5m", "1h"]
 
+    def test_candle_forward_fill_defaults_false_and_reads_value(self) -> None:
+        """Verify candle_forward_fill defaults to False and reads the DB value.
+
+        Given a service without and with candle_forward_fill set,
+        When accessing settings.candle_forward_fill,
+        Then the default False and the configured value are returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        default = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert default.candle_forward_fill is False
+        enabled = AppSettings(
+            bootstrap, settings_service=MockSettingsService({"candle_forward_fill": True})
+        )
+        assert enabled.candle_forward_fill is True
+
     def test_paper_instruments_returns_value(self) -> None:
         """Verify paper_instruments returns configured source map.
 

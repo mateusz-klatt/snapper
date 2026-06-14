@@ -502,6 +502,23 @@ class AppSettings:
         return self._get_db_setting("timeframes", ["1m"])
 
     @property
+    def candle_forward_fill(self) -> bool:
+        """Return whether higher-TF synthesis forward-fills empty windows.
+
+        When ``True`` the candle aggregator's time-driven flush synthesizes a
+        flat carried-close bar for windows with no 1m data (Phase 1b). Enable
+        ONLY for a publisher whose instruments have a contiguous warmup corpus at
+        the configured timeframe (24/7 crypto); leave OFF (the default) for
+        session-based equities, where it would manufacture non-trading-day bars
+        the strategy was never validated on.
+
+        Returns:
+            ``True`` to forward-fill empty higher-TF windows; ``False`` (default)
+            to leave the flush inert and emit only data-backed bars.
+        """
+        return self._get_db_setting("candle_forward_fill", False)
+
+    @property
     def backfill_days(self) -> int:
         """Return number of days for historical data backfill.
 

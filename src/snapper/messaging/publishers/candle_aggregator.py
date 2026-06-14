@@ -43,6 +43,8 @@ SUPPORTED_SYNTHESIS_TIMEFRAMES: frozenset[str] = frozenset(_TF_SECONDS)
 
 _WARNED_LATE_CAP: int = 4096
 
+_FORWARD_FILL_MAX_WINDOWS: int = 2000
+
 
 @dataclass
 class _HtfBucket:
@@ -116,6 +118,7 @@ class CandleAggregator:
         *,
         live_epoch: datetime | None = None,
         grace_seconds: float = 0.0,
+        forward_fill: bool = False,
     ) -> None:
         """Create an aggregator for the given higher timeframes.
 
@@ -133,19 +136,30 @@ class CandleAggregator:
                 watermark before a bucket is considered closed. Defaults to
                 ``0.0`` (a single symbol's finalized 1m stream is monotonic);
                 kept as a knob to absorb pathological skew.
+            forward_fill: Whether the time-driven :meth:`flush` synthesizes a
+                flat carried-close bar for empty windows (Phase 1b). Defaults to
+                ``False`` (flush is fully inert and Phase-1 behaviour is
+                unchanged). Enable ONLY for instruments whose warmup corpus is
+                contiguous at the configured timeframe (24/7 crypto), never for
+                session-based equities — forward-filling a non-contiguous corpus
+                manufactures bars the strategy was never validated on.
         """
         self._tf_seconds: dict[str, int] = {
             tf: _TF_SECONDS[tf] for tf in timeframes if tf in _TF_SECONDS
         }
         self._live_epoch_ts = int(live_epoch.timestamp()) if live_epoch is not None else 0
         self._grace_s = grace_seconds
+        self._forward_fill = forward_fill
         self._buckets: dict[tuple[str, str, int], _HtfBucket] = {}
         self._open_minutes: dict[str, dict[int, CandleUpdate]] = {}
         self._folded_minute: dict[str, int] = {}
         self._watermark: dict[str, datetime] = {}
         self._closed_window: dict[tuple[str, str], int] = {}
+        self._last_close: dict[tuple[str, str], float] = {}
+        self._last_real_window: dict[tuple[str, str], int] = {}
         self._late_rolls_after_close: int = 0
         self._warned_late: set[tuple[str, int]] = set()
+        self._warned_fill_overflow: set[tuple[str, str]] = set()
 
     @staticmethod
     def _floor(ts: datetime, tf_seconds: int) -> datetime:
@@ -161,6 +175,35 @@ class CandleAggregator:
         """
         unix = int(ts.astimezone(UTC).timestamp())
         return datetime.fromtimestamp((unix // tf_seconds) * tf_seconds, UTC)
+
+    @staticmethod
+    def _ceil(ts: int, tf_seconds: int) -> int:
+        """Return the first canonical UTC window-start at or after a timestamp.
+
+        Used to clamp the forward-fill walk to the first FULLY-LIVE window so a
+        live epoch landing mid-window never yields a non-boundary
+        ``interval_begin``.
+
+        Args:
+            ts: A UNIX timestamp in seconds.
+            tf_seconds: Window width in seconds.
+
+        Returns:
+            The smallest multiple of ``tf_seconds`` that is at or above ``ts``.
+        """
+        if ts % tf_seconds == 0:
+            return ts
+        return ((ts // tf_seconds) + 1) * tf_seconds
+
+    @property
+    def forward_fill(self) -> bool:
+        """Return whether the time-driven forward-fill flush is enabled.
+
+        Returns:
+            ``True`` when :meth:`flush` synthesizes flat carried-close bars for
+            empty windows; ``False`` when it is inert (the default).
+        """
+        return self._forward_fill
 
     def fold(self, candle_1m: CandleUpdate) -> list[tuple[str, CandleUpdate]]:
         """Ingest a 1m frame and return any higher-TF bars that just closed.
@@ -219,6 +262,48 @@ class CandleAggregator:
         if prev_minute is None or minute_ts > prev_minute:
             self._folded_minute[sym] = minute_ts
             self._watermark[sym] = candle_1m.interval_begin
+
+    def flush(self, now: datetime) -> list[tuple[str, CandleUpdate]]:
+        """Emit wall-clock-closed bars and forward-fill empty windows.
+
+        The time-driven counterpart to :meth:`fold`, for instruments too thin for
+        a later 1m to advance the watermark across a boundary. A no-op unless
+        forward-fill is enabled (the default), so the Phase-1 data path is left
+        byte-for-byte unchanged. Two steps:
+
+        1. Finalize every held minute that has GENUINELY ended
+           (``minute < floor(now, 60s)``) and run the SAME data-path
+           :meth:`_emit_closed`, so a trailing real window — or a seeded/pre-epoch
+           window whose triggering minute is finalized here rather than by a live
+           fold — closes through the normal machinery and is never stranded. The
+           current in-progress minute is never finalized.
+        2. For each active ``(symbol, timeframe)`` walk the LIVE region
+           chronologically from the frontier, sealing any wall-clock-ended real
+           bucket and forward-filling each empty window with a flat carried-close
+           bar. The frontier advanced in step 1 makes the walk start strictly
+           after any window step 1 emitted, so no window is emitted twice.
+
+        Args:
+            now: Current wall-clock time (UTC).
+
+        Returns:
+            Closed and forward-filled bars as ``(timeframe_label, candle)`` pairs.
+        """
+        if not self._forward_fill:
+            return []
+        out: list[tuple[str, CandleUpdate]] = []
+        minute_floor_ts = int(self._floor(now, 60).timestamp())
+        for sym in list(self._open_minutes):
+            open_minutes = self._open_minutes[sym]
+            to_finalize = sorted(minute for minute in open_minutes if minute < minute_floor_ts)
+            for minute in to_finalize:
+                self._finalize_minute(open_minutes.pop(minute))
+            if to_finalize:
+                out += self._emit_closed(sym)
+        for sym in self._symbols_with_state():
+            for tf, tf_seconds in self._tf_seconds.items():
+                out += self._flush_timeframe(sym, tf, tf_seconds, now)
+        return out
 
     def window_start(self, timeframe: str, now: datetime) -> datetime | None:
         """Return the canonical UTC window start for a timeframe at ``now``.
@@ -307,6 +392,12 @@ class CandleAggregator:
         late opening-minute frame cannot fake it), so a mid-window-join window is
         never published as a truncated bar.
 
+        Live folds also honour the per-timeframe frontier: a 1m mapping into a
+        window at or below ``_closed_window[(symbol, tf)]`` (already emitted or
+        forward-filled) is dropped and counted, because re-creating that bucket
+        would resurrect a window the :meth:`flush` path has already sealed. The
+        ``seeded`` path bypasses this (seeds legitimately pre-date the frontier).
+
         Args:
             tf: Timeframe label.
             candle: A finalized 1m candle to fold into the bucket.
@@ -316,10 +407,14 @@ class CandleAggregator:
         tf_seconds = self._tf_seconds[tf]
         begin = self._floor(candle.interval_begin, tf_seconds)
         begin_ts = int(begin.timestamp())
+        if not seeded:
+            frontier = self._closed_window.get((candle.symbol, tf))
+            if frontier is not None and begin_ts <= frontier:
+                self._record_late(candle.symbol, int(candle.interval_begin.timestamp()))
+                return
         key = (candle.symbol, tf, begin_ts)
         bucket = self._buckets.get(key)
         if bucket is None:
-            opened_live = begin_ts >= self._live_epoch_ts
             self._buckets[key] = _HtfBucket(
                 symbol=candle.symbol,
                 timeframe=tf,
@@ -333,8 +428,7 @@ class CandleAggregator:
                 interval_begin=begin,
                 open_ts=candle.interval_begin,
                 close_ts=candle.interval_begin,
-                complete=int(candle.interval_begin.timestamp()) == begin_ts
-                and (seeded or opened_live),
+                complete=self._is_complete_on_open(candle.interval_begin, begin_ts, seeded=seeded),
             )
             return
         bucket.high = max(bucket.high, candle.high)
@@ -349,11 +443,43 @@ class CandleAggregator:
             bucket.close = candle.close
             bucket.close_ts = candle.interval_begin
 
+    def _is_complete_on_open(self, first_minute: datetime, begin_ts: int, *, seeded: bool) -> bool:
+        """Decide whether a freshly-opened bucket is a trustworthy (complete) bar.
+
+        A window is trustworthy when it was seeded from the durable plane or it
+        OPENED at or after the live epoch (so every one of its minutes was
+        observed live). In the data path (forward-fill OFF) the bucket must ALSO
+        have been opened by the window's first minute — a conservative guard
+        against a mid-stream join publishing a truncated bar. In forward-fill mode
+        a missing opening minute of a fully-live window is a genuine no-trade
+        minute (the corpus is contiguous by construction), so the first-minute
+        requirement is dropped and the partially-filled window is the true bar.
+
+        Args:
+            first_minute: Interval-begin of the first 1m folded into the bucket.
+            begin_ts: The bucket's canonical window-start UNIX timestamp.
+            seeded: Whether the opening fold came from the restart seed.
+
+        Returns:
+            Whether the bucket may be published once its window closes.
+        """
+        trustworthy = seeded or begin_ts >= self._live_epoch_ts
+        if self._forward_fill:
+            return trustworthy
+        return int(first_minute.timestamp()) == begin_ts and trustworthy
+
     def _emit_closed(self, sym: str) -> list[tuple[str, CandleUpdate]]:
         """Emit and remove every closed bucket for one symbol.
 
         A bucket ``[begin, begin + tf_seconds)`` is closed when its end is at or
-        before the symbol's watermark minus grace.
+        before the symbol's watermark minus grace. Closed buckets are processed
+        in ascending window order so the per-timeframe frontier
+        (``_closed_window``) only ever ADVANCES — a removed bucket at or below the
+        existing frontier (a stranded pre-epoch / already-sealed window) is dropped
+        WITHOUT emitting and WITHOUT rewinding the frontier or carried close, so the
+        data and :meth:`flush` paths never disagree and never double-emit. A
+        complete emit advances the frontier, carried close, and last-real-window
+        marks together.
 
         Args:
             sym: Symbol whose buckets are evaluated.
@@ -362,7 +488,7 @@ class CandleAggregator:
             Closed bars as ``(label, candle)`` pairs, ascending timeframe.
         """
         cutoff = self._watermark[sym].timestamp() - self._grace_s
-        emitted: list[tuple[int, str, CandleUpdate]] = []
+        closed: list[_HtfBucket] = []
         to_remove: list[tuple[str, str, int]] = []
         for key, bucket in self._buckets.items():
             if bucket.symbol != sym:
@@ -372,14 +498,204 @@ class CandleAggregator:
             if end_ts > cutoff:
                 continue
             to_remove.append(key)
-            if not bucket.complete:
-                continue
-            emitted.append((tf_seconds, bucket.timeframe, self._to_candle_update(bucket)))
-            self._closed_window[(sym, bucket.timeframe)] = int(bucket.interval_begin.timestamp())
+            closed.append(bucket)
         for key in to_remove:
             del self._buckets[key]
+        closed.sort(key=lambda bucket: int(bucket.interval_begin.timestamp()))
+        emitted: list[tuple[int, str, CandleUpdate]] = []
+        for bucket in closed:
+            fkey = (sym, bucket.timeframe)
+            begin_ts = int(bucket.interval_begin.timestamp())
+            frontier = self._closed_window.get(fkey)
+            if frontier is not None and begin_ts <= frontier:
+                continue
+            self._closed_window[fkey] = begin_ts
+            if not bucket.complete:
+                continue
+            self._last_close[fkey] = bucket.close
+            self._last_real_window[fkey] = begin_ts
+            emitted.append(
+                (
+                    self._tf_seconds[bucket.timeframe],
+                    bucket.timeframe,
+                    self._to_candle_update(bucket),
+                )
+            )
         emitted.sort(key=lambda item: item[0])
         return [(label, candle) for _seconds, label, candle in emitted]
+
+    def _symbols_with_state(self) -> set[str]:
+        """Return symbols with an open bucket or an established forward-fill baseline.
+
+        Bounds the forward-fill walk to symbols the aggregator has actually
+        observed; a symbol that never produced a bar is never forward-filled.
+
+        Returns:
+            The set of symbols eligible for a forward-fill walk.
+        """
+        symbols = {bucket.symbol for bucket in self._buckets.values()}
+        symbols.update(sym for sym, _tf in self._last_close)
+        return symbols
+
+    def _earliest_ended_live_bucket(
+        self, sym: str, tf: str, tf_seconds: int, current_begin_ts: int
+    ) -> int | None:
+        """Return the earliest live-region, fully-ended real bucket window start.
+
+        Seeds the first forward-fill walk when no frontier exists yet. Only
+        buckets that opened at or after the live epoch and whose window ended
+        before the current open window count; an incomplete pre-epoch bucket is
+        excluded — the data path owns that region.
+
+        Args:
+            sym: Symbol.
+            tf: Timeframe label.
+            tf_seconds: Timeframe width in seconds.
+            current_begin_ts: Start of the current open window (UNIX seconds).
+
+        Returns:
+            The earliest qualifying window-start UNIX timestamp, or ``None``.
+        """
+        candidates = [
+            begin_ts
+            for (bucket_sym, bucket_tf, begin_ts) in self._buckets
+            if bucket_sym == sym
+            and bucket_tf == tf
+            and begin_ts >= self._live_epoch_ts
+            and begin_ts + tf_seconds <= current_begin_ts
+        ]
+        return min(candidates, default=None)
+
+    def _flush_timeframe(
+        self, sym: str, tf: str, tf_seconds: int, now: datetime
+    ) -> list[tuple[str, CandleUpdate]]:
+        """Seal ended real buckets and forward-fill empty windows for one timeframe.
+
+        Walks the live region chronologically from the frontier up to the current
+        open window, emitting each wall-clock-ended real bucket and filling each
+        empty window with a flat carried-close bar. Two independent bounds keep
+        synthesis finite: the per-call walk is capped at
+        :data:`_FORWARD_FILL_MAX_WINDOWS` (so one flush after a long stall cannot
+        emit thousands of bars), and a flat fill is suppressed once an empty window
+        is more than :data:`_FORWARD_FILL_MAX_WINDOWS` past the last REAL bar (so a
+        permanently-dark / delisted symbol stops manufacturing bars rather than
+        forward-filling forever — the frontier still advances, so no rewalk).
+
+        Args:
+            sym: Symbol.
+            tf: Timeframe label.
+            tf_seconds: Timeframe width in seconds.
+            now: Current wall-clock time (UTC).
+
+        Returns:
+            Sealed and forward-filled bars as ``(timeframe_label, candle)`` pairs.
+        """
+        current_begin_ts = int(self._floor(now, tf_seconds).timestamp())
+        frontier = self._closed_window.get((sym, tf))
+        last_close = self._last_close.get((sym, tf))
+        last_real = self._last_real_window.get((sym, tf))
+        if frontier is not None:
+            w = frontier + tf_seconds
+        else:
+            earliest = self._earliest_ended_live_bucket(sym, tf, tf_seconds, current_begin_ts)
+            if earliest is None:
+                return []
+            w = earliest
+        w = max(w, self._ceil(self._live_epoch_ts, tf_seconds))
+        horizon = _FORWARD_FILL_MAX_WINDOWS * tf_seconds
+        if (current_begin_ts - w) // tf_seconds > _FORWARD_FILL_MAX_WINDOWS:
+            w = current_begin_ts - horizon
+            self._purge_buckets_below(sym, tf, w)
+            self._warn_fill_overflow(sym, tf)
+        out: list[tuple[str, CandleUpdate]] = []
+        while w < current_begin_ts:
+            bucket = self._buckets.pop((sym, tf, w), None)
+            if bucket is not None and bucket.complete:
+                out.append((tf, self._to_candle_update(bucket)))
+                last_close = bucket.close
+                last_real = w
+                self._last_real_window[(sym, tf)] = w
+            elif (
+                bucket is None
+                and last_close is not None
+                and last_real is not None
+                and w - last_real <= horizon
+            ):
+                out.append((tf, self._flat_fill(sym, tf_seconds, w, last_close)))
+            self._closed_window[(sym, tf)] = w
+            if last_close is not None:
+                self._last_close[(sym, tf)] = last_close
+            w += tf_seconds
+        return out
+
+    def _purge_buckets_below(self, sym: str, tf: str, begin_ts: int) -> None:
+        """Drop ``(sym, tf)`` buckets that the overflow frontier jump skipped past.
+
+        Without this an overflow jump would orphan never-emitted buckets below the
+        new frontier (the frontier guard then blocks them from re-folding), so
+        they would linger forever.
+
+        Args:
+            sym: Symbol.
+            tf: Timeframe label.
+            begin_ts: New frontier window-start; buckets strictly below it are
+                removed.
+        """
+        stale = [
+            key for key in self._buckets if key[0] == sym and key[1] == tf and key[2] < begin_ts
+        ]
+        for key in stale:
+            del self._buckets[key]
+
+    def _flat_fill(
+        self, sym: str, tf_seconds: int, window_begin_ts: int, last_close: float
+    ) -> CandleUpdate:
+        """Build a flat synthetic bar carrying the prior close for an empty window.
+
+        Args:
+            sym: Symbol.
+            tf_seconds: Timeframe width in seconds (carried for provenance).
+            window_begin_ts: Canonical UTC window-start UNIX timestamp.
+            last_close: Close of the last sealed bar, used for OHLC and VWAP.
+
+        Returns:
+            A zero-volume :class:`CandleUpdate` flat at ``last_close``.
+        """
+        return CandleUpdate(
+            symbol=sym,
+            open=last_close,
+            high=last_close,
+            low=last_close,
+            close=last_close,
+            vwap=last_close,
+            trades=0,
+            volume=0.0,
+            interval_begin=datetime.fromtimestamp(window_begin_ts, UTC),
+            interval=tf_seconds,
+        )
+
+    def _warn_fill_overflow(self, sym: str, tf: str) -> None:
+        """Warn once per ``(symbol, timeframe)`` when a forward-fill is truncated.
+
+        The dedupe set is bounded like :attr:`_warned_late`: at
+        :data:`_WARNED_LATE_CAP` it is cleared so warnings may re-fire while
+        memory stays bounded.
+
+        Args:
+            sym: Symbol whose forward-fill exceeded the per-flush window bound.
+            tf: Timeframe label.
+        """
+        marker = (sym, tf)
+        if marker in self._warned_fill_overflow:
+            return
+        if len(self._warned_fill_overflow) >= _WARNED_LATE_CAP:
+            self._warned_fill_overflow.clear()
+        self._warned_fill_overflow.add(marker)
+        logger.warning(
+            f"forward-fill exceeded {_FORWARD_FILL_MAX_WINDOWS} windows for symbol={sym} "
+            f"timeframe={tf}; frontier jumped (earlier empty windows are NOT back-filled; "
+            f"a long-dark or delisted instrument is the likely cause)"
+        )
 
     def _to_candle_update(self, bucket: _HtfBucket) -> CandleUpdate:
         """Project a bucket to a :class:`CandleUpdate`.
