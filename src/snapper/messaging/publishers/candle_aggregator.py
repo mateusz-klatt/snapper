@@ -25,6 +25,7 @@ later phase and is deliberately out of scope here.
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 
 from loguru import logger
 
@@ -119,6 +120,7 @@ class CandleAggregator:
         live_epoch: datetime | None = None,
         grace_seconds: float = 0.0,
         forward_fill: bool = False,
+        flush_grace_seconds: float = 0.0,
     ) -> None:
         """Create an aggregator for the given higher timeframes.
 
@@ -143,13 +145,23 @@ class CandleAggregator:
                 contiguous at the configured timeframe (24/7 crypto), never for
                 session-based equities — forward-filling a non-contiguous corpus
                 manufactures bars the strategy was never validated on.
+            flush_grace_seconds: Wall-clock slack the :meth:`flush` subtracts from
+                ``now`` before sealing a minute or window, so a just-ended minute is
+                not finalized before the venue can deliver its FINAL frame for it
+                (which would otherwise be dropped as late and seal a stale bar).
+                Defaults to ``0.0`` (unit tests drive ``flush`` with explicit
+                boundaries); the publisher wires a small nonzero value in
+                production. Only active when forward-fill is enabled.
         """
         self._tf_seconds: dict[str, int] = {
             tf: _TF_SECONDS[tf] for tf in timeframes if tf in _TF_SECONDS
         }
-        self._live_epoch_ts = int(live_epoch.timestamp()) if live_epoch is not None else 0
+        self._live_epoch_ts = (
+            int(self._floor(live_epoch, 60).timestamp()) if live_epoch is not None else 0
+        )
         self._grace_s = grace_seconds
         self._forward_fill = forward_fill
+        self._flush_grace_s = flush_grace_seconds
         self._buckets: dict[tuple[str, str, int], _HtfBucket] = {}
         self._open_minutes: dict[str, dict[int, CandleUpdate]] = {}
         self._folded_minute: dict[str, int] = {}
@@ -272,16 +284,20 @@ class CandleAggregator:
         byte-for-byte unchanged. Two steps:
 
         1. Finalize every held minute that has GENUINELY ended
-           (``minute < floor(now, 60s)``) and run the SAME data-path
+           (``minute < floor(now - flush_grace, 60s)``) and run the SAME data-path
            :meth:`_emit_closed`, so a trailing real window — or a seeded/pre-epoch
            window whose triggering minute is finalized here rather than by a live
            fold — closes through the normal machinery and is never stranded. The
-           current in-progress minute is never finalized.
+           current in-progress minute is never finalized; the ``flush_grace`` slack
+           also keeps a JUST-ended minute held until the venue has had time to send
+           its final frame (otherwise that frame is dropped as late and the bar is
+           sealed stale).
         2. For each active ``(symbol, timeframe)`` walk the LIVE region
-           chronologically from the frontier, sealing any wall-clock-ended real
-           bucket and forward-filling each empty window with a flat carried-close
-           bar. The frontier advanced in step 1 makes the walk start strictly
-           after any window step 1 emitted, so no window is emitted twice.
+           chronologically from the frontier (up to the grace-adjusted ``now``),
+           sealing any wall-clock-ended real bucket and forward-filling each empty
+           window with a flat carried-close bar. The frontier advanced in step 1
+           makes the walk start strictly after any window step 1 emitted, so no
+           window is emitted twice.
 
         Args:
             now: Current wall-clock time (UTC).
@@ -292,7 +308,8 @@ class CandleAggregator:
         if not self._forward_fill:
             return []
         out: list[tuple[str, CandleUpdate]] = []
-        minute_floor_ts = int(self._floor(now, 60).timestamp())
+        effective = now - timedelta(seconds=self._flush_grace_s)
+        minute_floor_ts = int(self._floor(effective, 60).timestamp())
         for sym in list(self._open_minutes):
             open_minutes = self._open_minutes[sym]
             to_finalize = sorted(minute for minute in open_minutes if minute < minute_floor_ts)
@@ -302,7 +319,7 @@ class CandleAggregator:
                 out += self._emit_closed(sym)
         for sym in self._symbols_with_state():
             for tf, tf_seconds in self._tf_seconds.items():
-                out += self._flush_timeframe(sym, tf, tf_seconds, now)
+                out += self._flush_timeframe(sym, tf, tf_seconds, effective)
         return out
 
     def window_start(self, timeframe: str, now: datetime) -> datetime | None:
@@ -334,10 +351,17 @@ class CandleAggregator:
         startup/seed delay cannot let a mid-window-join window publish a
         truncated bar.
 
+        The epoch is FLOORED to the minute: a restart landing partway through a
+        minute (e.g. 10:00:30) still treats a higher-TF window OPENING at that
+        minute (10:00) as fully observed, because the venue's snapshot-on-subscribe
+        delivers the whole current minute — without flooring, that window would be
+        dropped as pre-epoch (one valid bar lost). A restart landing in a LATER
+        minute of a window still correctly suppresses it (earlier minutes missed).
+
         Args:
             epoch: The live-consumption start time.
         """
-        self._live_epoch_ts = int(epoch.timestamp())
+        self._live_epoch_ts = int(self._floor(epoch, 60).timestamp())
 
     def timeframe_seconds(self, timeframe: str) -> int:
         """Return the width in seconds of a configured higher timeframe.
@@ -452,8 +476,22 @@ class CandleAggregator:
         have been opened by the window's first minute — a conservative guard
         against a mid-stream join publishing a truncated bar. In forward-fill mode
         a missing opening minute of a fully-live window is a genuine no-trade
-        minute (the corpus is contiguous by construction), so the first-minute
-        requirement is dropped and the partially-filled window is the true bar.
+        minute (forward-fill ASSERTS a continuous corpus per feed), so the
+        first-minute requirement is dropped and the partially-filled window is the
+        true bar.
+
+        Interaction with the CA-1 epoch floor (forward-fill ONLY): flooring the
+        live epoch to the minute makes the restart-EPOCH window (whose start equals
+        the floored-epoch minute) trustworthy, so in forward-fill mode it emits
+        best-effort even if its first minute is absent. This is intended: the venue
+        snapshot-on-subscribe delivers the in-progress minute if it traded (so the
+        window is complete in the normal case), and an absent minute is a no-trade
+        minute under the continuous-corpus contract — identical to any other
+        interior gap forward-fill tolerates. It is strictly better than the
+        pre-CA-1 alternative of suppressing the whole window (e.g. a midnight
+        restart would otherwise drop the entire restart-day 1d bar). The data path
+        (forward-fill OFF) is unaffected — its first-minute requirement still
+        suppresses a genuinely truncated epoch window.
 
         Args:
             first_minute: Interval-begin of the first 1m folded into the bucket.

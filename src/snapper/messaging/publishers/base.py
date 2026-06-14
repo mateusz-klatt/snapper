@@ -184,6 +184,15 @@ Only started when ``candle_forward_fill`` is enabled. Well under the 300s
 smallest synthesizable timeframe, so a wall-clock-sealed or forward-filled
 higher-TF bar is at most ~one interval late."""
 
+_CANDLE_FLUSH_GRACE_S = 5.0
+"""Wall-clock slack the flush subtracts from ``now`` before sealing a minute/window.
+
+Gives the venue a few seconds past a minute boundary to deliver its FINAL frame
+for the just-ended minute before the flush finalizes it — otherwise that late
+frame is dropped and the higher-TF bar is sealed with a stale value. Comfortably
+covers typical kraken OHLC frame latency while keeping a forward-filled bar at most
+~one flush interval plus this grace late."""
+
 _PERSIST_SKIPPED_LOG_INTERVAL_S = 60.0
 """Cadence for the rate-limited ``persist_skipped_total`` log line.
 
@@ -786,7 +795,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     f"{sorted(SUPPORTED_SYNTHESIS_TIMEFRAMES)})"
                 )
             self._candle_aggregator = CandleAggregator(
-                higher_timeframes, forward_fill=self.settings.candle_forward_fill
+                higher_timeframes,
+                forward_fill=self.settings.candle_forward_fill,
+                flush_grace_seconds=_CANDLE_FLUSH_GRACE_S,
             )
             await self._seed_aggregator_from_db(
                 symbols_to_subscribe, higher_timeframes, datetime.now(UTC)

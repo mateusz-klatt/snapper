@@ -531,9 +531,12 @@ class TestForwardFillFlush:
 
         A mid-window-epoch restart strands the epoch-straddle bucket; when a later
         finalize removes it, a non-monotone frontier would rewind and re-emit
-        already-filled windows. The frontier must only advance.
+        already-filled windows. The frontier must only advance. The epoch floors
+        to 10:02 (CA-1) — strictly INSIDE [10:00,10:05) but past its first minute —
+        so the window stays stranded (a first-minute-restart window is instead
+        recovered as complete; see ``TestLiveEpochFloor``).
         """
-        agg = CandleAggregator(["5m"], live_epoch=_at_s(10, 0, 30), forward_fill=True)
+        agg = CandleAggregator(["5m"], live_epoch=_at_s(10, 2, 30), forward_fill=True)
         for minute in range(55, 60):
             agg.seed_1m("5m", _candle("A", _at(9, minute), close=50.0))
         agg.fold(_candle("A", _at(10, 0), close=60.0))
@@ -632,3 +635,92 @@ class TestForwardFillBounds:
             agg.flush(_at_s(10, 6, 30))
         agg.flush(_at_s(11, 31, 30))
         assert len(agg._warned_fill_overflow) <= 1
+
+
+class TestLiveEpochFloor:
+    """CA-1: the live epoch is floored to the minute so a restart mid-first-minute keeps its bar."""
+
+    def test_epoch_floored_to_minute_emits_first_minute_window(self) -> None:
+        """A restart at 10:00:30 still emits the [10:00,10:05) window it opened in."""
+        agg = CandleAggregator(["5m"])
+        agg.set_live_epoch(_at_s(10, 0, 30))
+        emitted: list[tuple[str, CandleUpdate]] = []
+        for minute in range(0, 7):
+            emitted += agg.fold(_candle("A", _at(10, minute)))
+        begins = [bar.interval_begin for _label, bar in emitted]
+        assert _at(10, 0) in begins
+
+    def test_epoch_floor_still_suppresses_later_minute_window(self) -> None:
+        """A restart at 10:02:30 still suppresses [10:00,10:05) (earlier minutes were missed)."""
+        agg = CandleAggregator(["5m"])
+        agg.set_live_epoch(_at_s(10, 2, 30))
+        emitted: list[tuple[str, CandleUpdate]] = []
+        for minute in range(0, 12):
+            emitted += agg.fold(_candle("A", _at(10, minute)))
+        begins = [bar.interval_begin for _label, bar in emitted]
+        assert _at(10, 0) not in begins
+        assert _at(10, 5) in begins
+
+    def test_constructor_epoch_also_floored_to_minute(self) -> None:
+        """The constructor ``live_epoch`` is floored to the minute as well."""
+        agg = CandleAggregator(["5m"], live_epoch=_at_s(10, 0, 45))
+        emitted: list[tuple[str, CandleUpdate]] = []
+        for minute in range(0, 7):
+            emitted += agg.fold(_candle("A", _at(10, minute)))
+        begins = [bar.interval_begin for _label, bar in emitted]
+        assert _at(10, 0) in begins
+
+    def test_forward_fill_epoch_straddle_window_emits_best_effort(self) -> None:
+        """FF + CA-1 floor: the restart-epoch window emits best-effort if its open minute is absent.
+
+        A restart at 10:00:30 floors the epoch to 10:00, so [10:00,10:05) is
+        trustworthy. With forward-fill ON the first-minute requirement is dropped,
+        so even with minute 10:00 genuinely absent the window emits best-effort
+        from 10:01-10:04 — intended (an absent minute is no-trade; the venue
+        snapshot delivers it if it traded), and strictly better than suppressing
+        the whole window (dual-Codex-reviewed).
+        """
+        agg = CandleAggregator(["5m"], forward_fill=True)
+        agg.set_live_epoch(_at_s(10, 0, 30))
+        for minute in range(1, 5):
+            agg.fold(_candle("A", _at(10, minute), close=100.0 + minute))
+        emitted = agg.flush(_at_s(10, 5, 31))
+        bars = {bar.interval_begin: bar for _label, bar in emitted}
+        assert _at(10, 0) in bars
+        assert bars[_at(10, 0)].close == 104.0
+
+
+class TestFlushGrace:
+    """FF-1: flush_grace withholds a just-ended minute/window until a late final frame can arrive."""
+
+    def test_flush_grace_withholds_just_ended_window(self) -> None:
+        """A trailing window is not sealed until the flush grace past its end has elapsed."""
+        agg = CandleAggregator(
+            ["5m"], live_epoch=_at(10, 0), forward_fill=True, flush_grace_seconds=5.0
+        )
+        for minute in range(0, 5):
+            agg.fold(_candle("A", _at(10, minute)))
+        assert agg.flush(_at_s(10, 5, 3)) == []
+        emitted = agg.flush(_at_s(10, 5, 6))
+        begins = [bar.interval_begin for _label, bar in emitted]
+        assert _at(10, 0) in begins
+
+    def test_zero_flush_grace_seals_at_boundary(self) -> None:
+        """With no grace (the default) the trailing window seals as soon as the boundary passes."""
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 0), forward_fill=True)
+        for minute in range(0, 5):
+            agg.fold(_candle("A", _at(10, minute)))
+        emitted = agg.flush(_at_s(10, 5, 3))
+        begins = [bar.interval_begin for _label, bar in emitted]
+        assert _at(10, 0) in begins
+
+    def test_flush_grace_seals_exactly_at_boundary_plus_grace(self) -> None:
+        """At exactly boundary+grace the window seals once (inclusive: effective == boundary)."""
+        agg = CandleAggregator(
+            ["5m"], live_epoch=_at(10, 0), forward_fill=True, flush_grace_seconds=5.0
+        )
+        for minute in range(0, 5):
+            agg.fold(_candle("A", _at(10, minute)))
+        emitted = agg.flush(_at_s(10, 5, 5))
+        begins = [bar.interval_begin for _label, bar in emitted]
+        assert begins.count(_at(10, 0)) == 1
