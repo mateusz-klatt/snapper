@@ -48,6 +48,7 @@ from snapper.messaging.publishers.base import _is_disconnect_error
 from snapper.messaging.publishers.base import _tick_writer_drop_counters
 from snapper.messaging.publishers.base import _trade_writer_drop_counters
 from snapper.messaging.publishers.base import _WriterSessionLostError
+from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.schemas.data import CandleData
@@ -100,7 +101,7 @@ class DummyClient(SimpleNamespace):
 
 
 class DummyPublisher(MarketDataPublisherService[Any]):
-    """Test stub for MarketDataPublisherService."""
+    """Test stub for MarketDataPublisherService (base candle hooks: no synthesis)."""
 
     def _create_exchange_client(self) -> DummyClient:
         return DummyClient()
@@ -110,6 +111,16 @@ class DummyPublisher(MarketDataPublisherService[Any]):
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         return symbols
+
+
+class SpotLikePublisher(DummyPublisher):
+    """Stub mirroring kraken spot: full native OHLC set + continuous-corpus forward-fill."""
+
+    def _native_candle_timeframes(self) -> frozenset[str]:
+        return frozenset({"1m"}) | SUPPORTED_SYNTHESIS_TIMEFRAMES
+
+    def _supports_forward_fill(self) -> bool:
+        return True
 
 
 def _ticker_update(
@@ -7107,18 +7118,67 @@ async def test_unsupported_higher_timeframe_is_filtered(
 ) -> None:
     """Verify a non-synthesizable configured timeframe is filtered out.
 
-    Given: timeframes ["1m","2h"] where 2h is not synthesizable,
+    Given: timeframes ["1m","1h","2h"] where 2h is not synthesizable,
     When: the publisher starts,
-    Then: the aggregator is created but carries no 2h synthesis (the warning
-        branch runs without error).
+    Then: the aggregator is created for 1h only (the unsupported-TF warning
+        branch runs without error and 2h is excluded).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    _mock_start_runtime(pub, monkeypatch)
+    pub.settings.timeframes = ["1m", "1h", "2h"]
+    pub._seed_aggregator_from_db = AsyncMock()
+    await pub.start()
+    assert pub._candle_aggregator is not None
+    assert set(pub._candle_aggregator._tf_seconds) == {"1h"}
+    assert "2h" not in pub._candle_aggregator._tf_seconds
+    await pub.stop()
+
+
+@pytest.mark.asyncio
+async def test_only_unsupported_higher_tf_builds_no_aggregator_and_drops_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config with only an unsynthesizable higher TF builds no aggregator.
+
+    Given: timeframes ["1m","2h"] where 2h is neither synthesizable nor native,
+    When: the publisher starts,
+    Then: no aggregator is created, the seed never runs, only the native 1m
+        consumer is spawned, and 2h is dropped (the else-branch filter + warning).
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     _mock_start_runtime(pub, monkeypatch)
     pub.settings.timeframes = ["1m", "2h"]
+    seed_mock = AsyncMock()
+    pub._seed_aggregator_from_db = seed_mock
+    await pub.start()
+    assert pub._candle_aggregator is None
+    assert len(pub._candle_consumer_tasks) == 1
+    seed_mock.assert_not_awaited()
+    await pub.stop()
+
+
+@pytest.mark.asyncio
+async def test_forward_fill_forced_off_for_unsupported_venue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """candle_forward_fill is forced OFF for a venue that does not support it.
+
+    Given: a publisher that inherits the base (False) _supports_forward_fill (a
+        non-continuous-corpus venue) and synthesizes a higher TF, with
+        candle_forward_fill=True,
+    When: it starts,
+    Then: the aggregator is built with forward_fill disabled and no flush loop is
+        spawned (the forced-off warning branch runs).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    _mock_start_runtime(pub, monkeypatch)
+    pub.settings.timeframes = ["1m", "1h"]
+    pub.settings.candle_forward_fill = True
     pub._seed_aggregator_from_db = AsyncMock()
     await pub.start()
     assert pub._candle_aggregator is not None
-    assert "2h" not in pub._candle_aggregator._tf_seconds
+    assert pub._candle_aggregator.forward_fill is False
+    assert pub._candle_flush_loop_task is None
     await pub.stop()
 
 
@@ -7132,7 +7192,7 @@ async def test_forward_fill_flag_starts_and_stops_flush_loop(
     When: the publisher starts and stops,
     Then: a flush loop task is created on start and cleared on stop.
     """
-    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub: Any = SpotLikePublisher(symbols=["BTC-USD"])
     _mock_start_runtime(pub, monkeypatch)
     pub.settings.timeframes = ["1m", "1h"]
     pub.settings.candle_forward_fill = True
@@ -7154,7 +7214,7 @@ async def test_forward_fill_off_does_not_start_flush_loop(
     When: the publisher starts,
     Then: no flush loop task is created (Phase-1 behaviour unchanged).
     """
-    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub: Any = SpotLikePublisher(symbols=["BTC-USD"])
     _mock_start_runtime(pub, monkeypatch)
     pub.settings.timeframes = ["1m", "1h"]
     pub.settings.candle_forward_fill = False

@@ -14,6 +14,8 @@ Architecture:
 """
 
 import asyncio
+from datetime import UTC
+from datetime import datetime
 from typing import Any
 from typing import cast
 from typing import get_args
@@ -112,6 +114,39 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
     async def _flush_candle_batch(self, batch: list[CandleUpsertRow]) -> None:
         """Skip candle persistence for replayed paper market data."""
         _ = batch
+
+    def _candle_live_epoch(self) -> datetime:
+        """Use the REPLAY START as the aggregator live epoch, not wall-clock now.
+
+        Replayed candles carry historical ``interval_begin`` timestamps; with a
+        wall-clock epoch every replayed higher-TF window would be pre-epoch and
+        suppressed. Anchoring the epoch at the replay start makes windows opening
+        at/after it trustworthy (and the partial first window self-suppresses,
+        exactly as a live mid-stream join does).
+
+        Returns:
+            The replay start time (UTC), or wall-clock now if unset (idle).
+        """
+        if self.start_time is None:
+            return datetime.now(UTC)
+        return datetime.fromtimestamp(self.start_time, UTC)
+
+    async def _seed_aggregator_from_db(
+        self, symbols: list[str], higher: list[str], now: datetime | None = None
+    ) -> None:
+        """No-op: paper replays the full 1m history, so there is nothing to seed.
+
+        The live seed rebuilds the current open window from persisted 1m around
+        wall-clock ``now`` — meaningless for a historical replay (and it would
+        query the ``paper`` exchange, which persists nothing). Paper's full 1m
+        replay reconstructs every window directly.
+
+        Args:
+            symbols: Ignored.
+            higher: Ignored.
+            now: Ignored.
+        """
+        _ = (symbols, higher, now)
 
 
 @register_process(

@@ -195,6 +195,11 @@ Components:
   seals a wall-clock-ended window with no later 1m and forward-fills empty
   windows with a flat carried-close bar — for instruments whose warmup corpus is
   contiguous at the timeframe (24/7 crypto), never for session-based equities.
+  The flag is gated per venue by the publisher's `_supports_forward_fill()` (only
+  kraken spot), so it is forced off (with a warning) elsewhere and in paper
+  replay. The paper publisher synthesizes from replayed 1m too, anchoring the
+  aggregator's live epoch at the replay start so historical higher-TF windows are
+  emitted rather than suppressed.
 - **Executors** (`executors/`) — Per-wallet order execution on
   exchanges. One executor process per `(exchange, wallet)` pair is
   spawned at boot from active `wallet_credentials` rows; each

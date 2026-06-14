@@ -783,8 +783,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         symbols_to_subscribe = self.symbols[:max_symbols] if max_symbols > 0 else self.symbols
         timeframes = self.settings.timeframes
         higher_timeframes = [timeframe for timeframe in timeframes if timeframe != "1m"]
+        supported_higher = [tf for tf in higher_timeframes if tf in SUPPORTED_SYNTHESIS_TIMEFRAMES]
         self._candle_aggregator = None
-        if higher_timeframes:
+        if supported_higher:
             unsupported = [
                 tf for tf in higher_timeframes if tf not in SUPPORTED_SYNTHESIS_TIMEFRAMES
             ]
@@ -794,15 +795,31 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     f"synthesizable and will NOT be published (supported higher TFs: "
                     f"{sorted(SUPPORTED_SYNTHESIS_TIMEFRAMES)})"
                 )
+            native_replaced = [
+                tf for tf in supported_higher if tf in self._native_candle_timeframes()
+            ]
+            if native_replaced:
+                logger.warning(
+                    f"{self.__class__.__name__}: synthesizing {native_replaced} from the 1m stream "
+                    f"INSTEAD of the venue-native OHLC feed (intentional per the synthesize-from-1m "
+                    f"design; the rolled-up VWAP/trades approximate the native bar)"
+                )
+            forward_fill = self.settings.candle_forward_fill and self._supports_forward_fill()
+            if self.settings.candle_forward_fill and not self._supports_forward_fill():
+                logger.warning(
+                    f"{self.__class__.__name__}: candle_forward_fill is set but this venue is not a "
+                    f"continuous-corpus feed — forward-fill is forced OFF (it would manufacture bars "
+                    f"the strategy was never validated on)"
+                )
             self._candle_aggregator = CandleAggregator(
-                higher_timeframes,
-                forward_fill=self.settings.candle_forward_fill,
+                supported_higher,
+                forward_fill=forward_fill,
                 flush_grace_seconds=_CANDLE_FLUSH_GRACE_S,
             )
             await self._seed_aggregator_from_db(
-                symbols_to_subscribe, higher_timeframes, datetime.now(UTC)
+                symbols_to_subscribe, supported_higher, datetime.now(UTC)
             )
-            self._candle_aggregator.set_live_epoch(datetime.now(UTC))
+            self._candle_aggregator.set_live_epoch(self._candle_live_epoch())
             candle_consumer_timeframes = ["1m"]
             if self._candle_aggregator.forward_fill:
                 self._candle_flush_loop_task = asyncio.create_task(
@@ -810,7 +827,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 )
                 tasks.append(self._candle_flush_loop_task)
         else:
-            candle_consumer_timeframes = timeframes
+            native = self._native_candle_timeframes()
+            candle_consumer_timeframes = [tf for tf in timeframes if tf in native]
+            dropped = [tf for tf in timeframes if tf not in native]
+            if dropped:
+                logger.warning(
+                    f"{self.__class__.__name__}: timeframes {dropped} are neither natively "
+                    f"subscribable nor synthesized by this publisher and will NOT be published "
+                    f"(native: {sorted(native)})"
+                )
         self._candle_consumer_tasks = [
             asyncio.create_task(
                 self._supervise_consumer(
@@ -1178,6 +1203,50 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             Exchange name for CandleData/TickData/TradeData.
         """
         return cast(MarketDataExchange, self._get_exchange_name())
+
+    def _native_candle_timeframes(self) -> frozenset[str]:
+        """Timeframes this publisher can subscribe to natively from the venue.
+
+        Used to filter the legacy (non-synthesizing) candle consumer so a
+        1m-only venue never crash-loops calling ``subscribe_candles`` with an
+        unsupported timeframe, and to flag (one-time) when synthesis REPLACES a
+        venue's native higher-TF feed. Default ``{"1m"}`` covers the 1m-only
+        venues (futures, equities, walutomat); kraken spot overrides with its
+        full native OHLC set.
+
+        Returns:
+            The set of natively-subscribable timeframe labels.
+        """
+        return frozenset({"1m"})
+
+    def _candle_live_epoch(self) -> datetime:
+        """The instant the aggregator should treat as the start of live data.
+
+        A higher-TF window opening at or after this epoch is trustworthy (every
+        minute observed). Live publishers use wall-clock now; the paper publisher
+        overrides this to its REPLAY START so historical replayed windows are
+        trustworthy and emitted (rather than suppressed as pre-epoch).
+
+        Returns:
+            The live-consumption start time (UTC).
+        """
+        return datetime.now(UTC)
+
+    def _supports_forward_fill(self) -> bool:
+        """Whether forward-fill (Phase 1b) is sound for this publisher's corpus.
+
+        Forward-fill manufactures a flat bar for an empty higher-TF window; it is
+        correct ONLY for a continuous-corpus venue (24/7 crypto), never for
+        session-based equities, a 24/5 FX feed, or a historical replay. Default
+        ``False`` — the global ``candle_forward_fill`` setting is gated by this so
+        a wall-clock flush loop can never run for a venue (or paper) where it
+        would manufacture bars the strategy was never validated on. Kraken spot
+        overrides to ``True``.
+
+        Returns:
+            ``True`` if forward-fill may be enabled for this publisher.
+        """
+        return False
 
     async def _ensure_instrument(self, native_symbol: str) -> str | None:
         """Resolve instrument_public_id for a native symbol, using cache.

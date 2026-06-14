@@ -836,7 +836,25 @@ Key properties:
     re-emitted. Enable it ONLY where the warm-up corpus is contiguous at the
     timeframe — 24/7 crypto qualifies; session-based equities (and 24/5 FX without
     verified weekend rows) must leave it off, or the live series would carry bars
-    the strategy was never validated on.
+    the strategy was never validated on. This is ENFORCED per venue: the global
+    `candle_forward_fill` setting is gated by each publisher's
+    `_supports_forward_fill()` (only the kraken-spot publisher returns true), so on
+    any other venue — or in paper replay — forward-fill is forced OFF with a
+    warning even if the flag is set. The flush wall-clock also applies a small
+    grace so a just-ended minute is not sealed before the venue can deliver its
+    final frame.
+- **Native-feed replacement (kraken spot)** — kraken spot is the one venue with a
+    native higher-TF OHLC feed; synthesizing those timeframes from 1m REPLACES it
+    (a deliberate one-mechanism choice — the rolled-up VWAP/trades approximate the
+    native bar). The publisher logs a one-time warning naming the replaced
+    timeframes so the fidelity tradeoff is not silent.
+- **Paper replay** — the paper publisher synthesizes higher timeframes from the
+    replayed `1m` history exactly as a live publisher does (so backtest bars match
+    forward-test bars and no persisted higher-TF rows are required), but anchors
+    the aggregator's live epoch at the REPLAY START rather than wall-clock now — so
+    historical windows are trustworthy and emitted instead of being suppressed as
+    pre-epoch. Paper does not run the restart seed (the full replay rebuilds every
+    window) and never forward-fills (it is not a continuous-corpus live feed).
 
 ### Micro-Batch DB Persistence
 

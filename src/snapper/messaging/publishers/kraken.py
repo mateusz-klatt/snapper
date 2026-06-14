@@ -54,6 +54,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_res
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import MarketDataPublisherService
+from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 
 apply_kraken_retry_after_honoring()
 apply_kraken_already_subscribed_filter()
@@ -152,6 +153,27 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             "kraken" exchange name.
         """
         return ExchangeEnum.KRAKEN
+
+    def _native_candle_timeframes(self) -> frozenset[str]:
+        """Kraken spot's WebSocket OHLC channel serves every supported timeframe.
+
+        Spot is the one venue with native higher-TF OHLC; the synthesize-from-1m
+        layer rolls those up from 1m instead, so this set drives the one-time
+        warning that synthesis REPLACES the native feed (a documented fidelity
+        tradeoff — the user's synthesize-everything decision).
+
+        Returns:
+            ``{"1m"}`` plus all synthesizable higher timeframes.
+        """
+        return frozenset({"1m"}) | SUPPORTED_SYNTHESIS_TIMEFRAMES
+
+    def _supports_forward_fill(self) -> bool:
+        """Kraken spot is a continuous 24/7 crypto feed — forward-fill is sound.
+
+        Returns:
+            ``True``.
+        """
+        return True
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         """Validate and filter symbols for Kraken.

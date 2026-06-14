@@ -1,6 +1,8 @@
 """Unit tests for paper trading market data publisher."""
 
 import asyncio
+from datetime import UTC
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -59,6 +61,45 @@ class TestPerSourcePaperPublisher:
         mock_get_settings.return_value = mock_settings
         pub = PerSourcePaperPublisher(source_exchange="kraken", symbols=[])
         assert pub._get_exchange_name() == "paper"
+
+    @patch("snapper.config.settings.get_settings")
+    def test_candle_live_epoch_is_replay_start(self, mock_get_settings: MagicMock) -> None:
+        """Paper anchors the aggregator live epoch at the replay start, not now().
+
+        Given a per-source publisher with a replay start_time,
+        When _candle_live_epoch is inspected,
+        Then it returns the replay start (so historical replayed higher-TF windows
+        are trustworthy and emitted), falling back to wall-clock now when no replay
+        window is set (idle/direct construction).
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_get_settings.return_value = mock_settings
+        start = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+        pub = PerSourcePaperPublisher(
+            source_exchange="kraken", symbols=["BTC-USD"], start_time=start.timestamp()
+        )
+        assert pub._candle_live_epoch() == start
+        idle = PerSourcePaperPublisher(source_exchange="kraken", symbols=["BTC-USD"])
+        before = datetime.now(UTC)
+        epoch = idle._candle_live_epoch()
+        assert epoch >= before
+
+    @patch("snapper.config.settings.get_settings")
+    def test_seed_aggregator_is_noop_for_replay(self, mock_get_settings: MagicMock) -> None:
+        """Paper's restart seed is a no-op (full 1m replay reconstructs every window).
+
+        Given a per-source publisher,
+        When _seed_aggregator_from_db is awaited,
+        Then it returns without touching any aggregator/repository.
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_get_settings.return_value = mock_settings
+        pub = PerSourcePaperPublisher(source_exchange="kraken", symbols=["BTC-USD"])
+        pub._candle_aggregator = MagicMock()
+        asyncio.run(pub._seed_aggregator_from_db(["BTC-USD"], ["1d"], None))
+        pub._candle_aggregator.seed_1m.assert_not_called()
 
     @patch("snapper.config.settings.get_settings")
     def test_get_process_name_includes_source(self, mock_get_settings: MagicMock) -> None:

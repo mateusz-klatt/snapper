@@ -16,6 +16,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISH
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
 from snapper.messaging.publishers import kraken as kraken_module
 from snapper.messaging.publishers.base import MarketDataPublisherService
+from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 
 
@@ -52,6 +53,20 @@ class TestKrakenMarketDataPublisher:
         """
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         assert publisher._get_exchange_name() == "kraken"
+
+    def test_candle_synthesis_hooks_for_spot(self) -> None:
+        """Kraken spot exposes its full native OHLC set and permits forward-fill.
+
+        Given a KrakenMarketDataPublisher,
+        When the candle-synthesis hooks are inspected,
+        Then it reports every native OHLC timeframe (so synthesis-replaces-native
+        warns) and permits forward-fill (continuous 24/7 crypto corpus).
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        assert publisher._supports_forward_fill() is True
+        assert publisher._native_candle_timeframes() == frozenset({"1m"}) | (
+            SUPPORTED_SYNTHESIS_TIMEFRAMES
+        )
 
     def test_validate_symbols_filters_invalid(self) -> None:
         """Verify invalid symbols are filtered out during validation.
