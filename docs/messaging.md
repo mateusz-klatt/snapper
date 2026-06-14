@@ -795,6 +795,37 @@ to a new interval (or falls outside the warm-up window), a fresh UUID7 is
 minted and the cache entry is replaced. This avoids any DB reads on the
 hot path.
 
+### Higher-Timeframe Candle Synthesis
+
+When more than one timeframe is configured (`timeframes` setting, e.g.
+`["1m", "1h", "1d"]`), the publisher subscribes to the venue's `1m` stream
+**only** and synthesizes every higher timeframe client-side from the finalized
+1m candles. Each synthesized bar is published on the same topic family as a
+native candle (`market.{exchange}.{instrument}.candles.{timeframe}`), so
+subscribers cannot tell a synthesized `1h`/`1d` bar from a venue-native one.
+
+Key properties:
+
+- **UTC boundaries** — every timeframe aligns to UTC (`1d` closes at `00:00`
+    UTC, fixed intervals to `floor(unix / interval) * interval`). This matches
+    Kraken's native OHLC boundaries and the Polygon historical corpus, so live
+    bars line up with backtest/warm-up data.
+- **Finalize once** — the venue emits many in-progress frames for the open
+    minute; a minute is folded into the higher timeframes exactly once, with its
+    final value, when a later minute is observed (per symbol).
+- **Emit on close** — a higher-TF bar is published only when its window has
+    closed (a finalized 1m at or after the window end). `open_at` is the window
+    START; consumers must treat `closed_at = open_at + timeframe` as the true
+    close — do not act on a bar before then.
+- **Publish-only (current phase)** — synthesized bars are published to ZMQ but
+    NOT persisted; `1h`/`4h`/`1d` history continues to be served from the
+    database / on-demand aggregation (`candle_query`). Only the `1m` stream is
+    persisted by the writer tasks.
+- **Restart rebuild** — on startup the open window of each higher timeframe is
+    rebuilt from the persisted `1m` history (excluding the current open minute,
+    which the live stream finalizes), so a mid-window restart does not truncate
+    that window's bar.
+
 ### Micro-Batch DB Persistence
 
 DB writes are decoupled from the ZMQ publish path via dedicated per-stream

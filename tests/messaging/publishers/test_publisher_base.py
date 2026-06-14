@@ -48,6 +48,7 @@ from snapper.messaging.publishers.base import _is_disconnect_error
 from snapper.messaging.publishers.base import _tick_writer_drop_counters
 from snapper.messaging.publishers.base import _trade_writer_drop_counters
 from snapper.messaging.publishers.base import _WriterSessionLostError
+from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
@@ -7018,3 +7019,500 @@ async def test_recovery_attempt_is_bounded_and_retried_on_hang(
     await pub._run_recovery_under_lock("stale")
     assert pub._attempt_liveness_recovery.await_count == 2
     assert not pub._recovery_lock.locked()
+
+
+def _candle_minute(hour: int, minute: int, *, day: int = 14) -> datetime:
+    """Return a UTC 1m candle boundary for the candle-synthesis tests."""
+    return datetime(2026, 6, day, hour, minute, tzinfo=UTC)
+
+
+def _candle_update(
+    *,
+    begin: datetime,
+    symbol: str = "BTC-USD",
+    open_: float = 100.0,
+    high: float = 100.0,
+    low: float = 100.0,
+    close: float = 100.0,
+    volume: float = 1.0,
+    vwap: float | None = None,
+    trades: int = 1,
+) -> CandleUpdate:
+    """Build a 1m :class:`CandleUpdate` for candle-synthesis tests."""
+    return CandleUpdate(
+        symbol=symbol,
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        vwap=close if vwap is None else vwap,
+        trades=trades,
+        volume=volume,
+        interval_begin=begin,
+        interval=60,
+    )
+
+
+@pytest.mark.asyncio
+async def test_higher_timeframes_create_aggregator_and_single_consumer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify configured higher timeframes enable synthesis from a single 1m sub.
+
+    Given: timeframes ["1m","1h","1d"],
+    When: the publisher starts,
+    Then: an aggregator is created for {1h,1d}, the restart seed runs, and only
+        one (1m) candle consumer task is spawned.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    _mock_start_runtime(pub, monkeypatch)
+    pub.settings.timeframes = ["1m", "1h", "1d"]
+    seed_mock = AsyncMock()
+    pub._seed_aggregator_from_db = seed_mock
+    await pub.start()
+    assert isinstance(pub._candle_aggregator, CandleAggregator)
+    assert set(pub._candle_aggregator._tf_seconds) == {"1h", "1d"}
+    assert pub._candle_aggregator._live_epoch_ts > 0
+    assert len(pub._candle_consumer_tasks) == 1
+    seed_mock.assert_awaited_once()
+    await pub.stop()
+
+
+@pytest.mark.asyncio
+async def test_single_timeframe_creates_no_aggregator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the 1m-only configuration keeps the legacy path (no aggregator).
+
+    Given: timeframes ["1m"],
+    When: the publisher starts,
+    Then: no aggregator is created, the seed is not run, one consumer spawns.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    _mock_start_runtime(pub, monkeypatch)
+    pub.settings.timeframes = ["1m"]
+    pub._candle_aggregator = CandleAggregator(["1h"])
+    seed_mock = AsyncMock()
+    pub._seed_aggregator_from_db = seed_mock
+    await pub.start()
+    assert pub._candle_aggregator is None
+    assert len(pub._candle_consumer_tasks) == 1
+    seed_mock.assert_not_awaited()
+    await pub.stop()
+
+
+@pytest.mark.asyncio
+async def test_unsupported_higher_timeframe_is_filtered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a non-synthesizable configured timeframe is filtered out.
+
+    Given: timeframes ["1m","2h"] where 2h is not synthesizable,
+    When: the publisher starts,
+    Then: the aggregator is created but carries no 2h synthesis (the warning
+        branch runs without error).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    _mock_start_runtime(pub, monkeypatch)
+    pub.settings.timeframes = ["1m", "2h"]
+    pub._seed_aggregator_from_db = AsyncMock()
+    await pub.start()
+    assert pub._candle_aggregator is not None
+    assert "2h" not in pub._candle_aggregator._tf_seconds
+    await pub.stop()
+
+
+@pytest.mark.asyncio
+async def test_candle_loop_publishes_synthesized_higher_timeframe() -> None:
+    """Verify the candle loop publishes a synthesized higher-TF bar.
+
+    Given: an active aggregator for 5m and a 1m stream crossing a 5m boundary,
+    When: the candle loop drains the stream,
+    Then: a 5m candle is published to the synthesized topic.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    pub._should_persist_row = lambda *_a, **_k: False
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    feed = [
+        _candle_update(begin=_candle_minute(10, 0)),
+        _candle_update(begin=_candle_minute(10, 1)),
+        _candle_update(begin=_candle_minute(10, 5)),
+        _candle_update(begin=_candle_minute(10, 6)),
+    ]
+
+    async def gen() -> AsyncIterator[Any]:
+        for candle in feed:
+            yield candle
+
+    pub._exchange_client = SimpleNamespace(subscribe_candles=lambda _s, _tf: gen())
+    await pub._candle_loop(["BTC-USD"], "1m")
+    topics = [call.args[0] for call in pub._publish_message.await_args_list]
+    assert any(topic.endswith(".candles.5m") for topic in topics)
+
+
+@pytest.mark.asyncio
+async def test_candle_loop_without_aggregator_publishes_no_higher_tf() -> None:
+    """Verify the legacy path publishes only the native timeframe.
+
+    Given: no aggregator,
+    When: the candle loop drains a 1m stream,
+    Then: only 1m topics are published (no synthesis).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    pub._should_persist_row = lambda *_a, **_k: False
+    feed = [
+        _candle_update(begin=_candle_minute(10, 0)),
+        _candle_update(begin=_candle_minute(10, 1)),
+    ]
+
+    async def gen() -> AsyncIterator[Any]:
+        for candle in feed:
+            yield candle
+
+    pub._exchange_client = SimpleNamespace(subscribe_candles=lambda _s, _tf: gen())
+    await pub._candle_loop(["BTC-USD"], "1m")
+    topics = [call.args[0] for call in pub._publish_message.await_args_list]
+    assert topics
+    assert all(topic.endswith(".candles.1m") for topic in topics)
+
+
+@pytest.mark.asyncio
+async def test_publish_synthesized_candle_publishes_without_persisting() -> None:
+    """Verify synthesized publish hits ZMQ but not the writer queue.
+
+    Given: a resolvable instrument,
+    When: a synthesized 1h candle is published,
+    Then: it is sent on the 1h topic and nothing is enqueued for persistence.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    synth = CandleUpdate(
+        symbol="BTC-USD",
+        open=1.0,
+        high=2.0,
+        low=0.5,
+        close=1.5,
+        vwap=1.25,
+        trades=10,
+        volume=7.0,
+        interval_begin=_candle_minute(10, 0),
+        interval=3600,
+    )
+    await pub._publish_synthesized_candle(synth, cast(Any, "kraken"), "1h")
+    assert pub._publish_message.await_count == 1
+    topic, message = pub._publish_message.await_args.args
+    assert topic.endswith(".candles.1h")
+    assert message.timeframe == "1h"
+    assert message.volume == 7.0
+    assert pub._candle_write_queue.qsize() == 0
+
+
+@pytest.mark.asyncio
+async def test_publish_synthesized_candle_skips_unknown_instrument() -> None:
+    """Verify an unresolved instrument suppresses the synthesized publish.
+
+    Given: an instrument that cannot be resolved,
+    When: a synthesized candle is published,
+    Then: nothing is sent to ZMQ.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._ensure_instrument = AsyncMock(return_value=None)
+    pub._publish_message = AsyncMock()
+    synth = _candle_update(begin=_candle_minute(10, 0))
+    await pub._publish_synthesized_candle(synth, cast(Any, "kraken"), "1h")
+    pub._publish_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_seed_aggregator_rebuilds_open_bucket_excluding_current_minute() -> None:
+    """Verify restart seed folds completed 1m and skips the current minute.
+
+    Given: persisted 1m rows in the current 1h window plus the current minute,
+    When: the aggregator is seeded,
+    Then: completed minutes fold (null vwap/trades coalesced) and the current
+        minute is excluded.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["1h"])
+    now = datetime(2026, 6, 14, 10, 30, 30, tzinfo=UTC)
+    rows = [
+        {
+            "open_at": _candle_minute(10, 5),
+            "timeframe": "1m",
+            "open": 50.0,
+            "high": 55.0,
+            "low": 48.0,
+            "close": 50.0,
+            "volume": 2.0,
+            "vwap": None,
+            "trades": None,
+            "public_id": "p1",
+            "timestamp": now,
+            "session_id": "s",
+            "sequence_id": 1,
+        },
+        {
+            "open_at": _candle_minute(10, 6),
+            "timeframe": "1m",
+            "open": 60.0,
+            "high": 61.0,
+            "low": 59.0,
+            "close": 60.0,
+            "volume": 3.0,
+            "vwap": 60.0,
+            "trades": 4,
+            "public_id": "p2",
+            "timestamp": now,
+            "session_id": "s",
+            "sequence_id": 2,
+        },
+        {
+            "open_at": _candle_minute(10, 30),
+            "timeframe": "1m",
+            "open": 70.0,
+            "high": 70.0,
+            "low": 70.0,
+            "close": 70.0,
+            "volume": 5.0,
+            "vwap": 70.0,
+            "trades": 9,
+            "public_id": "p3",
+            "timestamp": now,
+            "session_id": "s",
+            "sequence_id": 3,
+        },
+    ]
+    pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=rows))
+    await pub._seed_aggregator_from_db(["BTC-USD"], ["1h"], now)
+    pub.repository.get_candles.assert_awaited_once_with(
+        "BTC-USD",
+        "1m",
+        _candle_minute(10, 0),
+        _candle_minute(10, 30) - timedelta(microseconds=1),
+        "kraken",
+        now,
+        order="asc",
+    )
+    key = ("BTC-USD", "1h", int(_candle_minute(10, 0).timestamp()))
+    bucket = pub._candle_aggregator._buckets[key]
+    assert bucket.volume == 5.0
+    assert bucket.trades == 4
+
+
+@pytest.mark.asyncio
+async def test_seed_aggregator_rebuilds_previous_window_in_first_minute() -> None:
+    """Verify a first-minute restart rebuilds the just-closed previous window.
+
+    Given: now is in the first minute of the 1d window (the previous day just
+        closed and its bar has not emitted yet),
+    When: the aggregator is seeded,
+    Then: the PREVIOUS day's window is read and folded so it can emit when the
+        first live minute finalizes.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["1d"])
+    now = datetime(2026, 6, 14, 0, 0, 30, tzinfo=UTC)
+    prev_day = datetime(2026, 6, 13, tzinfo=UTC)
+    rows = [
+        {
+            "open_at": prev_day,
+            "timeframe": "1m",
+            "open": 10.0,
+            "high": 12.0,
+            "low": 9.0,
+            "close": 11.0,
+            "volume": 4.0,
+            "vwap": 11.0,
+            "trades": 3,
+            "public_id": "p1",
+            "timestamp": now,
+            "session_id": "s",
+            "sequence_id": 1,
+        }
+    ]
+    pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=rows))
+    await pub._seed_aggregator_from_db(["BTC-USD"], ["1d"], now)
+    pub.repository.get_candles.assert_awaited_once_with(
+        "BTC-USD",
+        "1m",
+        prev_day,
+        datetime(2026, 6, 14, tzinfo=UTC) - timedelta(microseconds=1),
+        "kraken",
+        now,
+        order="asc",
+    )
+    assert ("BTC-USD", "1d", int(prev_day.timestamp())) in pub._candle_aggregator._buckets
+
+
+@pytest.mark.asyncio
+async def test_seed_aggregator_skips_unconfigured_timeframe() -> None:
+    """Verify seeding skips a timeframe the aggregator does not synthesize.
+
+    Given: a higher timeframe absent from the aggregator (unsupported),
+    When: the aggregator is seeded,
+    Then: no DB read happens for it.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["1h"])
+    pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=[]))
+    now = datetime(2026, 6, 14, 10, 30, tzinfo=UTC)
+    await pub._seed_aggregator_from_db(["BTC-USD"], ["2h"], now)
+    pub.repository.get_candles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_seed_aggregator_skips_window_with_nonfinal_minute() -> None:
+    """Verify a window containing any non-final persisted 1m is not seeded.
+
+    Given: the current 1h window holds a finalized minute and a non-final one
+        (its row was last written before the minute closed),
+    When: the aggregator is seeded,
+    Then: the WHOLE window is left unseeded (so the complete-window guard later
+        suppresses the knowingly-incomplete bar).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    now = datetime(2026, 6, 14, 10, 30, 30, tzinfo=UTC)
+    pub._candle_aggregator = CandleAggregator(["1h"], live_epoch=now)
+    rows = [
+        {
+            "open_at": _candle_minute(10, 0),
+            "timeframe": "1m",
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 4.0,
+            "vwap": 10.0,
+            "trades": 2,
+            "public_id": "p1",
+            "timestamp": datetime(2026, 6, 14, 10, 1, 5, tzinfo=UTC),
+            "session_id": "s",
+            "sequence_id": 1,
+        },
+        {
+            "open_at": _candle_minute(10, 5),
+            "timeframe": "1m",
+            "open": 20.0,
+            "high": 20.0,
+            "low": 20.0,
+            "close": 20.0,
+            "volume": 9.0,
+            "vwap": 20.0,
+            "trades": 5,
+            "public_id": "p2",
+            "timestamp": datetime(2026, 6, 14, 10, 5, 30, tzinfo=UTC),
+            "session_id": "s",
+            "sequence_id": 2,
+        },
+    ]
+    pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=rows))
+    await pub._seed_aggregator_from_db(["BTC-USD"], ["1h"], now)
+    key = ("BTC-USD", "1h", int(_candle_minute(10, 0).timestamp()))
+    assert key not in pub._candle_aggregator._buckets
+
+
+@pytest.mark.asyncio
+async def test_seed_aggregator_skips_wildcard_subscription() -> None:
+    """Verify the seed is skipped (with no DB read) for a wildcard subscription.
+
+    Given: the wildcard ["*"] symbol set,
+    When: the aggregator is seeded,
+    Then: no DB read happens (concrete symbols are not enumerable here).
+    """
+    pub: Any = DummyPublisher(symbols=["*"])
+    pub._candle_aggregator = CandleAggregator(["1d"])
+    pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=[]))
+    now = datetime(2026, 6, 14, 10, 30, tzinfo=UTC)
+    await pub._seed_aggregator_from_db(["*"], ["1d"], now)
+    pub.repository.get_candles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_seed_aggregator_rebuilds_both_1h_and_1d() -> None:
+    """Verify a mid-window restart rebuilds open 1h AND 1d buckets.
+
+    Given: now mid-window with timeframes 1h and 1d,
+    When: the aggregator is seeded,
+    Then: both the open 1h and 1d buckets are reconstructed for the symbol.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["1h", "1d"])
+    now = datetime(2026, 6, 14, 10, 30, 30, tzinfo=UTC)
+
+    async def fake_get_candles(
+        symbol: str, timeframe: str, start: datetime, end: datetime, *_a: Any, **_k: Any
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "open_at": start,
+                "timeframe": "1m",
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 2.0,
+                "vwap": 1.0,
+                "trades": 1,
+                "public_id": "p",
+                "timestamp": now,
+                "session_id": "s",
+                "sequence_id": 1,
+            }
+        ]
+
+    pub.repository = SimpleNamespace(get_candles=AsyncMock(side_effect=fake_get_candles))
+    await pub._seed_aggregator_from_db(["BTC-USD"], ["1h", "1d"], now)
+    buckets = pub._candle_aggregator._buckets
+    assert ("BTC-USD", "1h", int(datetime(2026, 6, 14, 10, 0, tzinfo=UTC).timestamp())) in buckets
+    assert ("BTC-USD", "1d", int(datetime(2026, 6, 14, tzinfo=UTC).timestamp())) in buckets
+
+
+@pytest.mark.asyncio
+async def test_seed_aggregator_noop_without_repository_or_aggregator() -> None:
+    """Verify the seed is a no-op when prerequisites are missing.
+
+    Given: a missing repository (then a missing aggregator),
+    When: the seed runs,
+    Then: it returns without error and folds nothing.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["1h"])
+    pub.repository = None
+    await pub._seed_aggregator_from_db(
+        ["BTC-USD"], ["1h"], datetime(2026, 6, 14, 10, 30, tzinfo=UTC)
+    )
+    assert pub._candle_aggregator._buckets == {}
+    pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=[]))
+    pub._candle_aggregator = None
+    await pub._seed_aggregator_from_db(
+        ["BTC-USD"], ["1h"], datetime(2026, 6, 14, 10, 30, tzinfo=UTC)
+    )
+    pub.repository.get_candles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_seed_aggregator_defaults_now_to_current_time() -> None:
+    """Verify the seed computes the current time when none is injected.
+
+    Given: a repository and aggregator but no explicit now,
+    When: the seed runs,
+    Then: it completes without error using the real clock.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["1d"])
+    pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=[]))
+    await pub._seed_aggregator_from_db(["BTC-USD"], ["1d"])
+    assert pub._candle_aggregator._buckets == {}

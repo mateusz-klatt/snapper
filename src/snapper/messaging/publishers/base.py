@@ -48,6 +48,7 @@ from snapper.core.types import MarketDataTypeEnum
 from snapper.core.types import TradeSideEnum
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
+from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import InstrumentFeedHealthUpsertRow
 from snapper.data.repository_types import TickUpsertRow
@@ -69,6 +70,8 @@ from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
+from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import SettingChangedData
@@ -458,6 +461,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             maxsize=_CANDLE_WRITE_QUEUE_MAX
         )
         self._candle_consumer_tasks: list[asyncio.Task[None]] = []
+        self._candle_aggregator: CandleAggregator | None = None
         self._candle_writer_task: asyncio.Task[None] | None = None
         self._candle_writer_session: AsyncSession | None = None
         self._trade_write_queue: asyncio.Queue[TradeUpsertRow] = asyncio.Queue(
@@ -761,6 +765,26 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         tasks.append(self._feed_health_loop_task)
         symbols_to_subscribe = self.symbols[:max_symbols] if max_symbols > 0 else self.symbols
         timeframes = self.settings.timeframes
+        higher_timeframes = [timeframe for timeframe in timeframes if timeframe != "1m"]
+        self._candle_aggregator = None
+        if higher_timeframes:
+            unsupported = [
+                tf for tf in higher_timeframes if tf not in SUPPORTED_SYNTHESIS_TIMEFRAMES
+            ]
+            if unsupported:
+                logger.warning(
+                    f"{self.__class__.__name__}: configured timeframes {unsupported} are not "
+                    f"synthesizable and will NOT be published (supported higher TFs: "
+                    f"{sorted(SUPPORTED_SYNTHESIS_TIMEFRAMES)})"
+                )
+            self._candle_aggregator = CandleAggregator(higher_timeframes)
+            await self._seed_aggregator_from_db(
+                symbols_to_subscribe, higher_timeframes, datetime.now(UTC)
+            )
+            self._candle_aggregator.set_live_epoch(datetime.now(UTC))
+            candle_consumer_timeframes = ["1m"]
+        else:
+            candle_consumer_timeframes = timeframes
         self._candle_consumer_tasks = [
             asyncio.create_task(
                 self._supervise_consumer(
@@ -768,7 +792,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     partial(self._candle_loop, symbols_to_subscribe, timeframe),
                 )
             )
-            for timeframe in timeframes
+            for timeframe in candle_consumer_timeframes
         ]
         tasks.extend(self._candle_consumer_tasks)
         self._candle_writer_task = asyncio.create_task(self._candle_writer_loop())
@@ -1442,6 +1466,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     _enqueue_or_drop_oldest_candle_write(
                         self._candle_write_queue, row, exchange_label
                     )
+                if self._candle_aggregator is not None and timeframe == "1m":
+                    for tf_label, synth in self._candle_aggregator.fold(cast(CandleUpdate, candle)):
+                        await self._publish_synthesized_candle(synth, exchange, tf_label)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1594,6 +1621,169 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         await self._publish_message(topic, candle_msg)
         self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
         return row
+
+    async def _publish_synthesized_candle(
+        self, candle: CandleUpdate, exchange: MarketDataExchange, timeframe: str
+    ) -> None:
+        """Publish a synthesized higher-timeframe candle to ZMQ (no persist).
+
+        Publish-only twin of :meth:`_process_candle` for bars the
+        :class:`CandleAggregator` rolls up from the 1m stream. Resolves the
+        instrument and reuses the candle id cache so the ``public_id`` stays
+        stable across emissions (and would match a future persist phase), but
+        deliberately builds NO DB row and enqueues NOTHING to the writer queue
+        — Phase 1 of the candle synthesis layer is publish-only.
+
+        Args:
+            candle: Synthesized higher-timeframe candle from the aggregator.
+            exchange: Exchange name for message provenance.
+            timeframe: Explicit timeframe label from the aggregator (never
+                decoded from ``candle.interval``).
+        """
+        native_symbol = candle.symbol
+        instrument_public_id = await self._ensure_instrument(native_symbol)
+        if instrument_public_id is None:
+            return
+        public_id = self._resolve_candle_public_id(
+            instrument_public_id, timeframe, candle.interval_begin
+        )
+        topic = self._build_data_topic(
+            native_symbol, MarketDataTypeEnum.CANDLES, timeframe=timeframe
+        )
+        candle_msg = CandleData(
+            public_id=public_id,
+            timestamp=datetime.now(UTC),
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(topic),
+            exchange=exchange,
+            instrument=native_symbol,
+            volume=candle.volume,
+            timeframe=timeframe,
+            open_at=candle.interval_begin,
+            open=candle.open,
+            high=candle.high,
+            low=candle.low,
+            close=candle.close,
+            vwap=candle.vwap,
+            trades=candle.trades,
+        )
+        await self._publish_message(topic, candle_msg)
+
+    async def _seed_aggregator_from_db(
+        self, symbols: list[str], higher: list[str], now: datetime | None = None
+    ) -> None:
+        """Rebuild each higher timeframe's open (or just-closed) bucket from 1m.
+
+        After a restart the aggregator's buckets are empty, so a mid-window
+        restart would otherwise truncate the current higher-TF bar (e.g. a 1d
+        bar starting only from the restart time). For each higher timeframe and
+        symbol, fold the persisted FINALIZED 1m of the current open window,
+        EXCLUDING the current open minute — whose persisted row is a non-final
+        update frame and is left for the live stream to finalize. ``get_candles``
+        filters ``open_at <= end`` (inclusive), so the read ends one microsecond
+        before the current minute. If ANY persisted minute in a window is NON-FINAL
+        (last written before its minute closed, ``timestamp < open_at + 60s`` — e.g.
+        the minute in progress when the publisher crashed), the WHOLE window is left
+        unseeded: live frames then rebuild it mid-window and the aggregator's
+        complete-window guard suppresses it, so a knowingly-incomplete bar is never
+        published (it self-heals on the next fully-observed window). This fails safe
+        — the worst case is a suppressed first window after a crash, never a stale
+        bar.
+
+        Known Phase-1 residual: if the seed itself crosses a minute boundary (it
+        starts late in a minute and finishes after the next minute has closed),
+        the minute that closed mid-seed is neither seeded (excluded as the
+        current-at-start minute) nor consumed live (live begins after it closed)
+        and was never captured by any consumer — so the higher-TF window closing
+        right then can emit one minute short. This is a narrow,
+        restart-timing-specific race on a latent publish-only path; the robust
+        fix (a durable per-bar completeness signal so such a window is detected
+        and suppressed/recovered) is deferred to the persistence phase.
+
+        When the restart lands in the FIRST minute of a window (the current
+        window has no completed minutes yet), the immediately-PREVIOUS window is
+        rebuilt instead: it closed at-or-just-before the restart and its emit
+        (at the boundary minute's finalize) has not happened, so reconstructing
+        it lets it publish once the first live minute finalizes — never a
+        duplicate, since a window cannot emit during its own first minute.
+
+        No-op without a repository or aggregator, and for the wildcard (``["*"]``)
+        subscription (concrete symbols are not enumerable here; the unseeded
+        current open window is suppressed by the aggregator's complete-window
+        guard until it rolls over and self-heals).
+
+        Args:
+            symbols: Symbols to seed.
+            higher: Higher timeframe labels being synthesized.
+            now: Reference time; defaults to the current UTC time. Injected by
+                tests for deterministic window boundaries.
+        """
+        if self.repository is None or self._candle_aggregator is None:
+            return
+        if "*" in symbols:
+            logger.warning(
+                f"{self.__class__.__name__}: wildcard candle subscription cannot seed "
+                "higher-timeframe buckets on restart; the current open window is suppressed "
+                "until it rolls over (synthesized bars self-heal on the next fully-observed "
+                "window)"
+            )
+            return
+        now = now if now is not None else datetime.now(UTC)
+        minute_floor = CandleAggregator._floor(now, 60)
+        end = minute_floor - timedelta(microseconds=1)
+        exchange = self._get_exchange_name()
+        for timeframe in higher:
+            window_start = self._candle_aggregator.window_start(timeframe, now)
+            if window_start is None:
+                continue
+            if window_start <= end:
+                read_start = window_start
+            else:
+                read_start = window_start - timedelta(
+                    seconds=self._candle_aggregator.timeframe_seconds(timeframe)
+                )
+            for native_symbol in symbols:
+                rows = await self.repository.get_candles(
+                    native_symbol, "1m", read_start, end, exchange, now, order="asc"
+                )
+                candidates = [row for row in rows if row["open_at"] < minute_floor]
+                if any(
+                    row["timestamp"] < row["open_at"] + timedelta(seconds=60) for row in candidates
+                ):
+                    continue
+                for row in candidates:
+                    self._candle_aggregator.seed_1m(
+                        timeframe, self._candle_update_from_row(row, native_symbol)
+                    )
+
+    @staticmethod
+    def _candle_update_from_row(row: CandleRow, symbol: str) -> CandleUpdate:
+        """Project a persisted 1m candle row to a :class:`CandleUpdate`.
+
+        Args:
+            row: Persisted 1m candle row from :meth:`Repository.get_candles`.
+            symbol: Native symbol the row belongs to.
+
+        Returns:
+            A 1m :class:`CandleUpdate` suitable for the aggregator seed path.
+            A null persisted ``vwap`` falls back to the close price and a null
+            ``trades`` to zero, since :class:`CandleUpdate` requires concrete
+            values.
+        """
+        vwap = row["vwap"] if row["vwap"] is not None else row["close"]
+        trades = row["trades"] if row["trades"] is not None else 0
+        return CandleUpdate(
+            symbol=symbol,
+            open=row["open"],
+            high=row["high"],
+            low=row["low"],
+            close=row["close"],
+            vwap=vwap,
+            trades=trades,
+            volume=row["volume"],
+            interval_begin=row["open_at"],
+            interval=60,
+        )
 
     async def _tick_loop(self, symbols: list[str]) -> None:
         """Subscribe to tick data, publish to ZMQ, and hand off DB rows to the writer.

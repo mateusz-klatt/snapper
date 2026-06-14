@@ -184,7 +184,13 @@ flowchart LR
 Components:
 
 - **Broker** (`infrastructure/broker.py`) — XPUB/XSUB proxy
-- **Publishers** (`publishers/`) — Market data publication
+- **Publishers** (`publishers/`) — Market data publication. When multiple
+  timeframes are configured, a publisher subscribes to the venue's `1m` stream
+  only and a `CandleAggregator` (`publishers/candle_aggregator.py`) synthesizes
+  the higher timeframes (5m/15m/1h/4h/1d) client-side at UTC boundaries,
+  publishing them on the same `market.*.candles.{timeframe}` topic family. The
+  current phase is publish-only (synthesized bars are not persisted; see
+  `docs/messaging.md` "Higher-Timeframe Candle Synthesis").
 - **Executors** (`executors/`) — Per-wallet order execution on
   exchanges. One executor process per `(exchange, wallet)` pair is
   spawned at boot from active `wallet_credentials` rows; each
