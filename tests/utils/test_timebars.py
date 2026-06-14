@@ -1,5 +1,6 @@
 """Unit tests for autoload functionality."""
 
+import builtins
 import importlib
 import importlib.util
 import types
@@ -102,7 +103,7 @@ def temp_modules(monkeypatch: pytest.MonkeyPatch) -> dict[str, DummyModule]:
         yield (None, f"{base}.skip.tests", False)
 
     monkeypatch.setattr(importlib, "invalidate_caches", lambda: None)
-    monkeypatch.setattr("snapper.utils.autoload.pkgutil.walk_packages", fake_walk_packages)
+    monkeypatch.setattr(autoload.pkgutil, "walk_packages", fake_walk_packages)
     return entries
 
 
@@ -148,7 +149,7 @@ def test_import_all_under_warns_on_error(
     def fake_print(msg: str) -> None:
         printed.append(msg)
 
-    monkeypatch.setattr("builtins.print", fake_print)
+    monkeypatch.setattr(builtins, "print", fake_print)
     imported_count = autoload.import_all_under("autoload_pkg", exclude_parts=(), on_error="warn")
     assert imported_count == 2
     assert any("Failed to import autoload_pkg.exclude" in entry for entry in printed)
@@ -204,7 +205,7 @@ def test_import_all_under_ignore_errors(
     def fake_print(msg: str) -> None:
         printed.append(msg)
 
-    monkeypatch.setattr("builtins.print", fake_print)
+    monkeypatch.setattr(builtins, "print", fake_print)
     imported_count = autoload.import_all_under("autoload_pkg", exclude_parts=(), on_error="ignore")
     assert imported_count == 2
     assert len(printed) == 0
