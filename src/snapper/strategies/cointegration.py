@@ -4,6 +4,7 @@ This module implements a statistical arbitrage strategy based on
 cointegration between two correlated instruments.
 """
 
+from datetime import datetime
 from typing import NamedTuple
 
 import pandas as pd
@@ -115,6 +116,7 @@ class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
         self.lookback_window = int(self.params.get("lookback_window", 50))
         self.min_data_points = int(self.params.get("min_data_points", 30))
         self._position: str | None = None
+        self._last_signal_open_at: datetime | None = None
         self._init_legs(expected_count=2)
         self.instrument1 = self.legs[0]
         self.instrument2 = self.legs[1]
@@ -135,6 +137,23 @@ class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
             The configured ``lookback_window``.
         """
         return self.lookback_window
+
+    def _signal_floor(self) -> datetime | None:
+        """Return the latest ``open_at`` no signal may fire on (it or earlier).
+
+        The max of the warmup high-water mark (prefilled past days are context,
+        not tradeable — and live re-publishing a warmup day must not emit on
+        mixed warmup/live data) and the last-signaled day (one decision per day).
+
+        Returns:
+            The suppression floor ``open_at``, or ``None`` when neither is set.
+        """
+        floors = [
+            open_at
+            for open_at in (self._warmup_through_open_at, self._last_signal_open_at)
+            if open_at is not None
+        ]
+        return max(floors) if floors else None
 
     @staticmethod
     def _extract_instrument(topic: str) -> str:
@@ -159,11 +178,32 @@ class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
             instrument: The instrument symbol.
             candle: The candle data with OHLCV data.
 
+        The spread is computed on the two legs ALIGNED BY ``open_at`` (the days
+        BOTH legs have a bar), never by list position — a live feed delivering one
+        leg's bar before the other must not desync the regression. A freshness gate
+        then emits only when the triggering candle is BOTH legs' current bar:
+        ``candle.open_at == common[-1] == latest_seen`` (the latest day across
+        either leg). So a first-arriving (unpaired) bar of a period returns
+        ``None``, and — critically — if the OTHER leg has raced ahead to a later
+        day, this leg's bar is NOT the latest seen and also returns ``None``, so
+        the z-score, spread, AND both legs' order prices (``bars[-1].close`` /
+        partner ``bars[-1].close``) are always the SAME executable day. A leg that
+        lags then catches up in a burst only emits once both are current (live can
+        only execute at the current price). This matches the date-aligned daily
+        backtest the strategy was validated on.
+
+        At most ONE signal is emitted per ``open_at`` (the ``_last_signal_open_at``
+        guard): a revised / re-published bar for an already-signaled day cannot
+        produce a second same-day action (e.g. an entry then an exit), matching the
+        backtest's one-decision-per-day and guarding the A3-warmup/live same-day
+        collision.
+
         Returns:
             ``[primary, hedge]`` (both legs of the spread, in
             current-instrument-then-partner order) on entry/exit, or
-            ``None`` when no trade triggers or the partner price is
-            unavailable. Never returns a single naked leg.
+            ``None`` when no trade triggers, the partner price is unavailable, or
+            the triggering candle does not complete the latest common day. Never
+            returns a single naked leg.
         """
         if instrument not in [self.instrument1, self.instrument2]:
             return None
@@ -172,24 +212,35 @@ class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
             logger.warning(f"No candle data for {instrument}")
             return None
         current_price = bars[-1].close
-        prices1_list = [b.close for b in self.candle_buffer.get(self.instrument1, [])]
-        prices2_list = [b.close for b in self.candle_buffer.get(self.instrument2, [])]
-        if len(prices1_list) < self.min_data_points or len(prices2_list) < self.min_data_points:
+        closes1 = {b.open_at: b.close for b in self.candle_buffer.get(self.instrument1, [])}
+        closes2 = {b.open_at: b.close for b in self.candle_buffer.get(self.instrument2, [])}
+        common = sorted(closes1.keys() & closes2.keys())
+        if len(common) < self.min_data_points:
             return None
-        prices1 = pd.Series(prices1_list[-self.lookback_window :])
-        prices2 = pd.Series(prices2_list[-self.lookback_window :])
+        latest_seen = max(closes1.keys() | closes2.keys())
+        if candle.open_at != common[-1] or candle.open_at != latest_seen:
+            return None
+        signal_floor = self._signal_floor()
+        if signal_floor is not None and candle.open_at <= signal_floor:
+            return None
+        window = common[-self.lookback_window :]
+        prices1 = pd.Series([closes1[open_at] for open_at in window])
+        prices2 = pd.Series([closes2[open_at] for open_at in window])
         spread = prices1 - self.beta * prices2
         spread_mean = spread.mean()
         spread_std = spread.std()
         if spread_std == 0:
             return None
-        current_spread = prices1.iloc[-1] - self.beta * prices2.iloc[-1]
+        current_spread = float(prices1.iloc[-1] - self.beta * prices2.iloc[-1])
         z_score = (current_spread - spread_mean) / spread_std
         logger.debug(
             f"Spread z-score: {z_score:.2f}, position: {self._position}, "
             f"spread: {current_spread:.2f}, mean: {spread_mean:.2f}, std: {spread_std:.2f}"
         )
-        return self._generate_signal_from_zscore(z_score, instrument, current_price)
+        result = self._generate_signal_from_zscore(z_score, instrument, current_price)
+        if result is not None:
+            self._last_signal_open_at = candle.open_at
+        return result
 
     def _build_signal(
         self,
@@ -368,6 +419,7 @@ class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
     async def reset(self) -> None:
         """Reset strategy state for replay."""
         self._position = None
+        self._last_signal_open_at = None
         logger.info(f"Strategy {self.name} reset")
 
 

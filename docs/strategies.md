@@ -303,6 +303,16 @@ between two cointegrated instruments, entering when the z-score
 crosses `entry_threshold` and exiting on mean reversion past
 `exit_threshold`.
 
+The spread aligns the two legs **by `open_at`** (the days both legs have a bar),
+never by list position — a live feed delivering one leg's bar before the other
+cannot desync the regression. A signal fires only when the triggering candle is
+**both legs' current bar** (`open_at == latest common day == latest seen`), so the
+z-score and both legs' order prices are always the same executable day; the
+completing (second-arriving) leg of each period carries the signal. At most one
+signal is emitted per day, and no signal fires on a day at/under the warm-up
+high-water mark (prefilled history is context, not tradeable). This matches the
+date-aligned daily backtest.
+
 ```python
 from snapper.strategies.cointegration import CointegrationPairs
 ```

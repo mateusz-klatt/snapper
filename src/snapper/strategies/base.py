@@ -231,6 +231,7 @@ class BaseStrategy(ABC):
         self._tracker: SequenceTracker = SequenceTracker()
         self._gap_detector: GapDetector = GapDetector(f"strategy.{config.name}")
         self.candle_buffer: dict[str, list[CandleData]] = {}
+        self._warmup_through_open_at: datetime | None = None
         self._listen_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self.last_data_timestamp: float = time.time()
@@ -781,6 +782,7 @@ class BaseStrategy(ABC):
         keep = set(sorted(common)[-buffer_cap:])
         for instrument, bars in loaded.items():
             self.candle_buffer[instrument] = [bar for bar in bars if bar.open_at in keep]
+        self._warmup_through_open_at = max(keep)
         logger.info(
             f"Strategy {self.name}: warmed {len(keep)} aligned daily bars for "
             f"{sorted(loaded)} from the Polygon cache"

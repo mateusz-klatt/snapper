@@ -41,6 +41,7 @@ from snapper.server.process_routes import list_process_runs
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.base import StrategySignal
+from snapper.strategies.base import StrategySignalResult
 from snapper.strategies.cointegration import CointegrationPairs
 
 
@@ -68,6 +69,29 @@ def make_candle_envelope(
     )
 
 
+_TEST_CANDLE_BASE_TS = datetime(2024, 1, 1, tzinfo=UTC).timestamp()
+
+
+def _next_candle_ts(strategy: BaseStrategy, instrument: str) -> float:
+    """Return a per-leg monotonic UTC-day timestamp so lockstep legs align by open_at.
+
+    Stamps each leg's i-th fed bar at ``BASE + i*1d`` via a per-instrument counter
+    on the strategy instance, so two legs fed in lockstep share the same
+    ``open_at`` per step and align under the cointegration open_at-aligned spread.
+
+    Args:
+        strategy: Strategy whose per-leg counter is advanced.
+        instrument: The leg being fed.
+
+    Returns:
+        A UTC-day Unix timestamp for the next bar of this leg.
+    """
+    counters: dict[str, int] = strategy.__dict__.setdefault("_test_candle_seq", {})
+    index = counters.get(instrument, 0)
+    counters[instrument] = index + 1
+    return _TEST_CANDLE_BASE_TS + index * 86400.0
+
+
 async def feed_bar_to_strategy(
     strategy: BaseStrategy,
     instrument: str,
@@ -75,7 +99,9 @@ async def feed_bar_to_strategy(
     exchange: str = "kraken",
 ) -> StrategySignal | None:
     """Feed a candle envelope to a strategy and return generated signal."""
-    candle = make_candle_envelope(instrument, close, exchange=exchange)
+    candle = make_candle_envelope(
+        instrument, close, ts=_next_candle_ts(strategy, instrument), exchange=exchange
+    )
     if instrument not in strategy.candle_buffer:
         strategy.candle_buffer[instrument] = []
     strategy.candle_buffer[instrument].append(candle)
@@ -86,6 +112,20 @@ async def feed_bar_to_strategy(
     if isinstance(result, list):
         return result[0] if result else None
     return result
+
+
+async def feed_bar_returning_group(
+    strategy: BaseStrategy, instrument: str, close: float, exchange: str = "kraken"
+) -> StrategySignalResult:
+    """Feed a candle and return the RAW callback result (full leg group / single / None)."""
+    candle = make_candle_envelope(
+        instrument, close, ts=_next_candle_ts(strategy, instrument), exchange=exchange
+    )
+    strategy.candle_buffer.setdefault(instrument, []).append(candle)
+    max_buffer_size = strategy.params.get("buffer_size", 100)
+    if len(strategy.candle_buffer[instrument]) > max_buffer_size:
+        strategy.candle_buffer[instrument].pop(0)
+    return await strategy.on_candle(instrument, candle)
 
 
 def _make_rest_request() -> MagicMock:
@@ -1270,113 +1310,131 @@ class TestCointegrationInstrument2Hedges:
 
     @pytest.mark.asyncio
     async def test_short_spread_entry_instrument2_hedge(self, strategy: CointegrationPairs) -> None:
-        """Verify short spread entry generates instrument 2 hedge signal.
+        """Verify a short-spread entry triggered by the instrument2 (ETH) candle.
 
-        Given: History built for short spread,
-        When: BTC price rises to trigger entry,
-        Then: ETH buy hedge signal generated.
+        Given: Aligned short-spread history and the BTC partner bar for the entry
+            day already buffered,
+        When: the ETH candle completes that day (instrument2 is the trigger),
+        Then: a paired entry fires with sides by instrument identity (BTC sell,
+            ETH buy hedge), ETH first in the group, and position short_spread.
         """
         await self._build_history_for_short_spread(strategy)
         await feed_bar_to_strategy(strategy, "BTC-USD", 60000.0)
-        strategy._position = "short_spread"
-        signal = await feed_bar_to_strategy(strategy, "ETH-USD", 3017.5)
-        if signal:
-            assert signal.instrument == "ETH-USD"
-            assert signal.side == "buy"
-            assert "hedge" in signal.reason.lower()
+        group = await feed_bar_returning_group(strategy, "ETH-USD", 3017.5)
+        assert isinstance(group, list)
+        sides = {sig.instrument: sig.side for sig in group}
+        assert sides["BTC-USD"] == "sell"
+        assert sides["ETH-USD"] == "buy"
+        assert group[0].instrument == "ETH-USD"
+        eth_leg = next(sig for sig in group if sig.instrument == "ETH-USD")
+        assert 0 < eth_leg.strength < 0.1
+        assert "hedge" in eth_leg.reason.lower()
+        assert strategy._position == "short_spread"
 
     @pytest.mark.asyncio
     async def test_long_spread_entry_instrument2_hedge(self, strategy: CointegrationPairs) -> None:
-        """Verify long spread entry generates instrument 2 hedge signal.
+        """Verify a long-spread entry triggered by the instrument2 (ETH) candle.
 
-        Given: History built for long spread,
-        When: BTC price drops to trigger entry,
-        Then: ETH sell hedge signal generated.
+        Given: Aligned long-spread history and the BTC partner bar for the entry
+            day already buffered,
+        When: the ETH candle completes that day,
+        Then: a paired entry fires with sides by identity (BTC buy, ETH sell hedge)
+            and position long_spread.
         """
         await self._build_history_for_long_spread(strategy)
-        await feed_bar_to_strategy(strategy, "BTC-USD", 45000.0)
-        strategy._position = "long_spread"
-        signal = await feed_bar_to_strategy(strategy, "ETH-USD", 3175.0)
-        if signal:
-            assert signal.instrument == "ETH-USD"
-            assert signal.side == "sell"
-            assert "hedge" in signal.reason.lower()
+        await feed_bar_to_strategy(strategy, "BTC-USD", 40000.0)
+        group = await feed_bar_returning_group(strategy, "ETH-USD", 3175.0)
+        assert isinstance(group, list)
+        sides = {sig.instrument: sig.side for sig in group}
+        assert sides["BTC-USD"] == "buy"
+        assert sides["ETH-USD"] == "sell"
+        eth_leg = next(sig for sig in group if sig.instrument == "ETH-USD")
+        assert "hedge" in eth_leg.reason.lower()
+        assert strategy._position == "long_spread"
 
     @pytest.mark.asyncio
     async def test_short_spread_exit_instrument2_hedge(self, strategy: CointegrationPairs) -> None:
-        """Verify short spread exit generates instrument 2 exit signal.
+        """Verify a short-spread exit triggered by the instrument2 (ETH) candle.
 
-        Given: Active short spread position,
-        When: Spread reverts to exit threshold,
-        Then: ETH sell exit signal generated.
+        Given: An open short_spread (entered via the ETH trigger),
+        When: the spread reverts toward the mean and the ETH candle completes the
+            reverting day,
+        Then: a zero-strength exit group fires (BTC buy, ETH sell) and position
+            returns to flat.
         """
         await self._build_history_for_short_spread(strategy)
-        strategy._position = "short_spread"
-        signal = await feed_bar_to_strategy(strategy, "BTC-USD", 50350.0)
-        if signal and signal.strength == pytest.approx(0.0):
-            strategy._position = "short_spread"
-        signal = await feed_bar_to_strategy(strategy, "ETH-USD", 3017.5)
-        if signal and signal.strength == pytest.approx(0.0):
-            assert signal.instrument == "ETH-USD"
-            assert signal.side == "sell"
-            assert "exit" in signal.reason.lower()
+        await feed_bar_to_strategy(strategy, "BTC-USD", 60000.0)
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3017.5)
+        assert strategy._position == "short_spread"
+        await feed_bar_to_strategy(strategy, "BTC-USD", 50100.0)
+        group = await feed_bar_returning_group(strategy, "ETH-USD", 3018.0)
+        assert isinstance(group, list)
+        sides = {sig.instrument: sig.side for sig in group}
+        assert sides["BTC-USD"] == "buy"
+        assert sides["ETH-USD"] == "sell"
+        eth_leg = next(sig for sig in group if sig.instrument == "ETH-USD")
+        assert eth_leg.strength == pytest.approx(0.0)
+        assert "exit" in eth_leg.reason.lower()
+        assert strategy._position is None
 
     @pytest.mark.asyncio
     async def test_long_spread_exit_instrument2_hedge(self, strategy: CointegrationPairs) -> None:
-        """Verify long spread exit generates instrument 2 exit signal.
+        """Verify a long-spread exit triggered by the instrument2 (ETH) candle.
 
-        Given: Active long spread position,
-        When: Spread reverts to exit threshold,
-        Then: ETH buy exit signal generated.
+        Given: An open long_spread (entered via the ETH trigger),
+        When: the spread reverts toward the mean and the ETH candle completes the
+            reverting day,
+        Then: a zero-strength exit group fires (BTC sell, ETH buy) and position
+            returns to flat.
         """
         await self._build_history_for_long_spread(strategy)
-        strategy._position = "long_spread"
-        for i in range(10):
-            signal_btc = await feed_bar_to_strategy(strategy, "BTC-USD", 45000.0 + i * 500)
-            if signal_btc and signal_btc.strength == pytest.approx(0.0):
-                strategy._position = "long_spread"
-            signal_eth = await feed_bar_to_strategy(strategy, "ETH-USD", 3175.0 - i * 10)
-            if signal_eth and signal_eth.strength == pytest.approx(0.0):
-                assert signal_eth.instrument == "ETH-USD"
-                assert signal_eth.side == "buy"
-                assert "exit" in signal_eth.reason.lower()
-                break
+        await feed_bar_to_strategy(strategy, "BTC-USD", 40000.0)
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3175.0)
+        assert strategy._position == "long_spread"
+        await feed_bar_to_strategy(strategy, "BTC-USD", 49900.0)
+        group = await feed_bar_returning_group(strategy, "ETH-USD", 3050.0)
+        assert isinstance(group, list)
+        sides = {sig.instrument: sig.side for sig in group}
+        assert sides["BTC-USD"] == "sell"
+        assert sides["ETH-USD"] == "buy"
+        eth_leg = next(sig for sig in group if sig.instrument == "ETH-USD")
+        assert eth_leg.strength == pytest.approx(0.0)
+        assert "exit" in eth_leg.reason.lower()
+        assert strategy._position is None
 
     @pytest.mark.asyncio
-    async def test_entry_no_position_short_spread_instrument2_direct(
+    async def test_instrument2_short_entry_returns_ordered_pair(
         self, strategy: CointegrationPairs
     ) -> None:
-        """Verify short spread entry from no position triggers direct instrument 2 signal.
+        """An ETH-triggered short entry returns exactly the ordered [ETH, BTC] pair.
 
-        Given: No active position with short spread setup,
-        When: ETH price fed with BTC at entry level,
-        Then: ETH buy signal generated.
+        Given: Aligned short-spread history with the BTC partner buffered,
+        When: the ETH candle completes the entry day,
+        Then: the group is exactly two legs in current-then-partner order with no
+            side-channel queue (never a single naked leg).
         """
         await self._build_history_for_short_spread(strategy)
-        strategy._position = None
-        strategy.candle_buffer["BTC-USD"][-1] = make_candle_envelope("BTC-USD", 60000.0)
-        signal = await feed_bar_to_strategy(strategy, "ETH-USD", 3017.5)
-        if signal and strategy._position == "short_spread":
-            assert signal.instrument == "ETH-USD"
-            assert signal.side == "buy"
+        await feed_bar_to_strategy(strategy, "BTC-USD", 60000.0)
+        group = await feed_bar_returning_group(strategy, "ETH-USD", 3017.5)
+        assert isinstance(group, list)
+        assert [sig.instrument for sig in group] == ["ETH-USD", "BTC-USD"]
+        assert not hasattr(strategy, "_pending_signals")
 
     @pytest.mark.asyncio
-    async def test_entry_no_position_long_spread_instrument2_direct(
+    async def test_instrument2_long_entry_returns_ordered_pair(
         self, strategy: CointegrationPairs
     ) -> None:
-        """Verify long spread entry from no position triggers direct instrument 2 signal.
+        """An ETH-triggered long entry returns exactly the ordered [ETH, BTC] pair.
 
-        Given: No active position with long spread setup,
-        When: ETH price fed with BTC at entry level,
-        Then: ETH sell signal generated.
+        Given: Aligned long-spread history with the BTC partner buffered,
+        When: the ETH candle completes the entry day,
+        Then: the group is exactly two legs in current-then-partner order.
         """
         await self._build_history_for_long_spread(strategy)
-        strategy._position = None
-        strategy.candle_buffer["BTC-USD"][-1] = make_candle_envelope("BTC-USD", 40000.0)
-        signal = await feed_bar_to_strategy(strategy, "ETH-USD", 3200.0)
-        if signal and strategy._position == "long_spread":
-            assert signal.instrument == "ETH-USD"
-            assert signal.side == "sell"
+        await feed_bar_to_strategy(strategy, "BTC-USD", 40000.0)
+        group = await feed_bar_returning_group(strategy, "ETH-USD", 3175.0)
+        assert isinstance(group, list)
+        assert [sig.instrument for sig in group] == ["ETH-USD", "BTC-USD"]
 
 
 class TestEncryptionExceptionHandling:

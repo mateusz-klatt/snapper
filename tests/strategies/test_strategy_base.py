@@ -100,6 +100,31 @@ def make_candle_envelope(
     )
 
 
+_TEST_CANDLE_BASE_TS = datetime(2024, 1, 1, tzinfo=UTC).timestamp()
+
+
+def _next_candle_ts(strategy: BaseStrategy, instrument: str) -> float:
+    """Return a per-leg monotonic UTC-day timestamp for a fed candle.
+
+    Stamps each leg's i-th fed bar at ``BASE + i*1d`` (a per-instrument counter on
+    the strategy instance), so two legs fed in lockstep share the SAME ``open_at``
+    per step and thus align under the cointegration open_at-aligned spread. The
+    counter is independent of buffer pruning (it never repeats) and is per-instance
+    (no cross-test leakage).
+
+    Args:
+        strategy: Strategy whose per-leg counter is advanced.
+        instrument: The leg being fed.
+
+    Returns:
+        A UTC-day Unix timestamp for the next bar of this leg.
+    """
+    counters: dict[str, int] = strategy.__dict__.setdefault("_test_candle_seq", {})
+    index = counters.get(instrument, 0)
+    counters[instrument] = index + 1
+    return _TEST_CANDLE_BASE_TS + index * 86400.0
+
+
 async def feed_bar_returning_group(
     strategy: BaseStrategy,
     instrument: str,
@@ -113,7 +138,9 @@ async def feed_bar_returning_group(
     returns the full group so multi-leg emission can be asserted leg by
     leg.
     """
-    candle = make_candle_envelope(instrument, close, exchange=exchange)
+    candle = make_candle_envelope(
+        instrument, close, ts=_next_candle_ts(strategy, instrument), exchange=exchange
+    )
     if instrument not in strategy.candle_buffer:
         strategy.candle_buffer[instrument] = []
     strategy.candle_buffer[instrument].append(candle)
@@ -165,7 +192,9 @@ def prefill_candle_buffer(
     if instrument not in strategy.candle_buffer:
         strategy.candle_buffer[instrument] = []
     for close in closes:
-        candle = make_candle_envelope(instrument, close, exchange=exchange)
+        candle = make_candle_envelope(
+            instrument, close, ts=_next_candle_ts(strategy, instrument), exchange=exchange
+        )
         strategy.candle_buffer[instrument].append(candle)
     max_buffer_size = strategy.params.get("buffer_size", 100)
     while len(strategy.candle_buffer[instrument]) > max_buffer_size:
@@ -4547,6 +4576,7 @@ class TestCointegrationInitialization:
             await feed_bar_to_strategy(strategy, "BTC-USD", 100.0)
             await feed_bar_to_strategy(strategy, "ETH-USD", 100.0)
 
+        await feed_bar_to_strategy(strategy, "ETH-USD", 100.0)
         group = await feed_bar_returning_group(strategy, "BTC-USD", 130.0)
 
         assert isinstance(group, list)
@@ -4692,6 +4722,7 @@ class TestCointegrationSignalGeneration:
             await feed_bar_to_strategy(strategy, "BTC-USD", btc_price)
             await feed_bar_to_strategy(strategy, "ETH-USD", eth_price)
         btc_high = 60000.0
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3035.0)
         signal_btc = await feed_bar_to_strategy(strategy, "BTC-USD", btc_high)
         assert signal_btc is not None
         assert signal_btc.instrument == "BTC-USD"
@@ -4714,6 +4745,7 @@ class TestCointegrationSignalGeneration:
             await feed_bar_to_strategy(strategy, "BTC-USD", btc_price)
             await feed_bar_to_strategy(strategy, "ETH-USD", eth_price)
         btc_low = 45000.0
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3175.0)
         signal_btc = await feed_bar_to_strategy(strategy, "BTC-USD", btc_low)
         assert signal_btc is not None
         assert signal_btc.instrument == "BTC-USD"
@@ -4751,15 +4783,14 @@ class TestCointegrationSignalGeneration:
             eth_price = 3000.0 + i * 1
             await feed_bar_to_strategy(strategy, "BTC-USD", btc_price)
             await feed_bar_to_strategy(strategy, "ETH-USD", eth_price)
-        signal_btc = await feed_bar_to_strategy(strategy, "BTC-USD", 60000.0)
-        assert signal_btc is not None
-        signal_eth = await feed_bar_to_strategy(strategy, "ETH-USD", 3030.0)
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3035.0)
+        group = await feed_bar_returning_group(strategy, "BTC-USD", 60000.0)
         assert strategy._position == "short_spread"
-        if signal_eth:
-            assert signal_eth.instrument == "ETH-USD"
-            assert signal_eth.side == "buy"
-            assert 0 < signal_eth.strength < 0.1
-            assert "hedge" in signal_eth.reason.lower()
+        assert isinstance(group, list)
+        eth_leg = next(sig for sig in group if sig.instrument == "ETH-USD")
+        assert eth_leg.side == "buy"
+        assert 0 < eth_leg.strength < 0.1
+        assert "hedge" in eth_leg.reason.lower()
 
     @pytest.mark.asyncio
     async def test_exit_signal_short_spread_reversion(self, strategy: CointegrationPairs) -> None:
@@ -4774,6 +4805,7 @@ class TestCointegrationSignalGeneration:
             eth_price = 3000.0 + i * 1
             await feed_bar_to_strategy(strategy, "BTC-USD", btc_price)
             await feed_bar_to_strategy(strategy, "ETH-USD", eth_price)
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3035.0)
         signal = await feed_bar_to_strategy(strategy, "BTC-USD", 60000.0)
         assert strategy._position == "short_spread"
         for i in range(15):
@@ -4798,6 +4830,7 @@ class TestCointegrationSignalGeneration:
             eth_price = 3000.0 + i * 1
             await feed_bar_to_strategy(strategy, "BTC-USD", btc_price)
             await feed_bar_to_strategy(strategy, "ETH-USD", eth_price)
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3035.0)
         await feed_bar_to_strategy(strategy, "BTC-USD", 60000.0)
         assert strategy._position == "short_spread"
         for i in range(10):
@@ -4828,6 +4861,7 @@ class TestCointegrationSignalGeneration:
             eth_price = 3000.0 + i * 5
             await feed_bar_to_strategy(strategy, "BTC-USD", btc_price)
             await feed_bar_to_strategy(strategy, "ETH-USD", eth_price)
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3175.0)
         await feed_bar_to_strategy(strategy, "BTC-USD", 45000.0)
         assert strategy._position == "long_spread"
         for i in range(10):
@@ -4854,6 +4888,7 @@ class TestCointegrationSignalGeneration:
             eth_price = 3000.0 + i * 5
             await feed_bar_to_strategy(strategy, "BTC-USD", btc_price)
             await feed_bar_to_strategy(strategy, "ETH-USD", eth_price)
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3175.0)
         await feed_bar_to_strategy(strategy, "BTC-USD", 45000.0)
         assert strategy._position == "long_spread"
         await feed_bar_to_strategy(strategy, "BTC-USD", 44000.0)
@@ -4892,6 +4927,111 @@ class TestCointegrationSignalGeneration:
             signal = await feed_bar_to_strategy(strategy, "ETH-USD", 3000.0)
         assert signal is None
 
+    @pytest.mark.asyncio
+    async def test_first_arriving_leg_none_completing_leg_emits(
+        self, strategy: CointegrationPairs
+    ) -> None:
+        """The 1st-arriving bar of a period returns None; the completing bar emits.
+
+        Given: 35 aligned BTC/ETH days,
+        When: the BTC bar for the entry day arrives first, then the ETH bar,
+        Then: BTC returns None (unpaired) and ETH completes the day and signals.
+        """
+        for i in range(35):
+            await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0 + i * 100)
+            await feed_bar_to_strategy(strategy, "ETH-USD", 3000.0 + i)
+        first = await feed_bar_to_strategy(strategy, "BTC-USD", 60000.0)
+        assert first is None
+        assert strategy._position is None
+        second = await feed_bar_to_strategy(strategy, "ETH-USD", 3035.0)
+        assert second is not None
+        assert strategy._position == "short_spread"
+
+    @pytest.mark.asyncio
+    async def test_partner_ahead_blocks_stale_signal(self, strategy: CointegrationPairs) -> None:
+        """A leg racing ahead blocks a stale signal so prices stay same-day.
+
+        Given: aligned history, then BTC races two days ahead while ETH lags,
+        When: the lagging ETH bar for an older day arrives,
+        Then: no signal fires (BTC, not ETH's day, is the latest seen) and the
+            position stays flat — the order can never price legs on different days.
+        """
+        for i in range(35):
+            await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0 + i * 100)
+            await feed_bar_to_strategy(strategy, "ETH-USD", 3000.0 + i)
+        await feed_bar_to_strategy(strategy, "BTC-USD", 60000.0)
+        await feed_bar_to_strategy(strategy, "BTC-USD", 99999.0)
+        signal = await feed_bar_to_strategy(strategy, "ETH-USD", 3035.0)
+        assert signal is None
+        assert strategy._position is None
+
+    @pytest.mark.asyncio
+    async def test_self_lagging_behind_partner_does_not_emit(
+        self, strategy: CointegrationPairs
+    ) -> None:
+        """Symmetric guard: ETH ahead blocks a stale BTC bar from emitting.
+
+        Given: aligned history, then ETH races two days ahead while BTC lags,
+        When: the lagging BTC bar for an older day arrives,
+        Then: no signal fires (ETH is the latest seen) and the position stays flat.
+        """
+        for i in range(35):
+            await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0 + i * 100)
+            await feed_bar_to_strategy(strategy, "ETH-USD", 3000.0 + i)
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3035.0)
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3036.0)
+        signal = await feed_bar_to_strategy(strategy, "BTC-USD", 60000.0)
+        assert signal is None
+        assert strategy._position is None
+
+    @pytest.mark.asyncio
+    async def test_revised_same_day_bar_does_not_double_act(
+        self, strategy: CointegrationPairs
+    ) -> None:
+        """A revised bar for an already-signaled day cannot produce a 2nd same-day action.
+
+        Given: a short_spread entered on the latest day,
+        When: a revised (re-published) candle for that SAME open_at arrives — even
+            one whose price would flip the z-score,
+        Then: no second signal fires and the position is unchanged (one decision
+            per day; guards the A3-warmup/live same-day collision).
+        """
+        for i in range(35):
+            await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0 + i * 100)
+            await feed_bar_to_strategy(strategy, "ETH-USD", 3000.0 + i)
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3035.0)
+        await feed_bar_to_strategy(strategy, "BTC-USD", 60000.0)
+        assert strategy._position == "short_spread"
+        signaled_open_at = strategy._last_signal_open_at
+        assert signaled_open_at is not None
+        revised = make_candle_envelope("ETH-USD", 999999.0, ts=signaled_open_at.timestamp())
+        strategy.candle_buffer["ETH-USD"][-1] = revised
+        result = await strategy.on_candle("ETH-USD", revised)
+        assert result is None
+        assert strategy._position == "short_spread"
+
+    @pytest.mark.asyncio
+    async def test_no_signal_on_warmup_day_republish(self, strategy: CointegrationPairs) -> None:
+        """A live re-publish of a day at/under the warmup high-water mark does not signal.
+
+        Given: aligned history and a warmup high-water mark at the latest buffered
+            day (as the A3 prefill sets),
+        When: a live bar re-publishes that warmup day with a price that would flip
+            the z-score,
+        Then: no signal fires (prefilled past days are context, not tradeable; this
+            blocks a mixed warmup/live same-day entry) and the position stays flat.
+        """
+        for i in range(35):
+            await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0 + i * 100)
+            await feed_bar_to_strategy(strategy, "ETH-USD", 3000.0 + i)
+        warmup_day = strategy.candle_buffer["BTC-USD"][-1].open_at
+        strategy._warmup_through_open_at = warmup_day
+        revised = make_candle_envelope("BTC-USD", 999999.0, ts=warmup_day.timestamp())
+        strategy.candle_buffer["BTC-USD"][-1] = revised
+        result = await strategy.on_candle("BTC-USD", revised)
+        assert result is None
+        assert strategy._position is None
+
 
 class TestCointegrationReset:
     """Test suite for cointegration strategy reset."""
@@ -4907,6 +5047,7 @@ class TestCointegrationReset:
         for i in range(35):
             await feed_bar_to_strategy(strategy, "BTC-USD", 50000.0 + i * 100)
             await feed_bar_to_strategy(strategy, "ETH-USD", 3000.0 + i)
+        await feed_bar_to_strategy(strategy, "ETH-USD", 3035.0)
         await feed_bar_to_strategy(strategy, "BTC-USD", 60000.0)
         assert strategy._position is not None
         assert len(strategy.candle_buffer) > 0
