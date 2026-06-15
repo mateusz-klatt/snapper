@@ -115,53 +115,51 @@ class MarketSnapshotUpdaterService(ABC):
     def _resolve_batch_instrument_ids(
         self, native_symbols: set[str], exchange: str, as_of: datetime
     ) -> dict[str, str]:
-        """Resolve a batch of native symbols to instrument_public_id.
+        """Resolve a batch of native symbols to instrument_public_id in one query.
+
+        Collapses the per-symbol ``Symbol`` -> ``Instrument`` two-query
+        waterfall into a single ``Symbol`` JOIN ``Instrument`` IN-list query at
+        ``as_of`` (HV2-M12): a snapshot cycle over thousands of symbols pays
+        one round-trip instead of 2N. Symbols with no active instrument for
+        ``exchange`` are omitted from the result and warned, preserving the
+        prior skip semantics. Ordered by ``(Symbol.id, Instrument.id)`` so that
+        if abnormal data ever leaves overlapping active rows for one symbol,
+        the newest version wins deterministically (the prior per-symbol
+        ``.first()`` was arbitrary).
 
         Args:
             native_symbols: Set of native symbol strings.
             exchange: Exchange identifier (lowercase).
-            as_of: Point-in-time for temporal query.
+            as_of: Point-in-time for the temporal (SCD2) query.
 
         Returns:
             Mapping of native_symbol -> instrument_public_id for successful lookups.
         """
+        if not native_symbols:
+            return {}
         now = as_of
-        result: dict[str, str] = {}
+        symbols = list(native_symbols)
+        query = (
+            select(Symbol.native_symbol, Instrument.public_id)
+            .join(Instrument, Instrument.symbol_public_id == Symbol.public_id)
+            .where(
+                Symbol.native_symbol.in_(symbols),
+                Symbol.timestamp <= now,
+                Symbol.known_to > now,
+                Instrument.exchange == exchange,
+                Instrument.timestamp <= now,
+                Instrument.known_to > now,
+            )
+            .order_by(Symbol.id, Instrument.id)
+        )
         with self.repository.session_factory() as session:
-            for ns in native_symbols:
-                sym_pid = (
-                    session.execute(
-                        select(Symbol.public_id).where(
-                            Symbol.native_symbol == ns,
-                            Symbol.timestamp <= now,
-                            Symbol.known_to > now,
-                        )
-                    )
-                    .scalars()
-                    .first()
+            rows = session.execute(query).tuples().all()
+        result: dict[str, str] = dict(rows)
+        for ns in symbols:
+            if ns not in result:
+                logger.warning(
+                    f"No active instrument resolved for native_symbol={ns} exchange={exchange}"
                 )
-                if sym_pid is None:
-                    logger.warning(f"No active Symbol found for native_symbol={ns}")
-                    continue
-                inst_pid = (
-                    session.execute(
-                        select(Instrument.public_id).where(
-                            Instrument.symbol_public_id == sym_pid,
-                            Instrument.exchange == exchange,
-                            Instrument.timestamp <= now,
-                            Instrument.known_to > now,
-                        )
-                    )
-                    .scalars()
-                    .first()
-                )
-                if inst_pid is None:
-                    logger.warning(
-                        f"No active Instrument found for symbol_public_id={sym_pid}, "
-                        f"exchange={exchange}"
-                    )
-                    continue
-                result[ns] = inst_pid
         return result
 
     def _persist_snapshots_scd2(self, snapshots: list[MarketSnapshot]) -> int:

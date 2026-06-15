@@ -3,13 +3,17 @@
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
 
+from snapper.data.models import Instrument
 from snapper.data.models import MarketSnapshot
+from snapper.data.models import Symbol
+from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.market_data.base import MarketSnapshotUpdaterService
 from snapper.infrastructure.market_data.kraken import KrakenSnapshotUpdaterService
@@ -597,33 +601,93 @@ def test_resolve_instrument_public_id_instrument_not_found() -> None:
     assert result is None
 
 
-def test_resolve_batch_instrument_ids_mixed() -> None:
-    """Resolve batch with mix of found and missing symbols.
+def _seed_resolver_db(
+    tmp_path: Path, native_symbol: str = "BTC-USD", exchange: str = "kraken"
+) -> tuple[StubMarketUpdater, str]:
+    """Seed a sync repo with one Symbol+Instrument and return (updater, inst_pid)."""
+    repo = DatabaseRepository(f"sqlite:///{tmp_path / 'md.db'}")
+    repo.create_all()
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    with repo.session_factory() as session:
+        sym = Symbol(
+            native_symbol=native_symbol,
+            base="BTC",
+            quote="USD",
+            asset_type="crypto",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=1,
+        )
+        session.add(sym)
+        session.commit()
+        session.refresh(sym)
+        inst = Instrument(
+            symbol_public_id=sym.public_id,
+            exchange=exchange,
+            requires_ai_review=False,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=2,
+        )
+        session.add(inst)
+        session.commit()
+        session.refresh(inst)
+        inst_pid = inst.public_id
+    updater = StubMarketUpdater()
+    updater.repository = repo
+    return updater, inst_pid
 
-    Given: Two symbols, one resolvable and one not,
-    When: _resolve_batch_instrument_ids is called,
-    Then: Only the resolvable symbol appears in the result.
+
+def test_resolve_batch_instrument_ids_resolves_via_join(tmp_path: Path) -> None:
+    """The batch resolver maps a native symbol to its instrument in one JOIN.
+
+    Given: a seeded Symbol+Instrument for BTC-USD on kraken,
+    When: _resolve_batch_instrument_ids is called for {BTC-USD},
+    Then: it returns {BTC-USD: instrument_public_id}.
     """
-    session = _FakeSession(["sym-btc", "inst-btc", None])
-    updater = _make_updater_with_session(session)
+    updater, inst_pid = _seed_resolver_db(tmp_path)
+    result = updater._resolve_batch_instrument_ids({"BTC-USD"}, "kraken", as_of=datetime.now(UTC))
+    assert result == {"BTC-USD": inst_pid}
+
+
+def test_resolve_batch_instrument_ids_skips_unresolved(tmp_path: Path) -> None:
+    """Symbols with no active instrument are omitted from the result.
+
+    Given: BTC-USD is resolvable but NOPE is not,
+    When: _resolve_batch_instrument_ids is called for both,
+    Then: only BTC-USD appears in the result.
+    """
+    updater, inst_pid = _seed_resolver_db(tmp_path)
     result = updater._resolve_batch_instrument_ids(
         {"BTC-USD", "NOPE"}, "kraken", as_of=datetime.now(UTC)
     )
-    assert len(result) == 1
-    found_values = set(result.values())
-    assert "inst-btc" in found_values
+    assert result == {"BTC-USD": inst_pid}
 
 
-def test_resolve_batch_instrument_ids_instrument_missing() -> None:
-    """Log warning when instrument not found for resolved symbol.
+def test_resolve_batch_instrument_ids_exchange_filter(tmp_path: Path) -> None:
+    """An instrument on a different exchange does not resolve.
 
-    Given: Symbol resolves but instrument does not,
-    When: _resolve_batch_instrument_ids is called,
-    Then: Returns empty dict.
+    Given: BTC-USD's instrument exists only on kraken,
+    When: _resolve_batch_instrument_ids is queried for exchange walutomat,
+    Then: it returns an empty mapping.
     """
-    session = _FakeSession(["sym-pub-1", None])
-    updater = _make_updater_with_session(session)
-    result = updater._resolve_batch_instrument_ids({"BTC-USD"}, "kraken", as_of=datetime.now(UTC))
+    updater, _ = _seed_resolver_db(tmp_path)
+    result = updater._resolve_batch_instrument_ids(
+        {"BTC-USD"}, "walutomat", as_of=datetime.now(UTC)
+    )
+    assert result == {}
+
+
+def test_resolve_batch_instrument_ids_empty_input(tmp_path: Path) -> None:
+    """An empty symbol set short-circuits without querying.
+
+    Given: a seeded repo but an empty native-symbol set,
+    When: _resolve_batch_instrument_ids is called,
+    Then: it returns an empty mapping.
+    """
+    updater, _ = _seed_resolver_db(tmp_path)
+    result = updater._resolve_batch_instrument_ids(set(), "kraken", as_of=datetime.now(UTC))
     assert result == {}
 
 
