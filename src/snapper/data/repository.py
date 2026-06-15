@@ -10533,6 +10533,158 @@ class SQLAlchemyRepository(Repository):
             )
             return result.scalar()
 
+    async def get_shard_keys_with_fills(self, as_of: datetime) -> list[str]:
+        """Return distinct shard keys that have any ``fill_observed`` venue event.
+
+        Recovery's venue-plane gap pass (R9) iterates these to find shards
+        whose recorded fills were never consumed and were not covered by
+        checkpoint or execution recovery — including shards with ZERO
+        execution rows, which the execution-replay pass never visits (it
+        returns early on an empty executions table). ``as_of`` is accepted
+        for signature parity with the other recovery queries; venue events
+        are append-only and never closed, so no temporal filter applies.
+
+        Args:
+            as_of: Recovery anchor (unused; append-only rows).
+
+        Returns:
+            Distinct ``shard_key`` values bearing fill events.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(VenueEvent.shard_key)
+                .where(VenueEvent.event_type == "fill_observed")
+                .distinct()
+            )
+            return list(result.scalars().all())
+
+    async def shard_has_fill_gap(self, shard_key: str, as_of: datetime) -> bool:
+        """Return True when a shard's recorded fills exceed its consumed fills.
+
+        The R9 gap signal: the executor commits a ``fill_observed`` venue
+        event BEFORE publishing the fill, and the ``executions`` row only
+        after a successful publish, so recorded durable quantity that has no
+        matching consumed (published) quantity means a fill was dropped on
+        the publish/consume path. Comparison is on GROSS filled quantity, not
+        net position, so the absorption case (a later cumulative fill carries
+        an earlier unpublished fill's quantity under one execution row) shows
+        equal totals and is correctly NOT a gap.
+
+        ``recorded`` sums ``fill_size`` over fills deduped by identity
+        (``exec_id``, else ``trade_id``, else the row's unique ``public_id``
+        so id-less rows are never collapsed); duplicate redelivered rows share
+        an identity and collapse via ``MAX``. ``consumed`` sums
+        ``executions.size`` for the shard's orders, resolved
+        ``client_order_id`` -> current SCD2 ``orders.public_id`` and further
+        scoped to the shard's own ``wallet_public_id`` and ``mode`` (read from
+        the shard's venue rows) so a same-id order on a foreign shard cannot
+        inflate consumed — ``client_order_id`` is a globally-unique ``uuid7``
+        in practice, this scoping is defence-in-depth. An unresolved client
+        order id contributes zero (so its quantity reads as a gap — the safe
+        direction). Over-detection only triggers an exact-by-construction
+        rebuild; only under-detection would drop a fill, and a deduped durable
+        sum cannot under-count venue truth.
+
+        Args:
+            shard_key: Shard to evaluate.
+            as_of: Temporal anchor for the orders/executions join.
+
+        Returns:
+            True if recorded gross quantity exceeds consumed by more than eps.
+        """
+        async with self.session() as s:
+            scope_row = (
+                await s.execute(
+                    select(VenueEvent.wallet_public_id, VenueEvent.mode)
+                    .where(
+                        VenueEvent.shard_key == shard_key,
+                        VenueEvent.event_type == "fill_observed",
+                    )
+                    .limit(1)
+                )
+            ).first()
+            if scope_row is None:
+                return False
+            shard_wallet_public_id, shard_mode = scope_row
+            recorded_per_identity = (
+                select(func.max(VenueEvent.fill_size).label("s"))
+                .where(
+                    VenueEvent.shard_key == shard_key,
+                    VenueEvent.event_type == "fill_observed",
+                    VenueEvent.fill_size.isnot(None),
+                )
+                .group_by(
+                    func.coalesce(VenueEvent.exec_id, VenueEvent.trade_id, VenueEvent.public_id)
+                )
+                .subquery()
+            )
+            recorded_result = await s.execute(
+                select(func.coalesce(func.sum(recorded_per_identity.c.s), 0.0))
+            )
+            recorded_total = recorded_result.scalar() or 0.0
+            shard_client_order_ids = (
+                select(VenueEvent.client_order_id)
+                .where(
+                    VenueEvent.shard_key == shard_key,
+                    VenueEvent.event_type == "fill_observed",
+                    VenueEvent.client_order_id.isnot(None),
+                )
+                .distinct()
+            )
+            consumed_result = await s.execute(
+                select(func.coalesce(func.sum(Execution.size), 0.0))
+                .select_from(Execution)
+                .join(
+                    Order,
+                    and_(
+                        Execution.order_public_id == Order.public_id,
+                        *where_active(Order, as_of),
+                    ),
+                )
+                .where(
+                    Order.client_order_id.in_(shard_client_order_ids),
+                    Order.wallet_public_id == shard_wallet_public_id,
+                    Order.mode == shard_mode,
+                    *where_active(Execution, as_of),
+                )
+            )
+            consumed_total = consumed_result.scalar() or 0.0
+            return recorded_total - consumed_total > 1e-9
+
+    async def shard_has_accruals(
+        self, wallet_public_id: str, exchange: str, mode: str, as_of: datetime
+    ) -> bool:
+        """Return True when the wallet/exchange/mode has any accrual ledger row.
+
+        The R9 venue-event rebuild reconstructs cash from
+        ``initial_cash + fill_flows`` and cannot reconstruct funding accrued
+        before the checkpoint, so it is gated to non-funding (spot) shards.
+        Funding is per (wallet, exchange, mode); any matching ``accrual_ledger``
+        row means the shard's cash carries funding and the rebuild is skipped
+        (status-quo recovery), so the gate needs no instrument resolution.
+
+        Args:
+            wallet_public_id: Owning wallet.
+            exchange: Shard exchange.
+            mode: Execution mode (``live``/``paper``).
+            as_of: Temporal anchor.
+
+        Returns:
+            True if any active accrual ledger row exists for the scope.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(func.count())
+                .select_from(AccrualLedger)
+                .where(
+                    AccrualLedger.wallet_public_id == wallet_public_id,
+                    AccrualLedger.exchange == exchange,
+                    AccrualLedger.mode == mode,
+                    *where_active(AccrualLedger, as_of),
+                )
+            )
+            return (result.scalar() or 0) > 0
+
     async def has_order_submit_evidence(self, client_order_id: str) -> bool:
         """Return True when durable evidence shows the submit may have reached the venue.
 

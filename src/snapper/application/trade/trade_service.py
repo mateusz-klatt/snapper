@@ -18,6 +18,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Final
 from typing import Literal
+from typing import TypedDict
 
 from loguru import logger
 
@@ -103,6 +104,25 @@ class ShardState:
     recon_failure_count: int = 0
     active_cycle_public_id: str | None = None
     active_cycle_max_qty: float = 0.0
+
+
+class FillProjection(TypedDict):
+    """Fill-derived shard state produced by a chronological venue-event replay.
+
+    Carries exactly the fields a dropped fill corrupts and a from-scratch
+    venue-event replay reconstructs. R9 gap recovery overlays these onto a
+    live shard without disturbing command identity or ``peak_equity`` (which
+    venue events cannot carry and the checkpoint restore owns).
+    """
+
+    position_qty: float
+    entry_price: float | None
+    position_opened_at: datetime | None
+    realized_pnl: float
+    cash: float
+    turnover: float
+    seen_exec_ids: OrderedDict[str, None]
+    last_venue_event_id: int
 
 
 class TradeService:
@@ -264,8 +284,17 @@ class TradeService:
             event: Venue event row to apply. Must contain shard_key,
                 event_type, and id fields at minimum.
         """
-        shard_key = event["shard_key"]
-        shard = self._get_or_create_shard(shard_key)
+        shard = self._get_or_create_shard(event["shard_key"])
+        self._apply_event_to_shard(shard, event)
+
+    def _apply_event_to_shard(self, shard: ShardState, event: VenueEventRow) -> None:
+        """Dispatch one venue event onto a specific shard, enforcing id ordering.
+
+        Shared by :meth:`apply_venue_event` (live/delta replay onto the stored
+        shard) and :meth:`project_fill_state_from_events` (replay onto a
+        throwaway shard), so both honour the monotonic-id guard and identical
+        per-type handling.
+        """
         event_type = event["event_type"]
         event_id = event["id"]
 
@@ -286,6 +315,119 @@ class TradeService:
             logger.warning(f"TradeService: unknown venue event type: {event_type}")
 
         shard.last_venue_event_id = event_id
+
+    def reset_shard(self, shard_key: str) -> None:
+        """Replace a shard's in-memory state with a fresh projection.
+
+        Used by R9 venue-plane gap recovery before a from-scratch chronological
+        replay, so the rebuild starts from the canonical ``self._initial_cash``
+        with no carried-over position, cash, dedup, or watermark state.
+
+        Args:
+            shard_key: Shard to reset.
+        """
+        self._shards[shard_key] = ShardState(
+            cash=self._initial_cash,
+            peak_equity=self._initial_cash,
+        )
+
+    @staticmethod
+    def dedup_fill_events(events: list[VenueEventRow]) -> list[VenueEventRow]:
+        """Drop redelivered duplicate fill_observed rows by identity, order-preserving.
+
+        A from-scratch venue replay can span a shard's whole history. The live
+        ``_dedup_fill`` set is bounded (10k, FIFO-evicted), so two duplicate
+        fill rows (the same fill redelivered after a publish retry) separated by
+        more than that window would each apply and double-book. This collapses
+        later duplicates UP FRONT with an unbounded set — mirroring
+        ``_dedup_fill``'s either-key identity (exec_id OR trade_id, else the
+        client_order_id+size+price fallback) — so a single-pass replay is exact
+        regardless of history length. Non-fill lifecycle events pass through.
+
+        Args:
+            events: Id-ordered venue events to replay.
+
+        Returns:
+            The events with duplicate fill identities removed (first kept).
+        """
+        seen: set[str] = set()
+        result: list[VenueEventRow] = []
+        for event in events:
+            if event["event_type"] != "fill_observed":
+                result.append(event)
+                continue
+            exec_id = event.get("exec_id")
+            trade_id = event.get("trade_id")
+            keys = [key for key in (exec_id, trade_id) if key]
+            if not keys:
+                keys = [
+                    f"fallback-{event.get('client_order_id')}"
+                    f"-{event.get('fill_size')}-{event.get('fill_price')}"
+                ]
+            if any(key in seen for key in keys):
+                continue
+            seen.update(keys)
+            result.append(event)
+        return result
+
+    def project_fill_state_from_events(
+        self, shard_key: str, events: list[VenueEventRow]
+    ) -> FillProjection:
+        """Replay events into a THROWAWAY shard and return fill-derived state.
+
+        Applies the full id-ordered venue-event history to a fresh
+        ``ShardState`` that is NOT stored in ``self._shards`` (no global
+        mutation), so checkpoint-path gap recovery can overlay only the
+        fill-derived fields onto the live shard without disturbing the command
+        identity and ``peak_equity`` the checkpoint restore established. Cash
+        reconstructs exactly as the live path builds it
+        (``self._initial_cash`` + fill flows).
+
+        Args:
+            shard_key: Shard the events belong to (for parity; unused here).
+            events: Full id-ordered ``fill_observed``/lifecycle venue events.
+
+        Returns:
+            The fill-derived projection for overlay.
+        """
+        temp = ShardState(cash=self._initial_cash, peak_equity=self._initial_cash)
+        for event in self.dedup_fill_events(events):
+            self._apply_event_to_shard(temp, event)
+        return {
+            "position_qty": temp.position.position_qty,
+            "entry_price": temp.position.entry_price,
+            "position_opened_at": temp.position.position_opened_at,
+            "realized_pnl": temp.position.realized_pnl,
+            "cash": temp.cash,
+            "turnover": temp.turnover,
+            "seen_exec_ids": temp.seen_exec_ids,
+            "last_venue_event_id": temp.last_venue_event_id,
+        }
+
+    def overlay_fill_state(self, shard_key: str, projection: FillProjection) -> None:
+        """Overlay gap-corrected fill-derived fields onto a live shard.
+
+        Copies ONLY the fill-derived projection (position, entry, opened-at,
+        realized PnL, cash, turnover, dedup set, watermark) produced by a
+        chronological venue-event replay, leaving command identity and
+        ``peak_equity`` exactly as the checkpoint restore left them. Used by
+        checkpoint-path R9 recovery to correct a fill dropped under the scalar
+        watermark without changing non-fill recovery semantics.
+
+        Args:
+            shard_key: Shard to correct.
+            projection: Fill-derived state from
+                :meth:`project_fill_state_from_events`.
+        """
+        shard = self._get_or_create_shard(shard_key)
+        shard.position.position_qty = projection["position_qty"]
+        shard.position.entry_price = projection["entry_price"]
+        shard.position.position_opened_at = projection["position_opened_at"]
+        shard.position.realized_pnl = projection["realized_pnl"]
+        shard.cash = projection["cash"]
+        shard.turnover = projection["turnover"]
+        shard.seen_exec_ids = projection["seen_exec_ids"]
+        shard.last_venue_event_id = projection["last_venue_event_id"]
 
     def _apply_order_accepted(self, shard: ShardState, event: VenueEventRow) -> None:
         """Update command state on venue acceptance."""

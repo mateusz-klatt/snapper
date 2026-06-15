@@ -10512,3 +10512,355 @@ async def test_stop_command_round_trip_preserves_trigger_through_pipeline(
     assert active[0]["status"] == "accepted"
     assert active[0]["stop_price"] == 48000.0
     assert active[0]["order_type"] == "stop_limit"
+
+
+_GAP_WALLET = "00000000-0000-7000-8000-000000000001"
+
+
+def _gap_venue_row(
+    *,
+    shard_key: str,
+    client_order_id: str | None,
+    fill_size: float,
+    cum_fill_size: float,
+    exec_id: str | None,
+    trade_id: str | None,
+    event_type: str = "fill_observed",
+) -> VenueEventInsertRow:
+    """Build a venue event insert row for gap-detection tests."""
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    return {
+        "event_type": event_type,
+        "shard_key": shard_key,
+        "wallet_public_id": _GAP_WALLET,
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "received_at": now,
+        "session_id": "s1",
+        "sequence_id": 0,
+        "timestamp": now,
+        "client_order_id": client_order_id,
+        "side": "buy",
+        "status": "filled",
+        "fill_price": 100.0,
+        "fill_size": fill_size,
+        "cum_fill_size": cum_fill_size,
+        "exec_id": exec_id,
+        "trade_id": trade_id,
+        "liquidity_role": "taker",
+    }
+
+
+async def _insert_gap_order(r: SQLAlchemyRepository, inst_pid: str, client_order_id: str) -> str:
+    """Insert an order for the gap-detection wallet and return its public id."""
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    _, opid = await r.insert_order(
+        instrument_public_id=inst_pid,
+        wallet_public_id=_GAP_WALLET,
+        client_order_id=client_order_id,
+        exchange_order_id=None,
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=100.0,
+        size=100.0,
+        status="new",
+        session_id="s1",
+        sequence_id=0,
+        timestamp=now,
+    )
+    return opid
+
+
+async def _insert_gap_execution(
+    r: SQLAlchemyRepository, order_public_id: str, size: float, exec_id: str
+) -> None:
+    """Insert a consumed execution row under an order."""
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    await r.insert_execution(
+        order_public_id=order_public_id,
+        wallet_public_id=_GAP_WALLET,
+        timestamp=now,
+        side="buy",
+        status="filled",
+        price=100.0,
+        size=size,
+        fee=0.0,
+        fee_asset="USD",
+        session_id="s1",
+        sequence_id=0,
+        exec_id=exec_id,
+        trade_id=exec_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_shard_has_fill_gap_false_on_absorption(tmp_path: Path) -> None:
+    """Cum-absorption (recorded == consumed) is not a fill gap.
+
+    Given: two recorded venue fills (10 + 5) whose quantity was consumed under a
+        single execution row of size 15 (a later cumulative fill absorbing an
+        earlier unpublished one), so the earlier venue row has no execution row,
+    When: shard_has_fill_gap runs,
+    Then: it returns False because recorded gross equals consumed gross.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    opid = await _insert_gap_order(r, inst_pid, "c-abs")
+    await _insert_gap_execution(r, opid, 15.0, "eC")
+    shard = "kraken.BTC-USD.live"
+    await r.insert_venue_event(
+        _gap_venue_row(
+            shard_key=shard,
+            client_order_id="c-abs",
+            fill_size=10.0,
+            cum_fill_size=10.0,
+            exec_id="eB",
+            trade_id="eB",
+        )
+    )
+    await r.insert_venue_event(
+        _gap_venue_row(
+            shard_key=shard,
+            client_order_id="c-abs",
+            fill_size=5.0,
+            cum_fill_size=15.0,
+            exec_id="eC",
+            trade_id="eC",
+        )
+    )
+    assert await r.shard_has_fill_gap(shard, now) is False
+
+
+@pytest.mark.asyncio
+async def test_shard_has_fill_gap_true_when_recorded_exceeds_consumed(
+    tmp_path: Path,
+) -> None:
+    """A recorded fill with no matching execution row is a gap.
+
+    Given: a venue fill of size 10 recorded for an order that has NO execution
+        row (its publish/execution-insert never completed),
+    When: shard_has_fill_gap runs,
+    Then: it returns True (recorded 10 > consumed 0).
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    await _insert_gap_order(r, inst_pid, "c-gap")
+    shard = "kraken.BTC-USD.live"
+    await r.insert_venue_event(
+        _gap_venue_row(
+            shard_key=shard,
+            client_order_id="c-gap",
+            fill_size=10.0,
+            cum_fill_size=10.0,
+            exec_id="eB",
+            trade_id="eB",
+        )
+    )
+    assert await r.shard_has_fill_gap(shard, now) is True
+
+
+@pytest.mark.asyncio
+async def test_shard_has_fill_gap_dedups_redelivered_rows(tmp_path: Path) -> None:
+    """Redelivered duplicate venue rows do not inflate the recorded total.
+
+    Given: the same fill (exec_id eB, size 10) recorded twice and one matching
+        execution row of size 10,
+    When: shard_has_fill_gap runs,
+    Then: it returns False because the duplicate collapses by identity (a naive
+        sum would read 20 > 10 and wrongly report a gap).
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    opid = await _insert_gap_order(r, inst_pid, "c-dup")
+    await _insert_gap_execution(r, opid, 10.0, "eB")
+    shard = "kraken.BTC-USD.live"
+    for _ in range(2):
+        await r.insert_venue_event(
+            _gap_venue_row(
+                shard_key=shard,
+                client_order_id="c-dup",
+                fill_size=10.0,
+                cum_fill_size=10.0,
+                exec_id="eB",
+                trade_id="eB",
+            )
+        )
+    assert await r.shard_has_fill_gap(shard, now) is False
+
+
+@pytest.mark.asyncio
+async def test_shard_has_fill_gap_unresolved_client_order_id_counts_zero(
+    tmp_path: Path,
+) -> None:
+    """A fill whose client order id resolves to no order counts as consumed zero.
+
+    Given: a venue fill for a client_order_id with no matching orders row,
+    When: shard_has_fill_gap runs,
+    Then: it returns True (the unresolved order contributes consumed 0).
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    shard = "kraken.BTC-USD.live"
+    await r.insert_venue_event(
+        _gap_venue_row(
+            shard_key=shard,
+            client_order_id="c-orphan",
+            fill_size=10.0,
+            cum_fill_size=10.0,
+            exec_id="eX",
+            trade_id="eX",
+        )
+    )
+    assert await r.shard_has_fill_gap(shard, now) is True
+
+
+@pytest.mark.asyncio
+async def test_get_shard_keys_with_fills_distinct(tmp_path: Path) -> None:
+    """Distinct shard keys bearing fill_observed events are returned.
+
+    Given: fill_observed events on shards A and B and a non-fill event on C,
+    When: get_shard_keys_with_fills runs,
+    Then: it returns exactly {A, B} (C has no fill_observed event).
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    await r.insert_venue_event(
+        _gap_venue_row(
+            shard_key="shardA",
+            client_order_id="c-a",
+            fill_size=1.0,
+            cum_fill_size=1.0,
+            exec_id="a1",
+            trade_id="a1",
+        )
+    )
+    await r.insert_venue_event(
+        _gap_venue_row(
+            shard_key="shardB",
+            client_order_id="c-b",
+            fill_size=1.0,
+            cum_fill_size=1.0,
+            exec_id="b1",
+            trade_id="b1",
+        )
+    )
+    await r.insert_venue_event(
+        _gap_venue_row(
+            shard_key="shardC",
+            client_order_id="c-c",
+            fill_size=1.0,
+            cum_fill_size=1.0,
+            exec_id="c1",
+            trade_id="c1",
+            event_type="order_accepted",
+        )
+    )
+    result = await r.get_shard_keys_with_fills(now)
+    assert set(result) == {"shardA", "shardB"}
+
+
+@pytest.mark.asyncio
+async def test_shard_has_accruals_true_false(tmp_path: Path) -> None:
+    """Accruals are detected per (wallet, exchange, mode).
+
+    Given: one funding accrual for wallet W on kraken/live,
+    When: shard_has_accruals is queried,
+    Then: True for the matching scope and False for a different mode or wallet.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    accrual: AccrualLedgerInsertRow = {
+        "instrument_public_id": inst_pid,
+        "mode": "live",
+        "accrual_type": "funding",
+        "accrued_at": now,
+        "amount": -1.5,
+        "amount_asset": "USD",
+        "rate": 0.0001,
+        "notional": 15000.0,
+        "position_quantity_at_accrual": 0.3,
+        "exchange": "kraken",
+        "session_id": "s1",
+        "sequence_id": 0,
+        "timestamp": now,
+        "wallet_public_id": "W",
+    }
+    await r.insert_accrual(accrual)
+    assert await r.shard_has_accruals("W", "kraken", "live", now) is True
+    assert await r.shard_has_accruals("W", "kraken", "paper", now) is False
+    assert await r.shard_has_accruals("OTHER", "kraken", "live", now) is False
+
+
+@pytest.mark.asyncio
+async def test_shard_has_fill_gap_no_fills_returns_false(tmp_path: Path) -> None:
+    """A shard with no fill_observed events has no gap.
+
+    Given: a shard key with no recorded fills,
+    When: shard_has_fill_gap runs,
+    Then: it returns False (the scope lookup finds nothing).
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    assert (
+        await r.shard_has_fill_gap("kraken.BTC-USD.live", datetime(2024, 1, 1, tzinfo=UTC)) is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_shard_has_fill_gap_foreign_mode_not_consumed(tmp_path: Path) -> None:
+    """Consumed is scoped to the shard's mode, not bare client_order_id.
+
+    Given: a live shard with a recorded fill of size 10 and no live execution,
+        and a same-id order in PAPER mode (allowed by the (instrument, mode,
+        client_order_id) uniqueness) that has an execution of 10,
+    When: shard_has_fill_gap runs for the live shard,
+    Then: it still reports a gap because the paper execution is out of scope
+        (without mode scoping the paper fill would mask the live gap).
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    _, paper_opid = await r.insert_order(
+        instrument_public_id=inst_pid,
+        wallet_public_id=_GAP_WALLET,
+        mode="paper",
+        client_order_id="c-shared",
+        exchange_order_id=None,
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=100.0,
+        size=100.0,
+        status="new",
+        session_id="s1",
+        sequence_id=0,
+        timestamp=now,
+    )
+    await r.insert_execution(
+        order_public_id=paper_opid,
+        wallet_public_id=_GAP_WALLET,
+        timestamp=now,
+        side="buy",
+        status="filled",
+        price=100.0,
+        size=10.0,
+        fee=0.0,
+        fee_asset="USD",
+        session_id="s1",
+        sequence_id=0,
+        exec_id="ep",
+        trade_id="ep",
+    )
+    await _insert_gap_order(r, inst_pid, "c-shared")
+    shard = "kraken.BTC-USD.live"
+    await r.insert_venue_event(
+        _gap_venue_row(
+            shard_key=shard,
+            client_order_id="c-shared",
+            fill_size=10.0,
+            cum_fill_size=10.0,
+            exec_id="eB",
+            trade_id="eB",
+        )
+    )
+    assert await r.shard_has_fill_gap(shard, now) is True

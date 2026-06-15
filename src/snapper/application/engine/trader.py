@@ -307,6 +307,7 @@ class TraderCoordinator(RegisterableProcess):
         self.guard_scanner: PairedExecutionGuardScanner | None = None
         self._order_shard_keys: dict[str, str] = {}
         self._consumed_venue_event_watermarks: dict[str, int] = {}
+        self._checkpoint_recovered_shard_keys: set[str] = set()
         self._rearm_retired_cids: OrderedDict[str, None] = OrderedDict()
         self._wallet_short_to_id: dict[str, str] = {}
         self._unhealthy_executor_scopes: set[str] = set()
@@ -605,8 +606,13 @@ class TraderCoordinator(RegisterableProcess):
         """Rebuild engine confirmed state from checkpoints, executions, and active orders.
 
         Step 0: Read checkpoints, restore TradeService/BalanceService,
-            replay delta VenueEvents, create engines with restored state.
+            replay delta VenueEvents, create engines with restored state;
+            correct any fill dropped under the scalar watermark by overlaying
+            a chronological venue-event replay (R9).
         Step 1: Full-replay for shards without checkpoints (legacy path).
+        Step 1b: Venue-plane gap recovery (R9) — rebuild non-checkpoint,
+            non-funding shards whose recorded fills exceed consumed fills,
+            including venue-only shards the execution-replay pass never visits.
         Step 2: Query active orders across ALL exchanges, create engines
             for orders that have no executions yet, set order_in_flight.
         Step 3: Reconcile position_cycles against recovered engine state
@@ -616,6 +622,7 @@ class TraderCoordinator(RegisterableProcess):
         now = datetime.now(UTC)
         recovered_shards = await self._recover_from_checkpoints(now)
         await self._recover_from_executions(now, recovered_shards)
+        await self._recover_venue_event_gaps(now)
         await self._recover_active_orders(now)
         await self._reconcile_position_cycles()
         logger.info(
@@ -918,6 +925,10 @@ class TraderCoordinator(RegisterableProcess):
         if delta_events is None:
             return None
         self._restore_trade_service_from_checkpoint(checkpoint, shard_key, delta_events)
+        self._checkpoint_recovered_shard_keys.add(shard_key)
+        await self._correct_checkpoint_fill_gap(
+            shard_key, wallet_public_id, exchange_str, mode_str, now
+        )
         await self._register_checkpoint_open_orders(checkpoint, shard_key, now)
         await self._replay_checkpoint_accruals(
             checkpoint=checkpoint,
@@ -1100,6 +1111,167 @@ class TraderCoordinator(RegisterableProcess):
             seed = max(seed, *(event["id"] for event in delta_events))
         self._consumed_venue_event_watermarks[shard_key] = seed
 
+    async def _correct_checkpoint_fill_gap(
+        self,
+        shard_key: str,
+        wallet_public_id: str,
+        exchange_str: str,
+        mode_str: str,
+        now: datetime,
+    ) -> None:
+        """Overlay a chronological venue-event replay when a checkpoint shard dropped a fill.
+
+        The scalar checkpoint watermark can advance past a recorded-but-
+        unconsumed fill when a LATER consumed fill (cross-order on the same
+        shard) resolved a higher venue-event id; delta replay (``id >
+        watermark``) then skips the dropped fill, so the restored snapshot is
+        short its quantity (R9). When the shard's recorded gross fills exceed
+        its consumed fills, this re-derives the fill-derived state from a
+        full id-ordered venue-event replay and overlays ONLY those fields,
+        leaving command identity and ``peak_equity`` exactly as the checkpoint
+        restore set them. Gated to non-funding shards: a funding shard's cash
+        carries pre-checkpoint accruals a from-scratch replay cannot rebuild,
+        so it is left to status-quo recovery and logged.
+
+        Args:
+            shard_key: Recovered checkpoint shard.
+            wallet_public_id: Resolved owning wallet (for the funding gate).
+            exchange_str: Shard exchange (for the funding gate).
+            mode_str: Execution mode (for the funding gate).
+            now: Recovery anchor for the temporal queries.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        try:
+            if not await self.repository.shard_has_fill_gap(shard_key, now):
+                return
+            if await self.repository.shard_has_accruals(
+                wallet_public_id, exchange_str, mode_str, now
+            ):
+                logger.warning(
+                    f"ZMQTrader: {shard_key} has a recorded>consumed fill gap but carries "
+                    f"funding accruals; leaving to status-quo recovery (R9 rebuild is "
+                    f"spot-scoped, futures funding cash cannot be reconstructed from venue "
+                    f"events)"
+                )
+                return
+            events = await self.repository.get_venue_events_after(shard_key, 0)
+            projection = self.trade_service.project_fill_state_from_events(shard_key, events)
+            self.trade_service.overlay_fill_state(shard_key, projection)
+            self._consumed_venue_event_watermarks[shard_key] = (
+                events[-1]["id"] if events else projection["last_venue_event_id"]
+            )
+            logger.warning(
+                f"ZMQTrader: corrected dropped fill on checkpoint shard {shard_key} via "
+                f"venue-event overlay (pos={projection['position_qty']:.6f}, "
+                f"cash={projection['cash']:.2f})"
+            )
+        except Exception as e:
+            logger.error(
+                f"ZMQTrader: fill-gap correction failed for {shard_key}: {e}; "
+                f"leaving checkpoint-restored state in place"
+            )
+
+    async def _recover_venue_event_gaps(self, now: datetime) -> None:
+        """Rebuild non-checkpoint shards whose recorded fills were never consumed.
+
+        Third recovery pass (R9). The execution-replay pass groups by, and
+        early-returns on, the ``executions`` table, so a shard that has
+        ``fill_observed`` venue events but no execution rows (a fill recorded
+        before a publish that never completed) is never visited and its
+        quantity is permanently dropped. This pass discovers every owned shard
+        with fill events that was NOT recovered from a checkpoint, and rebuilds
+        the non-funding, gapped ones chronologically from the durable venue
+        plane. Idempotent: re-corrects execution-group shards that also carry a
+        gap, and re-runs exactly on later restarts.
+
+        Args:
+            now: Recovery anchor for the temporal queries.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        try:
+            shard_keys = await self.repository.get_shard_keys_with_fills(now)
+        except Exception as e:
+            logger.error(f"ZMQTrader: Failed to query shards with fills for gap recovery: {e}")
+            return
+        for shard_key in shard_keys:
+            if shard_key in self._checkpoint_recovered_shard_keys:
+                continue
+            if self._ownership is not None and not self._ownership.owns(shard_key):
+                continue
+            try:
+                await self._rebuild_shard_if_gapped(shard_key, now)
+            except Exception as e:
+                logger.error(
+                    f"ZMQTrader: venue-event gap rebuild failed for {shard_key}: {e}; skipping"
+                )
+
+    async def _rebuild_shard_if_gapped(self, shard_key: str, now: datetime) -> None:
+        """Rebuild one owned, non-funding, gapped shard from its venue-event history.
+
+        All fallible DB reads (gap check, accruals, wallet resolve, engine
+        create, venue-event fetch) complete BEFORE any live mutation
+        (``reset_shard`` + replay), so the fail-soft handler in
+        :meth:`_recover_venue_event_gaps` can never leave a half-wiped shard
+        when a read raises.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        parsed_shard = self._parse_shard_key(shard_key)
+        if parsed_shard is None:
+            logger.warning(f"ZMQTrader: Invalid shard_key for gap recovery: {shard_key}, skipping")
+            return
+        exchange_str, instrument, mode_str, wallet_short, strategy_tag = parsed_shard
+        if not await self.repository.shard_has_fill_gap(shard_key, now):
+            return
+        wallet_public_id = await self._resolve_checkpoint_wallet_public_id(
+            shard_key, wallet_short, now
+        )
+        if await self.repository.shard_has_accruals(wallet_public_id, exchange_str, mode_str, now):
+            logger.warning(
+                f"ZMQTrader: {shard_key} has a venue-event fill gap but carries funding "
+                f"accruals; leaving to status-quo recovery (R9 rebuild is spot-scoped)"
+            )
+            return
+        engine = next((e for e in self.engines.values() if e._shard_key == shard_key), None)
+        created = engine is None
+        if engine is None:
+            engine = await self._create_engine_for_recovery(
+                instrument,
+                exchange_str,
+                strategy_tag=strategy_tag,
+                wallet_public_id=wallet_public_id,
+                operator_public_id="",
+            )
+        if engine is None or engine._shard_key != shard_key:
+            logger.warning(
+                f"ZMQTrader: gap-recovery could not resolve a matching engine for "
+                f"{shard_key}, skipping"
+            )
+            return
+        events = await self.repository.get_venue_events_after(shard_key, 0)
+        self.trade_service.reset_shard(shard_key)
+        for event in self.trade_service.dedup_fill_events(events):
+            self.trade_service.apply_venue_event(event)
+        last_id = events[-1]["id"] if events else 0
+        self._consumed_venue_event_watermarks[shard_key] = last_id
+        self._restore_balance_service_from_shard(shard_key)
+        self._restore_engine_from_shard(engine, shard_key, instrument)
+        if created:
+            engine_key = self._build_engine_key(
+                instrument,
+                exchange_str,
+                strategy_tag if strategy_tag else mode_str,
+                wallet_public_id,
+            )
+            self._register_recovered_engine(engine_key, engine)
+        logger.warning(
+            f"ZMQTrader: rebuilt {shard_key} from venue events (recovered dropped fill): "
+            f"pos={engine.position_qty:.6f}, entry={engine.entry_price}, "
+            f"cash={engine.portfolio.cash:.2f}"
+        )
+
     async def _replay_checkpoint_accruals(
         self,
         *,
@@ -1222,7 +1394,10 @@ class TraderCoordinator(RegisterableProcess):
 
         Reads the current in-memory shard state (which already reflects
         checkpoint + delta replay) and copies it into the engine. This
-        ensures engine, portfolio, and TradeService are all in sync.
+        ensures engine, portfolio, and TradeService are all in sync. A flat
+        rebuilt shard CLEARS any prior portfolio position entry so a reused
+        engine (R9 gap rebuild that corrects a position to flat) cannot book a
+        later live fill from a stale quantity/average price.
 
         Args:
             engine: Freshly created engine to restore.
@@ -1242,6 +1417,8 @@ class TraderCoordinator(RegisterableProcess):
                 average_price=shard.position.entry_price,
                 realized_pnl=shard.position.realized_pnl,
             )
+        else:
+            engine.portfolio.positions.pop(instrument, None)
 
     async def _recover_from_executions(
         self, now: datetime, checkpoint_recovered: set[str] | None = None

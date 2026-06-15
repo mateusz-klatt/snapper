@@ -14,6 +14,7 @@ import pytest
 
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import SQLAlchemyRepository
@@ -121,6 +122,9 @@ def _set_sqlalchemy_repo(coord: TraderCoordinator, mock_repo: AsyncMock) -> None
     mock_repo.resolve_wallet_public_id_by_short = AsyncMock(return_value=None)
     mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
     mock_repo.insert_position_cycle = AsyncMock(return_value=(1, "cycle-pid"))
+    mock_repo.get_shard_keys_with_fills = AsyncMock(return_value=[])
+    mock_repo.shard_has_fill_gap = AsyncMock(return_value=False)
+    mock_repo.shard_has_accruals = AsyncMock(return_value=False)
     coord.repository = mock_repo
 
 
@@ -1070,3 +1074,436 @@ class TestCheckpointRecovery:
         assert engine.position_qty != pytest.approx(0.5)
         assert "t3" in engine.seen_exec_ids
         assert engine.portfolio.cash != pytest.approx(7500.0)
+
+
+class TestR9GapRecovery:
+    """R9: gap-aware recovery corrects fills dropped under the scalar watermark."""
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_gap_overlay_corrects_position(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A checkpoint shard with a recorded>consumed gap is corrected by overlay.
+
+        Given: a checkpoint at watermark 10 with empty delta (so checkpoint+delta
+            position is 0.5), a recorded>consumed fill gap, no funding, and a full
+            venue history summing to 0.9,
+        When: recovery runs,
+        Then: the shard position is overlaid to the venue-replay value 0.9 while
+            the checkpoint peak_equity is preserved.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_all_checkpoints = AsyncMock(
+            return_value=[_make_checkpoint(position_qty=0.5, peak_equity=10000.0)]
+        )
+
+        def venue_events(shard_key: str, after_id: int) -> list[VenueEventRow]:
+            if after_id == 0:
+                return [
+                    _make_venue_event(event_id=5, fill_size=0.5, exec_id="a", trade_id="a"),
+                    _make_venue_event(event_id=8, fill_size=0.4, exec_id="b", trade_id="b"),
+                ]
+            return []
+
+        mock_repo.get_venue_events_after = AsyncMock(side_effect=venue_events)
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo.shard_has_accruals = AsyncMock(return_value=False)
+
+        await coord._recover_engine_state()
+
+        shard = coord.trade_service._shards["kraken.BTC-USD.live"]
+        assert shard.position.position_qty == pytest.approx(0.9)
+        assert shard.peak_equity == pytest.approx(10000.0)
+        assert coord._consumed_venue_event_watermarks["kraken.BTC-USD.live"] == 8
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_gap_skipped_when_funding(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A funding (futures) shard's gap is left to status-quo recovery.
+
+        Given: the same gap as above but the shard carries funding accruals,
+        When: recovery runs,
+        Then: no overlay happens and the position stays the checkpoint+delta value
+            0.5 (the venue rebuild is spot-scoped).
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[_make_checkpoint(position_qty=0.5)])
+
+        def venue_events(shard_key: str, after_id: int) -> list[VenueEventRow]:
+            if after_id == 0:
+                return [
+                    _make_venue_event(event_id=5, fill_size=0.5, exec_id="a", trade_id="a"),
+                    _make_venue_event(event_id=8, fill_size=0.4, exec_id="b", trade_id="b"),
+                ]
+            return []
+
+        mock_repo.get_venue_events_after = AsyncMock(side_effect=venue_events)
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo.shard_has_accruals = AsyncMock(return_value=True)
+
+        await coord._recover_engine_state()
+
+        shard = coord.trade_service._shards["kraken.BTC-USD.live"]
+        assert shard.position.position_qty == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
+    async def test_pass3_orphan_venue_only_shard_rebuilt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A venue-only shard with no executions is discovered and rebuilt.
+
+        Given: no checkpoint and no execution rows (so the execution-replay pass
+            early-returns and never visits the shard), but a gapped shard with a
+            full venue history of one buy fill 0.5,
+        When: recovery runs,
+        Then: Pass 3 discovers the shard, creates the engine, and rebuilds its
+            position to 0.5.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_venue_events_after = AsyncMock(
+            return_value=[_make_venue_event(event_id=5, fill_size=0.5, exec_id="a", trade_id="a")]
+        )
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_shard_keys_with_fills = AsyncMock(return_value=["kraken.BTC-USD.live"])
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo.shard_has_accruals = AsyncMock(return_value=False)
+
+        await coord._recover_engine_state()
+
+        assert "BTC-USD@kraken-live" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live"]
+        assert engine.position_qty == pytest.approx(0.5)
+        assert coord._consumed_venue_event_watermarks["kraken.BTC-USD.live"] == 5
+
+    @pytest.mark.asyncio
+    async def test_pass3_skips_funding_shard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pass 3 leaves a funding shard to status-quo recovery (no rebuild).
+
+        Given: an orphan gapped shard that carries funding accruals,
+        When: recovery runs,
+        Then: no engine is rebuilt for it.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_shard_keys_with_fills = AsyncMock(return_value=["kraken.BTC-USD.live"])
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo.shard_has_accruals = AsyncMock(return_value=True)
+
+        await coord._recover_engine_state()
+
+        assert "BTC-USD@kraken-live" not in coord.engines
+
+    @pytest.mark.asyncio
+    async def test_pass3_skips_checkpoint_recovered_shard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pass 3 excludes shards already recovered (and corrected) by Pass 1.
+
+        Given: a shard key returned by discovery that is in the checkpoint-
+            recovered set,
+        When: _recover_venue_event_gaps runs,
+        Then: the per-shard rebuild helper is not invoked for it.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_shard_keys_with_fills = AsyncMock(return_value=["kraken.BTC-USD.live"])
+        coord.repository = mock_repo
+        coord._checkpoint_recovered_shard_keys = {"kraken.BTC-USD.live"}
+        coord._rebuild_shard_if_gapped = AsyncMock()
+
+        await coord._recover_venue_event_gaps(datetime(2024, 6, 1, tzinfo=UTC))
+
+        coord._rebuild_shard_if_gapped.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pass3_skips_foreign_shard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pass 3 skips shards this instance does not own (N>1 partitioning).
+
+        Given: a discovered shard not owned by this coordinator,
+        When: _recover_venue_event_gaps runs,
+        Then: the per-shard rebuild helper is not invoked for it.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_shard_keys_with_fills = AsyncMock(return_value=["kraken.BTC-USD.live"])
+        coord.repository = mock_repo
+        coord._ownership = MagicMock()
+        coord._ownership.owns = MagicMock(return_value=False)
+        coord._rebuild_shard_if_gapped = AsyncMock()
+
+        await coord._recover_venue_event_gaps(datetime(2024, 6, 1, tzinfo=UTC))
+
+        coord._rebuild_shard_if_gapped.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_correct_checkpoint_fill_gap_non_sqlalchemy_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_correct_checkpoint_fill_gap is a no-op without a SQLAlchemy repository.
+
+        Given: a coordinator whose repository is not a SQLAlchemyRepository,
+        When: _correct_checkpoint_fill_gap is called,
+        Then: it returns without touching shard state.
+        """
+        coord = _make_coord(monkeypatch)
+        coord.repository = MagicMock()
+        await coord._correct_checkpoint_fill_gap(
+            "kraken.BTC-USD.live", "", "kraken", "live", datetime(2024, 6, 1, tzinfo=UTC)
+        )
+        assert "kraken.BTC-USD.live" not in coord.trade_service._shards
+
+    @pytest.mark.asyncio
+    async def test_recover_venue_event_gaps_non_sqlalchemy_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_recover_venue_event_gaps is a no-op without a SQLAlchemy repository."""
+        coord = _make_coord(monkeypatch)
+        coord.repository = MagicMock()
+        coord._rebuild_shard_if_gapped = AsyncMock()
+        await coord._recover_venue_event_gaps(datetime(2024, 6, 1, tzinfo=UTC))
+        coord._rebuild_shard_if_gapped.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recover_venue_event_gaps_query_error_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A discovery-query failure is logged and skips gap recovery.
+
+        Given: get_shard_keys_with_fills raises,
+        When: _recover_venue_event_gaps runs,
+        Then: it swallows the error and invokes no per-shard rebuild.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_shard_keys_with_fills = AsyncMock(side_effect=RuntimeError("boom"))
+        coord.repository = mock_repo
+        coord._rebuild_shard_if_gapped = AsyncMock()
+        await coord._recover_venue_event_gaps(datetime(2024, 6, 1, tzinfo=UTC))
+        coord._rebuild_shard_if_gapped.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rebuild_shard_if_gapped_non_sqlalchemy_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_rebuild_shard_if_gapped is a no-op without a SQLAlchemy repository."""
+        coord = _make_coord(monkeypatch)
+        coord.repository = MagicMock()
+        await coord._rebuild_shard_if_gapped(
+            "kraken.BTC-USD.live", datetime(2024, 6, 1, tzinfo=UTC)
+        )
+        assert "kraken.BTC-USD.live" not in coord.trade_service._shards
+
+    @pytest.mark.asyncio
+    async def test_rebuild_shard_if_gapped_bad_shard_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shard key with too few segments is skipped before any gap query."""
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        await coord._rebuild_shard_if_gapped("garbage", datetime(2024, 6, 1, tzinfo=UTC))
+        mock_repo.shard_has_fill_gap.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rebuild_shard_if_gapped_no_gap_is_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A discovered shard with no gap does not reach the funding/rebuild steps."""
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        await coord._rebuild_shard_if_gapped(
+            "kraken.BTC-USD.live", datetime(2024, 6, 1, tzinfo=UTC)
+        )
+        mock_repo.shard_has_accruals.assert_not_called()
+        assert "BTC-USD@kraken-live" not in coord.engines
+
+    @pytest.mark.asyncio
+    async def test_rebuild_shard_if_gapped_create_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When no engine can be created (invalid scope) the shard is skipped.
+
+        Given: a gapped, non-funding shard but engine creation returns None,
+        When: _rebuild_shard_if_gapped runs,
+        Then: it skips before resetting the shard.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        coord._create_engine_for_recovery = AsyncMock(return_value=None)
+        await coord._rebuild_shard_if_gapped(
+            "kraken.BTC-USD.live", datetime(2024, 6, 1, tzinfo=UTC)
+        )
+        assert "kraken.BTC-USD.live" not in coord.trade_service._shards
+
+    @pytest.mark.asyncio
+    async def test_rebuild_shard_if_gapped_reuses_existing_engine(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shard with an engine from Pass 2 is reused and re-slaved, not re-registered.
+
+        Given: an engine already registered for a gapped shard (execution-group
+            recovery), and a venue history of one buy fill 0.5,
+        When: _rebuild_shard_if_gapped runs,
+        Then: the SAME engine object is reused, re-slaved to the rebuilt shard,
+            and no second engine is created.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_venue_events_after = AsyncMock(
+            return_value=[_make_venue_event(event_id=5, fill_size=0.5, exec_id="a", trade_id="a")]
+        )
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        existing = await coord._create_engine_for_recovery(
+            "BTC-USD", "kraken", strategy_tag=None, wallet_public_id="", operator_public_id=""
+        )
+        assert existing is not None
+        coord._register_recovered_engine("BTC-USD@kraken-live", existing)
+        coord._create_engine_for_recovery = AsyncMock()
+        await coord._rebuild_shard_if_gapped(
+            "kraken.BTC-USD.live", datetime(2024, 6, 1, tzinfo=UTC)
+        )
+        coord._create_engine_for_recovery.assert_not_called()
+        assert coord.engines["BTC-USD@kraken-live"] is existing
+        assert existing.position_qty == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_gap_correction_failure_preserves_checkpoint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A gap-detection query failure leaves checkpoint-restored state intact.
+
+        Given: a recovered checkpoint shard whose shard_has_fill_gap query raises,
+        When: recovery runs,
+        Then: the failure is swallowed and the checkpoint+delta position stands
+            (recovery does not abort).
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[_make_checkpoint(position_qty=0.5)])
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(side_effect=RuntimeError("boom"))
+
+        await coord._recover_engine_state()
+
+        shard = coord.trade_service._shards["kraken.BTC-USD.live"]
+        assert shard.position.position_qty == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
+    async def test_recover_venue_event_gaps_rebuild_error_continues(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A per-shard rebuild failure is swallowed so other shards still recover."""
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_shard_keys_with_fills = AsyncMock(return_value=["kraken.BTC-USD.live"])
+        coord.repository = mock_repo
+        coord._rebuild_shard_if_gapped = AsyncMock(side_effect=RuntimeError("boom"))
+        await coord._recover_venue_event_gaps(datetime(2024, 6, 1, tzinfo=UTC))
+        coord._rebuild_shard_if_gapped.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_pass3_reuse_clears_stale_flat_position(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reusing an engine and rebuilding to flat clears the stale portfolio position.
+
+        Given: an engine with a stale non-flat portfolio position and a venue
+            history that nets to flat (buy 0.5 then sell 0.5),
+        When: _rebuild_shard_if_gapped reuses the engine,
+        Then: the engine is flat and carries no portfolio position entry, so a
+            later live fill cannot book from a stale quantity/price.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_venue_events_after = AsyncMock(
+            return_value=[
+                _make_venue_event(
+                    event_id=5,
+                    side="buy",
+                    fill_price=100.0,
+                    fill_size=0.5,
+                    exec_id="a",
+                    trade_id="a",
+                ),
+                _make_venue_event(
+                    event_id=6,
+                    side="sell",
+                    fill_price=110.0,
+                    fill_size=0.5,
+                    exec_id="b",
+                    trade_id="b",
+                ),
+            ]
+        )
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        existing = await coord._create_engine_for_recovery(
+            "BTC-USD", "kraken", strategy_tag=None, wallet_public_id="", operator_public_id=""
+        )
+        assert existing is not None
+        existing.portfolio.positions["BTC-USD"] = PositionStateModel(
+            quantity=0.5, average_price=100.0, realized_pnl=0.0
+        )
+        coord._register_recovered_engine("BTC-USD@kraken-live", existing)
+
+        await coord._rebuild_shard_if_gapped(
+            "kraken.BTC-USD.live", datetime(2024, 6, 1, tzinfo=UTC)
+        )
+
+        assert coord.engines["BTC-USD@kraken-live"] is existing
+        assert existing.position_qty == pytest.approx(0.0)
+        assert "BTC-USD" not in existing.portfolio.positions
+
+    @pytest.mark.asyncio
+    async def test_rebuild_shard_if_gapped_read_failure_does_not_wipe_shard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A venue-event read failure happens BEFORE reset, so the shard is intact.
+
+        Given: a gapped shard with existing (Pass 2) TradeService state and a
+            get_venue_events_after that raises,
+        When: _rebuild_shard_if_gapped runs,
+        Then: it raises (caught fail-soft by the caller) WITHOUT having reset the
+            live shard — the prior position is preserved.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_venue_events_after = AsyncMock(side_effect=RuntimeError("db down"))
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        shard = coord.trade_service._get_or_create_shard("kraken.BTC-USD.live")
+        shard.position.position_qty = 0.5
+
+        with pytest.raises(RuntimeError):
+            await coord._rebuild_shard_if_gapped(
+                "kraken.BTC-USD.live", datetime(2024, 6, 1, tzinfo=UTC)
+            )
+
+        assert coord.trade_service._shards[
+            "kraken.BTC-USD.live"
+        ].position.position_qty == pytest.approx(0.5)

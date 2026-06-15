@@ -864,6 +864,27 @@ before falling back to the boot-time `wallet_short` cache. This keeps
 rolling restarts and credential rotations from recovering old
 `.w{wallet_short}` checkpoints into an empty or stale wallet scope.
 
+Recovery is also **gap-aware**. The executor commits a `fill_observed`
+venue event BEFORE publishing the fill and inserts the `executions`
+row only after a successful publish, so a fill recorded but never
+consumed (publish/insert never completed, and not absorbed by a later
+cumulative fill) can be stepped over by the scalar
+`last_venue_event_id` watermark and dropped. Recovery detects this per
+shard by **cumulative coverage** — recorded gross fill quantity
+(deduped by venue identity) exceeding the consumed `executions` total
+for the shard's orders — which is exact in both the absorption case
+(equal totals, no gap) and the true-drop case. A gapped, non-funding
+shard is rebuilt chronologically from its durable `venue_events`: a
+checkpoint shard overlays only the fill-derived fields (position,
+entry, cash, realized PnL, turnover, dedup set, watermark), leaving
+command identity and `peak_equity` from the checkpoint untouched; a
+shard with no checkpoint is rebuilt from scratch. A dedicated
+venue-plane pass discovers shards with recorded fills that the
+execution-replay pass never visits (it early-returns on an empty
+`executions` table). Funding (futures) shards are left to status-quo
+recovery — a from-scratch replay cannot reconstruct pre-checkpoint
+accruals — so the rebuild is spot-scoped.
+
 The coordinator also spawns the **paired-execution guard scanner**
 (`PairedExecutionGuardScanner`) as a background task: a DB-only
 liveness loop that assembles and arms multi-leg signal groups behind

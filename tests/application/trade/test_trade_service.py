@@ -6,6 +6,7 @@ from datetime import datetime
 
 import pytest
 
+from snapper.application.trade.trade_service import FillProjection
 from snapper.application.trade.trade_service import TradeService
 from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import VenueEventRow
@@ -1516,3 +1517,143 @@ def test_apply_breaker_open_is_rejection_equivalent_terminal() -> None:
     cmd = svc.get_command_state("kraken.BTC-USD.live")
     assert cmd.in_flight is False
     assert cmd.status == "failed"
+
+
+def test_reset_shard_reseeds_initial_cash() -> None:
+    """reset_shard replaces a shard with a fresh projection at initial cash.
+
+    Given: a shard that has applied a fill (non-zero position and watermark),
+    When: reset_shard is called,
+    Then: position, watermark and dedup set clear and cash/peak return to the
+        service's configured initial cash.
+    """
+    svc = TradeService(initial_cash=5000.0)
+    svc.apply_venue_event(_make_venue_event(event_id=1, fill_size=0.5))
+    svc.reset_shard("kraken.BTC-USD.live")
+    shard = svc._shards["kraken.BTC-USD.live"]
+    assert shard.position.position_qty == 0.0
+    assert shard.cash == 5000.0
+    assert shard.peak_equity == 5000.0
+    assert shard.last_venue_event_id == 0
+    assert len(shard.seen_exec_ids) == 0
+
+
+def test_project_fill_state_from_events_no_global_mutation() -> None:
+    """project_fill_state_from_events replays into a throwaway shard.
+
+    Given: a shard key that has no stored state,
+    When: project_fill_state_from_events replays a buy fill for it,
+    Then: it returns the fill-derived projection WITHOUT creating an entry in
+        the service's shard map.
+    """
+    svc = TradeService()
+    shard_key = "kraken.BTC-USD.live"
+    events = [_make_venue_event(event_id=1, side="buy", fill_size=0.5, fill_price=100.0)]
+    projection = svc.project_fill_state_from_events(shard_key, events)
+    assert shard_key not in svc._shards
+    assert projection["position_qty"] == pytest.approx(0.5)
+    assert projection["last_venue_event_id"] == 1
+
+
+def test_overlay_fill_state_preserves_command_and_peak() -> None:
+    """overlay_fill_state copies fill-derived fields only.
+
+    Given: a live shard with an in-flight command and a checkpoint peak equity,
+    When: overlay_fill_state applies a gap-corrected projection,
+    Then: position, cash, turnover, dedup set and watermark are overlaid while
+        command identity and peak_equity stay exactly as they were.
+    """
+    svc = TradeService()
+    shard_key = "kraken.BTC-USD.live"
+    shard = svc._get_or_create_shard(shard_key)
+    shard.command.in_flight = True
+    shard.command.command_public_id = "cmd-1"
+    shard.peak_equity = 12345.0
+    projection: FillProjection = {
+        "position_qty": 0.7,
+        "entry_price": 100.0,
+        "position_opened_at": None,
+        "realized_pnl": 5.0,
+        "cash": 9000.0,
+        "turnover": 70.0,
+        "seen_exec_ids": OrderedDict.fromkeys(["x"]),
+        "last_venue_event_id": 9,
+    }
+    svc.overlay_fill_state(shard_key, projection)
+    assert shard.position.position_qty == pytest.approx(0.7)
+    assert shard.cash == pytest.approx(9000.0)
+    assert shard.turnover == pytest.approx(70.0)
+    assert shard.last_venue_event_id == 9
+    assert "x" in shard.seen_exec_ids
+    assert shard.peak_equity == 12345.0
+    assert shard.command.in_flight is True
+    assert shard.command.command_public_id == "cmd-1"
+
+
+def test_dedup_fill_events_collapses_duplicate_identity() -> None:
+    """Redelivered duplicate fills (same identity) collapse to the first.
+
+    Given: two fill events sharing exec_id X and a distinct fill Y,
+    When: dedup_fill_events runs,
+    Then: only the first X and the Y survive, in order.
+    """
+    events = [
+        _make_venue_event(event_id=1, exec_id="X", trade_id="X", fill_size=0.5),
+        _make_venue_event(event_id=2, exec_id="X", trade_id="X", fill_size=0.5),
+        _make_venue_event(event_id=3, exec_id="Y", trade_id="Y", fill_size=0.3),
+    ]
+    out = TradeService.dedup_fill_events(events)
+    assert [event["id"] for event in out] == [1, 3]
+
+
+def test_dedup_fill_events_passes_through_non_fill_events() -> None:
+    """Non-fill lifecycle events are not deduped.
+
+    Given: order_accepted and order_terminal events,
+    When: dedup_fill_events runs,
+    Then: both pass through untouched.
+    """
+    events = [
+        _make_venue_event(event_id=1, event_type="order_accepted", exec_id=None, trade_id=None),
+        _make_venue_event(event_id=2, event_type="order_terminal", exec_id=None, trade_id=None),
+    ]
+    out = TradeService.dedup_fill_events(events)
+    assert [event["id"] for event in out] == [1, 2]
+
+
+def test_dedup_fill_events_idless_fallback_identity() -> None:
+    """Id-less fills dedup on the client_order_id+size+price fallback.
+
+    Given: two id-less fills with identical coid+size+price and one with a
+        different price,
+    When: dedup_fill_events runs,
+    Then: the identical pair collapses and the differing one survives.
+    """
+    events = [
+        _make_venue_event(event_id=1, exec_id=None, trade_id=None, fill_size=0.5, fill_price=100.0),
+        _make_venue_event(event_id=2, exec_id=None, trade_id=None, fill_size=0.5, fill_price=100.0),
+        _make_venue_event(event_id=3, exec_id=None, trade_id=None, fill_size=0.5, fill_price=101.0),
+    ]
+    out = TradeService.dedup_fill_events(events)
+    assert [event["id"] for event in out] == [1, 3]
+
+
+def test_project_fill_state_dedups_duplicate_beyond_window() -> None:
+    """A duplicate fill does not double-book the throwaway projection.
+
+    Given: the same fill (exec_id X) recorded twice,
+    When: project_fill_state_from_events replays it,
+    Then: the position reflects a single application of the fill.
+    """
+    svc = TradeService()
+    shard_key = "kraken.BTC-USD.live"
+    events = [
+        _make_venue_event(
+            event_id=1, exec_id="X", trade_id="X", side="buy", fill_size=0.5, fill_price=100.0
+        ),
+        _make_venue_event(
+            event_id=2, exec_id="X", trade_id="X", side="buy", fill_size=0.5, fill_price=100.0
+        ),
+    ]
+    projection = svc.project_fill_state_from_events(shard_key, events)
+    assert projection["position_qty"] == pytest.approx(0.5)
