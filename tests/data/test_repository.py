@@ -10864,3 +10864,92 @@ async def test_shard_has_fill_gap_foreign_mode_not_consumed(tmp_path: Path) -> N
         )
     )
     assert await r.shard_has_fill_gap(shard, now) is True
+
+
+@pytest.mark.asyncio
+async def test_get_position_cycle_statuses_by_public_ids(tmp_path: Path) -> None:
+    """Batch cycle-status lookup returns active status per id; missing ids omitted.
+
+    Given: an open cycle and a closed cycle persisted on distinct shards,
+    When: get_position_cycle_statuses_by_public_ids is queried for both plus a
+        non-existent id,
+    Then: it returns the two statuses and omits the non-existent id.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    _, open_pid = await r.insert_position_cycle(
+        _make_cycle_row(
+            instrument_public_id=inst_pid,
+            shard_key="kraken.BTC-USD.live.s1",
+            status="open",
+            opened_at=now,
+            timestamp=now,
+            sequence_id=1,
+        )
+    )
+    _, closed_pid = await r.insert_position_cycle(
+        _make_cycle_row(
+            instrument_public_id=inst_pid,
+            shard_key="kraken.BTC-USD.live.s2",
+            status="closed",
+            opened_at=now,
+            timestamp=now,
+            sequence_id=2,
+        )
+    )
+    result = await r.get_position_cycle_statuses_by_public_ids(
+        [open_pid, closed_pid, "nonexistent"], as_of=now
+    )
+    assert result == {open_pid: "open", closed_pid: "closed"}
+
+
+@pytest.mark.asyncio
+async def test_get_position_cycle_statuses_empty_returns_empty(tmp_path: Path) -> None:
+    """An empty id list short-circuits to an empty mapping.
+
+    Given: a seeded repository,
+    When: get_position_cycle_statuses_by_public_ids is called with no ids,
+    Then: it returns an empty dict.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    result = await r.get_position_cycle_statuses_by_public_ids(
+        [], as_of=datetime(2024, 1, 1, tzinfo=UTC)
+    )
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_get_position_cycle_statuses_chunks_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Results merge correctly across IN-list chunks.
+
+    Given: a chunk size of 1 and two open cycles on distinct shards,
+    When: get_position_cycle_statuses_by_public_ids resolves both ids,
+    Then: both appear in the merged result (the chunking loop iterates twice).
+    """
+    monkeypatch.setattr("snapper.data.repository._POSITION_CYCLE_LOOKUP_CHUNK_SIZE", 1)
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    _, pid_a = await r.insert_position_cycle(
+        _make_cycle_row(
+            instrument_public_id=inst_pid,
+            shard_key="kraken.BTC-USD.live.a",
+            status="open",
+            opened_at=now,
+            timestamp=now,
+            sequence_id=1,
+        )
+    )
+    _, pid_b = await r.insert_position_cycle(
+        _make_cycle_row(
+            instrument_public_id=inst_pid,
+            shard_key="kraken.BTC-USD.live.b",
+            status="open",
+            opened_at=now,
+            timestamp=now,
+            sequence_id=2,
+        )
+    )
+    result = await r.get_position_cycle_statuses_by_public_ids([pid_a, pid_b], as_of=now)
+    assert result == {pid_a: "open", pid_b: "open"}

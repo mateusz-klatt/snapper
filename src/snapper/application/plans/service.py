@@ -1198,34 +1198,51 @@ class PlanExecutorService(RegisterableProcess):
         trailing stops, additional plan types). Active plans with in-flight
         child orders must go through the cancel_requested + cancel
         TradeCommand flow, handled by the cancel route, not this sweep.
+
+        Cycle statuses are resolved in ONE batched IN-list query (HV2-M8)
+        instead of a per-plan round-trip each clock tick. A cycle missing from
+        the batch result is treated as not-open (matching the single-lookup
+        semantics). A batch-query failure propagates to
+        :meth:`_sweep_cycle_closures_safely`, which skips the tick without
+        cancelling any plan — safer than the prior per-cycle path that
+        cancelled a plan on a transient lookup error.
         """
+        armed: list[tuple[str, str, str]] = []
         for public_id, plan in tuple(self.plans.items()):
             if plan["status"] != ExecutionPlanStatusEnum.ARMED:
                 continue
             cycle_pid = plan.get("position_cycle_public_id")
             if not isinstance(cycle_pid, str):
                 continue
-            cycle_open = await self._is_cycle_open(cycle_pid)
-            if not cycle_open:
-                logger.info(
-                    "Clock sweep: cycle {} closed, cancelling armed {} {}",
-                    cycle_pid,
-                    plan["plan_type"],
-                    public_id,
-                )
-                await self._transition_plan(
-                    public_id,
-                    ExecutionPlanStatusEnum.CANCELLED,
-                    "cycle_closed_externally",
-                )
-                await self._log_decision(
-                    plan_public_id=public_id,
-                    decision_type="cycle_closed_externally",
-                    trigger_type="clock",
-                    reason=f"Cycle {cycle_pid} closed (detected by clock sweep)",
-                    importance="action",
-                    new_status=ExecutionPlanStatusEnum.CANCELLED,
-                )
+            armed.append((public_id, str(plan["plan_type"]), cycle_pid))
+        if not armed:
+            return
+        statuses = await self.repository.get_position_cycle_statuses_by_public_ids(
+            [cycle_pid for _, _, cycle_pid in armed],
+            as_of=datetime.now(UTC),
+        )
+        for public_id, plan_type, cycle_pid in armed:
+            if statuses.get(cycle_pid) == "open":
+                continue
+            logger.info(
+                "Clock sweep: cycle {} closed, cancelling armed {} {}",
+                cycle_pid,
+                plan_type,
+                public_id,
+            )
+            await self._transition_plan(
+                public_id,
+                ExecutionPlanStatusEnum.CANCELLED,
+                "cycle_closed_externally",
+            )
+            await self._log_decision(
+                plan_public_id=public_id,
+                decision_type="cycle_closed_externally",
+                trigger_type="clock",
+                reason=f"Cycle {cycle_pid} closed (detected by clock sweep)",
+                importance="action",
+                new_status=ExecutionPlanStatusEnum.CANCELLED,
+            )
 
     async def _run_loop(self) -> None:
         """Run listen, checkpoint, and clock tasks until stopped."""

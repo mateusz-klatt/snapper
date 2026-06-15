@@ -504,6 +504,7 @@ _SnapshotNaturalKey = str
 _SNAPSHOT_LOOKUP_CHUNK_SIZE = 500
 _OUTBOX_BULK_LOOKUP_CHUNK_SIZE = 200
 _PLAN_CHECKPOINT_LOOKUP_CHUNK_SIZE = 200
+_POSITION_CYCLE_LOOKUP_CHUNK_SIZE = 300
 DEFAULT_HIGH_CARDINALITY_LIMIT = 100_000
 _HIGH_CARDINALITY_STREAM_CHUNK_SIZE = 5_000
 _SQLITE_COUNT_GUARD_ROWS = 10_000_000
@@ -2825,6 +2826,30 @@ class Repository(ABC):
 
         Returns:
             Cycle row or None if not found at the given point in time.
+        """
+        ...
+
+    @abstractmethod
+    async def get_position_cycle_statuses_by_public_ids(
+        self,
+        cycle_public_ids: list[str],
+        as_of: datetime,
+    ) -> dict[str, str]:
+        """Return the active status of each given cycle public_id in one query.
+
+        Batched form of :meth:`get_position_cycle_by_public_id` for the
+        plan-executor cycle-closure sweep (HV2-M8): chunked IN-list queries
+        instead of N per-cycle round-trips per clock tick. Chunking bounds the
+        bind-parameter count so the sweep cannot fail wholesale at scale.
+        Cycles absent from the result do not exist active at ``as_of`` and the
+        caller treats them as not-open (matching a ``None`` single lookup).
+
+        Args:
+            cycle_public_ids: Cycle public identifiers to resolve.
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            Mapping of cycle public_id -> status for cycles active at ``as_of``.
         """
         ...
 
@@ -13020,6 +13045,33 @@ class SQLAlchemyRepository(Repository):
             if row is None:
                 return None
             return self._position_cycle_row_to_dict(row)
+
+    async def get_position_cycle_statuses_by_public_ids(
+        self,
+        cycle_public_ids: list[str],
+        as_of: datetime,
+    ) -> dict[str, str]:
+        """Return the active status of each given cycle public_id, chunked by IN-list."""
+        if not cycle_public_ids:
+            return {}
+        result: dict[str, str] = {}
+        async with self.session() as s:
+            for offset in range(0, len(cycle_public_ids), _POSITION_CYCLE_LOOKUP_CHUNK_SIZE):
+                chunk = cycle_public_ids[offset : offset + _POSITION_CYCLE_LOOKUP_CHUNK_SIZE]
+                rows = (
+                    (
+                        await s.execute(
+                            select(PositionCycle.public_id, PositionCycle.status).where(
+                                PositionCycle.public_id.in_(chunk),
+                                *where_active(PositionCycle, as_of),
+                            )
+                        )
+                    )
+                    .tuples()
+                    .all()
+                )
+                result.update(rows)
+        return result
 
     async def flip_position_cycle(
         self,

@@ -3696,8 +3696,8 @@ class TestSweepCycleClosures:
     ) -> None:
         """Armed bracket on closed cycle is cancelled by sweep."""
         mock_repo = AsyncMock()
-        mock_repo.get_position_cycle_by_public_id = AsyncMock(
-            return_value={"status": "closed", "public_id": "cycle-1"}
+        mock_repo.get_position_cycle_statuses_by_public_ids = AsyncMock(
+            return_value={"cycle-1": "closed"}
         )
         mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
         mock_repo.insert_execution_plan_decision = AsyncMock(return_value="d1")
@@ -3724,7 +3724,7 @@ class TestSweepCycleClosures:
         service._register_plan(plan, ManualOnceEvaluator())
         await service._sweep_cycle_closures()
         assert "plan-1" in service.plans
-        mock_repo.get_position_cycle_by_public_id.assert_not_called()
+        mock_repo.get_position_cycle_statuses_by_public_ids.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -3749,8 +3749,8 @@ class TestSweepCycleClosures:
     ) -> None:
         """Armed bracket with an open cycle remains registered."""
         mock_repo = AsyncMock()
-        mock_repo.get_position_cycle_by_public_id = AsyncMock(
-            return_value={"status": "open", "public_id": "cycle-1"}
+        mock_repo.get_position_cycle_statuses_by_public_ids = AsyncMock(
+            return_value={"cycle-1": "open"}
         )
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
@@ -3771,8 +3771,8 @@ class TestSweepCycleClosures:
     ) -> None:
         """Armed trailing stop on closed cycle is cancelled by sweep."""
         mock_repo = AsyncMock()
-        mock_repo.get_position_cycle_by_public_id = AsyncMock(
-            return_value={"status": "closed", "public_id": "cycle-1"}
+        mock_repo.get_position_cycle_statuses_by_public_ids = AsyncMock(
+            return_value={"cycle-1": "closed"}
         )
         mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
         mock_repo.insert_execution_plan_decision = AsyncMock(return_value="d1")
@@ -3957,7 +3957,7 @@ class TestSweepEdgeCases:
         service._register_plan(plan, ManualOnceEvaluator())
         await service._sweep_cycle_closures()
         assert "plan-1" in service.plans
-        mock_repo.get_position_cycle_by_public_id.assert_not_called()
+        mock_repo.get_position_cycle_statuses_by_public_ids.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
