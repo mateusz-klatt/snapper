@@ -761,6 +761,7 @@ class CandleAggregator:
             volume=bucket.volume,
             interval_begin=bucket.interval_begin,
             interval=self._tf_seconds[bucket.timeframe],
+            complete=bucket.complete,
         )
 
     def _record_late(self, sym: str, minute_ts: int) -> None:

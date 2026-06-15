@@ -739,6 +739,8 @@ def _candle_match_row(**overrides: Any) -> CandleUpsertRow:
         "volume": 1000.0,
         "vwap": 100.25,
         "trades": 10,
+        "source": "native",
+        "complete": True,
         "session_id": "test-session",
         "sequence_id": 1,
     }
@@ -762,6 +764,8 @@ def test_candle_row_matches_returns_true_when_all_business_columns_equal() -> No
         volume=1000.0,
         vwap=100.25,
         trades=10,
+        source="native",
+        complete=True,
     )
 
     assert SQLAlchemyRepository._candle_row_matches(cast(Any, existing), row) is True
@@ -777,16 +781,20 @@ def test_candle_row_matches_returns_true_when_all_business_columns_equal() -> No
         ("volume", 1000.1),
         ("vwap", 100.3),
         ("trades", 11),
+        ("source", "synthesized"),
+        ("complete", False),
     ],
 )
 def test_candle_row_matches_returns_false_when_any_business_column_differs(
-    column: str, changed: float
+    column: str, changed: float | str | bool
 ) -> None:
     """Verify the guard rejects a match when any single business column differs.
 
-    Given: An existing candle differing from the incoming row in one column,
+    Given: An existing candle differing from the incoming row in one column
+        (OHLCV/vwap/trades OR the provenance source/complete),
     When: _candle_row_matches is called,
-    Then: It returns False so a real correction still creates a new version.
+    Then: It returns False so a real correction (incl. a provenance change such
+        as a synthesized re-roll or a completeness flip) still creates a new version.
     """
     row = _candle_match_row()
     existing_values: dict[str, Any] = {
@@ -797,6 +805,8 @@ def test_candle_row_matches_returns_false_when_any_business_column_differs(
         "volume": 1000.0,
         "vwap": 100.25,
         "trades": 10,
+        "source": "native",
+        "complete": True,
     }
     existing_values[column] = changed
     existing = SimpleNamespace(**existing_values)
@@ -820,6 +830,8 @@ def test_candle_row_matches_handles_none_vwap() -> None:
         volume=1000.0,
         vwap=None,
         trades=10,
+        source="native",
+        complete=True,
     )
 
     assert SQLAlchemyRepository._candle_row_matches(cast(Any, existing), row) is True
@@ -849,6 +861,8 @@ async def test_upsert_candles_skips_identical_batch_row() -> None:
         volume=1000.0,
         vwap=100.25,
         trades=10,
+        source="native",
+        complete=True,
     )
     execute_calls = 0
     added_objects: list[Any] = []
@@ -890,6 +904,8 @@ async def test_upsert_candles_skips_identical_sequential_row() -> None:
         volume=1000.0,
         vwap=100.25,
         trades=10,
+        source="native",
+        complete=True,
     )
     call_count = 0
     added_objects: list[Any] = []
@@ -937,6 +953,8 @@ async def test_upsert_candles_caller_session_skips_identical_sequential_row() ->
         volume=1000.0,
         vwap=100.25,
         trades=10,
+        source="native",
+        complete=True,
     )
     added_objects: list[Any] = []
 
@@ -2712,6 +2730,8 @@ class TestSQLAlchemyRepositoryDialects:
         mock_row.volume = 1000.0
         mock_row.vwap = None
         mock_row.trades = 10
+        mock_row.source = "native"
+        mock_row.complete = True
         mock_row.public_id = "candle-pub-1"
         mock_row.timestamp = datetime(2024, 1, 1, tzinfo=UTC)
         mock_row.session_id = "sess-1"
@@ -2737,6 +2757,8 @@ class TestSQLAlchemyRepositoryDialects:
                     "volume": 1000.0,
                     "vwap": None,
                     "trades": 10,
+                    "source": "native",
+                    "complete": True,
                     "public_id": "candle-pub-1",
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "session_id": "sess-1",
@@ -10953,3 +10975,41 @@ async def test_get_position_cycle_statuses_chunks_merge(
     )
     result = await r.get_position_cycle_statuses_by_public_ids([pid_a, pid_b], as_of=now)
     assert result == {pid_a: "open", pid_b: "open"}
+
+
+@pytest.mark.asyncio
+async def test_upsert_candles_persists_and_returns_provenance(tmp_path: Path) -> None:
+    """upsert_candles persists source/complete and get_candles returns them.
+
+    Given: a synthesized higher-TF candle (source='synthesized', complete=False),
+    When: it is upserted and then read back via get_candles,
+    Then: the returned row carries the same provenance.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    inserted = await r.upsert_candles(
+        [
+            {
+                "instrument_public_id": inst_pid,
+                "open_at": now,
+                "timestamp": now,
+                "timeframe": "5m",
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 10.0,
+                "vwap": 1.2,
+                "trades": 5,
+                "source": "synthesized",
+                "complete": False,
+                "session_id": "s1",
+                "sequence_id": 1,
+            }
+        ]
+    )
+    assert inserted == 1
+    rows = await r.get_candles("BTC-USD", "5m", now, now, exchange="kraken", as_of=now)
+    assert len(rows) == 1
+    assert rows[0]["source"] == "synthesized"
+    assert rows[0]["complete"] is False

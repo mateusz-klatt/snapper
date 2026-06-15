@@ -58,6 +58,8 @@ def _row(open_at_ms: int, close: float, timeframe: str = "1m") -> CandleRow:
         volume=10.0,
         vwap=0.5,
         trades=7,
+        source="native",
+        complete=True,
         public_id="00000000-0000-7000-8000-0000000000aa",
         timestamp=datetime.fromtimestamp(open_at_ms / 1000, tz=UTC),
         session_id="seed-sid",

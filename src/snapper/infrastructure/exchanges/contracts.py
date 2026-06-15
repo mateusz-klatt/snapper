@@ -281,7 +281,14 @@ class TickerUpdate:
 
 @dataclass
 class CandleUpdate:
-    """Real-time candle update with OHLCV data."""
+    """Real-time candle update with OHLCV data.
+
+    ``complete`` is the trustworthy-boundary flag for higher-TF synthesis: True
+    for native frames and for synthesized bars whose window was seeded from the
+    durable plane or opened at/after the aggregator live epoch. It is NOT a
+    full-minute-coverage assertion (the 1m corpus is inherently gappy); it marks
+    boundary trust so the persistence layer can record provenance.
+    """
 
     symbol: str
     open: float
@@ -293,6 +300,7 @@ class CandleUpdate:
     volume: float
     interval_begin: datetime
     interval: int
+    complete: bool = True
 
 
 @dataclass

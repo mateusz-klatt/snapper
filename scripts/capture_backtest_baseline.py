@@ -80,6 +80,8 @@ def _candle_row(open_at: datetime, close: float, seq: int) -> CandleRow:
         "volume": 1.0,
         "vwap": None,
         "trades": None,
+        "source": "native",
+        "complete": True,
     }
     return row
 

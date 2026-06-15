@@ -2489,13 +2489,22 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             logger.error(f"Error publishing heartbeat: {e}")
 
     def _build_candle_row(
-        self, candle_msg: CandleData, instrument_public_id: str
+        self,
+        candle_msg: CandleData,
+        instrument_public_id: str,
+        *,
+        source: str = "native",
+        complete: bool = True,
     ) -> CandleUpsertRow:
         """Build a CandleUpsertRow from a published CandleData message.
 
         Args:
             candle_msg: Published CandleData with OHLCV fields.
             instrument_public_id: Resolved instrument identity.
+            source: Provenance tag — ``native`` for exchange-native frames
+                (all 1m), ``synthesized`` for aggregator higher-TF rollups.
+            complete: Trustworthy-boundary flag (always True for native
+                frames; carried from the aggregator bucket for synthesized).
 
         Returns:
             Fully materialized row dict ready for repository upsert.
@@ -2513,6 +2522,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             "volume": float(candle_msg.volume),
             "vwap": candle_msg.vwap if candle_msg.vwap is not None else candle_msg.close,
             "trades": candle_msg.trades if candle_msg.trades is not None else 0,
+            "source": source,
+            "complete": complete,
             "session_id": candle_msg.session_id,
             "sequence_id": candle_msg.sequence_id,
         }

@@ -5222,8 +5222,10 @@ class SQLAlchemyRepository(Repository):
         """Return True when every business column of ``row`` equals ``existing``.
 
         Used to make a re-upsert of identical data a true no-op: when the
-        active version already carries the same OHLCV/vwap/trade values, the
-        SCD2 close-old + insert-new churn is skipped.
+        active version already carries the same OHLCV/vwap/trade values AND the
+        same provenance (``source``/``complete``), the SCD2 close-old +
+        insert-new churn is skipped. Comparing provenance means a synthesized
+        re-roll that corrects an OHLCV-equal row's completeness still versions.
 
         The stored layer types these columns as ``Float`` (open, high, low,
         close, volume, vwap) and ``Integer`` (trades), so the incoming
@@ -5241,6 +5243,8 @@ class SQLAlchemyRepository(Repository):
             and existing.volume == row["volume"]
             and existing.vwap == row["vwap"]
             and existing.trades == row["trades"]
+            and existing.source == row.get("source", "native")
+            and existing.complete == row.get("complete", True)
         )
 
     @classmethod
@@ -5637,6 +5641,8 @@ class SQLAlchemyRepository(Repository):
                 Candle.volume,
                 Candle.vwap,
                 Candle.trades,
+                Candle.source,
+                Candle.complete,
                 Candle.public_id,
                 Candle.timestamp,
                 Candle.session_id,
@@ -5665,6 +5671,8 @@ class SQLAlchemyRepository(Repository):
                     "volume": r.volume,
                     "vwap": r.vwap,
                     "trades": r.trades,
+                    "source": r.source,
+                    "complete": r.complete,
                     "public_id": r.public_id,
                     "timestamp": r.timestamp,
                     "session_id": r.session_id,

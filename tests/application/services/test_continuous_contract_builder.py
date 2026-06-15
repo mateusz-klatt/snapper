@@ -48,6 +48,8 @@ def _candle(
         "volume": volume,
         "vwap": close,
         "trades": 100,
+        "source": "native",
+        "complete": True,
         "public_id": "candle-1",
         "timestamp": open_at,
         "session_id": "s1",

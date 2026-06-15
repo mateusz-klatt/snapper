@@ -104,6 +104,8 @@ def _candle_data_to_event(data: CandleData) -> CandleEvent:
         "volume": data.volume,
         "vwap": data.vwap,
         "trades": data.trades,
+        "source": "native",
+        "complete": True,
         "public_id": data.public_id,
         "timestamp": data.timestamp,
         "session_id": data.session_id,

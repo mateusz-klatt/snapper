@@ -323,6 +323,7 @@ class Candle(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        CheckConstraint("source IN ('native', 'synthesized')", name="ck_candle_source"),
     )
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
@@ -339,6 +340,8 @@ class Candle(TemporalMixin, Base):
     volume: Mapped[float] = mapped_column(Float)
     vwap: Mapped[float | None] = mapped_column(Float)
     trades: Mapped[int | None] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(16), server_default="native")
+    complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
 
 class Tick(TemporalMixin, Base):

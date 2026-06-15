@@ -34,6 +34,8 @@ class CandleUpsertRow(TypedDict, total=False):
     volume: float
     vwap: float | None
     trades: int | None
+    source: str
+    complete: bool
     session_id: str
     sequence_id: int
     public_id: str
@@ -117,6 +119,8 @@ class CandleRow(TypedDict):
     volume: float
     vwap: float | None
     trades: int | None
+    source: str
+    complete: bool
     public_id: str
     timestamp: datetime
     session_id: str

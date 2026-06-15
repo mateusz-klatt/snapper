@@ -78,6 +78,8 @@ def _row(
         volume=50.0,
         vwap=None,
         trades=None,
+        source="native",
+        complete=True,
         public_id="00000000-0000-7000-8000-0000000000aa",
         timestamp=open_at,
         session_id="seed",
