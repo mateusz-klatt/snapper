@@ -1994,9 +1994,19 @@ async def test_recover_leg_fills_reopens_recently_completed_group(
     When: the recovery leg-fill pass runs,
     Then: the leg re-projects to FILLED with the grown cumulative and the group
         reopens to COMPENSATING — the residual is visible to the scanner again.
+
+    The group is stamped at real ``now`` (not the helpers' fixed past date) so it
+    stays inside ``_COMPLETED_GROUP_REPLAY_WINDOW``, which the recovery pass derives
+    from the live clock — a fixed past timestamp drifts out of the window as wall
+    time advances and silently stops being replayed.
     """
     _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
-    await _insert_guard_group(_sql_repo(_coord), public_id="grp-cw", status="completed")
+    await _insert_guard_group(
+        _sql_repo(_coord),
+        public_id="grp-cw",
+        status="completed",
+        timestamp=datetime.now(UTC),
+    )
     await _insert_guard_leg(
         _sql_repo(_coord),
         public_id="leg-cw",
