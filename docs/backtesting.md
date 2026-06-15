@@ -363,7 +363,7 @@ byte-identical with pre-cross-asset behaviour.
 
 Two explicit non-goals in the current implementation:
 
-- **Same-symbol multi-venue** — `Portfolio.positions` is keyed by
+- **Same-symbol multi-venue** — `PortfolioTracker.positions` is keyed by
   instrument only, so running BTC-USD on Kraken Spot + Kraken Futures
   simultaneously in one backtest is NOT supported. Cross-asset
   strategies in scope use distinct symbols across feeds.
