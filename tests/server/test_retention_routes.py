@@ -35,6 +35,7 @@ from snapper.server.metrics_routes import _RETENTION_DISABLED_DETAIL
 from snapper.server.metrics_routes import _RETENTION_NOT_YET_RUN_DETAIL
 from snapper.server.metrics_routes import _RETENTION_UNAVAILABLE_DETAIL
 from snapper.server.metrics_routes import get_retention_metrics
+from tests.helpers.fastapi_routes import iter_fastapi_route_paths
 
 
 def _viewer_principal() -> AuthPrincipal:
@@ -239,5 +240,5 @@ class TestRouteRegistration:
     def test_route_mounted_at_api_metrics_retention(self) -> None:
         """``/api/metrics/retention`` appears in the FastAPI routes table."""
         app = create_app()
-        paths = {r.path for r in app.routes if hasattr(r, "path")}
+        paths = iter_fastapi_route_paths(app)
         assert "/api/metrics/retention" in paths

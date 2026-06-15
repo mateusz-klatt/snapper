@@ -24,10 +24,11 @@ from collections.abc import Iterable
 from typing import Final
 
 from fastapi import FastAPI
-from fastapi.routing import APIRoute
 
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.server.app import create_app
+from tests.helpers.fastapi_routes import FastAPIRouteView
+from tests.helpers.fastapi_routes import iter_fastapi_routes
 
 _STATE_CHANGING_METHODS: Final[frozenset[str]] = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 
@@ -41,7 +42,7 @@ CSRF_EXEMPT: Final[frozenset[tuple[str, str]]] = frozenset(
 )
 
 
-def _route_has_csrf_dependency(route: APIRoute) -> bool:
+def _route_has_csrf_dependency(route: FastAPIRouteView) -> bool:
     """Return ``True`` when ``validate_csrf_token`` appears in the route's dependants.
 
     FastAPI builds a tree of :class:`fastapi.dependencies.models.Dependant`
@@ -52,6 +53,8 @@ def _route_has_csrf_dependency(route: APIRoute) -> bool:
     ``Depends(validate_csrf_token)`` on every state-changing endpoint
     we want covered.
     """
+    if route.dependant is None:
+        return False
     pending = list(route.dependant.dependencies)
     while pending:
         dependant = pending.pop()
@@ -61,15 +64,13 @@ def _route_has_csrf_dependency(route: APIRoute) -> bool:
     return False
 
 
-def _state_changing_routes(app: FastAPI) -> Iterable[APIRoute]:
-    """Yield each main-app ``APIRoute`` whose methods include a state-changer.
+def _state_changing_routes(app: FastAPI) -> Iterable[FastAPIRouteView]:
+    """Yield each effective main-app route whose methods include a state-changer.
 
     Skips mounted sub-apps (e.g. the MCP sub-app at ``/api/mcp/*``)
     and routes without HTTP methods (e.g. WebSocket endpoints).
     """
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
+    for route in iter_fastapi_routes(app):
         methods = route.methods or set()
         if methods & _STATE_CHANGING_METHODS:
             yield route
@@ -111,9 +112,7 @@ class TestCsrfDependsCoverage:
         """
         app = create_app()
         registered: set[tuple[str, str]] = set()
-        for route in app.routes:
-            if not isinstance(route, APIRoute):
-                continue
+        for route in iter_fastapi_routes(app):
             for method in route.methods or set():
                 registered.add((method, route.path))
         missing = [

@@ -61,6 +61,7 @@ from snapper.server.metrics_routes import get_system_metrics
 from snapper.server.metrics_routes import get_system_metrics_history
 from snapper.server.metrics_routes import post_system_metrics_tracemalloc_start
 from snapper.server.metrics_routes import post_system_metrics_tracemalloc_stop
+from tests.helpers.fastapi_routes import iter_fastapi_route_paths
 
 
 def _build_synthetic_snapshot(
@@ -583,7 +584,7 @@ class TestRouteRegistration:
     def test_routes_mounted_under_api_metrics_system(self) -> None:
         """All four new routes appear under ``/api/metrics/system*``."""
         app = create_app()
-        paths = {r.path for r in app.routes if hasattr(r, "path")}
+        paths = iter_fastapi_route_paths(app)
         assert "/api/metrics/system" in paths
         assert "/api/metrics/system/history" in paths
         assert "/api/metrics/system/tracemalloc/start" in paths

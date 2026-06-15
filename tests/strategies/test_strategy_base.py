@@ -30,6 +30,7 @@ from snapper.application.ai_review.service import AiReviewDecisionOutcome
 from snapper.application.services.signals.service import signal_service
 from snapper.cli.app import _alembic_cfg
 from snapper.core.types import AiReviewStatusEnum
+from snapper.core.types import OrderExchange
 from snapper.core.types import PairedExecutionPolicyEnum
 from snapper.core.types import TradeSideEnum
 from snapper.infrastructure.historical.polygon.loader import GroupedDailyRow
@@ -57,6 +58,7 @@ from snapper.strategies.base import StrategySignal
 from snapper.strategies.base import StrategySignalResult
 from snapper.strategies.base import _grouped_row_to_warmup_candle
 from snapper.strategies.base import _native_to_polygon_crypto_ticker
+from snapper.strategies.cointegration import _FET_RENDER_DEFAULT_CONFIG
 from snapper.strategies.cointegration import CointegrationPairs
 from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.factory import StrategyNotFoundError
@@ -6652,6 +6654,35 @@ class TestWarmupPrefill:
         fet = [c.open_at for c in strat.candle_buffer["FET-USD"]]
         render = [c.open_at for c in strat.candle_buffer["RENDER-USD"]]
         assert len(fet) == 3
+        assert fet == render
+
+    @pytest.mark.asyncio
+    async def test_fet_render_default_config_opts_into_crypto_warmup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The registered FET/RENDER preset is warmup-ready by default."""
+
+        def _is_tradeable(_instrument: str, _exchange: object) -> bool:
+            return True
+
+        monkeypatch.setattr("snapper.strategies.models.is_tradeable", _is_tradeable)
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        _write_warmup_cache(tmp_path, 60, tickers=("X:FETUSD", "X:RENDERUSD"), end=end)
+        params = dict(cast(dict[str, object], _FET_RENDER_DEFAULT_CONFIG["params"]))
+        params["polygon_cache_root"] = str(tmp_path)
+        config = StrategyConfig(
+            name=cast(str, _FET_RENDER_DEFAULT_CONFIG["name"]),
+            strategy_class="CointegrationPairs",
+            inputs=list(cast(list[str], _FET_RENDER_DEFAULT_CONFIG["inputs"])),
+            outputs=list(cast(list[str], _FET_RENDER_DEFAULT_CONFIG["outputs"])),
+            exchange=cast(OrderExchange, _FET_RENDER_DEFAULT_CONFIG["exchange"]),
+            params=params,
+        )
+        strat = CointegrationPairs(config)
+        await strat._warmup_candle_buffer()
+        fet = [c.open_at for c in strat.candle_buffer["FET-USD"]]
+        render = [c.open_at for c in strat.candle_buffer["RENDER-USD"]]
+        assert len(fet) == 60
         assert fet == render
 
     @pytest.mark.asyncio

@@ -385,6 +385,8 @@ _FET_RENDER_DEFAULT_CONFIG: dict[str, object] = {
         "exit_threshold": 0.5,
         "lookback_window": 60,
         "min_data_points": 30,
+        "warmup_market_type": "crypto",
+        "buffer_size": 100,
     },
 }
 """Forward-test config for the FET-USD / RENDER-USD pair-trade.

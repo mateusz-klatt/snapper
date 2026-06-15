@@ -330,7 +330,10 @@ Two processes register this class out of the box:
 candles with the defaults above, and
 `strategy_cointegration_fet_render` is a forward-test preset that
 trades daily FET-USD/RENDER-USD paper candles with a screened hedge
-ratio (`beta=0.257463`, `lookback_window=60`).
+ratio (`beta=0.257463`, `lookback_window=60`). It opts into the
+A3-smoke Polygon crypto daily warm-up and sets `buffer_size=100`, so a
+fresh default process can prefill the 60-bar spread window when the
+local cache is present.
 
 ## Proprietary strategies
 
