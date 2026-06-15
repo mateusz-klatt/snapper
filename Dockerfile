@@ -2,7 +2,7 @@ ARG CADDY_TAG=2-alpine
 FROM caddy:${CADDY_TAG} AS caddy-source
 
 FROM node:26-alpine AS ui-build
-ARG COREPACK_VERSION=0.34.0
+ARG COREPACK_VERSION=0.35.0
 WORKDIR /app
 
 RUN (corepack --version 2>/dev/null || \
@@ -17,7 +17,7 @@ COPY frontend/ /app/frontend/
 RUN pnpm build
 
 FROM python:3.14-slim AS py-build
-ARG POETRY_VERSION=2.3.4
+ARG POETRY_VERSION=2.4.1
 
 ENV PIP_NO_CACHE_DIR=1
 WORKDIR /app
