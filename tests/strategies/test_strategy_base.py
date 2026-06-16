@@ -56,6 +56,7 @@ from snapper.strategies.base import CompositeStrategy
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.base import StrategySignal
 from snapper.strategies.base import StrategySignalResult
+from snapper.strategies.base import _db_row_to_warmup_candle
 from snapper.strategies.base import _grouped_row_to_warmup_candle
 from snapper.strategies.base import _native_to_polygon_crypto_ticker
 from snapper.strategies.cointegration import _FET_RENDER_DEFAULT_CONFIG
@@ -6692,8 +6693,68 @@ class _WarmupStrategy(MockStrategy):
         return int(self.params.get("warmup_n", 0))
 
 
+def _db_candle_row(close: float, *, day: date, volume: float = 10.0) -> dict[str, Any]:
+    """Build a persisted 1d CandleRow dict (00:00 UTC open_at) for warmup DB tests."""
+    open_at = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    return {
+        "open_at": open_at,
+        "timeframe": "1d",
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "volume": volume,
+        "vwap": close,
+        "trades": 5,
+        "source": "synthesized",
+        "complete": True,
+        "public_id": "00000000-0000-7000-8000-0000000000aa",
+        "timestamp": open_at,
+        "session_id": "seed",
+        "sequence_id": 1,
+    }
+
+
+class _StubWarmupRepo:
+    """Repository stub returning configured 1d rows per instrument (DB-first warmup).
+
+    The warmup uses the shared process-cached repo and must NOT dispose it, so this
+    stub deliberately exposes no engine/dispose surface.
+    """
+
+    def __init__(self, rows_by_symbol: dict[str, list[dict[str, Any]]] | None = None) -> None:
+        self._rows = rows_by_symbol or {}
+
+    async def get_candles(
+        self,
+        *,
+        instrument: str,
+        timeframe: str,
+        start: Any,
+        end: Any,
+        exchange: Any,
+        as_of: Any,
+        limit: int | None = None,
+        order: str = "asc",
+    ) -> list[dict[str, Any]]:
+        rows = sorted(
+            self._rows.get(instrument, []), key=lambda r: r["open_at"], reverse=order == "desc"
+        )
+        return rows[:limit] if limit is not None else rows
+
+
 class TestWarmupPrefill:
     """A3-smoke: strategy candle-buffer warmup from the Polygon daily cache."""
+
+    @pytest.fixture(autouse=True)
+    def _empty_db_plane(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Default the DB-first warmup to an empty plane so these tests hit the cache.
+
+        Slice 5 made warmup DB-first; with an empty persisted plane the loader
+        falls back to the Polygon cache, preserving the pre-slice-5 assertions
+        here while exercising the DB-short fallback path.
+        """
+        monkeypatch.setattr("snapper.strategies.base.get_repository", lambda url: _StubWarmupRepo())
 
     def test_native_to_polygon_crypto_ticker(self) -> None:
         """A BASE-QUOTE symbol maps to X:{BASE}{QUOTE}; non-pairs map to None."""
@@ -7013,3 +7074,189 @@ class TestWarmupPrefill:
         await strat.stop()
         assert order[0] == "warmup"
         assert order.index("warmup") < order.index("subscribe")
+
+
+class TestWarmupDbFirst:
+    """Phase 3 slice 5: warmup reads the persisted 1d plane first (canonical)."""
+
+    def test_db_row_to_warmup_candle_projection(self) -> None:
+        """The DB-row projection stamps the warmup envelope and 1d open_at.
+
+        Given: a persisted 1d CandleRow,
+        When: _db_row_to_warmup_candle projects it,
+        Then: it carries the row's open_at, OHLCV, the warmup session id and 1d TF.
+        """
+        candle = _db_row_to_warmup_candle(
+            _db_candle_row(2.5, day=date(2024, 2, 16)),
+            instrument="FET-USD",
+            exchange="kraken",
+            sequence_id=0,
+        )
+        assert candle.open_at == datetime(2024, 2, 16, tzinfo=UTC)
+        assert candle.timeframe == "1d"
+        assert candle.exchange == "kraken"
+        assert candle.instrument == "FET-USD"
+        assert candle.close == 2.5
+        assert candle.session_id == "warmup"
+
+    def _db_config(self, *, inputs: list[str], exchange: str, cache_root: Path) -> StrategyConfig:
+        """Build a crypto-opt-in warmup config for the DB-first tests."""
+        return _strategy_config(
+            name="w",
+            exchange=exchange,
+            inputs=inputs,
+            params={
+                "warmup_n": 3,
+                "warmup_market_type": "crypto",
+                "polygon_cache_root": str(cache_root),
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_db_first_warms_from_persisted_plane(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A populated DB warms the buffer canonically (no cache touched).
+
+        Given: the persisted plane holds the full 1d history for the leg,
+        When: warmup runs (no Polygon cache written),
+        Then: the buffer is filled from the DB under the leg's live venue.
+        """
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        rows = [_db_candle_row(float(i), day=end - timedelta(days=2 - i)) for i in range(3)]
+        monkeypatch.setattr(
+            "snapper.strategies.base.get_repository",
+            lambda url: _StubWarmupRepo({"FET-USD": rows}),
+        )
+        strat = _WarmupStrategy(
+            self._db_config(
+                inputs=["market.paper.kraken.FET-USD.candles.1d"],
+                exchange="paper",
+                cache_root=tmp_path,
+            )
+        )
+        await strat._warmup_candle_buffer()
+        buffer = strat.candle_buffer["FET-USD"]
+        assert [c.close for c in buffer] == [0.0, 1.0, 2.0]
+        assert all(c.exchange == "kraken" for c in buffer)
+
+    @pytest.mark.asyncio
+    async def test_db_first_non_paper_leg_uses_topic_exchange(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A live (non-paper) leg reads + stamps under the topic's own exchange.
+
+        Given: a live kraken 1d input and a populated DB,
+        When: warmup runs,
+        Then: the leg resolves under parsed.exchange (kraken) and warms from the DB.
+        """
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        rows = [_db_candle_row(float(i), day=end - timedelta(days=2 - i)) for i in range(3)]
+        monkeypatch.setattr(
+            "snapper.strategies.base.get_repository",
+            lambda url: _StubWarmupRepo({"FET-USD": rows}),
+        )
+        strat = _WarmupStrategy(
+            self._db_config(
+                inputs=["market.kraken.FET-USD.candles.1d"], exchange="kraken", cache_root=tmp_path
+            )
+        )
+        await strat._warmup_candle_buffer()
+        buffer = strat.candle_buffer["FET-USD"]
+        assert len(buffer) == 3
+        assert all(c.exchange == "kraken" for c in buffer)
+
+    @pytest.mark.asyncio
+    async def test_db_first_multi_leg_aligned(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Both legs warm from the DB on shared days.
+
+        Given: the DB holds aligned 1d history for two legs,
+        When: warmup runs,
+        Then: both buffers are installed from the DB.
+        """
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        days = [end - timedelta(days=2 - i) for i in range(3)]
+        rows = {
+            "FET-USD": [_db_candle_row(float(i), day=days[i]) for i in range(3)],
+            "RENDER-USD": [_db_candle_row(float(i) + 10, day=days[i]) for i in range(3)],
+        }
+        monkeypatch.setattr(
+            "snapper.strategies.base.get_repository", lambda url: _StubWarmupRepo(rows)
+        )
+        strat = _WarmupStrategy(
+            self._db_config(
+                inputs=[
+                    "market.paper.kraken.FET-USD.candles.1d",
+                    "market.paper.kraken.RENDER-USD.candles.1d",
+                ],
+                exchange="paper",
+                cache_root=tmp_path,
+            )
+        )
+        await strat._warmup_candle_buffer()
+        assert len(strat.candle_buffer["FET-USD"]) == 3
+        assert len(strat.candle_buffer["RENDER-USD"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_db_short_falls_back_to_cache(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A short persisted plane falls back to the Polygon cache bootstrap.
+
+        Given: the DB holds fewer than `count` rows for the leg but the cache is full,
+        When: warmup runs,
+        Then: the buffer is warmed from the Polygon cache (non-canonical fallback).
+        """
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        short_rows = [_db_candle_row(0.0, day=end)]
+        monkeypatch.setattr(
+            "snapper.strategies.base.get_repository",
+            lambda url: _StubWarmupRepo({"FET-USD": short_rows}),
+        )
+        _write_warmup_cache(tmp_path, 3, end=end)
+        strat = _WarmupStrategy(
+            self._db_config(
+                inputs=["market.paper.kraken.FET-USD.candles.1d"],
+                exchange="paper",
+                cache_root=tmp_path,
+            )
+        )
+        await strat._warmup_candle_buffer()
+        assert len(strat.candle_buffer["FET-USD"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_db_first_misaligned_installs_nothing_without_cache_fallback(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A populated-but-misaligned DB installs nothing and does NOT use the cache.
+
+        Given: both legs have >= count DB rows but on disjoint days, and a full cache,
+        When: warmup runs,
+        Then: no buffer is installed (live-only) and the cache is never consulted
+            (the canonical DB source is used; stale cache must not mask misalignment).
+        """
+        end = (datetime.now(UTC) - timedelta(days=1)).date()
+        fet_days = [end - timedelta(days=2 - i) for i in range(3)]
+        render_days = [end - timedelta(days=12 - i) for i in range(3)]
+        rows = {
+            "FET-USD": [_db_candle_row(float(i), day=fet_days[i]) for i in range(3)],
+            "RENDER-USD": [_db_candle_row(float(i), day=render_days[i]) for i in range(3)],
+        }
+        monkeypatch.setattr(
+            "snapper.strategies.base.get_repository", lambda url: _StubWarmupRepo(rows)
+        )
+        _write_warmup_cache(tmp_path, 5, tickers=("X:FETUSD", "X:RENDERUSD"), end=end)
+        strat = _WarmupStrategy(
+            self._db_config(
+                inputs=[
+                    "market.paper.kraken.FET-USD.candles.1d",
+                    "market.paper.kraken.RENDER-USD.candles.1d",
+                ],
+                exchange="paper",
+                cache_root=tmp_path,
+            )
+        )
+        await strat._warmup_candle_buffer()
+        assert strat.candle_buffer == {}

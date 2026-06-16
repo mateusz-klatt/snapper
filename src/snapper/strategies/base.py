@@ -38,6 +38,9 @@ from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataTypeEnum
 from snapper.core.types import PairedExecutionPolicy
+from snapper.data.repository import Repository
+from snapper.data.repository import get_repository
+from snapper.data.repository_types import CandleRow
 from snapper.infrastructure.historical.polygon.loader import GroupedDailyRow
 from snapper.infrastructure.historical.polygon.loader import load_recent_grouped_daily
 from snapper.messaging.infrastructure.gap_detector import GapDetector
@@ -146,6 +149,49 @@ def _grouped_row_to_warmup_candle(
         volume=float(row.volume),
         vwap=float(row.vwap) if row.vwap is not None else None,
         trades=row.total_trades,
+    )
+
+
+def _db_row_to_warmup_candle(
+    row: CandleRow, *, instrument: str, exchange: str, sequence_id: int
+) -> CandleData:
+    """Project a persisted 1d :class:`CandleRow` to a warmup :class:`CandleData`.
+
+    The DB-first counterpart of :func:`_grouped_row_to_warmup_candle` (Phase 3
+    slice 5). ``open_at`` is the persisted canonical 1d boundary (00:00 UTC),
+    already aligned with the synthesized live 1d bars, so the warmed series is
+    continuous with what live ``on_candle`` will receive. Uses the same
+    deterministic ``public_id`` (``exchange|instrument|1d|open_at``) and
+    ``session_id="warmup"`` envelope as the cache path.
+
+    Args:
+        row: Persisted 1d candle row from the repository.
+        instrument: Native instrument symbol (the candle-buffer key).
+        exchange: Market-data exchange for the candle envelope.
+        sequence_id: Monotonic sequence id within the warmup batch.
+
+    Returns:
+        A 1d :class:`CandleData` suitable for the strategy candle buffer.
+    """
+    open_at = row["open_at"]
+    open_at_ms = int(open_at.timestamp() * 1000)
+    public_id = str(uuid5(_WARMUP_CANDLE_NAMESPACE, f"{exchange}|{instrument}|1d|{open_at_ms}"))
+    return CandleData(
+        public_id=public_id,
+        timestamp=open_at,
+        session_id=_WARMUP_SESSION_ID,
+        sequence_id=sequence_id,
+        instrument=instrument,
+        exchange=cast(MarketDataExchange, exchange),
+        timeframe="1d",
+        open_at=open_at,
+        open=row["open"],
+        high=row["high"],
+        low=row["low"],
+        close=row["close"],
+        volume=row["volume"],
+        vwap=row["vwap"],
+        trades=row["trades"],
     )
 
 
@@ -702,10 +748,15 @@ class BaseStrategy(ABC):
         Called from :meth:`start` BEFORE :meth:`_subscribe_inputs` (so no live
         frame can race the buffer). OPT-IN and crypto-scoped: runs only when the
         strategy declares :meth:`required_candle_history` > 0 AND configures
-        ``params["warmup_market_type"] == "crypto"`` — the A3-smoke source is the
-        Polygon crypto daily cache (the DB holds too little daily history for these
-        legs today; the DB single-source path is a follow-up). The opt-in keeps a
+        ``params["warmup_market_type"] == "crypto"`` — the opt-in keeps a
         non-crypto strategy from ever loading a crypto ``X:`` ticker.
+
+        DB-FIRST (Phase 3 slice 5, §3.7): warms from the persisted ``1d`` plane
+        (``get_candles`` under the leg's live venue) when it holds the full
+        history, so the warmed series is continuous with the live synthesized 1d
+        bars and the read path is single-source. Only when the persisted plane is
+        short for some leg (e.g. pre-backfill) does it fall back to the Polygon
+        crypto daily cache as a non-canonical bootstrap (logged as such).
 
         ALIGNED ALL-OR-NOTHING across legs: every 1d candle input is loaded, and
         buffers are installed ONLY if all legs share at least ``count`` common UTC
@@ -744,23 +795,70 @@ class BaseStrategy(ABC):
                 legs.append(parsed)
             if not legs:
                 return
-            self._install_aligned_warmup(legs, count, buffer_cap)
+            if await self._install_db_warmup(legs, count, buffer_cap):
+                return
+            as_of = (datetime.now(UTC) - timedelta(days=1)).date()
+            self._install_cache_warmup(legs, count, buffer_cap, as_of)
         except Exception as exc:
             logger.warning(
                 f"Strategy {self.name}: candle warmup failed ({exc}); "
                 "continuing with live-only warmup"
             )
 
-    def _install_aligned_warmup(self, legs: list[Any], count: int, buffer_cap: int) -> None:
-        """Load all 1d legs and install date-aligned buffers, or install nothing.
+    async def _install_db_warmup(self, legs: list[Any], count: int, buffer_cap: int) -> bool:
+        """Try the canonical DB-first warmup: install aligned 1d buffers from the repo.
+
+        Reads each leg's persisted 1d history under the venue its live read
+        resolves (so the warmed series is continuous with the live synthesized 1d
+        bars). Installs the date-aligned buffers ONLY when EVERY leg has at least
+        ``count`` persisted rows. Returns False — signalling a Polygon-cache
+        bootstrap fallback — only when the persisted plane is SHORT for some leg
+        (e.g. pre-backfill); a genuine misalignment of a fully-populated plane
+        still installs nothing (live-only) rather than masking it with stale cache.
+
+        Uses the process-wide cached repository (:func:`get_repository`) — the
+        same shared engine pool the rest of the process (e.g. signal persistence)
+        uses — and does NOT dispose it; the pool is owned by the global lifecycle
+        (:func:`dispose_repositories`), so disposing here would close it for all.
 
         Args:
             legs: Parsed 1d candle-input topics.
             count: Required (aligned) warm-up bar count per leg.
             buffer_cap: Maximum buffered bars per instrument.
+
+        Returns:
+            True when the DB held every leg (canonical source used, even if the
+            aligned intersection then fell short); False when a leg was short, so
+            the caller should fall back to the Polygon cache bootstrap.
+        """
+        repo = get_repository(_bootstrap_settings.db_url)
+        loaded: dict[str, list[CandleData]] = {}
+        for parsed in legs:
+            bars = await self._load_warmup_leg_db(repo, parsed, count)
+            if len(bars) < count:
+                return False
+            loaded[parsed.instrument] = bars
+        self._install_aligned_buffers(loaded, count, buffer_cap, "the DB (canonical)")
+        return True
+
+    def _install_cache_warmup(
+        self, legs: list[Any], count: int, buffer_cap: int, as_of: date
+    ) -> None:
+        """Install the Polygon-cache bootstrap warmup (non-canonical fallback).
+
+        Used only when the persisted plane is not yet populated for some leg.
+        Loads each leg from the Polygon crypto cache and installs date-aligned
+        buffers, or installs nothing (live-only) on any shortfall to keep the
+        spread aligned. Logged as a non-canonical bootstrap so an operator can see
+        the DB was not the source.
+
+        Args:
+            legs: Parsed 1d candle-input topics.
+            count: Required (aligned) warm-up bar count per leg.
+            buffer_cap: Maximum buffered bars per instrument.
+            as_of: Last complete UTC day to load up to (inclusive).
         """
         cache_root = Path(self.params.get("polygon_cache_root", _DEFAULT_POLYGON_CACHE_ROOT))
-        as_of = (datetime.now(UTC) - timedelta(days=1)).date()
         loaded: dict[str, list[CandleData]] = {}
         for parsed in legs:
             bars = self._load_warmup_leg(parsed, cache_root, count, as_of)
@@ -771,6 +869,29 @@ class BaseStrategy(ABC):
                 )
                 return
             loaded[parsed.instrument] = bars
+        self._install_aligned_buffers(
+            loaded, count, buffer_cap, "the Polygon cache (non-canonical bootstrap)"
+        )
+
+    def _install_aligned_buffers(
+        self,
+        loaded: dict[str, list[CandleData]],
+        count: int,
+        buffer_cap: int,
+        source_label: str,
+    ) -> None:
+        """Install date-aligned 1d buffers from pre-loaded legs, or install nothing.
+
+        Shared by the DB-first and Polygon-cache warmup paths. Installs buffers
+        ONLY if all legs share at least ``count`` common UTC days, else installs
+        nothing (live-only) to keep a multi-leg spread date-aligned.
+
+        Args:
+            loaded: ``{instrument: ascending 1d bars}`` per leg (each >= count).
+            count: Required (aligned) warm-up bar count.
+            buffer_cap: Maximum buffered bars per instrument.
+            source_label: Human-readable source for the warm log.
+        """
         open_at_sets = [{bar.open_at for bar in bars} for bars in loaded.values()]
         common = set.intersection(*open_at_sets)
         if len(common) < count:
@@ -785,8 +906,49 @@ class BaseStrategy(ABC):
         self._warmup_through_open_at = max(keep)
         logger.info(
             f"Strategy {self.name}: warmed {len(keep)} aligned daily bars for "
-            f"{sorted(loaded)} from the Polygon cache"
+            f"{sorted(loaded)} from {source_label}"
         )
+
+    async def _load_warmup_leg_db(
+        self, repo: Repository, parsed: Any, count: int
+    ) -> list[CandleData]:
+        """Load one leg's warm-up candles from the persisted 1d plane.
+
+        Reads under the venue the leg's live read resolves (PAPER legs use their
+        ``source_exchange``), so the warmed bars match the live synthesized 1d
+        plane. The current forming day is never persisted (1d closes at the next
+        00:00 UTC), so the most-recent ``count`` rows end at the last complete day.
+
+        Args:
+            repo: Repository handle.
+            parsed: Parsed 1d candle-input topic.
+            count: Number of daily bars to load.
+
+        Returns:
+            Ascending warm-up candles (empty/short when the persisted plane lacks
+            ``count`` rows for the leg).
+        """
+        instrument = parsed.instrument
+        if parsed.exchange == ExchangeEnum.PAPER and parsed.source_exchange:
+            exchange = parsed.source_exchange
+        else:
+            exchange = parsed.exchange
+        rows = await repo.get_candles(
+            instrument=instrument,
+            timeframe="1d",
+            start=None,
+            end=None,
+            exchange=exchange,
+            as_of=datetime.now(UTC),
+            limit=count,
+            order="desc",
+        )
+        return [
+            _db_row_to_warmup_candle(
+                row, instrument=instrument, exchange=str(exchange), sequence_id=index
+            )
+            for index, row in enumerate(reversed(rows))
+        ]
 
     def _load_warmup_leg(
         self, parsed: Any, cache_root: Path, count: int, as_of: date

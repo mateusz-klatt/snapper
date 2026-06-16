@@ -153,15 +153,20 @@ candle buffer from history BEFORE subscribing to the live feed, so the strategy 
 indicator-ready from a cold start instead of waiting that many live periods (a
 restart re-warms the same way).
 
-The current (A3-smoke) source is the local Polygon **crypto daily** cache and is
-**opt-in + crypto-scoped**:
+Warm-up is **DB-first** (Phase 3 slice 5) and **opt-in + crypto-scoped**: it reads
+the persisted `1d` plane (`get_candles` under the leg's live venue) so the warmed
+series is continuous with the live synthesized 1d bars and the read path is
+single-source. Only when the persisted plane is short for some leg (e.g. before
+the operator has applied the daily backfill) does it fall back to the local
+Polygon **crypto daily** cache as a non-canonical bootstrap (logged as such).
 
 - Set `params["warmup_market_type"] = "crypto"` to enable it (without it, warm-up
   is skipped and the buffer fills live-only). This keeps a non-crypto strategy
   from ever loading a crypto ticker.
 - Set `params["buffer_size"]` (default 100) `>=` the lookback, or warm-up is
   skipped with a warning (no silent under-warm).
-- Optional `params["polygon_cache_root"]` (default `data/polygon/cache`).
+- Optional `params["polygon_cache_root"]` (default `data/polygon/cache`) — the
+  bootstrap fallback root, used only when the DB is short.
 - Only `1d` candle inputs are warmed (others rely on live fill).
 - **Aligned all-or-nothing for multi-leg strategies**: a pair (e.g. cointegration)
   is warmed only if every leg shares at least the required number of common UTC
