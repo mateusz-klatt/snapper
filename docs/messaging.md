@@ -824,10 +824,14 @@ Key properties:
     trustworthy-boundary flag, under the SAME persist policy
     (`_should_persist_row`) as the `1m` stream. Provenance is `source ∈
     {native, synthesized}` + `complete` (a trustworthy-boundary bool, NOT a
-    full-minute-coverage assertion). The candle READ path (`candle_query`) still
-    serves `5m`–`1d` from the DB / on-demand aggregation; routing every `>1m`
-    read single-source to the persisted plane (retiring on-read aggregation) is a
-    later slice.
+    full-minute-coverage assertion). The candle READ path single-source cutover
+    is gated by the `candle_single_source` setting (default OFF): while OFF, the
+    `/api/candles` smart route still derives `5m/15m/30m` on-read from the 1m
+    cache; when ON, those frames serve single-source from the persisted plane
+    (`get_candles`), retiring the on-read `derive_snaps` rollup and closing the
+    dual-source hazard. Enable it only after the persisted plane is populated and
+    `verify-candle-coverage` passes (else the read would be empty/short). `1m`
+    stays cache-served and `1h/4h/1d` are already DB-served regardless.
 - **Restart rebuild** — on startup the open window of each higher timeframe is
     rebuilt from the persisted `1m` history (excluding the current open minute,
     which the live stream finalizes), so a mid-window restart does not truncate

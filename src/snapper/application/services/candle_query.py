@@ -427,6 +427,7 @@ async def fetch_candles(
     timeframe: str,
     limit: int,
     as_of: datetime | None = None,
+    single_source: bool = False,
 ) -> CandleQueryResult:
     """Smart-routing entry used by ``/api/candles``.
 
@@ -449,6 +450,12 @@ async def fetch_candles(
         as_of: Optional point-in-time. When set, hard-routes to the
             DB path so cache (live snapshot only) cannot silently
             mis-serve time-travel queries.
+        single_source: Candle Phase 3 slice-4 read cutover. When True, the
+            derived frames (``5m/15m/30m``) serve single-source from the
+            persisted ``candles`` plane instead of on-read ``derive_snaps``,
+            closing the dual-source hazard. ``1m`` stays cache-served. Gated
+            OFF by default until the persisted plane is verified populated
+            (``verify-candle-coverage``); flipping it before then serves empty.
 
     Returns:
         :class:`CandleQueryResult` with chronological rows + a source
@@ -463,7 +470,12 @@ async def fetch_candles(
             limit=limit,
             as_of=as_of,
         )
-    if cache is None or timeframe not in CACHE_ELIGIBLE_TIMEFRAMES:
+    serves_from_db = (
+        cache is None
+        or timeframe not in CACHE_ELIGIBLE_TIMEFRAMES
+        or (single_source and timeframe in DERIVED_AGGREGATION_MAP)
+    )
+    if serves_from_db:
         return await fetch_db_only(
             repo=repo,
             exchange=exchange,
@@ -471,6 +483,7 @@ async def fetch_candles(
             timeframe=timeframe,
             limit=limit,
         )
+    assert cache is not None
     cache_snaps, cache_source = await _read_cache_snaps(
         cache=cache,
         exchange=exchange,

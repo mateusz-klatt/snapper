@@ -192,7 +192,10 @@ Components:
   Synthesized bars are also persisted to the `candles` table (tagged
   `source='synthesized'` with a `complete` trustworthy-boundary flag) when a
   higher timeframe is configured for persistence — off by default — under the
-  same persist policy as `1m`; the single-source read cutover is a later slice
+  same persist policy as `1m`; the single-source read cutover is gated by the
+  default-off `candle_single_source` setting (when ON, `/api/candles` serves
+  `5m/15m/30m` from the persisted plane instead of on-read derivation, after
+  `verify-candle-coverage` confirms the plane is populated)
   (see `docs/messaging.md` "Higher-Timeframe Candle Synthesis"). An optional,
   default-off `candle_forward_fill` setting enables a time-driven flush that
   seals a wall-clock-ended window with no later 1m and forward-fills empty

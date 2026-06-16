@@ -519,6 +519,26 @@ class AppSettings:
         return self._get_db_setting("candle_forward_fill", False)
 
     @property
+    def candle_single_source(self) -> bool:
+        """Return whether ``>1m`` candle reads serve single-source from the DB.
+
+        Candle Phase 3 slice 4 (the read-cutover). When ``True``, the
+        ``/api/candles`` smart route serves ``5m/15m/30m`` from the persisted
+        ``candles`` plane (``get_candles``) instead of deriving them on-read from
+        the 1m cache (``derive_snaps``) — closing the dual-source hazard
+        (cache-derived vs persisted-synthesized rollups can diverge). Leave OFF
+        (the default) until the persisted higher-TF plane is populated and
+        ``verify-candle-coverage`` passes; flipping it before then would serve an
+        empty/short series. ``1m`` stays cache-served and ``1h/4h/1d`` are already
+        DB-served, so this flag only affects the derived frames.
+
+        Returns:
+            ``True`` to route ``5m/15m/30m`` reads to the persisted plane;
+            ``False`` (default) to keep the on-read cache derivation.
+        """
+        return self._get_db_setting("candle_single_source", False)
+
+    @property
     def backfill_days(self) -> int:
         """Return number of days for historical data backfill.
 

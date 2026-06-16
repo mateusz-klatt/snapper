@@ -665,3 +665,78 @@ class TestFetchCandlesBackfill:
         )
         assert result.source == "derived"
         assert result.sample_count == 4
+
+
+class TestFetchCandlesSingleSource:
+    """Phase 3 slice-4 read cutover: ``single_source`` routes >1m to the DB."""
+
+    @pytest.mark.asyncio
+    async def test_single_source_routes_derived_frame_to_db(self) -> None:
+        """With the flag ON, a 5m read serves the persisted plane, not derive.
+
+        Given: a warm cache that WOULD derive a 5m bar and a DB 5m row with a
+            distinct close,
+        When: fetch_candles runs with single_source=True for 5m,
+        Then: it serves the DB row (source 'db'), bypassing the cache derive.
+        """
+        snaps = [_snap((i + 5) * 60_000, 1.0) for i in range(5)]
+        cache = _stub_cache(snaps)
+        repo = _stub_repo([_row(300_000, 999.0, timeframe="5m")])
+        result = await fetch_candles(
+            cache=cache,
+            repo=cast(Repository, repo),
+            exchange="kraken",
+            native_symbol="BTC-USD",
+            timeframe="5m",
+            limit=1,
+            single_source=True,
+        )
+        assert result.source == "db"
+        assert [row.close for row in result.rows] == [999.0]
+        cache.get_1m_candles.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_single_source_off_keeps_derive(self) -> None:
+        """With the flag OFF (default), a 5m read still derives from the cache.
+
+        Given: the same warm cache and DB row,
+        When: fetch_candles runs with single_source=False for 5m,
+        Then: it serves the derived bar (source 'derived'), not the DB row.
+        """
+        snaps = [_snap((i + 5) * 60_000, 1.0) for i in range(5)]
+        cache = _stub_cache(snaps)
+        repo = _stub_repo([_row(300_000, 999.0, timeframe="5m")])
+        result = await fetch_candles(
+            cache=cache,
+            repo=cast(Repository, repo),
+            exchange="kraken",
+            native_symbol="BTC-USD",
+            timeframe="5m",
+            limit=1,
+            single_source=False,
+        )
+        assert result.source == "derived"
+        assert [row.close for row in result.rows] == [1.0]
+
+    @pytest.mark.asyncio
+    async def test_single_source_keeps_1m_on_cache(self) -> None:
+        """The flag does not move 1m off the cache (only the derived frames).
+
+        Given: a warm 1m cache and the flag ON,
+        When: fetch_candles runs for 1m,
+        Then: it still serves the cache (1m is native, not a derived frame).
+        """
+        snaps = [_snap(i * 60_000, float(i)) for i in range(10)]
+        cache = _stub_cache(snaps)
+        repo = _stub_repo([])
+        result = await fetch_candles(
+            cache=cache,
+            repo=cast(Repository, repo),
+            exchange="kraken",
+            native_symbol="BTC-USD",
+            timeframe="1m",
+            limit=5,
+            single_source=True,
+        )
+        assert result.source == "cache"
+        cache.get_1m_candles.assert_awaited()

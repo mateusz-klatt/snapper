@@ -339,6 +339,21 @@ class TestAppSettingsTradingProperties:
         )
         assert enabled.candle_forward_fill is True
 
+    def test_candle_single_source_defaults_false_and_reads_value(self) -> None:
+        """Verify candle_single_source defaults to False and reads the DB value.
+
+        Given a service without and with candle_single_source set,
+        When accessing settings.candle_single_source,
+        Then the default False and the configured value are returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        default = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert default.candle_single_source is False
+        enabled = AppSettings(
+            bootstrap, settings_service=MockSettingsService({"candle_single_source": True})
+        )
+        assert enabled.candle_single_source is True
+
     def test_paper_instruments_returns_value(self) -> None:
         """Verify paper_instruments returns configured source map.
 

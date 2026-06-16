@@ -1037,6 +1037,32 @@ def _resolve_zmq_heartbeat_interval_ms(request: Request) -> int:
         return _ZMQ_HEARTBEAT_INTERVAL_DEFAULT_MS
 
 
+def _resolve_candle_single_source(request: Request) -> bool:
+    """Resolve the candle single-source read flag from DB-aware settings.
+
+    The cached :func:`get_settings` instance is bootstrap-only (no
+    ``SettingsService``), so reading the DB-backed ``candle_single_source``
+    directly off it raises ``RuntimeError``. The lifespan attaches the DB-aware
+    settings instance to ``request.app.state.settings``; fall back to OFF when
+    state is missing (e.g. ``TestClient`` setups that bypass the lifespan) so the
+    candle route never 500s on the flag lookup.
+
+    Args:
+        request: FastAPI request whose app state we consult.
+
+    Returns:
+        ``True`` to serve ``>1m`` reads single-source from the DB; ``False``
+        (default) to keep the on-read cache derivation.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:
+        return False
+    try:
+        return bool(settings.candle_single_source)
+    except RuntimeError:
+        return False
+
+
 def _build_strategy_payload(
     raw_status: dict[str, Any],
 ) -> StrategyStatusPayload | None:
@@ -1319,6 +1345,7 @@ async def _handle_get_candles(
             timeframe=timeframe,
             limit=limit,
             as_of=as_of,
+            single_source=_resolve_candle_single_source(request),
         )
         items = [
             project_query_row_to_candle_data(row, instrument=instrument, exchange=exchange)

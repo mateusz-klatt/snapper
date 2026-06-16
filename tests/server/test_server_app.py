@@ -12,6 +12,7 @@ from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
@@ -41,6 +42,7 @@ from snapper.server.app import _build_strategy_payload
 from snapper.server.app import _build_user_service_publisher
 from snapper.server.app import _clear_runtime_singletons
 from snapper.server.app import _reconcile_stale_backtests
+from snapper.server.app import _resolve_candle_single_source
 from snapper.server.app import _safe_get_caps_enforcer
 from snapper.server.app import _shutdown_user_service_publisher
 from snapper.server.app import _sync_process_registry_for_instance
@@ -4498,3 +4500,50 @@ class TestWarnOnTradfiNearExpiry:
         settings = MagicMock()
         settings.instruments = {"kraken_equities": ["MNQM6-CME"]}
         await _warn_on_tradfi_near_expiry(settings)
+
+
+class _RaisingSettings:
+    """Settings stub whose DB-backed flag raises (no SettingsService wired)."""
+
+    @property
+    def candle_single_source(self) -> bool:
+        """Raise like a bootstrap-only AppSettings reading a DB setting."""
+        raise RuntimeError("no settings service")
+
+
+def _request_with_settings(settings: Any) -> Any:
+    """Build a minimal request whose app.state carries (or omits) settings."""
+    state = SimpleNamespace() if settings is None else SimpleNamespace(settings=settings)
+    return SimpleNamespace(app=SimpleNamespace(state=state))
+
+
+class TestResolveCandleSingleSource:
+    """``_resolve_candle_single_source`` reads the DB-aware flag, falling back to OFF."""
+
+    def test_missing_settings_falls_back_to_off(self) -> None:
+        """Return False when app.state has no settings (lifespan bypassed).
+
+        Given: a request whose app.state carries no settings,
+        When: the flag is resolved,
+        Then: it falls back to False (OFF) rather than raising.
+        """
+        assert _resolve_candle_single_source(_request_with_settings(None)) is False
+
+    def test_reads_configured_flag(self) -> None:
+        """Return the DB-aware settings value when present.
+
+        Given: app.state.settings exposing candle_single_source=True,
+        When: the flag is resolved,
+        Then: True is returned.
+        """
+        settings = SimpleNamespace(candle_single_source=True)
+        assert _resolve_candle_single_source(_request_with_settings(settings)) is True
+
+    def test_runtime_error_falls_back_to_off(self) -> None:
+        """Return False when the flag lookup raises (service-less settings).
+
+        Given: settings whose candle_single_source raises RuntimeError,
+        When: the flag is resolved,
+        Then: it falls back to False rather than 500ing the candle route.
+        """
+        assert _resolve_candle_single_source(_request_with_settings(_RaisingSettings())) is False
