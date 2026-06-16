@@ -683,6 +683,56 @@ snapper polygon-load-grouped-candles --exchange kraken --cut-date 2026-06-16 -s 
 make run-polygon-grouped-candles EXCHANGE=kraken CUT_DATE=2026-06-16
 ```
 
+### `verify-candle-coverage`
+
+Read-only gate that verifies the persisted `candles` plane is ready to be the
+single source for `>1m` reads before the read-path cutover. For each
+`(symbol, timeframe)` under `--exchange` it RANGE-reads an explicit canonical
+window and checks the FULL expected slot grid (not just the newest rows) is
+fresh, gap-free, complete and correctly-tagged — `1d` is `native` strictly
+before `--cut-date` and `synthesized` at/after, every other higher timeframe is
+`synthesized`. Exits `1` (and prints the failing `(symbol, timeframe)` reasons)
+when any pair is incomplete, so it can gate the cutover and the DB-first warmup;
+exits `0` when every pair passes.
+
+It reads under the live venue — the same `--exchange` the read path and warmup
+resolve; passing `-e polygon` is rejected (that plane is orphaned). For `1d` the
+window is extended back across the `--cut-date` seam, so the §4e invariant is
+enforced directly: a `[cut_date, publisher_start)` gap (synthesis not yet
+persisting from the cut) surfaces as a missing-bar failure rather than silently
+staling the warmup. `--min-bars` is the window DEPTH verified — set it to the
+consumer's required lookback (e.g. the warmup depth) to verify that far back.
+
+The `derive_snaps` OHLCV-parity rung (the "no derive regression" check) needs a
+genuinely live, SUB-socket-warm cache as an independent witness, so the
+standalone CLI runs **structural checks only**; parity is deferred to an
+in-process slice-4 cutover check.
+
+```bash
+snapper verify-candle-coverage --exchange VENUE --cut-date YYYY-MM-DD [OPTIONS]
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `-e, --exchange` | string | *required* | Live venue the persisted bars + read path resolve under |
+| `--cut-date` | string | *required* | Synthesis ownership boundary (`YYYY-MM-DD`); decides `1d` provenance |
+| `-s, --symbol` | string[] | from settings | Native symbols to verify |
+| `-t, --timeframe` | string[] | `5m 15m 30m 1h 4h 1d` | Timeframes to verify |
+| `--min-bars` | int | `30` | Window depth (canonical slots) verified per pair |
+| `--writer-lag-seconds` | int | `120` | Grace seconds for the writer to flush the just-closed bar |
+
+**Examples:**
+
+```bash
+# Gate the FET/RENDER plane before the single-source cutover
+snapper verify-candle-coverage --exchange kraken --cut-date 2026-06-16 -s FET-USD -s RENDER-USD
+
+# Verify only the daily plane
+snapper verify-candle-coverage -e kraken --cut-date 2026-06-16 -s FET-USD -t 1d
+```
+
 ### `kraken-futures-backfill-candles`
 
 Backfills historical OHLCV candles for Kraken Futures perpetuals.

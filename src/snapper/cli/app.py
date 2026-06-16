@@ -80,6 +80,8 @@ from snapper.application.notify.push_beta import parse_push_beta_config
 from snapper.application.notify.sidecar import NotifySidecar
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
+from snapper.application.services.candle_coverage import VERIFIABLE_TIMEFRAMES
+from snapper.application.services.candle_coverage import verify_candle_coverage
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.settings import get_settings_service
 from snapper.application.updaters.historical.aggregates import PolygonAggregatesBackfillService
@@ -1392,6 +1394,97 @@ def polygon_load_grouped_candles(
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_grouped_candle_load())
+
+
+@app.command(name="verify-candle-coverage")
+def verify_candle_coverage_cmd(
+    exchange: str = typer.Option(
+        ...,
+        "--exchange",
+        "-e",
+        help="Live venue the persisted bars + read path resolve under (e.g. kraken)",
+    ),
+    cut_date: str = typer.Option(
+        ..., "--cut-date", help="Synthesis ownership boundary (YYYY-MM-DD); decides 1d provenance"
+    ),
+    symbols: Annotated[
+        list[str] | None,
+        typer.Option("--symbol", "-s", help="Native symbols to verify (default: from settings)"),
+    ] = None,
+    timeframes: Annotated[
+        list[str] | None,
+        typer.Option("--timeframe", "-t", help="Timeframes to verify (default: 5m..1d)"),
+    ] = None,
+    min_bars: int = typer.Option(30, "--min-bars", help="Minimum persisted rows required per pair"),
+    writer_lag_seconds: int = typer.Option(
+        120,
+        "--writer-lag-seconds",
+        help="Grace seconds for the writer to flush the just-closed bar",
+    ),
+) -> None:
+    """Verify the persisted candle plane is ready for the single-source cutover.
+
+    Read-only, structural only. For each ``(symbol, timeframe)`` under
+    ``--exchange`` it checks the persisted plane has a fresh, gap-free, complete,
+    correctly-tagged canonical window (``1d`` native before ``--cut-date``,
+    synthesized at/after, with the seam verified contiguous). Exits 1 when any
+    pair is incomplete, so it can gate the slice-4 read cutover. The
+    ``derive_snaps`` OHLCV-parity rung needs a genuinely live (SUB-warm) cache as
+    an independent witness, so it is NOT run here (deferred to an in-process
+    slice-4 cutover check); the standalone CLI is structural-only.
+
+    Args:
+        exchange: Live venue the persisted bars + read path resolve under (never
+            ``polygon``).
+        cut_date: Synthesis ownership boundary (YYYY-MM-DD).
+        symbols: Native symbols to verify (default: settings Polygon instruments).
+        timeframes: Timeframes to verify (default: 5m/15m/30m/1h/4h/1d).
+        min_bars: Minimum window depth (slots) verified per pair.
+        writer_lag_seconds: Grace seconds for the writer to flush the just-closed bar.
+    """
+    venue = ExchangeEnum(exchange)
+    if venue == ExchangeEnum.POLYGON:
+        typer.echo(
+            "polygon is the CSV cache segment, not a read venue; verify under the live venue"
+        )
+        raise typer.Exit(code=1)
+    cut_day = date_type.fromisoformat(cut_date)
+    tfs = timeframes if timeframes else list(VERIFIABLE_TIMEFRAMES)
+
+    async def run_verify() -> None:
+        settings = get_settings()
+        syms = symbols if symbols else list(settings.instruments.get(ExchangeEnum.POLYGON, []))
+        if not syms or syms == ["*"]:
+            typer.echo("No explicit symbols to verify; pass --symbol")
+            raise typer.Exit(code=1)
+        repo = get_repository(settings.db_url)
+        try:
+            report = await verify_candle_coverage(
+                repo=repo,
+                cache=None,
+                exchange=venue,
+                native_symbols=syms,
+                timeframes=tfs,
+                cut_date=cut_day,
+                as_of=datetime.now(UTC),
+                writer_lag_s=writer_lag_seconds,
+                min_bars=min_bars,
+            )
+        finally:
+            engine = getattr(repo, "engine", None)
+            if engine is not None:
+                await engine.dispose()
+        for entry in report.entries:
+            status = "PASS" if entry.ok else "FAIL"
+            typer.echo(
+                f"[{status}] {entry.symbol} {entry.timeframe} ({entry.bars} bars): {entry.reason}"
+            )
+        if not report.ok:
+            typer.echo("Candle coverage INCOMPLETE — not ready for single-source cutover")
+            raise typer.Exit(code=1)
+        typer.echo("Candle coverage OK")
+
+    asyncio.run(run_verify())
 
 
 @app.command(name="kraken-futures-backfill-candles")
