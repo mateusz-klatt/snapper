@@ -1327,6 +1327,13 @@ def polygon_load_csv(
 
 @app.command(name="polygon-load-grouped-candles")
 def polygon_load_grouped_candles(
+    exchange: str = typer.Option(
+        ...,
+        "--exchange",
+        "-e",
+        help="Venue the persisted 1d bars live under (the leg's live-read/warmup "
+        "venue, e.g. kraken) — NOT polygon",
+    ),
     cut_date: str = typer.Option(
         ...,
         "--cut-date",
@@ -1345,22 +1352,27 @@ def polygon_load_grouped_candles(
     """Load cached Polygon grouped-daily rows as 1d native candles (cache-only).
 
     Reads the on-disk grouped-daily cache and upserts each leg's days strictly
-    before ``--cut-date`` as ``source='native', complete=True`` 1d candles, so
-    the persisted plane holds the daily history the single-source read cutover
-    and DB-first warmup depend on. Never contacts the Polygon API. The cut date
-    keeps native backfill and synthesized live bars on disjoint day ranges.
+    before ``--cut-date`` as ``source='native', complete=True`` 1d candles under
+    the ``--exchange`` venue, so the persisted plane holds the daily history the
+    single-source read cutover and DB-first warmup (which resolve that same
+    venue) depend on. Never contacts the Polygon API. The cut date keeps native
+    backfill and synthesized live bars on disjoint day ranges.
 
     Args:
+        exchange: Venue the persisted bars live under (e.g. ``kraken``); the
+            leg's live-read/warmup venue, never ``polygon``.
         cut_date: First UTC day synthesized live persistence may own (YYYY-MM-DD).
         symbols: Native symbols to load (default: settings Polygon instruments).
         all_mapped: Load every Polygon-mapped native symbol.
         lookback_days: Calendar-day cap on the backward cache walk per symbol.
     """
     cut_day = date_type.fromisoformat(cut_date)
+    venue = ExchangeEnum(exchange)
 
     async def run_grouped_candle_load() -> None:
         service = PolygonGroupedCandleLoaderService(
             symbols=symbols,
+            exchange=venue,
             cut_date=cut_day,
             all_mapped=all_mapped,
             lookback_days=lookback_days,
@@ -1371,7 +1383,7 @@ def polygon_load_grouped_candles(
             )
             typer.echo(
                 f"Starting Polygon grouped-daily candle load "
-                f"(cut_date={cut_day.isoformat()}, {symbol_source})..."
+                f"(exchange={venue.value}, cut_date={cut_day.isoformat()}, {symbol_source})..."
             )
             await service.start()
             typer.echo("Polygon grouped-daily candle load complete!")

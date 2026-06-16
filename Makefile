@@ -52,7 +52,7 @@ help:
 	$(info run-polygon-load           Load cached Polygon CSVs into the DB [cache-only, no API])
 	$(info run-polygon                 Download then load Polygon OHLCV [run-polygon-aggregates + run-polygon-load])
 	$(info run-polygon-grouped        Download Polygon grouped daily to CSV [CLI])
-	$(info run-polygon-grouped-candles Load grouped-daily cache as 1d native candles [needs CUT_DATE=YYYY-MM-DD])
+	$(info run-polygon-grouped-candles Load grouped-daily cache as 1d native candles [needs EXCHANGE=venue CUT_DATE=YYYY-MM-DD])
 	$(info backfill-kraken-equities-candles Backfill Kraken Equities candles from configured instruments)
 	$(info migrate-dev                Run migrations + seed dev data)
 	$(info migrate-prod               Run migrations + seed prod data)
@@ -405,7 +405,7 @@ run-polygon-grouped:
 	$(PYRUN) snapper polygon-backfill-grouped -m fx -d 729
 
 run-polygon-grouped-candles:
-	$(PYRUN) snapper polygon-load-grouped-candles --cut-date $(CUT_DATE)
+	$(PYRUN) snapper polygon-load-grouped-candles --exchange $(EXCHANGE) --cut-date $(CUT_DATE)
 
 backfill-kraken-equities-candles:
 	$(PYRUN) snapper kraken-equities-backfill-candles -t 1h -d 30

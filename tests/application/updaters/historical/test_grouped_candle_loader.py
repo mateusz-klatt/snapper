@@ -62,18 +62,21 @@ class _StubAsyncRepo:
         self.upsert_batches: list[int] = []
         self.upserted_rows: list[dict[str, Any]] = []
         self.ensure_calls: list[str] = []
+        self.ensure_exchanges: list[Any] = []
+        self.get_candles_exchanges: list[Any] = []
         self._existing = existing_candles or []
         self.engine = _StubEngine()
 
     async def ensure_instrument(
         self,
         symbol_public_id: str,
-        exchange: str,
+        exchange: Any,
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
     ) -> tuple[int, str]:
         self.ensure_calls.append(symbol_public_id)
+        self.ensure_exchanges.append(exchange)
         return (1, f"inst-{symbol_public_id}")
 
     async def get_candles(
@@ -82,11 +85,12 @@ class _StubAsyncRepo:
         timeframe: str,
         start: datetime | None,
         end: datetime | None,
-        exchange: str,
+        exchange: Any,
         as_of: datetime,
         limit: int | None = None,
         order: str = "asc",
     ) -> list[dict[str, Any]]:
+        self.get_candles_exchanges.append(exchange)
         return list(self._existing)
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
@@ -109,6 +113,7 @@ def _build_service(
     monkeypatch: pytest.MonkeyPatch,
     *,
     symbols: list[str] | None,
+    exchange: ExchangeEnum | None = ExchangeEnum.KRAKEN,
     cut_date: date | None = date(2026, 6, 16),
     all_mapped: bool = False,
     lookback_days: int = 800,
@@ -118,6 +123,7 @@ def _build_service(
     Args:
         monkeypatch: Pytest monkeypatch fixture.
         symbols: Requested native symbols (None defers to settings).
+        exchange: Venue the persisted bars live under (None to test fail-fast).
         cut_date: Synthesis ownership boundary.
         all_mapped: Whether to load every Polygon-mapped native symbol.
         lookback_days: Backward cache-walk cap.
@@ -133,6 +139,7 @@ def _build_service(
     )
     return PolygonGroupedCandleLoaderService(
         symbols=symbols,
+        exchange=exchange,
         cut_date=cut_date,
         all_mapped=all_mapped,
         lookback_days=lookback_days,
@@ -195,6 +202,7 @@ def test_get_default_parameters_uses_settings_instruments() -> None:
     settings = cast(Any, type("S", (), {"instruments": {ExchangeEnum.POLYGON: ["FET-USD"]}})())
     params = PolygonGroupedCandleLoaderService.get_default_parameters(settings)
     assert params["symbols"] == ["FET-USD"]
+    assert params["exchange"] is None
     assert params["cut_date"] is None
     assert params["all_mapped"] is False
     assert params["lookback_days"] == 800
@@ -211,6 +219,19 @@ def test_native_to_grouped_ticker_valid_and_invalid() -> None:
     assert PolygonGroupedCandleLoaderService._native_to_grouped_ticker("NODASH") is None
     assert PolygonGroupedCandleLoaderService._native_to_grouped_ticker("A-B-C") is None
     assert PolygonGroupedCandleLoaderService._native_to_grouped_ticker("-USD") is None
+
+
+@pytest.mark.asyncio
+async def test_start_requires_exchange(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail fast when no exchange was provided.
+
+    Given: A service constructed with exchange=None,
+    When: start() runs,
+    Then: A ValueError is raised before any repository is touched.
+    """
+    service = _build_service(monkeypatch, symbols=["FET-USD"], exchange=None)
+    with pytest.raises(ValueError, match="exchange is required"):
+        await service.start()
 
 
 @pytest.mark.asyncio
@@ -415,6 +436,28 @@ async def test_load_symbol_skips_non_pair(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_load_symbol_writes_and_preflights_under_configured_exchange(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve the instrument and preflight under the configured venue, not Polygon.
+
+    Given: a loader configured with exchange=KRAKEN,
+    When: _load_symbol runs,
+    Then: ensure_instrument (write identity) AND the ownership-preflight
+        get_candles read both use KRAKEN — never ExchangeEnum.POLYGON — so the
+        persisted plane is the one the live read/warmup resolves.
+    """
+    async_repo = _StubAsyncRepo()
+    monkeypatch.setattr(grouped_module, "load_recent_grouped_daily", lambda *a, **k: [])
+    service = _build_service(monkeypatch, symbols=["FET-USD"], exchange=ExchangeEnum.KRAKEN)
+    service._db_async = cast(Any, async_repo)
+    await service._load_symbol("FET-USD", "pid-fet")
+    assert async_repo.ensure_exchanges == [ExchangeEnum.KRAKEN]
+    assert async_repo.get_candles_exchanges == [ExchangeEnum.KRAKEN]
+    assert ExchangeEnum.POLYGON not in async_repo.ensure_exchanges
+
+
+@pytest.mark.asyncio
 async def test_load_symbol_no_cached_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     """Log and return when the cache holds no pre-cut rows.
 
@@ -569,12 +612,14 @@ class _CliDummyService:
     def __init__(
         self,
         symbols: list[str] | None,
+        exchange: ExchangeEnum,
         cut_date: date,
         all_mapped: bool,
         lookback_days: int,
     ) -> None:
         _CliDummyService.last_kwargs = {
             "symbols": symbols,
+            "exchange": exchange,
             "cut_date": cut_date,
             "all_mapped": all_mapped,
             "lookback_days": lookback_days,
@@ -595,8 +640,8 @@ def test_cli_grouped_candles_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run the polygon-load-grouped-candles command happy path.
 
     Given: A stub loader service,
-    When: the command is invoked with --cut-date and a symbol,
-    Then: It exits 0 and forwards the parsed cut date.
+    When: the command is invoked with --exchange, --cut-date and a symbol,
+    Then: It exits 0 and forwards the parsed venue + cut date.
     """
     monkeypatch.setattr(app_module, "PolygonGroupedCandleLoaderService", _CliDummyService)
     runner = CliRunner()
@@ -604,6 +649,8 @@ def test_cli_grouped_candles_success(monkeypatch: pytest.MonkeyPatch) -> None:
         app,
         [
             "polygon-load-grouped-candles",
+            "--exchange",
+            "kraken",
             "--cut-date",
             "2026-06-16",
             "--symbol",
@@ -613,20 +660,36 @@ def test_cli_grouped_candles_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0
     assert "Polygon grouped-daily candle load complete!" in result.stdout
     assert _CliDummyService.last_kwargs["symbols"] == ["FET-USD"]
+    assert _CliDummyService.last_kwargs["exchange"] == ExchangeEnum.KRAKEN
     assert _CliDummyService.last_kwargs["cut_date"] == date(2026, 6, 16)
     assert _CliDummyService.last_kwargs["all_mapped"] is False
+
+
+def test_cli_grouped_candles_requires_exchange(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject invocation without the required --exchange.
+
+    Given: The command,
+    When: it is invoked with --cut-date but no --exchange,
+    Then: It exits non-zero (missing required option).
+    """
+    monkeypatch.setattr(app_module, "PolygonGroupedCandleLoaderService", _CliDummyService)
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["polygon-load-grouped-candles", "--cut-date", "2026-06-16", "--all"]
+    )
+    assert result.exit_code != 0
 
 
 def test_cli_grouped_candles_requires_cut_date(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reject invocation without the required --cut-date.
 
     Given: The command,
-    When: it is invoked without --cut-date,
+    When: it is invoked with --exchange but no --cut-date,
     Then: It exits non-zero (missing required option).
     """
     monkeypatch.setattr(app_module, "PolygonGroupedCandleLoaderService", _CliDummyService)
     runner = CliRunner()
-    result = runner.invoke(app, ["polygon-load-grouped-candles", "--all"])
+    result = runner.invoke(app, ["polygon-load-grouped-candles", "--exchange", "kraken", "--all"])
     assert result.exit_code != 0
 
 
@@ -640,7 +703,15 @@ def test_cli_grouped_candles_reports_error(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(app_module, "PolygonGroupedCandleLoaderService", _CliFailingService)
     runner = CliRunner()
     result = runner.invoke(
-        app, ["polygon-load-grouped-candles", "--cut-date", "2026-06-16", "--all"]
+        app,
+        [
+            "polygon-load-grouped-candles",
+            "--exchange",
+            "kraken",
+            "--cut-date",
+            "2026-06-16",
+            "--all",
+        ],
     )
     assert result.exit_code == 1
     assert "Error during Polygon grouped-daily candle load" in result.stdout

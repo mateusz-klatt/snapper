@@ -1,22 +1,37 @@
 """Polygon grouped-daily cache loader: persist 1d native candles.
 
 Candle Phase 3 slice 3a (``proprietary/plans/plan_2026_06_16_candle_phase3_persistence.md``
-§3.8/§4d). Loads the on-disk Polygon GROUPED-daily cache — the identical corpus
-the A3 strategy warmup reads (``load_recent_grouped_daily``) — and upserts each
-configured leg's days as ``1d, source='native', complete=True`` candles, so the
-persisted plane holds the historical daily history the single-source read cutover
-(slice 4) and the DB-first warmup (slice 5) depend on. Cache-only: it NEVER calls
-the Polygon API.
+§3.8/§4d/§4e). Loads the on-disk Polygon GROUPED-daily cache — the identical
+corpus the A3 strategy warmup reads (``load_recent_grouped_daily``) — and upserts
+each configured leg's days as ``1d, source='native', complete=True`` candles, so
+the persisted plane holds the historical daily history the single-source read
+cutover (slice 4) and the DB-first warmup (slice 5) depend on. Cache-only: it
+NEVER calls the Polygon API.
+
+Persisted under the live VENUE, not Polygon (§4e exchange-model audit). The
+``exchange`` is a REQUIRED parameter naming the venue identity the persisted bars
+must live under — the SAME exchange the leg's live read / DB-first warmup
+resolves (e.g. ``kraken`` for FET/RENDER). Instrument identity is per
+``(symbol, exchange)``, and live synthesized higher-TF bars persist under the
+live publisher's ``_get_exchange_name()`` venue; a Polygon-keyed backfill would
+be an ORPHANED plane no live read or warmup ever resolves. ``polygon`` here is
+ONLY the CSV cache market segment that supplies the OHLCV — never the persisted
+instrument identity (no Polygon streaming publisher exists).
 
 Writer-ownership guard (slice-2 review finding F1): because the candle unique key
-``(instrument_public_id, timeframe, open_at)`` excludes ``source``, a
+``(instrument_public_id, timeframe, open_at)`` excludes ``source``, once native
+backfill and live synthesis share one ``(symbol, exchange)`` instrument a
 native-backfilled ``1d`` row and a synthesized-live ``1d`` row sharing one
-``open_at`` would SCD2 version-thrash (the no-op matcher compares ``source``).
-This loader confines the backfill to historical days strictly BEFORE an explicit
-``cut_date`` (the first UTC day synthesized live persistence may own) and runs an
-ownership PREFLIGHT that fails closed if the persisted plane already violates the
-disjoint-range invariant — so the native and synthesized ``1d`` ranges are
-provably non-overlapping rather than merely intended to be.
+``open_at`` would SCD2 version-thrash (the no-op matcher compares ``source``;
+1d boundaries align to 00:00 UTC on both writers). This loader confines the
+backfill to historical days strictly BEFORE an explicit ``cut_date`` (the first
+UTC day synthesized live persistence may own) and runs an ownership PREFLIGHT
+(reading back UNDER THE SAME venue it writes) that fails closed if the persisted
+plane already violates the disjoint-range invariant — so the native and
+synthesized ``1d`` ranges are provably non-overlapping. (Note: the per-symbol
+day-aggregate ``polygon-load-csv`` path also writes ``1d source='native'`` under
+its own venue; keep its target disjoint from this one to avoid a native-vs-native
+same-key overlap.)
 
 The grouped crypto cache is keyed by the ``X:{BASE}{QUOTE}`` Polygon ticker (the
 convention the warmup uses), which is distinct from ``native_to_polygon_rest``'s
@@ -107,12 +122,13 @@ class PolygonGroupedCandleLoaderService(RegisterableProcess):
             settings: Application settings.
 
         Returns:
-            Default parameters for the constructor. ``cut_date`` defaults to
-            None so a registry-spawned instance fails fast rather than guessing
-            a boundary; the CLI requires an explicit value.
+            Default parameters for the constructor. ``exchange`` and ``cut_date``
+            default to None so a registry-spawned instance fails fast rather than
+            guessing a venue/boundary; the CLI requires explicit values.
         """
         return {
             "symbols": settings.instruments.get(ExchangeEnum.POLYGON, []),
+            "exchange": None,
             "cut_date": None,
             "all_mapped": False,
             "lookback_days": 800,
@@ -121,6 +137,7 @@ class PolygonGroupedCandleLoaderService(RegisterableProcess):
     def __init__(
         self,
         symbols: Sequence[str] | None = None,
+        exchange: ExchangeEnum | None = None,
         cut_date: date | None = None,
         all_mapped: bool = False,
         lookback_days: int = 800,
@@ -129,6 +146,9 @@ class PolygonGroupedCandleLoaderService(RegisterableProcess):
 
         Args:
             symbols: Native symbols to load (defaults to settings Polygon list).
+            exchange: Venue identity the persisted ``1d`` bars live under (the
+                leg's live-read / warmup venue, e.g. ``kraken``). None makes
+                :meth:`start` fail fast. Never ``polygon`` (cache corpus only).
             cut_date: First UTC day synthesized live persistence may own; the
                 backfill writes only days strictly before it. None makes
                 :meth:`start` fail fast.
@@ -136,6 +156,7 @@ class PolygonGroupedCandleLoaderService(RegisterableProcess):
             lookback_days: Calendar-day cap on the backward cache walk per symbol.
         """
         self._requested_symbols = list(symbols) if symbols is not None else None
+        self._exchange = exchange
         self._cut_date = cut_date
         self._all_mapped = all_mapped
         self._lookback_days = lookback_days
@@ -153,11 +174,14 @@ class PolygonGroupedCandleLoaderService(RegisterableProcess):
         preflight, and upserts each leg's pre-cut daily history.
 
         Raises:
-            ValueError: When ``cut_date`` was not provided (no guessed default).
+            ValueError: When ``exchange`` or ``cut_date`` was not provided (no
+                guessed default).
             OwnershipViolationError: When the persisted plane already violates
                 the native/synthesized ``1d`` split for a target instrument.
         """
         set_log_context("ld:poly_grouped")
+        if self._exchange is None:
+            raise ValueError("exchange is required for the grouped-daily candle backfill")
         if self._cut_date is None:
             raise ValueError("cut_date is required for the grouped-daily candle backfill")
         try:
@@ -325,13 +349,14 @@ class PolygonGroupedCandleLoaderService(RegisterableProcess):
                 synthesis territory).
         """
         assert self._db_async is not None
+        assert self._exchange is not None
         cut_dt = self._cut_datetime()
         existing = await self._db_async.get_candles(
             native_symbol,
             _TIMEFRAME_1D,
             None,
             None,
-            ExchangeEnum.POLYGON,
+            self._exchange,
             datetime.now(UTC),
             order="asc",
         )
@@ -406,9 +431,10 @@ class PolygonGroupedCandleLoaderService(RegisterableProcess):
             The instrument_public_id string.
         """
         assert self._db_async is not None
+        assert self._exchange is not None
         _id, instrument_public_id = await self._db_async.ensure_instrument(
             symbol_public_id=symbol_public_id,
-            exchange=ExchangeEnum.POLYGON,
+            exchange=self._exchange,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
             timestamp=datetime.now(UTC),

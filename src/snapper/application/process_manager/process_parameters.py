@@ -125,17 +125,25 @@ class GroupedCandleLoadParameters(StrictBody):
 
     Attributes:
         symbols: Native symbols to load (empty uses settings default).
+        exchange: The venue identity the persisted ``1d`` history must live
+            under — the SAME exchange the leg's live read / warmup resolves
+            (e.g. ``kraken`` for FET/RENDER), so warmup (DB-first) and the live
+            read cutover see one coherent 1d plane. NOT ``polygon`` (that is only
+            the CSV cache corpus, never a streamed/read venue). ``None`` makes
+            the service fail fast; the CLI requires it explicitly.
         cut_date: First UTC day synthesized live persistence may own. The
-            backfill writes ONLY ``1d`` days strictly before it, so native
-            backfilled history and synthesized live bars never share an
-            ``open_at`` (the candle unique key excludes ``source``). No guessed
-            default — ``None`` makes the service fail fast rather than silently
-            backfill into synthesized-owned days; the CLI requires it explicitly.
+            backfill writes ONLY ``1d`` days strictly before it, so under the
+            unified ``exchange`` plane native backfilled history and synthesized
+            live bars never share an ``open_at`` (the candle unique key excludes
+            ``source``). No guessed default — ``None`` makes the service fail
+            fast rather than silently backfill into synthesized-owned days; the
+            CLI requires it explicitly.
         all_mapped: If True, load every Polygon-mapped native symbol.
         lookback_days: Calendar-day cap on the backward cache walk per symbol.
     """
 
     symbols: list[str] = []
+    exchange: ExchangeEnum | None = None
     cut_date: date | None = None
     all_mapped: bool = False
     lookback_days: int = 800

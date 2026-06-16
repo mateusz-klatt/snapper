@@ -638,26 +638,36 @@ warmup reads — and upserts each leg's days into the `candles` table so the
 persisted plane holds the daily history the single-source candle read path
 and the DB-first warmup depend on. It never contacts the Polygon API.
 
+`--exchange` is **required**: it is the venue the persisted `1d` bars live
+under, which **must** be the same venue the leg's live read and warmup
+resolve (e.g. `kraken` for FET/RENDER) — *not* `polygon`. Instrument
+identity is per `(symbol, exchange)`; live synthesized higher-TF bars
+persist under the live publisher's venue, so a Polygon-keyed backfill would
+be an orphaned plane that no live read or warmup ever sees. `polygon` here
+is only the CSV cache segment that supplies the OHLCV.
+
 `--cut-date` is **required**: it is the first UTC day that synthesized live
 persistence may own. The backfill writes only days strictly *before* it, so
-native backfilled history and synthesized live bars never share a bar key
-(the candle unique key excludes `source`). Before writing, an ownership
-preflight fails closed if the persisted plane already holds a synthesized
-`1d` row before the cut date or a native `1d` row at/after it, so the
-operator resolves any overlap rather than silently version-thrashing.
+under one venue native backfilled history and synthesized live bars never
+share a bar key (the candle unique key excludes `source`). Before writing,
+an ownership preflight — reading back under the same venue — fails closed if
+the persisted plane already holds a synthesized `1d` row before the cut date
+or a native `1d` row at/after it, so the operator resolves any overlap
+rather than silently version-thrashing.
 
 When neither `--symbol` nor `--all` is given, the symbols default to the
 settings-configured Polygon instruments; the wildcard sentinel `["*"]` is
 treated like `--all` and enumerates every Polygon-mapped native symbol.
 
 ```bash
-snapper polygon-load-grouped-candles --cut-date YYYY-MM-DD [OPTIONS]
+snapper polygon-load-grouped-candles --exchange VENUE --cut-date YYYY-MM-DD [OPTIONS]
 ```
 
 **Options:**
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
+| `-e, --exchange` | string | *required* | Venue the persisted bars live under (e.g. `kraken`); the leg's live-read/warmup venue, never `polygon` |
 | `--cut-date` | string | *required* | First UTC day synthesis may own (`YYYY-MM-DD`); writes only days before it |
 | `-s, --symbol` | string[] | from settings | Native symbols to load |
 | `--all` | bool | `false` | Load every Polygon-mapped native symbol |
@@ -666,11 +676,11 @@ snapper polygon-load-grouped-candles --cut-date YYYY-MM-DD [OPTIONS]
 **Examples:**
 
 ```bash
-# Load FET/RENDER daily history before the synthesis cutover boundary
-snapper polygon-load-grouped-candles --cut-date 2026-06-16 -s FET-USD -s RENDER-USD
+# Load FET/RENDER daily history (under the kraken venue) before the cutover boundary
+snapper polygon-load-grouped-candles --exchange kraken --cut-date 2026-06-16 -s FET-USD -s RENDER-USD
 
-# Or via Make (CUT_DATE is required; unset fails fast)
-make run-polygon-grouped-candles CUT_DATE=2026-06-16
+# Or via Make (EXCHANGE and CUT_DATE are required; unset fails fast)
+make run-polygon-grouped-candles EXCHANGE=kraken CUT_DATE=2026-06-16
 ```
 
 ### `kraken-futures-backfill-candles`
