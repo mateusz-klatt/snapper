@@ -266,7 +266,12 @@ else
   WITH_TEST_DB := DB_URL="$(TEST_DB_URL)"
 endif
 
-$(TEST_DB_FILE):
+# Depend on the migration set so a cached dev.db is rebuilt whenever a migration
+# is added or changed; without this the file target is reused stale and newly
+# added columns are missing (db-init runs `alembic upgrade head` incrementally;
+# db-seed is idempotent, so re-running the recipe in place is safe and needs no
+# delete, keeping it cross-platform under both cmd and sh).
+$(TEST_DB_FILE): $(wildcard src/snapper/data/migrations/versions/*.py)
 	@echo "Bootstrapping local SQLite test fixture at $(TEST_DB_FILE)..."
 	$(WITH_TEST_DB) $(PYRUN) snapper db-init
 	$(WITH_TEST_DB) $(PYRUN) snapper db-seed --profile dev
