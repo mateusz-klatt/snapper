@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose move-imports run-server run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose move-imports run-server run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -52,6 +52,7 @@ help:
 	$(info run-polygon-load           Load cached Polygon CSVs into the DB [cache-only, no API])
 	$(info run-polygon                 Download then load Polygon OHLCV [run-polygon-aggregates + run-polygon-load])
 	$(info run-polygon-grouped        Download Polygon grouped daily to CSV [CLI])
+	$(info run-polygon-grouped-candles Load grouped-daily cache as 1d native candles [needs CUT_DATE=YYYY-MM-DD])
 	$(info backfill-kraken-equities-candles Backfill Kraken Equities candles from configured instruments)
 	$(info migrate-dev                Run migrations + seed dev data)
 	$(info migrate-prod               Run migrations + seed prod data)
@@ -402,6 +403,9 @@ run-polygon-grouped:
 	$(PYRUN) snapper polygon-backfill-grouped -m crypto -d 729
 	$(PYRUN) snapper polygon-backfill-grouped -m stocks -l us -d 729
 	$(PYRUN) snapper polygon-backfill-grouped -m fx -d 729
+
+run-polygon-grouped-candles:
+	$(PYRUN) snapper polygon-load-grouped-candles --cut-date $(CUT_DATE)
 
 backfill-kraken-equities-candles:
 	$(PYRUN) snapper kraken-equities-backfill-candles -t 1h -d 30

@@ -628,6 +628,51 @@ snapper polygon-load-csv --all --timespan minute
 snapper polygon-load-csv -s X:BTCUSD --since 2024-01-01 --until 2024-01-31
 ```
 
+### `polygon-load-grouped-candles`
+
+Loads the on-disk Polygon **grouped-daily** cache into the database as
+`1d` candles tagged `source='native', complete=True`. This is the
+cache-only counterpart to `polygon-backfill-grouped` (which only writes
+CSV): it reads the grouped-daily cache — the same corpus the strategy
+warmup reads — and upserts each leg's days into the `candles` table so the
+persisted plane holds the daily history the single-source candle read path
+and the DB-first warmup depend on. It never contacts the Polygon API.
+
+`--cut-date` is **required**: it is the first UTC day that synthesized live
+persistence may own. The backfill writes only days strictly *before* it, so
+native backfilled history and synthesized live bars never share a bar key
+(the candle unique key excludes `source`). Before writing, an ownership
+preflight fails closed if the persisted plane already holds a synthesized
+`1d` row before the cut date or a native `1d` row at/after it, so the
+operator resolves any overlap rather than silently version-thrashing.
+
+When neither `--symbol` nor `--all` is given, the symbols default to the
+settings-configured Polygon instruments; the wildcard sentinel `["*"]` is
+treated like `--all` and enumerates every Polygon-mapped native symbol.
+
+```bash
+snapper polygon-load-grouped-candles --cut-date YYYY-MM-DD [OPTIONS]
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `--cut-date` | string | *required* | First UTC day synthesis may own (`YYYY-MM-DD`); writes only days before it |
+| `-s, --symbol` | string[] | from settings | Native symbols to load |
+| `--all` | bool | `false` | Load every Polygon-mapped native symbol |
+| `--lookback-days` | int | `800` | Calendar-day cap on the backward cache walk per symbol |
+
+**Examples:**
+
+```bash
+# Load FET/RENDER daily history before the synthesis cutover boundary
+snapper polygon-load-grouped-candles --cut-date 2026-06-16 -s FET-USD -s RENDER-USD
+
+# Or via Make (CUT_DATE is required; unset fails fast)
+make run-polygon-grouped-candles CUT_DATE=2026-06-16
+```
+
 ### `kraken-futures-backfill-candles`
 
 Backfills historical OHLCV candles for Kraken Futures perpetuals.

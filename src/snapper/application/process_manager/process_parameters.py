@@ -120,6 +120,27 @@ class CsvLoadParameters(StrictBody):
     until: date | None = None
 
 
+class GroupedCandleLoadParameters(StrictBody):
+    """Parameters for PolygonGroupedCandleLoaderService.
+
+    Attributes:
+        symbols: Native symbols to load (empty uses settings default).
+        cut_date: First UTC day synthesized live persistence may own. The
+            backfill writes ONLY ``1d`` days strictly before it, so native
+            backfilled history and synthesized live bars never share an
+            ``open_at`` (the candle unique key excludes ``source``). No guessed
+            default — ``None`` makes the service fail fast rather than silently
+            backfill into synthesized-owned days; the CLI requires it explicitly.
+        all_mapped: If True, load every Polygon-mapped native symbol.
+        lookback_days: Calendar-day cap on the backward cache walk per symbol.
+    """
+
+    symbols: list[str] = []
+    cut_date: date | None = None
+    all_mapped: bool = False
+    lookback_days: int = 800
+
+
 class KrakenFuturesBackfillParameters(StrictBody):
     """Parameters for KrakenFuturesAggregatesBackfillService.
 

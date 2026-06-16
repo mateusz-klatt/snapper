@@ -85,6 +85,9 @@ from snapper.application.services.settings import get_settings_service
 from snapper.application.updaters.historical.aggregates import PolygonAggregatesBackfillService
 from snapper.application.updaters.historical.csv_loader import PolygonCsvLoaderService
 from snapper.application.updaters.historical.grouped import PolygonGroupedDailyBackfillService
+from snapper.application.updaters.historical.grouped_candle_loader import (
+    PolygonGroupedCandleLoaderService,
+)
 from snapper.application.updaters.historical.kraken_equities_aggregates import (
     KrakenEquitiesAggregatesBackfillService,
 )
@@ -1320,6 +1323,63 @@ def polygon_load_csv(
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_csv_load())
+
+
+@app.command(name="polygon-load-grouped-candles")
+def polygon_load_grouped_candles(
+    cut_date: str = typer.Option(
+        ...,
+        "--cut-date",
+        help="First UTC day (YYYY-MM-DD) synthesized live persistence may own; "
+        "backfill writes only days strictly before it",
+    ),
+    symbols: Annotated[
+        list[str] | None,
+        typer.Option("--symbol", "-s", help="Native symbols to load (default: from settings)"),
+    ] = None,
+    all_mapped: bool = typer.Option(False, "--all", help="Load every Polygon-mapped native symbol"),
+    lookback_days: int = typer.Option(
+        800, "--lookback-days", help="Calendar-day cap on the backward cache walk per symbol"
+    ),
+) -> None:
+    """Load cached Polygon grouped-daily rows as 1d native candles (cache-only).
+
+    Reads the on-disk grouped-daily cache and upserts each leg's days strictly
+    before ``--cut-date`` as ``source='native', complete=True`` 1d candles, so
+    the persisted plane holds the daily history the single-source read cutover
+    and DB-first warmup depend on. Never contacts the Polygon API. The cut date
+    keeps native backfill and synthesized live bars on disjoint day ranges.
+
+    Args:
+        cut_date: First UTC day synthesized live persistence may own (YYYY-MM-DD).
+        symbols: Native symbols to load (default: settings Polygon instruments).
+        all_mapped: Load every Polygon-mapped native symbol.
+        lookback_days: Calendar-day cap on the backward cache walk per symbol.
+    """
+    cut_day = date_type.fromisoformat(cut_date)
+
+    async def run_grouped_candle_load() -> None:
+        service = PolygonGroupedCandleLoaderService(
+            symbols=symbols,
+            cut_date=cut_day,
+            all_mapped=all_mapped,
+            lookback_days=lookback_days,
+        )
+        try:
+            symbol_source = (
+                _CLI_SYMBOL_SOURCE_ALL_MAPPED if all_mapped else _CLI_SYMBOL_SOURCE_SETTINGS
+            )
+            typer.echo(
+                f"Starting Polygon grouped-daily candle load "
+                f"(cut_date={cut_day.isoformat()}, {symbol_source})..."
+            )
+            await service.start()
+            typer.echo("Polygon grouped-daily candle load complete!")
+        except Exception as e:
+            typer.echo(f"Error during Polygon grouped-daily candle load: {e}")
+            raise typer.Exit(code=1) from e
+
+    asyncio.run(run_grouped_candle_load())
 
 
 @app.command(name="kraken-futures-backfill-candles")
