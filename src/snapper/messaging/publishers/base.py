@@ -1761,14 +1761,18 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     async def _publish_synthesized_candle(
         self, candle: CandleUpdate, exchange: MarketDataExchange, timeframe: str
     ) -> None:
-        """Publish a synthesized higher-timeframe candle to ZMQ (no persist).
+        """Publish AND persist a synthesized higher-timeframe candle (Phase 3).
 
-        Publish-only twin of :meth:`_process_candle` for bars the
+        The persisting twin of :meth:`_process_candle` for bars the
         :class:`CandleAggregator` rolls up from the 1m stream. Resolves the
-        instrument and reuses the candle id cache so the ``public_id`` stays
-        stable across emissions (and would match a future persist phase), but
-        deliberately builds NO DB row and enqueues NOTHING to the writer queue
-        — Phase 1 of the candle synthesis layer is publish-only.
+        instrument, reuses the stable candle ``public_id`` (so re-emissions are
+        idempotent), publishes to ZMQ, and — gated by the SAME persist policy as
+        the native 1m path (:meth:`_should_persist_row`) — enqueues a durable
+        row tagged ``source='synthesized'`` carrying the aggregator's
+        trustworthy-boundary ``complete`` flag. A re-emitted ``(instrument,
+        timeframe, open_at)`` is an SCD2 no-op unless OHLCV or provenance
+        changed (e.g. a completeness flip). Publish is unconditional; only the
+        DB write is policy-gated, mirroring the native path.
 
         Args:
             candle: Synthesized higher-timeframe candle from the aggregator.
@@ -1803,7 +1807,17 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             vwap=candle.vwap,
             trades=candle.trades,
         )
+        row = self._build_candle_row(
+            candle_msg,
+            instrument_public_id,
+            source="synthesized",
+            complete=candle.complete,
+        )
         await self._publish_message(topic, candle_msg)
+        if self._should_persist_row("candles", exchange, native_symbol):
+            _enqueue_or_drop_oldest_candle_write(
+                self._candle_write_queue, row, self._get_exchange_name()
+            )
 
     async def _seed_aggregator_from_db(
         self, symbols: list[str], higher: list[str], now: datetime | None = None

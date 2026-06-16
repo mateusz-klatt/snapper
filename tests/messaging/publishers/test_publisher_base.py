@@ -7426,12 +7426,13 @@ async def test_candle_loop_without_aggregator_publishes_no_higher_tf() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_synthesized_candle_publishes_without_persisting() -> None:
-    """Verify synthesized publish hits ZMQ but not the writer queue.
+async def test_publish_synthesized_candle_persists_with_synthesized_provenance() -> None:
+    """Verify a synthesized publish both ships to ZMQ and persists a tagged row.
 
-    Given: a resolvable instrument,
-    When: a synthesized 1h candle is published,
-    Then: it is sent on the 1h topic and nothing is enqueued for persistence.
+    Given: a resolvable instrument and the default (no-policy) persist gate,
+    When: a synthesized 1h candle carrying ``complete=False`` is published,
+    Then: it is sent on the 1h topic AND one writer-queue row is enqueued
+        tagged ``source='synthesized'`` carrying the bucket's ``complete`` flag.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -7448,6 +7449,7 @@ async def test_publish_synthesized_candle_publishes_without_persisting() -> None
         volume=7.0,
         interval_begin=_candle_minute(10, 0),
         interval=3600,
+        complete=False,
     )
     await pub._publish_synthesized_candle(synth, cast(Any, "kraken"), "1h")
     assert pub._publish_message.await_count == 1
@@ -7455,7 +7457,54 @@ async def test_publish_synthesized_candle_publishes_without_persisting() -> None
     assert topic.endswith(".candles.1h")
     assert message.timeframe == "1h"
     assert message.volume == 7.0
+    assert pub._candle_write_queue.qsize() == 1
+    row = pub._candle_write_queue.get_nowait()
+    assert row["source"] == "synthesized"
+    assert row["complete"] is False
+    assert row["timeframe"] == "1h"
+    assert row["open_at"] == _candle_minute(10, 0)
+    assert row["instrument_public_id"] == "inst-1"
+
+
+@pytest.mark.asyncio
+async def test_publish_synthesized_candle_skips_persist_when_policy_off() -> None:
+    """Verify a disabled persist policy publishes but enqueues nothing.
+
+    Given: a resolvable instrument and a persist gate that returns False,
+    When: a synthesized 1h candle is published,
+    Then: it is sent on the 1h topic and nothing is enqueued for persistence.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    pub._should_persist_row = lambda *_a, **_k: False
+    synth = _candle_update(begin=_candle_minute(10, 0))
+    await pub._publish_synthesized_candle(synth, cast(Any, "kraken"), "1h")
+    assert pub._publish_message.await_count == 1
     assert pub._candle_write_queue.qsize() == 0
+
+
+@pytest.mark.asyncio
+async def test_publish_synthesized_candle_reemits_with_stable_public_id() -> None:
+    """Verify re-emitting the same window reuses the candle public_id (SCD2-idempotent).
+
+    Given: a resolvable instrument,
+    When: the same synthesized 1h window is published twice,
+    Then: both enqueued rows carry the identical ``public_id`` so the downstream
+        SCD2 upsert collapses them to a no-op rather than a duplicate bar.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    synth = _candle_update(begin=_candle_minute(10, 0))
+    await pub._publish_synthesized_candle(synth, cast(Any, "kraken"), "1h")
+    await pub._publish_synthesized_candle(synth, cast(Any, "kraken"), "1h")
+    assert pub._candle_write_queue.qsize() == 2
+    first = pub._candle_write_queue.get_nowait()
+    second = pub._candle_write_queue.get_nowait()
+    assert first["public_id"] == second["public_id"]
 
 
 @pytest.mark.asyncio

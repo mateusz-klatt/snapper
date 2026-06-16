@@ -817,10 +817,17 @@ Key properties:
     closed (a finalized 1m at or after the window end). `open_at` is the window
     START; consumers must treat `closed_at = open_at + timeframe` as the true
     close — do not act on a bar before then.
-- **Publish-only (current phase)** — synthesized bars are published to ZMQ but
-    NOT persisted; `1h`/`4h`/`1d` history continues to be served from the
-    database / on-demand aggregation (`candle_query`). Only the `1m` stream is
-    persisted by the writer tasks.
+- **Persisted (provenance-tagged)** — synthesized bars are published to ZMQ and,
+    when a higher timeframe is configured for persistence (off by default —
+    `timeframes` defaults to `["1m"]`), also written to the `candles` table tagged
+    `source='synthesized'` and carrying the aggregator's `complete`
+    trustworthy-boundary flag, under the SAME persist policy
+    (`_should_persist_row`) as the `1m` stream. Provenance is `source ∈
+    {native, synthesized}` + `complete` (a trustworthy-boundary bool, NOT a
+    full-minute-coverage assertion). The candle READ path (`candle_query`) still
+    serves `5m`–`1d` from the DB / on-demand aggregation; routing every `>1m`
+    read single-source to the persisted plane (retiring on-read aggregation) is a
+    later slice.
 - **Restart rebuild** — on startup the open window of each higher timeframe is
     rebuilt from the persisted `1m` history (excluding the current open minute,
     which the live stream finalizes), so a mid-window restart does not truncate

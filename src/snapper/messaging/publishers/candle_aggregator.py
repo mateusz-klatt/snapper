@@ -17,9 +17,14 @@ epoch. This matches both Kraken native OHLC (1d closes 00:00 UTC) and the
 Polygon grouped-daily historical corpus (UTC calendar day), so live-synthesized
 bars align with the data a strategy was validated and warmed up on.
 
-Phase 1 is publish-only: the caller publishes emitted bars to ZMQ and does NOT
-persist them. Persistence plus the ``candle_query`` single-source refactor is a
-later phase and is deliberately out of scope here.
+This aggregator only synthesizes and emits closed bars; it never touches the
+DB. Phase 1 shipped emit-only (the caller published to ZMQ and persisted
+nothing). As of Phase 3
+(``proprietary/plans/plan_2026_06_16_candle_phase3_persistence.md``) the caller
+(:meth:`MarketDataPublisherService._publish_synthesized_candle`) additionally
+persists each emitted bar as ``source='synthesized'`` carrying its ``complete``
+flag, under the same persist policy as the native 1m path; the
+``candle_query`` single-source read cutover remains a later slice.
 """
 
 from dataclasses import dataclass
