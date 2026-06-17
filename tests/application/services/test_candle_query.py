@@ -26,6 +26,7 @@ from snapper.application.services.candle_query import derive_snaps
 from snapper.application.services.candle_query import fetch_cache_only
 from snapper.application.services.candle_query import fetch_candles
 from snapper.application.services.candle_query import fetch_db_only
+from snapper.application.services.candle_query import fetch_db_range
 from snapper.application.services.candle_query import row_from_db
 from snapper.application.services.candle_query import row_from_snap
 from snapper.application.services.market_cache import CandleSnap
@@ -300,6 +301,82 @@ class TestFetchDbOnly:
         )
         kwargs = repo.get_candles.await_args.kwargs
         assert kwargs["as_of"] == explicit
+
+
+class TestFetchDbRange:
+    """``fetch_db_range`` reads a market-time ``open_at`` window from the DB."""
+
+    @pytest.mark.asyncio
+    async def test_returns_db_rows_chronologically(self) -> None:
+        """Range rows come back oldest-first with ``source='db'`` and warm."""
+        rows = [_row(i * 86_400_000, float(i), timeframe="1d") for i in range(3)]
+        repo = _stub_repo(rows)
+        result = await fetch_db_range(
+            repo=cast(Repository, repo),
+            exchange="kraken",
+            native_symbol="BTC-USD",
+            timeframe="1d",
+            start=datetime(2023, 1, 1, tzinfo=UTC),
+            end=datetime(2023, 1, 4, tzinfo=UTC),
+            limit=1000,
+        )
+        assert result.source == "db"
+        assert result.sample_count == 3
+        assert result.is_warm is True
+        assert [row.open for row in result.rows] == [0.0, 1.0, 2.0]
+
+    @pytest.mark.asyncio
+    async def test_passes_window_and_ascending_order_to_repo(self) -> None:
+        """start/end/limit/order='asc' are forwarded to the repository."""
+        repo = _stub_repo([])
+        start = datetime(2023, 1, 1, tzinfo=UTC)
+        end = datetime(2023, 6, 1, tzinfo=UTC)
+        await fetch_db_range(
+            repo=cast(Repository, repo),
+            exchange="kraken",
+            native_symbol="BTC-USD",
+            timeframe="1d",
+            start=start,
+            end=end,
+            limit=750,
+        )
+        kwargs = repo.get_candles.await_args.kwargs
+        assert kwargs["start"] == start
+        assert kwargs["end"] == end
+        assert kwargs["order"] == "asc"
+        assert kwargs["limit"] == 750
+
+    @pytest.mark.asyncio
+    async def test_defaults_as_of_to_now_when_absent(self) -> None:
+        """Without ``as_of`` the repo still receives a concrete timestamp."""
+        repo = _stub_repo([])
+        await fetch_db_range(
+            repo=cast(Repository, repo),
+            exchange="kraken",
+            native_symbol="BTC-USD",
+            timeframe="1d",
+            start=datetime(2023, 1, 1, tzinfo=UTC),
+            end=datetime(2023, 6, 1, tzinfo=UTC),
+            limit=500,
+        )
+        assert repo.get_candles.await_args.kwargs["as_of"] is not None
+
+    @pytest.mark.asyncio
+    async def test_explicit_as_of_passed_through(self) -> None:
+        """An explicit ``as_of`` reaches the repo verbatim for SCD2 pinning."""
+        repo = _stub_repo([])
+        explicit = datetime(2026, 1, 1, tzinfo=UTC)
+        await fetch_db_range(
+            repo=cast(Repository, repo),
+            exchange="kraken",
+            native_symbol="BTC-USD",
+            timeframe="1d",
+            start=datetime(2023, 1, 1, tzinfo=UTC),
+            end=datetime(2023, 6, 1, tzinfo=UTC),
+            limit=500,
+            as_of=explicit,
+        )
+        assert repo.get_candles.await_args.kwargs["as_of"] == explicit
 
 
 class TestFetchCacheOnly:

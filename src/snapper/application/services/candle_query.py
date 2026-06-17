@@ -329,6 +329,62 @@ async def fetch_db_only(
     )
 
 
+async def fetch_db_range(
+    *,
+    repo: Repository,
+    exchange: AllExchange,
+    native_symbol: str,
+    timeframe: str,
+    start: datetime,
+    end: datetime,
+    limit: int,
+    as_of: datetime | None = None,
+) -> CandleQueryResult:
+    """Read a market-time ``[start, end]`` window from the persisted candles.
+
+    Selects by ``open_at`` (business/market time), unlike :func:`fetch_db_only`
+    which returns the latest ``limit`` bars current-in-DB at a write instant.
+    Reading by market time navigates the FULL persisted history — including
+    bulk-backfilled corpora whose DB write time is unrelated to their market
+    time, so ``as_of`` (write/valid time) cannot reach them. Powers the market
+    time-travel scrubber. Ascending by ``open_at``; ``limit`` is a backstop cap
+    so an over-wide window cannot return an unbounded result.
+
+    Args:
+        repo: Repository handle.
+        exchange: Resolved venue identifier.
+        native_symbol: Canonical native symbol (e.g. ``"BTC-USD"``).
+        timeframe: One of the seven supported timeframes. Validation
+            happens at route boundaries.
+        start: Inclusive window start (``open_at >= start``), UTC.
+        end: Inclusive window end (``open_at <= end``), UTC.
+        limit: Maximum bars to return (backstop for an over-wide range).
+        as_of: Optional SCD2 point-in-time for the row version; defaults to
+            :func:`datetime.now` (current versions).
+
+    Returns:
+        :class:`CandleQueryResult` with ``source="db"`` in chronological order.
+    """
+    processing_date = as_of or datetime.now(UTC)
+    rows = await repo.get_candles(
+        instrument=native_symbol,
+        timeframe=timeframe,
+        start=start,
+        end=end,
+        exchange=exchange,
+        as_of=processing_date,
+        limit=limit,
+        order="asc",
+    )
+    chrono = [row_from_db(row, timeframe) for row in rows]
+    return CandleQueryResult(
+        rows=chrono,
+        source="db",
+        sample_count=len(chrono),
+        is_warm=True,
+    )
+
+
 async def _read_cache_snaps(
     *,
     cache: MarketCacheService,

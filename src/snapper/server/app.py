@@ -129,6 +129,7 @@ from snapper.application.services.candle_query import CandleQueryRow
 from snapper.application.services.candle_query import fetch_cache_only as fetch_cache_only_candles
 from snapper.application.services.candle_query import fetch_candles as fetch_candle_query
 from snapper.application.services.candle_query import fetch_db_only as fetch_db_only_candles
+from snapper.application.services.candle_query import fetch_db_range as fetch_db_range_candles
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.market_cache import MarketCacheService
 from snapper.application.services.market_persist_policy import MarketPersistPolicy
@@ -1312,6 +1313,8 @@ async def _handle_get_candles(
     timeframe: str,
     limit: int,
     as_of: datetime | None,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> CandleListResponse:
     """Fetch smart-routed candles for the legacy REST endpoint.
 
@@ -1323,30 +1326,58 @@ async def _handle_get_candles(
         timeframe: Candle timeframe.
         limit: Maximum number of candles to return.
         as_of: Optional point-in-time query timestamp.
+        start: Optional inclusive market-time window start (``open_at``). When
+            paired with ``end`` the read switches to a DB market-time range
+            (the time-travel scrubber), bypassing the cache/as_of routing.
+        end: Optional inclusive market-time window end (``open_at``). Must be
+            provided together with ``start`` and be strictly after it.
 
     Returns:
         CandleListResponse wrapping projected candle rows.
 
     Raises:
-        HTTPException: For unsupported timeframe or mapped service failures.
+        HTTPException: For unsupported timeframe, a malformed range, or mapped
+            service failures.
     """
     if timeframe not in _CANDLE_QUERY_VALID_TIMEFRAMES:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported timeframe: {timeframe!r}",
         )
+    if (start is None) != (end is None):
+        raise HTTPException(
+            status_code=400,
+            detail="start and end must be provided together",
+        )
+    if start is not None and end is not None and start >= end:
+        raise HTTPException(
+            status_code=400,
+            detail="start must be strictly before end",
+        )
     try:
         cache: MarketCacheService | None = getattr(request.app.state, "market_cache", None)
-        result = await fetch_candle_query(
-            cache=cache,
-            repo=repo,
-            exchange=cast(AllExchange, exchange),
-            native_symbol=instrument,
-            timeframe=timeframe,
-            limit=limit,
-            as_of=as_of,
-            single_source=_resolve_candle_single_source(request),
-        )
+        if start is not None and end is not None:
+            result = await fetch_db_range_candles(
+                repo=repo,
+                exchange=cast(AllExchange, exchange),
+                native_symbol=instrument,
+                timeframe=timeframe,
+                start=start,
+                end=end,
+                limit=limit,
+                as_of=as_of,
+            )
+        else:
+            result = await fetch_candle_query(
+                cache=cache,
+                repo=repo,
+                exchange=cast(AllExchange, exchange),
+                native_symbol=instrument,
+                timeframe=timeframe,
+                limit=limit,
+                as_of=as_of,
+                single_source=_resolve_candle_single_source(request),
+            )
         items = [
             project_query_row_to_candle_data(row, instrument=instrument, exchange=exchange)
             for row in result.rows
@@ -1562,6 +1593,14 @@ def _create_candles_signals_router() -> APIRouter:
             int, Query(ge=1, le=1000, description="Number of candles to return")
         ] = 100,
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+        start: Annotated[
+            datetime | None,
+            Query(description="Market-time window start (open_at, UTC); pair with end"),
+        ] = None,
+        end: Annotated[
+            datetime | None,
+            Query(description="Market-time window end (open_at, UTC); pair with start"),
+        ] = None,
     ) -> CandleListResponse:
         """Fetch historical candle data with smart cache/DB routing.
 
@@ -1587,13 +1626,21 @@ def _create_candles_signals_router() -> APIRouter:
             limit: Maximum number of candles to return.
             as_of: Optional point-in-time query timestamp. When set,
                 hard-routes to DB so time-travel cannot lie.
+            start: Optional inclusive market-time window start (``open_at``,
+                UTC). Paired with ``end`` it reads a DB range by market time
+                (the time-travel scrubber), independent of the SCD2 ``as_of``
+                write-time so bulk-backfilled history is reachable.
+            end: Optional inclusive market-time window end (``open_at``, UTC);
+                must accompany ``start`` and be strictly after it.
 
         Returns:
             CandleListResponse wrapping the candle data (empty payload
             if neither cache nor DB have rows for the instrument).
 
         Raises:
-            HTTPException(400): ``timeframe`` outside the supported set.
+            HTTPException(400): ``timeframe`` outside the supported set, or a
+                malformed range (only one of ``start``/``end``, or
+                ``start >= end``).
         """
         return await _handle_get_candles(
             request,
@@ -1603,6 +1650,8 @@ def _create_candles_signals_router() -> APIRouter:
             timeframe,
             limit,
             as_of,
+            start,
+            end,
         )
 
     @router.get(

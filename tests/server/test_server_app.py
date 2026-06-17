@@ -1880,6 +1880,72 @@ class TestCreateApiRouter:
         assert items[0]["close"] == pytest.approx(50500.0)
         assert items[0]["timestamp"] is not None
 
+    def test_get_candles_market_time_range_returns_window(self) -> None:
+        """Test candles endpoint serves a market-time ``open_at`` window.
+
+        Given: A valid instrument with candle data in repository,
+        When: GET /api/candles is called with paired ``start`` and ``end``,
+        Then: Response returns the range read (the scrubber's DB window).
+        """
+        candle_rows = [
+            {
+                "public_id": "candle-uuid-range",
+                "timestamp": datetime(2023, 1, 2, tzinfo=dt.UTC),
+                "session_id": "sess-1",
+                "sequence_id": 1,
+                "timeframe": "1d",
+                "open_at": datetime(2023, 1, 2, tzinfo=dt.UTC),
+                "open": 50000.0,
+                "high": 51000.0,
+                "low": 49000.0,
+                "close": 50500.0,
+                "volume": 1000.0,
+                "vwap": 50250.0,
+                "trades": 10,
+            }
+        ]
+        repo = MockRepository(session_result=candle_rows)
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1d"
+            "&start=2023-01-01T00:00:00Z&end=2023-01-04T00:00:00Z"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["type"] == "candle_list"
+        assert data["count"] == 1
+        assert data["payload"][0]["timeframe"] == "1d"
+
+    def test_get_candles_range_requires_both_bounds(self) -> None:
+        """Test candles endpoint rejects a half-specified range.
+
+        Given: A running app,
+        When: GET /api/candles is called with ``start`` but no ``end``,
+        Then: Response is 400 (start and end must be paired).
+        """
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1d"
+            "&start=2023-01-01T00:00:00Z"
+        )
+        assert response.status_code == 400
+
+    def test_get_candles_range_rejects_inverted_window(self) -> None:
+        """Test candles endpoint rejects a range whose start is not before end.
+
+        Given: A running app,
+        When: GET /api/candles is called with ``start`` >= ``end``,
+        Then: Response is 400 (malformed range).
+        """
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1d"
+            "&start=2023-01-04T00:00:00Z&end=2023-01-01T00:00:00Z"
+        )
+        assert response.status_code == 400
+
     def test_get_candles_no_data_returns_empty_array(self) -> None:
         """Test candles endpoint returns empty array when no data.
 

@@ -601,11 +601,20 @@ GET /api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h&limit=100
 | `timeframe` | string | yes | Candle timeframe (e.g., `1m`, `5m`, `15m`, `1h`, `4h`, `1d`) |
 | `limit` | int | no | Number of candles, max 1000 (default 100) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
+| `start` | datetime | no | Market-time window start (`open_at`, UTC); pair with `end` |
+| `end` | datetime | no | Market-time window end (`open_at`, UTC); pair with `start` |
 
 Returns `200 OK` with an empty `payload` array when no candles match
 the query (unknown instrument, no warm-cache rows, etc.) — the
 `CandleListResponse` envelope is the canonical shape for empty
 results too.
+
+When both `start` and `end` are supplied the route reads a market-time
+range by `open_at` (ascending, capped at `limit`), bypassing the cache and
+the `as_of` write-time routing. This navigates the full persisted history —
+including bulk-backfilled corpora whose database write time is unrelated to
+their market time — and powers the market view's time-travel scrubber.
+Supplying only one of the pair, or `start >= end`, returns `400`.
 
 **Response (200):**
 
