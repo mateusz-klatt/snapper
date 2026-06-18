@@ -53,9 +53,12 @@ def _at(minute: int) -> datetime:
     return datetime(2026, 6, 1, 0, minute, 0, tzinfo=UTC)
 
 
-def _urow() -> CandleUpsertRow:
-    """Build a minimal upsert row (its content is irrelevant to the fake repo)."""
-    return {"timeframe": "5m"}
+def _urow(open_at: datetime | None = None) -> CandleUpsertRow:
+    """Build a minimal upsert row; an open_at lets the fake mark it contended."""
+    row: CandleUpsertRow = {"timeframe": "5m"}
+    if open_at is not None:
+        row["open_at"] = open_at
+    return row
 
 
 class _FakeRepo:
@@ -70,6 +73,7 @@ class _FakeRepo:
         has_engine: bool = True,
         raise_for: tuple[str, ...] = (),
         upsert_fail_times: int = 0,
+        conflict_open_ats: set[datetime] | None = None,
     ) -> None:
         """Store the canned instrument/candle fixtures the backfill will read."""
         self._instruments = instruments or {}
@@ -77,6 +81,7 @@ class _FakeRepo:
         self._candles = candles or {}
         self._raise_for = set(raise_for)
         self._upsert_fail_times = upsert_fail_times
+        self._conflict_open_ats = conflict_open_ats or set()
         self.upsert_calls = 0
         self.upserts: list[list[CandleUpsertRow]] = []
         if has_engine:
@@ -112,9 +117,11 @@ class _FakeRepo:
     async def upsert_candles(
         self, rows: list[CandleUpsertRow], session: object | None = None
     ) -> int:
-        """Record an upsert batch, failing the first configured calls."""
+        """Record an upsert batch, failing the first calls or any contended row."""
         self.upsert_calls += 1
         if self.upsert_calls <= self._upsert_fail_times:
+            raise IntegrityError("INSERT", None, Exception("dup"))
+        if any(r.get("open_at") in self._conflict_open_ats for r in rows):
             raise IntegrityError("INSERT", None, Exception("dup"))
         batch = list(rows)
         self.upserts.append(batch)
@@ -390,20 +397,33 @@ async def test_upsert_with_retry_recovers_after_conflict() -> None:
     sleep.assert_awaited_once()
 
 
-async def test_upsert_with_retry_exhausts_budget_and_raises() -> None:
-    """Verify a persistent conflict re-raises after the retry budget.
+async def test_upsert_with_retry_falls_back_to_per_row() -> None:
+    """Verify exhausting the retry budget triggers the per-row fallback.
 
-    Given: A repo that always raises IntegrityError,
+    Given: A repo that fails every batch attempt within the budget but accepts
+        per-row upserts,
     When: _upsert_with_retry runs with the backoff sleep patched out,
-    Then: It re-raises after retries+1 attempts.
+    Then: It defers to the per-row pass and writes every row without raising.
     """
-    repo = _FakeRepo(upsert_fail_times=99)
-    with (
-        patch.object(backfill.asyncio, "sleep", new=AsyncMock()),
-        pytest.raises(IntegrityError),
-    ):
-        await backfill._upsert_with_retry(repo, [_urow()])
-    assert repo.upsert_calls == backfill._UPSERT_RETRIES + 1
+    repo = _FakeRepo(upsert_fail_times=backfill._UPSERT_RETRIES + 1)
+    with patch.object(backfill.asyncio, "sleep", new=AsyncMock()) as sleep:
+        written = await backfill._upsert_with_retry(repo, [_urow(), _urow()])
+    assert written == 2
+    assert sleep.await_count == backfill._UPSERT_RETRIES
+
+
+async def test_upsert_skipping_contended_defers_hot_row() -> None:
+    """Verify the per-row fallback skips a contended window and writes the rest.
+
+    Given: A batch in which one window is contended by the live writer,
+    When: _upsert_skipping_contended runs,
+    Then: The contended row is skipped and the remaining rows are written.
+    """
+    repo = _FakeRepo(conflict_open_ats={_at(0)})
+    written = await backfill._upsert_skipping_contended(repo, [_urow(_at(0)), _urow(_at(5))])
+    assert written == 1
+    assert len(repo.upserts) == 1
+    assert repo.upserts[0][0]["open_at"] == _at(5)
 
 
 async def test_run_write_mode_full(tmp_path: Path) -> None:

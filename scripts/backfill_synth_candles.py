@@ -316,23 +316,22 @@ def _build_rows(
 
 
 async def _upsert_with_retry(repo: Repository, batch: list[CandleUpsertRow]) -> int:
-    """Upsert a candle batch, retrying on a concurrent-writer unique conflict.
+    """Upsert a candle batch, retrying transient conflicts then deferring hot rows.
 
     The live feed publisher and this backfill can both target the same
     ``(instrument, timeframe, open_at)`` current row for a freshly settled
-    window; the loser of that race raises a unique-violation ``IntegrityError``.
-    Retrying re-reads the now-present row, which then resolves to a clean no-op
-    or supersede, so a re-run stays error-free against the running feed.
+    window. A transient unique conflict is retried — the re-read resolves to a
+    clean no-op or supersede. A conflict that survives the retry budget means the
+    live writer actively owns that window with fresher data, so the batch falls
+    back to a per-row pass that skips only the contended rows. Either way a
+    re-run never errors and never overwrites live data.
 
     Args:
         repo: Repository handle.
         batch: Synthesized candle rows to upsert.
 
     Returns:
-        The number of rows written by the successful attempt.
-
-    Raises:
-        IntegrityError: When the conflict persists past the retry budget.
+        The number of rows written (contended rows deferred to the live writer).
     """
     attempt = 0
     while True:
@@ -341,8 +340,36 @@ async def _upsert_with_retry(repo: Repository, batch: list[CandleUpsertRow]) -> 
         except IntegrityError:
             attempt += 1
             if attempt > _UPSERT_RETRIES:
-                raise
+                return await _upsert_skipping_contended(repo, batch)
             await asyncio.sleep(_UPSERT_RETRY_BACKOFF_S * attempt)
+
+
+async def _upsert_skipping_contended(repo: Repository, batch: list[CandleUpsertRow]) -> int:
+    """Upsert a persistently-conflicting batch row by row, deferring hot windows.
+
+    Falls out of :func:`_upsert_with_retry` when a batch keeps losing the unique
+    race. Each row is upserted on its own so a single window the live writer is
+    actively versioning is skipped (logged) rather than aborting the whole
+    instrument; every other row is still written. The skipped window stays owned
+    by the live writer and is reconciled on a later run.
+
+    Args:
+        repo: Repository handle.
+        batch: The batch whose single-shot upsert hit a persistent conflict.
+
+    Returns:
+        The number of rows written, excluding the deferred contended rows.
+    """
+    written = 0
+    for row in batch:
+        try:
+            written += await repo.upsert_candles([row])
+        except IntegrityError:
+            logger.warning(
+                f"deferred contended window to live writer: "
+                f"timeframe={row.get('timeframe')} open_at={row.get('open_at')}"
+            )
+    return written
 
 
 async def _process_instrument(
