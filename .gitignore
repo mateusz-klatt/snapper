@@ -109,3 +109,6 @@ plan-*.md
 
 .claude/scheduled_tasks.lock
 .local-secrets/
+
+# backfill_synth_candles.py resume/progress log (local run artifact, not source)
+scripts/.backfill_synth_progress.jsonl
