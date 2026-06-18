@@ -42,6 +42,7 @@ from typing import cast
 from uuid import uuid7
 
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 from snapper.config.settings import get_settings
 from snapper.core.types import AllExchange
@@ -67,6 +68,10 @@ _DEFAULT_EXCHANGES: tuple[str, ...] = (
     "polygon",
     "walutomat",
 )
+
+_UPSERT_RETRIES: int = 3
+
+_UPSERT_RETRY_BACKOFF_S: float = 0.25
 
 
 @dataclass
@@ -310,6 +315,36 @@ def _build_rows(
     return out
 
 
+async def _upsert_with_retry(repo: Repository, batch: list[CandleUpsertRow]) -> int:
+    """Upsert a candle batch, retrying on a concurrent-writer unique conflict.
+
+    The live feed publisher and this backfill can both target the same
+    ``(instrument, timeframe, open_at)`` current row for a freshly settled
+    window; the loser of that race raises a unique-violation ``IntegrityError``.
+    Retrying re-reads the now-present row, which then resolves to a clean no-op
+    or supersede, so a re-run stays error-free against the running feed.
+
+    Args:
+        repo: Repository handle.
+        batch: Synthesized candle rows to upsert.
+
+    Returns:
+        The number of rows written by the successful attempt.
+
+    Raises:
+        IntegrityError: When the conflict persists past the retry budget.
+    """
+    attempt = 0
+    while True:
+        try:
+            return await repo.upsert_candles(batch)
+        except IntegrityError:
+            attempt += 1
+            if attempt > _UPSERT_RETRIES:
+                raise
+            await asyncio.sleep(_UPSERT_RETRY_BACKOFF_S * attempt)
+
+
 async def _process_instrument(
     repo: Repository,
     exchange: str,
@@ -353,7 +388,7 @@ async def _process_instrument(
     written = 0
     if not dry_run:
         for offset in range(0, len(synth_rows), batch_size):
-            written += await repo.upsert_candles(synth_rows[offset : offset + batch_size])
+            written += await _upsert_with_retry(repo, synth_rows[offset : offset + batch_size])
     return len(rows), len(synth_rows), written
 
 

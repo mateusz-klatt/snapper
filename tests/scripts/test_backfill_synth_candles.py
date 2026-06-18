@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 import scripts.backfill_synth_candles as backfill
 from snapper.data.repository_types import CandleRow
@@ -52,6 +53,11 @@ def _at(minute: int) -> datetime:
     return datetime(2026, 6, 1, 0, minute, 0, tzinfo=UTC)
 
 
+def _urow() -> CandleUpsertRow:
+    """Build a minimal upsert row (its content is irrelevant to the fake repo)."""
+    return {"timeframe": "5m"}
+
+
 class _FakeRepo:
     """Minimal in-memory Repository stand-in for backfill tests."""
 
@@ -63,12 +69,15 @@ class _FakeRepo:
         candles: dict[str, list[CandleRow]] | None = None,
         has_engine: bool = True,
         raise_for: tuple[str, ...] = (),
+        upsert_fail_times: int = 0,
     ) -> None:
         """Store the canned instrument/candle fixtures the backfill will read."""
         self._instruments = instruments or {}
         self._ipids = ipids or {}
         self._candles = candles or {}
         self._raise_for = set(raise_for)
+        self._upsert_fail_times = upsert_fail_times
+        self.upsert_calls = 0
         self.upserts: list[list[CandleUpsertRow]] = []
         if has_engine:
             self.engine = SimpleNamespace(dispose=AsyncMock())
@@ -103,7 +112,10 @@ class _FakeRepo:
     async def upsert_candles(
         self, rows: list[CandleUpsertRow], session: object | None = None
     ) -> int:
-        """Record an upsert batch and report it as fully written."""
+        """Record an upsert batch, failing the first configured calls."""
+        self.upsert_calls += 1
+        if self.upsert_calls <= self._upsert_fail_times:
+            raise IntegrityError("INSERT", None, Exception("dup"))
         batch = list(rows)
         self.upserts.append(batch)
         return len(batch)
@@ -348,6 +360,50 @@ async def test_process_instrument_writes_in_batches() -> None:
     assert n_windows == n_written
     assert len(repo.upserts) == n_windows
     assert all(len(batch) == 1 for batch in repo.upserts)
+
+
+async def test_upsert_with_retry_first_try_succeeds() -> None:
+    """Verify a clean batch needs no retry.
+
+    Given: A repo whose upsert succeeds immediately,
+    When: _upsert_with_retry runs,
+    Then: It returns the written count after a single call.
+    """
+    repo = _FakeRepo()
+    written = await backfill._upsert_with_retry(repo, [_urow()])
+    assert written == 1
+    assert repo.upsert_calls == 1
+
+
+async def test_upsert_with_retry_recovers_after_conflict() -> None:
+    """Verify a transient unique conflict is retried then succeeds.
+
+    Given: A repo that raises IntegrityError once before succeeding,
+    When: _upsert_with_retry runs with the backoff sleep patched out,
+    Then: It returns the written count after a second attempt.
+    """
+    repo = _FakeRepo(upsert_fail_times=1)
+    with patch.object(backfill.asyncio, "sleep", new=AsyncMock()) as sleep:
+        written = await backfill._upsert_with_retry(repo, [_urow(), _urow()])
+    assert written == 2
+    assert repo.upsert_calls == 2
+    sleep.assert_awaited_once()
+
+
+async def test_upsert_with_retry_exhausts_budget_and_raises() -> None:
+    """Verify a persistent conflict re-raises after the retry budget.
+
+    Given: A repo that always raises IntegrityError,
+    When: _upsert_with_retry runs with the backoff sleep patched out,
+    Then: It re-raises after retries+1 attempts.
+    """
+    repo = _FakeRepo(upsert_fail_times=99)
+    with (
+        patch.object(backfill.asyncio, "sleep", new=AsyncMock()),
+        pytest.raises(IntegrityError),
+    ):
+        await backfill._upsert_with_retry(repo, [_urow()])
+    assert repo.upsert_calls == backfill._UPSERT_RETRIES + 1
 
 
 async def test_run_write_mode_full(tmp_path: Path) -> None:
