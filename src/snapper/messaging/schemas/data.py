@@ -106,6 +106,11 @@ class CandleData(StrictDataSchema[Literal["candle"]]):
         volume: Total traded volume during the candle.
         vwap: Volume-weighted average price (optional).
         trades: Number of trades in the candle (optional).
+        complete: Whether this bar's window has closed. False marks a
+            provisional intra-minute update of a still-forming bar (the
+            "living" candle a UI redraws in place); True marks the final bar
+            for its window. Defaults True so existing producers (warmup
+            projections, backtest replay) are unaffected.
     """
 
     type: Literal["candle"] = "candle"
@@ -120,6 +125,7 @@ class CandleData(StrictDataSchema[Literal["candle"]]):
     volume: float
     vwap: float | None = None
     trades: int | None = None
+    complete: bool = True
 
 
 class TradeData(StrictDataSchema[Literal["trade"]]):

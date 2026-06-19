@@ -176,6 +176,22 @@ rather than exhausting the lifetime restart budget and permanently abandoning
 the feed (which would recreate the multi-hour dark-feed incident this work
 fixes). The invariant is asserted in the test suite."""
 
+_TIMEFRAME_WINDOW_SECONDS: dict[str, int] = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400,
+}
+"""Canonical candle-window width per timeframe label, in seconds.
+
+Used to derive the living-candle ``complete`` flag from the bar's window end.
+Keyed by the timeframe LABEL, not ``CandleUpdate.interval`` — venues disagree on
+the latter's unit (Kraken spot encodes ``1m`` as ``interval=1`` minutes, not 60
+seconds), so the label is the only portable width signal."""
+
 _FEED_HEALTH_FLUSH_INTERVAL_S = 30.0
 """Cadence for persisting the subscription-health snapshot to the DB.
 
@@ -1834,6 +1850,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             native_symbol, MarketDataTypeEnum.CANDLES, timeframe=timeframe
         )
         received_at = datetime.now(UTC)
+        window_seconds = _TIMEFRAME_WINDOW_SECONDS.get(timeframe, 0)
+        window_closed = received_at >= candle.interval_begin + timedelta(seconds=window_seconds)
         candle_msg = CandleData(
             public_id=public_id,
             timestamp=received_at,
@@ -1850,6 +1868,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             close=candle.close,
             vwap=candle.vwap,
             trades=candle.trades,
+            complete=window_closed,
         )
         row = self._build_candle_row(
             candle_msg, instrument_public_id, source=self._candle_source_for(timeframe)
@@ -1906,6 +1925,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             close=candle.close,
             vwap=candle.vwap,
             trades=candle.trades,
+            complete=candle.complete,
         )
         row = self._build_candle_row(
             candle_msg,

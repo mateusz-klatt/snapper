@@ -1479,6 +1479,76 @@ async def test_process_candle_tags_source_from_hook() -> None:
     assert row["source"] == "calculated"
 
 
+@pytest.mark.asyncio
+async def test_process_candle_marks_elapsed_1m_window_complete() -> None:
+    """A 1m bar opened more than 60s ago publishes complete=True.
+
+    Given: a 1m candle whose window opened 61s before now,
+    When: it is processed,
+    Then: the published CandleData carries complete=True (window elapsed) —
+        the window width comes from the '1m' label (60s), not the Kraken
+        minute-encoded CandleUpdate.interval.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    candle = _candle_update(begin=datetime.now(UTC) - timedelta(seconds=61))
+    await pub._process_candle(candle, cast(Any, "kraken"), "1m")
+    _topic, message = pub._publish_message.await_args.args
+    assert message.complete is True
+
+
+@pytest.mark.asyncio
+async def test_process_candle_marks_recent_1m_window_incomplete() -> None:
+    """A 1m bar opened less than 60s ago publishes complete=False.
+
+    Given: a 1m candle whose window opened 30s before now,
+    When: it is processed,
+    Then: the published CandleData carries complete=False (the living bar),
+        proving the boundary uses the 60s '1m' label width.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    candle = _candle_update(begin=datetime.now(UTC) - timedelta(seconds=30))
+    await pub._process_candle(candle, cast(Any, "kraken"), "1m")
+    _topic, message = pub._publish_message.await_args.args
+    assert message.complete is False
+
+
+@pytest.mark.asyncio
+async def test_publish_synthesized_candle_carries_complete_flag() -> None:
+    """A synthesized bar publishes the aggregator's complete flag on the wire.
+
+    Given: a synthesized candle marked complete=False by the aggregator,
+    When: it is published,
+    Then: the published CandleData carries complete=False so ZMQ subscribers
+        can distinguish a provisional rollup from a final one.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    synth = CandleUpdate(
+        symbol="BTC-USD",
+        open=1.0,
+        high=2.0,
+        low=0.5,
+        close=1.5,
+        vwap=1.25,
+        trades=3,
+        volume=4.0,
+        interval_begin=_candle_minute(10, 0),
+        interval=3600,
+        complete=False,
+    )
+    await pub._publish_synthesized_candle(synth, cast(Any, "kraken"), "1h")
+    _topic, message = pub._publish_message.await_args.args
+    assert message.complete is False
+
+
 def test_dark_feed_ceiling_exceeds_launcher_total_reset() -> None:
     """The dark-feed exit ceiling must exceed the launcher total-reset uptime.
 

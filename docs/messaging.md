@@ -409,6 +409,7 @@ candle = CandleData(
 | `volume` | float | Volume |
 | `vwap` | float \| null | Volume-weighted average price (optional) |
 | `trades` | int \| null | Number of trades in the candle (optional) |
+| `complete` | bool | Whether the bar's window has closed. `false` marks a provisional intra-minute update of a still-forming bar (the "living" candle a UI redraws in place); `true` marks the final bar. Defaults `true`. Native 1m bars derive it best-effort from the timeframe window; synthesized bars carry the aggregator's trustworthy-boundary flag. |
 | `timestamp` | datetime | Timestamp |
 
 ### SignalData
