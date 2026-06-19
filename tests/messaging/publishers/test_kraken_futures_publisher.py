@@ -42,6 +42,16 @@ class TestKrakenFuturesMarketDataPublisher:
         publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
         assert publisher._get_exchange_name() == "kraken_futures"
 
+    def test_candle_source_for_returns_calculated(self) -> None:
+        """Verify futures 1m bars are tagged calculated (trade-built).
+
+        Given: A KrakenFuturesMarketDataPublisher instance,
+        When: _candle_source_for is called for 1m,
+        Then: Returns 'calculated' (Snapper-computed, not venue OHLC).
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
+        assert publisher._candle_source_for("1m") == "calculated"
+
     def test_liveness_threshold_is_60s(self) -> None:
         """Verify the Futures liveness-recovery threshold is lowered to 60s.
 

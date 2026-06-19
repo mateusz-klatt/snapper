@@ -1297,6 +1297,25 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return frozenset({"1m"})
 
+    def _candle_source_for(self, timeframe: str) -> str:
+        """Provenance tag for a native-path candle from this publisher.
+
+        ``native`` means the bar is venue-precomputed upstream OHLC (Kraken
+        spot's ``ohlc:1m``, Polygon grouped-daily history). Publishers that
+        COMPUTE their 1m bars from the trade/quote stream (Kraken equities and
+        futures via ``TradeCandleBuilder``, Walutomat via REST quote polling)
+        override this to return ``calculated`` so provenance is unambiguous.
+        Higher-TF rollups carry ``synthesized`` via :meth:`_publish_synthesized_candle`
+        and never flow through here.
+
+        Args:
+            timeframe: The candle timeframe label (e.g. ``"1m"``).
+
+        Returns:
+            The ``source`` tag for the row (``native`` for upstream OHLC).
+        """
+        return "native"
+
     def _candle_live_epoch(self) -> datetime:
         """The instant the aggregator should treat as the start of live data.
 
@@ -1832,7 +1851,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             vwap=candle.vwap,
             trades=candle.trades,
         )
-        row = self._build_candle_row(candle_msg, instrument_public_id)
+        row = self._build_candle_row(
+            candle_msg, instrument_public_id, source=self._candle_source_for(timeframe)
+        )
         await self._publish_message(topic, candle_msg)
         self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
         return row

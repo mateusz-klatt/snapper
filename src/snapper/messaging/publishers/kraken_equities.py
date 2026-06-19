@@ -158,6 +158,18 @@ class KrakenEquitiesMarketDataPublisher(
         """
         return ExchangeEnum.KRAKEN_EQUITIES
 
+    def _candle_source_for(self, timeframe: str) -> str:
+        """Kraken equities builds its 1m bars from the live trade stream.
+
+        Args:
+            timeframe: The candle timeframe label.
+
+        Returns:
+            ``calculated`` — these 1m bars are Snapper-computed (via
+            ``TradeCandleBuilder``), not venue-precomputed OHLC.
+        """
+        return "calculated"
+
     async def start(self) -> None:
         """Start the publisher within a connector-registration context.
 

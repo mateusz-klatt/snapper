@@ -114,6 +114,20 @@ class TestWalutomatPublisher:
         assert publisher._get_exchange_name() == "walutomat"
 
     @patch("snapper.config.settings.get_settings")
+    def test_candle_source_for_returns_calculated(self, mock_get_settings: MagicMock) -> None:
+        """Verify Walutomat 1m bars are tagged calculated (quote-poll built).
+
+        Given a WalutomatMarketDataPublisher instance,
+        When _candle_source_for is called for 1m,
+        Then it returns 'calculated'.
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_get_settings.return_value = mock_settings
+        publisher = WalutomatMarketDataPublisher(symbols=[])
+        assert publisher._candle_source_for("1m") == "calculated"
+
+    @patch("snapper.config.settings.get_settings")
     def test_supports_public_trades_false(self, mock_get_settings: MagicMock) -> None:
         """Verify Walutomat reports no public trade feed.
 

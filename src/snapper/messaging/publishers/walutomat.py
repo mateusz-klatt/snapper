@@ -60,6 +60,18 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
     def _get_exchange_name(self) -> MarketDataExchange:
         return ExchangeEnum.WALUTOMAT
 
+    def _candle_source_for(self, timeframe: str) -> str:
+        """Walutomat builds its 1m bars from REST quote polling.
+
+        Args:
+            timeframe: The candle timeframe label.
+
+        Returns:
+            ``calculated`` — these 1m bars are Snapper-computed from polled
+            quotes, not venue-precomputed OHLC.
+        """
+        return "calculated"
+
     async def start(self) -> None:
         """Start the publisher within a connector-registration context.
 

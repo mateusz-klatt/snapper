@@ -1449,6 +1449,36 @@ async def test_process_candle_bumps_candle_watermark(
     assert pub._last_candle_msg_at == 5000.0
 
 
+def test_candle_source_for_defaults_native() -> None:
+    """The base provenance hook tags native-path candles as upstream OHLC.
+
+    Given: A base publisher,
+    When: The candle source hook is read for 1m,
+    Then: It returns 'native' (venue-precomputed upstream).
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    assert pub._candle_source_for("1m") == "native"
+
+
+@pytest.mark.asyncio
+async def test_process_candle_tags_source_from_hook() -> None:
+    """The native candle row carries the provenance from the source hook.
+
+    Given: A publisher whose source hook returns 'calculated',
+    When: A native candle is processed for a resolvable instrument,
+    Then: The built row is tagged source='calculated'.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    pub._candle_source_for = lambda _tf: "calculated"
+    candle = _candle_update(begin=_candle_minute(10, 0))
+    row = await pub._process_candle(candle, cast(Any, "kraken"), "1m")
+    assert row is not None
+    assert row["source"] == "calculated"
+
+
 def test_dark_feed_ceiling_exceeds_launcher_total_reset() -> None:
     """The dark-feed exit ceiling must exceed the launcher total-reset uptime.
 

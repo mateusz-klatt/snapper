@@ -46,6 +46,16 @@ class TestKrakenEquitiesMarketDataPublisher:
         publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
         assert publisher._get_exchange_name() == "kraken_equities"
 
+    def test_candle_source_for_returns_calculated(self) -> None:
+        """Verify equities 1m bars are tagged calculated (trade-built).
+
+        Given: A KrakenEquitiesMarketDataPublisher instance,
+        When: _candle_source_for is called for 1m,
+        Then: Returns 'calculated' (Snapper-computed, not venue OHLC).
+        """
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        assert publisher._candle_source_for("1m") == "calculated"
+
     def test_validate_symbols_filters_invalid(self) -> None:
         """Verify invalid symbols are filtered out.
 

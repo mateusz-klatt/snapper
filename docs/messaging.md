@@ -823,8 +823,12 @@ Key properties:
     `source='synthesized'` and carrying the aggregator's `complete`
     trustworthy-boundary flag, under the SAME persist policy
     (`_should_persist_row`) as the `1m` stream. Provenance is `source ∈
-    {native, synthesized}` + `complete` (a trustworthy-boundary bool, NOT a
-    full-minute-coverage assertion). The candle READ path single-source cutover
+    {native, calculated, synthesized}` + `complete` (a trustworthy-boundary
+    bool, NOT a full-minute-coverage assertion). `native` = venue-precomputed
+    upstream OHLC (Kraken spot `ohlc:1m`, Polygon history, Kraken
+    futures/equities 1m REST-aggregate backfills); `calculated` = Snapper-built
+    live 1m from the trade/quote stream (Kraken futures/equities, Walutomat —
+    tagged from migration 0012 forward); `synthesized` = higher-TF rollups. The candle READ path single-source cutover
     is gated by the `candle_single_source` setting (default OFF): while OFF, the
     `/api/candles` smart route still derives `5m/15m/30m` on-read from the 1m
     cache; when ON, those frames serve single-source from the persisted plane

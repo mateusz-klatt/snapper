@@ -323,7 +323,9 @@ class Candle(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
-        CheckConstraint("source IN ('native', 'synthesized')", name="ck_candle_source"),
+        CheckConstraint(
+            "source IN ('native', 'calculated', 'synthesized')", name="ck_candle_source"
+        ),
     )
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
