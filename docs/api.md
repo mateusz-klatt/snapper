@@ -3061,7 +3061,7 @@ async function connect() {
         if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(controlFrame("ping")));
         }
-    }, 30000);
+    }, 5000);
 }
 ```
 

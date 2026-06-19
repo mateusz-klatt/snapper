@@ -110,7 +110,6 @@ resolved manually.
 
 ```bash
 curl -s -X POST -H "Authorization: Bearer $SNAPPER_PAT" \
-    -H "X-CSRF-Token: $CSRF" \
     "$SNAPPER_BASE_URL/api/paired-execution/groups/$GROUP_ID/terminalize" | jq
 ```
 

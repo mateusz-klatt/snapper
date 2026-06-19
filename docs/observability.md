@@ -391,7 +391,7 @@ poll-with-backoff using the `Retry-After` header.
 
 | Field | Type | Notes |
 |---|---|---|
-| `table` | `str` | Table name (key in `EVENT_TABLES` or `STATE_TABLES`). |
+| `table` | `str` | Table name. Usually a key in `EVENT_TABLES` or `STATE_TABLES`; `candles` is also sampled (as a state-kind table) despite living outside both archiver registries. |
 | `table_kind` | `"event"` \| `"state"` | Discriminates wire semantics. |
 | `total` | `int \| null` | Total row count. On PostgreSQL this is a `pg_class.reltuples` planner estimate (`GREATEST(reltuples, 0)` — fast, accurate within `ANALYZE`/autovacuum drift, intended for growth-trend monitoring); on the SQLite dev fixture it is an exact `COUNT(*)`. `null` only on per-table query failure with no prior sample to clone. |
 | `current` | `int \| null` | Active SCD2 versions (rows whose `known_to` equals the SCD2 sentinel) for state tables; `null` for event tables (no SCD2 lifecycle — reporting `0` would imply the dimension exists). |

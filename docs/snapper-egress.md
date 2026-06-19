@@ -19,7 +19,7 @@ This sidecar is part of the egress-multiplexer subsystem.
   with no declared tunnels still expose `/ready` without probing
   WireGuard. Use `/readyz` when you need strict "every declared tunnel
   is up" semantics.
-- **`MASTER_PASSWORD`** in the same `.env` the snapper-api container
+- **`MASTER_PASSWORD`** in the same `.env` the `snapper` (API) container
   uses. The sidecar reads encrypted `egress_tunnel_*_private_key`
   settings via the same Fernet path; mismatched master passwords
   silently mean "no tunnels load".
@@ -87,8 +87,8 @@ encrypted private/optional preshared key settings, and merges the SOCKS5
 route into `egress_pool`. It can also restart the sidecar with
 `--restart-sidecar`. After `egress_pool` changes, restart
 **snapper-feed** (each feed-publisher process builds its own
-process-local pool at start) in addition to snapper-api — restarting
-only the API rebuilds the API process's pool but not the pools the
+process-local pool at start) in addition to `snapper` (the API tier) —
+restarting only the API rebuilds the API process's pool but not the pools the
 Kraken/Walutomat feeds actually dial through.
 
 Manual path:
@@ -117,7 +117,7 @@ Once the three keys exist in the DB, restart the sidecar:
 docker compose restart snapper-egress
 ```
 
-The container's lifespan calls `load_declared_tunnels(service)` →
+The sidecar orchestrator (`run_sidecar`) calls `load_declared_tunnels(service)` →
 `wg_control.bring_up(...)` → `Socks5Server.start()` for each tunnel.
 Failures are best-effort: one bad tunnel does NOT block the others.
 
@@ -198,7 +198,7 @@ NO_AUTH greeting. A route that fails preflight is auto-disabled in that
 process's effective config, so restart every process that should use
 the updated route set.
 
-The lifespan logs:
+The orchestrator logs:
 
 ```
 egress_pool: configured with 2 route(s), on_all_quarantined=wait
@@ -292,7 +292,8 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
 ## Decommissioning a tunnel
 
 1. Remove the route from `egress_pool` (set `enabled: false` on that
-   route OR delete the entry); restart snapper-api.
+   route OR delete the entry); restart the API and feed tiers
+   (`docker compose restart snapper snapper-feed`).
 2. Delete the three settings (`egress_tunnel_<id>`,
    `egress_tunnel_<id>_private_key`,
    `egress_tunnel_<id>_preshared_key`).

@@ -84,7 +84,7 @@ the complete quality gate using the consolidated Makefile targets before creatin
 7) Coverage (must be 100% - TDD requirement)
 
 - `make cov`
-    - The repo enforces 100% coverage threshold via .coveragerc configuration (TDD).
+    - The repo enforces 100% coverage threshold via the `[tool.coverage.report]` `fail_under = 100` setting in `pyproject.toml` (TDD).
 
 8) Full verification (REQUIRED before task completion)
 
