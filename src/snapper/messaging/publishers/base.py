@@ -72,6 +72,8 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedSubscribe
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
+from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
+from snapper.messaging.publishers.native_candle_finalizer import window_seconds
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import SettingChangedData
@@ -175,22 +177,6 @@ restart-and-retry cadence (self-healing the instant connectivity returns)
 rather than exhausting the lifetime restart budget and permanently abandoning
 the feed (which would recreate the multi-hour dark-feed incident this work
 fixes). The invariant is asserted in the test suite."""
-
-_TIMEFRAME_WINDOW_SECONDS: dict[str, int] = {
-    "1m": 60,
-    "5m": 300,
-    "15m": 900,
-    "30m": 1800,
-    "1h": 3600,
-    "4h": 14400,
-    "1d": 86400,
-}
-"""Canonical candle-window width per timeframe label, in seconds.
-
-Used to derive the living-candle ``complete`` flag from the bar's window end.
-Keyed by the timeframe LABEL, not ``CandleUpdate.interval`` — venues disagree on
-the latter's unit (Kraken spot encodes ``1m`` as ``interval=1`` minutes, not 60
-seconds), so the label is the only portable width signal."""
 
 _FEED_HEALTH_FLUSH_INTERVAL_S = 30.0
 """Cadence for persisting the subscription-health snapshot to the DB.
@@ -507,6 +493,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._candle_consumer_tasks: list[asyncio.Task[None]] = []
         self._candle_aggregator: CandleAggregator | None = None
         self._candle_flush_loop_task: asyncio.Task[None] | None = None
+        self._native_finalizer: NativeCandleFinalizer | None = None
+        self._native_finalize_flush_task: asyncio.Task[None] | None = None
+        self._persist_intermediate_candles: bool = False
         self._candle_writer_task: asyncio.Task[None] | None = None
         self._candle_writer_session: AsyncSession | None = None
         self._trade_write_queue: asyncio.Queue[TradeUpsertRow] = asyncio.Queue(
@@ -865,6 +854,17 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     f"(native: {sorted(native)})"
                 )
         self._consumes_native_candles = bool(candle_consumer_timeframes)
+        self._native_finalizer = None
+        if self._consumes_native_candles:
+            self._persist_intermediate_candles = self.settings.persist_intermediate_candles
+            self._native_finalizer = NativeCandleFinalizer(
+                persist_intermediate=self._persist_intermediate_candles,
+                flush_grace_seconds=_CANDLE_FLUSH_GRACE_S,
+            )
+            self._native_finalize_flush_task = asyncio.create_task(
+                self._native_finalize_flush_loop(self._get_data_exchange())
+            )
+            tasks.append(self._native_finalize_flush_task)
         self._candle_consumer_tasks = [
             asyncio.create_task(
                 self._supervise_consumer(
@@ -998,15 +998,33 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._tick_writer_task = None
 
     async def _stop_candle_pipeline(self) -> None:
-        """Stop and drain candle consumers, the flush loop, and the writer pipeline."""
+        """Stop and drain candle consumers, the flush loops, and the writer pipeline.
+
+        Ordering is load-bearing: both flush loops and the consumers are stopped
+        before the native finalizer is drained (so no concurrent ``observe`` /
+        ``flush`` mutates its held state), and the drain runs BEFORE the writer
+        queue is joined so ``join`` blocks until every drained final bar is
+        written — draining after the join would silently lose every held ended
+        bar on a clean shutdown.
+        """
         if self._candle_flush_loop_task is not None:
             self._candle_flush_loop_task.cancel()
         await self._await_shutdown_task(self._candle_flush_loop_task)
         self._candle_flush_loop_task = None
+        if self._native_finalize_flush_task is not None:
+            self._native_finalize_flush_task.cancel()
+        await self._await_shutdown_task(self._native_finalize_flush_task)
+        self._native_finalize_flush_task = None
         for task in self._candle_consumer_tasks:
             task.cancel()
         await self._await_shutdown_tasks(self._candle_consumer_tasks)
         self._candle_consumer_tasks = []
+        if self._native_finalizer is not None:
+            self._enqueue_finalized_candles(
+                self._native_finalizer.drain(datetime.now(UTC)),
+                self._get_data_exchange(),
+                self._get_exchange_name(),
+            )
         await self._join_shutdown_queue(self._candle_write_queue)
         await self._await_shutdown_task(self._candle_writer_task)
         self._candle_writer_task = None
@@ -1683,11 +1701,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 if self._candle_aggregator is not None and timeframe == "1m":
                     synthesized = self._candle_aggregator.fold(cast(CandleUpdate, candle))
                 row = await self._process_candle(cast(CandleUpdate, candle), exchange, timeframe)
-                if row is not None and self._should_persist_row(
-                    "candles", exchange, cast(CandleUpdate, candle).symbol
-                ):
-                    _enqueue_or_drop_oldest_candle_write(
-                        self._candle_write_queue, row, exchange_label
+                if row is not None:
+                    self._enqueue_finalized_candles(
+                        self._observe_native_candle(cast(CandleUpdate, candle).symbol, row),
+                        exchange,
+                        exchange_label,
                     )
                 for tf_label, synth in synthesized:
                     await self._publish_synthesized_candle(synth, exchange, tf_label)
@@ -1697,6 +1715,70 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             logger.error(f"Candle loop error for {symbols}: {e}")
         finally:
             _cleanup_pending_future(next_fut)
+
+    def _observe_native_candle(
+        self, native_symbol: str, row: CandleUpsertRow
+    ) -> list[tuple[str, CandleUpsertRow]]:
+        """Route a native candle row through the finalizer (or pass it through).
+
+        Args:
+            native_symbol: Native symbol of the frame (for the persist gate).
+            row: The built candle row for the current frame.
+
+        Returns:
+            ``(native_symbol, row)`` pairs to persist — the finalizer's release
+            set, or the row as-is when no finalizer is installed (non-candle
+            publishers / direct-call tests).
+        """
+        if self._native_finalizer is None:
+            return [(native_symbol, row)]
+        return self._native_finalizer.observe(native_symbol, row)
+
+    def _enqueue_finalized_candles(
+        self,
+        released: list[tuple[str, CandleUpsertRow]],
+        exchange: MarketDataExchange,
+        exchange_label: str,
+    ) -> None:
+        """Enqueue each released candle row that passes the per-symbol persist gate.
+
+        Args:
+            released: ``(native_symbol, row)`` pairs released by the finalizer.
+            exchange: Exchange for the persist-policy lookup.
+            exchange_label: Exchange label for write-queue drop logging.
+        """
+        for native_symbol, row in released:
+            if self._should_persist_row("candles", exchange, native_symbol):
+                _enqueue_or_drop_oldest_candle_write(self._candle_write_queue, row, exchange_label)
+
+    async def _native_finalize_flush_loop(self, exchange: MarketDataExchange) -> None:
+        """Release native bars whose window has ended (illiquid/stalled symbols).
+
+        Mirrors :meth:`_candle_flush_loop`'s scaffolding but for the native-1m
+        finalizer: every :data:`_CANDLE_FLUSH_INTERVAL_S` it asks the finalizer to
+        release any held window ended past the grace and enqueues each for
+        persistence. Runs for every native-candle publisher (not only
+        forward-fill venues) so a symbol that stops trading still gets its last
+        bar persisted. One bad tick is logged and never kills the loop.
+
+        Args:
+            exchange: Exchange name for provenance / persist-policy lookup.
+        """
+        exchange_label = self._get_exchange_name()
+        while self.running:
+            try:
+                await asyncio.sleep(_CANDLE_FLUSH_INTERVAL_S)
+                if not self.running:
+                    break
+                if self._native_finalizer is None:
+                    continue
+                self._enqueue_finalized_candles(
+                    self._native_finalizer.flush(datetime.now(UTC)), exchange, exchange_label
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Native candle finalize flush loop error: {e}")
 
     async def _candle_flush_loop(self, exchange: MarketDataExchange) -> None:
         """Drive the time-driven higher-TF candle flush (Phase 1b forward-fill).
@@ -1850,8 +1932,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             native_symbol, MarketDataTypeEnum.CANDLES, timeframe=timeframe
         )
         received_at = datetime.now(UTC)
-        window_seconds = _TIMEFRAME_WINDOW_SECONDS.get(timeframe, 0)
-        window_closed = received_at >= candle.interval_begin + timedelta(seconds=window_seconds)
+        window_closed = received_at >= candle.interval_begin + timedelta(
+            seconds=window_seconds(timeframe)
+        )
         candle_msg = CandleData(
             public_id=public_id,
             timestamp=received_at,
@@ -1871,7 +1954,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             complete=window_closed,
         )
         row = self._build_candle_row(
-            candle_msg, instrument_public_id, source=self._candle_source_for(timeframe)
+            candle_msg,
+            instrument_public_id,
+            source=self._candle_source_for(timeframe),
+            complete=candle_msg.complete,
         )
         await self._publish_message(topic, candle_msg)
         self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
@@ -1952,13 +2038,17 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         update frame and is left for the live stream to finalize. ``get_candles``
         filters ``open_at <= end`` (inclusive), so the read ends one microsecond
         before the current minute. If ANY persisted minute in a window is NON-FINAL
-        (last written before its minute closed, ``timestamp < open_at + 60s`` — e.g.
-        the minute in progress when the publisher crashed), the WHOLE window is left
-        unseeded: live frames then rebuild it mid-window and the aggregator's
-        complete-window guard suppresses it, so a knowingly-incomplete bar is never
-        published (it self-heals on the next fully-observed window). This fails safe
-        — the worst case is a suppressed first window after a crash, never a stale
-        bar.
+        (its durable ``complete`` flag is False — e.g. an intermediate bar written
+        with ``persist_intermediate_candles`` on, or a minute in progress when the
+        publisher crashed), the WHOLE window is left unseeded: live frames then
+        rebuild it mid-window and the aggregator's complete-window guard suppresses
+        it, so a knowingly-incomplete bar is never published (it self-heals on the
+        next fully-observed window). This fails safe — the worst case is a
+        suppressed first window after a crash, never a stale bar. The check reads
+        the persisted ``complete`` column (not a write-time heuristic), so a
+        finalized illiquid bar whose last frame arrived before its minute closed —
+        sealed ``complete=True`` with a pre-close ``timestamp`` by
+        :class:`NativeCandleFinalizer` — is correctly treated as final.
 
         Known Phase-1 residual: if the seed itself crosses a minute boundary (it
         starts late in a minute and finishes after the next minute has closed),
@@ -2017,9 +2107,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     native_symbol, "1m", read_start, end, exchange, now, order="asc"
                 )
                 candidates = [row for row in rows if row["open_at"] < minute_floor]
-                if any(
-                    row["timestamp"] < row["open_at"] + timedelta(seconds=60) for row in candidates
-                ):
+                if any(not row["complete"] for row in candidates):
                     continue
                 for row in candidates:
                     self._candle_aggregator.seed_1m(
@@ -2668,8 +2756,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             instrument_public_id: Resolved instrument identity.
             source: Provenance tag — ``native`` for exchange-native frames
                 (all 1m), ``synthesized`` for aggregator higher-TF rollups.
-            complete: Trustworthy-boundary flag (always True for native
-                frames; carried from the aggregator bucket for synthesized).
+            complete: Whether the bar's window has closed. For native frames it
+                carries the window-closed flag (False for an in-progress minute,
+                True once elapsed / when sealed by the finalizer); for synthesized
+                bars it carries the aggregator bucket's trustworthy-boundary flag.
 
         Returns:
             Fully materialized row dict ready for repository upsert.

@@ -326,6 +326,7 @@ controlled by these settings so high-volume feeds can be cache-first:
 | `market_persist_ticks` | Persistence mode for tick rows |
 | `market_persist_trades` | Persistence mode for trade rows |
 | `market_persist_candles` | Persistence mode for candle rows |
+| `persist_intermediate_candles` | When `false` (default) only the FINAL bar per native window is persisted (the native finalizer eliminates intra-minute SCD2 churn); `true` also persists in-progress `complete=false` bars, superseded by the final. ZMQ publishes every frame regardless. |
 | `market_persist_extra` | Explicit extra instrument allowlist |
 | `market_persist_exclude` | Explicit instrument denylist |
 

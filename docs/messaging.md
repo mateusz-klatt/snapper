@@ -837,10 +837,23 @@ Key properties:
     dual-source hazard. Enable it only after the persisted plane is populated and
     `verify-candle-coverage` passes (else the read would be empty/short). `1m`
     stays cache-served and `1h/4h/1d` are already DB-served regardless.
+- **Native 1m persistence is final-only by default** — every native 1m frame is
+    published to ZMQ (the living candle), but the `NativeCandleFinalizer` holds
+    the in-progress minute and persists exactly ONE `complete=True` bar per
+    window — on the next minute's first frame (boundary), or via a 30s wall-clock
+    flush for an illiquid/stalled symbol, or on shutdown drain. This eliminates
+    the intra-minute SCD2 "temporary candle" churn. Operator caveat: a 1m bar's
+    DB row therefore lags the live minute by up to one flush interval (~35s); the
+    cache/`/api/candles` live reads are ZMQ-fed and unaffected, and on a hard
+    crash the current held minute self-heals on restart (the venue re-sends it).
+    Set `persist_intermediate_candles=true` to also persist the in-progress
+    `complete=false` frames (superseded by the final).
 - **Restart rebuild** — on startup the open window of each higher timeframe is
     rebuilt from the persisted `1m` history (excluding the current open minute,
     which the live stream finalizes), so a mid-window restart does not truncate
-    that window's bar.
+    that window's bar. The seed reads each row's durable `complete` flag (not a
+    write-time heuristic) to decide finality, so a finalized illiquid bar sealed
+    with a pre-close write timestamp is correctly seeded.
 - **Forward-fill (opt-in, default off)** — with `candle_forward_fill` enabled, a
     time-driven flush (every 30s) seals a wall-clock-ended window that no later
     1m arrived to close, and forward-fills empty windows with a flat bar

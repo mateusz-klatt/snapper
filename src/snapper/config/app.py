@@ -519,6 +519,28 @@ class AppSettings:
         return self._get_db_setting("candle_forward_fill", False)
 
     @property
+    def persist_intermediate_candles(self) -> bool:
+        """Return whether in-progress (non-final) native candle bars are persisted.
+
+        Default ``False``: the native-candle finalizer persists only the FINAL
+        ``complete=True`` bar per window, eliminating the intra-minute SCD2
+        "temporary candle" churn. When ``True`` the in-progress ``complete=False``
+        frames are also written (and SCD2-superseded by the final), restoring
+        per-frame persistence for forensic use. This gates ONLY the DB write; the
+        living candle is published on every frame to ZMQ regardless.
+
+        Returns:
+            ``True`` to also persist intermediate bars; ``False`` (default) to
+            persist only the final bar per window.
+        """
+        raw = self._get_db_setting("persist_intermediate_candles", False)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in ("true", "1", "yes", "on")
+        return bool(raw)
+
+    @property
     def candle_single_source(self) -> bool:
         """Return whether ``>1m`` candle reads serve single-source from the DB.
 

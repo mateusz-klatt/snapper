@@ -51,6 +51,7 @@ from snapper.messaging.publishers.base import _WriterSessionLostError
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
+from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import SettingChangedData
@@ -292,6 +293,7 @@ async def test_start_warns_on_symbol_limit(monkeypatch: pytest.MonkeyPatch) -> N
     pub._trade_writer_loop = AsyncMock()
     pub._candle_loop = AsyncMock()
     pub._candle_writer_loop = AsyncMock()
+    pub._native_finalize_flush_loop = AsyncMock()
     await pub.start()
     await pub.stop()
 
@@ -369,6 +371,7 @@ def _mock_start_runtime(pub: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     pub._trade_writer_loop = noop
     pub._candle_loop = noop
     pub._candle_writer_loop = noop
+    pub._native_finalize_flush_loop = noop
     monkeypatch.setattr(
         "snapper.messaging.publishers.base.asyncio.gather", AsyncMock(return_value=None)
     )
@@ -2672,6 +2675,7 @@ async def test_start_skips_trade_loop_when_unsupported(monkeypatch: pytest.Monke
     pub._trade_writer_loop = AsyncMock()
     pub._candle_loop = AsyncMock()
     pub._candle_writer_loop = AsyncMock()
+    pub._native_finalize_flush_loop = AsyncMock()
     await pub.start()
     pub._trade_loop.assert_not_awaited()
     await pub.stop()
@@ -3238,6 +3242,7 @@ class TestFeedPublisherCoverage:
             ),
             patch.object(publisher, "_candle_loop", new=AsyncMock()),
             patch.object(publisher, "_candle_writer_loop", new=AsyncMock()),
+            patch.object(publisher, "_native_finalize_flush_loop", new=AsyncMock()),
             patch.object(publisher, "_tick_loop", new=AsyncMock()),
             patch.object(publisher, "_tick_writer_loop", new=AsyncMock()),
             patch.object(publisher, "_trade_loop", new=AsyncMock()),
@@ -7815,6 +7820,208 @@ async def test_candle_flush_loop_propagates_cancellation(
         await pub._candle_flush_loop(cast(Any, "kraken"))
 
 
+def _finalized_row(*, ipid: str = "inst-1", open_at: datetime) -> CandleUpsertRow:
+    """Build a candle row for native-finalizer wiring tests."""
+    return CandleUpsertRow(
+        instrument_public_id=ipid,
+        open_at=open_at,
+        timestamp=open_at,
+        timeframe="1m",
+        open=1.0,
+        high=2.0,
+        low=0.5,
+        close=1.5,
+        volume=10.0,
+        vwap=1.25,
+        trades=3,
+        source="native",
+        complete=False,
+    )
+
+
+def test_observe_native_candle_passthrough_without_finalizer() -> None:
+    """Without a finalizer, the row passes through unchanged for enqueue.
+
+    Given: a publisher with no native finalizer installed,
+    When: a native candle row is observed,
+    Then: the (symbol, row) pair is returned as-is (legacy per-frame behavior).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._native_finalizer = None
+    row = _finalized_row(open_at=_candle_minute(10, 0))
+    assert pub._observe_native_candle("BTC-USD", row) == [("BTC-USD", row)]
+
+
+def test_observe_native_candle_delegates_to_finalizer() -> None:
+    """With a finalizer, observation is delegated to it.
+
+    Given: a publisher with a native finalizer holding a prior window,
+    When: a later window's row is observed,
+    Then: the finalizer's release (the finalized predecessor) is returned.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._native_finalizer = NativeCandleFinalizer(
+        persist_intermediate=False, flush_grace_seconds=5.0
+    )
+    first = _finalized_row(open_at=_candle_minute(10, 0))
+    pub._observe_native_candle("BTC-USD", first)
+    released = pub._observe_native_candle("BTC-USD", _finalized_row(open_at=_candle_minute(10, 1)))
+    assert len(released) == 1
+    assert released[0][1]["open_at"] == _candle_minute(10, 0)
+    assert released[0][1]["complete"] is True
+
+
+def test_enqueue_finalized_candles_respects_persist_gate() -> None:
+    """Released rows are enqueued only when the persist policy allows.
+
+    Given: two released rows and a persist gate that allows one symbol,
+    When: they are enqueued,
+    Then: only the allowed symbol's row reaches the write queue.
+    """
+    pub: Any = DummyPublisher(symbols=["A-USD", "B-USD"])
+    pub._candle_write_queue = asyncio.Queue()
+    pub._should_persist_row = lambda _kind, _exch, sym: sym == "A-USD"
+    row_a = _finalized_row(ipid="inst-a", open_at=_candle_minute(10, 0))
+    row_b = _finalized_row(ipid="inst-b", open_at=_candle_minute(10, 0))
+    pub._enqueue_finalized_candles(
+        [("A-USD", row_a), ("B-USD", row_b)], cast(Any, "kraken"), "kraken"
+    )
+    assert pub._candle_write_queue.qsize() == 1
+    assert pub._candle_write_queue.get_nowait()["instrument_public_id"] == "inst-a"
+
+
+@pytest.mark.asyncio
+async def test_native_finalize_flush_loop_enqueues_flushed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The native flush loop enqueues each released bar that passes the gate.
+
+    Given: a finalizer whose flush yields one ended bar,
+    When: the flush loop ticks once,
+    Then: the bar is enqueued and the loop exits.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_write_queue = asyncio.Queue()
+    pub._should_persist_row = lambda *_a, **_k: True
+    row = _finalized_row(open_at=_candle_minute(10, 0))
+    finalizer = MagicMock()
+
+    def _flush(_now: datetime) -> list[tuple[str, Any]]:
+        pub.running = False
+        return [("BTC-USD", row)]
+
+    finalizer.flush = MagicMock(side_effect=_flush)
+    pub._native_finalizer = finalizer
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep", AsyncMock(return_value=None)
+    )
+    await pub._native_finalize_flush_loop(cast(Any, "kraken"))
+    assert pub._candle_write_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_native_finalize_flush_loop_skips_when_finalizer_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The native flush loop is a no-op when no finalizer is installed.
+
+    Given: no native finalizer,
+    When: the flush loop ticks,
+    Then: nothing is enqueued and the loop exits on the running flag.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_write_queue = asyncio.Queue()
+    pub._native_finalizer = None
+    ticks = {"count": 0}
+
+    async def _sleep(_seconds: float) -> None:
+        ticks["count"] += 1
+        if ticks["count"] >= 2:
+            pub.running = False
+
+    monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", _sleep)
+    await pub._native_finalize_flush_loop(cast(Any, "kraken"))
+    assert pub._candle_write_queue.qsize() == 0
+
+
+@pytest.mark.asyncio
+async def test_native_finalize_flush_loop_survives_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flush error is logged and does not crash the native flush loop.
+
+    Given: a finalizer whose flush raises,
+    When: the flush loop ticks,
+    Then: the error is swallowed and the loop exits on the running flag.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_write_queue = asyncio.Queue()
+    finalizer = MagicMock()
+
+    def _flush(_now: datetime) -> list[tuple[str, Any]]:
+        pub.running = False
+        raise RuntimeError("boom")
+
+    finalizer.flush = MagicMock(side_effect=_flush)
+    pub._native_finalizer = finalizer
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep", AsyncMock(return_value=None)
+    )
+    await pub._native_finalize_flush_loop(cast(Any, "kraken"))
+    assert pub._candle_write_queue.qsize() == 0
+
+
+@pytest.mark.asyncio
+async def test_native_finalize_flush_loop_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The native flush loop re-raises CancelledError so shutdown can await it.
+
+    Given: a flush loop whose sleep is cancelled,
+    When: the loop ticks,
+    Then: CancelledError propagates.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._native_finalizer = MagicMock()
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await pub._native_finalize_flush_loop(cast(Any, "kraken"))
+
+
+@pytest.mark.asyncio
+async def test_stop_candle_pipeline_drains_finalizer_before_join() -> None:
+    """Shutdown drains the finalizer's ended bars before joining the write queue.
+
+    Given: a publisher whose finalizer holds an ended window,
+    When: the candle pipeline is stopped,
+    Then: the drained final bar is enqueued (so the queue join persists it) and
+        the native flush task is cancelled.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_write_queue = asyncio.Queue()
+    pub._should_persist_row = lambda *_a, **_k: True
+    pub._candle_consumer_tasks = []
+    pub._candle_writer_task = None
+    pub._candle_flush_loop_task = None
+    pub._join_shutdown_queue = AsyncMock()
+    pub._await_shutdown_task = AsyncMock()
+    pub._await_shutdown_tasks = AsyncMock()
+    pub._native_finalize_flush_task = asyncio.create_task(asyncio.sleep(60))
+    finalizer = NativeCandleFinalizer(persist_intermediate=False, flush_grace_seconds=5.0)
+    finalizer.observe("BTC-USD", _finalized_row(open_at=_candle_minute(10, 0)))
+    pub._native_finalizer = finalizer
+    await pub._stop_candle_pipeline()
+    assert pub._candle_write_queue.qsize() == 1
+    assert pub._native_finalize_flush_task is None
+
+
 @pytest.mark.asyncio
 async def test_candle_loop_publishes_synthesized_higher_timeframe() -> None:
     """Verify the candle loop publishes a synthesized higher-TF bar.
@@ -8023,6 +8230,7 @@ async def test_seed_aggregator_rebuilds_open_bucket_excluding_current_minute() -
             "trades": None,
             "public_id": "p1",
             "timestamp": now,
+            "complete": True,
             "session_id": "s",
             "sequence_id": 1,
         },
@@ -8038,6 +8246,7 @@ async def test_seed_aggregator_rebuilds_open_bucket_excluding_current_minute() -
             "trades": 4,
             "public_id": "p2",
             "timestamp": now,
+            "complete": True,
             "session_id": "s",
             "sequence_id": 2,
         },
@@ -8053,6 +8262,7 @@ async def test_seed_aggregator_rebuilds_open_bucket_excluding_current_minute() -
             "trades": 9,
             "public_id": "p3",
             "timestamp": now,
+            "complete": True,
             "session_id": "s",
             "sequence_id": 3,
         },
@@ -8101,6 +8311,7 @@ async def test_seed_aggregator_rebuilds_previous_window_in_first_minute() -> Non
             "trades": 3,
             "public_id": "p1",
             "timestamp": now,
+            "complete": True,
             "session_id": "s",
             "sequence_id": 1,
         }
@@ -8139,8 +8350,8 @@ async def test_seed_aggregator_skips_unconfigured_timeframe() -> None:
 async def test_seed_aggregator_skips_window_with_nonfinal_minute() -> None:
     """Verify a window containing any non-final persisted 1m is not seeded.
 
-    Given: the current 1h window holds a finalized minute and a non-final one
-        (its row was last written before the minute closed),
+    Given: the current 1h window holds a finalized minute (complete=True) and a
+        non-final one (complete=False),
     When: the aggregator is seeded,
     Then: the WHOLE window is left unseeded (so the complete-window guard later
         suppresses the knowingly-incomplete bar).
@@ -8161,6 +8372,7 @@ async def test_seed_aggregator_skips_window_with_nonfinal_minute() -> None:
             "trades": 2,
             "public_id": "p1",
             "timestamp": datetime(2026, 6, 14, 10, 1, 5, tzinfo=UTC),
+            "complete": True,
             "session_id": "s",
             "sequence_id": 1,
         },
@@ -8176,6 +8388,7 @@ async def test_seed_aggregator_skips_window_with_nonfinal_minute() -> None:
             "trades": 5,
             "public_id": "p2",
             "timestamp": datetime(2026, 6, 14, 10, 5, 30, tzinfo=UTC),
+            "complete": False,
             "session_id": "s",
             "sequence_id": 2,
         },
@@ -8184,6 +8397,44 @@ async def test_seed_aggregator_skips_window_with_nonfinal_minute() -> None:
     await pub._seed_aggregator_from_db(["BTC-USD"], ["1h"], now)
     key = ("BTC-USD", "1h", int(_candle_minute(10, 0).timestamp()))
     assert key not in pub._candle_aggregator._buckets
+
+
+@pytest.mark.asyncio
+async def test_seed_aggregator_seeds_finalized_bar_with_preclose_timestamp() -> None:
+    """A finalized bar sealed with a pre-close timestamp is still seeded.
+
+    Given: a finalized 1m row (complete=True) whose write timestamp is before the
+        minute closed — as NativeCandleFinalizer seals an illiquid pair's last
+        frame,
+    When: the aggregator is seeded,
+    Then: the window IS seeded (the seed reads the durable complete flag, not the
+        write-time heuristic that would have misclassified this final bar).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    now = datetime(2026, 6, 14, 10, 30, 30, tzinfo=UTC)
+    pub._candle_aggregator = CandleAggregator(["1h"], live_epoch=now)
+    rows = [
+        {
+            "open_at": _candle_minute(10, 0),
+            "timeframe": "1m",
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 4.0,
+            "vwap": 10.0,
+            "trades": 2,
+            "public_id": "p1",
+            "timestamp": datetime(2026, 6, 14, 10, 0, 20, tzinfo=UTC),
+            "complete": True,
+            "session_id": "s",
+            "sequence_id": 1,
+        }
+    ]
+    pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=rows))
+    await pub._seed_aggregator_from_db(["BTC-USD"], ["1h"], now)
+    key = ("BTC-USD", "1h", int(_candle_minute(10, 0).timestamp()))
+    assert key in pub._candle_aggregator._buckets
 
 
 @pytest.mark.asyncio
@@ -8230,6 +8481,7 @@ async def test_seed_aggregator_rebuilds_both_1h_and_1d() -> None:
                 "trades": 1,
                 "public_id": "p",
                 "timestamp": now,
+                "complete": True,
                 "session_id": "s",
                 "sequence_id": 1,
             }
