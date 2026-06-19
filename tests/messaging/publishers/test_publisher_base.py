@@ -868,6 +868,129 @@ async def test_await_recovery_progress_true_after_stop_if_data_resumed() -> None
     assert await pub._await_recovery_progress(0.0) is True
 
 
+def test_recovery_progress_made_message_only() -> None:
+    """Without a candle baseline, only message progress is required.
+
+    Given: A publisher whose message watermark advanced past baseline,
+    When: Progress is evaluated with no candle baseline,
+    Then: It reports progress regardless of the candle watermark.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._last_message_at = 100.0
+    pub._last_candle_msg_at = 0.0
+    assert pub._recovery_progress_made(0.0, None) is True
+    pub._last_message_at = 0.0
+    assert pub._recovery_progress_made(0.0, None) is False
+
+
+def test_recovery_progress_made_candle_aware() -> None:
+    """With a candle baseline, both watermarks must advance.
+
+    Given: A publisher whose message watermark advanced,
+    When: Progress is evaluated with a candle baseline,
+    Then: It reports progress only once the candle watermark also advances.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._last_message_at = 100.0
+    pub._last_candle_msg_at = 0.0
+    assert pub._recovery_progress_made(0.0, 0.0) is False
+    pub._last_candle_msg_at = 100.0
+    assert pub._recovery_progress_made(0.0, 0.0) is True
+
+
+@pytest.mark.asyncio
+async def test_await_recovery_progress_candle_aware_true_when_candle_arrives() -> None:
+    """A candle-aware wait succeeds once a fresh candle arrives.
+
+    Given: A running publisher whose message and candle watermarks both
+        advanced past their baselines,
+    When: Progress is observed with a candle baseline,
+    Then: True is returned immediately.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_message_at = 100.0
+    pub._last_candle_msg_at = 100.0
+    assert await pub._await_recovery_progress(0.0, 0.0) is True
+
+
+@pytest.mark.asyncio
+async def test_await_recovery_progress_candle_aware_false_when_only_trades_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trade flow alone does not satisfy a candle-aware recovery wait.
+
+    Given: A running publisher whose message watermark advanced but whose
+        candle watermark did not, with the candle grace elapsed,
+    When: Progress is observed with a candle baseline,
+    Then: False is returned so the recovery keeps retrying.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_message_at = 100.0
+    pub._last_candle_msg_at = 0.0
+    monkeypatch.setattr("snapper.messaging.publishers.base._CANDLE_RECOVERY_PROGRESS_GRACE_S", 0.0)
+    assert await pub._await_recovery_progress(0.0, 0.0) is False
+
+
+@pytest.mark.asyncio
+async def test_run_recovery_candle_aware_retries_until_candle_resumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candle-triggered recovery retries until a native candle resumes.
+
+    Given: A running publisher whose first attempt restores trades but no
+        candle, and whose second attempt restores a candle,
+    When: Recovery runs requiring candle progress,
+    Then: It retries past the trade-only attempt and returns once the candle
+        watermark advances.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_message_at = 0.0
+    pub._last_candle_msg_at = 0.0
+    calls = {"n": 0}
+
+    def _attempt(_reason: str) -> None:
+        calls["n"] += 1
+        pub._last_message_at = 100.0 + calls["n"]
+        if calls["n"] >= 2:
+            pub._last_candle_msg_at = 100.0
+
+    pub._attempt_liveness_recovery = AsyncMock(side_effect=_attempt)
+    pub._sleep_with_jitter = AsyncMock()
+    monkeypatch.setattr("snapper.messaging.publishers.base._CANDLE_RECOVERY_PROGRESS_GRACE_S", 0.0)
+    await pub._run_recovery_under_lock("no_candles_for_400s", require_candle_progress=True)
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_spawn_recovery_forwards_candle_progress_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The candle-progress flag flows from spawn to the recovery loop.
+
+    Given: A running publisher past the recovery min-interval,
+    When: Recovery is spawned with require_candle_progress=True,
+    Then: The recovery loop receives the flag.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_recovery_at = 0.0
+    captured: dict[str, object] = {}
+
+    async def _fake_run(reason: str, *, require_candle_progress: bool = False) -> None:
+        captured["reason"] = reason
+        captured["flag"] = require_candle_progress
+
+    pub._run_recovery_under_lock = _fake_run
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub._spawn_recovery("no_candles_for_400s", require_candle_progress=True)
+    await asyncio.gather(*pub._recovery_tasks)
+    assert captured["flag"] is True
+    assert captured["reason"] == "no_candles_for_400s"
+
+
 @pytest.mark.asyncio
 async def test_sleep_with_jitter_applies_bounded_jitter(
     monkeypatch: pytest.MonkeyPatch,
@@ -1093,6 +1216,237 @@ async def test_dark_feed_exit_suppressed_when_threshold_zero() -> None:
     pub._publish_heartbeat = publish_once
     await pub._heartbeat_loop()
     pub._spawn_recovery.assert_not_called()
+
+
+def test_candle_liveness_threshold_disabled_by_default() -> None:
+    """The native-candle liveness guard is opt-in per venue.
+
+    Given: A base publisher,
+    When: The candle liveness threshold is read,
+    Then: It returns zero, leaving the guard disabled for venues whose
+        candles track trade liveness.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    assert pub._candle_liveness_threshold_s() == 0
+
+
+def test_candle_liveness_fires_recovery_when_candles_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent candle channel triggers recovery while trades stay fresh.
+
+    Given: A publisher whose message watchdog is satisfied (ticks/trades
+        flowing) but whose native candle channel has been silent past the
+        candle threshold,
+    When: The liveness guard runs,
+    Then: Recovery is spawned with a no_candles reason.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=60)
+    pub._candle_liveness_threshold_s = Mock(return_value=300)
+    pub._consumes_native_candles = True
+    pub._spawn_recovery = Mock()
+    pub._last_message_at = 1000.0
+    pub._last_candle_msg_at = 0.0
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub._check_feed_liveness()
+    pub._spawn_recovery.assert_called_once()
+    assert pub._spawn_recovery.call_args.kwargs["reason"] == "no_candles_for_1000s"
+
+
+def test_candle_liveness_does_not_fire_when_candles_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh candles leave the candle guard quiet.
+
+    Given: A publisher whose last native candle is below the candle
+        threshold,
+    When: The liveness guard runs,
+    Then: Recovery is not spawned.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=60)
+    pub._candle_liveness_threshold_s = Mock(return_value=300)
+    pub._consumes_native_candles = True
+    pub._spawn_recovery = Mock()
+    pub._last_message_at = 1000.0
+    pub._last_candle_msg_at = 900.0
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub._check_feed_liveness()
+    pub._spawn_recovery.assert_not_called()
+
+
+def test_candle_liveness_skipped_when_threshold_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled candle guard never fires even on long candle silence.
+
+    Given: A publisher whose candle threshold hook returns zero with a very
+        stale last candle,
+    When: The liveness guard runs,
+    Then: Recovery is not spawned by the candle branch.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=60)
+    pub._candle_liveness_threshold_s = Mock(return_value=0)
+    pub._spawn_recovery = Mock()
+    pub._last_message_at = 1000.0
+    pub._last_candle_msg_at = 0.0
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub._check_feed_liveness()
+    pub._spawn_recovery.assert_not_called()
+
+
+def test_candle_liveness_does_not_raise_dark_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candle-only stall never escalates to a process exit.
+
+    Given: A publisher whose trade channel is fresh but whose candle
+        channel has been silent far past the dark-feed exit ceiling,
+    When: The liveness guard runs,
+    Then: It spawns recovery for the dead candle channel but does NOT raise
+        FeedDarkTooLongError, so the live trade feed is never killed.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=60)
+    pub._candle_liveness_threshold_s = Mock(return_value=300)
+    pub._consumes_native_candles = True
+    pub._spawn_recovery = Mock()
+    fresh_now = _DARK_FEED_EXIT_CEILING_S + 100.0
+    pub._last_message_at = fresh_now
+    pub._last_candle_msg_at = 0.0
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: fresh_now)
+    pub._check_feed_liveness()
+    pub._spawn_recovery.assert_called_once()
+    assert "no_candles_for_" in pub._spawn_recovery.call_args.kwargs["reason"]
+
+
+def test_message_recovery_is_candle_aware_on_candle_venue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a candle venue, a message-dark recovery also waits for candles.
+
+    Given: A candle venue whose message watchdog is stale but whose candle
+        watermark is fresh,
+    When: The liveness guard runs,
+    Then: It spawns a message recovery flagged to require candle progress, so
+        a general-outage recovery does not declare success on trades alone
+        and let the candle branch restart the just-restored socket.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=60)
+    pub._candle_liveness_threshold_s = Mock(return_value=300)
+    pub._consumes_native_candles = True
+    pub._spawn_recovery = Mock()
+    pub._last_message_at = 0.0
+    pub._last_candle_msg_at = 1000.0
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub._check_feed_liveness()
+    pub._spawn_recovery.assert_called_once()
+    assert pub._spawn_recovery.call_args.kwargs["reason"] == "no_messages_for_1000s"
+    assert pub._spawn_recovery.call_args.kwargs["require_candle_progress"] is True
+
+
+def test_liveness_both_thresholds_breached_each_branch_requires_candle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A general outage on a candle venue makes both triggers candle-aware.
+
+    Given: A candle venue stale on both the message and candle watchdogs but
+        below the dark-feed exit ceiling,
+    When: The liveness guard runs,
+    Then: Both branches request recovery with candle progress required (the
+        spawn-level dedup then collapses them to a single attempt).
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=60)
+    pub._candle_liveness_threshold_s = Mock(return_value=300)
+    pub._consumes_native_candles = True
+    pub._spawn_recovery = Mock()
+    pub._last_message_at = 0.0
+    pub._last_candle_msg_at = 0.0
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub._check_feed_liveness()
+    assert pub._spawn_recovery.call_count == 2
+    reasons = [call.kwargs["reason"] for call in pub._spawn_recovery.call_args_list]
+    assert reasons == ["no_messages_for_1000s", "no_candles_for_1000s"]
+    assert all(
+        call.kwargs["require_candle_progress"] is True
+        for call in pub._spawn_recovery.call_args_list
+    )
+
+
+def test_candle_liveness_skipped_when_no_candle_subscription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candle venue with no active candle subscription never churns.
+
+    Given: A venue that opts into the candle guard but is not consuming any
+        native candle (the degenerate timeframes=[] config),
+    When: The liveness guard runs with a very stale candle watermark,
+    Then: No recovery is spawned, so the guard cannot churn forever waiting
+        for a candle that is never subscribed.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=60)
+    pub._candle_liveness_threshold_s = Mock(return_value=300)
+    pub._consumes_native_candles = False
+    pub._spawn_recovery = Mock()
+    pub._last_message_at = 1000.0
+    pub._last_candle_msg_at = 0.0
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub._check_feed_liveness()
+    pub._spawn_recovery.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_feed_liveness_both_stale_spawns_single_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the real spawn, a both-stale heartbeat collapses to one recovery.
+
+    Given: A candle venue stale on both watchdogs, using the real
+        _spawn_recovery (only its attempt hook is stubbed),
+    When: The liveness guard runs,
+    Then: Exactly one recovery task is created — the second branch's spawn is
+        deduplicated by the just-set recovery timestamp.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=60)
+    pub._candle_liveness_threshold_s = Mock(return_value=300)
+    pub._consumes_native_candles = True
+    pub._last_recovery_at = 0.0
+    pub._last_message_at = 0.0
+    pub._last_candle_msg_at = 0.0
+    pub._attempt_liveness_recovery = AsyncMock()
+    pub._await_recovery_progress = AsyncMock(return_value=True)
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub._check_feed_liveness()
+    assert len(pub._recovery_tasks) == 1
+    await asyncio.gather(*pub._recovery_tasks)
+
+
+@pytest.mark.asyncio
+async def test_process_candle_bumps_candle_watermark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each native candle frame refreshes the candle liveness watermark.
+
+    Given: A publisher whose instrument resolution short-circuits,
+    When: A native candle is processed,
+    Then: The candle watermark advances to the current monotonic time even
+        though the row is dropped for an unresolved instrument.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._ensure_instrument = AsyncMock(return_value=None)
+    pub._last_candle_msg_at = 0.0
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 5000.0)
+    candle = _candle_update(begin=datetime(2026, 6, 19, 8, 0, tzinfo=UTC))
+    result = await pub._process_candle(candle, ExchangeEnum.KRAKEN, "1m")
+    assert result is None
+    assert pub._last_candle_msg_at == 5000.0
 
 
 def test_dark_feed_ceiling_exceeds_launcher_total_reset() -> None:
@@ -7464,6 +7818,26 @@ async def test_publish_synthesized_candle_persists_with_synthesized_provenance()
     assert row["timeframe"] == "1h"
     assert row["open_at"] == _candle_minute(10, 0)
     assert row["instrument_public_id"] == "inst-1"
+
+
+@pytest.mark.asyncio
+async def test_publish_synthesized_candle_does_not_bump_candle_watermark() -> None:
+    """Synthesized bars must not refresh the native-candle liveness watermark.
+
+    Given: A publisher with a stale native-candle watermark,
+    When: A synthesized higher-TF candle is published (as the forward-fill
+        path keeps doing during a native-channel outage),
+    Then: The native-candle watermark is unchanged, so a dead native channel
+        cannot be masked by synthesized forward-fills.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    pub._last_candle_msg_at = 0.0
+    synth = _candle_update(begin=_candle_minute(10, 0))
+    await pub._publish_synthesized_candle(synth, cast(Any, "kraken"), "1h")
+    assert pub._last_candle_msg_at == 0.0
 
 
 @pytest.mark.asyncio

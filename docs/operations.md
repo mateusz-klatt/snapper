@@ -294,6 +294,18 @@ action:
   after 60 s of message silence (their wildcard/continuous universes
   always tick, so 60 s reliably means a dark feed); Kraken Equities uses
   120 s and is fully suppressed during scheduled CME closure windows.
+- **Native-candle liveness.** The message watchdog above shares one
+  watermark across ticks, trades, and candles, so a venue whose 1m bars
+  arrive on a dedicated native channel (Kraken Spot's `ohlc:1m`) can have
+  that channel stall silently while ticks/trades keep the watermark fresh
+  (the 2026-06-18 incident: trades alive ~21 h, candles dark). Spot
+  therefore also runs a venue-wide candle watchdog: if no native 1m candle
+  arrives for 300 s (well above the ~60 s venue-wide cadence) while a
+  candle subscription is active, it spawns the same WS-restart recovery
+  (which re-subscribes the dead channel). This recovery is candle-aware —
+  it is only declared successful once a fresh native candle resumes, not on
+  trades alone — and it never escalates to the dark-feed process exit, so a
+  candle-only stall cannot kill the still-live trade feed.
 - **Transport keepalive.** Every Kraken WebSocket handshake is opened
   with an explicit `ping_timeout`/`close_timeout` so a silently dead
   socket (a yanked link with no close frame) surfaces in tens of seconds

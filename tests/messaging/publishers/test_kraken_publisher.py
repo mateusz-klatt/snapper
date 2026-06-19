@@ -200,6 +200,17 @@ class TestKrakenReconnectWatchdog:
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         assert pub._get_liveness_recovery_threshold_s() == 60
 
+    def test_candle_liveness_threshold_is_300s(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a Spot publisher whose 1m bars arrive on a dedicated native
+            ohlc channel that can stall independently of ticks and trades,
+        When the native-candle liveness threshold is read,
+        Then it is the 300 second venue-wide candle-silence threshold.
+        """
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        assert pub._candle_liveness_threshold_s() == 300
+
     def test_storm_under_limit_does_not_schedule_restart(self) -> None:
         """Spec — full Given/When/Then below.
 

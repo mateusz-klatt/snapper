@@ -144,6 +144,16 @@ start delivering data; a failed reconnect resumes the backoff loop as
 soon as the grace window elapses with no progress."""
 _RECOVERY_PROGRESS_POLL_S: Final = 1.0
 """Poll cadence while observing for post-recovery message progress."""
+_CANDLE_RECOVERY_PROGRESS_GRACE_S: Final = 120.0
+"""Window to observe for a fresh native candle after a candle-triggered recovery.
+
+A candle-triggered recovery rebuilds the socket and replays the OHLC
+subscriptions, but the first candle only arrives at the next minute boundary,
+so this grace must exceed the full-universe replay time plus that ~60 s
+inter-bar latency. Reusing the shorter message grace would declare the attempt
+unsuccessful before any candle could prove recovery and churn full WS restarts
+(trades alone advance the message watermark, so candle progress must be observed
+separately)."""
 _DARK_FEED_EXIT_CEILING_S: Final = 1500.0
 """Maximum continuous message-silence (seconds) a publisher tolerates before
 escalating from in-process recovery to a fatal process exit.
@@ -454,6 +464,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._last_tick_payload: dict[str, tuple[TickPayloadValue, ...]] = {}
         self._seen_trade_ids: dict[str, collections.OrderedDict[str, None]] = {}
         self._last_message_at: float = monotonic()
+        self._last_candle_msg_at: float = monotonic()
+        self._consumes_native_candles: bool = False
         self._recovery_lock: asyncio.Lock = asyncio.Lock()
         self._last_recovery_at: float = 0.0
         self._recovery_tasks: set[asyncio.Task[None]] = set()
@@ -836,6 +848,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     f"subscribable nor synthesized by this publisher and will NOT be published "
                     f"(native: {sorted(native)})"
                 )
+        self._consumes_native_candles = bool(candle_consumer_timeframes)
         self._candle_consumer_tasks = [
             asyncio.create_task(
                 self._supervise_consumer(
@@ -1048,18 +1061,48 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """Return message-silence threshold before recovery is attempted."""
         return _LIVENESS_RECOVERY_THRESHOLD_S_DEFAULT
 
-    def _spawn_recovery(self, reason: str) -> None:
-        """Schedule a tracked liveness recovery task with deduplication."""
+    def _candle_liveness_threshold_s(self) -> int:
+        """Return native-candle silence threshold before recovery, or 0 to disable.
+
+        The shared :attr:`_last_message_at` watchdog cannot see a dead native
+        candle channel while ticks or trades keep flowing on the same socket
+        (the 2026-06-18 kraken-spot ``ohlc:1m`` stall: trades alive ~21h, candles
+        dark). Venues that receive 1m on a dedicated continuous native channel
+        override this so a venue-wide candle silence triggers the same WS-restart
+        recovery (which re-subscribes the dead channel). The base returns ``0``:
+        trade-built / sparse venues already track candle liveness through trade
+        liveness, so a separate guard would only false-fire.
+
+        Returns:
+            Seconds of venue-wide native-candle silence tolerated before a
+            recovery is spawned, or ``0`` when the guard is disabled.
+        """
+        return 0
+
+    def _spawn_recovery(self, reason: str, *, require_candle_progress: bool = False) -> None:
+        """Schedule a tracked liveness recovery task with deduplication.
+
+        Args:
+            reason: Human-readable trigger reason for log context.
+            require_candle_progress: When True (a candle-channel stall), the
+                recovery only counts as successful once a fresh NATIVE candle
+                arrives, observed over the longer candle grace — trades alone
+                must not declare the dead candle channel recovered.
+        """
         if monotonic() - self._last_recovery_at < _MIN_RECOVERY_INTERVAL_S:
             return
         if self._recovery_lock.locked():
             return
         self._last_recovery_at = monotonic()
-        task = asyncio.create_task(self._run_recovery_under_lock(reason))
+        task = asyncio.create_task(
+            self._run_recovery_under_lock(reason, require_candle_progress=require_candle_progress)
+        )
         self._recovery_tasks.add(task)
         task.add_done_callback(self._recovery_tasks.discard)
 
-    async def _run_recovery_under_lock(self, reason: str) -> None:
+    async def _run_recovery_under_lock(
+        self, reason: str, *, require_candle_progress: bool = False
+    ) -> None:
         """Persistently recover a stale feed under the recovery lock.
 
         Holds the publisher-level recovery lock for the whole recovery so
@@ -1080,6 +1123,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
         Args:
             reason: Human-readable trigger reason for log context.
+            require_candle_progress: When True, success additionally requires a
+                fresh native candle (observed over the longer candle grace), so
+                a candle-channel stall is not declared recovered by trade flow
+                alone.
 
         Returns:
             None.
@@ -1090,6 +1137,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         async with self._recovery_lock:
             baseline = self._last_message_at
+            candle_baseline = self._last_candle_msg_at if require_candle_progress else None
             backoff = _RECOVERY_BACKOFF_INITIAL_S
             attempt = 0
             while self.running:
@@ -1106,7 +1154,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                         f"{self._get_exchange_name()}: recovery attempt {attempt} "
                         f"raised {exc!r} (reason={reason}); will retry"
                     )
-                if attempt_ok and await self._await_recovery_progress(baseline):
+                if attempt_ok and await self._await_recovery_progress(baseline, candle_baseline):
                     logger.info(
                         f"{self._get_exchange_name()}: feed recovered after {attempt} "
                         f"attempt(s) (reason={reason})"
@@ -1115,26 +1163,56 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 await self._sleep_with_jitter(backoff)
                 backoff = min(backoff * 2.0, _RECOVERY_BACKOFF_CAP_S)
 
-    async def _await_recovery_progress(self, baseline: float) -> bool:
+    async def _await_recovery_progress(
+        self, baseline: float, candle_baseline: float | None = None
+    ) -> bool:
         """Observe for fresh messages after a recovery attempt.
 
         Args:
             baseline: ``_last_message_at`` captured when recovery started;
                 progress means the feed advanced past this value.
+            candle_baseline: When not None, ``_last_candle_msg_at`` captured at
+                recovery start; success additionally requires a fresh native
+                candle past it, observed over ``_CANDLE_RECOVERY_PROGRESS_GRACE_S``
+                instead of the shorter message grace (the first candle only
+                arrives at the next minute boundary).
 
         Returns:
-            True as soon as ``_last_message_at`` advances past
-            ``baseline`` (data is flowing again), or False once the
-            ``_RECOVERY_PROGRESS_GRACE_S`` window elapses with no progress.
+            True as soon as the required watermarks advance past their
+            baselines (data — and, when requested, a native candle — is
+            flowing again), or False once the grace window elapses with no
+            such progress.
         """
-        deadline = monotonic() + _RECOVERY_PROGRESS_GRACE_S
+        grace = (
+            _RECOVERY_PROGRESS_GRACE_S
+            if candle_baseline is None
+            else _CANDLE_RECOVERY_PROGRESS_GRACE_S
+        )
+        deadline = monotonic() + grace
         while self.running:
-            if self._last_message_at > baseline:
+            if self._recovery_progress_made(baseline, candle_baseline):
                 return True
             if monotonic() >= deadline:
                 return False
             await asyncio.sleep(_RECOVERY_PROGRESS_POLL_S)
-        return self._last_message_at > baseline
+        return self._recovery_progress_made(baseline, candle_baseline)
+
+    def _recovery_progress_made(self, baseline: float, candle_baseline: float | None) -> bool:
+        """Return whether the watermarks required for recovery have advanced.
+
+        Args:
+            baseline: ``_last_message_at`` value captured at recovery start.
+            candle_baseline: ``_last_candle_msg_at`` value captured at recovery
+                start, or None when native-candle progress is not required.
+
+        Returns:
+            True when the message watermark advanced past ``baseline`` and,
+            when ``candle_baseline`` is not None, the candle watermark advanced
+            past it.
+        """
+        if self._last_message_at <= baseline:
+            return False
+        return candle_baseline is None or self._last_candle_msg_at > candle_baseline
 
     async def _sleep_with_jitter(self, seconds: float) -> None:
         """Sleep ``seconds`` with plus/minus ``_RECOVERY_JITTER_FRACTION`` jitter.
@@ -1725,6 +1803,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             ``None`` when the instrument could not be resolved.
         """
         self._last_message_at = monotonic()
+        self._last_candle_msg_at = monotonic()
         native_symbol = candle.symbol
         instrument_public_id = await self._ensure_instrument(native_symbol)
         if instrument_public_id is None:
@@ -2471,15 +2550,39 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         feed stays dark past ``_DARK_FEED_EXIT_CEILING_S`` despite
         recovery, escalate to a process exit.
 
+        Separately, for venues with a dedicated native candle channel
+        (``_candle_liveness_threshold_s() > 0``) that are actually consuming
+        one (``_consumes_native_candles`` — guards the degenerate
+        ``timeframes=[]`` config where no candle is ever subscribed, which
+        would otherwise churn), spawn a recovery when no native candle has
+        arrived venue-wide for longer than that threshold even though ticks
+        or trades keep the shared message watchdog satisfied. This catches a silent candle-channel stall;
+        it never escalates to a process exit, because a candle-only stall
+        with a live trade channel must not kill the trade feed — the
+        WS-restart recovery re-subscribes the dead channel instead.
+
+        On a candle venue BOTH triggers spawn with
+        ``require_candle_progress=True`` so recovery is only declared
+        successful once a native candle resumes (not merely trades). This
+        also closes a general-outage race: after a long full-dark recovery
+        a candle-blind success would release the lock while candles are
+        still arriving, and the candle branch would immediately restart the
+        just-restored socket.
+
         Raises:
             FeedDarkTooLongError: When the feed has been dark beyond the
                 exit ceiling and the launcher must restart the publisher.
         """
+        candle_threshold_s = self._candle_liveness_threshold_s()
+        candle_venue = candle_threshold_s > 0 and self._consumes_native_candles
         threshold_s = self._get_liveness_recovery_threshold_s()
         if threshold_s > 0:
             stale_for = monotonic() - self._last_message_at
             if stale_for > threshold_s:
-                self._spawn_recovery(reason=f"no_messages_for_{stale_for:.0f}s")
+                self._spawn_recovery(
+                    reason=f"no_messages_for_{stale_for:.0f}s",
+                    require_candle_progress=candle_venue,
+                )
             if stale_for > _DARK_FEED_EXIT_CEILING_S:
                 logger.error(
                     f"{self._get_exchange_name()}: feed dark for {stale_for:.0f}s "
@@ -2487,6 +2590,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     "exiting for launcher restart"
                 )
                 raise FeedDarkTooLongError(f"{self._get_exchange_name()} dark for {stale_for:.0f}s")
+        if candle_venue:
+            candle_stale_for = monotonic() - self._last_candle_msg_at
+            if candle_stale_for > candle_threshold_s:
+                self._spawn_recovery(
+                    reason=f"no_candles_for_{candle_stale_for:.0f}s",
+                    require_candle_progress=True,
+                )
 
     async def _publish_heartbeat(self, topic: str, message: HeartbeatData) -> None:
         """Send a complete heartbeat message to ZMQ.

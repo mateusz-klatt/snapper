@@ -85,6 +85,17 @@ feed is genuinely dark (some symbol ticks every few seconds otherwise), and a
 multi-minute outage is detected and recovered in ~1 minute rather than five."""
 """Sleep between disconnect and reconnect during in-process WS restart."""
 
+_CANDLE_LIVENESS_THRESHOLD_S: Final[int] = 300
+"""Native-candle silence threshold (seconds) before Spot candle recovery fires.
+
+Spot receives 1m on a dedicated native ``ohlc:1m`` channel that can stall
+silently while ticks and trades keep the shared message watchdog satisfied (the
+2026-06-18 incident: trades alive ~21h, candles dark, no error). Across the
+~1900-symbol Spot universe a liquid pair prints a 1m candle every minute, so
+venue-wide candle silence past 300 s (>> the ~60 s cadence, <<< the 21 h outage)
+is an unambiguous channel stall and triggers the WS-restart recovery that
+re-subscribes the dead channel."""
+
 
 @register_process(
     "kraken_feed_publisher",
@@ -174,6 +185,18 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             ``True``.
         """
         return True
+
+    def _candle_liveness_threshold_s(self) -> int:
+        """Enable the native-candle liveness guard for Spot's ohlc:1m channel.
+
+        Spot is the one venue whose 1m bars arrive on a dedicated native
+        WebSocket channel that can stall independently of ticks and trades, so
+        it opts into the venue-wide candle-silence watchdog.
+
+        Returns:
+            ``_CANDLE_LIVENESS_THRESHOLD_S`` seconds.
+        """
+        return _CANDLE_LIVENESS_THRESHOLD_S
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         """Validate and filter symbols for Kraken.
