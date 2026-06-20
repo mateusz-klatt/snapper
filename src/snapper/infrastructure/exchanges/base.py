@@ -362,9 +362,19 @@ class ExchangeClientBase(ABC):
         """Log a fast-budget exhaustion, skipping mid-loop recoveries.
 
         Only an entry this attempt itself drove to a scheduled ``failed``
-        state is logged: a first exhaustion at ERROR, a re-failure after a
+        state is logged: a first exhaustion at WARNING, a re-failure after a
         slow retry at DEBUG. An entry that recovered (now confirmed) or was
         explicitly rejected (failed but unscheduled) mid-loop stays silent.
+
+        First exhaustion is WARNING, not ERROR, because a single symbol
+        backing off is recoverable per-symbol degradation, not a venue
+        outage: the slow-retry and dark-recovery passes keep nudging it,
+        the venue-wide signal already surfaces as the aggregated stale
+        WARNING in :meth:`_log_stale_subscriptions`, and a genuinely dark
+        venue is escalated to ERROR with a reconnect by the publisher
+        liveness watchdog. Reserving ERROR for those venue-level paths
+        keeps the operator alert tier from being flooded by benign
+        per-symbol churn (illiquid contracts, closed-market resubscribes).
 
         Args:
             entry: The overdue entry whose retry attempt returned False.
@@ -378,7 +388,7 @@ class ExchangeClientBase(ABC):
         if entry.status != "failed" or entry.next_attempt_at is None:
             return
         if entry.slow_retry_count == 0:
-            logger.error(
+            logger.warning(
                 "{}: subscribe failed for {}/{} after {} retries; backing off",
                 self.exchange_name,
                 entry.channel,

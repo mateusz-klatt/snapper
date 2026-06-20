@@ -243,6 +243,46 @@ class TestHealthLoopRetry:
         )
 
     @pytest.mark.asyncio
+    async def test_loop_logs_warning_not_error_on_first_subscribe_exhaustion(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A first fast-budget exhaustion backs off at WARNING, never ERROR.
+
+        Given: A pending entry with no retry budget,
+        When: The health loop runs one tick and the entry exhausts its budget,
+        Then: Exactly one "backing off" record is emitted at WARNING and no
+            ERROR record is produced, so benign per-symbol backoff stays off
+            the operator alert tier (venue-wide darkness is escalated to
+            ERROR elsewhere by the publisher liveness watchdog).
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0,
+            retry_interval_s=1.0,
+            max_retries=0,
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 10.0)
+        tracker.mark_pending("ticker", "BTC/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 12.0)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+        try:
+            client._health_loop_running = True
+            await client._subscription_health_loop()
+        finally:
+            logger.remove(sink_id)
+        backoff_logs = [rec for rec in caplog.records if "backing off" in rec.message]
+        error_logs = [rec for rec in caplog.records if rec.levelname == "ERROR"]
+        assert (len(backoff_logs), backoff_logs[0].levelname, error_logs) == (1, "WARNING", [])
+
+    @pytest.mark.asyncio
     async def test_loop_consumes_retry_when_retry_subscribe_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -451,11 +491,11 @@ class TestHealthLoopRetry:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A slow-retried subscription that re-fails logs DEBUG, not ERROR.
+        """A slow-retried subscription that re-fails logs DEBUG, not WARNING.
 
         Given: A pending entry already escalated by one slow retry,
         When: Its ACK window expires and the health loop runs one tick,
-        Then: It re-fails with a DEBUG record (not the first-failure ERROR)
+        Then: It re-fails with a DEBUG record (not the first-failure WARNING)
             and is not re-subscribed in the same tick.
         """
         client = HealthLoopClient()
