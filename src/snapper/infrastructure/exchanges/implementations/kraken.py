@@ -31,6 +31,8 @@ import json
 import time
 from collections.abc import AsyncIterator
 from collections.abc import Callable
+from datetime import UTC
+from datetime import datetime
 from time import monotonic
 from typing import Any
 from typing import Final
@@ -55,6 +57,8 @@ from snapper.infrastructure.exchanges._subscription_health import interval_to_la
 from snapper.infrastructure.exchanges._subscription_health import label_to_interval
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges._subscription_request import canonicalise_parameters
+from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
+from snapper.infrastructure.exchanges._trade_candle_builder import enqueue_or_drop_oldest_candle
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_candle_list
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_execution_list
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_instrument
@@ -437,6 +441,14 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_TICK_QUEUE_MAX_SIZE)
         self._candle_queues: dict[int, asyncio.Queue[CandleUpdate]] = {}
         self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+        self._trade_built_candle_builder: TradeCandleBuilder = TradeCandleBuilder(
+            interval_seconds=60
+        )
+        self._trade_built_candle_queue: asyncio.Queue[CandleUpdate] = asyncio.Queue(
+            maxsize=_TICK_QUEUE_MAX_SIZE
+        )
+        self._trade_built_candle_aggregator_task: asyncio.Task[None] | None = None
+        self._trade_built_candles_enabled: bool = False
         self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue(
             maxsize=_QUEUE_MAX_SIZE
         )
@@ -1425,6 +1437,98 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.error(f"WebSocket candle subscription error: {e}")
             raise
 
+    def subscribe_trade_built_candles(
+        self,
+        symbols: list[str],
+        timeframe: str = "1m",
+    ) -> AsyncIterator[CandleUpdate]:
+        """Stream trade-built 1m candles synthesized from the spot trade feed.
+
+        Phase-4 SHADOW path: spot 1m candles built locally from the
+        already-consumed trade stream (mirroring Kraken futures/equities),
+        for a live A/B against the venue-native ``ohlc:1m``. This NEVER
+        subscribes to Kraken again and NEVER touches the native candle
+        queues (:attr:`_candle_queues`); it only starts the local aggregator
+        and yields completed buckets from the dedicated trade-built queue.
+
+        Args:
+            symbols: Native symbols (advisory; the builder emits a candle for
+                every symbol whose trades it has actually folded).
+            timeframe: Candle interval. Only ``"1m"`` is supported.
+
+        Returns:
+            AsyncIterator yielding ``CandleUpdate`` for each completed
+            1-minute trade-built bucket.
+
+        Raises:
+            ValueError: When ``timeframe`` is not ``"1m"``.
+        """
+        return self._subscribe_trade_built_candles_impl(symbols, timeframe)
+
+    async def _subscribe_trade_built_candles_impl(
+        self,
+        symbols: list[str],
+        timeframe: str,
+    ) -> AsyncIterator[CandleUpdate]:
+        """Yield trade-built 1m candles from the dedicated shadow queue.
+
+        Starts the background :meth:`_trade_built_candle_aggregator` task on
+        first call and cancels it cleanly on iterator close so a publisher
+        shutdown does not leak the task.
+
+        Args:
+            symbols: Native symbols (advisory; see
+                :meth:`subscribe_trade_built_candles`).
+            timeframe: Candle interval. Must be ``"1m"``.
+
+        Yields:
+            ``CandleUpdate`` for each completed 1-minute trade-built bucket.
+
+        Raises:
+            ValueError: When ``timeframe`` is not ``"1m"``.
+        """
+        if timeframe != "1m":
+            raise ValueError(
+                f"Kraken spot trade-built candles only support 1m "
+                f"(synthesized from trades). Got {timeframe!r}."
+            )
+        self._trade_built_candles_enabled = True
+        if (
+            self._trade_built_candle_aggregator_task is None
+            or self._trade_built_candle_aggregator_task.done()
+        ):
+            self._trade_built_candle_aggregator_task = asyncio.create_task(
+                self._trade_built_candle_aggregator()
+            )
+        try:
+            while True:
+                try:
+                    candle = await asyncio.wait_for(
+                        self._trade_built_candle_queue.get(), timeout=0.1
+                    )
+                    yield candle
+                except TimeoutError:
+                    await asyncio.sleep(0.01)
+        finally:
+            self._trade_built_candles_enabled = False
+            task = self._trade_built_candle_aggregator_task
+            if task and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    async def _trade_built_candle_aggregator(self) -> None:
+        """Emit completed trade-built 1m candles roughly once per second.
+
+        Wakes every second, asks :attr:`_trade_built_candle_builder` for any
+        bucket whose minute has finished, and routes each into
+        :attr:`_trade_built_candle_queue`.
+        """
+        while True:
+            await asyncio.sleep(1.0)
+            for candle in self._trade_built_candle_builder.pop_completed(datetime.now(UTC)):
+                enqueue_or_drop_oldest_candle(self._trade_built_candle_queue, candle, "Candle")
+
     def _expand_spot_symbols(
         self, symbols: list[str], *, channel_label: str, wildcard_note: str
     ) -> list[str]:
@@ -2270,6 +2374,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             trade_list = parse_kraken_trade_list(data)
             for trade_data in trade_list:
                 _enqueue_or_drop_oldest(self._trade_queue, trade_data, "trade")
+                if self._trade_built_candles_enabled:
+                    self._trade_built_candle_builder.update(trade_data)
         except ValueError as e:
             logger.warning(f"Failed to parse trade data: {e}")
 

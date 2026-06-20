@@ -25,6 +25,7 @@ from pytest import MonkeyPatch
 
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
+from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -77,6 +78,11 @@ def _client() -> KrakenExchangeClient:
     client._ws_connected = True
     client._tick_queue = asyncio.Queue[TickerUpdate]()
     client._candle_queues = {}
+    client._trade_queue = asyncio.Queue[TradeUpdate]()
+    client._trade_built_candle_builder = TradeCandleBuilder(interval_seconds=60)
+    client._trade_built_candle_queue = asyncio.Queue[CandleUpdate]()
+    client._trade_built_candle_aggregator_task = None
+    client._trade_built_candles_enabled = False
     client._ccxt_client = SimpleNamespace()
     client._subscription_cache = {}
     client._health_tracker = SubscriptionHealthTracker()
@@ -8267,3 +8273,167 @@ class TestResolveCcxtOrderType:
         """
         weird = self._ccxt_order(info={"descr": {"ordertype": "quantum-stop"}})
         assert kraken_client._convert_ccxt_order(weird).type is ExchangeOrderTypeEnum.LIMIT
+
+
+def _trade_built_candle() -> CandleUpdate:
+    """Return a representative trade-built 1m candle for shadow-path tests.
+
+    Returns:
+        A ``CandleUpdate`` standing in for a completed 1-minute bucket.
+    """
+    return CandleUpdate(
+        symbol="BTC/USD",
+        open=1.0,
+        high=2.0,
+        low=0.5,
+        close=1.5,
+        vwap=1.5,
+        trades=1,
+        volume=1.0,
+        interval_begin=datetime.fromtimestamp(0, UTC),
+        interval=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_trade_data_folds_into_trade_built_builder_when_enabled(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Enabled shadow folds each parsed spot trade into the trade-built builder.
+
+    Given: A client with trade-built shadow candles enabled,
+    When: ``_handle_trade_data`` parses a trade frame,
+    Then: The parsed trade is folded into the trade-built builder.
+    """
+    client = _client()
+    client._trade_built_candles_enabled = True
+    trade = TradeUpdate(
+        symbol="BTC/USD",
+        side="buy",
+        quantity=0.1,
+        price=50000.0,
+        ord_type="limit",
+        trade_id="1",
+        timestamp=datetime.now(UTC),
+    )
+    monkeypatch.setattr(kr, "parse_kraken_trade_list", lambda data: [trade])
+    client._handle_trade_data([{"symbol": "BTC/USD"}])
+    assert client._trade_built_candle_builder.update_count == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_trade_data_skips_trade_built_builder_when_disabled(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Disabled shadow leaves the trade-built builder untouched (no leak when off).
+
+    Given: A client with trade-built shadow candles disabled (the default),
+    When: ``_handle_trade_data`` parses a trade frame,
+    Then: The trade-built builder receives no updates.
+    """
+    client = _client()
+    trade = TradeUpdate(
+        symbol="BTC/USD",
+        side="buy",
+        quantity=0.1,
+        price=50000.0,
+        ord_type="limit",
+        trade_id="1",
+        timestamp=datetime.now(UTC),
+    )
+    monkeypatch.setattr(kr, "parse_kraken_trade_list", lambda data: [trade])
+    client._handle_trade_data([{"symbol": "BTC/USD"}])
+    assert client._trade_built_candle_builder.update_count == 0
+
+
+@pytest.mark.asyncio
+async def test_subscribe_trade_built_candles_rejects_non_1m() -> None:
+    """Trade-built shadow only supports 1m candles.
+
+    Given: A Kraken spot client,
+    When: ``subscribe_trade_built_candles`` is iterated with a non-1m timeframe,
+    Then: A ``ValueError`` is raised.
+    """
+    client = _client()
+    gen = client.subscribe_trade_built_candles(["BTC-USD"], "5m")
+    with pytest.raises(ValueError, match="only support 1m"):
+        await anext(gen)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_trade_built_candles_drains_queue_and_isolates_native() -> None:
+    """Shadow subscription yields trade-built candles without touching native queues.
+
+    Given: A client whose trade-built queue receives a candle shortly after the
+        first drain attempt times out,
+    When: ``subscribe_trade_built_candles`` is iterated then closed,
+    Then: The candle is yielded, ``_trade_built_candles_enabled`` toggles True
+        during iteration and False after close, and the native
+        ``_candle_queues`` are never created.
+    """
+    client = _client()
+    candle = _trade_built_candle()
+
+    async def _delayed_put() -> None:
+        await asyncio.sleep(0.15)
+        await client._trade_built_candle_queue.put(candle)
+
+    putter = asyncio.create_task(_delayed_put())
+    gen = client.subscribe_trade_built_candles(["BTC-USD"], "1m")
+    first = await anext(gen)
+    assert first is candle
+    assert client._trade_built_candles_enabled is True
+    await gen.aclose()
+    assert client._trade_built_candles_enabled is False
+    assert client._candle_queues == {}
+    await putter
+
+
+@pytest.mark.asyncio
+async def test_trade_built_candle_aggregator_enqueues_completed_candles(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """The aggregator routes completed builder buckets into the trade-built queue.
+
+    Given: A builder that reports one completed bucket,
+    When: ``_trade_built_candle_aggregator`` runs,
+    Then: The completed candle is enqueued onto the trade-built queue.
+    """
+    client = _client()
+    candle = _trade_built_candle()
+    monkeypatch.setattr(
+        client._trade_built_candle_builder, "pop_completed", lambda now_utc: [candle]
+    )
+    task = asyncio.create_task(client._trade_built_candle_aggregator())
+    try:
+        got = await asyncio.wait_for(client._trade_built_candle_queue.get(), timeout=3.0)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert got is candle
+
+
+@pytest.mark.asyncio
+async def test_subscribe_trade_built_candles_reuses_running_aggregator_task() -> None:
+    """A second subscription reuses the already-running aggregator task.
+
+    Given: A client whose trade-built aggregator task is already running,
+    When: ``subscribe_trade_built_candles`` is iterated,
+    Then: The existing task is reused (not replaced) and is cancelled on close.
+    """
+    client = _client()
+
+    async def _never() -> None:
+        await asyncio.Event().wait()
+
+    running = asyncio.create_task(_never())
+    client._trade_built_candle_aggregator_task = running
+    candle = _trade_built_candle()
+    await client._trade_built_candle_queue.put(candle)
+    gen = client.subscribe_trade_built_candles(["BTC-USD"], "1m")
+    first = await anext(gen)
+    assert first is candle
+    assert client._trade_built_candle_aggregator_task is running
+    await gen.aclose()
+    assert running.cancelled() or running.done()
