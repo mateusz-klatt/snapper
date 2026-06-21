@@ -619,6 +619,212 @@ class TestPrivateTrafficSelection:
         assert "host=" in joined
 
 
+class TestStatusSnapshot:
+    """Tests for the operator egress pool status snapshot."""
+
+    @staticmethod
+    def _status_config() -> EgressPoolConfig:
+        """Build a mixed route config for status snapshot tests.
+
+        Returns:
+            EgressPoolConfig with direct, IE, and PL routes.
+        """
+        return EgressPoolConfig(
+            enabled=True,
+            private_fallback_route_id="pl",
+            routes=[
+                RouteConfig(
+                    id="default",
+                    kind="direct",
+                    priority=100,
+                    region="host",
+                    exit_ip="198.51.100.11",
+                    provider="isp",
+                ),
+                RouteConfig(
+                    id="ie",
+                    kind="socks5",
+                    proxy_url="socks5h://ie:1081",
+                    priority=10,
+                    allowed_exchanges=("kraken",),
+                    region="ie-dub",
+                    exit_ip="203.0.113.20",
+                    provider="wireguard-ie",
+                ),
+                RouteConfig(
+                    id="pl",
+                    kind="socks5",
+                    proxy_url="socks5h://pl:1084",
+                    priority=5,
+                    allowed_exchanges=("walutomat",),
+                ),
+            ],
+        )
+
+    def test_status_snapshot_reports_mixed_routes_and_active_rows(self) -> None:
+        """Spec — status snapshot exposes route metadata, health, and reservations.
+
+        Given direct and SOCKS5 routes with mixed metadata and one
+            quarantined route,
+        When status_snapshot is called with active public/private holds,
+        Then the snapshot includes pool policy, route metadata,
+            quarantine state, and active reservation tuples.
+        """
+        pool = EgressPool(self._status_config())
+        direct_private = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        pool._quarantine_route(
+            "ie",
+            datetime.now(UTC) + timedelta(seconds=60),
+            "http-429",
+        )
+        pl_public = pool.reserve(exchange="walutomat", purpose="websocket")
+
+        snapshot = pool.status_snapshot()
+
+        assert snapshot.enabled is True
+        assert snapshot.on_all_quarantined == "wait"
+        assert snapshot.private_fallback_route_id == "pl"
+        assert snapshot.private_on_fallback is False
+        direct = snapshot.routes[0]
+        ie = snapshot.routes[1]
+        pl = snapshot.routes[2]
+        assert direct.id == "default"
+        assert direct.kind == "direct"
+        assert direct.region == "host"
+        assert direct.exit_ip == "198.51.100.11"
+        assert direct.provider == "isp"
+        assert direct.quarantined is False
+        assert direct.quarantine_seconds_remaining is None
+        assert direct.in_use_count == 1
+        assert [(r.exchange, r.traffic_class) for r in direct.active_reservations] == [
+            ("kraken", "private")
+        ]
+        assert ie.id == "ie"
+        assert ie.kind == "socks5"
+        assert ie.region == "ie-dub"
+        assert ie.exit_ip == "203.0.113.20"
+        assert ie.provider == "wireguard-ie"
+        assert ie.allowed_exchanges == ["kraken"]
+        assert ie.quarantined is True
+        assert ie.quarantine_seconds_remaining is not None
+        assert 55.0 <= ie.quarantine_seconds_remaining <= 60.0
+        assert pl.id == "pl"
+        assert pl.region is None
+        assert pl.exit_ip is None
+        assert pl.provider is None
+        assert pl.allowed_exchanges == ["walutomat"]
+        assert [(r.exchange, r.traffic_class) for r in pl.active_reservations] == [
+            ("walutomat", "public")
+        ]
+        direct_private.release()
+        pl_public.release()
+
+    def test_active_reservation_map_counts_duplicate_tuples(self) -> None:
+        """Spec — duplicate active tuples remain visible until all holds release.
+
+        Given two outstanding reservations for the same route/exchange/class,
+        When each reservation is released,
+        Then in_use_count decrements each time while the active tuple
+            remains until the last release.
+        """
+        pool = EgressPool(_two_route_config())
+        first = pool.reserve(exchange="kraken", purpose="websocket")
+        second = pool.reserve(exchange="kraken", purpose="websocket")
+
+        held = pool.status_snapshot().routes[0]
+        assert held.in_use_count == 2
+        assert [(r.exchange, r.traffic_class) for r in held.active_reservations] == [
+            ("kraken", "public")
+        ]
+
+        first.release()
+        one_left = pool.status_snapshot().routes[0]
+        assert one_left.in_use_count == 1
+        assert [(r.exchange, r.traffic_class) for r in one_left.active_reservations] == [
+            ("kraken", "public")
+        ]
+
+        second.release()
+        empty = pool.status_snapshot().routes[0]
+        assert empty.in_use_count == 0
+        assert empty.active_reservations == []
+
+    def test_private_on_fallback_true_when_private_hold_is_not_direct(self) -> None:
+        """Spec — private_on_fallback tracks active private holds on fallback.
+
+        Given direct is quarantined and PL is the private fallback,
+        When private traffic reserves the fallback route,
+        Then status_snapshot reports private_on_fallback=True until release.
+        """
+        pool = EgressPool(self._status_config())
+        direct = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        direct.quarantine(120.0, reason="http-429")
+        direct.release()
+
+        fallback = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        snapshot = pool.status_snapshot()
+
+        assert fallback.route_id == "pl"
+        assert snapshot.private_on_fallback is True
+        pl = snapshot.routes[2]
+        assert [(r.exchange, r.traffic_class) for r in pl.active_reservations] == [
+            ("kraken", "private")
+        ]
+
+        fallback.release()
+        assert pool.status_snapshot().private_on_fallback is False
+
+    def test_http_reserve_updates_status_without_websocket_log_branch(self) -> None:
+        """Spec — HTTP reservations update status through the non-WS branch.
+
+        Given an HTTP route reservation,
+        When status_snapshot is inspected,
+        Then the active tuple is visible and release clears it.
+        """
+        pool = EgressPool(_two_route_config())
+        reservation = pool.reserve(exchange="kraken", purpose="http")
+
+        held = pool.status_snapshot().routes[0]
+        assert held.in_use_count == 1
+        assert [(r.exchange, r.traffic_class) for r in held.active_reservations] == [
+            ("kraken", "public")
+        ]
+
+        reservation.release()
+        assert pool.status_snapshot().routes[0].active_reservations == []
+
+    def test_status_snapshot_marks_expired_quarantine_as_not_quarantined(self) -> None:
+        """Spec — expired quarantine deadlines report zero remaining seconds.
+
+        Given a route whose quarantine_until is already in the past,
+        When status_snapshot is called,
+        Then quarantined is False and remaining seconds is 0.0.
+        """
+        pool = EgressPool(_two_route_config())
+        pool._quarantine_route(
+            "default",
+            datetime.now(UTC) - timedelta(seconds=10),
+            "http-429",
+        )
+
+        route = pool.status_snapshot().routes[0]
+
+        assert route.quarantined is False
+        assert route.quarantine_seconds_remaining == 0.0
+
+
 class TestReserveAllQuarantined:
     """Tests for ``EgressPool.reserve`` when no route is available."""
 
@@ -771,10 +977,25 @@ class TestDefensiveBranches:
             unchanged.
         """
         pool = EgressPool(_two_route_config())
-        pool._decrement_in_use("nonexistent-route")
+        pool._decrement_in_use("nonexistent-route", "kraken", "public")
         snapshot = pool.snapshot()
         for snap in snapshot:
             assert snap.in_use_count == 0
+
+    def test_active_reservation_helpers_ignore_unknown_route(self) -> None:
+        """Spec — active reservation helpers ignore unknown route ids.
+
+        Given a pool with one configured route,
+        When active reservation helpers receive a missing route id,
+        Then they return without mutating visible route status.
+        """
+        pool = EgressPool(_two_route_config())
+        pool._increment_active_reservation_locked("missing-route", "kraken", "public")
+        pool._decrement_active_reservation_locked("missing-route", "kraken", "public")
+
+        snapshot = pool.status_snapshot()
+
+        assert all(route.active_reservations == [] for route in snapshot.routes)
 
     def test_quarantine_route_ignores_unknown_route(self) -> None:
         """Spec — _quarantine_route of an unknown route_id is a no-op.

@@ -181,6 +181,31 @@ class TestRouteConfig:
         )
         assert route.allowed_exchanges == ("walutomat",)
 
+    def test_optional_operator_metadata_fields_parse(self) -> None:
+        """Spec — RouteConfig accepts optional operator metadata fields.
+
+        Given a route dict with region, exit_ip, and provider,
+        When RouteConfig validates it,
+        Then the fields are retained and existing configs remain optional.
+        """
+        route = RouteConfig.model_validate(
+            {
+                "id": "wg-pl-1",
+                "kind": "socks5",
+                "proxy_url": "socks5h://x:1084",
+                "region": "pl-waw",
+                "exit_ip": "203.0.113.10",
+                "provider": "mullvad",
+            }
+        )
+        default_route = RouteConfig(id="default", kind="direct")
+        assert route.region == "pl-waw"
+        assert route.exit_ip == "203.0.113.10"
+        assert route.provider == "mullvad"
+        assert default_route.region is None
+        assert default_route.exit_ip is None
+        assert default_route.provider is None
+
 
 class TestEgressPoolConfig:
     """Tests for the top-level EgressPoolConfig model."""

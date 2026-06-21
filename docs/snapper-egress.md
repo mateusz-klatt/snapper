@@ -133,10 +133,17 @@ Edit the `egress_pool` setting to add the new route:
     {"id": "default", "kind": "direct", "priority": 100, "enabled": true},
     {"id": "wg-uk-1", "kind": "socks5",
      "proxy_url": "socks5h://snapper-egress:1081",
+     "region": "uk-lon",
+     "exit_ip": "203.0.113.20",
+     "provider": "wireguard-uk",
      "priority": 10, "enabled": true}
   ]
 }
 ```
+
+`region`, `exit_ip`, and `provider` are optional operator metadata
+fields. They do not affect routing; they are surfaced through
+`GET /api/health/egress` so an operator can identify where a route exits.
 
 **Priority semantics:** `EgressPool.reserve()` sorts by
 `(priority, in_use_count)` and picks the **lowest** number first.
@@ -230,7 +237,13 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    ```
    Each tunnel id maps to `{"status": "up", "reason": null}`.
 
-4. **WireGuard handshake established?** (operator debugging — uses
+4. **Backend egress snapshot visible?** From an authenticated operator
+   session with `read:system_status`, call `GET /api/health/egress`.
+   Expect `payload.enabled=true`, one row per configured route, route
+   metadata (`region`, `exit_ip`, `provider`) when configured,
+   quarantine state, `in_use_count`, and `active_reservations`.
+
+5. **WireGuard handshake established?** (operator debugging — uses
    `iproute2` shipped in the image)
    ```
    docker compose exec snapper-egress ip -d link show wg-uk-1
@@ -239,7 +252,7 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    The interface should be `UP` and the rule should pin `from
    <tunnel_addr>` → table N.
 
-5. **Kraken WS uses the tunnel?** The pool is a process-local
+6. **Kraken WS uses the tunnel?** The pool is a process-local
    singleton inside each feed-publisher process — `get_egress_pool()`
    in a fresh `docker compose exec` interpreter returns `None`, and
    quarantining inside the API process would not touch the publisher
@@ -252,7 +265,7 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    source IP should match the VPN exit. Restore the normal direct-route
    priority when done.
 
-6. **Stable tick flow?**
+7. **Stable tick flow?**
    ```sql
    SELECT i.exchange, COUNT(*) AS n
    FROM ticks t JOIN instruments i ON i.public_id = t.instrument_public_id

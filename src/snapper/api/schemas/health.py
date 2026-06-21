@@ -18,6 +18,7 @@ from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.types import ComponentStatus
 from snapper.core.types import HealthStatus
+from snapper.infrastructure.network.egress_models import EgressRouteStatusSnapshot
 
 _CONN_STATS_DESC = "Connection statistics"
 
@@ -144,6 +145,46 @@ class HealthCheckResponse(PayloadResponse[Literal["health_check_response"], Heal
     """
 
     type: Literal["health_check_response"] = "health_check_response"
+
+
+class EgressHealthData(StrictDataSchema[Literal["egress_health"]]):
+    """Domain data for the egress pool health endpoint.
+
+    Attributes:
+        type: Payload item type discriminator.
+        enabled: True when an egress pool singleton is configured.
+        on_all_quarantined: Configured exhaustion policy, or ``None``
+            when the pool is disabled.
+        private_fallback_route_id: Configured private fallback route id.
+        private_on_fallback: True when private traffic is currently
+            reserved on a non-direct route.
+        routes: Per-route status rows in configured order.
+    """
+
+    type: Literal["egress_health"] = "egress_health"
+    enabled: bool = Field(description="Whether the egress pool is configured")
+    on_all_quarantined: Literal["wait", "raise"] | None = Field(
+        default=None,
+        description="Configured policy when all eligible routes are quarantined",
+    )
+    private_fallback_route_id: str | None = Field(
+        default=None,
+        description="Configured private fallback route id",
+    )
+    private_on_fallback: bool = Field(
+        default=False,
+        description="Whether private traffic is currently using a non-direct route",
+    )
+    routes: list[EgressRouteStatusSnapshot] = Field(
+        default_factory=list,
+        description="Per-route egress health rows",
+    )
+
+
+class EgressHealthResponse(PayloadResponse[Literal["egress_health_response"], EgressHealthData]):
+    """Envelope-wrapped response for ``GET /api/health/egress``."""
+
+    type: Literal["egress_health_response"] = "egress_health_response"
 
 
 class ZmqComponents(StrictBody):

@@ -582,6 +582,59 @@ provenance; the inner `health_check` payload holds the runtime
 snapshot. `gap_detection` provides observability into sequence gap
 detection across the ZMQ bridge and per-session REST client detectors.
 
+### GET /api/health/egress
+
+Operator egress route snapshot. Requires `read:system_status`
+permission and uses the same CSRF guard as the detailed monitoring
+health routes.
+
+The endpoint returns an explicit disabled payload when the process has
+no configured egress pool, rather than treating that as an error.
+
+**Response (200):**
+
+```json
+{
+    "type": "egress_health_response",
+    "sequence_id": 1,
+    "public_id": "<uuid7>",
+    "timestamp": "2026-01-18T12:00:00Z",
+    "session_id": "<server-session>",
+    "topic": null,
+    "payload": {
+        "type": "egress_health",
+        "enabled": true,
+        "on_all_quarantined": "wait",
+        "private_fallback_route_id": "pl",
+        "private_on_fallback": false,
+        "routes": [
+            {
+                "id": "default",
+                "kind": "direct",
+                "region": "host",
+                "exit_ip": "198.51.100.11",
+                "provider": "isp",
+                "priority": 100,
+                "allowed_exchanges": [],
+                "enabled": true,
+                "quarantined": false,
+                "quarantine_seconds_remaining": null,
+                "in_use_count": 1,
+                "active_reservations": [
+                    {"exchange": "kraken", "traffic_class": "private"}
+                ]
+            }
+        ]
+    }
+}
+```
+
+`region`, `exit_ip`, and `provider` are optional operator metadata
+copied from the `egress_pool.routes[]` entry. `active_reservations`
+lists the unique `(exchange, traffic_class)` tuples currently reserved
+on the route. `private_on_fallback` is true when any private reservation
+is active on a non-direct route.
+
 ### GET /api/candles
 
 Fetch OHLCV candlestick data. Requires `read:market_data` permission.

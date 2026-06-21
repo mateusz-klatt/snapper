@@ -222,6 +222,7 @@ from snapper.server.credential_routes import router as credential_router
 from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.device_routes import router as device_router
+from snapper.server.egress_health_routes import router as egress_health_router
 from snapper.server.execution_plan_routes import router as execution_plan_router
 from snapper.server.json_body import patch_openapi
 from snapper.server.market_cache_routes import router as market_cache_router
@@ -963,6 +964,7 @@ def create_app() -> FastAPI:
     app.include_router(trailing_stop_router, prefix=API_PREFIX)
     app.include_router(backtest_router, prefix=API_PREFIX)
     app.include_router(device_router, prefix=API_PREFIX)
+    app.include_router(egress_health_router, prefix=API_PREFIX)
     app.include_router(alert_default_router, prefix=API_PREFIX)
     app.include_router(metrics_router, prefix=API_PREFIX)
     app.include_router(alerts_router, prefix=API_PREFIX)

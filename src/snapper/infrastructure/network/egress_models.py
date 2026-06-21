@@ -12,6 +12,9 @@ Three shapes live here:
 * ``EgressPoolConfig`` — top-level setting payload combining
   ``enabled``, ``on_all_quarantined`` policy, the private fallback
   route id, and the route list.
+* ``EgressPoolStatusSnapshot`` — read-only operator status projection
+  returned by ``EgressPool.status_snapshot`` and exposed through the
+  backend health route.
 """
 
 from dataclasses import dataclass
@@ -71,6 +74,9 @@ class RouteConfig(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     kind: Literal["direct", "socks5"]
     proxy_url: str | None = None
+    region: str | None = None
+    exit_ip: str | None = None
+    provider: str | None = None
     priority: int = 0
     enabled: bool = True
     allowed_exchanges: StringSequence = Field(
@@ -264,6 +270,77 @@ class RouteSnapshot:
     in_use_count: int
     last_handshake_429_at: datetime | None
     last_close_1015_at: datetime | None
+
+
+class EgressActiveReservationSnapshot(BaseModel):
+    """Currently reserved traffic tuple for one egress route.
+
+    Attributes:
+        exchange: Exchange name resolved by the egress context.
+        traffic_class: Explicit traffic class used for selection.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    exchange: str
+    traffic_class: Literal["public", "private"]
+
+
+class EgressRouteStatusSnapshot(BaseModel):
+    """Operator status projection for one route.
+
+    Attributes:
+        id: Route id from the configured egress pool.
+        kind: Route kind, either direct or socks5.
+        region: Optional operator-provided region label.
+        exit_ip: Optional operator-provided observed exit IP.
+        provider: Optional operator-provided provider label.
+        priority: Public-selection priority.
+        allowed_exchanges: Exchanges this route may serve for public traffic.
+        enabled: Effective route enabled flag after preflight.
+        quarantined: True when the route is inside a quarantine window.
+        quarantine_seconds_remaining: Seconds until quarantine release,
+            ``None`` when the route has no quarantine deadline.
+        in_use_count: Number of outstanding reservation handles.
+        active_reservations: Unique exchange and traffic-class pairs
+            currently reserved on the route.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    id: str
+    kind: Literal["direct", "socks5"]
+    region: str | None = None
+    exit_ip: str | None = None
+    provider: str | None = None
+    priority: int
+    allowed_exchanges: list[str] = Field(default_factory=list)
+    enabled: bool
+    quarantined: bool
+    quarantine_seconds_remaining: float | None
+    in_use_count: int
+    active_reservations: list[EgressActiveReservationSnapshot] = Field(default_factory=list)
+
+
+class EgressPoolStatusSnapshot(BaseModel):
+    """Operator status projection for the full egress pool.
+
+    Attributes:
+        enabled: True when the singleton pool is configured and active.
+        on_all_quarantined: Pool policy, or ``None`` when disabled.
+        private_fallback_route_id: Configured private fallback route id.
+        private_on_fallback: True when any private reservation is active
+            on a non-direct route.
+        routes: Per-route status rows in configured order.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    enabled: bool
+    on_all_quarantined: Literal["wait", "raise"] | None = None
+    private_fallback_route_id: str | None = None
+    private_on_fallback: bool = False
+    routes: list[EgressRouteStatusSnapshot] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)

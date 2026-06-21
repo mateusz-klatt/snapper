@@ -33,7 +33,10 @@ from loguru import logger
 
 from snapper.application.services.settings import SettingsService
 from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
+from snapper.infrastructure.network.egress_models import EgressActiveReservationSnapshot
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
+from snapper.infrastructure.network.egress_models import EgressPoolStatusSnapshot
+from snapper.infrastructure.network.egress_models import EgressRouteStatusSnapshot
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_models import RouteSelection
 from snapper.infrastructure.network.egress_models import RouteSnapshot
@@ -41,6 +44,7 @@ from snapper.infrastructure.network.egress_models import RouteState
 from snapper.infrastructure.network.egress_reservation import EgressPoolBase
 from snapper.infrastructure.network.egress_reservation import EgressReservation
 from snapper.infrastructure.network.egress_reservation import QuarantineReason
+from snapper.infrastructure.network.egress_reservation import TrafficClass
 
 _PYTHON_SOCKS_WARNING_LOGGED: list[bool] = [False]
 """One-shot flag to throttle the ``python-socks not installed`` warning."""
@@ -72,6 +76,9 @@ class EgressPool(EgressPoolBase):
         self._lock = threading.RLock()
         self._states: dict[str, RouteState] = {
             route.id: RouteState(config=route, enabled=route.enabled) for route in config.routes
+        }
+        self._active_reservations: dict[str, dict[tuple[str, TrafficClass], int]] = {
+            route.id: {} for route in config.routes
         }
 
     def size(self) -> int:
@@ -109,7 +116,9 @@ class EgressPool(EgressPoolBase):
             serves ``exchange`` at all.
         """
         now = datetime.now(UTC)
-        effective_traffic_class = "private" if traffic_class == "private" else "public"
+        effective_traffic_class: TrafficClass = (
+            "private" if traffic_class == "private" else "public"
+        )
         with self._lock:
             if effective_traffic_class == "private":
                 return self._pick_private_locked(now) is not None
@@ -146,7 +155,9 @@ class EgressPool(EgressPoolBase):
             release.
         """
         now = datetime.now(UTC)
-        effective_traffic_class = "private" if traffic_class == "private" else "public"
+        effective_traffic_class: TrafficClass = (
+            "private" if traffic_class == "private" else "public"
+        )
         with self._lock:
             if effective_traffic_class == "private":
                 fallback_route_id = self._config.private_fallback_route_id
@@ -229,7 +240,9 @@ class EgressPool(EgressPoolBase):
                 and ``on_all_quarantined == "raise"``.
         """
         now = datetime.now(UTC)
-        effective_traffic_class = "private" if traffic_class == "private" else "public"
+        effective_traffic_class: TrafficClass = (
+            "private" if traffic_class == "private" else "public"
+        )
         with self._lock:
             selection = self._pick_locked(preferred_route, exchange, now, effective_traffic_class)
             if selection is None:
@@ -252,6 +265,7 @@ class EgressPool(EgressPoolBase):
             selection.state.last_pick_at = now
             route_config = selection.state.config
             route_id = route_config.id
+            self._increment_active_reservation_locked(route_id, exchange, effective_traffic_class)
             route_kind = route_config.kind
             proxy_url = route_config.proxy_url
             is_fallback = selection.is_fallback
@@ -273,6 +287,8 @@ class EgressPool(EgressPoolBase):
             pool=self,
             route_id=route_id,
             proxy_url=proxy_url,
+            exchange=exchange,
+            traffic_class=effective_traffic_class,
         )
 
     def snapshot(self) -> list[RouteSnapshot]:
@@ -299,7 +315,58 @@ class EgressPool(EgressPoolBase):
                 for s in self._states.values()
             ]
 
-    def _decrement_in_use(self, route_id: str) -> None:
+    def status_snapshot(self) -> EgressPoolStatusSnapshot:
+        """Return an operator status snapshot of the egress pool.
+
+        Returns:
+            A Pydantic snapshot containing pool-level policy and one
+            row per route with metadata, quarantine state, in-use count,
+            and unique active reservation traffic tuples.
+        """
+        now = datetime.now(UTC)
+        with self._lock:
+            routes: list[EgressRouteStatusSnapshot] = []
+            private_on_fallback = False
+            for state in self._states.values():
+                active_reservations = self._active_snapshot_locked(state.config.id)
+                if state.config.kind != "direct" and any(
+                    item.traffic_class == "private" for item in active_reservations
+                ):
+                    private_on_fallback = True
+                quarantine_seconds_remaining = self._quarantine_remaining_locked(state, now)
+                routes.append(
+                    EgressRouteStatusSnapshot(
+                        id=state.config.id,
+                        kind=state.config.kind,
+                        region=state.config.region,
+                        exit_ip=state.config.exit_ip,
+                        provider=state.config.provider,
+                        priority=state.config.priority,
+                        allowed_exchanges=list(state.config.allowed_exchanges),
+                        enabled=state.enabled,
+                        quarantined=(
+                            quarantine_seconds_remaining is not None
+                            and quarantine_seconds_remaining > 0.0
+                        ),
+                        quarantine_seconds_remaining=quarantine_seconds_remaining,
+                        in_use_count=state.in_use_count,
+                        active_reservations=active_reservations,
+                    )
+                )
+            return EgressPoolStatusSnapshot(
+                enabled=self._config.enabled,
+                on_all_quarantined=self._config.on_all_quarantined,
+                private_fallback_route_id=self._config.private_fallback_route_id,
+                private_on_fallback=private_on_fallback,
+                routes=routes,
+            )
+
+    def _decrement_in_use(
+        self,
+        route_id: str,
+        exchange: str,
+        traffic_class: TrafficClass,
+    ) -> None:
         """Decrement a route's ``in_use_count`` (clamped to >= 0).
 
         Called by ``EgressReservation.release`` and by the
@@ -311,6 +378,7 @@ class EgressPool(EgressPoolBase):
             if state is None:
                 return
             state.in_use_count = max(0, state.in_use_count - 1)
+            self._decrement_active_reservation_locked(route_id, exchange, traffic_class)
 
     def _quarantine_route(
         self,
@@ -350,12 +418,74 @@ class EgressPool(EgressPoolBase):
             return True
         return state.quarantine_until <= now
 
+    def _increment_active_reservation_locked(
+        self,
+        route_id: str,
+        exchange: str,
+        traffic_class: TrafficClass,
+    ) -> None:
+        """Increment the active reservation tuple count for a route.
+
+        Pool lock MUST be held.
+        """
+        reservations = self._active_reservations.get(route_id)
+        if reservations is None:
+            return
+        key = (exchange, traffic_class)
+        reservations[key] = reservations.get(key, 0) + 1
+
+    def _decrement_active_reservation_locked(
+        self,
+        route_id: str,
+        exchange: str,
+        traffic_class: TrafficClass,
+    ) -> None:
+        """Decrement the active reservation tuple count for a route.
+
+        Pool lock MUST be held.
+        """
+        reservations = self._active_reservations.get(route_id)
+        if reservations is None:
+            return
+        key = (exchange, traffic_class)
+        count = reservations.get(key)
+        if count is None:
+            return
+        if count <= 1:
+            del reservations[key]
+            return
+        reservations[key] = count - 1
+
+    def _active_snapshot_locked(self, route_id: str) -> list[EgressActiveReservationSnapshot]:
+        """Return sorted unique active reservation tuples for a route.
+
+        Pool lock MUST be held.
+        """
+        reservations = self._active_reservations.get(route_id, {})
+        return [
+            EgressActiveReservationSnapshot(exchange=exchange, traffic_class=traffic_class)
+            for exchange, traffic_class in sorted(reservations)
+        ]
+
+    @staticmethod
+    def _quarantine_remaining_locked(state: RouteState, now: datetime) -> float | None:
+        """Return remaining quarantine seconds for a route.
+
+        Pool lock MUST be held.
+        """
+        if state.quarantine_until is None:
+            return None
+        remaining = (state.quarantine_until - now).total_seconds()
+        if remaining < 0.0:
+            return 0.0
+        return remaining
+
     def _pick_locked(
         self,
         preferred_route: str | None,
         exchange: str,
         now: datetime,
-        traffic_class: str,
+        traffic_class: TrafficClass,
     ) -> RouteSelection | None:
         """Return the best available route for this exchange or None.
 

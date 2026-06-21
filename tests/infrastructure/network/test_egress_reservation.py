@@ -118,8 +118,14 @@ class TestFinalizer:
         """
         pool = _build_pool()
         reservation = pool.reserve(exchange="kraken", purpose="websocket")
-        _finalize_release(pool, reservation.route_id)
+        _finalize_release(
+            pool,
+            reservation.route_id,
+            reservation.exchange,
+            reservation.traffic_class,
+        )
         assert pool.snapshot()[0].in_use_count == 0
+        assert pool.status_snapshot().routes[0].active_reservations == []
         reservation.release()
         assert pool.snapshot()[0].in_use_count == 0
 
