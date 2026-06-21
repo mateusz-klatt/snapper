@@ -64,6 +64,7 @@ from websockets.exceptions import ProxyError
 from snapper.core.json_types import JsonObject
 from snapper.infrastructure.network.egress_context import current_egress_identity
 from snapper.infrastructure.network.egress_context import resolve_egress_traffic
+from snapper.infrastructure.network.egress_pool import EgressPool
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_reservation import EgressReservation
 from snapper.utils.logging import is_file_sink_ready
@@ -629,41 +630,67 @@ def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -
         )
         return wait
     if pool is not None and pool.size() > 0:
-        identity = current_egress_identity()
-        exchange_name: str
-        traffic_class: str
-        if identity is not None:
-            exchange_name = identity.exchange
-            traffic_class = identity.traffic_class
-        else:
-            publisher = _CONNECTOR_PUBLISHERS.get(connector_id)
-            if publisher is not None:
-                exchange_name = publisher._get_exchange_name()
-                traffic_class = "public"
-            else:
-                exchange_name, traffic_class = resolve_egress_traffic()
-        if pool.has_available(exchange=exchange_name, traffic_class=traffic_class):
-            logger.info(
-                "kraken WS pool-aware reconnect: healthy route available (connector={})",
-                connector_id,
-            )
-            return _RETRY_AFTER_MIN_SECONDS
-        earliest = (
-            pool.earliest_release_in_seconds(
-                exchange=exchange_name,
-                traffic_class=traffic_class,
-            )
-            or 0.0
-        )
-        logger.warning(
-            "kraken WS pool-aware reconnect: all routes quarantined; "
-            "sleeping {}s until earliest release (connector={})",
-            earliest,
-            connector_id,
-        )
-        return max(earliest, _RETRY_AFTER_MIN_SECONDS)
+        return _pool_reconnect_wait(pool, connector_id)
     fallback: float = _ORIGINAL_GET_RECONNECT_WAIT(self, attempts)
     return fallback
+
+
+def _resolve_pool_reconnect_scope(connector_id: int) -> tuple[str, str]:
+    """Given a connector id, when pool reconnect routing is needed, then return scope.
+
+    Args:
+        connector_id: Identity of the SDK connector being reconnected.
+
+    Returns:
+        The ``(exchange_name, traffic_class)`` pair used for pool availability.
+
+    Raises:
+        This helper does not raise directly.
+    """
+    identity = current_egress_identity()
+    if identity is not None:
+        return identity.exchange, identity.traffic_class
+    publisher = _CONNECTOR_PUBLISHERS.get(connector_id)
+    if publisher is not None:
+        return publisher._get_exchange_name(), "public"
+    return resolve_egress_traffic()
+
+
+def _pool_reconnect_wait(pool: EgressPool, connector_id: int) -> float:
+    """Given a non-empty egress pool, when reconnecting, then choose the pool wait.
+
+    Args:
+        pool: Configured egress pool with at least one enabled route.
+        connector_id: Identity of the SDK connector being reconnected.
+
+    Returns:
+        The route-health floor when a matching route is available, otherwise
+        the earliest release delay floored at ``_RETRY_AFTER_MIN_SECONDS``.
+
+    Raises:
+        This helper does not raise directly.
+    """
+    exchange_name, traffic_class = _resolve_pool_reconnect_scope(connector_id)
+    if pool.has_available(exchange=exchange_name, traffic_class=traffic_class):
+        logger.info(
+            "kraken WS pool-aware reconnect: healthy route available (connector={})",
+            connector_id,
+        )
+        return _RETRY_AFTER_MIN_SECONDS
+    earliest = (
+        pool.earliest_release_in_seconds(
+            exchange=exchange_name,
+            traffic_class=traffic_class,
+        )
+        or 0.0
+    )
+    logger.warning(
+        "kraken WS pool-aware reconnect: all routes quarantined; "
+        "sleeping {}s until earliest release (connector={})",
+        earliest,
+        connector_id,
+    )
+    return max(earliest, _RETRY_AFTER_MIN_SECONDS)
 
 
 def _patched_init(self: ConnectSpotWebsocketBase, *args: Any, **kwargs: Any) -> None:

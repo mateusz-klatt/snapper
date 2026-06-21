@@ -738,6 +738,166 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             "egress_pool setting leaves the pool empty and feeds stay direct)"
         )
 
+    async def _configure_candle_consumers(
+        self, symbols_to_subscribe: list[str], tasks: list[asyncio.Task[None]]
+    ) -> list[str]:
+        """Given runtime settings, when starting, then configure candle consumers.
+
+        Args:
+            symbols_to_subscribe: Symbols selected after exchange connection limits.
+            tasks: Mutable startup task list that receives any flush tasks.
+
+        Returns:
+            Candle timeframes that should get supervised consumer tasks.
+
+        Raises:
+            Exception: Propagates restart-seed repository failures unchanged.
+        """
+        timeframes = self.settings.timeframes
+        higher_timeframes = [timeframe for timeframe in timeframes if timeframe != "1m"]
+        supported_higher = [tf for tf in higher_timeframes if tf in SUPPORTED_SYNTHESIS_TIMEFRAMES]
+        self._candle_aggregator = None
+        if supported_higher:
+            return await self._configure_synthesized_candle_consumers(
+                symbols_to_subscribe, higher_timeframes, supported_higher, tasks
+            )
+        return self._configure_native_candle_consumers(timeframes)
+
+    async def _configure_synthesized_candle_consumers(
+        self,
+        symbols_to_subscribe: list[str],
+        higher_timeframes: list[str],
+        supported_higher: list[str],
+        tasks: list[asyncio.Task[None]],
+    ) -> list[str]:
+        """Given higher timeframes, when synthesis is enabled, then start its support.
+
+        Args:
+            symbols_to_subscribe: Symbols selected after exchange connection limits.
+            higher_timeframes: Configured timeframes above ``1m``.
+            supported_higher: Higher timeframes supported by the aggregator.
+            tasks: Mutable startup task list that receives the optional flush task.
+
+        Returns:
+            The native ``1m`` consumer timeframe required for synthesis.
+
+        Raises:
+            Exception: Propagates restart-seed repository failures unchanged.
+        """
+        unsupported = [tf for tf in higher_timeframes if tf not in SUPPORTED_SYNTHESIS_TIMEFRAMES]
+        if unsupported:
+            logger.warning(
+                f"{self.__class__.__name__}: configured timeframes {unsupported} are not "
+                f"synthesizable and will NOT be published (supported higher TFs: "
+                f"{sorted(SUPPORTED_SYNTHESIS_TIMEFRAMES)})"
+            )
+        native_replaced = [tf for tf in supported_higher if tf in self._native_candle_timeframes()]
+        if native_replaced:
+            logger.warning(
+                f"{self.__class__.__name__}: synthesizing {native_replaced} from the 1m stream "
+                f"INSTEAD of the venue-native OHLC feed (intentional per the synthesize-from-1m "
+                f"design; the rolled-up VWAP/trades approximate the native bar)"
+            )
+        forward_fill = self.settings.candle_forward_fill and self._supports_forward_fill()
+        if self.settings.candle_forward_fill and not self._supports_forward_fill():
+            logger.warning(
+                f"{self.__class__.__name__}: candle_forward_fill is set but this venue is not a "
+                f"continuous-corpus feed — forward-fill is forced OFF (it would manufacture bars "
+                f"the strategy was never validated on)"
+            )
+        self._candle_aggregator = CandleAggregator(
+            supported_higher,
+            forward_fill=forward_fill,
+            flush_grace_seconds=_CANDLE_FLUSH_GRACE_S,
+        )
+        await self._seed_aggregator_from_db(
+            symbols_to_subscribe, supported_higher, datetime.now(UTC)
+        )
+        self._candle_aggregator.set_live_epoch(self._candle_live_epoch())
+        if self._candle_aggregator.forward_fill:
+            self._candle_flush_loop_task = asyncio.create_task(
+                self._candle_flush_loop(self._get_data_exchange())
+            )
+            tasks.append(self._candle_flush_loop_task)
+        return ["1m"]
+
+    def _configure_native_candle_consumers(self, timeframes: list[str]) -> list[str]:
+        """Given configured timeframes, when no synthesis runs, then select native feeds.
+
+        Args:
+            timeframes: Configured candle timeframes.
+
+        Returns:
+            Timeframes supported by the exchange's native candle stream.
+
+        Raises:
+            This helper does not raise directly.
+        """
+        stream_timeframes = self._candle_stream_timeframes()
+        candle_consumer_timeframes = [tf for tf in timeframes if tf in stream_timeframes]
+        dropped = [tf for tf in timeframes if tf not in stream_timeframes]
+        if dropped:
+            logger.warning(
+                f"{self.__class__.__name__}: timeframes {dropped} are neither natively "
+                f"subscribable nor synthesized by this publisher and will NOT be published "
+                f"(native: {sorted(stream_timeframes)})"
+            )
+        return candle_consumer_timeframes
+
+    def _start_native_finalizer_if_needed(
+        self, candle_consumer_timeframes: list[str], tasks: list[asyncio.Task[None]]
+    ) -> None:
+        """Given candle consumers, when native candles run, then start finalization.
+
+        Args:
+            candle_consumer_timeframes: Candle timeframes selected for consumption.
+            tasks: Mutable startup task list that receives the finalizer task.
+
+        Returns:
+            None.
+
+        Raises:
+            This helper does not raise directly.
+        """
+        self._consumes_native_candles = bool(candle_consumer_timeframes)
+        self._native_finalizer = None
+        if self._consumes_native_candles:
+            self._persist_intermediate_candles = self.settings.persist_intermediate_candles
+            self._native_finalizer = NativeCandleFinalizer(
+                persist_intermediate=self._persist_intermediate_candles,
+                flush_grace_seconds=_CANDLE_FLUSH_GRACE_S,
+            )
+            self._native_finalize_flush_task = asyncio.create_task(
+                self._native_finalize_flush_loop(self._get_data_exchange())
+            )
+            tasks.append(self._native_finalize_flush_task)
+
+    def _start_trade_tasks_if_supported(
+        self, symbols_to_subscribe: list[str], tasks: list[asyncio.Task[None]], process_name: str
+    ) -> None:
+        """Given selected symbols, when trades are supported, then start trade tasks.
+
+        Args:
+            symbols_to_subscribe: Symbols selected after exchange connection limits.
+            tasks: Mutable startup task list that receives trade tasks.
+            process_name: Log label for this publisher process.
+
+        Returns:
+            None.
+
+        Raises:
+            This helper does not raise directly.
+        """
+        if self._supports_public_trades():
+            self._trade_consumer_task = asyncio.create_task(
+                self._supervise_consumer("trade", partial(self._trade_loop, symbols_to_subscribe))
+            )
+            tasks.append(self._trade_consumer_task)
+            self._trade_writer_task = asyncio.create_task(self._trade_writer_loop())
+            tasks.append(self._trade_writer_task)
+        else:
+            logger.info(f"{process_name}: Trade loop disabled (exchange has no public trade feed)")
+
     async def start(self) -> None:
         """Start the publisher service and connect to exchange."""
         exchange_name = self._get_exchange_name()
@@ -799,73 +959,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._feed_health_loop_task = asyncio.create_task(self._feed_health_flush_loop())
         tasks.append(self._feed_health_loop_task)
         symbols_to_subscribe = self.symbols[:max_symbols] if max_symbols > 0 else self.symbols
-        timeframes = self.settings.timeframes
-        higher_timeframes = [timeframe for timeframe in timeframes if timeframe != "1m"]
-        supported_higher = [tf for tf in higher_timeframes if tf in SUPPORTED_SYNTHESIS_TIMEFRAMES]
-        self._candle_aggregator = None
-        if supported_higher:
-            unsupported = [
-                tf for tf in higher_timeframes if tf not in SUPPORTED_SYNTHESIS_TIMEFRAMES
-            ]
-            if unsupported:
-                logger.warning(
-                    f"{self.__class__.__name__}: configured timeframes {unsupported} are not "
-                    f"synthesizable and will NOT be published (supported higher TFs: "
-                    f"{sorted(SUPPORTED_SYNTHESIS_TIMEFRAMES)})"
-                )
-            native_replaced = [
-                tf for tf in supported_higher if tf in self._native_candle_timeframes()
-            ]
-            if native_replaced:
-                logger.warning(
-                    f"{self.__class__.__name__}: synthesizing {native_replaced} from the 1m stream "
-                    f"INSTEAD of the venue-native OHLC feed (intentional per the synthesize-from-1m "
-                    f"design; the rolled-up VWAP/trades approximate the native bar)"
-                )
-            forward_fill = self.settings.candle_forward_fill and self._supports_forward_fill()
-            if self.settings.candle_forward_fill and not self._supports_forward_fill():
-                logger.warning(
-                    f"{self.__class__.__name__}: candle_forward_fill is set but this venue is not a "
-                    f"continuous-corpus feed — forward-fill is forced OFF (it would manufacture bars "
-                    f"the strategy was never validated on)"
-                )
-            self._candle_aggregator = CandleAggregator(
-                supported_higher,
-                forward_fill=forward_fill,
-                flush_grace_seconds=_CANDLE_FLUSH_GRACE_S,
-            )
-            await self._seed_aggregator_from_db(
-                symbols_to_subscribe, supported_higher, datetime.now(UTC)
-            )
-            self._candle_aggregator.set_live_epoch(self._candle_live_epoch())
-            candle_consumer_timeframes = ["1m"]
-            if self._candle_aggregator.forward_fill:
-                self._candle_flush_loop_task = asyncio.create_task(
-                    self._candle_flush_loop(self._get_data_exchange())
-                )
-                tasks.append(self._candle_flush_loop_task)
-        else:
-            stream_timeframes = self._candle_stream_timeframes()
-            candle_consumer_timeframes = [tf for tf in timeframes if tf in stream_timeframes]
-            dropped = [tf for tf in timeframes if tf not in stream_timeframes]
-            if dropped:
-                logger.warning(
-                    f"{self.__class__.__name__}: timeframes {dropped} are neither natively "
-                    f"subscribable nor synthesized by this publisher and will NOT be published "
-                    f"(native: {sorted(stream_timeframes)})"
-                )
-        self._consumes_native_candles = bool(candle_consumer_timeframes)
-        self._native_finalizer = None
-        if self._consumes_native_candles:
-            self._persist_intermediate_candles = self.settings.persist_intermediate_candles
-            self._native_finalizer = NativeCandleFinalizer(
-                persist_intermediate=self._persist_intermediate_candles,
-                flush_grace_seconds=_CANDLE_FLUSH_GRACE_S,
-            )
-            self._native_finalize_flush_task = asyncio.create_task(
-                self._native_finalize_flush_loop(self._get_data_exchange())
-            )
-            tasks.append(self._native_finalize_flush_task)
+        candle_consumer_timeframes = await self._configure_candle_consumers(
+            symbols_to_subscribe, tasks
+        )
+        self._start_native_finalizer_if_needed(candle_consumer_timeframes, tasks)
         self._candle_consumer_tasks = [
             asyncio.create_task(
                 self._supervise_consumer(
@@ -884,15 +981,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         tasks.append(self._tick_consumer_task)
         self._tick_writer_task = asyncio.create_task(self._tick_writer_loop())
         tasks.append(self._tick_writer_task)
-        if self._supports_public_trades():
-            self._trade_consumer_task = asyncio.create_task(
-                self._supervise_consumer("trade", partial(self._trade_loop, symbols_to_subscribe))
-            )
-            tasks.append(self._trade_consumer_task)
-            self._trade_writer_task = asyncio.create_task(self._trade_writer_loop())
-            tasks.append(self._trade_writer_task)
-        else:
-            logger.info(f"{process_name}: Trade loop disabled (exchange has no public trade feed)")
+        self._start_trade_tasks_if_supported(symbols_to_subscribe, tasks, process_name)
         self._extra_background_tasks = await self._start_extra_background_tasks(
             symbols_to_subscribe
         )
@@ -965,7 +1054,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             Background tasks that should join the main gather and be cancelled
             during stop. The base implementation has no extra work.
         """
-        return []
+        completed: asyncio.Future[list[asyncio.Task[None]]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        completed.set_result([])
+        return await completed
 
     async def _stop_extra_background_tasks(self) -> None:
         """Cancel and await subclass-owned background tasks.
@@ -1751,26 +1844,55 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     continue
                 next_fut = None
                 candle = done.pop().result()
-                if candle is _STREAM_END:
+                should_continue = await self._handle_candle_stream_item(
+                    candle, exchange, exchange_label, timeframe
+                )
+                if not should_continue:
                     break
-                synthesized: list[tuple[str, CandleUpdate]] = []
-                if self._candle_aggregator is not None and timeframe == "1m":
-                    synthesized = self._candle_aggregator.fold(cast(CandleUpdate, candle))
-                row = await self._process_candle(cast(CandleUpdate, candle), exchange, timeframe)
-                if row is not None:
-                    self._enqueue_finalized_candles(
-                        self._observe_native_candle(cast(CandleUpdate, candle).symbol, row),
-                        exchange,
-                        exchange_label,
-                    )
-                for tf_label, synth in synthesized:
-                    await self._publish_synthesized_candle(synth, exchange, tf_label)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"Candle loop error for {symbols}: {e}")
         finally:
             _cleanup_pending_future(next_fut)
+
+    async def _handle_candle_stream_item(
+        self,
+        candle: CandleUpdate | object,
+        exchange: MarketDataExchange,
+        exchange_label: str,
+        timeframe: str,
+    ) -> bool:
+        """Given one stream item, when consumed, then publish and enqueue its effects.
+
+        Args:
+            candle: Stream item returned by the candle iterator.
+            exchange: Data exchange stamped on outbound/persisted rows.
+            exchange_label: Exchange label used for write-queue drop logging.
+            timeframe: Native timeframe of the stream being consumed.
+
+        Returns:
+            ``False`` when the iterator sentinel was observed, otherwise ``True``.
+
+        Raises:
+            Exception: Propagates publish, process, or synthesis failures unchanged.
+        """
+        if candle is _STREAM_END:
+            return False
+        candle_update = cast(CandleUpdate, candle)
+        synthesized: list[tuple[str, CandleUpdate]] = []
+        if self._candle_aggregator is not None and timeframe == "1m":
+            synthesized = self._candle_aggregator.fold(candle_update)
+        row = await self._process_candle(candle_update, exchange, timeframe)
+        if row is not None:
+            self._enqueue_finalized_candles(
+                self._observe_native_candle(candle_update.symbol, row),
+                exchange,
+                exchange_label,
+            )
+        for tf_label, synth in synthesized:
+            await self._publish_synthesized_candle(synth, exchange, tf_label)
+        return True
 
     def _observe_native_candle(
         self, native_symbol: str, row: CandleUpsertRow
@@ -2134,7 +2256,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             now: Reference time; defaults to the current UTC time. Injected by
                 tests for deterministic window boundaries.
         """
-        if self.repository is None or self._candle_aggregator is None:
+        repository = self.repository
+        aggregator = self._candle_aggregator
+        if repository is None or aggregator is None:
             return
         if "*" in symbols:
             logger.warning(
@@ -2149,26 +2273,125 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         end = minute_floor - timedelta(microseconds=1)
         exchange = self._get_exchange_name()
         for timeframe in higher:
-            window_start = self._candle_aggregator.window_start(timeframe, now)
-            if window_start is None:
-                continue
-            if window_start <= end:
-                read_start = window_start
-            else:
-                read_start = window_start - timedelta(
-                    seconds=self._candle_aggregator.timeframe_seconds(timeframe)
-                )
-            for native_symbol in symbols:
-                rows = await self.repository.get_candles(
-                    native_symbol, "1m", read_start, end, exchange, now, order="asc"
-                )
-                candidates = [row for row in rows if row["open_at"] < minute_floor]
-                if any(not row["complete"] for row in candidates):
-                    continue
-                for row in candidates:
-                    self._candle_aggregator.seed_1m(
-                        timeframe, self._candle_update_from_row(row, native_symbol)
-                    )
+            await self._seed_timeframe_from_db(
+                repository,
+                aggregator,
+                symbols,
+                timeframe,
+                now,
+                minute_floor,
+                end,
+                exchange,
+            )
+
+    async def _seed_timeframe_from_db(
+        self,
+        repository: Repository,
+        aggregator: CandleAggregator,
+        symbols: list[str],
+        timeframe: str,
+        now: datetime,
+        minute_floor: datetime,
+        end: datetime,
+        exchange: AllExchange,
+    ) -> None:
+        """Given a timeframe, when restarting, then seed it from finalized 1m rows.
+
+        Args:
+            repository: Repository used for persisted 1m reads.
+            aggregator: Candle aggregator being rebuilt.
+            symbols: Concrete native symbols to seed.
+            timeframe: Higher timeframe label to seed.
+            now: Restart reference time.
+            minute_floor: Current minute floor at restart.
+            end: Inclusive read end just before ``minute_floor``.
+            exchange: Exchange label used for the persisted read.
+
+        Returns:
+            None.
+
+        Raises:
+            Exception: Propagates repository read failures unchanged.
+        """
+        read_start = self._seed_read_start(aggregator, timeframe, now, end)
+        if read_start is None:
+            return
+        for native_symbol in symbols:
+            await self._seed_symbol_timeframe_from_db(
+                repository,
+                aggregator,
+                native_symbol,
+                timeframe,
+                read_start,
+                end,
+                exchange,
+                now,
+                minute_floor,
+            )
+
+    def _seed_read_start(
+        self, aggregator: CandleAggregator, timeframe: str, now: datetime, end: datetime
+    ) -> datetime | None:
+        """Given a timeframe, when seeding, then calculate the persisted read start.
+
+        Args:
+            aggregator: Candle aggregator being rebuilt.
+            timeframe: Higher timeframe label to seed.
+            now: Restart reference time.
+            end: Inclusive read end just before the current minute.
+
+        Returns:
+            The read start datetime, or ``None`` for unsupported timeframes.
+
+        Raises:
+            This helper does not raise directly.
+        """
+        window_start = aggregator.window_start(timeframe, now)
+        if window_start is None:
+            return None
+        if window_start <= end:
+            return window_start
+        return window_start - timedelta(seconds=aggregator.timeframe_seconds(timeframe))
+
+    async def _seed_symbol_timeframe_from_db(
+        self,
+        repository: Repository,
+        aggregator: CandleAggregator,
+        native_symbol: str,
+        timeframe: str,
+        read_start: datetime,
+        end: datetime,
+        exchange: AllExchange,
+        now: datetime,
+        minute_floor: datetime,
+    ) -> None:
+        """Given one symbol/timeframe, when restarting, then fold complete rows.
+
+        Args:
+            repository: Repository used for persisted 1m reads.
+            aggregator: Candle aggregator being rebuilt.
+            native_symbol: Native symbol to seed.
+            timeframe: Higher timeframe label to seed.
+            read_start: Inclusive read start.
+            end: Inclusive read end just before ``minute_floor``.
+            exchange: Exchange label used for the persisted read.
+            now: Restart reference time used as the repository ``as_of``.
+            minute_floor: Current minute floor at restart.
+
+        Returns:
+            None.
+
+        Raises:
+            Exception: Propagates repository read failures unchanged.
+        """
+        rows = await repository.get_candles(
+            native_symbol, "1m", read_start, end, exchange, now, order="asc"
+        )
+        candidates = [row for row in rows if row["open_at"] < minute_floor]
+        if any(not row["complete"] for row in candidates):
+            return
+        for row in candidates:
+            aggregator.seed_1m(timeframe, self._candle_update_from_row(row, native_symbol))
 
     @staticmethod
     def _candle_update_from_row(row: CandleRow, symbol: str) -> CandleUpdate:

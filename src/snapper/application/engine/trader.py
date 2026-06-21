@@ -77,6 +77,7 @@ from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import AccrualLedgerInsertRow
+from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PairedExecutionGroupInsertRow
@@ -1156,7 +1157,7 @@ class TraderCoordinator(RegisterableProcess):
                 )
                 return
             events = await self.repository.get_venue_events_after(shard_key, 0)
-            projection = self.trade_service.project_fill_state_from_events(shard_key, events)
+            projection = self.trade_service.project_fill_state_from_events(events)
             self.trade_service.overlay_fill_state(shard_key, projection)
             self._consumed_venue_event_watermarks[shard_key] = (
                 events[-1]["id"] if events else projection["last_venue_event_id"]
@@ -1191,7 +1192,7 @@ class TraderCoordinator(RegisterableProcess):
         if not isinstance(self.repository, SQLAlchemyRepository):
             return
         try:
-            shard_keys = await self.repository.get_shard_keys_with_fills(now)
+            shard_keys = await self.repository.get_shard_keys_with_fills()
         except Exception as e:
             logger.error(f"ZMQTrader: Failed to query shards with fills for gap recovery: {e}")
             return
@@ -3375,6 +3376,128 @@ class TraderCoordinator(RegisterableProcess):
         self.trade_service.apply_venue_event(venue_event)
         self._order_shard_keys.pop(order_event.client_order_id, None)
 
+    async def _advance_checkpoint_watermark(
+        self,
+        repository: SQLAlchemyRepository,
+        shard_key: str,
+        consumed_fill: ExecutionData | None,
+    ) -> None:
+        """Given a consumed fill, when checkpointing, then advance its watermark.
+
+        Args:
+            repository: SQLAlchemy repository used for the durable fill lookup.
+            shard_key: Shard being checkpointed.
+            consumed_fill: Fill just consumed by the projection, or ``None``.
+
+        Returns:
+            None.
+
+        Raises:
+            Exception: Propagates repository lookup failures unchanged.
+        """
+        if consumed_fill is None:
+            return
+        resolved_id = await repository.get_consumed_fill_venue_event_id(
+            shard_key=shard_key,
+            client_order_id=consumed_fill.client_order_id,
+            exec_id=consumed_fill.trade_id,
+            cum_fill_size=consumed_fill.size,
+        )
+        if resolved_id is None:
+            logger.warning(
+                f"TraderCoordinator: could not resolve durable venue event id for "
+                f"consumed fill {consumed_fill.client_order_id} on {shard_key}; "
+                f"checkpoint watermark left unadvanced"
+            )
+            return
+        self._consumed_venue_event_watermarks[shard_key] = max(
+            self._consumed_venue_event_watermarks.get(shard_key, 0),
+            resolved_id,
+        )
+
+    def _checkpoint_wallet_public_id(self, shard_key: str) -> str:
+        """Given a shard key, when checkpointing, then resolve its wallet id.
+
+        Args:
+            shard_key: Shard being checkpointed.
+
+        Returns:
+            Wallet public id, or an empty string when no wallet short is encoded.
+
+        Raises:
+            This helper does not raise directly.
+        """
+        parsed_shard = self._parse_shard_key(shard_key)
+        wallet_short = parsed_shard[3] if parsed_shard else ""
+        return self._wallet_short_to_id.get(wallet_short, "") if wallet_short else ""
+
+    def _checkpoint_operator_public_id(self, shard_key: str) -> str | None:
+        """Given a shard key, when checkpointing, then resolve its operator id.
+
+        Args:
+            shard_key: Shard being checkpointed.
+
+        Returns:
+            Operator public id for the matching engine, or ``None``.
+
+        Raises:
+            This helper does not raise directly.
+        """
+        for engine in self.engines.values():
+            if engine._shard_key == shard_key:
+                return engine.operator_public_id or None
+        return None
+
+    def _build_checkpoint_upsert_row(
+        self,
+        shard_key: str,
+        snap: dict[str, float | str | int | datetime | None],
+        *,
+        now: datetime,
+        watermark: int,
+        wallet_public_id: str,
+        operator_public_id: str | None,
+    ) -> CheckpointUpsertRow:
+        """Given a checkpoint snapshot, when persisting, then build the row.
+
+        Args:
+            shard_key: Shard being checkpointed.
+            snap: In-memory trade projection snapshot.
+            now: Timestamp captured for this checkpoint write.
+            watermark: Consumed venue-event watermark to persist.
+            wallet_public_id: Resolved wallet public id.
+            operator_public_id: Resolved operator public id, or ``None``.
+
+        Returns:
+            Repository upsert row with the same fields as the previous inline dict.
+
+        Raises:
+            Exception: Propagates tracker sequencing or type conversion failures unchanged.
+        """
+        ep = snap["entry_price"]
+        oci = snap["open_command_ids"]
+        opened_at = snap.get("position_opened_at")
+        return {
+            "shard_key": shard_key,
+            "wallet_public_id": wallet_public_id,
+            "operator_public_id": operator_public_id,
+            "position_qty": cast(float, snap["position_qty"]),
+            "entry_price": cast(float, ep) if ep is not None else None,
+            "position_opened_at": cast(datetime, opened_at) if opened_at is not None else None,
+            "cash": cast(float, snap["cash"]),
+            "peak_equity": cast(float, snap["peak_equity"]),
+            "realized_pnl": cast(float, snap["realized_pnl"]),
+            "turnover": cast(float, snap["turnover"]),
+            "last_venue_event_id": watermark,
+            "last_venue_event_at": now if watermark else None,
+            "open_command_ids": cast(str, oci) if oci is not None else None,
+            "seen_exec_ids": cast(str, snap["seen_exec_ids"]),
+            "checkpoint_at": now,
+            "session_id": self._tracker.session_id,
+            "sequence_id": self._tracker.next_sequence(f"checkpoint.{shard_key}"),
+            "bus_time": now,
+        }
+
     async def _persist_checkpoint(
         self,
         shard_key: str,
@@ -3404,64 +3527,25 @@ class TraderCoordinator(RegisterableProcess):
                 the consumed watermark. ``None`` for non-fill checkpoints (e.g.
                 funding accrual), which must not advance the watermark.
         """
-        if not isinstance(self.repository, SQLAlchemyRepository):
+        repository = self.repository
+        if not isinstance(repository, SQLAlchemyRepository):
             return
         snap = self.trade_service.snapshot_for_checkpoint(shard_key)
         now = datetime.now(UTC)
-        ep = snap["entry_price"]
-        oci = snap["open_command_ids"]
-        if consumed_fill is not None:
-            resolved_id = await self.repository.get_consumed_fill_venue_event_id(
-                shard_key=shard_key,
-                client_order_id=consumed_fill.client_order_id,
-                exec_id=consumed_fill.trade_id,
-                cum_fill_size=consumed_fill.size,
-            )
-            if resolved_id is None:
-                logger.warning(
-                    f"TraderCoordinator: could not resolve durable venue event id for "
-                    f"consumed fill {consumed_fill.client_order_id} on {shard_key}; "
-                    f"checkpoint watermark left unadvanced"
-                )
-            else:
-                self._consumed_venue_event_watermarks[shard_key] = max(
-                    self._consumed_venue_event_watermarks.get(shard_key, 0),
-                    resolved_id,
-                )
+        await self._advance_checkpoint_watermark(repository, shard_key, consumed_fill)
         watermark = self._consumed_venue_event_watermarks.get(shard_key, 0)
-        parsed_shard = self._parse_shard_key(shard_key)
-        wallet_short = parsed_shard[3] if parsed_shard else ""
-        wallet_public_id = self._wallet_short_to_id.get(wallet_short, "") if wallet_short else ""
-        operator_public_id: str | None = None
-        for engine in self.engines.values():
-            if engine._shard_key == shard_key:
-                operator_public_id = engine.operator_public_id or None
-                break
+        wallet_public_id = self._checkpoint_wallet_public_id(shard_key)
+        operator_public_id = self._checkpoint_operator_public_id(shard_key)
         try:
-            opened_at = snap.get("position_opened_at")
-            await self.repository.upsert_checkpoint(
-                {
-                    "shard_key": shard_key,
-                    "wallet_public_id": wallet_public_id,
-                    "operator_public_id": operator_public_id,
-                    "position_qty": cast(float, snap["position_qty"]),
-                    "entry_price": cast(float, ep) if ep is not None else None,
-                    "position_opened_at": (
-                        cast(datetime, opened_at) if opened_at is not None else None
-                    ),
-                    "cash": cast(float, snap["cash"]),
-                    "peak_equity": cast(float, snap["peak_equity"]),
-                    "realized_pnl": cast(float, snap["realized_pnl"]),
-                    "turnover": cast(float, snap["turnover"]),
-                    "last_venue_event_id": watermark,
-                    "last_venue_event_at": now if watermark else None,
-                    "open_command_ids": cast(str, oci) if oci is not None else None,
-                    "seen_exec_ids": cast(str, snap["seen_exec_ids"]),
-                    "checkpoint_at": now,
-                    "session_id": self._tracker.session_id,
-                    "sequence_id": self._tracker.next_sequence(f"checkpoint.{shard_key}"),
-                    "bus_time": now,
-                }
+            await repository.upsert_checkpoint(
+                self._build_checkpoint_upsert_row(
+                    shard_key,
+                    snap,
+                    now=now,
+                    watermark=watermark,
+                    wallet_public_id=wallet_public_id,
+                    operator_public_id=operator_public_id,
+                )
             )
         except Exception:
             logger.exception(f"TraderCoordinator: Failed to persist checkpoint for {shard_key}")

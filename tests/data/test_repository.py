@@ -10761,7 +10761,6 @@ async def test_get_shard_keys_with_fills_distinct(tmp_path: Path) -> None:
     Then: it returns exactly {A, B} (C has no fill_observed event).
     """
     r, _, _ = await _seed_full_repo(tmp_path)
-    now = datetime(2024, 1, 1, tzinfo=UTC)
     await r.insert_venue_event(
         _gap_venue_row(
             shard_key="shardA",
@@ -10793,7 +10792,7 @@ async def test_get_shard_keys_with_fills_distinct(tmp_path: Path) -> None:
             event_type="order_accepted",
         )
     )
-    result = await r.get_shard_keys_with_fills(now)
+    result = await r.get_shard_keys_with_fills()
     assert set(result) == {"shardA", "shardB"}
 
 

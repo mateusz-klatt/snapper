@@ -81,6 +81,7 @@ from snapper.application.notify.sidecar import NotifySidecar
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.services.candle_coverage import VERIFIABLE_TIMEFRAMES
+from snapper.application.services.candle_coverage import CoverageReport
 from snapper.application.services.candle_coverage import verify_candle_coverage
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.settings import get_settings_service
@@ -1396,6 +1397,101 @@ def polygon_load_grouped_candles(
     asyncio.run(run_grouped_candle_load())
 
 
+def _resolve_verify_candle_coverage_symbols(
+    symbols: list[str] | None, configured_symbols: list[str]
+) -> list[str]:
+    """Given CLI and configured symbols, when verifying coverage, then choose symbols.
+
+    Args:
+        symbols: Explicit ``--symbol`` values from the CLI.
+        configured_symbols: Settings-derived Polygon instruments.
+
+    Returns:
+        The native symbols to verify.
+
+    Raises:
+        typer.Exit: When no explicit symbols can be resolved.
+    """
+    syms = symbols if symbols else configured_symbols
+    if not syms or syms == ["*"]:
+        typer.echo("No explicit symbols to verify; pass --symbol")
+        raise typer.Exit(code=1)
+    return syms
+
+
+def _echo_candle_coverage_report(report: CoverageReport) -> None:
+    """Given a coverage report, when the CLI completes, then print its verdicts.
+
+    Args:
+        report: Coverage report returned by the application verifier.
+
+    Returns:
+        None.
+
+    Raises:
+        typer.Exit: When any entry is incomplete.
+    """
+    for entry in report.entries:
+        status = "PASS" if entry.ok else "FAIL"
+        typer.echo(
+            f"[{status}] {entry.symbol} {entry.timeframe} ({entry.bars} bars): {entry.reason}"
+        )
+    if not report.ok:
+        typer.echo("Candle coverage INCOMPLETE — not ready for single-source cutover")
+        raise typer.Exit(code=1)
+    typer.echo("Candle coverage OK")
+
+
+async def _run_verify_candle_coverage_cmd(
+    *,
+    venue: ExchangeEnum,
+    cut_day: date_type,
+    symbols: list[str] | None,
+    timeframes: list[str],
+    min_bars: int,
+    writer_lag_seconds: int,
+) -> None:
+    """Given parsed CLI options, when invoked, then run the coverage verifier.
+
+    Args:
+        venue: Live venue selected for verification.
+        cut_day: Synthesis ownership boundary.
+        symbols: Explicit CLI symbols, or None to use settings.
+        timeframes: Timeframes selected for verification.
+        min_bars: Minimum verification window depth.
+        writer_lag_seconds: Grace seconds for writer flush latency.
+
+    Returns:
+        None.
+
+    Raises:
+        typer.Exit: When symbols cannot be resolved or coverage is incomplete.
+        Exception: Propagates verifier failures unchanged.
+    """
+    settings = get_settings()
+    syms = _resolve_verify_candle_coverage_symbols(
+        symbols, list(settings.instruments.get(ExchangeEnum.POLYGON, []))
+    )
+    repo = get_repository(settings.db_url)
+    try:
+        report = await verify_candle_coverage(
+            repo=repo,
+            cache=None,
+            exchange=venue,
+            native_symbols=syms,
+            timeframes=timeframes,
+            cut_date=cut_day,
+            as_of=datetime.now(UTC),
+            writer_lag_s=writer_lag_seconds,
+            min_bars=min_bars,
+        )
+    finally:
+        engine = getattr(repo, "engine", None)
+        if engine is not None:
+            await engine.dispose()
+    _echo_candle_coverage_report(report)
+
+
 @app.command(name="verify-candle-coverage")
 def verify_candle_coverage_cmd(
     exchange: str = typer.Option(
@@ -1450,41 +1546,16 @@ def verify_candle_coverage_cmd(
         raise typer.Exit(code=1)
     cut_day = date_type.fromisoformat(cut_date)
     tfs = timeframes if timeframes else list(VERIFIABLE_TIMEFRAMES)
-
-    async def run_verify() -> None:
-        settings = get_settings()
-        syms = symbols if symbols else list(settings.instruments.get(ExchangeEnum.POLYGON, []))
-        if not syms or syms == ["*"]:
-            typer.echo("No explicit symbols to verify; pass --symbol")
-            raise typer.Exit(code=1)
-        repo = get_repository(settings.db_url)
-        try:
-            report = await verify_candle_coverage(
-                repo=repo,
-                cache=None,
-                exchange=venue,
-                native_symbols=syms,
-                timeframes=tfs,
-                cut_date=cut_day,
-                as_of=datetime.now(UTC),
-                writer_lag_s=writer_lag_seconds,
-                min_bars=min_bars,
-            )
-        finally:
-            engine = getattr(repo, "engine", None)
-            if engine is not None:
-                await engine.dispose()
-        for entry in report.entries:
-            status = "PASS" if entry.ok else "FAIL"
-            typer.echo(
-                f"[{status}] {entry.symbol} {entry.timeframe} ({entry.bars} bars): {entry.reason}"
-            )
-        if not report.ok:
-            typer.echo("Candle coverage INCOMPLETE — not ready for single-source cutover")
-            raise typer.Exit(code=1)
-        typer.echo("Candle coverage OK")
-
-    asyncio.run(run_verify())
+    asyncio.run(
+        _run_verify_candle_coverage_cmd(
+            venue=venue,
+            cut_day=cut_day,
+            symbols=symbols,
+            timeframes=tfs,
+            min_bars=min_bars,
+            writer_lag_seconds=writer_lag_seconds,
+        )
+    )
 
 
 @app.command(name="kraken-futures-backfill-candles")

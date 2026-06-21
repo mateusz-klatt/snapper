@@ -1549,7 +1549,7 @@ def test_project_fill_state_from_events_no_global_mutation() -> None:
     svc = TradeService()
     shard_key = "kraken.BTC-USD.live"
     events = [_make_venue_event(event_id=1, side="buy", fill_size=0.5, fill_price=100.0)]
-    projection = svc.project_fill_state_from_events(shard_key, events)
+    projection = svc.project_fill_state_from_events(events)
     assert shard_key not in svc._shards
     assert projection["position_qty"] == pytest.approx(0.5)
     assert projection["last_venue_event_id"] == 1
@@ -1646,7 +1646,6 @@ def test_project_fill_state_dedups_duplicate_beyond_window() -> None:
     Then: the position reflects a single application of the fill.
     """
     svc = TradeService()
-    shard_key = "kraken.BTC-USD.live"
     events = [
         _make_venue_event(
             event_id=1, exec_id="X", trade_id="X", side="buy", fill_size=0.5, fill_price=100.0
@@ -1655,5 +1654,5 @@ def test_project_fill_state_dedups_duplicate_beyond_window() -> None:
             event_id=2, exec_id="X", trade_id="X", side="buy", fill_size=0.5, fill_price=100.0
         ),
     ]
-    projection = svc.project_fill_state_from_events(shard_key, events)
+    projection = svc.project_fill_state_from_events(events)
     assert projection["position_qty"] == pytest.approx(0.5)

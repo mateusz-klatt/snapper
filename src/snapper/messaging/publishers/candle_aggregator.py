@@ -315,7 +315,7 @@ class CandleAggregator:
         out: list[tuple[str, CandleUpdate]] = []
         effective = now - timedelta(seconds=self._flush_grace_s)
         minute_floor_ts = int(self._floor(effective, 60).timestamp())
-        for sym in list(self._open_minutes):
+        for sym in self._open_minutes:
             open_minutes = self._open_minutes[sym]
             to_finalize = sorted(minute for minute in open_minutes if minute < minute_floor_ts)
             for minute in to_finalize:

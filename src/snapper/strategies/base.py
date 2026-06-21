@@ -86,6 +86,9 @@ _WARMUP_SESSION_ID = "warmup"
 _DEFAULT_POLYGON_CACHE_ROOT = "data/polygon/cache"
 """Default Polygon cache root for warmup prefill (override via params)."""
 
+_MARKET_TOPIC_PREFIX = "market."
+"""Prefix for market data topics consumed by strategies."""
+
 
 def _native_to_polygon_crypto_ticker(native_symbol: str) -> str | None:
     """Derive the Polygon REST crypto ticker for a native ``BASE-QUOTE`` symbol.
@@ -550,7 +553,7 @@ class BaseStrategy(ABC):
         assert self.subscriber is not None
         subscribed_heartbeats: set[str] = set()
         for topic in self.inputs:
-            if not topic.startswith("market."):
+            if not topic.startswith(_MARKET_TOPIC_PREFIX):
                 continue
             parsed = parse_market_topic(topic)
             if parsed is None:
@@ -681,7 +684,7 @@ class BaseStrategy(ABC):
                 if topic_str.startswith("system."):
                     await self._handle_system_message(topic_str, payload_str)
                     continue
-                if topic_str.startswith("market."):
+                if topic_str.startswith(_MARKET_TOPIC_PREFIX):
                     parsed = parse_market_topic(topic_str)
                     if parsed is None:
                         logger.warning(f"Strategy {self.name}: Malformed market topic: {topic_str}")
@@ -783,7 +786,7 @@ class BaseStrategy(ABC):
                 return
             legs: list[Any] = []
             for topic in self.inputs:
-                if not topic.startswith("market."):
+                if not topic.startswith(_MARKET_TOPIC_PREFIX):
                     continue
                 parsed = parse_market_topic(topic)
                 if (

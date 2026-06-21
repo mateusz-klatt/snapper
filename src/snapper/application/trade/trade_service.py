@@ -370,9 +370,7 @@ class TradeService:
             result.append(event)
         return result
 
-    def project_fill_state_from_events(
-        self, shard_key: str, events: list[VenueEventRow]
-    ) -> FillProjection:
+    def project_fill_state_from_events(self, events: list[VenueEventRow]) -> FillProjection:
         """Replay events into a THROWAWAY shard and return fill-derived state.
 
         Applies the full id-ordered venue-event history to a fresh
@@ -384,7 +382,6 @@ class TradeService:
         (``self._initial_cash`` + fill flows).
 
         Args:
-            shard_key: Shard the events belong to (for parity; unused here).
             events: Full id-ordered ``fill_observed``/lifecycle venue events.
 
         Returns:

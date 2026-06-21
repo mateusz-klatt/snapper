@@ -1359,7 +1359,7 @@ class PairedExecutionLeg(TemporalMixin, Base):
         Index("ix_pel_client_order_id", "client_order_id"),
         Index("ix_pel_exchange_order_id", "exchange_order_id"),
         Index("ix_pel_shard_status", "shard_key", "status"),
-        CheckConstraint("side IN ('buy', 'sell')", name="ck_pel_side"),
+        CheckConstraint(_CK_SIDE_BUY_SELL, name="ck_pel_side"),
         CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_pel_mode"),
     )
     group_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
@@ -2131,7 +2131,7 @@ class ExecutionPlan(TemporalMixin, Base):
             name="ck_ep_status",
         ),
         CheckConstraint(
-            "side IN ('buy', 'sell')",
+            _CK_SIDE_BUY_SELL,
             name="ck_ep_side",
         ),
         CheckConstraint(

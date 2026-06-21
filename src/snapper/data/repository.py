@@ -10690,19 +10690,14 @@ class SQLAlchemyRepository(Repository):
             )
             return result.scalar()
 
-    async def get_shard_keys_with_fills(self, as_of: datetime) -> list[str]:
+    async def get_shard_keys_with_fills(self) -> list[str]:
         """Return distinct shard keys that have any ``fill_observed`` venue event.
 
         Recovery's venue-plane gap pass (R9) iterates these to find shards
         whose recorded fills were never consumed and were not covered by
         checkpoint or execution recovery — including shards with ZERO
         execution rows, which the execution-replay pass never visits (it
-        returns early on an empty executions table). ``as_of`` is accepted
-        for signature parity with the other recovery queries; venue events
-        are append-only and never closed, so no temporal filter applies.
-
-        Args:
-            as_of: Recovery anchor (unused; append-only rows).
+        returns early on an empty executions table).
 
         Returns:
             Distinct ``shard_key`` values bearing fill events.

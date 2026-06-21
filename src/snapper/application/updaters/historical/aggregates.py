@@ -196,30 +196,9 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             self._archive_symbols = self._db_sync.get_archive_symbols()
             client = PolygonExchangeClient(api_key=api_key)
             self._loader = PolygonHistoricalLoader(client, cache_root=_CACHE_ROOT)
-            if self._all_mapped:
-                symbols = self._get_all_mapped_symbols()
-                if not symbols:
-                    logger.warning("No symbols with Polygon mapping found in database")
-                    return
-                logger.info(f"Fetched {len(symbols)} symbols with Polygon mapping from database")
-            else:
-                symbols = self._requested_symbols or self.settings.instruments.get(
-                    ExchangeEnum.POLYGON, []
-                )
-                if symbols == ["*"]:
-                    symbols = self._get_all_mapped_symbols()
-                    if not symbols:
-                        logger.warning(
-                            "Wildcard settings but no Polygon-mapped symbols in database"
-                        )
-                        return
-                    logger.info(
-                        f"Resolved {len(symbols)} Polygon symbols from wildcard settings "
-                        "(same as --all)"
-                    )
-                elif not symbols:
-                    logger.warning("No Polygon symbols configured for backfill")
-                    return
+            symbols = self._resolve_symbols_for_start()
+            if not symbols:
+                return
             for symbol in symbols:
                 context = self._resolve_symbol_context(symbol)
                 if context is None:
@@ -230,6 +209,42 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             if client is not None:
                 await client.disconnect()
             self._dispose_resources()
+
+    def _resolve_symbols_for_start(self) -> list[str]:
+        """Given configured symbol options, when starting, then choose symbols.
+
+        Args:
+            None.
+
+        Returns:
+            Symbols selected for aggregate download, or an empty list when
+            startup should stop after the same warning the inline path emitted.
+
+        Raises:
+            This helper does not raise directly.
+        """
+        if self._all_mapped:
+            symbols = self._get_all_mapped_symbols()
+            if not symbols:
+                logger.warning("No symbols with Polygon mapping found in database")
+                return []
+            logger.info(f"Fetched {len(symbols)} symbols with Polygon mapping from database")
+            return symbols
+        symbols = self._requested_symbols or self.settings.instruments.get(ExchangeEnum.POLYGON, [])
+        if symbols == ["*"]:
+            mapped_symbols = self._get_all_mapped_symbols()
+            if not mapped_symbols:
+                logger.warning("Wildcard settings but no Polygon-mapped symbols in database")
+                return []
+            logger.info(
+                f"Resolved {len(mapped_symbols)} Polygon symbols from wildcard settings "
+                "(same as --all)"
+            )
+            return mapped_symbols
+        if not symbols:
+            logger.warning("No Polygon symbols configured for backfill")
+            return []
+        return list(symbols)
 
     def _dispose_resources(self) -> None:
         """Dispose the synchronous repository allocated during startup."""

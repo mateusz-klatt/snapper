@@ -185,7 +185,7 @@ class NativeCandleFinalizer:
             ``(native_symbol, final_row)`` pairs for the released windows.
         """
         out: list[tuple[str, CandleUpsertRow]] = []
-        for key in list(self._held.keys()):
+        for key in tuple(self._held):
             held = self._held[key]
             window_end = held.row["open_at"] + timedelta(
                 seconds=window_seconds(held.row["timeframe"])

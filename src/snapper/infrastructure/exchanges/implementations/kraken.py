@@ -775,6 +775,26 @@ class KrakenExchangeClient(ExchangeClientBase):
             AmbiguousOrderSubmitError: If the venue call failed in a way
                 where the order MAY exist on the venue.
         """
+        ccxt_symbol, ccxt_type, ccxt_params = self._build_ccxt_order_submit(request)
+        order_data = await self._submit_ccxt_order(request, ccxt_symbol, ccxt_type, ccxt_params)
+        order = self._snapshot_submitted_ccxt_order(request, order_data)
+        await self._attach_submitted_order_db_ids(request, order)
+        return order
+
+    def _build_ccxt_order_submit(
+        self, request: ExchangeOrderRequest
+    ) -> tuple[str, str, dict[str, Any]]:
+        """Given an order request, when using CCXT, then build submit arguments.
+
+        Args:
+            request: Order request from the exchange contract.
+
+        Returns:
+            Native symbol mapped to CCXT, CCXT order type, and CCXT params.
+
+        Raises:
+            ValueError: Propagates symbol mapping or stop-price validation failures.
+        """
         ccxt_symbol = native_to_ccxt(request.symbol)
         ccxt_params: dict[str, Any] = {}
         if request.client_order_id:
@@ -789,6 +809,30 @@ class KrakenExchangeClient(ExchangeClientBase):
             ccxt_type = (
                 "limit" if request.type is ExchangeOrderTypeEnum.STOP_LOSS_LIMIT else "market"
             )
+        return ccxt_symbol, ccxt_type, ccxt_params
+
+    async def _submit_ccxt_order(
+        self,
+        request: ExchangeOrderRequest,
+        ccxt_symbol: str,
+        ccxt_type: str,
+        ccxt_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Given prepared CCXT arguments, when submitting, then map ambiguous failures.
+
+        Args:
+            request: Original order request used for error identity.
+            ccxt_symbol: CCXT trading pair.
+            ccxt_type: CCXT order type.
+            ccxt_params: CCXT-specific order parameters.
+
+        Returns:
+            Raw CCXT order payload.
+
+        Raises:
+            AmbiguousOrderSubmitError: If the send failed ambiguously.
+            ccxt.RateLimitExceeded: Propagated unchanged for definitive venue rejection.
+        """
         try:
             order_data = await self._with_retry(
                 self._ccxt_client.create_order,
@@ -817,9 +861,25 @@ class KrakenExchangeClient(ExchangeClientBase):
                 instrument=request.symbol,
                 message=f"Kraken Spot create_order network failure (order may exist): {e}",
             ) from e
-        exchange_id = str(order_data.get("id") or "")
-        order = ExchangeOrderSnapshot(
-            id=exchange_id,
+        return cast(dict[str, Any], order_data)
+
+    def _snapshot_submitted_ccxt_order(
+        self, request: ExchangeOrderRequest, order_data: dict[str, Any]
+    ) -> ExchangeOrderSnapshot:
+        """Given a raw CCXT submit answer, when accepted, then build a snapshot.
+
+        Args:
+            request: Original order request.
+            order_data: Raw CCXT order payload.
+
+        Returns:
+            Pending order snapshot matching the previous inline construction.
+
+        Raises:
+            This helper does not raise directly.
+        """
+        return ExchangeOrderSnapshot(
+            id=str(order_data.get("id") or ""),
             client_order_id=request.client_order_id,
             symbol=request.symbol,
             side=request.side,
@@ -831,12 +891,27 @@ class KrakenExchangeClient(ExchangeClientBase):
             remaining=float(request.amount),
             timestamp=time.time(),
         )
+
+    async def _attach_submitted_order_db_ids(
+        self, request: ExchangeOrderRequest, order: ExchangeOrderSnapshot
+    ) -> None:
+        """Given a submitted order, when it has a venue id, then attach DB ids.
+
+        Args:
+            request: Original order request.
+            order: Submitted order snapshot to mutate with DB identifiers.
+
+        Returns:
+            None.
+
+        Raises:
+            Exception: Propagates database logging failures unchanged.
+        """
         if order.id:
             db_result = await self._log_order_to_db(request, order)
             if db_result is not None:
                 order.db_order_id = db_result[0]
                 order.db_order_public_id = db_result[1]
-        return order
 
     async def _create_order_via_native(
         self, request: ExchangeOrderRequest
@@ -1150,11 +1225,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         user_client = self._get_user_client()
         extra_params = {"cl_ord_id": client_order_id}
-        queries: tuple[tuple[Callable[..., dict[str, Any]], str], ...] = (
-            (user_client.get_open_orders, "open"),
-            (user_client.get_closed_orders, "closed"),
-        )
-        for fetch, key in queries:
+        for fetch, key in self._native_client_id_queries(user_client):
             response = await self._with_retry(
                 fetch,
                 extra_params=extra_params,
@@ -1163,30 +1234,115 @@ class KrakenExchangeClient(ExchangeClientBase):
                 egress_operation=f"native_find_order_by_client_id_{key}",
                 egress_target=spot_sdk_proxy_target(user_client),
             )
-            orders = response.get(key) if isinstance(response, dict) else None
-            if not isinstance(orders, dict):
+            response_dict = cast(dict[str, Any], response)
+            orders = self._native_order_set(response_dict, key, client_order_id)
+            match = self._matching_native_client_order(orders, key, client_order_id, symbol)
+            if match is not None:
+                return match
+            if key == "closed":
+                self._ensure_closed_orders_exhaustive(response_dict, orders, client_order_id)
+        return None
+
+    def _native_client_id_queries(
+        self, user_client: User
+    ) -> tuple[tuple[Callable[..., dict[str, Any]], str], ...]:
+        """Given a native user client, when verifying id, then return query order.
+
+        Args:
+            user_client: Native Kraken User REST client.
+
+        Returns:
+            Open-order query followed by closed-order query.
+
+        Raises:
+            This helper does not raise directly.
+        """
+        return (
+            (user_client.get_open_orders, "open"),
+            (user_client.get_closed_orders, "closed"),
+        )
+
+    @staticmethod
+    def _native_order_set(
+        response: dict[str, Any], key: str, client_order_id: str
+    ) -> dict[str, Any]:
+        """Given a native response, when reading one set, then validate its shape.
+
+        Args:
+            response: Native Kraken response payload.
+            key: Response key being read, either ``open`` or ``closed``.
+            client_order_id: Client id used in the query, for diagnostics.
+
+        Returns:
+            Mapping of order txid to native order payload.
+
+        Raises:
+            RuntimeError: If the response does not contain an order mapping.
+        """
+        orders = response.get(key) if isinstance(response, dict) else None
+        if not isinstance(orders, dict):
+            raise RuntimeError(
+                f"Kraken returned a malformed {key}-orders set for "
+                f"{client_order_id}: cannot answer authoritatively"
+            )
+        return orders
+
+    def _matching_native_client_order(
+        self,
+        orders: dict[str, Any],
+        key: str,
+        client_order_id: str,
+        symbol: str,
+    ) -> ExchangeOrderSnapshot | None:
+        """Given native orders, when scanning, then return the matching client id.
+
+        Args:
+            orders: Native order mapping keyed by txid.
+            key: Response set name used for diagnostics.
+            client_order_id: Client id being verified.
+            symbol: Native symbol stamped on the returned snapshot.
+
+        Returns:
+            Converted order snapshot when the echoed client id matches, else ``None``.
+
+        Raises:
+            RuntimeError: If any native order payload is malformed.
+        """
+        for txid, payload in orders.items():
+            if not isinstance(payload, dict):
                 raise RuntimeError(
-                    f"Kraken returned a malformed {key}-orders set for "
+                    f"Kraken returned a malformed {key} order entry for "
                     f"{client_order_id}: cannot answer authoritatively"
                 )
-            for txid, payload in orders.items():
-                if not isinstance(payload, dict):
-                    raise RuntimeError(
-                        f"Kraken returned a malformed {key} order entry for "
-                        f"{client_order_id}: cannot answer authoritatively"
-                    )
-                if payload.get("cl_ord_id") == client_order_id:
-                    return self._convert_kraken_user_order(str(txid), payload, symbol)
-            if key == "closed":
-                count = response.get("count")
-                if not isinstance(count, int) or count > len(orders):
-                    raise RuntimeError(
-                        f"Kraken closed-orders answer for {client_order_id} is not "
-                        f"provably exhaustive (count={count!r}, rows={len(orders)}): "
-                        f"a paged or count-less answer that may hide the order "
-                        f"cannot prove absence"
-                    )
+            if payload.get("cl_ord_id") == client_order_id:
+                return self._convert_kraken_user_order(str(txid), payload, symbol)
         return None
+
+    @staticmethod
+    def _ensure_closed_orders_exhaustive(
+        response: dict[str, Any], orders: dict[str, Any], client_order_id: str
+    ) -> None:
+        """Given closed-order response, when proving absence, then require exhaustiveness.
+
+        Args:
+            response: Native closed-orders response payload.
+            orders: Closed orders returned in the response.
+            client_order_id: Client id being verified.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If the closed-order response may be paged or count-less.
+        """
+        count = response.get("count")
+        if not isinstance(count, int) or count > len(orders):
+            raise RuntimeError(
+                f"Kraken closed-orders answer for {client_order_id} is not "
+                f"provably exhaustive (count={count!r}, rows={len(orders)}): "
+                f"a paged or count-less answer that may hide the order "
+                f"cannot prove absence"
+            )
 
     async def _fetch_orders_from_exchange(
         self,
@@ -2794,6 +2950,43 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.debug("Initialized native Kraken User REST API client")
         return self._user_client
 
+    async def _invoke_with_retry_slot(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        egress_kind: KrakenRestOperationKind | None = None,
+        egress_operation: str | None = None,
+        egress_target: RestProxyTarget | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Given a REST callable, when one retry attempt runs, then return its result.
+
+        Args:
+            func: Function to call (sync or async).
+            *args: Positional arguments for func.
+            egress_kind: Optional REST routing classification for sync Kraken calls.
+            egress_operation: Stable operation name for the egress identity.
+            egress_target: External client/session proxy target.
+            **kwargs: Keyword arguments for func.
+
+        Returns:
+            Result of the function call.
+
+        Raises:
+            Exception: Propagates acquisition or invocation failures unchanged.
+        """
+        await self._acquire_rest_slot()
+        result = await self._invoke_func(
+            func,
+            *args,
+            egress_kind=egress_kind,
+            egress_operation=egress_operation,
+            egress_target=egress_target,
+            **kwargs,
+        )
+        self._circuit_failures = 0
+        return result
+
     async def _with_retry(
         self,
         func: Callable[..., Any],
@@ -2844,8 +3037,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         attempt = 0
         while True:
             try:
-                await self._acquire_rest_slot()
-                result = await self._invoke_func(
+                return await self._invoke_with_retry_slot(
                     func,
                     *args,
                     egress_kind=egress_kind,
@@ -2853,8 +3045,6 @@ class KrakenExchangeClient(ExchangeClientBase):
                     egress_target=egress_target,
                     **kwargs,
                 )
-                self._circuit_failures = 0
-                return result
             except ccxt.RateLimitExceeded:
                 attempt = await self._handle_rate_limit(attempt, max_retries, base_delay)
             except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:

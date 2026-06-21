@@ -277,6 +277,95 @@ def _evaluate_derive_parity(
     return ""
 
 
+def _validate_coverage_inputs(
+    exchange: AllExchange,
+    native_symbols: Sequence[str],
+    timeframes: Sequence[str],
+) -> None:
+    """Given coverage inputs, when verification starts, then reject invalid sets.
+
+    Args:
+        exchange: Live venue selected for verification.
+        native_symbols: Symbols requested for verification.
+        timeframes: Timeframes requested for verification.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: When the venue is ``polygon``, no symbols/timeframes were
+            supplied, or a timeframe is outside the verifier's supported set.
+    """
+    if exchange == ExchangeEnum.POLYGON:
+        raise ValueError(
+            "polygon is the CSV cache segment, not a persisted read venue; "
+            "verify under the live venue"
+        )
+    if not native_symbols or not timeframes:
+        raise ValueError("verify_candle_coverage requires non-empty native_symbols and timeframes")
+    unknown = [timeframe for timeframe in timeframes if timeframe not in _TF_SECONDS]
+    if unknown:
+        raise ValueError(f"unverifiable timeframes: {unknown}")
+
+
+async def _build_coverage_entry(
+    *,
+    repo: Repository,
+    cache: MarketCacheService | None,
+    exchange: AllExchange,
+    symbol: str,
+    timeframe: str,
+    cut_dt: datetime,
+    as_of: datetime,
+    writer_lag_s: int,
+    min_bars: int,
+) -> CoverageEntry:
+    """Given one symbol/timeframe, when checked, then return its coverage entry.
+
+    Args:
+        repo: Repository handle used for the persisted candle range read.
+        cache: Optional warm 1m cache used for derive-parity verification.
+        exchange: Live venue selected for verification.
+        symbol: Native symbol being verified.
+        timeframe: Higher timeframe being verified.
+        cut_dt: UTC synthesis ownership boundary.
+        as_of: Reference time for latest-closed-window calculation.
+        writer_lag_s: Writer grace in seconds.
+        min_bars: Minimum slot depth for the verification window.
+
+    Returns:
+        The coverage verdict for the requested ``(symbol, timeframe)`` pair.
+
+    Raises:
+        Exception: Propagates repository or cache read failures unchanged.
+    """
+    tf_seconds = _TF_SECONDS[timeframe]
+    end = _latest_closed_open(as_of, writer_lag_s, tf_seconds)
+    start = _window_start(end, tf_seconds, timeframe, cut_dt, min_bars)
+    rows = await repo.get_candles(
+        instrument=symbol,
+        timeframe=timeframe,
+        start=start,
+        end=end,
+        exchange=exchange,
+        as_of=as_of,
+        order="asc",
+    )
+    reason = _evaluate_grid(rows, timeframe, tf_seconds, start, end, cut_dt)
+    if not reason and cache is not None and timeframe in DERIVED_AGGREGATION_MAP:
+        snaps = await cache.get_1m_candles(exchange, symbol, limit=_CACHE_PARITY_LIMIT)
+        reason = _evaluate_derive_parity(rows, snaps, DERIVED_AGGREGATION_MAP[timeframe])
+    return CoverageEntry(
+        symbol=symbol,
+        timeframe=timeframe,
+        ok=not reason,
+        reason=reason or "ok",
+        bars=len(rows),
+        oldest=rows[0]["open_at"] if rows else None,
+        newest=rows[-1]["open_at"] if rows else None,
+    )
+
+
 async def verify_candle_coverage(
     *,
     repo: Repository,
@@ -312,45 +401,22 @@ async def verify_candle_coverage(
             ``native_symbols``/``timeframes`` is empty, or a timeframe is not
             verifiable (would otherwise vacuously pass or raise downstream).
     """
-    if exchange == ExchangeEnum.POLYGON:
-        raise ValueError(
-            "polygon is the CSV cache segment, not a persisted read venue; "
-            "verify under the live venue"
-        )
-    if not native_symbols or not timeframes:
-        raise ValueError("verify_candle_coverage requires non-empty native_symbols and timeframes")
-    unknown = [timeframe for timeframe in timeframes if timeframe not in _TF_SECONDS]
-    if unknown:
-        raise ValueError(f"unverifiable timeframes: {unknown}")
+    _validate_coverage_inputs(exchange, native_symbols, timeframes)
     cut_dt = _cut_datetime(cut_date)
     entries: list[CoverageEntry] = []
     for symbol in native_symbols:
         for timeframe in timeframes:
-            tf_seconds = _TF_SECONDS[timeframe]
-            end = _latest_closed_open(as_of, writer_lag_s, tf_seconds)
-            start = _window_start(end, tf_seconds, timeframe, cut_dt, min_bars)
-            rows = await repo.get_candles(
-                instrument=symbol,
-                timeframe=timeframe,
-                start=start,
-                end=end,
-                exchange=exchange,
-                as_of=as_of,
-                order="asc",
-            )
-            reason = _evaluate_grid(rows, timeframe, tf_seconds, start, end, cut_dt)
-            if not reason and cache is not None and timeframe in DERIVED_AGGREGATION_MAP:
-                snaps = await cache.get_1m_candles(exchange, symbol, limit=_CACHE_PARITY_LIMIT)
-                reason = _evaluate_derive_parity(rows, snaps, DERIVED_AGGREGATION_MAP[timeframe])
             entries.append(
-                CoverageEntry(
+                await _build_coverage_entry(
+                    repo=repo,
+                    cache=cache,
+                    exchange=exchange,
                     symbol=symbol,
                     timeframe=timeframe,
-                    ok=not reason,
-                    reason=reason or "ok",
-                    bars=len(rows),
-                    oldest=rows[0]["open_at"] if rows else None,
-                    newest=rows[-1]["open_at"] if rows else None,
+                    cut_dt=cut_dt,
+                    as_of=as_of,
+                    writer_lag_s=writer_lag_s,
+                    min_bars=min_bars,
                 )
             )
     return CoverageReport(entries=entries, ok=all(entry.ok for entry in entries))
