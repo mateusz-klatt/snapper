@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from loguru import logger
 
 from snapper.infrastructure.network import egress_pool as pool_module
 from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
@@ -350,6 +351,272 @@ class TestReserveExchangeFilter:
             r = pool.reserve(exchange=exchange, purpose="websocket")
             assert r.route_id in {"ie", "uk"}
             r.release()
+
+
+class TestPrivateTrafficSelection:
+    """Tests for private direct-first routing and fallback semantics."""
+
+    @staticmethod
+    def _private_config(on_all_quarantined: str = "wait") -> EgressPoolConfig:
+        """Build direct + public VPN + PL private fallback config.
+
+        Args:
+            on_all_quarantined: Pool policy to install.
+
+        Returns:
+            EgressPoolConfig used by private routing tests.
+        """
+        return EgressPoolConfig(
+            enabled=True,
+            on_all_quarantined=on_all_quarantined,
+            private_fallback_route_id="pl",
+            routes=[
+                RouteConfig(id="default", kind="direct", priority=100),
+                RouteConfig(
+                    id="ie",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1081",
+                    priority=10,
+                ),
+                RouteConfig(
+                    id="pl",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1084",
+                    priority=5,
+                    allowed_exchanges=("walutomat",),
+                ),
+            ],
+        )
+
+    def test_public_selection_keeps_existing_allow_list_policy(self) -> None:
+        """Spec — public traffic ignores the private fallback policy.
+
+        Given: direct is lower priority than public VPN routes and PL is
+            pinned to Walutomat,
+        When: public Kraken traffic reserves a route,
+        Then: it uses the existing public selector and picks the IE route.
+        """
+        pool = EgressPool(self._private_config())
+        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        assert reservation.route_id == "ie"
+        reservation.release()
+
+    def test_unknown_traffic_class_defaults_to_public(self) -> None:
+        """Spec — unknown traffic classes are treated as public.
+
+        Given: a private fallback config,
+        When: a caller passes an unrecognized traffic class,
+        Then: the public route is selected rather than private direct.
+        """
+        pool = EgressPool(self._private_config())
+        reservation = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="mystery",
+        )
+        assert reservation.route_id == "ie"
+        reservation.release()
+
+    def test_private_selection_picks_direct_first(self) -> None:
+        """Spec — private traffic uses direct before public VPN routes.
+
+        Given: a healthy direct route and lower-priority SOCKS routes,
+        When: private Kraken traffic reserves a route,
+        Then: direct is selected regardless of public priority order.
+        """
+        pool = EgressPool(self._private_config())
+        reservation = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        assert reservation.route_id == "default"
+        assert reservation.proxy_url is None
+        reservation.release()
+
+    def test_private_selection_falls_back_to_pl_when_direct_quarantined(self) -> None:
+        """Spec — private fallback bypasses the route allow-list.
+
+        Given: direct is quarantined and PL is publicly pinned to Walutomat,
+        When: private Kraken traffic reserves a route,
+        Then: PL is selected even though public Kraken traffic could not use it.
+        """
+        pool = EgressPool(self._private_config())
+        direct = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        direct.quarantine(120.0, reason="http-429")
+        direct.release()
+
+        fallback = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+
+        assert fallback.route_id == "pl"
+        assert fallback.proxy_url == "socks5h://x:1084"
+        fallback.release()
+
+    def test_private_wait_mode_uses_all_quarantined_direct_fallback(self) -> None:
+        """Spec — private wait mode ignores healthy public-only routes.
+
+        Given: direct and PL private fallback are quarantined while IE is healthy,
+        When: private traffic reserves in wait mode,
+        Then: the pool returns direct under the all-quarantined wait policy.
+        """
+        pool = EgressPool(self._private_config(on_all_quarantined="wait"))
+        direct = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        direct.quarantine(120.0, reason="http-429")
+        direct.release()
+        pl = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        pl.quarantine(120.0, reason="http-429")
+        pl.release()
+
+        fallback = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+
+        assert fallback.route_id == "default"
+        fallback.release()
+
+    def test_private_raise_mode_raises_when_direct_and_pl_unavailable(self) -> None:
+        """Spec — private raise mode raises when private routes are unavailable.
+
+        Given: direct and PL private fallback are quarantined while IE is healthy,
+        When: private traffic reserves in raise mode,
+        Then: AllRoutesQuarantinedError is raised.
+        """
+        pool = EgressPool(self._private_config(on_all_quarantined="raise"))
+        direct = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        direct.quarantine(120.0, reason="http-429")
+        direct.release()
+        pl = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        pl.quarantine(120.0, reason="http-429")
+        pl.release()
+
+        with pytest.raises(AllRoutesQuarantinedError):
+            pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
+
+    def test_private_has_available_and_earliest_release_use_private_routes(self) -> None:
+        """Spec — private availability ignores public-only healthy routes.
+
+        Given: direct and PL are quarantined while IE remains healthy,
+        When: private availability and release time are queried,
+        Then: availability is False and release time is based on private routes.
+        """
+        pool = EgressPool(self._private_config())
+        assert pool.earliest_release_in_seconds(exchange="kraken", traffic_class="private") is None
+        direct = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        direct.quarantine(30.0, reason="http-429")
+        direct.release()
+        pl = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        pl.quarantine(90.0, reason="http-429")
+        pl.release()
+
+        assert pool.has_available(exchange="kraken", traffic_class="private") is False
+        assert pool.has_available(exchange="kraken", traffic_class="public") is True
+        earliest = pool.earliest_release_in_seconds(exchange="kraken", traffic_class="private")
+        assert earliest is not None
+        assert 27.0 <= earliest <= 32.0
+
+    def test_private_without_fallback_honors_wait_mode(self) -> None:
+        """Spec — missing private fallback does not invent a private route.
+
+        Given: no ``private_fallback_route_id`` is configured and direct is quarantined,
+        When: private traffic reserves in wait mode,
+        Then: the all-quarantined direct fallback is returned.
+        """
+        config = EgressPoolConfig(
+            enabled=True,
+            routes=[
+                RouteConfig(id="default", kind="direct", priority=100),
+                RouteConfig(
+                    id="ie",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1081",
+                    priority=10,
+                ),
+            ],
+        )
+        pool = EgressPool(config)
+        direct = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        direct.quarantine(120.0, reason="http-429")
+        direct.release()
+
+        fallback = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+
+        assert fallback.route_id == "default"
+        fallback.release()
+
+    def test_selection_log_emitted_for_websocket_reserve(self) -> None:
+        """Spec — reserve emits one structured WS selection log.
+
+        Given: a private reserve call,
+        When: a WebSocket route is selected,
+        Then: the log line includes exchange, traffic class, route, fallback,
+            proxy, pid, and host fields.
+        """
+        messages: list[str] = []
+        sink_id = logger.add(lambda message: messages.append(str(message)), level="INFO")
+        try:
+            pool = EgressPool(self._private_config())
+            reservation = pool.reserve(
+                exchange="kraken",
+                purpose="websocket",
+                traffic_class="private",
+            )
+            reservation.release()
+        finally:
+            logger.remove(sink_id)
+
+        joined = "\n".join(messages)
+        assert "egress_pool: selected route" in joined
+        assert "exchange=kraken" in joined
+        assert "traffic_class=private" in joined
+        assert "purpose=websocket" in joined
+        assert "route_id=default" in joined
+        assert "route_kind=direct" in joined
+        assert "is_fallback=False" in joined
+        assert "proxy_url=direct" in joined
+        assert "pid=" in joined
+        assert "host=" in joined
 
 
 class TestReserveAllQuarantined:

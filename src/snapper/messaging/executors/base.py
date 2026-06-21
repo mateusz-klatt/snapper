@@ -74,6 +74,7 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
+from snapper.infrastructure.network.egress_context import egress_identity
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.gap_detector import GapDetector
@@ -4272,15 +4273,22 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 "ExchangeExecutorService: WebSocket executions unsupported; skipping handler"
             )
             return
-        stream = self.exchange_client.subscribe_executions()
-        try:
-            async for message in stream:
-                if not self.running:
-                    break
-                await self._process_execution(message)
-        finally:
-            if isinstance(stream, AsyncGenerator):
-                await stream.aclose()
+        exchange_name = self._get_exchange_name()
+        with egress_identity(
+            exchange=exchange_name,
+            traffic_class="private",
+            owner="executor",
+            operation="order_ws",
+        ):
+            stream = self.exchange_client.subscribe_executions()
+            try:
+                async for message in stream:
+                    if not self.running:
+                        break
+                    await self._process_execution(message)
+            finally:
+                if isinstance(stream, AsyncGenerator):
+                    await stream.aclose()
 
     def _cleanup_expired_orphans(self) -> None:
         """Remove orphaned executions that exceeded TTL.

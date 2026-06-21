@@ -54,6 +54,9 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _LAST_CLOSE_CODE
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PATCH_APPLIED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PATCH_LOGGED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PENDING_RETRY_AFTER_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import (
+    _PRIVATE_DIRECT_CONNECT_ERROR_QUARANTINE_S,
+)
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RESUBSCRIBE_PACE_PATCH_APPLIED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RESUBSCRIBE_PACE_PATCH_LOGGED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RESUBSCRIBE_PACE_S
@@ -90,6 +93,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.exchanges.kraken_sdk_patches import get_registered_publisher
 from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
+from snapper.infrastructure.network.egress_context import egress_identity
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_pool import _POOL_HOLDER
@@ -1225,6 +1229,55 @@ class TestPhaseBPrimeShim:
             "close_timeout": _WS_CLOSE_TIMEOUT_S,
         }
 
+    def test_shim_passes_explicit_private_traffic_class_to_pool(self) -> None:
+        """Spec — explicit private identity is passed to ``pool.reserve``.
+
+        Given an active executor egress identity,
+        When _ConnectShim is constructed,
+        Then the pool reserve call receives ``traffic_class="private"``.
+        """
+
+        class _ReservationDouble:
+            route_id = "default"
+            proxy_url: str | None = None
+
+            def websocket_kwargs(self) -> dict[str, str | None]:
+                """Return direct WebSocket kwargs.
+
+                Returns:
+                    Proxy kwargs for a direct route.
+                """
+                return {"proxy": None}
+
+            def release(self) -> None:
+                """Release the test reservation."""
+                return None
+
+        fake_pool = MagicMock()
+        fake_pool.size.return_value = 1
+        fake_pool.reserve.return_value = _ReservationDouble()
+
+        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+            return MagicMock()
+
+        with patch(
+            "snapper.infrastructure.exchanges.kraken_sdk_patches.get_egress_pool",
+            return_value=fake_pool,
+        ), egress_identity(
+            exchange="kraken",
+            traffic_class="private",
+            owner="executor",
+            operation="order_ws",
+        ):
+            shim_cls = _wrap_connect_factory(fake_connect)
+            shim_cls("wss://kraken")
+
+        fake_pool.reserve.assert_called_once_with(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+
     def test_shim_socks5_route_injects_proxy_url(self) -> None:
         """Spec — when socks5 is preferred, proxy=socks5h://... is injected.
 
@@ -1569,6 +1622,72 @@ class TestPhaseBPrimeShim:
         snap = pool.snapshot()[0]
         assert snap.quarantine_until is None
         assert snap.in_use_count == 0
+
+    @pytest.mark.asyncio
+    async def test_private_direct_connect_error_quarantines_direct_briefly(self) -> None:
+        """Spec — private direct connect errors trigger PL fallback.
+
+        Given the pool has direct plus a configured PL private fallback,
+        When a private direct handshake raises a connect error,
+        Then direct is briefly quarantined and the next private reserve
+            selects PL.
+        """
+        config = EgressPoolConfig(
+            enabled=True,
+            private_fallback_route_id="pl",
+            routes=[
+                RouteConfig(id="default", kind="direct", priority=100),
+                RouteConfig(
+                    id="pl",
+                    kind="socks5",
+                    proxy_url="socks5h://snapper-egress:1084",
+                    priority=10,
+                    allowed_exchanges=("walutomat",),
+                ),
+            ],
+        )
+        pool = configure_egress_pool(config)
+        assert pool is not None
+
+        async def fake_aenter(_: Any) -> Any:
+            raise ConnectionRefusedError("connection refused")
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        with egress_identity(
+            exchange="kraken",
+            traffic_class="private",
+            owner="executor",
+            operation="order_ws",
+        ):
+            shim_cls = _wrap_connect_factory(fake_connect)
+            shim = shim_cls("wss://kraken")
+            before = datetime.now(UTC)
+            with pytest.raises(ConnectionRefusedError):
+                await shim.__aenter__()
+            direct = next(s for s in pool.snapshot() if s.id == "default")
+            assert direct.quarantine_until is not None
+            held_s = (direct.quarantine_until - before).total_seconds()
+            assert (
+                _PRIVATE_DIRECT_CONNECT_ERROR_QUARANTINE_S - 2.0
+                <= held_s
+                <= (_PRIVATE_DIRECT_CONNECT_ERROR_QUARANTINE_S + 1.0)
+            )
+            assert direct.in_use_count == 0
+            next_reservation = pool.reserve(
+                exchange="kraken",
+                purpose="websocket",
+                traffic_class="private",
+            )
+            assert next_reservation.route_id == "pl"
+            next_reservation.release()
 
     @pytest.mark.asyncio
     async def test_shim_connect_error_pool_disabled_just_propagates(self) -> None:
@@ -1987,9 +2106,46 @@ class TestPhaseBPrimeGetReconnectWait:
             ):
                 wait = _patched_get_reconnect_wait(connector, 1)
             assert wait == _RETRY_AFTER_MIN_SECONDS
-            fake_pool.has_available.assert_called_once_with(exchange="kraken_equities")
+            fake_pool.has_available.assert_called_once_with(
+                exchange="kraken_equities",
+                traffic_class="public",
+            )
         finally:
             _CONNECTOR_PUBLISHERS.pop(connector_id, None)
+
+    def test_pool_reconnect_wait_uses_explicit_private_identity(self) -> None:
+        """Spec — reconnect wait passes private traffic class to the pool.
+
+        Given an explicit private executor identity and an enabled pool,
+        When _patched_get_reconnect_wait consults route availability,
+        Then it queries both availability and release time with
+            ``traffic_class="private"``.
+        """
+        connector = MagicMock(spec=ConnectSpotWebsocketBase)
+        fake_pool = MagicMock()
+        fake_pool.size.return_value = 1
+        fake_pool.has_available.return_value = False
+        fake_pool.earliest_release_in_seconds.return_value = 12.5
+        with patch(
+            "snapper.infrastructure.exchanges.kraken_sdk_patches.get_egress_pool",
+            return_value=fake_pool,
+        ), egress_identity(
+            exchange="kraken",
+            traffic_class="private",
+            owner="executor",
+            operation="order_ws",
+        ):
+            wait = _patched_get_reconnect_wait(connector, 1)
+
+        assert wait == 12.5
+        fake_pool.has_available.assert_called_once_with(
+            exchange="kraken",
+            traffic_class="private",
+        )
+        fake_pool.earliest_release_in_seconds.assert_called_once_with(
+            exchange="kraken",
+            traffic_class="private",
+        )
 
     def test_pool_enabled_all_quarantined_returns_earliest_release(self) -> None:
         """Spec — all routes quarantined returns earliest release deadline.

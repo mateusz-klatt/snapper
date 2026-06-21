@@ -196,6 +196,7 @@ class TestEgressPoolConfig:
         assert config.enabled is False
         assert config.routes == []
         assert config.on_all_quarantined == "wait"
+        assert config.private_fallback_route_id is None
 
     def test_enabled_requires_direct_route(self) -> None:
         """Spec — enabled=True with no direct route is rejected.
@@ -324,6 +325,44 @@ class TestEgressPoolConfig:
             }
         )
         assert len(config.routes) == 1
+
+    def test_private_fallback_route_id_accepts_declared_route(self) -> None:
+        """Spec — private fallback id may name an existing route.
+
+        Given a config whose ``private_fallback_route_id`` points at
+            a declared route,
+        When EgressPoolConfig is constructed,
+        Then the fallback id is stored.
+        """
+        config = EgressPoolConfig(
+            enabled=True,
+            private_fallback_route_id="pl",
+            routes=[
+                RouteConfig(id="default", kind="direct"),
+                RouteConfig(
+                    id="pl",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1084",
+                    allowed_exchanges=("walutomat",),
+                ),
+            ],
+        )
+        assert config.private_fallback_route_id == "pl"
+
+    def test_private_fallback_route_id_rejects_unknown_route(self) -> None:
+        """Spec — private fallback id must name an existing route.
+
+        Given a config whose ``private_fallback_route_id`` points at
+            no declared route,
+        When EgressPoolConfig is constructed,
+        Then ValidationError is raised.
+        """
+        with pytest.raises(ValidationError, match="private_fallback_route_id"):
+            EgressPoolConfig(
+                enabled=True,
+                private_fallback_route_id="missing",
+                routes=[RouteConfig(id="default", kind="direct")],
+            )
 
 
 class TestRouteStateDefaults:

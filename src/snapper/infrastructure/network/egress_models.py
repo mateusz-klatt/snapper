@@ -10,7 +10,8 @@ Three shapes live here:
 * ``RouteState`` — mutable per-route runtime state owned by the
   ``EgressPool`` and guarded by the pool's internal lock.
 * ``EgressPoolConfig`` — top-level setting payload combining
-  ``enabled``, ``on_all_quarantined`` policy, and the route list.
+  ``enabled``, ``on_all_quarantined`` policy, the private fallback
+  route id, and the route list.
 """
 
 from dataclasses import dataclass
@@ -169,6 +170,9 @@ class EgressPoolConfig(BaseModel):
             into a single long sleep until the earliest release.
             ``raise``: pool raises ``AllRoutesQuarantinedError`` so
             the reconnect watchdog handles the storm.
+        private_fallback_route_id: Optional route id used when private
+            executor traffic cannot use a healthy direct route. The
+            route must be declared in ``routes`` when set.
         routes: List of declared routes. When ``enabled=True``, at
             least one ``direct`` route with ``enabled=True`` MUST be
             present so the pool always has a fallback.
@@ -178,6 +182,7 @@ class EgressPoolConfig(BaseModel):
 
     enabled: bool = False
     on_all_quarantined: Literal["wait", "raise"] = "wait"
+    private_fallback_route_id: str | None = None
     routes: list[RouteConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -195,6 +200,27 @@ class EgressPoolConfig(BaseModel):
             raise ValueError(
                 "egress_pool with enabled=True requires at least one "
                 "enabled direct route as fallback"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_private_fallback_route_exists(self) -> Self:
+        """Reject a private fallback id that does not name a declared route.
+
+        Returns:
+            The validated config.
+
+        Raises:
+            ValueError: When ``private_fallback_route_id`` is set but no
+                route with that id exists.
+        """
+        if self.private_fallback_route_id is None:
+            return self
+        route_ids = {route.id for route in self.routes}
+        if self.private_fallback_route_id not in route_ids:
+            raise ValueError(
+                f"private_fallback_route_id {self.private_fallback_route_id!r} "
+                "does not name a declared route"
             )
         return self
 
@@ -249,9 +275,10 @@ class RouteSelection:
             policy. Callers MUST NOT mutate this directly; the pool
             increments ``in_use_count`` inside the same critical
             section that created the selection.
-        is_fallback: ``True`` when the pool fell back to the direct
-            route under ``on_all_quarantined="wait"`` because no
-            healthy route was available.
+        is_fallback: ``True`` when the pool selected a configured
+            fallback route or fell back to the direct route under
+            ``on_all_quarantined="wait"`` because no healthy route was
+            available.
     """
 
     state: RouteState

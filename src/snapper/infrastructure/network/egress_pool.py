@@ -20,6 +20,8 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import os
+import socket
 import threading
 from datetime import UTC
 from datetime import datetime
@@ -81,7 +83,7 @@ class EgressPool(EgressPoolBase):
         with self._lock:
             return sum(1 for s in self._states.values() if s.enabled)
 
-    def has_available(self, exchange: str | None = None) -> bool:
+    def has_available(self, exchange: str | None = None, traffic_class: str = "public") -> bool:
         """Return True if any route is enabled, not quarantined, and serves ``exchange``.
 
         Args:
@@ -94,6 +96,10 @@ class EgressPool(EgressPoolBase):
                 Kraken connect shim's ``_patched_get_reconnect_wait``)
                 MUST pass the exchange so a Walutomat-pinned route
                 cannot falsely look healthy to Kraken.
+            traffic_class: ``"public"`` keeps the legacy exchange
+                allow-list policy. ``"private"`` considers only a
+                healthy direct route or the configured private fallback
+                route. Any other value is treated as ``"public"``.
 
         Returns:
             ``True`` when at least one matching route is enabled and
@@ -103,14 +109,19 @@ class EgressPool(EgressPoolBase):
             serves ``exchange`` at all.
         """
         now = datetime.now(UTC)
+        effective_traffic_class = "private" if traffic_class == "private" else "public"
         with self._lock:
+            if effective_traffic_class == "private":
+                return self._pick_private_locked(now) is not None
             return any(
                 self._is_available_locked(s, now)
                 and (exchange is None or self._exchange_allows_locked(s, exchange))
                 for s in self._states.values()
             )
 
-    def earliest_release_in_seconds(self, exchange: str | None = None) -> float | None:
+    def earliest_release_in_seconds(
+        self, exchange: str | None = None, traffic_class: str = "public"
+    ) -> float | None:
         """Minimum seconds until any quarantine deadline expires.
 
         Args:
@@ -121,6 +132,12 @@ class EgressPool(EgressPoolBase):
                 exchange so the deadline reflects an
                 exchange-eligible release, not a release for a
                 differently-pinned route.
+            traffic_class: ``"public"`` keeps the legacy exchange
+                allow-list policy. ``"private"`` considers only
+                direct routes and the configured private fallback
+                route, bypassing that fallback route's
+                ``allowed_exchanges``. Any other value is treated as
+                ``"public"``.
 
         Returns:
             ``None`` if no matching route is currently quarantined.
@@ -129,14 +146,25 @@ class EgressPool(EgressPoolBase):
             release.
         """
         now = datetime.now(UTC)
+        effective_traffic_class = "private" if traffic_class == "private" else "public"
         with self._lock:
-            deadlines = [
-                s.quarantine_until
-                for s in self._states.values()
-                if s.enabled
-                and s.quarantine_until is not None
-                and (exchange is None or self._exchange_allows_locked(s, exchange))
-            ]
+            if effective_traffic_class == "private":
+                fallback_route_id = self._config.private_fallback_route_id
+                deadlines = [
+                    s.quarantine_until
+                    for s in self._states.values()
+                    if s.enabled
+                    and s.quarantine_until is not None
+                    and (s.config.kind == "direct" or s.config.id == fallback_route_id)
+                ]
+            else:
+                deadlines = [
+                    s.quarantine_until
+                    for s in self._states.values()
+                    if s.enabled
+                    and s.quarantine_until is not None
+                    and (exchange is None or self._exchange_allows_locked(s, exchange))
+                ]
         if not deadlines:
             return None
         earliest = min(deadlines)
@@ -151,6 +179,7 @@ class EgressPool(EgressPoolBase):
         exchange: str,
         purpose: Literal["websocket", "http"],
         preferred_route: str | None = None,
+        traffic_class: str = "public",
     ) -> EgressReservation:
         """Pick the best route and return a borrowed handle.
 
@@ -171,6 +200,14 @@ class EgressPool(EgressPoolBase):
             - ``on_all_quarantined == "raise"``: raise
               ``AllRoutesQuarantinedError``.
 
+        Private selection policy:
+
+        * Pick the first healthy direct route.
+        * If no direct route is healthy, pick
+          ``private_fallback_route_id`` when configured and healthy,
+          ignoring that route's ``allowed_exchanges``.
+        * If neither route is healthy, apply ``on_all_quarantined``.
+
         Args:
             exchange: The exchange name used to filter routes by
                 ``RouteConfig.allowed_exchanges``. Routes with an
@@ -178,6 +215,10 @@ class EgressPool(EgressPoolBase):
             purpose: ``"websocket"`` or ``"http"``; included in
                 route-exhaustion error messages.
             preferred_route: Optional route id hint.
+            traffic_class: ``"public"`` uses the legacy exchange
+                allow-list policy. ``"private"`` uses the direct
+                then configured fallback policy. Any other value is
+                treated as ``"public"``.
 
         Returns:
             A fresh ``EgressReservation`` with the route's
@@ -188,27 +229,50 @@ class EgressPool(EgressPoolBase):
                 and ``on_all_quarantined == "raise"``.
         """
         now = datetime.now(UTC)
+        effective_traffic_class = "private" if traffic_class == "private" else "public"
         with self._lock:
-            selection = self._pick_locked(preferred_route, exchange, now)
+            selection = self._pick_locked(preferred_route, exchange, now, effective_traffic_class)
             if selection is None:
                 if self._config.on_all_quarantined == "raise":
                     raise AllRoutesQuarantinedError(
-                        f"all egress routes quarantined (exchange={exchange}, purpose={purpose})"
+                        f"all egress routes quarantined "
+                        f"(exchange={exchange}, traffic_class={effective_traffic_class}, "
+                        f"purpose={purpose})"
                     )
                 fallback = self._fallback_direct_locked()
                 if fallback is None:
                     raise AllRoutesQuarantinedError(
                         f"all egress routes quarantined and no direct "
                         f"fallback available "
-                        f"(exchange={exchange}, purpose={purpose})"
+                        f"(exchange={exchange}, traffic_class={effective_traffic_class}, "
+                        f"purpose={purpose})"
                     )
                 selection = RouteSelection(state=fallback, is_fallback=True)
             selection.state.in_use_count += 1
             selection.state.last_pick_at = now
+            route_config = selection.state.config
+            route_id = route_config.id
+            route_kind = route_config.kind
+            proxy_url = route_config.proxy_url
+            is_fallback = selection.is_fallback
+        if purpose == "websocket":
+            logger.info(
+                "egress_pool: selected route exchange={} traffic_class={} purpose={} "
+                "route_id={} route_kind={} is_fallback={} proxy_url={} pid={} host={}",
+                exchange,
+                effective_traffic_class,
+                purpose,
+                route_id,
+                route_kind,
+                is_fallback,
+                proxy_url or "direct",
+                os.getpid(),
+                socket.gethostname(),
+            )
         return EgressReservation(
             pool=self,
-            route_id=selection.state.config.id,
-            proxy_url=selection.state.config.proxy_url,
+            route_id=route_id,
+            proxy_url=proxy_url,
         )
 
     def snapshot(self) -> list[RouteSnapshot]:
@@ -291,6 +355,7 @@ class EgressPool(EgressPoolBase):
         preferred_route: str | None,
         exchange: str,
         now: datetime,
+        traffic_class: str,
     ) -> RouteSelection | None:
         """Return the best available route for this exchange or None.
 
@@ -298,9 +363,13 @@ class EgressPool(EgressPoolBase):
         exchanges (e.g. ``["walutomat"]``) are skipped when the caller
         is reserving for a different exchange. ``allowed_exchanges=()``
         means the route serves any exchange (back-compatible default).
+        Private traffic bypasses this public policy and delegates to
+        :meth:`_pick_private_locked`.
 
         Pool lock MUST be held.
         """
+        if traffic_class == "private":
+            return self._pick_private_locked(now)
         if preferred_route is not None:
             preferred = self._states.get(preferred_route)
             if (
@@ -318,6 +387,34 @@ class EgressPool(EgressPoolBase):
             return None
         available.sort(key=lambda s: (s.config.priority, s.in_use_count))
         return RouteSelection(state=available[0], is_fallback=False)
+
+    def _pick_private_locked(self, now: datetime) -> RouteSelection | None:
+        """Return the private direct route or configured fallback route.
+
+        Private executor traffic is deliberately narrower than public
+        routing: a healthy direct route wins regardless of priority, and
+        the configured private fallback is considered only when direct is
+        unavailable. The fallback route's ``allowed_exchanges`` is ignored
+        because it may be publicly pinned to Walutomat while serving as the
+        private Kraken fallback.
+
+        Args:
+            now: Current UTC timestamp used for quarantine checks.
+
+        Returns:
+            The selected route, or ``None`` when neither private route is
+            available.
+        """
+        for state in self._states.values():
+            if state.config.kind == "direct" and self._is_available_locked(state, now):
+                return RouteSelection(state=state, is_fallback=False)
+        fallback_route_id = self._config.private_fallback_route_id
+        if fallback_route_id is None:
+            return None
+        fallback = self._states[fallback_route_id]
+        if self._is_available_locked(fallback, now):
+            return RouteSelection(state=fallback, is_fallback=True)
+        return None
 
     @staticmethod
     def _exchange_allows_locked(state: RouteState, exchange: str) -> bool:
@@ -546,6 +643,7 @@ async def _preflight_routes(config: EgressPoolConfig) -> EgressPoolConfig:
     return EgressPoolConfig(
         enabled=config.enabled,
         on_all_quarantined=config.on_all_quarantined,
+        private_fallback_route_id=config.private_fallback_route_id,
         routes=new_routes,
     )
 

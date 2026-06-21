@@ -36,6 +36,7 @@ from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
+from snapper.infrastructure.network.egress_context import current_egress_identity
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.schemas.data import ExecutionData
@@ -2711,6 +2712,63 @@ async def test_execution_handler_processes_message(monkeypatch: pytest.MonkeyPat
     await executor._execution_handler()
     assert processed == ["msg"]
     assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_execution_handler_runs_stream_under_private_egress_identity() -> None:
+    """Spec — execution stream runs under private egress identity.
+
+    Given: A running Kraken-like executor with websocket executions enabled,
+    When: ``_execution_handler`` enters the execution subscription,
+    Then: the subscription observes executor-owned private order WS identity.
+    """
+
+    class Client:
+        supports_websocket_executions = True
+
+        def __init__(self) -> None:
+            """Initialize observed identity storage."""
+            self.observed_exchange: str | None = None
+            self.observed_traffic_class: str | None = None
+            self.observed_owner: str | None = None
+            self.observed_operation: str | None = None
+
+        async def subscribe_executions(self) -> AsyncIterator[str]:
+            """Observe the current egress identity and yield one update.
+
+            Yields:
+                One execution update marker.
+            """
+            identity = current_egress_identity()
+            if identity is not None:
+                self.observed_exchange = identity.exchange
+                self.observed_traffic_class = identity.traffic_class
+                self.observed_owner = identity.owner
+                self.observed_operation = identity.operation
+            yield "msg"
+
+    executor = MergedDummyExecutor()
+    executor.running = True
+    client = Client()
+    executor.exchange_client = cast(Any, client)
+
+    async def stop_after_message(message: Any) -> None:
+        """Stop the handler after the first execution update.
+
+        Args:
+            message: Execution update marker.
+        """
+        executor.running = False
+
+    executor._process_execution = stop_after_message
+
+    await executor._execution_handler()
+
+    assert client.observed_exchange == "kraken"
+    assert client.observed_traffic_class == "private"
+    assert client.observed_owner == "executor"
+    assert client.observed_operation == "order_ws"
+    assert current_egress_identity() is None
 
 
 @pytest.mark.asyncio
