@@ -92,6 +92,10 @@ def _client() -> KrakenExchangeClient:
     client._rest_pool_closed = False
 
     async def _with_retry(fn: Any, *args: Any, **kwargs: Any) -> Any:
+        kwargs.pop("retry_network_errors", None)
+        kwargs.pop("egress_kind", None)
+        kwargs.pop("egress_operation", None)
+        kwargs.pop("egress_target", None)
         return await fn(*args, **kwargs)
 
     client._with_retry = _with_retry
@@ -6867,6 +6871,27 @@ class TestInvokeFuncOffloadsSyncCalls:
         result = await client._invoke_func(async_call)
         assert result == "ok"
         assert async_thread_id[0] == main_thread_id
+
+    @pytest.mark.asyncio
+    async def test_routed_sync_callable_requires_operation_and_target(self) -> None:
+        """Routed sync callables require a complete egress target.
+
+        Given: A sync callable marked for Kraken REST egress routing,
+        When: operation and proxy target metadata are missing,
+        Then: the client raises before dispatching the callable.
+        """
+        client = KrakenExchangeClient()
+        called: list[bool] = []
+
+        def sync_call() -> str:
+            called.append(True)
+            return "ok"
+
+        with pytest.raises(RuntimeError, match="requires operation and target"):
+            await client._invoke_func(sync_call, egress_kind="public_read")
+
+        assert called == []
+        client._shutdown_rest_pool()
 
 
 class TestRestPoolLifecycle:

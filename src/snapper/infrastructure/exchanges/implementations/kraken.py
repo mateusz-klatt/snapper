@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import threading
 import time
 from collections.abc import AsyncIterator
 from collections.abc import Callable
@@ -82,6 +83,11 @@ from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
 from snapper.infrastructure.exchanges.errors import RestPoolDispatchError
+from snapper.infrastructure.exchanges.kraken_rest_egress import KrakenRestOperationKind
+from snapper.infrastructure.exchanges.kraken_rest_egress import RestProxyTarget
+from snapper.infrastructure.exchanges.kraken_rest_egress import ccxt_proxy_target
+from snapper.infrastructure.exchanges.kraken_rest_egress import route_kraken_rest_sync_call
+from snapper.infrastructure.exchanges.kraken_rest_egress import spot_sdk_proxy_target
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenExecutionSubscribeParamsSchema
@@ -467,6 +473,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._circuit_open_until = 0.0
         self._max_failures = 5
         self._circuit_timeout = 60.0
+        self._rest_egress_proxy_lock = threading.RLock()
 
     def get_ccxt_client(self) -> Any:
         """Get the underlying CCXT client instance.
@@ -475,6 +482,40 @@ class KrakenExchangeClient(ExchangeClientBase):
             The CCXT Kraken client for direct access to CCXT methods.
         """
         return self._ccxt_client
+
+    async def _dispatch_routed_rest[ResultT](
+        self,
+        *,
+        operation: str,
+        kind: KrakenRestOperationKind,
+        target: RestProxyTarget,
+        sync_call: Callable[[], ResultT],
+    ) -> ResultT:
+        """Dispatch a blocking Kraken REST call through the egress router.
+
+        The route helper runs inside the REST worker thread so mutable
+        CCXT/SDK proxy state is scoped around the actual blocking HTTP
+        send, not around an ``await`` in the event loop.
+
+        Args:
+            operation: Stable operation name for egress identity.
+            kind: Public/private/idempotency classification.
+            target: REST client whose proxy state should be scoped.
+            sync_call: Blocking SDK call to execute.
+
+        Returns:
+            Result returned by ``sync_call``.
+        """
+        return await self._dispatch_blocking(
+            lambda: route_kraken_rest_sync_call(
+                exchange=str(self.exchange_name),
+                operation=operation,
+                kind=kind,
+                target=target,
+                proxy_lock=self._rest_egress_proxy_lock,
+                sync_call=sync_call,
+            )
+        )
 
     async def connect(self) -> None:
         """Establish REST connection to Kraken exchange.
@@ -496,7 +537,12 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._reopen_rest_pool()
         try:
             self._ccxt_client.nonce = lambda: int(time.time() * 100_000_000)
-            await self._with_retry(self._ccxt_client.load_markets)
+            await self._with_retry(
+                self._ccxt_client.load_markets,
+                egress_kind="public_read",
+                egress_operation="load_markets",
+                egress_target=ccxt_proxy_target(self._ccxt_client),
+            )
             logger.info("Kraken REST connection established")
             self._circuit_failures = 0
             self._circuit_open_until = 0.0
@@ -593,7 +639,13 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         try:
             ccxt_symbol = native_to_ccxt(symbol)
-            ticker_data = await self._with_retry(self._ccxt_client.fetch_ticker, ccxt_symbol)
+            ticker_data = await self._with_retry(
+                self._ccxt_client.fetch_ticker,
+                ccxt_symbol,
+                egress_kind="public_read",
+                egress_operation="fetch_ticker",
+                egress_target=ccxt_proxy_target(self._ccxt_client),
+            )
             native_symbol = ccxt_to_native(ticker_data["symbol"])
             return TickerSnapshot(
                 symbol=native_symbol,
@@ -635,6 +687,9 @@ class KrakenExchangeClient(ExchangeClientBase):
                 timeframe,
                 since,
                 limit,
+                egress_kind="public_read",
+                egress_operation="fetch_ohlcv",
+                egress_target=ccxt_proxy_target(self._ccxt_client),
             )
             return [
                 OhlcvSnapshot(
@@ -744,6 +799,9 @@ class KrakenExchangeClient(ExchangeClientBase):
                 float(request.price) if request.price else None,
                 ccxt_params,
                 retry_network_errors=False,
+                egress_kind="private_mutation",
+                egress_operation="create_order",
+                egress_target=ccxt_proxy_target(self._ccxt_client),
             )
         except ccxt.RateLimitExceeded:
             raise
@@ -825,10 +883,14 @@ class KrakenExchangeClient(ExchangeClientBase):
             if kraken_rest_symbol.endswith(("x/USD", "x/EUR")):
                 extra_params["asset_class"] = "tokenized_asset"
             try:
-                result = await self._dispatch_blocking(
-                    trade_client.create_order,
-                    **kraken_params,
-                    extra_params=extra_params or None,
+                result = await self._dispatch_routed_rest(
+                    operation="native_create_order",
+                    kind="private_mutation",
+                    target=spot_sdk_proxy_target(trade_client),
+                    sync_call=lambda: trade_client.create_order(
+                        **kraken_params,
+                        extra_params=extra_params or None,
+                    ),
                 )
             except (requests.exceptions.RequestException, RestPoolDispatchError) as e:
                 raise AmbiguousOrderSubmitError(
@@ -870,9 +932,19 @@ class KrakenExchangeClient(ExchangeClientBase):
                 self._ccxt_client.cancel_order,
                 order_id,
                 ccxt_symbol,
+                retry_network_errors=False,
+                egress_kind="private_mutation",
+                egress_operation="cancel_order",
+                egress_target=ccxt_proxy_target(self._ccxt_client),
             )
             order_data = await self._with_retry(
-                self._ccxt_client.fetch_order, order_id, ccxt_symbol
+                self._ccxt_client.fetch_order,
+                order_id,
+                ccxt_symbol,
+                retry_network_errors=False,
+                egress_kind="private_idempotent_read",
+                egress_operation="fetch_order_after_cancel",
+                egress_target=ccxt_proxy_target(self._ccxt_client),
             )
             canceled_order = self._convert_ccxt_order(order_data)
             return canceled_order
@@ -882,7 +954,12 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.info(f"Symbol {symbol} not supported by CCXT, using native Kraken API fallback")
             try:
                 trade_client = self._get_trade_client()
-                await self._dispatch_blocking(trade_client.cancel_order, txid=order_id)
+                await self._dispatch_routed_rest(
+                    operation="native_cancel_order",
+                    kind="private_mutation",
+                    target=spot_sdk_proxy_target(trade_client),
+                    sync_call=lambda: trade_client.cancel_order(txid=order_id),
+                )
                 return ExchangeOrderSnapshot(
                     id=order_id,
                     client_order_id=None,
@@ -931,6 +1008,10 @@ class KrakenExchangeClient(ExchangeClientBase):
                 self._ccxt_client.fetch_order,
                 order_id,
                 ccxt_symbol,
+                retry_network_errors=False,
+                egress_kind="private_idempotent_read",
+                egress_operation="fetch_order",
+                egress_target=ccxt_proxy_target(self._ccxt_client),
             )
             return self._convert_ccxt_order(order_data)
         except Exception as e:
@@ -958,7 +1039,14 @@ class KrakenExchangeClient(ExchangeClientBase):
             Exception: If the venue query fails.
         """
         user_client = self._get_user_client()
-        response = await self._with_retry(user_client.get_orders_info, order_id)
+        response = await self._with_retry(
+            user_client.get_orders_info,
+            order_id,
+            retry_network_errors=False,
+            egress_kind="private_idempotent_read",
+            egress_operation="native_get_orders_info",
+            egress_target=spot_sdk_proxy_target(user_client),
+        )
         entry = response.get(order_id) if isinstance(response, dict) else None
         if not isinstance(entry, dict):
             raise RuntimeError(
@@ -1007,7 +1095,17 @@ class KrakenExchangeClient(ExchangeClientBase):
                 return await self._find_order_by_client_id_native(client_order_id, symbol)
         params = {"clientOrderId": client_order_id}
         for fetch in (self._ccxt_client.fetch_open_orders, self._ccxt_client.fetch_closed_orders):
-            orders = await self._with_retry(fetch, ccxt_symbol, None, None, params)
+            orders = await self._with_retry(
+                fetch,
+                ccxt_symbol,
+                None,
+                None,
+                params,
+                retry_network_errors=False,
+                egress_kind="private_idempotent_read",
+                egress_operation="find_order_by_client_id",
+                egress_target=ccxt_proxy_target(self._ccxt_client),
+            )
             if not isinstance(orders, list):
                 raise RuntimeError(
                     f"Kraken returned a non-list order set for {client_order_id}: "
@@ -1057,7 +1155,14 @@ class KrakenExchangeClient(ExchangeClientBase):
             (user_client.get_closed_orders, "closed"),
         )
         for fetch, key in queries:
-            response = await self._with_retry(fetch, extra_params=extra_params)
+            response = await self._with_retry(
+                fetch,
+                extra_params=extra_params,
+                retry_network_errors=False,
+                egress_kind="private_idempotent_read",
+                egress_operation=f"native_find_order_by_client_id_{key}",
+                egress_target=spot_sdk_proxy_target(user_client),
+            )
             orders = response.get(key) if isinstance(response, dict) else None
             if not isinstance(orders, dict):
                 raise RuntimeError(
@@ -1105,7 +1210,16 @@ class KrakenExchangeClient(ExchangeClientBase):
             if status == ExchangeOrderStatusEnum.OPEN
             else self._ccxt_client.fetch_orders
         )
-        result: list[dict[str, Any]] = await self._with_retry(fetch_func, ccxt_symbol, None, limit)
+        result: list[dict[str, Any]] = await self._with_retry(
+            fetch_func,
+            ccxt_symbol,
+            None,
+            limit,
+            retry_network_errors=False,
+            egress_kind="private_idempotent_read",
+            egress_operation="fetch_orders",
+            egress_target=ccxt_proxy_target(self._ccxt_client),
+        )
         return result
 
     async def get_orders(
@@ -1156,7 +1270,13 @@ class KrakenExchangeClient(ExchangeClientBase):
         if not self.api_key or not self.api_secret:
             raise RuntimeError("API credentials required for balance")
         try:
-            balance_data = await self._with_retry(self._ccxt_client.fetch_balance)
+            balance_data = await self._with_retry(
+                self._ccxt_client.fetch_balance,
+                retry_network_errors=False,
+                egress_kind="private_idempotent_read",
+                egress_operation="fetch_balance",
+                egress_target=ccxt_proxy_target(self._ccxt_client),
+            )
             balances = {}
             for curr, data in balance_data.items():
                 if curr in ["free", "used", "total", "info", "timestamp", "datetime"]:
@@ -2679,6 +2799,9 @@ class KrakenExchangeClient(ExchangeClientBase):
         func: Callable[..., Any],
         *args: Any,
         retry_network_errors: bool = True,
+        egress_kind: KrakenRestOperationKind | None = None,
+        egress_operation: str | None = None,
+        egress_target: RestProxyTarget | None = None,
         **kwargs: Any,
     ) -> Any:
         """Execute function with retry and circuit breaker logic.
@@ -2701,6 +2824,10 @@ class KrakenExchangeClient(ExchangeClientBase):
             retry_network_errors: When False, raise network-class errors
                 immediately after circuit-breaker accounting instead of
                 retrying. Required for non-idempotent venue mutations.
+            egress_kind: Optional REST routing classification for sync
+                Kraken calls.
+            egress_operation: Stable operation name for the egress identity.
+            egress_target: External client/session proxy target.
             **kwargs: Keyword arguments for func.
 
         Returns:
@@ -2718,7 +2845,14 @@ class KrakenExchangeClient(ExchangeClientBase):
         while True:
             try:
                 await self._acquire_rest_slot()
-                result = await self._invoke_func(func, *args, **kwargs)
+                result = await self._invoke_func(
+                    func,
+                    *args,
+                    egress_kind=egress_kind,
+                    egress_operation=egress_operation,
+                    egress_target=egress_target,
+                    **kwargs,
+                )
                 self._circuit_failures = 0
                 return result
             except ccxt.RateLimitExceeded:
@@ -2732,7 +2866,15 @@ class KrakenExchangeClient(ExchangeClientBase):
                 logger.error(f"Unexpected error: {e}")
                 raise
 
-    async def _invoke_func(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    async def _invoke_func(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        egress_kind: KrakenRestOperationKind | None = None,
+        egress_operation: str | None = None,
+        egress_target: RestProxyTarget | None = None,
+        **kwargs: Any,
+    ) -> Any:
         """Invoke a function, awaiting if it is a coroutine.
 
         Synchronous callables (CCXT REST helpers, native Kraken Trade
@@ -2745,6 +2887,10 @@ class KrakenExchangeClient(ExchangeClientBase):
         Args:
             func: Function to call.
             *args: Positional arguments.
+            egress_kind: Optional REST routing classification for sync
+                Kraken calls.
+            egress_operation: Stable operation name for the egress identity.
+            egress_target: External client/session proxy target.
             **kwargs: Keyword arguments.
 
         Returns:
@@ -2752,6 +2898,15 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         if inspect.iscoroutinefunction(func):
             return await func(*args, **kwargs)
+        if egress_kind is not None:
+            if egress_operation is None or egress_target is None:
+                raise RuntimeError("Kraken REST egress routing requires operation and target")
+            return await self._dispatch_routed_rest(
+                operation=egress_operation,
+                kind=egress_kind,
+                target=egress_target,
+                sync_call=lambda: func(*args, **kwargs),
+            )
         return await self._dispatch_blocking(func, *args, **kwargs)
 
     @staticmethod

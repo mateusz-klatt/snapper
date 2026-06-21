@@ -291,6 +291,93 @@ class EgressPool(EgressPoolBase):
             traffic_class=effective_traffic_class,
         )
 
+    def reserve_private_direct(
+        self,
+        *,
+        exchange: str,
+        purpose: Literal["websocket", "http"],
+    ) -> EgressReservation:
+        """Reserve the enabled direct route for private direct-only REST traffic.
+
+        This is intentionally narrower than ``reserve(traffic_class="private")``:
+        order-mutating REST calls must remain direct even when the direct route
+        is quarantined for WebSocket/private-read selection, so this method
+        never selects the configured PL fallback.
+
+        Args:
+            exchange: Exchange name attached to the active reservation map.
+            purpose: ``"websocket"`` or ``"http"`` for diagnostics.
+
+        Returns:
+            Direct-route reservation with ``traffic_class="private"``.
+
+        Raises:
+            AllRoutesQuarantinedError: When no enabled direct route exists.
+        """
+        now = datetime.now(UTC)
+        with self._lock:
+            direct = self._fallback_direct_locked()
+            if direct is None:
+                raise AllRoutesQuarantinedError(
+                    f"no direct egress route available "
+                    f"(exchange={exchange}, traffic_class=private, purpose={purpose})"
+                )
+            direct.in_use_count += 1
+            direct.last_pick_at = now
+            route_id = direct.config.id
+            proxy_url = direct.config.proxy_url
+            self._increment_active_reservation_locked(route_id, exchange, "private")
+        return EgressReservation(
+            pool=self,
+            route_id=route_id,
+            proxy_url=proxy_url,
+            exchange=exchange,
+            traffic_class="private",
+        )
+
+    def reserve_private_fallback(
+        self,
+        *,
+        exchange: str,
+        purpose: Literal["websocket", "http"],
+    ) -> EgressReservation | None:
+        """Reserve the configured private fallback route if it is healthy.
+
+        Used only after a private idempotent REST read proves a direct
+        pre-send connect failure. The fallback route bypasses
+        ``allowed_exchanges`` just like the WebSocket private selector,
+        but this method never falls back to direct and never applies
+        ``on_all_quarantined``.
+
+        Args:
+            exchange: Exchange name attached to the active reservation map.
+            purpose: ``"websocket"`` or ``"http"`` for diagnostics.
+
+        Returns:
+            Fallback-route reservation, or ``None`` when no configured and
+            healthy fallback exists.
+        """
+        now = datetime.now(UTC)
+        with self._lock:
+            fallback_route_id = self._config.private_fallback_route_id
+            if fallback_route_id is None:
+                return None
+            fallback = self._states.get(fallback_route_id)
+            if fallback is None or not self._is_available_locked(fallback, now):
+                return None
+            fallback.in_use_count += 1
+            fallback.last_pick_at = now
+            route_id = fallback.config.id
+            proxy_url = fallback.config.proxy_url
+            self._increment_active_reservation_locked(route_id, exchange, "private")
+        return EgressReservation(
+            pool=self,
+            route_id=route_id,
+            proxy_url=proxy_url,
+            exchange=exchange,
+            traffic_class="private",
+        )
+
     def snapshot(self) -> list[RouteSnapshot]:
         """Read-only view of route states for tests + observability.
 

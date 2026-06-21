@@ -585,6 +585,96 @@ class TestPrivateTrafficSelection:
         assert fallback.route_id == "default"
         fallback.release()
 
+    def test_private_direct_reservation_ignores_quarantine_without_pl_fallback(self) -> None:
+        """Spec — direct-only private reservation never selects the PL fallback.
+
+        Given: direct is quarantined and PL is healthy,
+        When: private direct-only REST traffic reserves a route,
+        Then: the direct route is still selected and the active private
+            reservation is recorded on direct, not PL.
+        """
+        pool = EgressPool(self._private_config())
+        direct = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="private",
+        )
+        direct.quarantine(120.0, reason="http-429")
+        direct.release()
+
+        reservation = pool.reserve_private_direct(exchange="kraken", purpose="http")
+        snapshot = pool.status_snapshot()
+
+        assert reservation.route_id == "default"
+        assert [(r.exchange, r.traffic_class) for r in snapshot.routes[0].active_reservations] == [
+            ("kraken", "private")
+        ]
+        assert snapshot.routes[2].active_reservations == []
+        reservation.release()
+
+    def test_private_direct_reservation_raises_without_enabled_direct_route(self) -> None:
+        """Spec — direct-only private reservation fails when direct is absent.
+
+        Given: a disabled pool object contains only a SOCKS5 route,
+        When: private direct-only REST traffic reserves a route,
+        Then: the pool raises instead of selecting a VPN fallback.
+        """
+        config = EgressPoolConfig(
+            enabled=False,
+            routes=[
+                RouteConfig(
+                    id="pl",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1084",
+                ),
+            ],
+        )
+        pool = EgressPool(config)
+
+        with pytest.raises(AllRoutesQuarantinedError, match="no direct egress route"):
+            pool.reserve_private_direct(exchange="kraken", purpose="http")
+
+    def test_private_fallback_reservation_uses_configured_healthy_route_only(self) -> None:
+        """Spec — fallback-only reservation selects PL only while it is healthy.
+
+        Given: PL is configured as the private fallback,
+        When: fallback-only REST traffic reserves a route and then PL is quarantined,
+        Then: the first call returns PL and the second returns None.
+        """
+        pool = EgressPool(self._private_config())
+
+        fallback = pool.reserve_private_fallback(exchange="kraken", purpose="http")
+        assert fallback is not None
+        assert fallback.route_id == "pl"
+        assert fallback.proxy_url == "socks5h://x:1084"
+        fallback.quarantine(120.0, reason="http-429")
+        fallback.release()
+
+        assert pool.reserve_private_fallback(exchange="kraken", purpose="http") is None
+
+    def test_private_fallback_reservation_returns_none_when_unconfigured(self) -> None:
+        """Spec — fallback-only reservation does not infer a fallback route.
+
+        Given: a pool has direct and public VPN routes but no private fallback id,
+        When: fallback-only REST traffic asks for a route,
+        Then: None is returned instead of selecting the public VPN.
+        """
+        config = EgressPoolConfig(
+            enabled=True,
+            routes=[
+                RouteConfig(id="default", kind="direct", priority=100),
+                RouteConfig(
+                    id="ie",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1081",
+                    priority=10,
+                ),
+            ],
+        )
+        pool = EgressPool(config)
+
+        assert pool.reserve_private_fallback(exchange="kraken", purpose="http") is None
+
     def test_selection_log_emitted_for_websocket_reserve(self) -> None:
         """Spec — reserve emits one structured WS selection log.
 
@@ -823,6 +913,41 @@ class TestStatusSnapshot:
 
         assert route.quarantined is False
         assert route.quarantine_seconds_remaining == 0.0
+
+    def test_quarantine_deadline_is_extend_only_and_records_close_marker(self) -> None:
+        """Spec — shorter later quarantines do not shorten route quarantine.
+
+        Given: a route is already quarantined until a later deadline,
+        When: a shorter close-1015 quarantine is recorded,
+        Then: the deadline remains extended and the close marker is captured.
+        """
+        pool = EgressPool(_two_route_config())
+        later = datetime.now(UTC) + timedelta(seconds=60)
+        earlier = datetime.now(UTC) + timedelta(seconds=10)
+
+        pool._quarantine_route("default", later, "http-429")
+        pool._quarantine_route("default", earlier, "close-1015")
+        route = pool.snapshot()[0]
+
+        assert route.quarantine_until == later
+        assert route.last_handshake_429_at is not None
+        assert route.last_close_1015_at is not None
+
+    def test_active_reservation_decrement_ignores_missing_tuple(self) -> None:
+        """Spec — defensive active-map cleanup ignores unknown tuples.
+
+        Given: no active reservation exists for a route/exchange/class tuple,
+        When: the cleanup hook is invoked for that tuple,
+        Then: the status snapshot remains empty and no count goes negative.
+        """
+        pool = EgressPool(_two_route_config())
+
+        with pool._lock:
+            pool._decrement_active_reservation_locked("default", "kraken", "public")
+
+        route = pool.status_snapshot().routes[0]
+        assert route.in_use_count == 0
+        assert route.active_reservations == []
 
 
 class TestReserveAllQuarantined:

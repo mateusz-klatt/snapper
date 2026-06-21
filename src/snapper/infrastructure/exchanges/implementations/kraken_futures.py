@@ -23,8 +23,10 @@ established pattern).
 import asyncio
 import contextlib
 import math
+import threading
 import time
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from time import monotonic
@@ -72,6 +74,11 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.errors import RestPoolDispatchError
+from snapper.infrastructure.exchanges.kraken_rest_egress import KrakenRestOperationKind
+from snapper.infrastructure.exchanges.kraken_rest_egress import RestProxyTarget
+from snapper.infrastructure.exchanges.kraken_rest_egress import ccxt_proxy_target
+from snapper.infrastructure.exchanges.kraken_rest_egress import futures_sdk_proxy_target
+from snapper.infrastructure.exchanges.kraken_rest_egress import route_kraken_rest_sync_call
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
@@ -323,6 +330,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._public_subscribe_lock: asyncio.Lock = asyncio.Lock()
         self._ws_connect_lock: asyncio.Lock = asyncio.Lock()
         self._private_ws_connect_lock: asyncio.Lock = asyncio.Lock()
+        self._rest_egress_proxy_lock = threading.RLock()
         self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue(
             maxsize=_QUEUE_MAX_SIZE
         )
@@ -339,6 +347,36 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         if not self._api_key or not self._api_secret:
             raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
+
+    async def _dispatch_routed_rest[ResultT](
+        self,
+        *,
+        operation: str,
+        kind: KrakenRestOperationKind,
+        target: RestProxyTarget,
+        sync_call: Callable[[], ResultT],
+    ) -> ResultT:
+        """Dispatch a blocking Futures REST call through the egress router.
+
+        Args:
+            operation: Stable operation name for egress identity.
+            kind: Public/private/idempotency classification.
+            target: REST client whose proxy state should be scoped.
+            sync_call: Blocking SDK call to execute.
+
+        Returns:
+            Result returned by ``sync_call``.
+        """
+        return await self._dispatch_blocking(
+            lambda: route_kraken_rest_sync_call(
+                exchange=str(self.exchange_name),
+                operation=operation,
+                kind=kind,
+                target=target,
+                proxy_lock=self._rest_egress_proxy_lock,
+                sync_call=sync_call,
+            )
+        )
 
     async def connect(self) -> None:
         """Establish REST connection to Kraken Futures.
@@ -359,7 +397,12 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._reopen_rest_pool()
         try:
             self._record_rest_call()
-            await self._dispatch_blocking(self._ccxt_client.load_markets)
+            await self._dispatch_routed_rest(
+                operation="load_markets",
+                kind="public_read",
+                target=ccxt_proxy_target(self._ccxt_client),
+                sync_call=self._ccxt_client.load_markets,
+            )
             self._market_client = Market(sandbox=self.sandbox)
             logger.info("Kraken Futures REST connection established")
         except BaseException as e:
@@ -833,7 +876,12 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             TickerSnapshot with current price data.
         """
         self._record_rest_call()
-        data = await self._dispatch_blocking(self._ccxt_client.fetch_ticker, symbol)
+        data = await self._dispatch_routed_rest(
+            operation="fetch_ticker",
+            kind="public_read",
+            target=ccxt_proxy_target(self._ccxt_client),
+            sync_call=lambda: self._ccxt_client.fetch_ticker(symbol),
+        )
         return TickerSnapshot(
             symbol=symbol,
             bid=float(data.get("bid") or 0),
@@ -861,8 +909,11 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             List of OhlcvSnapshot objects.
         """
         self._record_rest_call()
-        raw = await self._dispatch_blocking(
-            self._ccxt_client.fetch_ohlcv, symbol, timeframe, since, limit
+        raw = await self._dispatch_routed_rest(
+            operation="fetch_ohlcv",
+            kind="public_read",
+            target=ccxt_proxy_target(self._ccxt_client),
+            sync_call=lambda: self._ccxt_client.fetch_ohlcv(symbol, timeframe, since, limit),
         )
         return [
             OhlcvSnapshot(
@@ -948,8 +999,12 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             kwargs["reduceOnly"] = True
         self._record_rest_call()
         try:
-            result = await self._dispatch_blocking(
-                cast(Trade, self._trade_client).create_order, **kwargs
+            trade_client = cast(Trade, self._trade_client)
+            result = await self._dispatch_routed_rest(
+                operation="create_order",
+                kind="private_mutation",
+                target=futures_sdk_proxy_target(trade_client),
+                sync_call=lambda: trade_client.create_order(**kwargs),
             )
         except (requests.exceptions.RequestException, RestPoolDispatchError) as e:
             raise AmbiguousOrderSubmitError(
@@ -995,8 +1050,12 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await self._dispatch_blocking(
-            cast(Trade, self._trade_client).cancel_order, order_id=order_id
+        trade_client = cast(Trade, self._trade_client)
+        result = await self._dispatch_routed_rest(
+            operation="cancel_order",
+            kind="private_mutation",
+            target=futures_sdk_proxy_target(trade_client),
+            sync_call=lambda: trade_client.cancel_order(order_id=order_id),
         )
         cancel_status = result.get("cancelStatus", {})
         status_str = cancel_status.get("status", "cancelled")
@@ -1042,8 +1101,12 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await self._dispatch_blocking(
-            cast(Trade, self._trade_client).get_orders_status, orderIds=[order_id]
+        trade_client = cast(Trade, self._trade_client)
+        result = await self._dispatch_routed_rest(
+            operation="get_orders_status",
+            kind="private_idempotent_read",
+            target=futures_sdk_proxy_target(trade_client),
+            sync_call=lambda: trade_client.get_orders_status(orderIds=[order_id]),
         )
         orders = result.get("orders", [])
         if not orders:
@@ -1090,7 +1153,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await self._dispatch_blocking(cast(Trade, self._trade_client).get_fills)
+        trade_client = cast(Trade, self._trade_client)
+        result = await self._dispatch_routed_rest(
+            operation="get_fills",
+            kind="private_idempotent_read",
+            target=futures_sdk_proxy_target(trade_client),
+            sync_call=trade_client.get_fills,
+        )
         fills = result.get("fills")
         if not isinstance(fills, list):
             return None
@@ -1269,8 +1338,12 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await self._dispatch_blocking(
-            cast(Trade, self._trade_client).get_orders_status, cliOrdIds=[client_order_id]
+        trade_client = cast(Trade, self._trade_client)
+        result = await self._dispatch_routed_rest(
+            operation="find_order_by_client_id",
+            kind="private_idempotent_read",
+            target=futures_sdk_proxy_target(trade_client),
+            sync_call=lambda: trade_client.get_orders_status(cliOrdIds=[client_order_id]),
         )
         orders = result.get("orders")
         if not isinstance(orders, list):
@@ -1321,7 +1394,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await self._dispatch_blocking(cast(User, self._user_client).get_open_orders)
+        user_client = cast(User, self._user_client)
+        result = await self._dispatch_routed_rest(
+            operation="get_open_orders",
+            kind="private_idempotent_read",
+            target=futures_sdk_proxy_target(user_client),
+            sync_call=user_client.get_open_orders,
+        )
         raw_orders: list[dict[str, Any]] = result.get("openOrders", [])
         snapshots = [self._convert_sdk_order(o) for o in raw_orders]
         if symbol:
@@ -1403,7 +1482,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await self._dispatch_blocking(cast(User, self._user_client).get_wallets)
+        user_client = cast(User, self._user_client)
+        result = await self._dispatch_routed_rest(
+            operation="get_wallets",
+            kind="private_idempotent_read",
+            target=futures_sdk_proxy_target(user_client),
+            sync_call=user_client.get_wallets,
+        )
         accounts: dict[str, Any] = result.get("accounts", {})
         balances: dict[str, AccountBalance] = {}
         for acct_name, acct_data in accounts.items():
@@ -1431,7 +1516,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         self._record_rest_call()
-        result = await self._dispatch_blocking(cast(User, self._user_client).get_open_positions)
+        user_client = cast(User, self._user_client)
+        result = await self._dispatch_routed_rest(
+            operation="get_open_positions",
+            kind="private_idempotent_read",
+            target=futures_sdk_proxy_target(user_client),
+            sync_call=user_client.get_open_positions,
+        )
         raw_positions: list[dict[str, Any]] = result.get("openPositions", [])
         positions: list[OpenPositionSnapshot] = []
         for pos in raw_positions:
@@ -1477,10 +1568,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         if not self._market_client:
             self._market_client = Market(sandbox=self.sandbox)
+        market_client = self._market_client
         self._record_rest_call()
-        result = await self._dispatch_blocking(
-            self._market_client.get_historical_funding_rates,
-            symbol,
+        result = await self._dispatch_routed_rest(
+            operation="get_historical_funding_rates",
+            kind="public_read",
+            target=futures_sdk_proxy_target(market_client),
+            sync_call=lambda: market_client.get_historical_funding_rates(symbol),
         )
         if not isinstance(result, dict):
             logger.warning(f"Unexpected SDK response type for historical funding: {type(result)}")
@@ -1546,8 +1640,14 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         if not self._market_client:
             self._market_client = Market(sandbox=self.sandbox)
+        market_client = self._market_client
         self._record_rest_call()
-        result = await self._dispatch_blocking(self._market_client.get_tickers)
+        result = await self._dispatch_routed_rest(
+            operation="get_tickers",
+            kind="public_read",
+            target=futures_sdk_proxy_target(market_client),
+            sync_call=market_client.get_tickers,
+        )
         if not isinstance(result, dict):
             logger.warning(f"Unexpected SDK response type for tickers: {type(result)}")
             return None
@@ -2049,8 +2149,14 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         if not self._market_client:
             self._market_client = Market(sandbox=self.sandbox)
+        market_client = self._market_client
         self._record_rest_call()
-        result = await self._dispatch_blocking(self._market_client.get_instruments)
+        result = await self._dispatch_routed_rest(
+            operation="get_instruments",
+            kind="public_read",
+            target=futures_sdk_proxy_target(market_client),
+            sync_call=market_client.get_instruments,
+        )
         instruments: list[dict[str, Any]] = result.get("instruments", [])
         for inst in instruments:
             yield inst
@@ -2063,7 +2169,15 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         if not self._market_client:
             self._market_client = Market(sandbox=self.sandbox)
-        result = self._market_client.get_instruments()
+        market_client = self._market_client
+        result = route_kraken_rest_sync_call(
+            exchange=str(self.exchange_name),
+            operation="get_instruments_sync",
+            kind="public_read",
+            target=futures_sdk_proxy_target(market_client),
+            proxy_lock=self._rest_egress_proxy_lock,
+            sync_call=market_client.get_instruments,
+        )
         return list(result.get("instruments", []))
 
     def get_parsed_instrument(self, data: dict[str, Any]) -> InstrumentPairDescriptor:
