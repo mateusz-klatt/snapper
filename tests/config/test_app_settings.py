@@ -400,6 +400,75 @@ class TestAppSettingsTradingProperties:
         assert _value(1) is True
         assert _value(0) is False
 
+    def test_spot_candle_source_defaults_native_and_only_accepts_trade_built(self) -> None:
+        """Verify the Kraken Spot live candle source is opt-in.
+
+        Given a service with the setting absent, explicitly trade_built, and
+            several fallback values,
+        When accessing settings.spot_candle_source,
+        Then only the normalized trade_built string switches the source.
+
+        Returns:
+            None.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        default = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert default.spot_candle_source == "native"
+
+        def _value(raw: object) -> str:
+            """Read the Spot candle source for one raw service value.
+
+            Args:
+                raw: Raw settings-service value.
+
+            Returns:
+                Normalized Spot candle source.
+            """
+            settings = AppSettings(
+                bootstrap,
+                settings_service=MockSettingsService({"spot_candle_source": raw}),
+            )
+            return settings.spot_candle_source
+
+        assert _value("trade_built") == "trade_built"
+        assert _value(" TRADE_BUILT ") == "trade_built"
+        assert _value("native") == "native"
+        assert _value("trades") == "native"
+        assert _value(True) == "native"
+
+    def test_trade_built_finalize_grace_seconds_defaults_and_coerces(self) -> None:
+        """Verify the trade-built finalization grace setting parses seconds.
+
+        Given a service with the setting absent, numeric, string, and negative,
+        When accessing settings.trade_built_finalize_grace_seconds,
+        Then it defaults to twelve seconds and clamps negative values to zero.
+
+        Returns:
+            None.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        default = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert default.trade_built_finalize_grace_seconds == 12
+
+        def _value(raw: object) -> int:
+            """Read the trade-built grace for one raw service value.
+
+            Args:
+                raw: Raw settings-service value.
+
+            Returns:
+                Parsed non-negative grace seconds.
+            """
+            settings = AppSettings(
+                bootstrap,
+                settings_service=MockSettingsService({"trade_built_finalize_grace_seconds": raw}),
+            )
+            return settings.trade_built_finalize_grace_seconds
+
+        assert _value(20) == 20
+        assert _value("7") == 7
+        assert _value(-4) == 0
+
     def test_candle_single_source_defaults_false_and_reads_value(self) -> None:
         """Verify candle_single_source defaults to False and reads the DB value.
 

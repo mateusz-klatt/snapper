@@ -102,6 +102,38 @@ class DummyClient(SimpleNamespace):
             yield None
 
 
+class RecordingCandleClient(DummyClient):
+    """Client stub that records candle subscription calls."""
+
+    def __init__(self) -> None:
+        """Initialize call tracking and a reusable stream."""
+        super().__init__()
+        self.calls: list[tuple[list[str], str]] = []
+        self.stream = self._stream()
+
+    def subscribe_candles(self, symbols: list[str], timeframe: str) -> AsyncIterator[CandleUpdate]:
+        """Record the candle subscription and return the stream.
+
+        Args:
+            symbols: Native symbols to subscribe.
+            timeframe: Candle timeframe label.
+
+        Returns:
+            The configured async candle stream.
+        """
+        self.calls.append((symbols, timeframe))
+        return self.stream
+
+    async def _stream(self) -> AsyncIterator[CandleUpdate]:
+        """Yield no candles.
+
+        Yields:
+            No values.
+        """
+        if False:
+            yield _candle_update()
+
+
 class DummyPublisher(MarketDataPublisherService[Any]):
     """Test stub for MarketDataPublisherService (base candle hooks: no synthesis)."""
 
@@ -1537,6 +1569,38 @@ def test_candle_source_for_defaults_native() -> None:
     """
     pub = DummyPublisher(symbols=["BTC-USD"])
     assert pub._candle_source_for("1m") == "native"
+
+
+def test_candle_stream_timeframes_default_to_native_set() -> None:
+    """The direct candle stream defaults to the native timeframe set.
+
+    Given: A base publisher,
+    When: Its candle stream timeframe hook is read,
+    Then: It returns the same set as the native timeframe hook.
+
+    Returns:
+        None.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    assert pub._candle_stream_timeframes() == pub._native_candle_timeframes()
+
+
+def test_subscribe_candle_stream_defaults_to_exchange_subscribe_candles() -> None:
+    """The default candle stream hook delegates to subscribe_candles unchanged.
+
+    Given: A base publisher with a recording exchange client,
+    When: _subscribe_candle_stream is called,
+    Then: It returns the client's candle stream and passes timeframe as a keyword.
+
+    Returns:
+        None.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    client = RecordingCandleClient()
+    pub._exchange_client = client
+    stream = pub._subscribe_candle_stream(["BTC-USD"], "1m")
+    assert stream is client.stream
+    assert client.calls == [(["BTC-USD"], "1m")]
 
 
 @pytest.mark.asyncio

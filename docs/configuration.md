@@ -328,6 +328,8 @@ controlled by these settings so high-volume feeds can be cache-first:
 | `market_persist_candles` | Persistence mode for candle rows |
 | `persist_intermediate_candles` | When `false` (default) only the FINAL bar per native window is persisted (the native finalizer eliminates intra-minute SCD2 churn); `true` also persists in-progress `complete=false` bars, superseded by the final. ZMQ publishes every frame regardless. |
 | `spot_trade_built_shadow_enabled` | When `false` (default) Kraken Spot trade-built 1m candles are not persisted; `true` writes them to `shadow_candles` only for native-vs-trade-built A/B checks. |
+| `spot_candle_source` | Kraken Spot live 1m source. Default `native` keeps venue OHLC unchanged; explicit `trade_built` switches live 1m bars to the trade stream. |
+| `trade_built_finalize_grace_seconds` | Seconds to wait after a trade-built minute closes before finalizing it. Default `12` absorbs late Kraken trades. |
 | `market_persist_extra` | Explicit extra instrument allowlist |
 | `market_persist_exclude` | Explicit instrument denylist |
 

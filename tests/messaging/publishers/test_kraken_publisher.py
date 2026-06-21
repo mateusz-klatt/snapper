@@ -32,13 +32,15 @@ from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 class _ShadowSettings:
     """Minimal settings object for the shadow hook tests."""
 
-    def __init__(self, enabled: bool) -> None:
+    def __init__(self, enabled: bool, source: str = "native") -> None:
         """Store the shadow setting value.
 
         Args:
             enabled: Value returned by spot_trade_built_shadow_enabled.
+            source: Value returned by spot_candle_source.
         """
         self.spot_trade_built_shadow_enabled = enabled
+        self.spot_candle_source = source
 
 
 class _ShadowRepository:
@@ -93,6 +95,21 @@ class _ShadowClient:
         """
         self.candles = candles
         self.calls: list[tuple[list[str], str]] = []
+        self.native_calls: list[tuple[list[str], str]] = []
+        self.native_stream = self._iter_candles()
+
+    def subscribe_candles(self, symbols: list[str], timeframe: str) -> AsyncIterator[CandleUpdate]:
+        """Return an async iterator of native candles.
+
+        Args:
+            symbols: Symbols passed by the publisher.
+            timeframe: Requested timeframe.
+
+        Returns:
+            Async iterator over configured candles.
+        """
+        self.native_calls.append((symbols, timeframe))
+        return self.native_stream
 
     def subscribe_trade_built_candles(
         self, symbols: list[str], timeframe: str
@@ -190,6 +207,111 @@ class TestKrakenMarketDataPublisher:
         assert publisher._native_candle_timeframes() == frozenset({"1m"}) | (
             SUPPORTED_SYNTHESIS_TIMEFRAMES
         )
+        assert publisher._candle_stream_timeframes() == frozenset({"1m"}) | (
+            SUPPORTED_SYNTHESIS_TIMEFRAMES
+        )
+
+    def test_trade_built_mode_keeps_1m_stream_without_native_claim(self) -> None:
+        """Trade-built mode starts the 1m loop without claiming venue OHLC.
+
+        Given a Kraken Spot publisher in trade-built mode,
+        When its candle timeframe hooks are inspected,
+        Then 1m remains stream-consumed but no timeframe is reported native.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
+        assert publisher._native_candle_timeframes() == frozenset()
+        assert publisher._candle_stream_timeframes() == frozenset({"1m"})
+        assert publisher._candle_liveness_threshold_s() == 300
+
+    def test_subscribe_candle_stream_native_mode_uses_native_ohlc(self) -> None:
+        """Native mode delegates the live candle stream to subscribe_candles.
+
+        Given a Kraken Spot publisher in default native mode,
+        When the candle stream hook is called,
+        Then the exchange client's native candle subscription is used.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        client = _ShadowClient([])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False, "native"))
+        publisher._exchange_client = cast(KrakenExchangeClient, client)
+        stream = publisher._subscribe_candle_stream(["BTC-USD"], "1m")
+        assert stream is client.native_stream
+        assert client.native_calls == [(["BTC-USD"], "1m")]
+        assert client.calls == []
+
+    def test_subscribe_candle_stream_trade_built_mode_uses_trade_built(self) -> None:
+        """Trade-built mode delegates the live candle stream to trades.
+
+        Given a Kraken Spot publisher in trade-built mode,
+        When the candle stream hook is called,
+        Then the exchange client's trade-built candle subscription is used.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        client = _ShadowClient([])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
+        publisher._exchange_client = cast(KrakenExchangeClient, client)
+        stream = publisher._subscribe_candle_stream(["BTC-USD"], "1m")
+        assert stream is not client.native_stream
+        assert client.calls == [(["BTC-USD"], "1m")]
+        assert client.native_calls == []
+
+    def test_candle_source_for_tracks_spot_source_setting(self) -> None:
+        """The live Spot candle provenance follows the selected source.
+
+        Given Kraken Spot publishers in native and trade-built modes,
+        When the candle source hook is read,
+        Then native mode stays native and trade-built mode is calculated.
+
+        Returns:
+            None.
+        """
+        native = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        native.settings = cast(AppSettings, _ShadowSettings(False, "native"))
+        trade_built = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        trade_built.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
+        assert native._candle_source_for("1m") == "native"
+        assert trade_built._candle_source_for("1m") == "calculated"
+
+    @pytest.mark.asyncio
+    async def test_trade_built_live_candle_updates_liveness_watermark(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Trade-built live candles still refresh the candle watchdog.
+
+        Given a Kraken Spot publisher in trade-built mode,
+        When a live 1m candle flows through the normal candle processor,
+        Then the row is calculated and the candle liveness watermark advances.
+
+        Args:
+            monkeypatch: Pytest monkeypatch fixture.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
+        publisher._ensure_instrument = AsyncMock(
+            return_value="00000000-0000-7000-8000-000000000501"
+        )
+        publisher._publish_message = AsyncMock()
+        publisher._last_candle_msg_at = 0.0
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 700.0)
+        row = await publisher._process_candle(_shadow_candle(), "kraken", "1m")
+        assert row is not None
+        assert row["source"] == "calculated"
+        assert publisher._last_candle_msg_at == 700.0
+        assert bool(publisher._candle_stream_timeframes()) is True
+        assert publisher._candle_liveness_threshold_s() == 300
 
     def test_validate_symbols_filters_invalid(self) -> None:
         """Verify invalid symbols are filtered out during validation.
@@ -347,6 +469,21 @@ class TestKrakenMarketDataPublisher:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_shadow_background_hook_trade_built_mode_returns_empty(self) -> None:
+        """Trade-built live mode suppresses the shadow A/B writer.
+
+        Given: A Kraken publisher with shadow enabled but live source trade-built,
+        When: the extra background task hook runs,
+        Then: no shadow task is started because the trade-built stream is live.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(True, "trade_built"))
+        assert await publisher._start_extra_background_tasks(["BTC-USD"]) == []
 
     @pytest.mark.asyncio
     async def test_shadow_candle_loop_returns_when_client_missing(self) -> None:

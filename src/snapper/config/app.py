@@ -556,6 +556,30 @@ class AppSettings:
         return bool(raw)
 
     @property
+    def spot_candle_source(self) -> str:
+        """Return the Kraken Spot live 1m candle source selection.
+
+        Returns:
+            ``"trade_built"`` only when explicitly configured; otherwise
+            ``"native"`` so default deployments keep the venue OHLC path.
+        """
+        raw = self._get_db_setting("spot_candle_source", "native")
+        if isinstance(raw, str) and raw.strip().lower() == "trade_built":
+            return "trade_built"
+        return "native"
+
+    @property
+    def trade_built_finalize_grace_seconds(self) -> int:
+        """Return wall-clock grace before trade-built 1m buckets finalize.
+
+        Returns:
+            Non-negative seconds to wait after a bucket's minute close before
+            the trade-built candle builder emits it.
+        """
+        raw = self._get_db_setting("trade_built_finalize_grace_seconds", 12)
+        return max(0, int(raw))
+
+    @property
     def candle_single_source(self) -> bool:
         """Return whether ``>1m`` candle reads serve single-source from the DB.
 

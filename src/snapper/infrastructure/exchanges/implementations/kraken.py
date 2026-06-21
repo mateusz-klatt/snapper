@@ -33,6 +33,7 @@ from collections.abc import AsyncIterator
 from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from time import monotonic
 from typing import Any
 from typing import Final
@@ -419,7 +420,9 @@ class KrakenExchangeClient(ExchangeClientBase):
             repository: Database repository for order/execution logging.
         """
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN)
-        self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker()
+        self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker(
+            dark_recovery_channels=frozenset({"ticker", "trade"})
+        )
         self.settings = get_settings()
         self.api_key = api_key
         self.api_secret = api_secret
@@ -1521,12 +1524,15 @@ class KrakenExchangeClient(ExchangeClientBase):
         """Emit completed trade-built 1m candles roughly once per second.
 
         Wakes every second, asks :attr:`_trade_built_candle_builder` for any
-        bucket whose minute has finished, and routes each into
-        :attr:`_trade_built_candle_queue`.
+        bucket whose minute has finished beyond the configured late-trade
+        grace, and routes each into :attr:`_trade_built_candle_queue`.
         """
         while True:
             await asyncio.sleep(1.0)
-            for candle in self._trade_built_candle_builder.pop_completed(datetime.now(UTC)):
+            cutoff = datetime.now(UTC) - timedelta(
+                seconds=self.settings.trade_built_finalize_grace_seconds
+            )
+            for candle in self._trade_built_candle_builder.pop_completed(cutoff):
                 enqueue_or_drop_oldest_candle(self._trade_built_candle_queue, candle, "Candle")
 
     def _expand_spot_symbols(

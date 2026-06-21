@@ -845,14 +845,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 )
                 tasks.append(self._candle_flush_loop_task)
         else:
-            native = self._native_candle_timeframes()
-            candle_consumer_timeframes = [tf for tf in timeframes if tf in native]
-            dropped = [tf for tf in timeframes if tf not in native]
+            stream_timeframes = self._candle_stream_timeframes()
+            candle_consumer_timeframes = [tf for tf in timeframes if tf in stream_timeframes]
+            dropped = [tf for tf in timeframes if tf not in stream_timeframes]
             if dropped:
                 logger.warning(
                     f"{self.__class__.__name__}: timeframes {dropped} are neither natively "
                     f"subscribable nor synthesized by this publisher and will NOT be published "
-                    f"(native: {sorted(native)})"
+                    f"(native: {sorted(stream_timeframes)})"
                 )
         self._consumes_native_candles = bool(candle_consumer_timeframes)
         self._native_finalizer = None
@@ -1364,6 +1364,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return frozenset({"1m"})
 
+    def _candle_stream_timeframes(self) -> frozenset[str]:
+        """Timeframes this publisher can consume through the candle loop.
+
+        Returns:
+            Timeframes that should start a direct candle-loop subscription.
+            The base implementation is exactly the native venue set.
+        """
+        return self._native_candle_timeframes()
+
     def _candle_source_for(self, timeframe: str) -> str:
         """Provenance tag for a native-path candle from this publisher.
 
@@ -1382,6 +1391,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             The ``source`` tag for the row (``native`` for upstream OHLC).
         """
         return "native"
+
+    def _subscribe_candle_stream(
+        self, symbols: list[str], timeframe: str
+    ) -> AsyncIterator[CandleUpdate]:
+        """Subscribe to the live candle stream for a timeframe.
+
+        Args:
+            symbols: Native symbols to subscribe for.
+            timeframe: Candle timeframe interval.
+
+        Returns:
+            Async iterator of candle updates from the exchange client.
+        """
+        return cast(T, self._exchange_client).subscribe_candles(symbols, timeframe)
 
     def _candle_live_epoch(self) -> datetime:
         """The instant the aggregator should treat as the start of live data.
@@ -1718,7 +1741,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return
         exchange = self._get_data_exchange()
         exchange_label = self._get_exchange_name()
-        iterator = self._exchange_client.subscribe_candles(symbols, timeframe).__aiter__()
+        iterator = self._subscribe_candle_stream(symbols, timeframe).__aiter__()
         next_fut: asyncio.Future[CandleUpdate | object] | None = None
         try:
             while self.running:

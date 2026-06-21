@@ -8,6 +8,7 @@ from collections.abc import Coroutine
 from dataclasses import asdict
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
@@ -86,6 +87,7 @@ def _client() -> KrakenExchangeClient:
     client._ccxt_client = SimpleNamespace()
     client._subscription_cache = {}
     client._health_tracker = SubscriptionHealthTracker()
+    client.settings = SimpleNamespace(trade_built_finalize_grace_seconds=12)
     client._rest_pool = None
     client._rest_pool_closed = False
 
@@ -112,6 +114,21 @@ async def test_handle_channel_data_drops_ticker_snapshot_envelope() -> None:
     )
 
     client._handle_ticker_data.assert_not_called()
+
+
+def test_spot_health_tracker_dark_recovers_trades_too() -> None:
+    """Spot dark recovery covers the trade channel.
+
+    Given: A freshly constructed Spot client,
+    When: Its health tracker is inspected,
+    Then: dark_recovery_channels includes trade so trade-built candles have a
+        slow dark-channel backstop.
+
+    Returns:
+        None.
+    """
+    client = KrakenExchangeClient()
+    assert client._health_tracker.dark_recovery_channels == frozenset({"ticker", "trade"})
 
 
 @pytest.mark.asyncio
@@ -8393,17 +8410,35 @@ async def test_subscribe_trade_built_candles_drains_queue_and_isolates_native() 
 async def test_trade_built_candle_aggregator_enqueues_completed_candles(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    """The aggregator routes completed builder buckets into the trade-built queue.
+    """The aggregator routes grace-completed buckets into the trade-built queue.
 
     Given: A builder that reports one completed bucket,
     When: ``_trade_built_candle_aggregator`` runs,
-    Then: The completed candle is enqueued onto the trade-built queue.
+    Then: The completed candle is enqueued and the builder sees now minus
+        the configured finalization grace.
+
+    Returns:
+        None.
     """
     client = _client()
     candle = _trade_built_candle()
-    monkeypatch.setattr(
-        client._trade_built_candle_builder, "pop_completed", lambda now_utc: [candle]
-    )
+    fixed_now = datetime(2026, 6, 20, 12, 1, 15, tzinfo=UTC)
+    observed_cutoffs: list[datetime] = []
+    monkeypatch.setattr(kr, "datetime", SimpleNamespace(now=lambda _tz: fixed_now))
+
+    def _pop_completed(now_utc: datetime) -> list[CandleUpdate]:
+        """Capture the completion cutoff and return one candle.
+
+        Args:
+            now_utc: Grace-adjusted completion cutoff.
+
+        Returns:
+            Completed candle list.
+        """
+        observed_cutoffs.append(now_utc)
+        return [candle]
+
+    monkeypatch.setattr(client._trade_built_candle_builder, "pop_completed", _pop_completed)
     task = asyncio.create_task(client._trade_built_candle_aggregator())
     try:
         got = await asyncio.wait_for(client._trade_built_candle_queue.get(), timeout=3.0)
@@ -8412,6 +8447,7 @@ async def test_trade_built_candle_aggregator_enqueues_completed_candles(
         with contextlib.suppress(asyncio.CancelledError):
             await task
     assert got is candle
+    assert observed_cutoffs == [fixed_now - timedelta(seconds=12)]
 
 
 @pytest.mark.asyncio

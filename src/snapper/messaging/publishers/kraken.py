@@ -30,11 +30,13 @@ Register and run via process manager::
 import asyncio
 import time
 from collections import deque
+from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
 from functools import partial
 from typing import Any
 from typing import Final
+from typing import cast
 
 from loguru import logger
 
@@ -179,9 +181,55 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         tradeoff — the user's synthesize-everything decision).
 
         Returns:
-            ``{"1m"}`` plus all synthesizable higher timeframes.
+            ``{"1m"}`` plus all synthesizable higher timeframes in native
+            mode; empty in trade-built mode because no venue OHLC channel is
+            the live 1m source.
         """
+        if self.settings.spot_candle_source == "trade_built":
+            return frozenset()
         return frozenset({"1m"}) | SUPPORTED_SYNTHESIS_TIMEFRAMES
+
+    def _candle_stream_timeframes(self) -> frozenset[str]:
+        """Return timeframes consumed by the live Spot candle loop.
+
+        Returns:
+            ``{"1m"}`` in trade-built mode, otherwise the native OHLC set.
+        """
+        if self.settings.spot_candle_source == "trade_built":
+            return frozenset({"1m"})
+        return super()._candle_stream_timeframes()
+
+    def _subscribe_candle_stream(
+        self, symbols: list[str], timeframe: str
+    ) -> AsyncIterator[CandleUpdate]:
+        """Subscribe to the selected live Spot candle source.
+
+        Args:
+            symbols: Native Spot symbols to subscribe.
+            timeframe: Candle timeframe requested by the base candle loop.
+
+        Returns:
+            Native OHLC candles by default, or trade-built 1m candles when the
+            operator explicitly selects ``spot_candle_source=trade_built``.
+        """
+        if self.settings.spot_candle_source == "trade_built":
+            return cast(KrakenExchangeClient, self._exchange_client).subscribe_trade_built_candles(
+                symbols, "1m"
+            )
+        return super()._subscribe_candle_stream(symbols, timeframe)
+
+    def _candle_source_for(self, timeframe: str) -> str:
+        """Return the provenance tag for Spot live 1m candle rows.
+
+        Args:
+            timeframe: Candle timeframe requested by the base candle loop.
+
+        Returns:
+            ``"calculated"`` in trade-built mode, otherwise ``"native"``.
+        """
+        if self.settings.spot_candle_source == "trade_built":
+            return "calculated"
+        return super()._candle_source_for(timeframe)
 
     def _supports_forward_fill(self) -> bool:
         """Kraken spot is a continuous 24/7 crypto feed — forward-fill is sound.
@@ -192,11 +240,12 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         return True
 
     def _candle_liveness_threshold_s(self) -> int:
-        """Enable the native-candle liveness guard for Spot's ohlc:1m channel.
+        """Enable the candle liveness guard for Spot's live 1m stream.
 
         Spot is the one venue whose 1m bars arrive on a dedicated native
-        WebSocket channel that can stall independently of ticks and trades, so
-        it opts into the venue-wide candle-silence watchdog.
+        WebSocket channel by default. When the live source is trade-built,
+        the same candle loop and watermark are still watched so a stalled
+        trade-built candle stream triggers recovery instead of going dark.
 
         Returns:
             ``_CANDLE_LIVENESS_THRESHOLD_S`` seconds.
@@ -276,6 +325,8 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             A single supervised shadow task when the setting is enabled,
             otherwise an empty task list.
         """
+        if self.settings.spot_candle_source == "trade_built":
+            return []
         if not self.settings.spot_trade_built_shadow_enabled:
             return []
         return [

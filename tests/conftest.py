@@ -325,6 +325,8 @@ def _build_mock_settings() -> Mock:
     mock_settings.timeframes = ["1m"]
     mock_settings.candle_forward_fill = False
     mock_settings.spot_trade_built_shadow_enabled = False
+    mock_settings.spot_candle_source = "native"
+    mock_settings.trade_built_finalize_grace_seconds = 12
     mock_settings.backfill_days = 30
     mock_settings.risk_max_leverage = 1.0
     mock_settings.risk_max_drawdown = 0.15
