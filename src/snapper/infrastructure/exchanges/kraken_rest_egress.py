@@ -16,6 +16,7 @@ import requests
 import urllib3.exceptions
 
 from snapper.infrastructure.network.egress_context import TrafficClass
+from snapper.infrastructure.network.egress_context import current_egress_identity
 from snapper.infrastructure.network.egress_context import egress_identity
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_reservation import EgressReservation
@@ -211,6 +212,15 @@ def route_kraken_rest_sync_call[ResultT](
         Exception: Any SDK exception not eligible for private read fallback,
             or the fallback attempt's exception.
     """
+    active_identity = current_egress_identity()
+    if active_identity is not None and active_identity.traffic_class == "private":
+        return _route_under_active_private_identity(
+            exchange=exchange,
+            target=target,
+            proxy_lock=proxy_lock,
+            sync_call=sync_call,
+            kind=kind,
+        )
     classification = classify_kraken_rest_operation(kind, operation=operation)
     with egress_identity(
         exchange=exchange,
@@ -238,6 +248,47 @@ def route_kraken_rest_sync_call[ResultT](
             proxy_lock=proxy_lock,
             sync_call=sync_call,
         )
+
+
+def _route_under_active_private_identity[ResultT](
+    *,
+    exchange: str,
+    target: RestProxyTarget,
+    proxy_lock: AbstractContextManager[object],
+    sync_call: Callable[[], ResultT],
+    kind: KrakenRestOperationKind,
+) -> ResultT:
+    """Route a REST call while preserving an outer private identity.
+
+    Args:
+        exchange: Venue tag used by the egress pool.
+        target: External REST client whose proxy state should be scoped.
+        proxy_lock: Per-client lock guarding mutable SDK/session proxy state.
+        sync_call: Blocking SDK call to execute.
+        kind: Call-site classification.
+
+    Returns:
+        Result returned by the SDK call.
+    """
+    if kind == "public_read":
+        return _run_private_direct_without_reservation(
+            target=target,
+            proxy_lock=proxy_lock,
+            sync_call=sync_call,
+        )
+    if kind == "private_idempotent_read":
+        return _run_private_idempotent_read(
+            exchange=exchange,
+            target=target,
+            proxy_lock=proxy_lock,
+            sync_call=sync_call,
+        )
+    return _run_private_mutation(
+        exchange=exchange,
+        target=target,
+        proxy_lock=proxy_lock,
+        sync_call=sync_call,
+    )
 
 
 def is_provable_presend_connect_error(error: BaseException) -> bool:
@@ -377,6 +428,30 @@ def _run_private_direct[ResultT](
     finally:
         if reservation is not None:
             reservation.release()
+
+
+def _run_private_direct_without_reservation[ResultT](
+    *,
+    target: RestProxyTarget,
+    proxy_lock: AbstractContextManager[object],
+    sync_call: Callable[[], ResultT],
+) -> ResultT:
+    """Execute a private-scoped public read directly without pool reservation.
+
+    Args:
+        target: External REST client whose proxy state should be scoped.
+        proxy_lock: Per-client lock guarding mutable SDK/session proxy state.
+        sync_call: Blocking SDK call to execute.
+
+    Returns:
+        Result returned by the SDK call.
+    """
+    return _execute_with_proxy(
+        target=target,
+        proxy_lock=proxy_lock,
+        proxy_url=None,
+        sync_call=sync_call,
+    )
 
 
 def _reserve_private_fallback(exchange: str) -> EgressReservation | None:

@@ -1328,48 +1328,54 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         supports_ws = self.exchange_client.supports_websocket_executions
         self._client_context_active = True
         try:
-            async with self.exchange_client:
-                logger.info(
-                    f"ExchangeExecutorService[{exchange_name}]: "
-                    f"Exchange client initialized with WebSocket"
-                )
-                self.running = True
-                self._task_last_pass["reconciliation"] = time.monotonic()
-                await self._recover_pending_orders(exchange_name)
-                try:
-                    tasks = [
-                        asyncio.create_task(
-                            self._supervise_loop(
-                                "order_handler",
-                                self._order_handler,
-                                pre_respawn=self._rebuild_order_subscriber,
-                            )
-                        ),
-                        asyncio.create_task(
-                            self._supervise_loop("heartbeat", self._heartbeat_loop)
-                        ),
-                    ]
-                    if supports_ws:
-                        tasks.append(asyncio.create_task(self._supervise_execution_stream()))
-                    tasks.append(
-                        asyncio.create_task(
-                            self._supervise_loop("reconciliation", self._reconciliation_handler)
-                        )
+            with egress_identity(
+                exchange=exchange_name,
+                traffic_class="private",
+                owner="executor",
+                operation="client_lifecycle",
+            ):
+                async with self.exchange_client:
+                    logger.info(
+                        f"ExchangeExecutorService[{exchange_name}]: "
+                        f"Exchange client initialized with WebSocket"
                     )
+                    self.running = True
+                    self._task_last_pass["reconciliation"] = time.monotonic()
+                    await self._recover_pending_orders(exchange_name)
                     try:
-                        await asyncio.gather(*tasks)
+                        tasks = [
+                            asyncio.create_task(
+                                self._supervise_loop(
+                                    "order_handler",
+                                    self._order_handler,
+                                    pre_respawn=self._rebuild_order_subscriber,
+                                )
+                            ),
+                            asyncio.create_task(
+                                self._supervise_loop("heartbeat", self._heartbeat_loop)
+                            ),
+                        ]
+                        if supports_ws:
+                            tasks.append(asyncio.create_task(self._supervise_execution_stream()))
+                        tasks.append(
+                            asyncio.create_task(
+                                self._supervise_loop("reconciliation", self._reconciliation_handler)
+                            )
+                        )
+                        try:
+                            await asyncio.gather(*tasks)
+                        except asyncio.CancelledError:
+                            logger.info(f"ExchangeExecutorService[{exchange_name}] tasks cancelled")
+                            raise
+                        finally:
+                            for task in tasks:
+                                task.cancel()
+                            await asyncio.gather(*tasks, return_exceptions=True)
                     except asyncio.CancelledError:
-                        logger.info(f"ExchangeExecutorService[{exchange_name}] tasks cancelled")
                         raise
-                    finally:
-                        for task in tasks:
-                            task.cancel()
-                        await asyncio.gather(*tasks, return_exceptions=True)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    await self.stop()
-                    raise
+                    except Exception:
+                        await self.stop()
+                        raise
         finally:
             self._client_context_active = False
 

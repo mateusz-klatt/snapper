@@ -2772,6 +2772,73 @@ async def test_execution_handler_runs_stream_under_private_egress_identity() -> 
 
 
 @pytest.mark.asyncio
+async def test_executor_start_enters_client_under_private_egress_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — executor startup connects the exchange client as private traffic.
+
+    Given: an executor client whose context entry records egress identity,
+    When: ``start`` enters the exchange client lifecycle,
+    Then: the connect path observes executor-owned private identity and the
+        context is reset after startup fails.
+    """
+
+    class Client:
+        supports_websocket_executions = False
+
+        def __init__(self) -> None:
+            """Initialize observed identity storage."""
+            self.observed_exchange: str | None = None
+            self.observed_traffic_class: str | None = None
+            self.observed_owner: str | None = None
+            self.observed_operation: str | None = None
+
+        def set_tracker(self, _tracker: Any) -> None:
+            """Accept the sequence tracker assigned during startup."""
+
+        async def __aenter__(self) -> Client:
+            """Record the active egress identity during client connect.
+
+            Returns:
+                This client.
+
+            Raises:
+                RuntimeError: Always raised to stop startup before tasks spawn.
+            """
+            identity = current_egress_identity()
+            if identity is not None:
+                self.observed_exchange = identity.exchange
+                self.observed_traffic_class = identity.traffic_class
+                self.observed_owner = identity.owner
+                self.observed_operation = identity.operation
+            raise RuntimeError("stop after connect")
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            """Close the client context."""
+
+    client = Client()
+    executor = DummyExecutor(client)
+    monkeypatch.setattr(executor, "_initialize_settings", AsyncMock(return_value=None))
+    monkeypatch.setattr(executor, "_resolve_credentials", AsyncMock(return_value=None))
+    monkeypatch.setattr(executor, "_setup_zmq_sockets", MagicMock())
+    monkeypatch.setattr(executor, "stop", AsyncMock(return_value=None))
+
+    with pytest.raises(RuntimeError, match="stop after connect"):
+        await executor.start()
+
+    assert client.observed_exchange == "paper"
+    assert client.observed_traffic_class == "private"
+    assert client.observed_owner == "executor"
+    assert client.observed_operation == "client_lifecycle"
+    assert current_egress_identity() is None
+
+
+@pytest.mark.asyncio
 async def test_execution_handler_logs_error_when_running(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test execution handler propagates errors while running.
 

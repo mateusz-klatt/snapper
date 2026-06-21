@@ -28,6 +28,7 @@ from snapper.infrastructure.exchanges.kraken_rest_egress import is_provable_pres
 from snapper.infrastructure.exchanges.kraken_rest_egress import route_kraken_rest_sync_call
 from snapper.infrastructure.exchanges.kraken_rest_egress import spot_sdk_proxy_target
 from snapper.infrastructure.network.egress_context import current_egress_identity
+from snapper.infrastructure.network.egress_context import egress_identity
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
@@ -40,6 +41,7 @@ class _FakeCcxtClient:
     def __init__(self) -> None:
         self.session = requests.Session()
         self.proxies: dict[str, str] = {}
+        self.load_markets: Callable[[], dict[str, object]] = lambda: {}
         self.fetch_ticker: Callable[[str], dict[str, object]] = lambda _symbol: {}
         self.fetch_balance: Callable[[], dict[str, object]] = lambda: {}
         self.create_order: Callable[..., dict[str, object]] = lambda *_args, **_kwargs: {}
@@ -233,6 +235,54 @@ def test_public_rest_routes_through_pool_vpn_and_restores_proxy_state() -> None:
     assert client.session.trust_env is True
 
 
+def test_private_identity_public_rest_read_runs_direct_without_pool_reservation() -> None:
+    """Spec — executor-scoped public REST reads bypass the VPN pool.
+
+    Given: a public REST call runs under an explicit private executor identity,
+    When: the helper routes that public read,
+    Then: the call runs direct and no egress route is reserved.
+    """
+    pool = configure_egress_pool(_private_fallback_config())
+    assert pool is not None
+    client = _FakeCcxtClient()
+    seen_proxies: list[dict[str, str]] = []
+    seen_identity: list[tuple[str, str, str]] = []
+
+    def sync_call() -> str:
+        identity = current_egress_identity()
+        assert identity is not None
+        seen_identity.append((identity.exchange, identity.traffic_class, identity.owner))
+        seen_proxies.append(_proxy_snapshot(client.session))
+        return "ok"
+
+    with egress_identity(
+        exchange="kraken",
+        traffic_class="private",
+        owner="executor",
+        operation="client_lifecycle",
+    ):
+        result = route_kraken_rest_sync_call(
+            exchange="kraken",
+            operation="load_markets",
+            kind="public_read",
+            target=ccxt_proxy_target(client),
+            proxy_lock=threading.RLock(),
+            sync_call=sync_call,
+        )
+
+    assert result == "ok"
+    assert seen_identity == [("kraken", "private", "executor")]
+    assert seen_proxies == [{}]
+    assert [
+        (route.id, route.in_use_count, route.active_reservations)
+        for route in pool.status_snapshot().routes
+    ] == [
+        ("default", 0, []),
+        ("ie", 0, []),
+        ("pl", 0, []),
+    ]
+
+
 def test_public_rest_without_pool_runs_direct_with_public_identity() -> None:
     """Spec — public reads stay public and direct when the pool is disabled.
 
@@ -263,6 +313,55 @@ def test_public_rest_without_pool_runs_direct_with_public_identity() -> None:
     assert result == "ok"
     assert seen_identity == [("kraken", "public")]
     assert seen_proxies == [{}]
+
+
+@pytest.mark.asyncio
+async def test_spot_connect_load_markets_under_private_identity_never_reserves_pool() -> None:
+    """Spec — executor-scoped Spot connect cannot depend on the VPN pool.
+
+    Given: Kraken Spot ``connect`` is called under executor private identity,
+    When: ``load_markets`` runs through the public-read classification,
+    Then: the load runs direct, observes the executor identity, and leaves
+        every pool route unreserved.
+    """
+    pool = configure_egress_pool(_private_fallback_config())
+    assert pool is not None
+    client = KrakenExchangeClient(api_key="key", api_secret="secret")
+    fake_ccxt = _FakeCcxtClient()
+    seen_proxies: list[dict[str, str]] = []
+    seen_identity: list[tuple[str, str, str]] = []
+
+    def load_markets() -> dict[str, object]:
+        identity = current_egress_identity()
+        assert identity is not None
+        seen_identity.append((identity.exchange, identity.traffic_class, identity.owner))
+        seen_proxies.append(_proxy_snapshot(fake_ccxt.session))
+        return {}
+
+    fake_ccxt.load_markets = MagicMock(side_effect=load_markets)
+    client._ccxt_client = fake_ccxt
+    try:
+        with egress_identity(
+            exchange="kraken",
+            traffic_class="private",
+            owner="executor",
+            operation="client_lifecycle",
+        ):
+            await client.connect()
+    finally:
+        client._shutdown_rest_pool()
+
+    assert seen_identity == [("kraken", "private", "executor")]
+    assert seen_proxies == [{}]
+    assert [
+        (route.id, route.in_use_count, route.active_reservations)
+        for route in pool.status_snapshot().routes
+    ] == [
+        ("default", 0, []),
+        ("ie", 0, []),
+        ("pl", 0, []),
+    ]
+    fake_ccxt.load_markets.assert_called_once_with()
 
 
 def test_public_rest_presend_connect_error_quarantines_and_releases_route() -> None:
@@ -360,6 +459,45 @@ def test_private_idempotent_read_falls_back_once_after_presend_connect_error() -
     ]
 
 
+def test_private_identity_private_read_preserves_executor_identity() -> None:
+    """Spec — private read routing preserves the active executor identity.
+
+    Given: a private idempotent read runs under executor private identity,
+    When: the helper routes the call,
+    Then: the call remains direct and sees the executor identity.
+    """
+    configure_egress_pool(_private_fallback_config())
+    client = _FakeCcxtClient()
+    seen_identity: list[tuple[str, str, str]] = []
+    seen_proxies: list[dict[str, str]] = []
+
+    def sync_call() -> str:
+        identity = current_egress_identity()
+        assert identity is not None
+        seen_identity.append((identity.exchange, identity.traffic_class, identity.owner))
+        seen_proxies.append(_proxy_snapshot(client.session))
+        return "read-ok"
+
+    with egress_identity(
+        exchange="kraken",
+        traffic_class="private",
+        owner="executor",
+        operation="client_lifecycle",
+    ):
+        result = route_kraken_rest_sync_call(
+            exchange="kraken",
+            operation="fetch_balance",
+            kind="private_idempotent_read",
+            target=ccxt_proxy_target(client),
+            proxy_lock=threading.RLock(),
+            sync_call=sync_call,
+        )
+
+    assert result == "read-ok"
+    assert seen_identity == [("kraken", "private", "executor")]
+    assert seen_proxies == [{}]
+
+
 def test_private_idempotent_read_ambiguous_error_does_not_fallback() -> None:
     """Spec — private read fallback is denied for ambiguous transport errors.
 
@@ -440,6 +578,47 @@ def test_private_mutation_presend_error_is_not_retried_or_rerouted() -> None:
             sync_call=sync_call,
         )
 
+    assert seen_proxies == [{}]
+
+
+def test_private_identity_mutation_preserves_no_retry_safety() -> None:
+    """Spec — executor-scoped mutations remain direct single-attempt failures.
+
+    Given: a private mutation runs under executor private identity,
+    When: the mutation raises a pre-send connect error,
+    Then: the error propagates after one direct attempt with no fallback.
+    """
+    configure_egress_pool(_private_fallback_config())
+    client = _FakeCcxtClient()
+    seen_identity: list[tuple[str, str, str]] = []
+    seen_proxies: list[dict[str, str]] = []
+
+    def sync_call() -> str:
+        identity = current_egress_identity()
+        assert identity is not None
+        seen_identity.append((identity.exchange, identity.traffic_class, identity.owner))
+        seen_proxies.append(_proxy_snapshot(client.session))
+        raise _wrapped_presend_error()
+
+    with (
+        egress_identity(
+            exchange="kraken",
+            traffic_class="private",
+            owner="executor",
+            operation="client_lifecycle",
+        ),
+        pytest.raises(RuntimeError, match="sdk wrapper"),
+    ):
+        route_kraken_rest_sync_call(
+            exchange="kraken",
+            operation="create_order",
+            kind="private_mutation",
+            target=ccxt_proxy_target(client),
+            proxy_lock=threading.RLock(),
+            sync_call=sync_call,
+        )
+
+    assert seen_identity == [("kraken", "private", "executor")]
     assert seen_proxies == [{}]
 
 
