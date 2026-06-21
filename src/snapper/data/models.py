@@ -346,6 +346,55 @@ class Candle(TemporalMixin, Base):
     complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
 
+class ShadowCandle(TemporalMixin, Base):
+    """SQLAlchemy model for shadow OHLCV candlestick A/B rows."""
+
+    __tablename__ = "shadow_candles"
+    __table_args__ = (
+        Index(
+            "uq_shadow_candle_itf_open_source",
+            "instrument_public_id",
+            "timeframe",
+            "open_at",
+            "source",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_shadow_candle_instrument_open_source", "instrument_public_id", "open_at", "source"
+        ),
+        Index(
+            "ix_shadow_candles_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(
+            "source IN ('native', 'calculated', 'synthesized')",
+            name="ck_shadow_candle_source",
+        ),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    open_at: Mapped[datetime] = mapped_column(TZDateTime())
+    timeframe: Mapped[str] = mapped_column(String(8))
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float)
+    vwap: Mapped[float | None] = mapped_column(Float)
+    trades: Mapped[int | None] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(16), server_default="native")
+    complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+
+
 class Tick(TemporalMixin, Base):
     """SQLAlchemy model for real-time price tick snapshots.
 

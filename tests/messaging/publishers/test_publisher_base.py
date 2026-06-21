@@ -28,6 +28,7 @@ from snapper.application.process_manager.registry import get_registered_processe
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import CandleUpsertRow
+from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.data.repository_types import TickUpsertRow
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
@@ -112,6 +113,45 @@ class DummyPublisher(MarketDataPublisherService[Any]):
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         return symbols
+
+
+class HookPublisher(DummyPublisher):
+    """Publisher stub that exposes the extra background task hook."""
+
+    def __init__(self, symbols: list[str]) -> None:
+        """Initialize the hook publisher.
+
+        Args:
+            symbols: Native symbols for the publisher.
+        """
+        super().__init__(symbols)
+        self.received_symbols: list[str] = []
+        self.cancelled = asyncio.Event()
+
+    async def _start_extra_background_tasks(
+        self, symbols_to_subscribe: list[str]
+    ) -> list[asyncio.Task[None]]:
+        """Start one cancellable background task.
+
+        Args:
+            symbols_to_subscribe: Symbols passed by the base start hook.
+
+        Returns:
+            A single task that remains pending until cancelled.
+        """
+        self.received_symbols = list(symbols_to_subscribe)
+        return [asyncio.create_task(self._extra_loop())]
+
+    async def _extra_loop(self) -> None:
+        """Wait until cancelled and record shutdown.
+
+        Returns:
+            None.
+        """
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.cancelled.set()
 
 
 class SpotLikePublisher(DummyPublisher):
@@ -207,6 +247,42 @@ def test_require_repository_raises_when_uninitialized() -> None:
     pub = DummyPublisher(symbols=["BTC-USD"])
     with pytest.raises(RuntimeError, match="Repository not initialized"):
         pub._require_repository()
+
+
+@pytest.mark.asyncio
+async def test_extra_background_task_hook_defaults_empty() -> None:
+    """The base extra task hook is a no-op.
+
+    Given: A publisher subclass that does not override the hook,
+    When: _start_extra_background_tasks is called,
+    Then: it returns an empty task list.
+
+    Returns:
+        None.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    assert await pub._start_extra_background_tasks(["BTC-USD"]) == []
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_extra_background_tasks() -> None:
+    """Stop cancels background tasks returned by the subclass hook.
+
+    Given: A publisher with one extra background task registered,
+    When: stop is called,
+    Then: the task is cancelled and the tracked task list is cleared.
+
+    Returns:
+        None.
+    """
+    pub = HookPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._extra_background_tasks = await pub._start_extra_background_tasks(["BTC-USD"])
+    await asyncio.sleep(0)
+    await pub.stop()
+    assert pub.received_symbols == ["BTC-USD"]
+    assert pub.cancelled.is_set()
+    assert pub._extra_background_tasks == []
 
 
 @pytest.mark.asyncio
@@ -3776,6 +3852,7 @@ class DummyRepository:
         """Initialize the instance."""
         self.instrument_calls: list[dict[str, Any]] = []
         self.candle_calls: list[list[dict[str, Any]]] = []
+        self.shadow_candle_calls: list[list[ShadowCandleUpsertRow]] = []
         self.tick_calls: list[list[dict[str, Any]]] = []
         self.trade_calls: list[list[dict[str, Any]]] = []
         self._next_id = 100
@@ -3805,6 +3882,11 @@ class DummyRepository:
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         """Upsert candles to repository."""
         self.candle_calls.append(rows)
+        return len(rows)
+
+    async def upsert_shadow_candles(self, rows: list[ShadowCandleUpsertRow]) -> int:
+        """Upsert shadow candles to repository."""
+        self.shadow_candle_calls.append(rows)
         return len(rows)
 
     async def upsert_ticks(self, rows: list[dict[str, Any]]) -> int:

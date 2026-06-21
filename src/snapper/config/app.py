@@ -541,6 +541,21 @@ class AppSettings:
         return bool(raw)
 
     @property
+    def spot_trade_built_shadow_enabled(self) -> bool:
+        """Return whether Kraken Spot trade-built 1m candles write shadow rows.
+
+        Returns:
+            ``True`` to enable the shadow table A/B writer; ``False`` (default)
+            to leave the live Spot publisher unchanged.
+        """
+        raw = self._get_db_setting("spot_trade_built_shadow_enabled", False)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in ("true", "1", "yes", "on")
+        return bool(raw)
+
+    @property
     def candle_single_source(self) -> bool:
         """Return whether ``>1m`` candle reads serve single-source from the DB.
 

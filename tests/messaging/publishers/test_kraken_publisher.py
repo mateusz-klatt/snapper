@@ -2,15 +2,24 @@
 
 import asyncio
 from collections import deque
+from collections.abc import AsyncIterator
+from datetime import UTC
+from datetime import datetime
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.app import AppSettings
 from snapper.core.types import ProcessRestartPolicyEnum
+from snapper.data.repository import Repository
+from snapper.data.repository_types import CandleUpsertRow
+from snapper.data.repository_types import ShadowCandleUpsertRow
+from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
@@ -18,6 +27,120 @@ from snapper.messaging.publishers import kraken as kraken_module
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
+
+
+class _ShadowSettings:
+    """Minimal settings object for the shadow hook tests."""
+
+    def __init__(self, enabled: bool) -> None:
+        """Store the shadow setting value.
+
+        Args:
+            enabled: Value returned by spot_trade_built_shadow_enabled.
+        """
+        self.spot_trade_built_shadow_enabled = enabled
+
+
+class _ShadowRepository:
+    """Repository fake that records live and shadow candle writes separately."""
+
+    def __init__(self) -> None:
+        """Initialize recorded write batches."""
+        self.shadow_rows: list[list[ShadowCandleUpsertRow]] = []
+        self.live_rows: list[list[CandleUpsertRow]] = []
+
+    async def upsert_shadow_candles(
+        self, rows: list[ShadowCandleUpsertRow], session: AsyncSession | None = None
+    ) -> int:
+        """Record shadow candle rows.
+
+        Args:
+            rows: Shadow rows written by the publisher.
+            session: Optional repository session.
+
+        Returns:
+            Number of rows recorded.
+        """
+        del session
+        self.shadow_rows.append(rows)
+        return len(rows)
+
+    async def upsert_candles(
+        self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
+    ) -> int:
+        """Record live candle rows.
+
+        Args:
+            rows: Live rows written by the publisher.
+            session: Optional repository session.
+
+        Returns:
+            Number of rows recorded.
+        """
+        del session
+        self.live_rows.append(rows)
+        return len(rows)
+
+
+class _ShadowClient:
+    """Exchange client fake yielding trade-built candles."""
+
+    def __init__(self, candles: list[CandleUpdate]) -> None:
+        """Store candles for the subscription iterator.
+
+        Args:
+            candles: Candle updates to yield.
+        """
+        self.candles = candles
+        self.calls: list[tuple[list[str], str]] = []
+
+    def subscribe_trade_built_candles(
+        self, symbols: list[str], timeframe: str
+    ) -> AsyncIterator[CandleUpdate]:
+        """Return an async iterator of trade-built candles.
+
+        Args:
+            symbols: Symbols passed by the publisher.
+            timeframe: Requested timeframe.
+
+        Returns:
+            Async iterator over configured candles.
+        """
+        self.calls.append((symbols, timeframe))
+        return self._iter_candles()
+
+    async def _iter_candles(self) -> AsyncIterator[CandleUpdate]:
+        """Yield configured candles.
+
+        Yields:
+            Candle updates in configured order.
+        """
+        for candle in self.candles:
+            yield candle
+
+
+def _shadow_candle(symbol: str = "BTC-USD") -> CandleUpdate:
+    """Build one completed trade-built candle update.
+
+    Args:
+        symbol: Native symbol for the candle.
+
+    Returns:
+        Candle update suitable for the shadow publisher path.
+    """
+    return CandleUpdate(
+        symbol=symbol,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        vwap=100.2,
+        trades=8,
+        volume=12.0,
+        interval_begin=datetime(2026, 6, 20, 12, 0, tzinfo=UTC),
+        interval=60,
+        complete=True,
+    )
 
 
 class TestKrakenMarketDataPublisher:
@@ -168,6 +291,191 @@ class TestKrakenMarketDataPublisher:
         mock_settings.instruments = {"walutomat": ["EUR-PLN"]}
         kwargs = KrakenMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {"symbols": []}
+
+    @pytest.mark.asyncio
+    async def test_shadow_background_hook_disabled_returns_empty(self) -> None:
+        """The Spot shadow task is disabled by default.
+
+        Given: A Kraken publisher with the shadow setting disabled,
+        When: the extra background task hook runs,
+        Then: no task is started.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False))
+        assert await publisher._start_extra_background_tasks(["BTC-USD"]) == []
+
+    @pytest.mark.asyncio
+    async def test_shadow_background_hook_enabled_starts_consumer(self) -> None:
+        """The Spot shadow setting starts one supervised consumer task.
+
+        Given: A Kraken publisher with the shadow setting enabled,
+        When: the extra background task hook runs,
+        Then: one task starts the shadow candle loop with the selected symbols.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(True))
+        started = asyncio.Event()
+        captured: list[list[str]] = []
+
+        async def _fake_shadow_loop(symbols: list[str]) -> None:
+            """Record symbols and wait until cancelled.
+
+            Args:
+                symbols: Symbols passed into the shadow loop.
+
+            Returns:
+                None.
+            """
+            captured.append(symbols)
+            started.set()
+            await asyncio.Event().wait()
+
+        publisher.running = True
+        publisher._shadow_candle_loop = _fake_shadow_loop
+        tasks = await publisher._start_extra_background_tasks(["BTC-USD"])
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert len(tasks) == 1
+            assert captured == [["BTC-USD"]]
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_shadow_candle_loop_returns_when_client_missing(self) -> None:
+        """The shadow loop exits cleanly before startup attaches a client.
+
+        Given: A Kraken publisher without an exchange client,
+        When: the shadow loop is called,
+        Then: it returns without writing rows.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.running = True
+        repository = _ShadowRepository()
+        publisher.repository = cast(Repository, repository)
+        await publisher._shadow_candle_loop(["BTC-USD"])
+        assert repository.shadow_rows == []
+
+    @pytest.mark.asyncio
+    async def test_shadow_candle_loop_breaks_when_stopped(self) -> None:
+        """The shadow loop honors the running flag before row processing.
+
+        Given: A shadow candle arrives after running has been cleared,
+        When: the loop receives it,
+        Then: it breaks before resolving instruments or writing rows.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        repository = _ShadowRepository()
+        client = _ShadowClient([_shadow_candle()])
+        publisher.repository = cast(Repository, repository)
+        publisher._exchange_client = cast(KrakenExchangeClient, client)
+        publisher.running = False
+        publisher._ensure_instrument = AsyncMock(return_value="unused")
+        await publisher._shadow_candle_loop(["BTC-USD"])
+        assert client.calls == [(["BTC-USD"], "1m")]
+        publisher._ensure_instrument.assert_not_awaited()
+        assert repository.shadow_rows == []
+
+    @pytest.mark.asyncio
+    async def test_shadow_candle_loop_skips_unknown_instrument(self) -> None:
+        """Unknown symbols do not reach the shadow repository.
+
+        Given: A trade-built candle whose instrument cannot be resolved,
+        When: the shadow loop processes it,
+        Then: no shadow write occurs.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        repository = _ShadowRepository()
+        publisher.repository = cast(Repository, repository)
+        publisher._exchange_client = cast(KrakenExchangeClient, _ShadowClient([_shadow_candle()]))
+        publisher.running = True
+        publisher._ensure_instrument = AsyncMock(return_value=None)
+        publisher._should_persist_row = MagicMock(return_value=True)
+        await publisher._shadow_candle_loop(["BTC-USD"])
+        publisher._should_persist_row.assert_not_called()
+        assert repository.shadow_rows == []
+
+    @pytest.mark.asyncio
+    async def test_shadow_candle_loop_applies_persist_policy_skip(self) -> None:
+        """The existing candle persist policy gates shadow writes.
+
+        Given: A resolved trade-built candle filtered by the persist policy,
+        When: the shadow loop processes it,
+        Then: the repository is not called.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        repository = _ShadowRepository()
+        publisher.repository = cast(Repository, repository)
+        publisher._exchange_client = cast(KrakenExchangeClient, _ShadowClient([_shadow_candle()]))
+        publisher.running = True
+        publisher._ensure_instrument = AsyncMock(
+            return_value="00000000-0000-7000-8000-000000000501"
+        )
+        publisher._should_persist_row = MagicMock(return_value=False)
+        await publisher._shadow_candle_loop(["BTC-USD"])
+        publisher._should_persist_row.assert_called_once_with("candles", "kraken", "BTC-USD")
+        assert repository.shadow_rows == []
+
+    @pytest.mark.asyncio
+    async def test_shadow_candle_loop_writes_only_shadow_rows(self) -> None:
+        """The shadow path never touches the live candle pipeline.
+
+        Given: A resolved trade-built Spot candle that passes the persist policy,
+        When: the shadow loop processes it,
+        Then: only upsert_shadow_candles receives a calculated complete 1m row.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        repository = _ShadowRepository()
+        publisher.repository = cast(Repository, repository)
+        publisher._exchange_client = cast(KrakenExchangeClient, _ShadowClient([_shadow_candle()]))
+        publisher.running = True
+        instrument_public_id = "00000000-0000-7000-8000-000000000501"
+        publisher._ensure_instrument = AsyncMock(return_value=instrument_public_id)
+        publisher._should_persist_row = MagicMock(return_value=True)
+        publisher._process_candle = AsyncMock(side_effect=AssertionError("live candle path"))
+        publisher._observe_native_candle = MagicMock(side_effect=AssertionError("native observer"))
+        publisher._enqueue_finalized_candles = MagicMock(side_effect=AssertionError("live queue"))
+        publisher._publish_synthesized_candle = AsyncMock(
+            side_effect=AssertionError("synth publisher")
+        )
+        publisher._resolve_candle_public_id = MagicMock(
+            side_effect=AssertionError("live candle id")
+        )
+        publisher._candle_source_for = MagicMock(side_effect=AssertionError("live source"))
+        await publisher._shadow_candle_loop(["BTC-USD"])
+        assert repository.live_rows == []
+        assert len(repository.shadow_rows) == 1
+        row = repository.shadow_rows[0][0]
+        assert row["instrument_public_id"] == instrument_public_id
+        assert row["timeframe"] == "1m"
+        assert row["source"] == "calculated"
+        assert row["complete"] is True
+        assert row["open"] == pytest.approx(100.0)
+        assert publisher._candle_write_queue.empty()
+        publisher._process_candle.assert_not_awaited()
+        publisher._resolve_candle_public_id.assert_not_called()
 
 
 class TestKrakenReconnectWatchdog:

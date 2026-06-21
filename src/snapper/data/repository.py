@@ -147,6 +147,7 @@ from snapper.data.models import PairedExecutionLeg
 from snapper.data.models import Position
 from snapper.data.models import PositionCycle
 from snapper.data.models import Setting
+from snapper.data.models import ShadowCandle
 from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
@@ -227,6 +228,7 @@ from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import PositionRow
 from snapper.data.repository_types import ScopeGrantRow
 from snapper.data.repository_types import SettingRow
+from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
@@ -932,6 +934,23 @@ class Repository(ABC):
 
         Optional ``session`` lets writer tasks share a pinned
         connection across many flushes.
+        """
+        ...
+
+    @abstractmethod
+    async def upsert_shadow_candles(
+        self, rows: list[ShadowCandleUpsertRow], session: AsyncSession | None = None
+    ) -> int:
+        """Insert or update shadow candles and return the changed row count.
+
+        Args:
+            rows: Shadow candle rows to insert or revise.
+            session: Optional caller-managed session. When provided, commit
+                remains caller-owned.
+
+        Returns:
+            Number of inserted successor versions. Identical active rows are
+            no-ops and excluded from the count.
         """
         ...
 
@@ -5373,6 +5392,111 @@ class SQLAlchemyRepository(Repository):
             )
             row["public_id"] = existing.public_id
         session.add(Candle(**row))
+        return True
+
+    async def upsert_shadow_candles(
+        self, rows: list[ShadowCandleUpsertRow], session: AsyncSession | None = None
+    ) -> int:
+        """Close-old + insert-new for shadow candle rows.
+
+        Args:
+            rows: Shadow candle rows keyed by instrument, timeframe, open time,
+                and source. ``public_id`` and ``known_to`` are filled when absent.
+            session: Optional caller-managed session. When ``None``, this method
+                opens and commits its own session.
+
+        Returns:
+            Number of inserted shadow candle versions. Re-upserting an identical
+            active row returns zero for that row.
+        """
+        if not rows:
+            return 0
+        for row in rows:
+            if "public_id" not in row:
+                row["public_id"] = str(uuid7())
+            if "known_to" not in row:
+                row["known_to"] = KNOWN_TO_MAX
+        if session is not None:
+            count = 0
+            for row in rows:
+                if await self._upsert_shadow_candle_row(session, row):
+                    count += 1
+            return count
+        async with self.session() as s:
+            count = 0
+            for row in rows:
+                if await self._upsert_shadow_candle_row(s, row):
+                    count += 1
+            await s.commit()
+            return count
+
+    @staticmethod
+    def _shadow_candle_row_matches(existing: ShadowCandle, row: ShadowCandleUpsertRow) -> bool:
+        """Return True when the active shadow candle already carries row values.
+
+        Args:
+            existing: Active persisted shadow candle version.
+            row: Incoming shadow candle row.
+
+        Returns:
+            True when every OHLCV, provenance, and completeness value matches.
+        """
+        return (
+            existing.open == row["open"]
+            and existing.high == row["high"]
+            and existing.low == row["low"]
+            and existing.close == row["close"]
+            and existing.volume == row["volume"]
+            and existing.vwap == row["vwap"]
+            and existing.trades == row["trades"]
+            and existing.source == row.get("source", "native")
+            and existing.complete == row.get("complete", True)
+        )
+
+    @classmethod
+    async def _upsert_shadow_candle_row(
+        cls,
+        session: AsyncSession,
+        row: ShadowCandleUpsertRow,
+    ) -> bool:
+        """Run the sequential shadow candle SCD2 close+insert path.
+
+        Args:
+            session: Active async SQLAlchemy session.
+            row: Shadow candle row to insert or revise.
+
+        Returns:
+            True when a new version was inserted, false when the active version
+            was identical and no-oped.
+        """
+        bus_time = row["timestamp"]
+        source = row.get("source", "native")
+        existing = (
+            (
+                await session.execute(
+                    select(ShadowCandle)
+                    .where(
+                        ShadowCandle.instrument_public_id == row["instrument_public_id"],
+                        ShadowCandle.timeframe == row["timeframe"],
+                        ShadowCandle.open_at == row["open_at"],
+                        ShadowCandle.source == source,
+                        ShadowCandle.timestamp <= bus_time,
+                        ShadowCandle.known_to > bus_time,
+                    )
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if existing:
+            if cls._shadow_candle_row_matches(existing, row):
+                return False
+            await session.execute(
+                update(ShadowCandle).where(ShadowCandle.id == existing.id).values(known_to=bus_time)
+            )
+            row["public_id"] = existing.public_id
+        session.add(ShadowCandle(**row))
         return True
 
     async def upsert_trades(

@@ -30,6 +30,9 @@ Register and run via process manager::
 import asyncio
 import time
 from collections import deque
+from datetime import UTC
+from datetime import datetime
+from functools import partial
 from typing import Any
 from typing import Final
 
@@ -43,6 +46,8 @@ from snapper.core.types import MarketDataExchange
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.data.repository_types import ShadowCandleUpsertRow
+from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
@@ -257,6 +262,88 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._reconnect_timestamps: deque[float] = deque(maxlen=_RECONNECT_LIMIT * 2)
         self._restart_lock = asyncio.Lock()
         self._force_ws_restart_task: asyncio.Task[None] | None = None
+
+    async def _start_extra_background_tasks(
+        self, symbols_to_subscribe: list[str]
+    ) -> list[asyncio.Task[None]]:
+        """Start the optional Spot trade-built shadow candle writer.
+
+        Args:
+            symbols_to_subscribe: Native Spot symbols selected for this
+                publisher connection.
+
+        Returns:
+            A single supervised shadow task when the setting is enabled,
+            otherwise an empty task list.
+        """
+        if not self.settings.spot_trade_built_shadow_enabled:
+            return []
+        return [
+            asyncio.create_task(
+                self._supervise_consumer(
+                    "shadow_candle:1m",
+                    partial(self._shadow_candle_loop, symbols_to_subscribe),
+                )
+            )
+        ]
+
+    async def _shadow_candle_loop(self, symbols: list[str]) -> None:
+        """Persist trade-built Spot 1m candles into the shadow table only.
+
+        Args:
+            symbols: Native Spot symbols to pass to the trade-built candle
+                subscription.
+
+        Returns:
+            None.
+        """
+        client = self._exchange_client
+        if client is None:
+            logger.error("Exchange client not initialized")
+            return
+        repository = self._require_repository()
+        exchange = self._get_data_exchange()
+        async for candle in client.subscribe_trade_built_candles(symbols, "1m"):
+            if not self.running:
+                break
+            instrument_public_id = await self._ensure_instrument(candle.symbol)
+            if instrument_public_id is None:
+                continue
+            row = self._build_shadow_candle_row(candle, instrument_public_id)
+            if not self._should_persist_row("candles", exchange, candle.symbol):
+                continue
+            await repository.upsert_shadow_candles([row])
+
+    def _build_shadow_candle_row(
+        self, candle: CandleUpdate, instrument_public_id: str
+    ) -> ShadowCandleUpsertRow:
+        """Build a shadow candle row from a trade-built candle update.
+
+        Args:
+            candle: Completed trade-built Spot 1m candle.
+            instrument_public_id: Resolved instrument identity.
+
+        Returns:
+            Shadow candle row tagged ``calculated`` and ready for repository
+            upsert.
+        """
+        return {
+            "instrument_public_id": instrument_public_id,
+            "open_at": candle.interval_begin,
+            "timestamp": datetime.now(UTC),
+            "timeframe": "1m",
+            "open": candle.open,
+            "high": candle.high,
+            "low": candle.low,
+            "close": candle.close,
+            "volume": candle.volume,
+            "vwap": candle.vwap,
+            "trades": candle.trades,
+            "source": "calculated",
+            "complete": True,
+            "session_id": self._tracker.session_id,
+            "sequence_id": self._tracker.next_sequence("shadow_candles"),
+        }
 
     async def start(self) -> None:
         """Start the publisher within a connector-registration context.

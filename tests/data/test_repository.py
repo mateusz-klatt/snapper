@@ -66,6 +66,7 @@ from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import OrderInsertRow
+from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import TradeRow
@@ -1749,6 +1750,13 @@ class DummyRepository(Repository):
         """Upsert candles - no-op returning 0."""
         return 0
 
+    async def upsert_shadow_candles(
+        self, rows: list[ShadowCandleUpsertRow], session: AsyncSession | None = None
+    ) -> int:
+        """Upsert shadow candles - no-op returning 0."""
+        del rows, session
+        return 0
+
     async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
         """Upsert trades - no-op returning 0."""
         return 0
@@ -2849,6 +2857,12 @@ class _MinimalRepository(Repository):
         self, rows: list[dict[str, Any]], session: AsyncSession | None = None
     ) -> int:
         del session
+        return 0
+
+    async def upsert_shadow_candles(
+        self, rows: list[ShadowCandleUpsertRow], session: AsyncSession | None = None
+    ) -> int:
+        del rows, session
         return 0
 
     async def upsert_trades(

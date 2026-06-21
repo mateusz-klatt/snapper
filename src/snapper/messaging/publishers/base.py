@@ -507,6 +507,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._persist_policy: MarketPersistPolicy | None = None
         self._persist_skipped_counters: dict[tuple[str, PersistDataType], list[float]] = {}
         self._feed_health_loop_task: asyncio.Task[None] | None = None
+        self._extra_background_tasks: list[asyncio.Task[None]] = []
 
     def _require_repository(self) -> Repository:
         """Return initialized repository or raise an explicit runtime error.
@@ -892,6 +893,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             tasks.append(self._trade_writer_task)
         else:
             logger.info(f"{process_name}: Trade loop disabled (exchange has no public trade feed)")
+        self._extra_background_tasks = await self._start_extra_background_tasks(
+            symbols_to_subscribe
+        )
+        tasks.extend(self._extra_background_tasks)
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -926,6 +931,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             not self.running
             and not self._has_pending_writer_shutdown()
             and not self._recovery_tasks
+            and not self._extra_background_tasks
         ):
             return
         self.running = False
@@ -938,12 +944,39 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if self._exchange_client is not None:
             await self._exchange_client.stop_health_loop()
         await self._stop_feed_health_loop()
+        await self._stop_extra_background_tasks()
         await self._stop_tick_pipeline()
         await self._stop_candle_pipeline()
         await self._stop_trade_pipeline()
         await self._close_runtime_resources()
         exchange_name = self._get_exchange_name()
         logger.info(f"{exchange_name}_feed_publisher: Stopped")
+
+    async def _start_extra_background_tasks(
+        self, symbols_to_subscribe: list[str]
+    ) -> list[asyncio.Task[None]]:
+        """Start subclass-owned background tasks after the standard pipelines.
+
+        Args:
+            symbols_to_subscribe: The symbols selected for this publisher
+                connection after venue-level limits have been applied.
+
+        Returns:
+            Background tasks that should join the main gather and be cancelled
+            during stop. The base implementation has no extra work.
+        """
+        return []
+
+    async def _stop_extra_background_tasks(self) -> None:
+        """Cancel and await subclass-owned background tasks.
+
+        Returns:
+            None.
+        """
+        for task in self._extra_background_tasks:
+            task.cancel()
+        await self._await_shutdown_tasks(self._extra_background_tasks)
+        self._extra_background_tasks = []
 
     def _has_pending_writer_shutdown(self) -> bool:
         """Return whether stop should drain a partially initialised writer."""

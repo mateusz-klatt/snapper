@@ -364,6 +364,42 @@ class TestAppSettingsTradingProperties:
         assert _value(1) is True
         assert _value(0) is False
 
+    def test_spot_trade_built_shadow_enabled_defaults_false_and_coerces(self) -> None:
+        """Verify spot_trade_built_shadow_enabled defaults False and coerces values.
+
+        Given a service with the setting absent, as a bool, as truthy/falsey
+            strings, and as an int,
+        When accessing settings.spot_trade_built_shadow_enabled,
+        Then it defaults False and coerces each representation correctly.
+
+        Returns:
+            None.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        default = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert default.spot_trade_built_shadow_enabled is False
+
+        def _value(raw: object) -> bool:
+            """Read the shadow setting for one raw service value.
+
+            Args:
+                raw: Raw settings-service value.
+
+            Returns:
+                Coerced boolean property value.
+            """
+            settings = AppSettings(
+                bootstrap,
+                settings_service=MockSettingsService({"spot_trade_built_shadow_enabled": raw}),
+            )
+            return settings.spot_trade_built_shadow_enabled
+
+        assert _value(True) is True
+        assert _value("yes") is True
+        assert _value("false") is False
+        assert _value(1) is True
+        assert _value(0) is False
+
     def test_candle_single_source_defaults_false_and_reads_value(self) -> None:
         """Verify candle_single_source defaults to False and reads the DB value.
 
