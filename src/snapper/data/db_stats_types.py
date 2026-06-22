@@ -13,8 +13,9 @@ truth, no circular dependency.
 ``TableKind`` distinguishes append-only event tables (``current`` /
 ``closed`` are semantically null — these tables have no SCD2 lifecycle)
 from SCD2 state tables (``current`` counts rows whose ``known_to`` equals
-the SCD2 sentinel; ``closed`` is derived as ``max(0, total - current)``
-rather than counted directly — see :class:`TableCounters`).
+the SCD2 sentinel, except explicit PostgreSQL index-estimated tables;
+``closed`` is derived as ``total - current`` after clamping ``total`` to
+the current floor — see :class:`TableCounters`).
 """
 
 from dataclasses import dataclass
@@ -36,11 +37,16 @@ class TableEntry:
             :class:`sqlalchemy.orm.DeclarativeBase` so the count
             primitive can resolve ``model.known_to`` /
             ``model.timestamp`` columns at runtime.
+        current_estimate_index: Optional PostgreSQL index name whose
+            planner statistics estimate active rows for state tables
+            where exact ``current`` counts are too expensive. SQLite
+            and tables without this value use the exact current count.
     """
 
     name: str
     kind: TableKind
     model: type[DeclarativeBase]
+    current_estimate_index: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,12 +59,14 @@ class TableCounters:
             autovacuum drift), on SQLite exact. ``None`` only on
             per-table query failure (the snapshotter then reuses prior
             values via ``dataclasses.replace(prior, is_stale=True)``).
-        current: Active SCD2 versions (rows whose ``known_to`` equals
-            the SCD2 sentinel; always an exact count) for state tables;
+        current: Active SCD2 versions for state tables. The value is an
+            exact count except for explicit PostgreSQL index-estimated
+            tables, where it uses active partial-index statistics;
             ``None`` for event tables (semantics).
         closed: Superseded SCD2 versions for state tables, derived as
-            ``max(0, total - current)`` to skip a slow full scan —
-            inherits the PG estimate error; ``None`` for event tables.
+            ``total - current`` after ``total`` is clamped no lower than
+            ``current`` to skip a slow full scan; inherits PG estimate
+            error; ``None`` for event tables.
         archivable: Row count in the policy retention window when a
             policy is registered for the table; ``None`` when no policy
             applies (semantically distinct from ``0``).

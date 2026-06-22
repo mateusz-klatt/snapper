@@ -136,10 +136,11 @@ class TestRegistryComposition:
         assert {"telemetry", "ticks", "trades", "control"} <= names
 
     def test_candles_sampled_as_state(self) -> None:
-        """``candles`` is sampled explicitly (it lives outside the archiver registries) as SCD2 state."""
+        """``candles`` is sampled explicitly as SCD2 state with active-index current estimates."""
         entry = next(e for e in TABLES_TO_SAMPLE if e.name == "candles")
         assert entry.kind == "state"
         assert entry.model is Candle
+        assert entry.current_estimate_index == "uq_candle_itf_open"
 
 
 class TestConstructorAndProperties:

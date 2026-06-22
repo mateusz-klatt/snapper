@@ -4446,14 +4446,18 @@ class Repository(ABC):
           ``COUNT(timestamp >= window_start AND timestamp < window_end + 1d)``
           when ``archivable_window`` is provided, else ``None``.
         * ``entry.kind == "state"`` (SCD2-versioned):
-          ``current = COUNT(known_to == KNOWN_TO_MAX)`` (always exact),
-          ``total`` dialect-aware as above, and
-          ``closed = max(0, total - current)`` — derived rather than
-          counted to skip a slow full scan; it inherits the PG estimate
-          error, and the clamp absorbs stale estimates where the exact
-          ``current`` exceeds ``total``. ``archivable`` is the
-          closed-only count over the same half-open ``timestamp``
-          window when ``archivable_window`` is provided, else ``None``.
+          ``current`` is an exact
+          ``COUNT(known_to == KNOWN_TO_MAX)`` except on PostgreSQL when
+          ``entry.current_estimate_index`` names an active partial index,
+          in which case ``pg_class.reltuples`` for that index estimates
+          active rows. ``total`` is dialect-aware as above and is
+          clamped no lower than ``current`` before
+          ``closed = total - current`` is derived to skip a slow full
+          scan. On PostgreSQL ``total`` and ``closed`` remain estimates
+          but are never below the exact or index-estimated ``current``.
+          ``archivable`` is the closed-only count over the same
+          half-open ``timestamp`` window when ``archivable_window`` is
+          provided, else ``None``.
 
         Args:
             entry: Table descriptor (name, kind, ORM model).
@@ -16318,6 +16322,43 @@ class SQLAlchemyRepository(Repository):
             return count
         raise NotImplementedError(f"_count_total_estimate not implemented for dialect={dialect}")
 
+    async def _count_index_estimate(
+        self, s: AsyncSession, model: type[Any], index_name: str
+    ) -> int:
+        """PostgreSQL planner-stat row estimate for one index.
+
+        Scenario:
+            A state table can have a very large active set where exact
+            ``COUNT(known_to == KNOWN_TO_MAX)`` is not suitable for the
+            snapshotter timeout budget.
+
+        Behavior:
+            PostgreSQL reads ``pg_class.reltuples`` for the named index,
+            joined through ``pg_namespace`` using the model schema so
+            identically named indexes in other schemas are ignored.
+
+        Outcome:
+            The returned value is a non-negative active-row estimate.
+            Missing stats return ``0``. Unsupported dialects fail loud
+            because callers should only use this for PostgreSQL-specific
+            index estimates.
+        """
+        dialect = self.dialect_name
+        if dialect == "postgresql":
+            schema_name = model.__table__.schema or "public"
+            stmt = text(
+                "SELECT GREATEST(c.reltuples::bigint, 0) "
+                "FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.relname = :index "
+                "AND n.nspname = :schema "
+                "AND c.relkind = 'i'"
+            )
+            result = await s.execute(stmt, {"index": index_name, "schema": schema_name})
+            scalar = result.scalar_one_or_none()
+            return int(scalar) if scalar is not None else 0
+        raise NotImplementedError(f"_count_index_estimate not implemented for dialect={dialect}")
+
     async def count_table_stats(
         self,
         entry: TableEntry,
@@ -16327,12 +16368,14 @@ class SQLAlchemyRepository(Repository):
         """Per-table four-counter primitive (event + state).
 
         The ``total`` count uses :meth:`_count_total_estimate` which is
-        dialect-aware: PostgreSQL returns a planner estimate (fast,
-        accurate within autovacuum drift), SQLite returns an exact
-        count. ``closed`` is derived as ``max(0, total - current)`` on
-        SCD2/state tables to skip a slow full-table scan; the clamp
-        handles stale PG estimates where ``current`` (exact, partial
-        index) temporarily exceeds the estimated ``total``.
+        dialect-aware: PostgreSQL returns a planner estimate and SQLite
+        returns an exact count. State-table ``current`` is exact except
+        when a PostgreSQL-only ``entry.current_estimate_index`` is set,
+        in which case :meth:`_count_index_estimate` reads the active
+        partial-index estimate. ``total`` is clamped no lower than
+        ``current`` before ``closed`` is derived, so panels keep
+        ``Total >= Current >= 0`` while PostgreSQL ``total`` and
+        ``closed`` remain estimates.
         """
         model = cast(Any, entry.model)
         async with self.session() as s:
@@ -16346,11 +16389,15 @@ class SQLAlchemyRepository(Repository):
                     )
                     archivable = int((await s.execute(archivable_stmt)).scalar_one())
                 return TableCounters(total=total, current=None, closed=None, archivable=archivable)
-            current_stmt = (
-                select(func.count()).select_from(model).where(model.known_to == KNOWN_TO_MAX)
-            )
-            current = int((await s.execute(current_stmt)).scalar_one())
+            if entry.current_estimate_index is not None and self.dialect_name == "postgresql":
+                current = await self._count_index_estimate(s, model, entry.current_estimate_index)
+            else:
+                current_stmt = (
+                    select(func.count()).select_from(model).where(model.known_to == KNOWN_TO_MAX)
+                )
+                current = int((await s.execute(current_stmt)).scalar_one())
             total = await self._count_total_estimate(s, model)
+            total = max(total, current)
             closed = max(0, total - current)
             archivable = None
             if archivable_predicate is not None:

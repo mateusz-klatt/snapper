@@ -6,12 +6,11 @@ Pins the per-kind contract:
   (dialect-aware — exact on SQLite, planner estimate on PostgreSQL);
   ``current`` / ``closed`` = ``None``;
   ``archivable`` = half-open window count (or ``None`` when no window).
-* STATE tables: ``current = COUNT(known_to == KNOWN_TO_MAX)`` (exact,
-  partial-index scan);
+* STATE tables: ``current = COUNT(known_to == KNOWN_TO_MAX)`` except
+  explicit PostgreSQL active-index estimates such as ``candles``;
   ``total`` via :meth:`_count_total_estimate` (dialect-aware);
-  ``closed = max(0, total - current)`` (clamped to handle stale PG
-  estimates where the exact ``current`` count temporarily exceeds the
-  estimated ``total``);
+  ``total`` clamps no lower than ``current`` before
+  ``closed = max(0, total - current)`` is derived;
   ``archivable`` = closed-window count (or ``None``).
 
 Half-open window contract: rows AT
@@ -23,6 +22,7 @@ from datetime import UTC
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
+from types import TracebackType
 
 import pytest
 from sqlalchemy import update
@@ -31,6 +31,7 @@ from snapper.data import repository as repo_module
 from snapper.data.db_stats_types import TableCounters
 from snapper.data.db_stats_types import TableEntry
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Candle
 from snapper.data.models import Order
 from snapper.data.models import Telemetry
 from snapper.data.repository import SQLAlchemyRepository
@@ -52,6 +53,62 @@ def _telemetry_entry() -> TableEntry:
 def _orders_entry() -> TableEntry:
     """``TableEntry`` for the ``orders`` state table."""
     return TableEntry(name="orders", kind="state", model=Order)
+
+
+def _candles_entry() -> TableEntry:
+    """``TableEntry`` for candles with PostgreSQL active-index current estimation."""
+    return TableEntry(
+        name="candles",
+        kind="state",
+        model=Candle,
+        current_estimate_index="uq_candle_itf_open",
+    )
+
+
+class _ScalarOneResult:
+    """Stub SQLAlchemy result returning one scalar value."""
+
+    def __init__(self, value: int) -> None:
+        """Store the scalar result value."""
+        self._value = value
+
+    def scalar_one(self) -> int:
+        """Return the configured scalar value."""
+        return self._value
+
+
+class _CurrentCountSession:
+    """Stub async session returning one exact current-count result."""
+
+    def __init__(self, current: int) -> None:
+        """Store the current count and record executed statements."""
+        self._current = current
+        self.statements: list[object] = []
+
+    async def execute(self, stmt: object, params: dict[str, str] | None = None) -> _ScalarOneResult:
+        """Record the statement and return the configured current count."""
+        self.statements.append((stmt, params))
+        return _ScalarOneResult(self._current)
+
+
+class _StubSessionContext:
+    """Minimal async context manager for ``SQLAlchemyRepository.session``."""
+
+    def __init__(self, session: object) -> None:
+        """Store the object yielded from ``async with``."""
+        self._session = session
+
+    async def __aenter__(self) -> object:
+        """Return the configured session object."""
+        return self._session
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        """Leave exception handling to the caller."""
 
 
 async def _insert_telemetry_row(
@@ -332,8 +389,10 @@ class TestDialectAwareTotalEstimate:
     * SQLite emits an exact ``count(*)`` (acceptable at dev scale).
     * Unknown dialects raise ``NotImplementedError`` (fail loud rather
       than silently produce zero or wrong counts).
-    * ``closed`` is clamped to ``max(0, total - current)`` so a stale
-      PG estimate (``total < current``) cannot produce a negative value.
+    * State ``total`` is clamped to the exact or index-estimated
+      ``current`` floor before ``closed`` is derived, so a stale PG
+      estimate (``total < current``) cannot leak impossible panel
+      values.
     """
 
     @pytest.mark.asyncio
@@ -371,6 +430,57 @@ class TestDialectAwareTotalEstimate:
         assert captured["params"] == {"table": "orders", "schema": "public"}
 
     @pytest.mark.asyncio
+    async def test_postgresql_index_estimate_uses_schema_aware_pg_class_query(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Given a PG active-index estimate, When queried, Then the index stats are schema scoped."""
+        captured: dict[str, object] = {}
+
+        class _StubResult:
+            def scalar_one_or_none(self) -> int:
+                return 272000000
+
+        class _StubSession:
+            async def execute(
+                self, stmt: object, params: dict[str, str] | None = None
+            ) -> _StubResult:
+                captured["stmt"] = str(stmt)
+                captured["params"] = params
+                return _StubResult()
+
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        monkeypatch.setattr(type(repo), "dialect_name", "postgresql")
+        result = await repo._count_index_estimate(_StubSession(), Candle, "uq_candle_itf_open")
+        assert result == 272000000
+        sql = str(captured["stmt"]).lower()
+        assert "pg_class" in sql
+        assert "pg_namespace" in sql
+        assert "n.nspname" in sql
+        assert "c.relkind = 'i'" in sql
+        assert captured["params"] == {"index": "uq_candle_itf_open", "schema": "public"}
+
+    @pytest.mark.asyncio
+    async def test_postgresql_index_estimate_missing_stats_returns_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Given missing PG index stats, When estimated, Then the helper returns zero."""
+
+        class _StubResult:
+            def scalar_one_or_none(self) -> int | None:
+                return None
+
+        class _StubSession:
+            async def execute(
+                self, _stmt: object, _params: dict[str, str] | None = None
+            ) -> _StubResult:
+                return _StubResult()
+
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        monkeypatch.setattr(type(repo), "dialect_name", "postgresql")
+        result = await repo._count_index_estimate(_StubSession(), Candle, "uq_candle_itf_open")
+        assert result == 0
+
+    @pytest.mark.asyncio
     async def test_sqlite_path_runs_exact_count(self, _repo: SQLAlchemyRepository) -> None:
         """SQLite dialect returns an exact count over the model."""
         await _insert_telemetry_row(
@@ -395,33 +505,137 @@ class TestDialectAwareTotalEstimate:
         monkeypatch.setattr(type(repo), "dialect_name", "mysql")
         with pytest.raises(NotImplementedError, match="dialect=mysql"):
             await repo._count_total_estimate(_StubSession(), Telemetry)
+        with pytest.raises(NotImplementedError, match="dialect=mysql"):
+            await repo._count_index_estimate(_StubSession(), Candle, "uq_candle_itf_open")
 
     @pytest.mark.asyncio
-    async def test_closed_clamps_to_zero_when_estimate_below_current(
-        self, _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    async def test_total_clamps_to_current_when_estimate_below_current(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Stale ``reltuples`` estimate must not produce negative ``closed``.
+        """Given a stale low estimate, When counted, Then total clamps to the current floor.
 
-        Simulates a PG state where ``current`` (exact, partial index)
-        is 10 but ``_count_total_estimate`` (autoanalyze stale) returns 5.
-        The implementation must clamp ``closed = max(0, 5 - 10) = 0``.
+        Simulates a PG state where ``current`` is 10 but
+        ``_count_total_estimate`` returns 5 before autoanalyze catches
+        up. The implementation must return ``total == current`` and
+        ``closed == 0``.
         """
-        for i in range(10):
-            await _insert_active_order(
-                _repo,
-                public_id=f"ord-{i}",
-                timestamp=datetime(2026, 5, 1, 0, 0, tzinfo=UTC),
-                sequence_id=i + 1,
-            )
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        session = _CurrentCountSession(current=10)
+
+        def _session_factory() -> _StubSessionContext:
+            return _StubSessionContext(session)
 
         async def _stale_estimate(_self: object, _s: object, _model: object) -> int:
             return 5
 
-        monkeypatch.setattr(type(_repo), "_count_total_estimate", _stale_estimate)
-        counters = await _repo.count_table_stats(_orders_entry())
+        monkeypatch.setattr(repo, "session", _session_factory)
+        monkeypatch.setattr(type(repo), "_count_total_estimate", _stale_estimate)
+        counters = await repo.count_table_stats(_orders_entry())
         assert counters.current == 10
         assert counters.closed == 0
-        assert counters.total == 5
+        assert counters.total == 10
+        assert len(session.statements) == 1
+
+    @pytest.mark.asyncio
+    async def test_state_total_above_current_remains_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Given estimate >= current, When counted, Then total and closed retain that estimate."""
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        session = _CurrentCountSession(current=2)
+
+        def _session_factory() -> _StubSessionContext:
+            return _StubSessionContext(session)
+
+        async def _high_estimate(_self: object, _s: object, _model: object) -> int:
+            return 12
+
+        monkeypatch.setattr(repo, "session", _session_factory)
+        monkeypatch.setattr(type(repo), "_count_total_estimate", _high_estimate)
+        counters = await repo.count_table_stats(_orders_entry())
+        assert counters.current == 2
+        assert counters.total == 12
+        assert counters.closed == 10
+        assert len(session.statements) == 1
+
+    @pytest.mark.asyncio
+    async def test_candle_current_uses_index_estimate_on_postgresql(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Given candles on PG, When counted, Then current comes from the active index estimate."""
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        index_calls: list[tuple[object, str]] = []
+
+        def _session_factory() -> _StubSessionContext:
+            return _StubSessionContext(object())
+
+        async def _index_estimate(_self: object, _s: object, model: object, index_name: str) -> int:
+            index_calls.append((model, index_name))
+            return 42
+
+        async def _total_estimate(_self: object, _s: object, _model: object) -> int:
+            return 100
+
+        monkeypatch.setattr(repo, "session", _session_factory)
+        monkeypatch.setattr(type(repo), "dialect_name", "postgresql")
+        monkeypatch.setattr(type(repo), "_count_index_estimate", _index_estimate)
+        monkeypatch.setattr(type(repo), "_count_total_estimate", _total_estimate)
+        counters = await repo.count_table_stats(_candles_entry())
+        assert counters == TableCounters(total=100, current=42, closed=58, archivable=None)
+        assert index_calls == [(Candle, "uq_candle_itf_open")]
+
+    @pytest.mark.asyncio
+    async def test_candle_current_stays_exact_on_sqlite(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Given candles on SQLite, When indexed for PG, Then current still uses exact count."""
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        session = _CurrentCountSession(current=1)
+
+        def _session_factory() -> _StubSessionContext:
+            return _StubSessionContext(session)
+
+        async def _index_estimate(
+            _self: object, _s: object, _model: object, _index_name: str
+        ) -> int:
+            raise AssertionError("SQLite must not read PG index estimates")
+
+        async def _total_estimate(_self: object, _s: object, _model: object) -> int:
+            return 2
+
+        monkeypatch.setattr(repo, "session", _session_factory)
+        monkeypatch.setattr(type(repo), "_count_index_estimate", _index_estimate)
+        monkeypatch.setattr(type(repo), "_count_total_estimate", _total_estimate)
+        counters = await repo.count_table_stats(_candles_entry())
+        assert counters == TableCounters(total=2, current=1, closed=1, archivable=None)
+        assert len(session.statements) == 1
+
+    @pytest.mark.asyncio
+    async def test_non_candle_state_tables_keep_exact_current_on_postgresql(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Given non-candle state on PG, When counted, Then current remains an exact count."""
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        session = _CurrentCountSession(current=2)
+
+        def _session_factory() -> _StubSessionContext:
+            return _StubSessionContext(session)
+
+        async def _index_estimate(
+            _self: object, _s: object, _model: object, _index_name: str
+        ) -> int:
+            raise AssertionError("non-candle state tables must keep exact current")
+
+        async def _total_estimate(_self: object, _s: object, _model: object) -> int:
+            return 3
+
+        monkeypatch.setattr(repo, "session", _session_factory)
+        monkeypatch.setattr(type(repo), "dialect_name", "postgresql")
+        monkeypatch.setattr(type(repo), "_count_index_estimate", _index_estimate)
+        monkeypatch.setattr(type(repo), "_count_total_estimate", _total_estimate)
+        counters = await repo.count_table_stats(_orders_entry())
+        assert counters == TableCounters(total=3, current=2, closed=1, archivable=None)
+        assert len(session.statements) == 1
 
     @pytest.mark.asyncio
     async def test_sqlite_guard_warns_above_threshold(

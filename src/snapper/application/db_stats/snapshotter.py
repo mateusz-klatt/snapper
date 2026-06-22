@@ -132,9 +132,21 @@ as ``state``: the model is SCD2-versioned via ``TemporalMixin``, so
 ``current`` / ``closed`` derive from ``known_to``.
 """
 
+_STATE_CURRENT_ESTIMATE_INDEXES: Final[dict[str, str]] = {"candles": "uq_candle_itf_open"}
+"""State tables whose PostgreSQL ``current`` count uses active-index stats.
+
+The named index must contain exactly the active SCD2 rows. SQLite keeps
+the exact ``known_to`` current count for every state table.
+"""
+
 TABLES_TO_SAMPLE: Final[tuple[TableEntry, ...]] = (
     *(
-        TableEntry(name=name, kind="state", model=model)
+        TableEntry(
+            name=name,
+            kind="state",
+            model=model,
+            current_estimate_index=_STATE_CURRENT_ESTIMATE_INDEXES.get(name),
+        )
         for name, model in sorted(_STATE_MODELS.items())
     ),
     *(
@@ -150,11 +162,11 @@ class TableStats:
 
     ``total`` is dialect-aware: on PostgreSQL it is a planner ESTIMATE
     (``pg_class.reltuples``, accurate within autovacuum drift), on
-    SQLite an exact count. ``current`` and ``archivable`` are always
-    exact; ``closed`` on state tables is derived as
-    ``max(0, total - current)``, clamping the case where the exact
-    ``current`` temporarily exceeds a stale PG estimate. Consumers must
-    not treat ``total`` (or ``closed``) as exact on PostgreSQL.
+    SQLite an exact count. ``current`` and ``archivable`` are exact
+    except for explicit PostgreSQL active-index current estimates such
+    as ``candles``. ``closed`` on state tables is derived after
+    clamping ``total`` no lower than ``current``. Consumers must not
+    treat PostgreSQL estimated axes as exact.
     """
 
     table: str
