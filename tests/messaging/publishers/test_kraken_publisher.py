@@ -246,7 +246,8 @@ class TestKrakenMarketDataPublisher:
         assert client.native_calls == [(["BTC-USD"], "1m")]
         assert client.calls == []
 
-    def test_subscribe_candle_stream_trade_built_mode_uses_trade_built(self) -> None:
+    @pytest.mark.asyncio
+    async def test_subscribe_candle_stream_trade_built_mode_uses_trade_built(self) -> None:
         """Trade-built mode delegates the live candle stream to trades.
 
         Given a Kraken Spot publisher in trade-built mode,
@@ -257,13 +258,105 @@ class TestKrakenMarketDataPublisher:
             None.
         """
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
-        client = _ShadowClient([])
+        candle = _shadow_candle()
+        client = _ShadowClient([candle])
         publisher.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
         publisher._exchange_client = cast(KrakenExchangeClient, client)
         stream = publisher._subscribe_candle_stream(["BTC-USD"], "1m")
-        assert stream is not client.native_stream
+        observed = [item async for item in stream]
+        assert observed == [candle]
         assert client.calls == [(["BTC-USD"], "1m")]
         assert client.native_calls == []
+
+    @pytest.mark.asyncio
+    async def test_trade_built_liveness_watchdog_stays_quiet_when_candles_flow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fresh calculated Spot candles prevent spurious liveness recovery.
+
+        Given a Kraken Spot publisher in trade-built mode with trades still
+        flowing after the last calculated candle,
+        When the candle liveness guard runs inside the threshold,
+        Then no recovery is spawned.
+
+        Args:
+            monkeypatch: Pytest monkeypatch fixture.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
+        publisher._exchange_client = cast(KrakenExchangeClient, _ShadowClient([_shadow_candle()]))
+        publisher._consumes_native_candles = True
+        publisher._get_liveness_recovery_threshold_s = MagicMock(return_value=60)
+        publisher._spawn_recovery = MagicMock()
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 700.0)
+        observed = [item async for item in publisher._subscribe_candle_stream(["BTC-USD"], "1m")]
+        assert observed == [_shadow_candle()]
+        assert publisher._last_candle_msg_at == 700.0
+        publisher._last_message_at = 999.0
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 999.0)
+        publisher._check_feed_liveness()
+        publisher._spawn_recovery.assert_not_called()
+
+    def test_trade_built_liveness_watchdog_recovers_when_calculated_candles_stop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real trade-built candle gap still triggers recovery.
+
+        Given a Kraken Spot publisher in trade-built mode with trade messages
+        still fresh but no calculated candles beyond the threshold,
+        When the candle liveness guard runs,
+        Then recovery is spawned for the stale candle source.
+
+        Args:
+            monkeypatch: Pytest monkeypatch fixture.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
+        publisher._consumes_native_candles = True
+        publisher._get_liveness_recovery_threshold_s = MagicMock(return_value=60)
+        publisher._spawn_recovery = MagicMock()
+        publisher._last_message_at = 1000.0
+        publisher._last_candle_msg_at = 699.0
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+        publisher._check_feed_liveness()
+        publisher._spawn_recovery.assert_called_once()
+        assert publisher._spawn_recovery.call_args.kwargs["reason"] == "no_candles_for_301s"
+        assert publisher._spawn_recovery.call_args.kwargs["require_candle_progress"] is True
+
+    def test_native_liveness_watchdog_recovers_when_native_candles_stop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Native Spot candle liveness behavior stays unchanged.
+
+        Given a Kraken Spot publisher in native mode with fresh non-candle
+        messages but stale native candles,
+        When the candle liveness guard runs,
+        Then recovery is still spawned for the native candle gap.
+
+        Args:
+            monkeypatch: Pytest monkeypatch fixture.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False, "native"))
+        publisher._consumes_native_candles = True
+        publisher._get_liveness_recovery_threshold_s = MagicMock(return_value=60)
+        publisher._spawn_recovery = MagicMock()
+        publisher._last_message_at = 1000.0
+        publisher._last_candle_msg_at = 699.0
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+        publisher._check_feed_liveness()
+        publisher._spawn_recovery.assert_called_once()
+        assert publisher._spawn_recovery.call_args.kwargs["reason"] == "no_candles_for_301s"
+        assert publisher._spawn_recovery.call_args.kwargs["require_candle_progress"] is True
 
     def test_candle_source_for_tracks_spot_source_setting(self) -> None:
         """The live Spot candle provenance follows the selected source.

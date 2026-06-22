@@ -875,7 +875,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     def _start_native_finalizer_if_needed(
         self, candle_consumer_timeframes: list[str], tasks: list[asyncio.Task[None]]
     ) -> None:
-        """Given candle consumers, when native candles run, then start finalization.
+        """Given candle consumers, when live candles run, then start finalization.
 
         Args:
             candle_consumer_timeframes: Candle timeframes selected for consumption.
@@ -2127,8 +2127,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             ``CandleUpsertRow`` ready for the writer queue, or
             ``None`` when the instrument could not be resolved.
         """
-        self._last_message_at = monotonic()
-        self._last_candle_msg_at = monotonic()
+        self._mark_candle_liveness_progress()
         native_symbol = candle.symbol
         instrument_public_id = await self._ensure_instrument(native_symbol)
         if instrument_public_id is None:
@@ -2170,6 +2169,16 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         await self._publish_message(topic, candle_msg)
         self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
         return row
+
+    def _mark_candle_liveness_progress(self) -> None:
+        """Record live candle progress for feed recovery checks.
+
+        Returns:
+            None.
+        """
+        now = monotonic()
+        self._last_message_at = now
+        self._last_candle_msg_at = now
 
     async def _publish_synthesized_candle(
         self, candle: CandleUpdate, exchange: MarketDataExchange, timeframe: str
@@ -2988,20 +2997,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         feed stays dark past ``_DARK_FEED_EXIT_CEILING_S`` despite
         recovery, escalate to a process exit.
 
-        Separately, for venues with a dedicated native candle channel
+        Separately, for venues with a dedicated live candle source
         (``_candle_liveness_threshold_s() > 0``) that are actually consuming
         one (``_consumes_native_candles`` — guards the degenerate
         ``timeframes=[]`` config where no candle is ever subscribed, which
-        would otherwise churn), spawn a recovery when no native candle has
+        would otherwise churn), spawn a recovery when no live candle has
         arrived venue-wide for longer than that threshold even though ticks
-        or trades keep the shared message watchdog satisfied. This catches a silent candle-channel stall;
+        or trades keep the shared message watchdog satisfied. This catches a silent candle-source stall;
         it never escalates to a process exit, because a candle-only stall
         with a live trade channel must not kill the trade feed — the
         WS-restart recovery re-subscribes the dead channel instead.
 
         On a candle venue BOTH triggers spawn with
         ``require_candle_progress=True`` so recovery is only declared
-        successful once a native candle resumes (not merely trades). This
+        successful once a live candle resumes (not merely trades). This
         also closes a general-outage race: after a long full-dark recovery
         a candle-blind success would release the lock while candles are
         still arriving, and the candle branch would immediately restart the

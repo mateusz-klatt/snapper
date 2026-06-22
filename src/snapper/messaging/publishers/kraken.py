@@ -213,10 +213,24 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             operator explicitly selects ``spot_candle_source=trade_built``.
         """
         if self.settings.spot_candle_source == "trade_built":
-            return cast(KrakenExchangeClient, self._exchange_client).subscribe_trade_built_candles(
-                symbols, "1m"
-            )
+            return self._subscribe_trade_built_live_candles(symbols)
         return super()._subscribe_candle_stream(symbols, timeframe)
+
+    async def _subscribe_trade_built_live_candles(
+        self, symbols: list[str]
+    ) -> AsyncIterator[CandleUpdate]:
+        """Subscribe to calculated Spot candles and mark candle liveness at receipt.
+
+        Args:
+            symbols: Native Spot symbols to subscribe.
+
+        Yields:
+            Trade-built 1m candle updates from the exchange client.
+        """
+        client = cast(KrakenExchangeClient, self._exchange_client)
+        async for candle in client.subscribe_trade_built_candles(symbols, "1m"):
+            self._mark_candle_liveness_progress()
+            yield candle
 
     def _candle_source_for(self, timeframe: str) -> str:
         """Return the provenance tag for Spot live 1m candle rows.
