@@ -19,6 +19,7 @@ from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import ShadowCandleUpsertRow
+from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
@@ -225,7 +226,7 @@ class TestKrakenMarketDataPublisher:
         publisher.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
         assert publisher._native_candle_timeframes() == frozenset()
         assert publisher._candle_stream_timeframes() == frozenset({"1m"})
-        assert publisher._candle_liveness_threshold_s() == 300
+        assert publisher._candle_liveness_threshold_s() == 0
 
     def test_subscribe_candle_stream_native_mode_uses_native_ohlc(self) -> None:
         """Native mode delegates the live candle stream to subscribe_candles.
@@ -300,15 +301,16 @@ class TestKrakenMarketDataPublisher:
         publisher._check_feed_liveness()
         publisher._spawn_recovery.assert_not_called()
 
-    def test_trade_built_liveness_watchdog_recovers_when_calculated_candles_stop(
+    def test_trade_built_liveness_watchdog_does_not_restart_ws_for_candle_gap(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A real trade-built candle gap still triggers recovery.
+        """A calculated-candle gap does not restart the Spot WS by itself.
 
-        Given a Kraken Spot publisher in trade-built mode with trade messages
-        still fresh but no calculated candles beyond the threshold,
+        Given a Kraken Spot publisher in trade-built mode with market messages
+        still fresh but no calculated candles beyond the native threshold,
         When the candle liveness guard runs,
-        Then recovery is spawned for the stale candle source.
+        Then no candle-only recovery is spawned because calculated candles are
+        downstream of the trade feed rather than an independent OHLC channel.
 
         Args:
             monkeypatch: Pytest monkeypatch fixture.
@@ -325,9 +327,63 @@ class TestKrakenMarketDataPublisher:
         publisher._last_candle_msg_at = 699.0
         monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
         publisher._check_feed_liveness()
+        publisher._spawn_recovery.assert_not_called()
+
+    def test_trade_built_warmup_does_not_trip_before_first_finalized_minute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Trade-built warmup does not trigger the native OHLC watchdog.
+
+        Given a Kraken Spot publisher in trade-built mode shortly after startup,
+        When trades or ticks have kept the shared message watermark fresh but no
+        calculated minute has finalized yet,
+        Then no recovery is spawned.
+
+        Args:
+            monkeypatch: Pytest monkeypatch fixture.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
+        publisher._consumes_native_candles = True
+        publisher._get_liveness_recovery_threshold_s = MagicMock(return_value=60)
+        publisher._spawn_recovery = MagicMock()
+        publisher._last_message_at = 1072.0
+        publisher._last_candle_msg_at = 1000.0
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1072.0)
+        publisher._check_feed_liveness()
+        publisher._spawn_recovery.assert_not_called()
+
+    def test_trade_built_full_feed_dark_still_recovers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A genuinely dark trade-built feed still uses message recovery.
+
+        Given a Kraken Spot publisher in trade-built mode whose shared message
+        watermark is stale,
+        When the liveness guard runs,
+        Then recovery is spawned through the normal message-dark path.
+
+        Args:
+            monkeypatch: Pytest monkeypatch fixture.
+
+        Returns:
+            None.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
+        publisher._consumes_native_candles = True
+        publisher._get_liveness_recovery_threshold_s = MagicMock(return_value=60)
+        publisher._spawn_recovery = MagicMock()
+        publisher._last_message_at = 900.0
+        publisher._last_candle_msg_at = 900.0
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+        publisher._check_feed_liveness()
         publisher._spawn_recovery.assert_called_once()
-        assert publisher._spawn_recovery.call_args.kwargs["reason"] == "no_candles_for_301s"
-        assert publisher._spawn_recovery.call_args.kwargs["require_candle_progress"] is True
+        assert publisher._spawn_recovery.call_args.kwargs["reason"] == "no_messages_for_100s"
+        assert publisher._spawn_recovery.call_args.kwargs["require_candle_progress"] is False
 
     def test_native_liveness_watchdog_recovers_when_native_candles_stop(
         self, monkeypatch: pytest.MonkeyPatch
@@ -404,7 +460,7 @@ class TestKrakenMarketDataPublisher:
         assert row["source"] == "calculated"
         assert publisher._last_candle_msg_at == 700.0
         assert bool(publisher._candle_stream_timeframes()) is True
-        assert publisher._candle_liveness_threshold_s() == 300
+        assert publisher._candle_liveness_threshold_s() == 0
 
     def test_validate_symbols_filters_invalid(self) -> None:
         """Verify invalid symbols are filtered out during validation.
@@ -919,6 +975,55 @@ class TestKrakenReconnectWatchdog:
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         pub._force_ws_restart = AsyncMock()
         await pub._attempt_liveness_recovery("stale")
+        pub._force_ws_restart.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_trade_built_candle_recovery_does_not_force_ws_restart(self) -> None:
+        """Trade-built candle-only recovery is a no-op restart guard.
+
+        Given: A Kraken publisher in trade-built mode with local trade-built
+            builder state already attached to the client,
+        When: A stale ``no_candles`` recovery reason reaches the recovery hook,
+        Then: The full WebSocket restart helper is not awaited and the local
+            builder state remains attached.
+
+        Returns:
+            None.
+        """
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        pub.settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
+        client = KrakenExchangeClient.__new__(KrakenExchangeClient)
+        builder = TradeCandleBuilder(interval_seconds=60)
+        queue: asyncio.Queue[CandleUpdate] = asyncio.Queue()
+        client._trade_built_candle_builder = builder
+        client._trade_built_candle_queue = queue
+        client._trade_built_candle_aggregator_task = None
+        client._trade_built_candles_enabled = True
+        pub._exchange_client = client
+        pub._force_ws_restart = AsyncMock()
+        await pub._attempt_liveness_recovery("no_candles_for_301s")
+        pub._force_ws_restart.assert_not_awaited()
+        assert pub._exchange_client is client
+        assert client._trade_built_candle_builder is builder
+        assert client._trade_built_candle_queue is queue
+        assert client._trade_built_candle_aggregator_task is None
+        assert client._trade_built_candles_enabled is True
+
+    @pytest.mark.asyncio
+    async def test_native_candle_recovery_still_forces_ws_restart(self) -> None:
+        """Native candle recovery still uses the existing WS restart path.
+
+        Given: A Kraken publisher in native mode,
+        When: A stale native-candle recovery reason reaches the recovery hook,
+        Then: The full WebSocket restart helper is awaited.
+
+        Returns:
+            None.
+        """
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        pub.settings = cast(AppSettings, _ShadowSettings(False, "native"))
+        pub._force_ws_restart = AsyncMock()
+        await pub._attempt_liveness_recovery("no_candles_for_301s")
         pub._force_ws_restart.assert_awaited_once()
 
     @pytest.mark.asyncio

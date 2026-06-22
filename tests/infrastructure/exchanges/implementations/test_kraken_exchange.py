@@ -136,6 +136,47 @@ def test_spot_health_tracker_dark_recovers_trades_too() -> None:
 
 
 @pytest.mark.asyncio
+async def test_spot_trade_dark_recovery_resubscribes_trade(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A genuinely dark Spot trade subscription is re-subscribed.
+
+    Given: A Kraken Spot client whose confirmed trade subscription has produced
+        no recent data past the dark-recovery threshold,
+    When: The inherited dark-subscription recovery pass runs,
+    Then: The client re-subscribes the trade channel for that symbol.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+
+    Returns:
+        None.
+    """
+    client = _client()
+    ws = _DummyWs(asyncio.Queue())
+    client._ws_client = ws
+    tracker = SubscriptionHealthTracker(
+        data_stale_threshold_s=100.0,
+        dark_recovery_threshold_multiplier=3.0,
+        retry_subscribe_spacing_s=0.0,
+        dark_recovery_channels=frozenset({"trade"}),
+    )
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges._subscription_health.time.monotonic", lambda: 0.0
+    )
+    tracker.mark_confirmed("trade", "XBT/USD")
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges._subscription_health.time.monotonic", lambda: 400.0
+    )
+    await client._recover_dark_subscriptions(tracker)
+    assert ws.subscriptions == [
+        ({"channel": "trade", "symbol": ["XBT/USD"], "snapshot": False}, None),
+    ]
+    entry = tracker.snapshot()[("trade", "XBT/USD")]
+    assert (entry.status, entry.dark_recovery_count) == ("pending", 1)
+
+
+@pytest.mark.asyncio
 async def test_handle_channel_data_drops_trade_snapshot_envelope() -> None:
     """Trade snapshot envelope is dropped.
 

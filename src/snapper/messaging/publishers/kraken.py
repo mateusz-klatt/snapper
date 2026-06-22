@@ -92,7 +92,7 @@ feed is genuinely dark (some symbol ticks every few seconds otherwise), and a
 multi-minute outage is detected and recovered in ~1 minute rather than five."""
 """Sleep between disconnect and reconnect during in-process WS restart."""
 
-_CANDLE_LIVENESS_THRESHOLD_S: Final[int] = 300
+_NATIVE_CANDLE_LIVENESS_THRESHOLD_S: Final[int] = 300
 """Native-candle silence threshold (seconds) before Spot candle recovery fires.
 
 Spot receives 1m on a dedicated native ``ohlc:1m`` channel that can stall
@@ -258,13 +258,16 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
 
         Spot is the one venue whose 1m bars arrive on a dedicated native
         WebSocket channel by default. When the live source is trade-built,
-        the same candle loop and watermark are still watched so a stalled
-        trade-built candle stream triggers recovery instead of going dark.
+        candles are derived from the public trade feed instead of a separate
+        OHLC channel, so the candle-only watchdog is disabled and the existing
+        message/trade-subscription health paths own recovery.
 
         Returns:
-            ``_CANDLE_LIVENESS_THRESHOLD_S`` seconds.
+            Native OHLC silence threshold in native mode, otherwise ``0``.
         """
-        return _CANDLE_LIVENESS_THRESHOLD_S
+        if self.settings.spot_candle_source == "trade_built":
+            return 0
+        return _NATIVE_CANDLE_LIVENESS_THRESHOLD_S
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         """Validate and filter symbols for Kraken.
@@ -496,8 +499,24 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         await super().stop()
 
     async def _attempt_liveness_recovery(self, reason: str) -> None:
-        """Recover stale market data by forcing a WS restart."""
+        """Recover stale market data by forcing a WS restart.
+
+        Args:
+            reason: Liveness trigger reason.
+
+        Returns:
+            None.
+        """
         logger.error("kraken publisher: liveness recovery triggered ({})", reason)
+        if self.settings.spot_candle_source == "trade_built" and reason.startswith(
+            "no_candles_for_"
+        ):
+            logger.warning(
+                "kraken publisher: skipping candle-only WS restart in trade_built mode; "
+                "calculated candles are recovered by trade feed liveness"
+            )
+            self._mark_candle_liveness_progress()
+            return
         await self._force_ws_restart()
 
     def _get_liveness_recovery_threshold_s(self) -> int:
