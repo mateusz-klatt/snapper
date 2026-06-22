@@ -525,6 +525,7 @@ class EgressPool(EgressPoolBase):
                     EgressRouteStatusSnapshot(
                         id=state.config.id,
                         kind=state.config.kind,
+                        proxy_url=state.config.proxy_url,
                         region=state.config.region,
                         exit_ip=state.config.exit_ip,
                         provider=state.config.provider,

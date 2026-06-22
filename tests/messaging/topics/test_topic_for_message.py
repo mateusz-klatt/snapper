@@ -7,9 +7,11 @@ import pytest
 
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.infrastructure.network.egress_models import EgressPoolStatusSnapshot
+from snapper.infrastructure.network.egress_models import EgressTransferInterfaceSnapshot
 from snapper.messaging.schemas.data import AlertEventData
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import EgressPoolSnapshotEventData
+from snapper.messaging.schemas.data import EgressTransferEventData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
@@ -394,6 +396,32 @@ class TestTopicForMessage:
             snapshot=EgressPoolStatusSnapshot(enabled=True),
         )
         assert topic_for_message(data) == "system.egress.snapshot"
+
+    def test_egress_transfer_event_data(self) -> None:
+        """EgressTransferEventData maps to system.egress.transfer.
+
+        Given an egress transfer event,
+        When topic_for_message() is called,
+        Then: Returns system.egress.transfer.
+        """
+        data = EgressTransferEventData(
+            session_id="s1",
+            sequence_id=1,
+            public_id="p1",
+            timestamp=datetime.now(UTC),
+            interfaces=[
+                EgressTransferInterfaceSnapshot(
+                    interface="wg-pl",
+                    socks5_listen_port=1084,
+                    rx_bytes=1,
+                    tx_bytes=2,
+                    counter_reset=True,
+                    sampled_at=datetime.now(UTC),
+                )
+            ],
+        )
+
+        assert topic_for_message(data) == "system.egress.transfer"
 
     def test_symbol_alias_update_data(self) -> None:
         """SymbolAliasUpdateData maps to system.symbol_aliases.

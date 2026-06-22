@@ -628,6 +628,7 @@ snapshots remain visible and are flagged in `containers`.
             {
                 "id": "default",
                 "kind": "direct",
+                "proxy_url": null,
                 "region": "host",
                 "exit_ip": "198.51.100.11",
                 "provider": "isp",
@@ -668,25 +669,38 @@ snapshots remain visible and are flagged in `containers`.
                         "count": 0,
                         "last_seen_at": "2026-01-18T12:00:01Z"
                     }
-                ]
+                ],
+                "transfer": null
             }
         ]
     }
 }
 ```
 
-`region`, `exit_ip`, and `provider` are optional operator metadata
-copied from the `egress_pool.routes[]` entry. `active_reservations`
-lists the unique `(container, exchange, traffic_class)` tuples currently
-reserved on the route. `connections` lists target hostnames by
-`(container, host, kind, exchange, traffic_class)`: WebSocket rows carry
-currently open counts, while REST rows retain the capped last-seen host
-with count zero after the short reservation releases. Only hostnames are
-reported; URL paths, queries, headers, bodies, and credentials are never
-included. `containers` lists each reporting process, the age of its
-latest snapshot as observed by the API process, whether that snapshot is
-stale, and how many routes it reported. `private_on_fallback` is true
-when any private reservation is active on a non-direct route.
+`region`, `exit_ip`, and `provider` are optional operator metadata copied
+from the `egress_pool.routes[]` entry. `proxy_url` is present so the API
+can join sidecar transfer samples to SOCKS5 routes by listener port.
+`active_reservations` lists the unique `(container, exchange,
+traffic_class)` tuples currently reserved on the route. `connections`
+lists target hostnames by `(container, host, kind, exchange,
+traffic_class)`: WebSocket rows carry currently open counts, while REST
+rows retain the capped last-seen host with count zero after the short
+reservation releases. Only hostnames are reported; URL paths, queries,
+headers, bodies, and credentials are never included.
+
+SOCKS5 routes may include `transfer` when the API has a matching
+`system.egress.transfer` sample from `snapper-egress`. The nested object
+contains `interface`, `socks5_listen_port`, cumulative `rx_bytes` and
+`tx_bytes`, current `rx_rate_bytes_per_second` and
+`tx_rate_bytes_per_second` when a reliable delta exists,
+`latest_handshake_at`, `counter_reset`, `sampled_at`,
+`sample_age_seconds`, and `stale`. Direct routes, missing samples, and
+ambiguous port joins return `transfer: null`.
+
+`containers` lists each reporting process, the age of its latest snapshot
+as observed by the API process, whether that snapshot is stale, and how
+many routes it reported. `private_on_fallback` is true when any private
+reservation is active on a non-direct route.
 
 ### GET /api/candles
 

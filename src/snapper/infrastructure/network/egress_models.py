@@ -314,12 +314,79 @@ class EgressConnectionSnapshot(BaseModel):
     last_seen_at: datetime | None = None
 
 
+class EgressTransferInterfaceSnapshot(BaseModel):
+    """Sidecar transfer sample for one WireGuard interface.
+
+    Attributes:
+        interface: WireGuard interface name sampled by the sidecar.
+        socks5_listen_port: SOCKS5 listener port for the tunnel.
+        rx_bytes: Cumulative received bytes summed across peers.
+        tx_bytes: Cumulative transmitted bytes summed across peers.
+        rx_rate_bytes_per_second: Receive rate since the previous sample,
+            or ``None`` when no reliable delta exists.
+        tx_rate_bytes_per_second: Transmit rate since the previous sample,
+            or ``None`` when no reliable delta exists.
+        latest_handshake_at: Latest peer handshake timestamp, when present.
+        counter_reset: True when rates are unavailable because this was
+            a first sample, missing interface, non-positive interval, or
+            counter decrease.
+        sampled_at: Wall-clock sample timestamp from the sidecar process.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    interface: str
+    socks5_listen_port: int
+    rx_bytes: int
+    tx_bytes: int
+    rx_rate_bytes_per_second: float | None = None
+    tx_rate_bytes_per_second: float | None = None
+    latest_handshake_at: datetime | None = None
+    counter_reset: bool
+    sampled_at: datetime
+
+
+class EgressTransferSnapshot(BaseModel):
+    """API route transfer projection joined from sidecar samples.
+
+    Attributes:
+        interface: WireGuard interface name sampled by the sidecar.
+        socks5_listen_port: SOCKS5 listener port matched to a route.
+        rx_bytes: Cumulative received bytes summed across peers.
+        tx_bytes: Cumulative transmitted bytes summed across peers.
+        rx_rate_bytes_per_second: Current receive rate, or ``None``
+            when no reliable rate exists for the sample.
+        tx_rate_bytes_per_second: Current transmit rate, or ``None``
+            when no reliable rate exists for the sample.
+        latest_handshake_at: Latest peer handshake timestamp, when present.
+        counter_reset: True when the rate fields are intentionally empty.
+        sampled_at: Wall-clock sample timestamp from the sidecar.
+        sample_age_seconds: Seconds since this API process received the sample.
+        stale: True when receive age exceeds the cache stale threshold.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    interface: str
+    socks5_listen_port: int
+    rx_bytes: int
+    tx_bytes: int
+    rx_rate_bytes_per_second: float | None = None
+    tx_rate_bytes_per_second: float | None = None
+    latest_handshake_at: datetime | None = None
+    counter_reset: bool
+    sampled_at: datetime
+    sample_age_seconds: float
+    stale: bool
+
+
 class EgressRouteStatusSnapshot(BaseModel):
     """Operator status projection for one route.
 
     Attributes:
         id: Route id from the configured egress pool.
         kind: Route kind, either direct or socks5.
+        proxy_url: SOCKS5 proxy URL used for sidecar transfer correlation.
         region: Optional operator-provided region label.
         exit_ip: Optional operator-provided observed exit IP.
         provider: Optional operator-provided provider label.
@@ -333,12 +400,14 @@ class EgressRouteStatusSnapshot(BaseModel):
         active_reservations: Unique exchange and traffic-class pairs
             currently reserved on the route.
         connections: Target host connection counters and REST last-seen rows.
+        transfer: Sidecar WireGuard transfer stats joined by SOCKS5 port.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     id: str
     kind: Literal["direct", "socks5"]
+    proxy_url: str | None = None
     region: str | None = None
     exit_ip: str | None = None
     provider: str | None = None
@@ -350,6 +419,7 @@ class EgressRouteStatusSnapshot(BaseModel):
     in_use_count: int
     active_reservations: list[EgressActiveReservationSnapshot] = Field(default_factory=list)
     connections: list[EgressConnectionSnapshot] = Field(default_factory=list)
+    transfer: EgressTransferSnapshot | None = None
 
 
 class EgressPoolStatusSnapshot(BaseModel):

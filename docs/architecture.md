@@ -1124,7 +1124,10 @@ Deploy notes (see `docker-compose.yml` `snapper-feed` service):
   routes. Each pool-bearing process publishes a read-only
   `system.egress.snapshot` frame on the heartbeat cadence; the API
   process subscribes to those frames and merges the latest per-container
-  snapshots into `GET /api/health/egress` for observability only.
+  snapshots into `GET /api/health/egress` for observability only. The
+  `snapper-egress` sidecar also publishes `system.egress.transfer` samples
+  from `wg show <iface> dump`; the API joins those onto SOCKS5 route rows
+  by listener port without changing route selection.
 
 **Multi-instance deployment (AI-review fanout dedup):**
 multi-worker uvicorn is a supported production topology. The

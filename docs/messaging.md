@@ -116,6 +116,7 @@ database artifacts used by the trade runtime. They are not additional ZMQ topics
 | `system.heartbeats.strategy.{name}` | Strategy heartbeat (e.g. `strategy.rsi_btc_1h`) |
 | `system.heartbeats.feed.{exchange}` | Feed heartbeat (e.g. `feed.kraken`, `feed.paper.kraken`) |
 | `system.egress.snapshot` | Read-only process-local egress pool snapshot for API aggregation |
+| `system.egress.transfer` | Read-only snapper-egress WireGuard transfer samples for API route load |
 | `system.settings` | Configuration change notifications |
 | `system.symbol_aliases` | Symbol cache invalidation |
 
@@ -137,6 +138,15 @@ the snapshot leaves the process. The API process subscribes to the exact
 topic, caches the latest frame per container by local receive time, and
 merges those snapshots into `GET /api/health/egress` without changing
 routing decisions.
+
+The `snapper-egress` sidecar publishes `system.egress.transfer` on the
+same cadence with an `EgressTransferEventData` payload. Each interface row
+contains `interface`, `socks5_listen_port`, cumulative `rx_bytes` and
+`tx_bytes`, optional byte-per-second rates, `latest_handshake_at`,
+`counter_reset`, and `sampled_at`. The API caches the latest sample per
+interface by receive time and joins transfer data onto
+`GET /api/health/egress` routes by SOCKS5 listener port. Ambiguous port
+joins are left null.
 
 Executor heartbeats derive `status` from supervised-loop health instead of
 reporting a fixed healthy value. ERROR fires on an active loop death streak

@@ -29,20 +29,28 @@ and surfaced on ``/tunnels``; they do NOT crash the orchestrator.
 
 import asyncio
 import signal
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Final
 
+import zmq.asyncio
 from aiohttp import web
 from loguru import logger
 
 from snapper.application.services.settings import SettingsService
 from snapper.infrastructure.network import wg_control
+from snapper.infrastructure.network.egress_transfer_observability import EgressTransferPublisher
+from snapper.infrastructure.network.egress_transfer_stats import EgressTransferSampler
+from snapper.infrastructure.network.egress_transfer_stats import EgressTransferTunnel
 from snapper.infrastructure.network.egress_tunnel_models import LoadedTunnel
 from snapper.infrastructure.network.egress_tunnel_models import LoadResult
 from snapper.infrastructure.network.egress_tunnel_models import TunnelLoadFailure
 from snapper.infrastructure.network.egress_tunnel_models import load_declared_tunnels
 from snapper.infrastructure.network.socks5_server import Socks5Server
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import build_audit_publisher
+from snapper.messaging.infrastructure.publisher import shutdown_audit_publisher
 
 _HEALTHCHECK_PORT: Final[int] = 8081
 """Port the orchestrator binds the /ready / /tunnels / /readyz endpoints to."""
@@ -63,6 +71,9 @@ dictionaries with typed keys. Using it eliminates the
 ``NotAppKeyWarning`` and gives the handlers strict typing on
 ``request.app[_STATE_KEY]`` without an ``isinstance`` cast.
 """
+
+_MIN_TRANSFER_INTERVAL_SECONDS: Final[float] = 0.001
+"""Minimum transfer sample cadence in seconds."""
 
 
 @dataclass
@@ -97,12 +108,23 @@ class _SidecarState:
     failed: list[_FailedTunnel] = field(default_factory=list)
 
 
+@dataclass
+class _TransferPublisherResources:
+    """Transfer publisher plus the ZMQ resources it owns."""
+
+    transfer_publisher: EgressTransferPublisher
+    publisher: MessagePublisher
+    context: zmq.asyncio.Context
+
+
 async def run_sidecar(
     settings_service: SettingsService,
     *,
     shutdown_event: asyncio.Event | None = None,
     healthcheck_port: int = _HEALTHCHECK_PORT,
     healthcheck_host: str = _HEALTHCHECK_HOST,
+    zmq_broker_xsub: str | None = None,
+    heartbeat_interval_ms: int = 1000,
 ) -> int:
     """Run the snapper-egress orchestrator until shutdown_event fires.
 
@@ -110,10 +132,10 @@ async def run_sidecar(
 
     1. ``load_declared_tunnels(settings_service)`` enumerates
        declared tunnels + decrypts their keys. If at least one tunnel
-       loads, the kernel WireGuard probe runs via ``asyncio.to_thread``
-       before the first bring-up. Empty default deployments skip the
-       probe so CI and local smoke tests can expose ``/ready`` without
-       host WireGuard.
+       loads, the kernel WireGuard probe runs in a dedicated worker
+       thread before the first bring-up. Empty default deployments skip
+       the probe so CI and local smoke tests can expose ``/ready``
+       without host WireGuard.
     2. For each successfully loaded tunnel (sorted by id):
          * ``wg_control.bring_up(...)`` — create wg interface,
            configure peer, source-based route.
@@ -141,6 +163,10 @@ async def run_sidecar(
         healthcheck_host: Override the default host. Tests use
             ``127.0.0.1``; production stays on ``0.0.0.0`` so any
             container on the Docker network can reach it.
+        zmq_broker_xsub: Optional broker XSUB endpoint used only for
+            publishing sidecar transfer samples.
+        heartbeat_interval_ms: Heartbeat cadence in milliseconds, reused
+            for transfer sampling.
 
     Returns:
         ``0`` for a clean shutdown. A non-zero return is reserved
@@ -149,15 +175,78 @@ async def run_sidecar(
     state = _SidecarState()
     load_result = await _load_declared_tunnels_after_kernel_probe(settings_service)
     runner: web.AppRunner | None = None
+    transfer_resources: _TransferPublisherResources | None = None
     try:
         await _bring_up_tunnels(load_result, state)
+        transfer_resources = _start_transfer_publisher(
+            state=state,
+            zmq_broker_xsub=zmq_broker_xsub,
+            interval_seconds=_egress_transfer_interval_seconds(heartbeat_interval_ms),
+        )
         runner = await _start_healthcheck_app(state, healthcheck_host, healthcheck_port)
         await (shutdown_event or asyncio.Event()).wait()
     finally:
+        if transfer_resources is not None:
+            await _stop_transfer_publisher(transfer_resources)
         if runner is not None:
             await runner.cleanup()
         await _shutdown_tunnels(state)
     return 0
+
+
+def _egress_transfer_interval_seconds(heartbeat_interval_ms: int) -> float:
+    """Return the transfer publish cadence in seconds."""
+    return max(heartbeat_interval_ms / 1000, _MIN_TRANSFER_INTERVAL_SECONDS)
+
+
+def _start_transfer_publisher(
+    *,
+    state: _SidecarState,
+    zmq_broker_xsub: str | None,
+    interval_seconds: float,
+) -> _TransferPublisherResources | None:
+    """Start sidecar transfer publishing when tunnels and broker exist."""
+    if not zmq_broker_xsub or not state.running:
+        return None
+    publisher: MessagePublisher | None = None
+    context: zmq.asyncio.Context | None = None
+    try:
+        built_publisher, built_context = build_audit_publisher(zmq_broker_xsub)
+        publisher = built_publisher
+        context = built_context
+        tunnels = [
+            EgressTransferTunnel(
+                interface=running.loaded.descriptor.interface,
+                socks5_listen_port=running.loaded.descriptor.socks5_listen_port,
+            )
+            for running in state.running
+        ]
+        sampler = EgressTransferSampler(tunnels=tunnels)
+        transfer_publisher = EgressTransferPublisher(
+            sampler=sampler,
+            publisher=publisher,
+            interval_seconds=interval_seconds,
+        )
+        transfer_publisher.start()
+        logger.info(
+            "sidecar: transfer publisher started for {} tunnel(s)",
+            len(tunnels),
+        )
+        return _TransferPublisherResources(
+            transfer_publisher=transfer_publisher,
+            publisher=built_publisher,
+            context=built_context,
+        )
+    except Exception:
+        logger.exception("sidecar: transfer publisher startup failed")
+        shutdown_audit_publisher(publisher, context)
+        return None
+
+
+async def _stop_transfer_publisher(resources: _TransferPublisherResources) -> None:
+    """Stop transfer publishing and close its PUB socket resources."""
+    await resources.transfer_publisher.stop()
+    shutdown_audit_publisher(resources.publisher, resources.context)
 
 
 async def _load_declared_tunnels_after_kernel_probe(
@@ -187,7 +276,15 @@ async def _load_declared_tunnels_after_kernel_probe(
 async def _probe_kernel_wireguard_for_loaded_tunnels() -> str | None:
     """Return a failure reason when the active kernel WireGuard probe fails."""
     try:
-        failure_reason = await asyncio.to_thread(wg_control.check_kernel_wireguard)
+        loop = asyncio.get_running_loop()
+        with ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="snapper-egress-wg-probe",
+        ) as executor:
+            failure_reason = await loop.run_in_executor(
+                executor,
+                wg_control.check_kernel_wireguard,
+            )
     except Exception as exc:
         logger.exception("sidecar: kernel WireGuard probe failed before tunnel bring-up")
         return f"kernel_probe: {exc}"

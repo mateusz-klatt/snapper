@@ -20,6 +20,7 @@ import sys
 from loguru import logger
 
 from snapper.application.services.settings import get_settings_service
+from snapper.config.settings import get_settings_with_service
 from snapper.infrastructure.network.egress_sidecar import install_signal_handlers
 from snapper.infrastructure.network.egress_sidecar import run_sidecar
 
@@ -47,9 +48,15 @@ async def _async_main(args: argparse.Namespace) -> int:
         return 2
     logger.info("snapper-egress: starting (instance_id={})", args.instance_id)
     settings_service = await get_settings_service(db_url, zmq_xsub)
+    settings = get_settings_with_service(settings_service)
     shutdown_event = asyncio.Event()
     install_signal_handlers(asyncio.get_running_loop(), shutdown_event)
-    return await run_sidecar(settings_service, shutdown_event=shutdown_event)
+    return await run_sidecar(
+        settings_service,
+        shutdown_event=shutdown_event,
+        zmq_broker_xsub=zmq_xsub,
+        heartbeat_interval_ms=settings.zmq_heartbeat_interval_ms,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

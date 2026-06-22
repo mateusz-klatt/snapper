@@ -21,13 +21,16 @@ from snapper.infrastructure.network.egress_models import EgressConnectionSnapsho
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import EgressPoolStatusSnapshot
 from snapper.infrastructure.network.egress_models import EgressRouteStatusSnapshot
+from snapper.infrastructure.network.egress_models import EgressTransferInterfaceSnapshot
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_observability import EGRESS_SNAPSHOT_TOPIC
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
+from snapper.infrastructure.network.egress_transfer_observability import EGRESS_TRANSFER_TOPIC
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import EgressPoolSnapshotEventData
+from snapper.messaging.schemas.data import EgressTransferEventData
 from snapper.server import egress_health_routes as egress_routes
 from snapper.server.egress_health_routes import get_egress_health
 from snapper.server.egress_health_routes import router
@@ -110,6 +113,34 @@ def _configure_pool_with_private_fallback() -> None:
     )
 
 
+def _configure_pool_with_ambiguous_socks5_ports() -> None:
+    """Install two SOCKS5 routes sharing one listener port."""
+    configure_egress_pool(
+        EgressPoolConfig(
+            enabled=True,
+            routes=[
+                RouteConfig(
+                    id="default",
+                    kind="direct",
+                    priority=100,
+                ),
+                RouteConfig(
+                    id="pl-a",
+                    kind="socks5",
+                    proxy_url="socks5h://pl:1084",
+                    priority=5,
+                ),
+                RouteConfig(
+                    id="pl-b",
+                    kind="socks5",
+                    proxy_url="socks5h://pl:1084",
+                    priority=6,
+                ),
+            ],
+        )
+    )
+
+
 def _feed_snapshot() -> EgressPoolStatusSnapshot:
     """Build a remote feed snapshot for route merge tests."""
     return EgressPoolStatusSnapshot(
@@ -121,6 +152,7 @@ def _feed_snapshot() -> EgressPoolStatusSnapshot:
             EgressRouteStatusSnapshot(
                 id="default",
                 kind="direct",
+                proxy_url=None,
                 priority=100,
                 allowed_exchanges=[],
                 enabled=True,
@@ -158,6 +190,36 @@ def _event_payload(container: str, snapshot: EgressPoolStatusSnapshot) -> bytes:
         snapshot=snapshot,
     )
     return event.publish_to(EGRESS_SNAPSHOT_TOPIC)
+
+
+def _transfer_payload(
+    *,
+    interface: str = "wg-pl",
+    socks5_listen_port: int = 1084,
+    rx_bytes: int = 100,
+    tx_bytes: int = 200,
+) -> bytes:
+    """Build one serialized egress transfer event payload."""
+    event = EgressTransferEventData(
+        session_id="session-1",
+        sequence_id=1,
+        public_id="event-1",
+        timestamp=datetime(2026, 6, 22, tzinfo=UTC),
+        interfaces=[
+            EgressTransferInterfaceSnapshot(
+                interface=interface,
+                socks5_listen_port=socks5_listen_port,
+                rx_bytes=rx_bytes,
+                tx_bytes=tx_bytes,
+                rx_rate_bytes_per_second=12.5,
+                tx_rate_bytes_per_second=25.0,
+                latest_handshake_at=datetime(2026, 6, 22, 9, 59, tzinfo=UTC),
+                counter_reset=False,
+                sampled_at=datetime(2026, 6, 22, 10, 0, tzinfo=UTC),
+            )
+        ],
+    )
+    return event.publish_to(EGRESS_TRANSFER_TOPIC)
 
 
 class TestEgressHealthRoute:
@@ -258,8 +320,134 @@ class TestEgressHealthRoute:
         assert fallback["region"] == "pl-waw"
         assert fallback["exit_ip"] == "203.0.113.10"
         assert fallback["provider"] == "wireguard-pl"
+        assert fallback["proxy_url"] == "socks5h://pl:1084"
+        assert fallback["transfer"] is None
 
         reservation.release()
+
+    @pytest.mark.asyncio
+    async def test_endpoint_joins_transfer_snapshot_by_socks5_port(self) -> None:
+        """Spec — matching sidecar transfer rows attach to SOCKS5 routes.
+
+        Given a SOCKS5 route whose proxy port matches a cached transfer sample,
+        When the egress health handler is called,
+        Then the route includes cumulative bytes, rates, sample age, and stale flag.
+        """
+        _configure_pool_with_private_fallback()
+        clock = _FakeClock(100.0)
+        cache = EgressSnapshotCache(
+            own_container="api",
+            stale_after_seconds=3.0,
+            clock=clock,
+        )
+        cache._ingest(EGRESS_TRANSFER_TOPIC, _transfer_payload())
+        clock.value = 104.0
+
+        response = await get_egress_health(
+            request=_request(cache),
+            _principal=_principal(),
+            _csrf=None,
+        )
+
+        assert response.__class__.model_validate_json(response.model_dump_json()) == response
+        routes = response.model_dump(mode="json")["payload"]["routes"]
+        assert routes[0]["id"] == "default"
+        assert routes[0]["transfer"] is None
+        assert routes[1]["id"] == "pl"
+        assert routes[1]["transfer"] == {
+            "interface": "wg-pl",
+            "socks5_listen_port": 1084,
+            "rx_bytes": 100,
+            "tx_bytes": 200,
+            "rx_rate_bytes_per_second": 12.5,
+            "tx_rate_bytes_per_second": 25.0,
+            "latest_handshake_at": "2026-06-22T09:59:00Z",
+            "counter_reset": False,
+            "sampled_at": "2026-06-22T10:00:00Z",
+            "sample_age_seconds": 4.0,
+            "stale": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_endpoint_leaves_transfer_null_without_matching_port(self) -> None:
+        """Spec — unmatched sidecar ports do not attach to route rows.
+
+        Given a cached transfer sample for a different SOCKS5 port,
+        When the egress health handler is called,
+        Then the SOCKS5 route transfer field remains null.
+        """
+        _configure_pool_with_private_fallback()
+        cache = EgressSnapshotCache(
+            own_container="api",
+            stale_after_seconds=3.0,
+            clock=_FakeClock(100.0),
+        )
+        cache._ingest(EGRESS_TRANSFER_TOPIC, _transfer_payload(socks5_listen_port=1099))
+
+        response = await get_egress_health(
+            request=_request(cache),
+            _principal=_principal(),
+            _csrf=None,
+        )
+
+        routes = response.model_dump(mode="json")["payload"]["routes"]
+        assert routes[1]["id"] == "pl"
+        assert routes[1]["transfer"] is None
+
+    @pytest.mark.asyncio
+    async def test_endpoint_leaves_transfer_null_for_ambiguous_route_port(self) -> None:
+        """Spec — duplicate route ports are ambiguous and receive no transfer.
+
+        Given two SOCKS5 routes share the same listener port,
+        When a matching transfer sample is cached,
+        Then neither route receives that sample.
+        """
+        _configure_pool_with_ambiguous_socks5_ports()
+        cache = EgressSnapshotCache(
+            own_container="api",
+            stale_after_seconds=3.0,
+            clock=_FakeClock(100.0),
+        )
+        cache._ingest(EGRESS_TRANSFER_TOPIC, _transfer_payload())
+
+        response = await get_egress_health(
+            request=_request(cache),
+            _principal=_principal(),
+            _csrf=None,
+        )
+
+        routes = response.model_dump(mode="json")["payload"]["routes"]
+        assert routes[1]["id"] == "pl-a"
+        assert routes[1]["transfer"] is None
+        assert routes[2]["id"] == "pl-b"
+        assert routes[2]["transfer"] is None
+
+    @pytest.mark.asyncio
+    async def test_endpoint_leaves_transfer_null_for_ambiguous_transfer_port(self) -> None:
+        """Spec — duplicate sidecar transfer ports are ambiguous.
+
+        Given two cached interfaces report the same SOCKS5 listener port,
+        When a route has that port,
+        Then the transfer field remains null instead of choosing one sample.
+        """
+        _configure_pool_with_private_fallback()
+        cache = EgressSnapshotCache(
+            own_container="api",
+            stale_after_seconds=3.0,
+            clock=_FakeClock(100.0),
+        )
+        cache._ingest(EGRESS_TRANSFER_TOPIC, _transfer_payload(interface="wg-pl"))
+        cache._ingest(EGRESS_TRANSFER_TOPIC, _transfer_payload(interface="wg-de"))
+
+        response = await get_egress_health(
+            request=_request(cache),
+            _principal=_principal(),
+            _csrf=None,
+        )
+
+        routes = response.model_dump(mode="json")["payload"]["routes"]
+        assert routes[1]["id"] == "pl"
+        assert routes[1]["transfer"] is None
 
     @pytest.mark.asyncio
     async def test_endpoint_merges_cached_feed_snapshot(self) -> None:
@@ -472,6 +660,17 @@ class TestEgressHealthRoute:
 
         assert egress_routes._latest_seen_at(None, seen_at) == seen_at
         assert egress_routes._latest_seen_at(seen_at, None) == seen_at
+
+    def test_socks5_port_parser_rejects_unjoinable_proxy_urls(self) -> None:
+        """Spec — only valid socks5h proxy ports are used for transfer joins.
+
+        Given direct, non-socks5h, and malformed proxy URLs,
+        When the health route extracts a join port,
+        Then no port is returned.
+        """
+        assert egress_routes._socks5_port_from_proxy_url(None) is None
+        assert egress_routes._socks5_port_from_proxy_url("http://pl:1084") is None
+        assert egress_routes._socks5_port_from_proxy_url("socks5h://pl:notaport") is None
 
     def test_router_exposes_health_egress_path(self) -> None:
         """Spec — the router exposes the egress health path.

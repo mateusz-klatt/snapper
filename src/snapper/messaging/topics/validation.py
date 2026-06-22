@@ -631,6 +631,7 @@ def _validate_system_topic(topic: str) -> tuple[bool, str]:
     Expected formats:
     - system.heartbeats[.{component_type}[.{component_name}]]
     - system.egress.snapshot
+    - system.egress.transfer
     - system.symbol_aliases
     - system.settings
 
@@ -651,9 +652,9 @@ def _validate_system_topic(topic: str) -> tuple[bool, str]:
     if system_type == "heartbeats":
         return _validate_heartbeat_topic(segments)
     if system_type == "egress":
-        if len(segments) == 3 and segments[2] == "snapshot":
+        if len(segments) == 3 and segments[2] in {"snapshot", "transfer"}:
             return True, ""
-        return False, "system.egress must be exactly system.egress.snapshot"
+        return False, "system.egress must be system.egress.snapshot or system.egress.transfer"
     if system_type in {"symbol_aliases", "settings"}:
         if len(segments) != 2:
             return False, f"system.{system_type} must have exactly 2 segments"

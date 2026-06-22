@@ -16,6 +16,7 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.messaging.schemas.data import AlertEventData
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import EgressPoolSnapshotEventData
+from snapper.messaging.schemas.data import EgressTransferEventData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import ExecutionPlanDecisionEventData
 from snapper.messaging.schemas.data import HeartbeatData
@@ -84,6 +85,7 @@ MESSAGE_TYPE_MAP: dict[str, type[StrictDataSchema[Any]]] = {
     "execution": ExecutionData,
     "heartbeat": HeartbeatData,
     "egress_pool_snapshot_event": EgressPoolSnapshotEventData,
+    "egress_transfer_event": EgressTransferEventData,
     "setting_changed": SettingChangedData,
     "order": OrderData,
     "symbol_alias_update": SymbolAliasUpdateData,

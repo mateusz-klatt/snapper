@@ -11,8 +11,11 @@ import zmq
 
 from snapper.infrastructure.network.egress_models import EgressPoolStatusSnapshot
 from snapper.infrastructure.network.egress_models import EgressRouteStatusSnapshot
+from snapper.infrastructure.network.egress_models import EgressTransferInterfaceSnapshot
 from snapper.infrastructure.network.egress_observability import EGRESS_SNAPSHOT_TOPIC
+from snapper.infrastructure.network.egress_transfer_observability import EGRESS_TRANSFER_TOPIC
 from snapper.messaging.schemas.data import EgressPoolSnapshotEventData
+from snapper.messaging.schemas.data import EgressTransferEventData
 from snapper.server import egress_snapshot_cache as cache_module
 from snapper.server.egress_snapshot_cache import EgressSnapshotCache
 
@@ -107,6 +110,36 @@ def _payload(container: str, snapshot: EgressPoolStatusSnapshot) -> bytes:
     return event.publish_to(EGRESS_SNAPSHOT_TOPIC)
 
 
+def _transfer_payload(
+    *,
+    interface: str = "wg-pl",
+    socks5_listen_port: int = 1084,
+    rx_bytes: int = 100,
+    tx_bytes: int = 200,
+) -> bytes:
+    """Serialize one egress transfer event."""
+    event = EgressTransferEventData(
+        session_id="session-1",
+        sequence_id=1,
+        public_id="event-1",
+        timestamp=datetime(2026, 6, 22, tzinfo=UTC),
+        interfaces=[
+            EgressTransferInterfaceSnapshot(
+                interface=interface,
+                socks5_listen_port=socks5_listen_port,
+                rx_bytes=rx_bytes,
+                tx_bytes=tx_bytes,
+                rx_rate_bytes_per_second=10.0,
+                tx_rate_bytes_per_second=20.0,
+                latest_handshake_at=datetime(2026, 6, 22, 9, 59, tzinfo=UTC),
+                counter_reset=False,
+                sampled_at=datetime(2026, 6, 22, 10, 0, tzinfo=UTC),
+            )
+        ],
+    )
+    return event.publish_to(EGRESS_TRANSFER_TOPIC)
+
+
 class TestEgressSnapshotCacheIngest:
     """Payload ingestion and cache read behaviour."""
 
@@ -166,6 +199,63 @@ class TestEgressSnapshotCacheIngest:
         cache._ingest(EGRESS_SNAPSHOT_TOPIC, _payload("api", _snapshot()))
 
         assert cache.latest_snapshots() == []
+
+    def test_ingest_caches_transfer_per_interface_and_updates_existing(self) -> None:
+        """Spec — newer sidecar transfer samples replace old interface rows."""
+        clock = _FakeClock(100.0)
+        cache = EgressSnapshotCache(
+            own_container="api",
+            stale_after_seconds=3.0,
+            clock=clock,
+        )
+        cache._ingest(
+            EGRESS_TRANSFER_TOPIC,
+            _transfer_payload(interface="wg-pl", rx_bytes=100, tx_bytes=200),
+        )
+        clock.value = 101.0
+        cache._ingest(
+            EGRESS_TRANSFER_TOPIC,
+            _transfer_payload(interface="wg-pl", rx_bytes=150, tx_bytes=260),
+        )
+
+        entries = cache.latest_transfers()
+
+        assert len(entries) == 1
+        assert entries[0].interface == "wg-pl"
+        assert entries[0].snapshot.rx_bytes == 150
+        assert entries[0].snapshot.tx_bytes == 260
+        assert entries[0].age_seconds == 0.0
+        assert entries[0].stale is False
+
+    def test_latest_transfers_sort_and_flag_stale(self) -> None:
+        """Spec — transfer samples are sorted and stale by receive age."""
+        clock = _FakeClock(100.0)
+        cache = EgressSnapshotCache(
+            own_container="api",
+            stale_after_seconds=3.0,
+            clock=clock,
+        )
+        cache._ingest(EGRESS_TRANSFER_TOPIC, _transfer_payload(interface="wg-z"))
+        cache._ingest(EGRESS_TRANSFER_TOPIC, _transfer_payload(interface="wg-a"))
+        clock.value = 104.0
+
+        entries = cache.latest_transfers()
+
+        assert [entry.interface for entry in entries] == ["wg-a", "wg-z"]
+        assert [entry.age_seconds for entry in entries] == [4.0, 4.0]
+        assert [entry.stale for entry in entries] == [True, True]
+
+    def test_ingest_ignores_bad_transfer_payload(self) -> None:
+        """Spec — malformed transfer payloads do not enter the transfer cache."""
+        cache = EgressSnapshotCache(
+            own_container="api",
+            stale_after_seconds=3.0,
+            clock=_FakeClock(100.0),
+        )
+
+        cache._ingest(EGRESS_TRANSFER_TOPIC, b"{not json")
+
+        assert cache.latest_transfers() == []
 
 
 class TestEgressSnapshotCacheListener:
@@ -321,6 +411,7 @@ class TestEgressSnapshotCacheStartStop:
         assert fake_socket.connected_to == "tcp://broker:7501"
         assert (zmq.RCVHWM, 10000) in fake_socket.options
         assert (zmq.SUBSCRIBE, EGRESS_SNAPSHOT_TOPIC) in fake_socket.subscriptions
+        assert (zmq.SUBSCRIBE, EGRESS_TRANSFER_TOPIC) in fake_socket.subscriptions
         assert fake_socket.closed is True
         assert fake_context.terminated is True
 

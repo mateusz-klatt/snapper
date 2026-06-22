@@ -8,9 +8,11 @@ import pytest
 from pydantic import ValidationError
 
 from snapper.infrastructure.network.egress_models import EgressPoolStatusSnapshot
+from snapper.infrastructure.network.egress_models import EgressTransferInterfaceSnapshot
 from snapper.messaging.schemas.data import AlertEventData
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import EgressPoolSnapshotEventData
+from snapper.messaging.schemas.data import EgressTransferEventData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import ExecutionPlanDecisionEventData
 from snapper.messaging.schemas.data import FundingAccrualData
@@ -376,6 +378,36 @@ class TestMessages:
         assert isinstance(parsed, EgressPoolSnapshotEventData)
         assert parsed.container == "feed@host"
         assert parsed.snapshot.enabled is True
+
+    def test_parse_egress_transfer_event(self) -> None:
+        """Test egress transfer event parsing via the ZMQ message registry.
+
+        Given: A serialized EgressTransferEventData payload,
+        When: Parsed with parse_message,
+        Then: The typed event and nested interface sample are preserved.
+        """
+        event = EgressTransferEventData(
+            session_id="session-1",
+            sequence_id=1,
+            public_id="event-1",
+            timestamp=datetime(2026, 6, 22, tzinfo=UTC),
+            interfaces=[
+                EgressTransferInterfaceSnapshot(
+                    interface="wg-pl",
+                    socks5_listen_port=1084,
+                    rx_bytes=100,
+                    tx_bytes=200,
+                    counter_reset=True,
+                    sampled_at=datetime(2026, 6, 22, tzinfo=UTC),
+                )
+            ],
+        )
+
+        parsed = parse_message(event.to_json())
+
+        assert isinstance(parsed, EgressTransferEventData)
+        assert parsed.interfaces[0].interface == "wg-pl"
+        assert parsed.interfaces[0].socks5_listen_port == 1084
 
     def test_parse_message_invalid_json(self) -> None:
         """Test parse_message handles invalid JSON.

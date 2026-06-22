@@ -2,10 +2,10 @@
 
 Feed publishers own process-local egress pools, so their active
 reservations never appear in the API process's singleton. This consumer
-subscribes to ``system.egress.snapshot`` and keeps the latest read-only
-snapshot per reporting process. Freshness is based on local receive time
-so container clock skew cannot make a live publisher look stale or fresh
-incorrectly.
+subscribes to ``system.egress.snapshot`` plus ``system.egress.transfer``
+and keeps the latest read-only state for health rendering. Freshness is
+based on local receive time so container clock skew cannot make a live
+publisher look stale or fresh incorrectly.
 """
 
 import asyncio
@@ -19,11 +19,14 @@ import zmq.asyncio
 from loguru import logger
 
 from snapper.infrastructure.network.egress_models import EgressPoolStatusSnapshot
+from snapper.infrastructure.network.egress_models import EgressTransferInterfaceSnapshot
 from snapper.infrastructure.network.egress_observability import EGRESS_SNAPSHOT_TOPIC
+from snapper.infrastructure.network.egress_transfer_observability import EGRESS_TRANSFER_TOPIC
 from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import EgressPoolSnapshotEventData
+from snapper.messaging.schemas.data import EgressTransferEventData
 from snapper.messaging.topics.validation import validate_topic
 
 _RECV_BACKOFF_SECONDS = 1.0
@@ -40,6 +43,26 @@ class _StoredEgressSnapshot:
         Args:
             received_at: Monotonic clock value at receipt.
             snapshot: Parsed egress pool status snapshot.
+        """
+        self.received_at = received_at
+        self.snapshot = snapshot
+
+
+class _StoredEgressTransfer:
+    """One interface's latest transfer sample and local receipt timestamp."""
+
+    __slots__ = ("received_at", "snapshot")
+
+    def __init__(
+        self,
+        received_at: float,
+        snapshot: EgressTransferInterfaceSnapshot,
+    ) -> None:
+        """Store a transfer sample with its monotonic receive timestamp.
+
+        Args:
+            received_at: Monotonic clock value at receipt.
+            snapshot: Parsed transfer sample for one WireGuard interface.
         """
         self.received_at = received_at
         self.snapshot = snapshot
@@ -62,8 +85,25 @@ class EgressCachedSnapshot:
     stale: bool
 
 
+@dataclass(frozen=True, slots=True)
+class EgressCachedTransfer:
+    """Public read model for a cached sidecar transfer sample.
+
+    Attributes:
+        interface: WireGuard interface name from the sidecar sample.
+        snapshot: Latest transfer sample for that interface.
+        age_seconds: Seconds since this API process received the frame.
+        stale: True when age exceeds the configured stale threshold.
+    """
+
+    interface: str
+    snapshot: EgressTransferInterfaceSnapshot
+    age_seconds: float
+    stale: bool
+
+
 class EgressSnapshotCache:
-    """Receive and cache egress pool snapshots from other processes."""
+    """Receive and cache egress observability frames from other processes."""
 
     def __init__(
         self,
@@ -83,6 +123,7 @@ class EgressSnapshotCache:
         self._stale_after_seconds = stale_after_seconds
         self._clock = clock
         self._snapshots: dict[str, _StoredEgressSnapshot] = {}
+        self._transfers: dict[str, _StoredEgressTransfer] = {}
         self._zmq_context: zmq.asyncio.Context | None = None
         self._subscriber: ValidatedSubscriber | None = None
         self._listen_task: asyncio.Task[None] | None = None
@@ -120,6 +161,7 @@ class EgressSnapshotCache:
                 apply_hwm(raw_sub_socket, rcvhwm=HWM_AUDIT)
                 raw_sub_socket.connect(zmq_broker_xpub)
                 self._subscriber.subscribe(EGRESS_SNAPSHOT_TOPIC)
+                self._subscriber.subscribe(EGRESS_TRANSFER_TOPIC)
             except Exception:
                 await self._reap_unlocked()
                 raise
@@ -127,7 +169,7 @@ class EgressSnapshotCache:
             self._listen_task = asyncio.create_task(self._listen_loop())
             logger.info(
                 "EgressSnapshotCache: subscribed to {} on {} (own={})",
-                EGRESS_SNAPSHOT_TOPIC,
+                f"{EGRESS_SNAPSHOT_TOPIC}, {EGRESS_TRANSFER_TOPIC}",
                 zmq_broker_xpub,
                 self._own_container,
             )
@@ -158,7 +200,7 @@ class EgressSnapshotCache:
                 context.term()
 
     async def _listen_loop(self) -> None:
-        """Consume egress snapshot frames until cancelled."""
+        """Consume egress observability frames until cancelled."""
         subscriber = self._subscriber
         if subscriber is None:
             return
@@ -194,17 +236,24 @@ class EgressSnapshotCache:
         return topic, payload
 
     def _ingest(self, topic: str, payload: bytes) -> None:
-        """Parse and store one egress snapshot frame.
+        """Parse and store one egress observability frame.
 
         Args:
-            topic: ZMQ topic, expected to be ``system.egress.snapshot``.
+            topic: ZMQ topic, expected to be an allowed ``system.egress`` topic.
             payload: Raw JSON payload bytes.
         """
-        if topic != EGRESS_SNAPSHOT_TOPIC:
+        if topic not in {EGRESS_SNAPSHOT_TOPIC, EGRESS_TRANSFER_TOPIC}:
             return
         is_valid, _error = validate_topic(topic)
         if not is_valid:
             return
+        if topic == EGRESS_TRANSFER_TOPIC:
+            self._ingest_transfer(payload)
+            return
+        self._ingest_pool_snapshot(topic, payload)
+
+    def _ingest_pool_snapshot(self, topic: str, payload: bytes) -> None:
+        """Parse and store one egress pool snapshot frame."""
         try:
             event = EgressPoolSnapshotEventData.from_json(payload.decode("utf-8"))
         except Exception as exc:
@@ -216,6 +265,20 @@ class EgressSnapshotCache:
             received_at=self._clock(),
             snapshot=event.snapshot,
         )
+
+    def _ingest_transfer(self, payload: bytes) -> None:
+        """Parse and store sidecar transfer samples by interface."""
+        try:
+            event = EgressTransferEventData.from_json(payload.decode("utf-8"))
+        except Exception as exc:
+            logger.error("EgressSnapshotCache: transfer payload parse failed: {}", exc)
+            return
+        received_at = self._clock()
+        for item in event.interfaces:
+            self._transfers[item.interface] = _StoredEgressTransfer(
+                received_at=received_at,
+                snapshot=item,
+            )
 
     def latest_snapshots(self) -> list[EgressCachedSnapshot]:
         """Return cached snapshots sorted by container id.
@@ -237,3 +300,24 @@ class EgressSnapshotCache:
                 )
             )
         return sorted(entries, key=lambda item: item.container)
+
+    def latest_transfers(self) -> list[EgressCachedTransfer]:
+        """Return cached transfer samples sorted by interface.
+
+        Returns:
+            Cached transfer samples with receive-age and stale flag
+            computed from the current local monotonic clock.
+        """
+        now = self._clock()
+        entries: list[EgressCachedTransfer] = []
+        for interface, stored in self._transfers.items():
+            age_seconds = max(0.0, now - stored.received_at)
+            entries.append(
+                EgressCachedTransfer(
+                    interface=interface,
+                    snapshot=stored.snapshot,
+                    age_seconds=age_seconds,
+                    stale=age_seconds > self._stale_after_seconds,
+                )
+            )
+        return sorted(entries, key=lambda item: item.interface)

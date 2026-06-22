@@ -2052,6 +2052,16 @@ class TestSystemTopicHeartbeatPaths:
         valid, _err = validate_topic("system.egress.snapshot")
         assert valid
 
+    def test_system_egress_transfer_valid(self) -> None:
+        """Verify system.egress.transfer topic is valid.
+
+        Given: The sidecar egress transfer topic,
+        When: Validated,
+        Then: Validation succeeds.
+        """
+        valid, _err = validate_topic("system.egress.transfer")
+        assert valid
+
     def test_system_egress_extra_segments(self) -> None:
         """Verify malformed system.egress topics are rejected.
 
@@ -2061,7 +2071,7 @@ class TestSystemTopicHeartbeatPaths:
         """
         valid, _err = validate_topic("system.egress.snapshot.extra")
         assert not valid
-        assert "system.egress.snapshot" in _err
+        assert "system.egress.snapshot or system.egress.transfer" in _err
 
     def test_system_invalid_type(self) -> None:
         """Verify system topic with invalid type is rejected.

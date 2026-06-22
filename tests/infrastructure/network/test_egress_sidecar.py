@@ -19,6 +19,7 @@ from snapper.infrastructure.network import egress_sidecar
 from snapper.infrastructure.network.egress_sidecar import _bring_down_safe
 from snapper.infrastructure.network.egress_sidecar import _bring_up_one
 from snapper.infrastructure.network.egress_sidecar import _bring_up_tunnels
+from snapper.infrastructure.network.egress_sidecar import _egress_transfer_interval_seconds
 from snapper.infrastructure.network.egress_sidecar import _FailedTunnel
 from snapper.infrastructure.network.egress_sidecar import _handle_ready
 from snapper.infrastructure.network.egress_sidecar import _handle_readyz
@@ -26,13 +27,17 @@ from snapper.infrastructure.network.egress_sidecar import _handle_tunnels
 from snapper.infrastructure.network.egress_sidecar import _RunningTunnel
 from snapper.infrastructure.network.egress_sidecar import _shutdown_tunnels
 from snapper.infrastructure.network.egress_sidecar import _SidecarState
+from snapper.infrastructure.network.egress_sidecar import _start_transfer_publisher
 from snapper.infrastructure.network.egress_sidecar import _stop_server_safe
+from snapper.infrastructure.network.egress_sidecar import _stop_transfer_publisher
 from snapper.infrastructure.network.egress_sidecar import install_signal_handlers
 from snapper.infrastructure.network.egress_sidecar import run_sidecar
 from snapper.infrastructure.network.egress_tunnel_models import LoadedTunnel
 from snapper.infrastructure.network.egress_tunnel_models import LoadResult
 from snapper.infrastructure.network.egress_tunnel_models import TunnelDescriptor
 from snapper.infrastructure.network.egress_tunnel_models import TunnelLoadFailure
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 def _make_descriptor(
@@ -522,6 +527,8 @@ class TestRunSidecar:
         server_instance = MagicMock()
         server_instance.start = AsyncMock()
         server_instance.stop = AsyncMock()
+        runner = MagicMock()
+        runner.cleanup = AsyncMock()
         with (
             patch.object(
                 egress_sidecar.wg_control,
@@ -536,6 +543,11 @@ class TestRunSidecar:
                 new=AsyncMock(return_value=load_result),
             ),
             patch.object(egress_sidecar, "Socks5Server", return_value=server_instance),
+            patch.object(
+                egress_sidecar,
+                "_start_healthcheck_app",
+                new=AsyncMock(return_value=runner),
+            ),
         ):
             result = await run_sidecar(
                 service,
@@ -546,6 +558,7 @@ class TestRunSidecar:
         assert result == 0
         server_instance.start.assert_awaited_once()
         server_instance.stop.assert_awaited_once()
+        runner.cleanup.assert_awaited_once()
 
     async def test_run_sidecar_cleans_tunnels_on_healthcheck_bind_failure(
         self,
@@ -595,6 +608,53 @@ class TestRunSidecar:
         server_instance.stop.assert_awaited_once()
         bring_down_mock.assert_awaited_once()
 
+    async def test_run_sidecar_stops_transfer_publisher_on_shutdown(self) -> None:
+        """Spec — run_sidecar stops transfer resources during graceful shutdown.
+
+        Given the transfer publisher helper returns resources,
+        When run_sidecar exits through its shutdown event,
+        Then the matching stop helper is awaited before tunnel cleanup completes.
+        """
+        service = MagicMock()
+        load_result = LoadResult(tunnels=[], failures=[])
+        shutdown_event = asyncio.Event()
+        shutdown_event.set()
+        runner = MagicMock()
+        runner.cleanup = AsyncMock()
+        transfer_resources = MagicMock()
+        stop_transfer = AsyncMock()
+        with (
+            patch.object(
+                egress_sidecar,
+                "load_declared_tunnels",
+                new=AsyncMock(return_value=load_result),
+            ),
+            patch.object(
+                egress_sidecar,
+                "_start_healthcheck_app",
+                new=AsyncMock(return_value=runner),
+            ),
+            patch.object(
+                egress_sidecar,
+                "_start_transfer_publisher",
+                return_value=transfer_resources,
+            ),
+            patch.object(
+                egress_sidecar,
+                "_stop_transfer_publisher",
+                new=stop_transfer,
+            ),
+        ):
+            result = await run_sidecar(
+                service,
+                shutdown_event=shutdown_event,
+                zmq_broker_xsub="tcp://broker:7500",
+            )
+
+        assert result == 0
+        stop_transfer.assert_awaited_once_with(transfer_resources)
+        runner.cleanup.assert_awaited_once()
+
     async def test_start_healthcheck_app_cleans_runner_on_site_start_failure(
         self,
     ) -> None:
@@ -618,6 +678,155 @@ class TestRunSidecar:
         ):
             await egress_sidecar._start_healthcheck_app(state, "127.0.0.1", 0)
         runner_instance.cleanup.assert_awaited_once()
+
+    async def test_start_healthcheck_app_returns_runner_on_success(self) -> None:
+        """Spec — _start_healthcheck_app returns the configured runner.
+
+        Given aiohttp runner and site start successfully,
+        When the helper runs,
+        Then the app is wired and the runner is returned for later cleanup.
+        """
+        state = _SidecarState()
+        runner_instance = MagicMock()
+        runner_instance.setup = AsyncMock()
+        runner_instance.cleanup = AsyncMock()
+        site_instance = MagicMock()
+        site_instance.start = AsyncMock()
+        with (
+            patch.object(egress_sidecar.web, "AppRunner", return_value=runner_instance),
+            patch.object(egress_sidecar.web, "TCPSite", return_value=site_instance),
+        ):
+            runner = await egress_sidecar._start_healthcheck_app(state, "127.0.0.1", 8081)
+
+        assert runner is runner_instance
+        runner_instance.setup.assert_awaited_once()
+        site_instance.start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+class TestTransferPublisherLifecycle:
+    """Sidecar transfer publisher wiring."""
+
+    async def test_start_transfer_publisher_skips_without_broker_or_tunnels(self) -> None:
+        """Spec — transfer publishing requires both XSUB and running tunnels.
+
+        Given sidecar state with no running tunnels or no broker endpoint,
+        When the transfer publisher helper runs,
+        Then no ZMQ resources are opened.
+        """
+        state = _SidecarState()
+        loaded = _make_loaded()
+        running_state = _SidecarState(
+            running=[
+                _RunningTunnel(
+                    loaded=loaded,
+                    server=MagicMock(),
+                    tunnel_index=0,
+                )
+            ]
+        )
+
+        assert (
+            _start_transfer_publisher(
+                state=state,
+                zmq_broker_xsub="tcp://broker:7500",
+                interval_seconds=1.0,
+            )
+            is None
+        )
+        assert (
+            _start_transfer_publisher(
+                state=running_state,
+                zmq_broker_xsub=None,
+                interval_seconds=1.0,
+            )
+            is None
+        )
+
+    async def test_start_transfer_publisher_builds_and_stops_resources(self) -> None:
+        """Spec — running tunnels start a transfer publisher on the broker XSUB.
+
+        Given one running tunnel and a broker endpoint,
+        When the transfer publisher helper runs,
+        Then a publisher task is started and shutdown closes its resources.
+        """
+        raw = MagicMock()
+        raw.send_multipart = AsyncMock()
+        raw.close = MagicMock()
+        raw.setsockopt = MagicMock()
+        publisher = MessagePublisher(raw, SequenceTracker())
+        context = MagicMock()
+        loaded = _make_loaded()
+        state = _SidecarState(
+            running=[
+                _RunningTunnel(
+                    loaded=loaded,
+                    server=MagicMock(),
+                    tunnel_index=0,
+                )
+            ]
+        )
+        with patch.object(
+            egress_sidecar,
+            "build_audit_publisher",
+            return_value=(publisher, context),
+        ):
+            resources = _start_transfer_publisher(
+                state=state,
+                zmq_broker_xsub="tcp://broker:7500",
+                interval_seconds=10.0,
+            )
+
+        assert resources is not None
+        assert resources.publisher is publisher
+        assert resources.context is context
+        assert resources.transfer_publisher._task is not None
+
+        await _stop_transfer_publisher(resources)
+
+        raw.setsockopt.assert_called()
+        raw.close.assert_called_once()
+        context.term.assert_called_once()
+
+    async def test_start_transfer_publisher_cleans_partial_resources_on_failure(self) -> None:
+        """Spec — transfer publisher startup failures do not crash the sidecar.
+
+        Given build_audit_publisher raises,
+        When the transfer publisher helper runs,
+        Then it returns None after invoking the shared cleanup helper.
+        """
+        loaded = _make_loaded()
+        state = _SidecarState(
+            running=[
+                _RunningTunnel(
+                    loaded=loaded,
+                    server=MagicMock(),
+                    tunnel_index=0,
+                )
+            ]
+        )
+        cleanup = MagicMock()
+        with (
+            patch.object(
+                egress_sidecar,
+                "build_audit_publisher",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch.object(egress_sidecar, "shutdown_audit_publisher", cleanup),
+        ):
+            resources = _start_transfer_publisher(
+                state=state,
+                zmq_broker_xsub="tcp://broker:7500",
+                interval_seconds=1.0,
+            )
+
+        assert resources is None
+        cleanup.assert_called_once_with(None, None)
+
+    async def test_egress_transfer_interval_seconds_applies_floor(self) -> None:
+        """Spec — the heartbeat cadence is converted to seconds with a floor."""
+        assert _egress_transfer_interval_seconds(2500) == 2.5
+        assert _egress_transfer_interval_seconds(0) == 0.001
 
 
 class TestInstallSignalHandlers:

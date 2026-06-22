@@ -50,6 +50,7 @@ from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
 from snapper.core.types import PairedExecutionPolicy
 from snapper.infrastructure.network.egress_models import EgressPoolStatusSnapshot
+from snapper.infrastructure.network.egress_models import EgressTransferInterfaceSnapshot
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import FillStatus
 from snapper.interface.websocket.schemas import HealthStatus
@@ -583,6 +584,21 @@ class EgressPoolSnapshotEventData(StrictDataSchema[Literal["egress_pool_snapshot
     type: Literal["egress_pool_snapshot_event"] = "egress_pool_snapshot_event"
     container: str
     snapshot: EgressPoolStatusSnapshot
+
+
+class EgressTransferEventData(StrictDataSchema[Literal["egress_transfer_event"]]):
+    """Sidecar WireGuard transfer samples for egress tunnels.
+
+    Published by the snapper-egress sidecar over the existing broker
+    XSUB path so the API process can join transfer counters onto route
+    health rows by SOCKS5 listener port.
+
+    Attributes:
+        interfaces: Per-WireGuard-interface transfer samples.
+    """
+
+    type: Literal["egress_transfer_event"] = "egress_transfer_event"
+    interfaces: list[EgressTransferInterfaceSnapshot] = Field(default_factory=list)
 
 
 class SettingChangedData(StrictDataSchema[Literal["setting_changed"]]):

@@ -47,6 +47,7 @@ from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderEvent
 from snapper.core.types import OrderEventEnum
 from snapper.core.types import OrderExchange
+from snapper.messaging.schemas.data import EgressTransferEventData
 
 
 def market_topic(
@@ -691,6 +692,8 @@ def topic_for_message(data: StrictDataSchema[Any]) -> str:
             return heartbeat_topic_from_component(data.component)
         case EgressPoolSnapshotEventData():
             return system_topic("egress.snapshot")
+        case EgressTransferEventData():
+            return system_topic("egress.transfer")
         case SettingChangedData():
             return system_topic("settings")
         case SymbolAliasUpdateData():

@@ -243,12 +243,17 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    metadata (`region`, `exit_ip`, `provider`) when configured,
    quarantine state, merged `in_use_count`, per-reservation `container`,
    `connections` rows for open WebSocket host counts and capped REST
-   last-seen hostnames, and a `containers` summary row for each
-   reporting process. Connection rows expose hostnames only, never URL
-   paths, query strings, headers, request bodies, or credentials. A
-   missing `snapper-feed` row means the API process has not received a
-   `system.egress.snapshot` frame from that container yet; a stale row
-   remains visible with `stale=true`.
+   last-seen hostnames, and a `transfer` object on SOCKS5 routes when
+   `snapper-egress` has reported matching WireGuard counters for that
+   listener port. Transfer rows include cumulative rx/tx bytes, current
+   byte rates when a reliable delta exists, the latest WireGuard
+   handshake timestamp, sample age, and stale/reset flags. Direct routes,
+   missing samples, and ambiguous shared ports show `transfer=null`.
+   Connection rows expose hostnames only, never URL paths, query strings,
+   headers, request bodies, or credentials. A missing `snapper-feed` row
+   means the API process has not received a `system.egress.snapshot`
+   frame from that container yet; a stale row remains visible with
+   `stale=true`.
 
 5. **WireGuard handshake established?** (operator debugging — uses
    `iproute2` shipped in the image)
@@ -342,6 +347,7 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
   re-dialing the dead tunnel.
 - Tunnel handshake age: WireGuard re-keys every 2 minutes; if `wg
   show <iface> latest-handshakes` returns > 180 s ago, the peer is
-  unreachable.
+  unreachable. The backend also surfaces the latest handshake from
+  sidecar `system.egress.transfer` samples on the matching SOCKS5 route.
 - SOCKS5 listener latency: ≤ 1 ms additional vs direct route (single
   process, single asyncio loop, no auth handshake).

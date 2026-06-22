@@ -93,17 +93,26 @@ class TestAsyncMain:
         fake_service = MagicMock()
         run_mock = AsyncMock(return_value=0)
         get_service_mock = AsyncMock(return_value=fake_service)
+        settings = MagicMock()
+        settings.zmq_heartbeat_interval_ms = 2500
+        get_settings_mock = MagicMock(return_value=settings)
         install_mock = MagicMock()
         with (
             patch.object(egress_main, "get_settings_service", new=get_service_mock),
+            patch.object(egress_main, "get_settings_with_service", new=get_settings_mock),
             patch.object(egress_main, "install_signal_handlers", new=install_mock),
             patch.object(egress_main, "run_sidecar", new=run_mock),
         ):
             result = await egress_main._async_main(args)
         assert result == 0
         get_service_mock.assert_awaited_once_with("postgres://x/y", "tcp://localhost:5555")
+        get_settings_mock.assert_called_once_with(fake_service)
         install_mock.assert_called_once()
         run_mock.assert_awaited_once()
+        await_args = run_mock.await_args
+        assert await_args is not None
+        assert await_args.kwargs["zmq_broker_xsub"] == "tcp://localhost:5555"
+        assert await_args.kwargs["heartbeat_interval_ms"] == 2500
 
 
 class TestMain:
