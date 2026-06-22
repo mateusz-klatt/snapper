@@ -59,6 +59,9 @@ services:
     image: klattm/snapper:latest
     container_name: snapper-egress
     env_file: .env
+    environment:
+      - ZMQ_BROKER_XSUB=tcp://snapper:7500
+      - ZMQ_BROKER_XPUB=tcp://snapper:7501
     expose:
       - "8081"
     user: "0:0"
