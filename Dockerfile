@@ -9,7 +9,7 @@ RUN (corepack --version 2>/dev/null || \
         npm install -g --force --ignore-scripts "corepack@${COREPACK_VERSION}") \
     && corepack enable
 
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml frontend/.npmrc ./frontend/
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./frontend/
 WORKDIR /app/frontend
 RUN pnpm install --frozen-lockfile --ignore-scripts
 
