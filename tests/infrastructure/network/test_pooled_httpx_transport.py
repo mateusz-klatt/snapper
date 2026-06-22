@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_pool import configure_egress_pool

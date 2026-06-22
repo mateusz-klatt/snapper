@@ -12,7 +12,7 @@ from snapper.config.settings import AppSettings
 from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
-from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.messaging.publishers import kraken_equities as equities_module
 from snapper.messaging.publishers.kraken_equities import KrakenEquitiesMarketDataPublisher
 from snapper.messaging.publishers.kraken_equities import _is_cme_closed

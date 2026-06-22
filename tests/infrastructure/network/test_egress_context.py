@@ -4,7 +4,8 @@ from collections.abc import Iterator
 
 import pytest
 
-from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.exchanges import kraken_sdk_patches
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.network.egress_context import current_egress_identity
 from snapper.infrastructure.network.egress_context import egress_identity
 from snapper.infrastructure.network.egress_context import resolve_egress_traffic
@@ -109,3 +110,14 @@ def test_resolve_defaults_to_public_default_exchange() -> None:
     Then: it returns that default exchange as public traffic.
     """
     assert resolve_egress_traffic(default_exchange="kraken") == ("kraken", "public")
+
+
+def test_kraken_sdk_patches_reuses_egress_context_current_publisher() -> None:
+    """Spec — the Kraken shim reuses the ContextVar owned by egress context.
+
+    Given: The egress context owns ``_CURRENT_PUBLISHER``,
+    When: Kraken SDK patches are imported,
+    Then: The shim module exposes the same ContextVar object without owning
+        a second definition.
+    """
+    assert kraken_sdk_patches._CURRENT_PUBLISHER is _CURRENT_PUBLISHER

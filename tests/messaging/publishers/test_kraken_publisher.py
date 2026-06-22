@@ -21,8 +21,8 @@ from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
-from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.messaging.publishers import kraken as kraken_module
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.messaging.publishers.walutomat import WalutomatMarketDataPublisher
 
 

@@ -64,6 +64,7 @@ from websockets.exceptions import InvalidStatus
 from websockets.exceptions import ProxyError
 
 from snapper.core.json_types import JsonObject
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.network.egress_context import current_egress_identity
 from snapper.infrastructure.network.egress_context import resolve_egress_traffic
 from snapper.infrastructure.network.egress_pool import EgressPool
@@ -244,11 +245,6 @@ _CURRENT_CONNECTOR_ID: contextvars.ContextVar[int | None] = contextvars.ContextV
     "_kraken_current_connector_id", default=None
 )
 """ContextVar carrying ``id(self)`` from patched ``__run`` into the connect shim."""
-
-_CURRENT_PUBLISHER: contextvars.ContextVar[Any] = contextvars.ContextVar(
-    "_kraken_current_publisher", default=None
-)
-"""ContextVar carrying the owning publisher instance into patched ``__init__``."""
 
 _ORIGINAL_GET_RECONNECT_WAIT: Any = getattr(
     ConnectSpotWebsocketBase, "_ConnectSpotWebsocketBase__get_reconnect_wait"

@@ -47,7 +47,6 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _ALREADY_SUBSCRI
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CLOSE_CODE_BACKOFF_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CONNECTOR_PUBLISHERS
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_CONNECTOR_ID
-from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _FUTURES_PATCH_APPLIED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _FUTURES_PATCH_LOGGED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _LAST_CLOSE_CODE
@@ -93,6 +92,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.exchanges.kraken_sdk_patches import get_registered_publisher
 from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.network.egress_context import egress_identity
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig

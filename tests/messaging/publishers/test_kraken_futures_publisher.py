@@ -10,7 +10,7 @@ from snapper.config.app import AppSettings
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
-from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.messaging.publishers.kraken_futures import KrakenFuturesMarketDataPublisher
 
 

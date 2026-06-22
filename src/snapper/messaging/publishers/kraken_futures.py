@@ -32,8 +32,8 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
-from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_futures_pool_routing
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.symbols.functions import get_available_kraken_futures_symbols
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService

@@ -51,7 +51,6 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
-from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_WINDOW_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import (
@@ -59,6 +58,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import (
 )
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_resubscribe_pacing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES

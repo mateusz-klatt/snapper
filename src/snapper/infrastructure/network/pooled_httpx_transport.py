@@ -32,7 +32,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 
 _HTTP_CONNECT_ERROR_QUARANTINE_S: float = 60.0

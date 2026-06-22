@@ -16,7 +16,7 @@ from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
-from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
 

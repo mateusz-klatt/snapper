@@ -6,7 +6,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Literal
 from typing import Protocol
-from typing import cast
 
 TrafficClass = Literal["public", "private"]
 """Allowed egress traffic classes."""
@@ -41,6 +40,11 @@ class _PublisherContext(Protocol):
 _EGRESS_IDENTITY: ContextVar[EgressIdentity | None] = ContextVar(
     "snapper_egress_identity", default=None
 )
+
+_CURRENT_PUBLISHER: ContextVar[_PublisherContext | None] = ContextVar(
+    "_kraken_current_publisher", default=None
+)
+"""ContextVar carrying the owning publisher instance for legacy public traffic."""
 
 
 @contextmanager
@@ -104,9 +108,7 @@ def resolve_egress_traffic(default_exchange: str = "kraken") -> tuple[str, str]:
     if identity is not None:
         return identity.exchange, identity.traffic_class
 
-    from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
-
-    publisher = cast(_PublisherContext | None, _CURRENT_PUBLISHER.get())
+    publisher = _CURRENT_PUBLISHER.get()
     if publisher is not None:
         return publisher._get_exchange_name(), "public"
     return default_exchange, "public"
