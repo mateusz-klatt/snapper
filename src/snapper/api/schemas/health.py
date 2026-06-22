@@ -147,6 +147,23 @@ class HealthCheckResponse(PayloadResponse[Literal["health_check_response"], Heal
     type: Literal["health_check_response"] = "health_check_response"
 
 
+class EgressContainerSummary(StrictBody):
+    """Reporting source summary for the egress health endpoint.
+
+    Attributes:
+        container: Stable process/container source id.
+        last_seen_age_seconds: Seconds since the API process observed
+            this source's snapshot.
+        stale: True when the source missed the stale threshold.
+        route_count: Number of routes included in the source snapshot.
+    """
+
+    container: str = Field(description="Reporting process/container id")
+    last_seen_age_seconds: float = Field(description="Seconds since latest report")
+    stale: bool = Field(description="Whether the latest report is stale")
+    route_count: int = Field(description="Number of routes in the source snapshot")
+
+
 class EgressHealthData(StrictDataSchema[Literal["egress_health"]]):
     """Domain data for the egress pool health endpoint.
 
@@ -158,6 +175,7 @@ class EgressHealthData(StrictDataSchema[Literal["egress_health"]]):
         private_fallback_route_id: Configured private fallback route id.
         private_on_fallback: True when private traffic is currently
             reserved on a non-direct route.
+        containers: Per-reporting-source summary rows.
         routes: Per-route status rows in configured order.
     """
 
@@ -174,6 +192,10 @@ class EgressHealthData(StrictDataSchema[Literal["egress_health"]]):
     private_on_fallback: bool = Field(
         default=False,
         description="Whether private traffic is currently using a non-direct route",
+    )
+    containers: list[EgressContainerSummary] = Field(
+        default_factory=list,
+        description="Per-container egress snapshot summaries",
     )
     routes: list[EgressRouteStatusSnapshot] = Field(
         default_factory=list,

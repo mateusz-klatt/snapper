@@ -59,6 +59,7 @@ class TestTopicRegistry:
         expected = {
             "market.",
             "signals.",
+            "system.egress.",
             "system.heartbeats.",
             "orders.commands.",
             "orders.events.",

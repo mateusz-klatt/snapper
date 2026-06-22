@@ -30,6 +30,7 @@ from loguru import logger
 
 QuarantineReason = Literal["http-429", "close-1015", "http-connect-error", "ws-connect-error"]
 TrafficClass = Literal["public", "private"]
+ConnectionKind = Literal["ws", "rest"]
 
 
 class EgressPoolBase(ABC):
@@ -51,6 +52,8 @@ class EgressPoolBase(ABC):
         route_id: str,
         exchange: str,
         traffic_class: TrafficClass,
+        connection_kind: ConnectionKind,
+        target_host: str | None,
     ) -> None:
         """Decrement ``in_use_count`` for the named route."""
 
@@ -69,6 +72,8 @@ def _finalize_release(
     route_id: str,
     exchange: str,
     traffic_class: TrafficClass,
+    connection_kind: ConnectionKind,
+    target_host: str | None,
 ) -> None:
     """Defensive release fired by ``weakref.finalize`` on GC.
 
@@ -84,8 +89,12 @@ def _finalize_release(
         exchange: Exchange tuple member to clear from active status.
         traffic_class: Traffic-class tuple member to clear from active
             status.
+        connection_kind: Connection kind tuple member to clear from
+            active host status.
+        target_host: Sanitized hostname tuple member to clear from
+            active host status.
     """
-    pool._decrement_in_use(route_id, exchange, traffic_class)
+    pool._decrement_in_use(route_id, exchange, traffic_class, connection_kind, target_host)
 
 
 class EgressReservation:
@@ -97,6 +106,9 @@ class EgressReservation:
             socks5 routes.
         exchange: Exchange name used to reserve the route.
         traffic_class: Traffic class used to reserve the route.
+        connection_kind: Connection kind used for host-aware observability.
+        target_host: Sanitized target hostname, or ``None`` when unknown
+            or invalid.
     """
 
     def __init__(
@@ -106,6 +118,8 @@ class EgressReservation:
         proxy_url: str | None,
         exchange: str,
         traffic_class: TrafficClass,
+        connection_kind: ConnectionKind,
+        target_host: str | None,
     ) -> None:
         """Create a reservation. Called by ``EgressPool.reserve``.
 
@@ -119,11 +133,16 @@ class EgressReservation:
             proxy_url: The reserved route's ``proxy_url`` (None for direct).
             exchange: Exchange name associated with this reservation.
             traffic_class: Traffic class associated with this reservation.
+            connection_kind: ``"ws"`` for WebSocket reservations or
+                ``"rest"`` for REST reservations.
+            target_host: Sanitized target hostname, or ``None`` when unknown.
         """
         self.route_id = route_id
         self.proxy_url = proxy_url
         self.exchange = exchange
         self.traffic_class = traffic_class
+        self.connection_kind = connection_kind
+        self.target_host = target_host
         self._pool = pool
         self._released = False
         self._finalizer = weakref.finalize(
@@ -133,6 +152,8 @@ class EgressReservation:
             route_id,
             exchange,
             traffic_class,
+            connection_kind,
+            target_host,
         )
 
     def websocket_kwargs(self) -> dict[str, str | None]:
@@ -165,7 +186,13 @@ class EgressReservation:
             return
         self._released = True
         self._finalizer.detach()
-        self._pool._decrement_in_use(self.route_id, self.exchange, self.traffic_class)
+        self._pool._decrement_in_use(
+            self.route_id,
+            self.exchange,
+            self.traffic_class,
+            self.connection_kind,
+            self.target_host,
+        )
 
     def quarantine(
         self,

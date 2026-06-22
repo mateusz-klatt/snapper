@@ -58,6 +58,9 @@ from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.network.egress_observability import EgressSnapshotPublisher
+from snapper.infrastructure.network.egress_observability import resolve_egress_container_id
+from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_pool import safely_initialize_egress_pool
 from snapper.infrastructure.symbols.functions import get_market_data_capability_exclusions
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
@@ -508,6 +511,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._persist_skipped_counters: dict[tuple[str, PersistDataType], list[float]] = {}
         self._feed_health_loop_task: asyncio.Task[None] | None = None
         self._extra_background_tasks: list[asyncio.Task[None]] = []
+        self._egress_snapshot_publisher: EgressSnapshotPublisher | None = None
 
     def _require_repository(self) -> Repository:
         """Return initialized repository or raise an explicit runtime error.
@@ -738,6 +742,30 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             "egress_pool setting leaves the pool empty and feeds stay direct)"
         )
 
+    def _start_egress_snapshot_publisher(self, process_name: str) -> None:
+        """Start egress snapshot publishing when this process owns a pool.
+
+        Args:
+            process_name: Existing publisher process label used for logging.
+        """
+        if get_egress_pool() is None or self.msg_publisher is None:
+            return
+        publisher = EgressSnapshotPublisher(
+            container=resolve_egress_container_id(process_name),
+            publisher=self.msg_publisher,
+            interval_seconds=self.settings.zmq_heartbeat_interval_ms / 1000.0,
+        )
+        publisher.start()
+        self._egress_snapshot_publisher = publisher
+
+    async def _stop_egress_snapshot_publisher(self) -> None:
+        """Stop the egress snapshot publisher if it was started."""
+        publisher = self._egress_snapshot_publisher
+        self._egress_snapshot_publisher = None
+        if publisher is None:
+            return
+        await publisher.stop()
+
     async def _configure_candle_consumers(
         self, symbols_to_subscribe: list[str], tasks: list[asyncio.Task[None]]
     ) -> list[str]:
@@ -958,6 +986,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         tasks.append(asyncio.create_task(self._symbol_aliases_loop()))
         self._feed_health_loop_task = asyncio.create_task(self._feed_health_flush_loop())
         tasks.append(self._feed_health_loop_task)
+        self._start_egress_snapshot_publisher(process_name)
         symbols_to_subscribe = self.symbols[:max_symbols] if max_symbols > 0 else self.symbols
         candle_consumer_timeframes = await self._configure_candle_consumers(
             symbols_to_subscribe, tasks
@@ -1032,6 +1061,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             self._recovery_tasks.difference_update(recovery_tasks)
         if self._exchange_client is not None:
             await self._exchange_client.stop_health_loop()
+        await self._stop_egress_snapshot_publisher()
         await self._stop_feed_health_loop()
         await self._stop_extra_background_tasks()
         await self._stop_tick_pipeline()

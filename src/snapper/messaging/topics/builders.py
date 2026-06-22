@@ -644,6 +644,7 @@ def topic_for_message(data: StrictDataSchema[Any]) -> str:
     """
     from snapper.messaging.schemas.data import AlertEventData
     from snapper.messaging.schemas.data import CandleData
+    from snapper.messaging.schemas.data import EgressPoolSnapshotEventData
     from snapper.messaging.schemas.data import ExecutionData
     from snapper.messaging.schemas.data import HeartbeatData
     from snapper.messaging.schemas.data import OrderCancelData
@@ -688,6 +689,8 @@ def topic_for_message(data: StrictDataSchema[Any]) -> str:
             return signal_topic(data.exchange, data.instrument, "live")
         case HeartbeatData():
             return heartbeat_topic_from_component(data.component)
+        case EgressPoolSnapshotEventData():
+            return system_topic("egress.snapshot")
         case SettingChangedData():
             return system_topic("settings")
         case SymbolAliasUpdateData():

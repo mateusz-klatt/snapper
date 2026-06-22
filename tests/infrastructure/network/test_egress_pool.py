@@ -26,6 +26,7 @@ from snapper.infrastructure.network.egress_pool import _preflight_routes
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_pool import initialize_egress_pool
+from snapper.infrastructure.network.egress_pool import normalize_egress_target_host
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
 from snapper.infrastructure.network.egress_pool import safely_initialize_egress_pool
 
@@ -895,6 +896,115 @@ class TestStatusSnapshot:
         reservation.release()
         assert pool.status_snapshot().routes[0].active_reservations == []
 
+    def test_websocket_connection_counts_group_by_target_host(self) -> None:
+        """Spec — WebSocket reservations count live holds per target host.
+
+        Given two WS reservations for the same route and hostname,
+        When status_snapshot is inspected before and after releases,
+        Then the connection count decrements with the reservation lifecycle.
+        """
+        pool = EgressPool(_two_route_config())
+        first = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            target_host="WS.KRAKEN.COM",
+            connection_kind="ws",
+        )
+        second = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            target_host="ws.kraken.com",
+            connection_kind="ws",
+        )
+
+        held = pool.status_snapshot().routes[0].connections
+        assert [
+            (item.host, item.kind, item.exchange, item.traffic_class, item.count) for item in held
+        ] == [("ws.kraken.com", "ws", "kraken", "public", 2)]
+        assert held[0].last_seen_at is None
+
+        first.release()
+        one_left = pool.status_snapshot().routes[0].connections
+        assert one_left[0].count == 1
+
+        second.release()
+        assert pool.status_snapshot().routes[0].connections == []
+
+    def test_rest_connection_records_last_seen_after_release(self) -> None:
+        """Spec — REST reservations leave a last-seen host row after release.
+
+        Given a REST reservation for a target host,
+        When it is released immediately after the call,
+        Then the route keeps the host with count zero and a timestamp.
+        """
+        pool = EgressPool(_two_route_config())
+        reservation = pool.reserve(
+            exchange="kraken",
+            purpose="http",
+            target_host="API.KRAKEN.COM",
+            connection_kind="rest",
+        )
+
+        active = pool.status_snapshot().routes[0].connections
+        assert len(active) == 1
+        assert active[0].host == "api.kraken.com"
+        assert active[0].kind == "rest"
+        assert active[0].count == 1
+        assert active[0].last_seen_at is not None
+        last_seen_at = active[0].last_seen_at
+
+        reservation.release()
+        released = pool.status_snapshot().routes[0].connections
+        assert len(released) == 1
+        assert released[0].count == 0
+        assert released[0].last_seen_at == last_seen_at
+
+    def test_target_host_sanitization_rejects_paths_queries_and_controls(self) -> None:
+        """Spec — host tracking accepts only lowercase hostnames.
+
+        Given clean hosts and unsafe URL-like or control-character inputs,
+        When host normalization and reservation tracking run,
+        Then only the safe hostname is retained in snapshots.
+        """
+        assert normalize_egress_target_host(" API.KRAKEN.COM ") == "api.kraken.com"
+        assert normalize_egress_target_host("") is None
+        assert normalize_egress_target_host("api.kraken.com/private/Balance") is None
+        assert normalize_egress_target_host("api.kraken.com?txid=order-1") is None
+        assert normalize_egress_target_host("api.kraken.com\n") is None
+
+        pool = EgressPool(_two_route_config())
+        reservation = pool.reserve(
+            exchange="kraken",
+            purpose="http",
+            target_host="api.kraken.com/private/Balance?txid=order-1",
+            connection_kind="rest",
+        )
+
+        assert pool.status_snapshot().routes[0].connections == []
+        reservation.release()
+
+    def test_rest_last_seen_hosts_are_capped_per_route(self) -> None:
+        """Spec — REST last-seen host rows are capped per route.
+
+        Given more than sixteen distinct REST target hosts on one route,
+        When each reservation is released,
+        Then the oldest host is evicted and the newest sixteen remain.
+        """
+        pool = EgressPool(_two_route_config())
+        for index in range(17):
+            reservation = pool.reserve(
+                exchange="kraken",
+                purpose="http",
+                target_host=f"api-{index}.kraken.com",
+                connection_kind="rest",
+            )
+            reservation.release()
+
+        hosts = [item.host for item in pool.status_snapshot().routes[0].connections]
+        assert len(hosts) == 16
+        assert "api-0.kraken.com" not in hosts
+        assert "api-16.kraken.com" in hosts
+
     def test_status_snapshot_marks_expired_quarantine_as_not_quarantined(self) -> None:
         """Spec — expired quarantine deadlines report zero remaining seconds.
 
@@ -1102,7 +1212,7 @@ class TestDefensiveBranches:
             unchanged.
         """
         pool = EgressPool(_two_route_config())
-        pool._decrement_in_use("nonexistent-route", "kraken", "public")
+        pool._decrement_in_use("nonexistent-route", "kraken", "public", "ws", None)
         snapshot = pool.snapshot()
         for snap in snapshot:
             assert snap.in_use_count == 0
@@ -1121,6 +1231,45 @@ class TestDefensiveBranches:
         snapshot = pool.status_snapshot()
 
         assert all(route.active_reservations == [] for route in snapshot.routes)
+
+    def test_connection_helpers_ignore_unknown_or_missing_rows(self) -> None:
+        """Spec — connection helper safety branches ignore missing state.
+
+        Given a pool with one route,
+        When connection helpers receive an unknown route or missing key,
+        Then they return without mutating visible route status.
+        """
+        pool = EgressPool(_two_route_config())
+        observed_at = datetime.now(UTC)
+        pool._increment_connection_locked(
+            "missing-route",
+            "kraken",
+            "public",
+            "ws",
+            "ws.kraken.com",
+            observed_at,
+        )
+        pool._decrement_connection_locked(
+            "missing-route",
+            "kraken",
+            "public",
+            "ws",
+            "ws.kraken.com",
+        )
+        pool._decrement_connection_locked(
+            "default",
+            "kraken",
+            "public",
+            "ws",
+            "ws.kraken.com",
+        )
+        pool._record_rest_last_seen_locked(
+            "missing-route",
+            ("kraken", "public", "rest", "api.kraken.com"),
+            observed_at,
+        )
+
+        assert all(route.connections == [] for route in pool.status_snapshot().routes)
 
     def test_quarantine_route_ignores_unknown_route(self) -> None:
         """Spec — _quarantine_route of an unknown route_id is a no-op.

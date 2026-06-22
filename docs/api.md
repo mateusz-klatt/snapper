@@ -588,8 +588,11 @@ Operator egress route snapshot. Requires `read:system_status`
 permission and uses the same CSRF guard as the detailed monitoring
 health routes.
 
-The endpoint returns an explicit disabled payload when the process has
-no configured egress pool, rather than treating that as an error.
+The endpoint returns the API process's local egress snapshot merged with
+the latest `system.egress.snapshot` frames from other pool-bearing
+processes such as `snapper-feed`. Missing remote snapshots are not an
+error: the payload still includes the API process. Stale remote
+snapshots remain visible and are flagged in `containers`.
 
 **Response (200):**
 
@@ -607,6 +610,20 @@ no configured egress pool, rather than treating that as an error.
         "on_all_quarantined": "wait",
         "private_fallback_route_id": "pl",
         "private_on_fallback": false,
+        "containers": [
+            {
+                "container": "api:coord-0@snapper",
+                "last_seen_age_seconds": 0.0,
+                "stale": false,
+                "route_count": 1
+            },
+            {
+                "container": "publisher:kraken@snapper-feed",
+                "last_seen_age_seconds": 1.4,
+                "stale": false,
+                "route_count": 1
+            }
+        ],
         "routes": [
             {
                 "id": "default",
@@ -619,9 +636,38 @@ no configured egress pool, rather than treating that as an error.
                 "enabled": true,
                 "quarantined": false,
                 "quarantine_seconds_remaining": null,
-                "in_use_count": 1,
+                "in_use_count": 2,
                 "active_reservations": [
-                    {"exchange": "kraken", "traffic_class": "private"}
+                    {
+                        "exchange": "kraken",
+                        "traffic_class": "private",
+                        "container": "api:coord-0@snapper"
+                    },
+                    {
+                        "exchange": "kraken",
+                        "traffic_class": "public",
+                        "container": "publisher:kraken@snapper-feed"
+                    }
+                ],
+                "connections": [
+                    {
+                        "host": "ws-auth.kraken.com",
+                        "kind": "ws",
+                        "exchange": "kraken",
+                        "traffic_class": "private",
+                        "container": "api:coord-0@snapper",
+                        "count": 1,
+                        "last_seen_at": null
+                    },
+                    {
+                        "host": "api.kraken.com",
+                        "kind": "rest",
+                        "exchange": "kraken",
+                        "traffic_class": "public",
+                        "container": "publisher:kraken@snapper-feed",
+                        "count": 0,
+                        "last_seen_at": "2026-01-18T12:00:01Z"
+                    }
                 ]
             }
         ]
@@ -631,9 +677,16 @@ no configured egress pool, rather than treating that as an error.
 
 `region`, `exit_ip`, and `provider` are optional operator metadata
 copied from the `egress_pool.routes[]` entry. `active_reservations`
-lists the unique `(exchange, traffic_class)` tuples currently reserved
-on the route. `private_on_fallback` is true when any private reservation
-is active on a non-direct route.
+lists the unique `(container, exchange, traffic_class)` tuples currently
+reserved on the route. `connections` lists target hostnames by
+`(container, host, kind, exchange, traffic_class)`: WebSocket rows carry
+currently open counts, while REST rows retain the capped last-seen host
+with count zero after the short reservation releases. Only hostnames are
+reported; URL paths, queries, headers, bodies, and credentials are never
+included. `containers` lists each reporting process, the age of its
+latest snapshot as observed by the API process, whether that snapshot is
+stale, and how many routes it reported. `private_on_fallback` is true
+when any private reservation is active on a non-direct route.
 
 ### GET /api/candles
 

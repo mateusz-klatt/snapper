@@ -241,7 +241,14 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    session with `read:system_status`, call `GET /api/health/egress`.
    Expect `payload.enabled=true`, one row per configured route, route
    metadata (`region`, `exit_ip`, `provider`) when configured,
-   quarantine state, `in_use_count`, and `active_reservations`.
+   quarantine state, merged `in_use_count`, per-reservation `container`,
+   `connections` rows for open WebSocket host counts and capped REST
+   last-seen hostnames, and a `containers` summary row for each
+   reporting process. Connection rows expose hostnames only, never URL
+   paths, query strings, headers, request bodies, or credentials. A
+   missing `snapper-feed` row means the API process has not received a
+   `system.egress.snapshot` frame from that container yet; a stale row
+   remains visible with `stale=true`.
 
 5. **WireGuard handshake established?** (operator debugging — uses
    `iproute2` shipped in the image)

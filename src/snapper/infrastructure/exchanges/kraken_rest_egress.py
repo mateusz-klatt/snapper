@@ -5,12 +5,14 @@ import errno
 import socket
 from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import MutableMapping
 from contextlib import AbstractContextManager
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Literal
 from typing import cast
+from urllib.parse import urlsplit
 
 import requests
 import urllib3.exceptions
@@ -19,6 +21,7 @@ from snapper.infrastructure.network.egress_context import TrafficClass
 from snapper.infrastructure.network.egress_context import current_egress_identity
 from snapper.infrastructure.network.egress_context import egress_identity
 from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import normalize_egress_target_host
 from snapper.infrastructure.network.egress_reservation import EgressReservation
 
 KrakenRestOperationKind = Literal["public_read", "private_idempotent_read", "private_mutation"]
@@ -35,6 +38,7 @@ _PRESEND_ERRNOS = frozenset(
     }
 )
 _MISSING = object()
+_REST_URL_ATTRS = ("url", "URL", "base_url", "baseUrl", "api_url", "apiUrl")
 
 
 @dataclass(frozen=True)
@@ -331,6 +335,7 @@ def _run_public_read[ResultT](
 ) -> ResultT:
     """Execute a public read through the public egress selector."""
     pool = get_egress_pool()
+    target_host = _target_host_from_rest_target(target)
     if pool is None or pool.size() == 0:
         return _execute_with_proxy(
             target=target,
@@ -338,7 +343,13 @@ def _run_public_read[ResultT](
             proxy_url=None,
             sync_call=sync_call,
         )
-    reservation = pool.reserve(exchange=exchange, purpose="http", traffic_class="public")
+    reservation = pool.reserve(
+        exchange=exchange,
+        purpose="http",
+        traffic_class="public",
+        target_host=target_host,
+        connection_kind="rest",
+    )
     try:
         try:
             return _execute_with_proxy(
@@ -376,7 +387,8 @@ def _run_private_idempotent_read[ResultT](
     except Exception as exc:
         if not is_provable_presend_connect_error(exc):
             raise
-        fallback = _reserve_private_fallback(exchange)
+        target_host = _target_host_from_rest_target(target)
+        fallback = _reserve_private_fallback(exchange, target_host)
         if fallback is None:
             raise
         try:
@@ -416,8 +428,14 @@ def _run_private_direct[ResultT](
     """Execute private traffic on the direct route only."""
     pool = get_egress_pool()
     reservation: EgressReservation | None = None
+    target_host = _target_host_from_rest_target(target)
     if pool is not None and pool.size() > 0:
-        reservation = pool.reserve_private_direct(exchange=exchange, purpose="http")
+        reservation = pool.reserve_private_direct(
+            exchange=exchange,
+            purpose="http",
+            target_host=target_host,
+            connection_kind="rest",
+        )
     try:
         return _execute_with_proxy(
             target=target,
@@ -454,12 +472,62 @@ def _run_private_direct_without_reservation[ResultT](
     )
 
 
-def _reserve_private_fallback(exchange: str) -> EgressReservation | None:
+def _reserve_private_fallback(exchange: str, target_host: str | None) -> EgressReservation | None:
     """Reserve the configured private fallback route when it is available."""
     pool = get_egress_pool()
     if pool is None or pool.size() == 0:
         return None
-    return pool.reserve_private_fallback(exchange=exchange, purpose="http")
+    return pool.reserve_private_fallback(
+        exchange=exchange,
+        purpose="http",
+        target_host=target_host,
+        connection_kind="rest",
+    )
+
+
+def _target_host_from_rest_target(target: RestProxyTarget) -> str | None:
+    """Resolve the REST target host from an SDK or CCXT client.
+
+    Args:
+        target: REST proxy target carrying the external client.
+
+    Returns:
+        Lowercase hostname only, or ``None`` when the client exposes no
+        parseable base URL.
+    """
+    for attr in _REST_URL_ATTRS:
+        host = _target_host_from_url_candidate(getattr(target.client, attr, None))
+        if host is not None:
+            return host
+    urls = getattr(target.client, "urls", None)
+    return _target_host_from_url_candidate(urls)
+
+
+def _target_host_from_url_candidate(candidate: object) -> str | None:
+    """Resolve the first safe host from a URL string or nested mapping."""
+    if isinstance(candidate, str):
+        return _target_host_from_url_string(candidate)
+    if isinstance(candidate, Mapping):
+        mapped: Mapping[object, object] = candidate
+        for key in ("api", "public", "private", "rest", "spot", "futures"):
+            if key in mapped:
+                host = _target_host_from_url_candidate(mapped[key])
+                if host is not None:
+                    return host
+        for value in mapped.values():
+            host = _target_host_from_url_candidate(value)
+            if host is not None:
+                return host
+    return None
+
+
+def _target_host_from_url_string(value: str) -> str | None:
+    """Parse a URL string to a sanitized hostname only."""
+    parsed = urlsplit(value)
+    hostname = parsed.hostname
+    if hostname is None and "://" not in value:
+        hostname = urlsplit(f"https://{value}").hostname
+    return normalize_egress_target_host(hostname)
 
 
 def _execute_with_proxy[ResultT](

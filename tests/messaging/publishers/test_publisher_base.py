@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
@@ -35,6 +36,15 @@ from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.network.egress_models import EgressPoolConfig
+from snapper.infrastructure.network.egress_models import RouteConfig
+from snapper.infrastructure.network.egress_observability import EGRESS_SNAPSHOT_TOPIC
+from snapper.infrastructure.network.egress_observability import EgressSnapshotPublisher
+from snapper.infrastructure.network.egress_pool import configure_egress_pool
+from snapper.infrastructure.network.egress_pool import reset_egress_pool
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.publishers.base import _DARK_FEED_EXIT_CEILING_S
 from snapper.messaging.publishers.base import _FEED_HEALTH_FLUSH_INTERVAL_S
 from snapper.messaging.publishers.base import _TRADE_ID_LRU_MAX_PER_SYMBOL
@@ -267,6 +277,28 @@ class StubValidatedSubscriber(SimpleNamespace):
         self.recv_multipart = AsyncMock()
         self.subscribe = Mock()
         self.close = lambda: None
+
+
+def _message_publisher_stub() -> tuple[MessagePublisher, StubValidatedPublisher]:
+    """Build a message publisher around a stubbed validated PUB socket."""
+    raw = StubValidatedPublisher()
+    return MessagePublisher(cast(ValidatedPublisher, raw), SequenceTracker()), raw
+
+
+def _configure_egress_snapshot_pool() -> None:
+    """Install a direct route pool for publisher egress snapshot tests."""
+    configure_egress_pool(
+        EgressPoolConfig(
+            enabled=True,
+            routes=[
+                RouteConfig(
+                    id="direct",
+                    kind="direct",
+                    priority=100,
+                )
+            ],
+        )
+    )
 
 
 def test_require_repository_raises_when_uninitialized() -> None:
@@ -1201,6 +1233,116 @@ async def test_maybe_init_egress_pool_when_disabled(monkeypatch: pytest.MonkeyPa
     )
     await pub._maybe_init_egress_pool(MagicMock())
     init_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_start_egress_snapshot_publisher_builds_and_publishes_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pool-bearing feeds publish egress snapshots with their container id.
+
+    Given: A publisher process with a configured egress pool and ZMQ publisher,
+    When: The base service starts the egress snapshot publisher and one tick runs,
+    Then: A system egress snapshot event is sent with the resolved container id.
+    """
+    reset_egress_pool()
+    try:
+        _configure_egress_snapshot_pool()
+        pub = DummyPublisher(symbols=["BTC-USD"])
+        msg_publisher, raw = _message_publisher_stub()
+        pub.msg_publisher = msg_publisher
+        pub.settings.zmq_heartbeat_interval_ms = 60_000
+        monkeypatch.setattr(
+            "snapper.messaging.publishers.base.resolve_egress_container_id",
+            lambda _process_name: "pub:kraken@feed-host",
+        )
+
+        pub._start_egress_snapshot_publisher("pub:kraken")
+        snapshot_publisher = pub._egress_snapshot_publisher
+        assert snapshot_publisher is not None
+        sent = await snapshot_publisher.publish_once()
+        await pub._stop_egress_snapshot_publisher()
+
+        assert sent is True
+        assert snapshot_publisher.container == "pub:kraken@feed-host"
+        raw.send_multipart.assert_awaited_once()
+        call_args = raw.send_multipart.await_args
+        assert call_args is not None
+        assert call_args.args[0] == EGRESS_SNAPSHOT_TOPIC
+        payload: bytes = call_args.args[1]
+        decoded = json.loads(payload)
+        assert decoded["topic"] == EGRESS_SNAPSHOT_TOPIC
+        assert decoded["container"] == "pub:kraken@feed-host"
+        assert decoded["snapshot"]["enabled"] is True
+        assert decoded["snapshot"]["routes"][0]["id"] == "direct"
+    finally:
+        reset_egress_pool()
+
+
+def test_start_egress_snapshot_publisher_skips_without_pool_or_socket() -> None:
+    """The feed base skips egress snapshots until both prerequisites exist.
+
+    Given: Publishers missing either the local egress pool or message publisher,
+    When: The egress snapshot publisher start hook runs,
+    Then: No background publisher is installed.
+    """
+    reset_egress_pool()
+    try:
+        no_pool = DummyPublisher(symbols=["BTC-USD"])
+        msg_publisher, _raw = _message_publisher_stub()
+        no_pool.msg_publisher = msg_publisher
+        no_pool._start_egress_snapshot_publisher("pub:kraken")
+        assert no_pool._egress_snapshot_publisher is None
+
+        _configure_egress_snapshot_pool()
+        no_socket = DummyPublisher(symbols=["BTC-USD"])
+        no_socket.msg_publisher = None
+        no_socket._start_egress_snapshot_publisher("pub:kraken")
+        assert no_socket._egress_snapshot_publisher is None
+    finally:
+        reset_egress_pool()
+
+
+@pytest.mark.asyncio
+async def test_stop_egress_snapshot_publisher_awaits_active_publisher() -> None:
+    """The feed base stops an installed egress snapshot publisher.
+
+    Given: A running egress snapshot publisher owned by the feed base,
+    When: The base stop hook runs,
+    Then: The background task is cancelled and the stored publisher is cleared.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    msg_publisher, _raw = _message_publisher_stub()
+    snapshot_publisher = EgressSnapshotPublisher(
+        container="pub:kraken@feed-host",
+        publisher=msg_publisher,
+        interval_seconds=60.0,
+    )
+    snapshot_publisher.start()
+    task = snapshot_publisher._task
+    pub._egress_snapshot_publisher = snapshot_publisher
+
+    await pub._stop_egress_snapshot_publisher()
+
+    assert pub._egress_snapshot_publisher is None
+    assert snapshot_publisher._task is None
+    assert task is not None
+    assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_stop_egress_snapshot_publisher_returns_without_installed_publisher() -> None:
+    """The feed base stop hook is a no-op when no snapshot publisher exists.
+
+    Given: A publisher with no installed egress snapshot publisher,
+    When: The base stop hook runs,
+    Then: Shutdown completes without creating or stopping anything.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+
+    await pub._stop_egress_snapshot_publisher()
+
+    assert pub._egress_snapshot_publisher is None
 
 
 @pytest.mark.asyncio

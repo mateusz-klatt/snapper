@@ -1121,7 +1121,10 @@ Deploy notes (see `docker-compose.yml` `snapper-feed` service):
 - By default feed publishers dial exchanges directly. To verify egress
   routing, set `feed_egress_enabled=true`, restart `snapper-feed`, then
   confirm publisher connections use the configured `snapper-egress` SOCKS
-  routes.
+  routes. Each pool-bearing process publishes a read-only
+  `system.egress.snapshot` frame on the heartbeat cadence; the API
+  process subscribes to those frames and merges the latest per-container
+  snapshots into `GET /api/health/egress` for observability only.
 
 **Multi-instance deployment (AI-review fanout dedup):**
 multi-worker uvicorn is a supported production topology. The

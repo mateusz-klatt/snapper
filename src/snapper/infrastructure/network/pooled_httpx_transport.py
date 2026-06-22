@@ -110,7 +110,12 @@ class PooledAsyncTransport(httpx.AsyncBaseTransport):
         exchange_name = (
             publisher._get_exchange_name() if publisher is not None else self._default_exchange_tag
         )
-        reservation = pool.reserve(exchange=exchange_name, purpose="http")
+        reservation = pool.reserve(
+            exchange=exchange_name,
+            purpose="http",
+            target_host=request.url.host,
+            connection_kind="rest",
+        )
         transport = self._get_or_create_transport(reservation.proxy_url)
         try:
             return await transport.handle_async_request(request)

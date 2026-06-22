@@ -2042,6 +2042,27 @@ class TestSystemTopicHeartbeatPaths:
         assert not valid
         assert "2 segments" in _err.lower()
 
+    def test_system_egress_snapshot_valid(self) -> None:
+        """Verify system.egress.snapshot topic is valid.
+
+        Given: The cross-process egress snapshot topic,
+        When: Validated,
+        Then: Validation succeeds.
+        """
+        valid, _err = validate_topic("system.egress.snapshot")
+        assert valid
+
+    def test_system_egress_extra_segments(self) -> None:
+        """Verify malformed system.egress topics are rejected.
+
+        Given: A system.egress topic with additional segments,
+        When: Validated,
+        Then: Validation fails with the exact topic requirement.
+        """
+        valid, _err = validate_topic("system.egress.snapshot.extra")
+        assert not valid
+        assert "system.egress.snapshot" in _err
+
     def test_system_invalid_type(self) -> None:
         """Verify system topic with invalid type is rejected.
 

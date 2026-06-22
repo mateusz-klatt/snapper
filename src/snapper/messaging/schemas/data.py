@@ -49,6 +49,7 @@ from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
 from snapper.core.types import PairedExecutionPolicy
+from snapper.infrastructure.network.egress_models import EgressPoolStatusSnapshot
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import FillStatus
 from snapper.interface.websocket.schemas import HealthStatus
@@ -566,6 +567,22 @@ class HeartbeatData(StrictDataSchema[Literal["heartbeat"]]):
     status: HealthStatus
     lag_ms: int
     meta: JsonObject = Field(default={})
+
+
+class EgressPoolSnapshotEventData(StrictDataSchema[Literal["egress_pool_snapshot_event"]]):
+    """Cross-process egress pool observability snapshot.
+
+    Published by each process that owns a process-local egress pool so
+    the API process can merge reservations without changing routing.
+
+    Attributes:
+        container: Stable human-readable source identity.
+        snapshot: Read-only pool status snapshot from the source process.
+    """
+
+    type: Literal["egress_pool_snapshot_event"] = "egress_pool_snapshot_event"
+    container: str
+    snapshot: EgressPoolStatusSnapshot
 
 
 class SettingChangedData(StrictDataSchema[Literal["setting_changed"]]):

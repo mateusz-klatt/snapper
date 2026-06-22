@@ -278,12 +278,40 @@ class EgressActiveReservationSnapshot(BaseModel):
     Attributes:
         exchange: Exchange name resolved by the egress context.
         traffic_class: Explicit traffic class used for selection.
+        container: Process or container identity that reported the reservation.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     exchange: str
     traffic_class: Literal["public", "private"]
+    container: str = ""
+
+
+class EgressConnectionSnapshot(BaseModel):
+    """Observed target host connection state for one egress route.
+
+    Attributes:
+        host: Lowercase target hostname only, without path, query,
+            headers, body, or credential material.
+        kind: Connection kind, WebSocket or REST.
+        exchange: Exchange name resolved by the egress context.
+        traffic_class: Explicit traffic class used for selection.
+        container: Process or container identity that reported the connection.
+        count: Currently open reservations for this host tuple.
+        last_seen_at: Latest REST observation timestamp, or ``None``
+            for live WebSocket counters.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    host: str
+    kind: Literal["ws", "rest"]
+    exchange: str
+    traffic_class: Literal["public", "private"]
+    container: str = ""
+    count: int
+    last_seen_at: datetime | None = None
 
 
 class EgressRouteStatusSnapshot(BaseModel):
@@ -304,6 +332,7 @@ class EgressRouteStatusSnapshot(BaseModel):
         in_use_count: Number of outstanding reservation handles.
         active_reservations: Unique exchange and traffic-class pairs
             currently reserved on the route.
+        connections: Target host connection counters and REST last-seen rows.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
@@ -320,6 +349,7 @@ class EgressRouteStatusSnapshot(BaseModel):
     quarantine_seconds_remaining: float | None
     in_use_count: int
     active_reservations: list[EgressActiveReservationSnapshot] = Field(default_factory=list)
+    connections: list[EgressConnectionSnapshot] = Field(default_factory=list)
 
 
 class EgressPoolStatusSnapshot(BaseModel):

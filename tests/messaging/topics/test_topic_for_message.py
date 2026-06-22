@@ -6,8 +6,10 @@ from datetime import datetime
 import pytest
 
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.infrastructure.network.egress_models import EgressPoolStatusSnapshot
 from snapper.messaging.schemas.data import AlertEventData
 from snapper.messaging.schemas.data import CandleData
+from snapper.messaging.schemas.data import EgressPoolSnapshotEventData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
@@ -375,6 +377,23 @@ class TestTopicForMessage:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
         assert topic_for_message(data) == "system.settings"
+
+    def test_egress_snapshot_event_data(self) -> None:
+        """EgressPoolSnapshotEventData maps to system.egress.snapshot.
+
+        Given: An egress snapshot event,
+        When: Deriving topic,
+        Then: Returns system.egress.snapshot.
+        """
+        data = EgressPoolSnapshotEventData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            container="feed@host",
+            snapshot=EgressPoolStatusSnapshot(enabled=True),
+        )
+        assert topic_for_message(data) == "system.egress.snapshot"
 
     def test_symbol_alias_update_data(self) -> None:
         """SymbolAliasUpdateData maps to system.symbol_aliases.

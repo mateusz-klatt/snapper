@@ -630,6 +630,7 @@ def _validate_system_topic(topic: str) -> tuple[bool, str]:
 
     Expected formats:
     - system.heartbeats[.{component_type}[.{component_name}]]
+    - system.egress.snapshot
     - system.symbol_aliases
     - system.settings
 
@@ -649,13 +650,18 @@ def _validate_system_topic(topic: str) -> tuple[bool, str]:
         return False, f"Expected 'system' category, got '{category}'"
     if system_type == "heartbeats":
         return _validate_heartbeat_topic(segments)
+    if system_type == "egress":
+        if len(segments) == 3 and segments[2] == "snapshot":
+            return True, ""
+        return False, "system.egress must be exactly system.egress.snapshot"
     if system_type in {"symbol_aliases", "settings"}:
         if len(segments) != 2:
             return False, f"system.{system_type} must have exactly 2 segments"
         return True, ""
     return (
         False,
-        f"Invalid system type '{system_type}'. Must be: heartbeats, settings, symbol_aliases",
+        "Invalid system type "
+        f"'{system_type}'. Must be: egress, heartbeats, settings, symbol_aliases",
     )
 
 

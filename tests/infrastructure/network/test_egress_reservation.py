@@ -123,6 +123,8 @@ class TestFinalizer:
             reservation.route_id,
             reservation.exchange,
             reservation.traffic_class,
+            reservation.connection_kind,
+            reservation.target_host,
         )
         assert pool.snapshot()[0].in_use_count == 0
         assert pool.status_snapshot().routes[0].active_reservations == []

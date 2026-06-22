@@ -23,6 +23,7 @@ import json
 import os
 import socket
 import threading
+from collections import OrderedDict
 from datetime import UTC
 from datetime import datetime
 from typing import Final
@@ -34,6 +35,7 @@ from loguru import logger
 from snapper.application.services.settings import SettingsService
 from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
 from snapper.infrastructure.network.egress_models import EgressActiveReservationSnapshot
+from snapper.infrastructure.network.egress_models import EgressConnectionSnapshot
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import EgressPoolStatusSnapshot
 from snapper.infrastructure.network.egress_models import EgressRouteStatusSnapshot
@@ -41,6 +43,7 @@ from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_models import RouteSelection
 from snapper.infrastructure.network.egress_models import RouteSnapshot
 from snapper.infrastructure.network.egress_models import RouteState
+from snapper.infrastructure.network.egress_reservation import ConnectionKind
 from snapper.infrastructure.network.egress_reservation import EgressPoolBase
 from snapper.infrastructure.network.egress_reservation import EgressReservation
 from snapper.infrastructure.network.egress_reservation import QuarantineReason
@@ -48,6 +51,49 @@ from snapper.infrastructure.network.egress_reservation import TrafficClass
 
 _PYTHON_SOCKS_WARNING_LOGGED: list[bool] = [False]
 """One-shot flag to throttle the ``python-socks not installed`` warning."""
+
+_MAX_REST_HOSTS_PER_ROUTE = 16
+_HOST_FORBIDDEN_CHARS = frozenset("/\\?#@")
+ConnectionKey = tuple[str, TrafficClass, ConnectionKind, str]
+
+
+def normalize_egress_target_host(target_host: str | None) -> str | None:
+    """Return a safe lowercase hostname for egress observability.
+
+    Args:
+        target_host: Candidate hostname from a parsed URL or request object.
+
+    Returns:
+        Lowercase host string, or ``None`` when the candidate is empty,
+        contains control characters, whitespace, or URL/path separators.
+    """
+    if target_host is None:
+        return None
+    for char in target_host:
+        codepoint = ord(char)
+        if codepoint < 32 or codepoint == 127:
+            return None
+    host = target_host.strip().lower()
+    if not host:
+        return None
+    for char in host:
+        if char.isspace() or char in _HOST_FORBIDDEN_CHARS:
+            return None
+    return host
+
+
+def _connection_kind_for_purpose(purpose: Literal["websocket", "http"]) -> ConnectionKind:
+    """Return the default connection kind for a reservation purpose.
+
+    Args:
+        purpose: Reservation purpose supplied by the caller.
+
+    Returns:
+        ``"ws"`` for WebSocket reservations and ``"rest"`` for HTTP ones.
+    """
+    if purpose == "websocket":
+        return "ws"
+    return "rest"
 
 
 class EgressPool(EgressPoolBase):
@@ -79,6 +125,12 @@ class EgressPool(EgressPoolBase):
         }
         self._active_reservations: dict[str, dict[tuple[str, TrafficClass], int]] = {
             route.id: {} for route in config.routes
+        }
+        self._active_connection_counts: dict[str, dict[ConnectionKey, int]] = {
+            route.id: {} for route in config.routes
+        }
+        self._rest_last_seen: dict[str, OrderedDict[ConnectionKey, datetime]] = {
+            route.id: OrderedDict() for route in config.routes
         }
 
     def size(self) -> int:
@@ -191,6 +243,8 @@ class EgressPool(EgressPoolBase):
         purpose: Literal["websocket", "http"],
         preferred_route: str | None = None,
         traffic_class: str = "public",
+        target_host: str | None = None,
+        connection_kind: ConnectionKind | None = None,
     ) -> EgressReservation:
         """Pick the best route and return a borrowed handle.
 
@@ -230,6 +284,9 @@ class EgressPool(EgressPoolBase):
                 allow-list policy. ``"private"`` uses the direct
                 then configured fallback policy. Any other value is
                 treated as ``"public"``.
+            target_host: Parsed target hostname for read-only observability.
+            connection_kind: ``"ws"`` or ``"rest"``. When omitted, the
+                value is derived from ``purpose``.
 
         Returns:
             A fresh ``EgressReservation`` with the route's
@@ -243,6 +300,8 @@ class EgressPool(EgressPoolBase):
         effective_traffic_class: TrafficClass = (
             "private" if traffic_class == "private" else "public"
         )
+        effective_connection_kind = connection_kind or _connection_kind_for_purpose(purpose)
+        normalized_host = normalize_egress_target_host(target_host)
         with self._lock:
             selection = self._pick_locked(preferred_route, exchange, now, effective_traffic_class)
             if selection is None:
@@ -266,6 +325,14 @@ class EgressPool(EgressPoolBase):
             route_config = selection.state.config
             route_id = route_config.id
             self._increment_active_reservation_locked(route_id, exchange, effective_traffic_class)
+            self._increment_connection_locked(
+                route_id,
+                exchange,
+                effective_traffic_class,
+                effective_connection_kind,
+                normalized_host,
+                now,
+            )
             route_kind = route_config.kind
             proxy_url = route_config.proxy_url
             is_fallback = selection.is_fallback
@@ -289,6 +356,8 @@ class EgressPool(EgressPoolBase):
             proxy_url=proxy_url,
             exchange=exchange,
             traffic_class=effective_traffic_class,
+            connection_kind=effective_connection_kind,
+            target_host=normalized_host,
         )
 
     def reserve_private_direct(
@@ -296,6 +365,8 @@ class EgressPool(EgressPoolBase):
         *,
         exchange: str,
         purpose: Literal["websocket", "http"],
+        target_host: str | None = None,
+        connection_kind: ConnectionKind = "rest",
     ) -> EgressReservation:
         """Reserve the enabled direct route for private direct-only REST traffic.
 
@@ -307,6 +378,8 @@ class EgressPool(EgressPoolBase):
         Args:
             exchange: Exchange name attached to the active reservation map.
             purpose: ``"websocket"`` or ``"http"`` for diagnostics.
+            target_host: Parsed target hostname for read-only observability.
+            connection_kind: ``"ws"`` or ``"rest"`` host bucket.
 
         Returns:
             Direct-route reservation with ``traffic_class="private"``.
@@ -315,6 +388,7 @@ class EgressPool(EgressPoolBase):
             AllRoutesQuarantinedError: When no enabled direct route exists.
         """
         now = datetime.now(UTC)
+        normalized_host = normalize_egress_target_host(target_host)
         with self._lock:
             direct = self._fallback_direct_locked()
             if direct is None:
@@ -327,12 +401,22 @@ class EgressPool(EgressPoolBase):
             route_id = direct.config.id
             proxy_url = direct.config.proxy_url
             self._increment_active_reservation_locked(route_id, exchange, "private")
+            self._increment_connection_locked(
+                route_id,
+                exchange,
+                "private",
+                connection_kind,
+                normalized_host,
+                now,
+            )
         return EgressReservation(
             pool=self,
             route_id=route_id,
             proxy_url=proxy_url,
             exchange=exchange,
             traffic_class="private",
+            connection_kind=connection_kind,
+            target_host=normalized_host,
         )
 
     def reserve_private_fallback(
@@ -340,6 +424,8 @@ class EgressPool(EgressPoolBase):
         *,
         exchange: str,
         purpose: Literal["websocket", "http"],
+        target_host: str | None = None,
+        connection_kind: ConnectionKind = "rest",
     ) -> EgressReservation | None:
         """Reserve the configured private fallback route if it is healthy.
 
@@ -352,12 +438,15 @@ class EgressPool(EgressPoolBase):
         Args:
             exchange: Exchange name attached to the active reservation map.
             purpose: ``"websocket"`` or ``"http"`` for diagnostics.
+            target_host: Parsed target hostname for read-only observability.
+            connection_kind: ``"ws"`` or ``"rest"`` host bucket.
 
         Returns:
             Fallback-route reservation, or ``None`` when no configured and
             healthy fallback exists.
         """
         now = datetime.now(UTC)
+        normalized_host = normalize_egress_target_host(target_host)
         with self._lock:
             fallback_route_id = self._config.private_fallback_route_id
             if fallback_route_id is None:
@@ -370,12 +459,22 @@ class EgressPool(EgressPoolBase):
             route_id = fallback.config.id
             proxy_url = fallback.config.proxy_url
             self._increment_active_reservation_locked(route_id, exchange, "private")
+            self._increment_connection_locked(
+                route_id,
+                exchange,
+                "private",
+                connection_kind,
+                normalized_host,
+                now,
+            )
         return EgressReservation(
             pool=self,
             route_id=route_id,
             proxy_url=proxy_url,
             exchange=exchange,
             traffic_class="private",
+            connection_kind=connection_kind,
+            target_host=normalized_host,
         )
 
     def snapshot(self) -> list[RouteSnapshot]:
@@ -416,6 +515,7 @@ class EgressPool(EgressPoolBase):
             private_on_fallback = False
             for state in self._states.values():
                 active_reservations = self._active_snapshot_locked(state.config.id)
+                connections = self._connection_snapshot_locked(state.config.id)
                 if state.config.kind != "direct" and any(
                     item.traffic_class == "private" for item in active_reservations
                 ):
@@ -438,6 +538,7 @@ class EgressPool(EgressPoolBase):
                         quarantine_seconds_remaining=quarantine_seconds_remaining,
                         in_use_count=state.in_use_count,
                         active_reservations=active_reservations,
+                        connections=connections,
                     )
                 )
             return EgressPoolStatusSnapshot(
@@ -453,6 +554,8 @@ class EgressPool(EgressPoolBase):
         route_id: str,
         exchange: str,
         traffic_class: TrafficClass,
+        connection_kind: ConnectionKind,
+        target_host: str | None,
     ) -> None:
         """Decrement a route's ``in_use_count`` (clamped to >= 0).
 
@@ -466,6 +569,13 @@ class EgressPool(EgressPoolBase):
                 return
             state.in_use_count = max(0, state.in_use_count - 1)
             self._decrement_active_reservation_locked(route_id, exchange, traffic_class)
+            self._decrement_connection_locked(
+                route_id,
+                exchange,
+                traffic_class,
+                connection_kind,
+                target_host,
+            )
 
     def _quarantine_route(
         self,
@@ -543,6 +653,73 @@ class EgressPool(EgressPoolBase):
             return
         reservations[key] = count - 1
 
+    def _increment_connection_locked(
+        self,
+        route_id: str,
+        exchange: str,
+        traffic_class: TrafficClass,
+        connection_kind: ConnectionKind,
+        target_host: str | None,
+        observed_at: datetime,
+    ) -> None:
+        """Increment the active host tuple count for a route.
+
+        Pool lock MUST be held.
+        """
+        if target_host is None:
+            return
+        connections = self._active_connection_counts.get(route_id)
+        if connections is None:
+            return
+        key = (exchange, traffic_class, connection_kind, target_host)
+        connections[key] = connections.get(key, 0) + 1
+        if connection_kind == "rest":
+            self._record_rest_last_seen_locked(route_id, key, observed_at)
+
+    def _decrement_connection_locked(
+        self,
+        route_id: str,
+        exchange: str,
+        traffic_class: TrafficClass,
+        connection_kind: ConnectionKind,
+        target_host: str | None,
+    ) -> None:
+        """Decrement the active host tuple count for a route.
+
+        Pool lock MUST be held.
+        """
+        if target_host is None:
+            return
+        connections = self._active_connection_counts.get(route_id)
+        if connections is None:
+            return
+        key = (exchange, traffic_class, connection_kind, target_host)
+        count = connections.get(key)
+        if count is None:
+            return
+        if count <= 1:
+            del connections[key]
+            return
+        connections[key] = count - 1
+
+    def _record_rest_last_seen_locked(
+        self,
+        route_id: str,
+        key: ConnectionKey,
+        observed_at: datetime,
+    ) -> None:
+        """Record one REST host observation, capped by route.
+
+        Pool lock MUST be held.
+        """
+        hosts = self._rest_last_seen.get(route_id)
+        if hosts is None:
+            return
+        hosts.pop(key, None)
+        hosts[key] = observed_at
+        while len(hosts) > _MAX_REST_HOSTS_PER_ROUTE:
+            hosts.popitem(last=False)
+
     def _active_snapshot_locked(self, route_id: str) -> list[EgressActiveReservationSnapshot]:
         """Return sorted unique active reservation tuples for a route.
 
@@ -553,6 +730,44 @@ class EgressPool(EgressPoolBase):
             EgressActiveReservationSnapshot(exchange=exchange, traffic_class=traffic_class)
             for exchange, traffic_class in sorted(reservations)
         ]
+
+    def _connection_snapshot_locked(self, route_id: str) -> list[EgressConnectionSnapshot]:
+        """Return sorted connection rows for a route.
+
+        Pool lock MUST be held.
+        """
+        connections = self._active_connection_counts.get(route_id, {})
+        rows = [
+            EgressConnectionSnapshot(
+                host=host,
+                kind=connection_kind,
+                exchange=exchange,
+                traffic_class=traffic_class,
+                count=count,
+                last_seen_at=None,
+            )
+            for (exchange, traffic_class, connection_kind, host), count in sorted(
+                connections.items(),
+                key=lambda item: (item[0][3], item[0][2], item[0][0], item[0][1]),
+            )
+            if connection_kind == "ws"
+        ]
+        rest_seen = self._rest_last_seen.get(route_id, OrderedDict())
+        rows.extend(
+            EgressConnectionSnapshot(
+                host=host,
+                kind=connection_kind,
+                exchange=exchange,
+                traffic_class=traffic_class,
+                count=connections.get((exchange, traffic_class, connection_kind, host), 0),
+                last_seen_at=last_seen_at,
+            )
+            for (exchange, traffic_class, connection_kind, host), last_seen_at in sorted(
+                rest_seen.items(),
+                key=lambda item: (item[0][3], item[0][2], item[0][0], item[0][1]),
+            )
+        )
+        return rows
 
     @staticmethod
     def _quarantine_remaining_locked(state: RouteState, now: datetime) -> float | None:

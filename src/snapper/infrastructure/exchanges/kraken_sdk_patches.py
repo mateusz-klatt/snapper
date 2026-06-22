@@ -45,8 +45,10 @@ import asyncio
 import contextvars
 import weakref
 from collections.abc import Callable
+from collections.abc import Mapping
 from typing import Any
 from typing import Final
+from urllib.parse import urlsplit
 
 import kraken.futures.websocket as _kraken_futures_ws
 import kraken.spot.websocket.connectors as _kraken_connectors
@@ -374,6 +376,7 @@ class _ConnectShim:
     def __init__(self, original_connect: Any, *args: Any, **kwargs: Any) -> None:
         self._reservation: EgressReservation | None = None
         self._traffic_class = "public"
+        target_host = _target_host_from_connect_args(args, kwargs)
         pool = get_egress_pool()
         if pool is not None and pool.size() > 0:
             exchange_name, traffic_class = resolve_egress_traffic()
@@ -382,6 +385,8 @@ class _ConnectShim:
                 exchange=exchange_name,
                 purpose="websocket",
                 traffic_class=traffic_class,
+                target_host=target_host,
+                connection_kind="ws",
             )
             kwargs = {**kwargs, **self._reservation.websocket_kwargs()}
         kwargs = {
@@ -513,6 +518,31 @@ class _ConnectShim:
             _CLOSE_1015_QUARANTINE_S,
         )
         self._reservation.quarantine(_CLOSE_1015_QUARANTINE_S, reason="close-1015")
+
+
+def _target_host_from_connect_args(
+    args: tuple[object, ...], kwargs: Mapping[str, object]
+) -> str | None:
+    """Extract the hostname from ``websockets.connect`` call arguments.
+
+    Args:
+        args: Positional arguments passed to the SDK's connect call.
+        kwargs: Keyword arguments passed to the SDK's connect call.
+
+    Returns:
+        Lowercase hostname from the URI, or ``None`` when no URI exists
+        or the URI does not parse to a host.
+    """
+    candidate = kwargs.get("uri")
+    if not isinstance(candidate, str) and args:
+        first = args[0]
+        candidate = first if isinstance(first, str) else None
+    if not isinstance(candidate, str):
+        return None
+    hostname = urlsplit(candidate).hostname
+    if hostname is None:
+        return None
+    return hostname.lower()
 
 
 def _wrap_connect_factory(original_connect: Any) -> Any:

@@ -41,6 +41,7 @@ class _FakeCcxtClient:
     def __init__(self) -> None:
         self.session = requests.Session()
         self.proxies: dict[str, str] = {}
+        self.urls: dict[str, object] = {"api": {"public": "https://api.kraken.com"}}
         self.load_markets: Callable[[], dict[str, object]] = lambda: {}
         self.fetch_ticker: Callable[[str], dict[str, object]] = lambda _symbol: {}
         self.fetch_balance: Callable[[], dict[str, object]] = lambda: {}
@@ -53,6 +54,7 @@ class _FakeFuturesTradeClient:
     def __init__(self) -> None:
         self._FuturesClient__session = requests.Session()
         self._FuturesClient__proxy = None
+        self.URL = "https://futures.kraken.com"
         self.create_order: Callable[..., dict[str, object]] = lambda **_kwargs: {}
 
 
@@ -62,6 +64,7 @@ class _FakeSpotSdkClient:
     def __init__(self) -> None:
         self._SpotClient__session = requests.Session()
         self._SpotClient__proxy = None
+        self.URL = "https://api.kraken.com"
 
 
 class _FakeClientWithoutProxyAttribute:
@@ -233,6 +236,90 @@ def test_public_rest_routes_through_pool_vpn_and_restores_proxy_state() -> None:
     assert seen_proxies == [{"http": "socks5h://ie:1081", "https": "socks5h://ie:1081"}]
     assert client.session.proxies == {"http": "http://before", "https": "http://before"}
     assert client.session.trust_env is True
+
+
+def test_public_rest_records_ccxt_base_url_host_in_snapshot() -> None:
+    """Spec — CCXT REST base URL host is recorded without path or query.
+
+    Given a CCXT-like client whose API URL includes path and query data,
+    When a public REST read is routed through the egress pool,
+    Then the route snapshot records only the lowercase target hostname.
+    """
+    pool = configure_egress_pool(_private_fallback_config())
+    assert pool is not None
+    client = _FakeCcxtClient()
+    client.urls = {"api": {"public": "https://API.KRAKEN.COM/0/public?txid=secret"}}
+
+    result = route_kraken_rest_sync_call(
+        exchange="kraken",
+        operation="fetch_ticker",
+        kind="public_read",
+        target=ccxt_proxy_target(client),
+        proxy_lock=threading.RLock(),
+        sync_call=lambda: "ok",
+    )
+
+    assert result == "ok"
+    connection = pool.status_snapshot().routes[1].connections[0]
+    assert connection.host == "api.kraken.com"
+    assert connection.kind == "rest"
+    assert connection.count == 0
+    assert connection.last_seen_at is not None
+
+
+def test_public_rest_uses_fallback_mapping_host_without_scheme() -> None:
+    """Spec — REST host resolver falls back through nested URL mappings.
+
+    Given a CCXT-like client whose preferred API URL entry is absent
+        but another mapping value carries a schemeless hostname,
+    When a public REST read is routed,
+    Then the route snapshot records the fallback hostname.
+    """
+    pool = configure_egress_pool(_private_fallback_config())
+    assert pool is not None
+    client = _FakeCcxtClient()
+    client.urls = {"api": {"public": None}, "backup": "API.KRAKEN.COM"}
+
+    route_kraken_rest_sync_call(
+        exchange="kraken",
+        operation="fetch_ticker",
+        kind="public_read",
+        target=ccxt_proxy_target(client),
+        proxy_lock=threading.RLock(),
+        sync_call=lambda: "ok",
+    )
+
+    connection = pool.status_snapshot().routes[1].connections[0]
+    assert connection.host == "api.kraken.com"
+
+
+def test_spot_rest_records_sdk_base_url_host_in_snapshot() -> None:
+    """Spec — SDK REST base URL host is recorded for URL-shaped clients.
+
+    Given a Spot SDK-like client with a URL attribute,
+    When a private mutation runs on the direct route,
+    Then the route snapshot records the SDK REST hostname only.
+    """
+    pool = configure_egress_pool(_private_fallback_config())
+    assert pool is not None
+    client = _FakeSpotSdkClient()
+
+    result = route_kraken_rest_sync_call(
+        exchange="kraken",
+        operation="private_mutation",
+        kind="private_mutation",
+        target=spot_sdk_proxy_target(client),
+        proxy_lock=threading.RLock(),
+        sync_call=lambda: "ok",
+    )
+
+    assert result == "ok"
+    connection = pool.status_snapshot().routes[0].connections[0]
+    assert connection.host == "api.kraken.com"
+    assert connection.kind == "rest"
+    assert connection.exchange == "kraken"
+    assert connection.traffic_class == "private"
+    assert connection.count == 0
 
 
 def test_private_identity_public_rest_read_runs_direct_without_pool_reservation() -> None:

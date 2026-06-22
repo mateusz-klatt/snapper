@@ -115,6 +115,7 @@ database artifacts used by the trade runtime. They are not additional ZMQ topics
 | `system.heartbeats.executor.{exchange}.{wallet_short}` | Per-wallet executor heartbeat (5 segments). `wallet_short` is the **last** 12 lowercase hex characters of the wallet UUID (see `snapper.core.wallet_short`) |
 | `system.heartbeats.strategy.{name}` | Strategy heartbeat (e.g. `strategy.rsi_btc_1h`) |
 | `system.heartbeats.feed.{exchange}` | Feed heartbeat (e.g. `feed.kraken`, `feed.paper.kraken`) |
+| `system.egress.snapshot` | Read-only process-local egress pool snapshot for API aggregation |
 | `system.settings` | Configuration change notifications |
 | `system.symbol_aliases` | Symbol cache invalidation |
 
@@ -124,6 +125,18 @@ Heartbeat `component` values use dot notation matching the topic path after
 executor heartbeat envelope additionally carries `meta.wallet_public_id` so
 subscribers that prefix-match the 4-segment parent topic can still
 disambiguate by reading the payload.
+
+Pool-bearing processes publish `system.egress.snapshot` on the heartbeat
+cadence with an `EgressPoolSnapshotEventData` payload. The payload
+carries `container` (`<role>@<hostname>`) and `snapshot`, where
+`snapshot` is the process-local `EgressPoolStatusSnapshot`, including
+per-route `connections` rows for open WebSocket host counts and capped
+REST last-seen hostnames. Only hostnames are emitted; URL paths, query
+strings, headers, bodies, and authentication material are stripped before
+the snapshot leaves the process. The API process subscribes to the exact
+topic, caches the latest frame per container by local receive time, and
+merges those snapshots into `GET /api/health/egress` without changing
+routing decisions.
 
 Executor heartbeats derive `status` from supervised-loop health instead of
 reporting a fixed healthy value. ERROR fires on an active loop death streak

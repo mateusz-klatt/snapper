@@ -1257,7 +1257,7 @@ class TestPhaseBPrimeShim:
         fake_pool.size.return_value = 1
         fake_pool.reserve.return_value = _ReservationDouble()
 
-        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+        def fake_connect(*args: object, **kwargs: object) -> MagicMock:
             return MagicMock()
 
         with patch(
@@ -1276,6 +1276,146 @@ class TestPhaseBPrimeShim:
             exchange="kraken",
             purpose="websocket",
             traffic_class="private",
+            target_host="kraken",
+            connection_kind="ws",
+        )
+
+    def test_shim_passes_keyword_uri_host_to_pool(self) -> None:
+        """Spec — keyword URI hostname is passed to the egress pool.
+
+        Given the pool is enabled and the connect URI is supplied as a kwarg,
+        When _ConnectShim is constructed,
+        Then the pool receives the lowercase URI hostname only.
+        """
+
+        class _ReservationDouble:
+            route_id = "default"
+            proxy_url: str | None = None
+
+            def websocket_kwargs(self) -> dict[str, str | None]:
+                """Return direct WebSocket kwargs.
+
+                Returns:
+                    Proxy kwargs for a direct route.
+                """
+                return {"proxy": None}
+
+            def release(self) -> None:
+                """Release the test reservation."""
+                return None
+
+        fake_pool = MagicMock()
+        fake_pool.size.return_value = 1
+        fake_pool.reserve.return_value = _ReservationDouble()
+
+        def fake_connect(*args: object, **kwargs: object) -> MagicMock:
+            return MagicMock()
+
+        with patch(
+            "snapper.infrastructure.exchanges.kraken_sdk_patches.get_egress_pool",
+            return_value=fake_pool,
+        ):
+            shim_cls = _wrap_connect_factory(fake_connect)
+            shim_cls(uri="wss://FUTURES.KRAKEN.COM/ws/v1?token=secret")
+
+        fake_pool.reserve.assert_called_once_with(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="public",
+            target_host="futures.kraken.com",
+            connection_kind="ws",
+        )
+
+    def test_shim_missing_uri_passes_none_target_host_to_pool(self) -> None:
+        """Spec — missing connect URI leaves the egress target host unknown.
+
+        Given the pool is enabled and no positional or keyword URI is present,
+        When _ConnectShim is constructed,
+        Then the pool receives ``target_host=None``.
+        """
+
+        class _ReservationDouble:
+            route_id = "default"
+            proxy_url: str | None = None
+
+            def websocket_kwargs(self) -> dict[str, str | None]:
+                """Return direct WebSocket kwargs.
+
+                Returns:
+                    Proxy kwargs for a direct route.
+                """
+                return {"proxy": None}
+
+            def release(self) -> None:
+                """Release the test reservation."""
+                return None
+
+        fake_pool = MagicMock()
+        fake_pool.size.return_value = 1
+        fake_pool.reserve.return_value = _ReservationDouble()
+
+        def fake_connect(*args: object, **kwargs: object) -> MagicMock:
+            return MagicMock()
+
+        with patch(
+            "snapper.infrastructure.exchanges.kraken_sdk_patches.get_egress_pool",
+            return_value=fake_pool,
+        ):
+            shim_cls = _wrap_connect_factory(fake_connect)
+            shim_cls()
+
+        fake_pool.reserve.assert_called_once_with(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="public",
+            target_host=None,
+            connection_kind="ws",
+        )
+
+    def test_shim_unparseable_uri_passes_none_target_host_to_pool(self) -> None:
+        """Spec — URI without a hostname leaves the egress target host unknown.
+
+        Given the pool is enabled and the connect URI has no URL hostname,
+        When _ConnectShim is constructed,
+        Then the pool receives ``target_host=None``.
+        """
+
+        class _ReservationDouble:
+            route_id = "default"
+            proxy_url: str | None = None
+
+            def websocket_kwargs(self) -> dict[str, str | None]:
+                """Return direct WebSocket kwargs.
+
+                Returns:
+                    Proxy kwargs for a direct route.
+                """
+                return {"proxy": None}
+
+            def release(self) -> None:
+                """Release the test reservation."""
+                return None
+
+        fake_pool = MagicMock()
+        fake_pool.size.return_value = 1
+        fake_pool.reserve.return_value = _ReservationDouble()
+
+        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+            return MagicMock()
+
+        with patch(
+            "snapper.infrastructure.exchanges.kraken_sdk_patches.get_egress_pool",
+            return_value=fake_pool,
+        ):
+            shim_cls = _wrap_connect_factory(fake_connect)
+            shim_cls("not-a-url")
+
+        fake_pool.reserve.assert_called_once_with(
+            exchange="kraken",
+            purpose="websocket",
+            traffic_class="public",
+            target_host=None,
+            connection_kind="ws",
         )
 
     def test_shim_socks5_route_injects_proxy_url(self) -> None:

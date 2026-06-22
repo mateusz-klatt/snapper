@@ -144,6 +144,36 @@ class TestPooledAsyncTransport:
         assert factory.calls == ["socks5h://snapper-egress:1084"]
 
     @pytest.mark.asyncio
+    async def test_request_host_is_recorded_without_path_or_query(self) -> None:
+        """Spec — HTTPX request host is recorded as a REST connection host.
+
+        Given a request URL with path and query data,
+        When the pooled transport reserves and releases a route,
+        Then the egress snapshot keeps only the lowercase hostname.
+        """
+        pool = configure_egress_pool(
+            EgressPoolConfig(
+                enabled=True,
+                routes=[RouteConfig(id="default", kind="direct", priority=0)],
+            )
+        )
+        assert pool is not None
+        factory = _RecordingFactory()
+        transport = PooledAsyncTransport(transport_factory=factory)
+        request = httpx.Request(
+            "GET",
+            "https://API.WALUTOMAT.PL/private/order?orderId=secret",
+        )
+
+        await transport.handle_async_request(request)
+
+        connection = pool.status_snapshot().routes[0].connections[0]
+        assert connection.host == "api.walutomat.pl"
+        assert connection.kind == "rest"
+        assert connection.count == 0
+        assert connection.last_seen_at is not None
+
+    @pytest.mark.asyncio
     async def test_default_exchange_tag_used_when_no_publisher_context(self) -> None:
         """Spec — falls back to ``default_exchange_tag`` when ``_CURRENT_PUBLISHER`` is None.
 

@@ -178,6 +178,8 @@ from snapper.data.repository_types import InstrumentContractRow
 from snapper.data.repository_types import InstrumentRelatedRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import UnderlyingAssetRow
+from snapper.infrastructure.network.egress_observability import EgressSnapshotPublisher
+from snapper.infrastructure.network.egress_observability import resolve_egress_container_id
 from snapper.infrastructure.network.egress_pool import safely_initialize_egress_pool
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
@@ -223,6 +225,7 @@ from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.device_routes import router as device_router
 from snapper.server.egress_health_routes import router as egress_health_router
+from snapper.server.egress_snapshot_cache import EgressSnapshotCache
 from snapper.server.execution_plan_routes import router as execution_plan_router
 from snapper.server.json_body import patch_openapi
 from snapper.server.market_cache_routes import router as market_cache_router
@@ -247,6 +250,7 @@ from snapper.utils.logging import set_log_context
 API_PREFIX = "/api"
 _INTERNAL_SERVER_ERROR_DESCRIPTION = "Internal server error"
 _UNDERLYING_NOT_FOUND_DESCRIPTION = "Underlying not found"
+_EGRESS_SNAPSHOT_STALE_MULTIPLIER = 3.0
 
 
 def handle_rate_limit_exceeded(request: Request, exc: Exception) -> Response:
@@ -545,6 +549,104 @@ async def _stop_remote_summary_cache(app: FastAPI) -> None:
     await cache.stop()
 
 
+def _egress_snapshot_interval_seconds(heartbeat_interval_ms: int) -> float:
+    """Return the egress snapshot publish cadence in seconds.
+
+    Args:
+        heartbeat_interval_ms: Existing ZMQ heartbeat cadence in milliseconds.
+
+    Returns:
+        Cadence in seconds with a small positive floor.
+    """
+    return max(heartbeat_interval_ms / 1000.0, 0.001)
+
+
+async def _start_egress_snapshot_cache(
+    app: FastAPI,
+    *,
+    own_container: str,
+    zmq_broker_xpub: str,
+    heartbeat_interval_ms: int,
+) -> None:
+    """Build and start the cross-process egress snapshot cache.
+
+    Args:
+        app: FastAPI application instance whose state holds the cache.
+        own_container: Local source id ignored on ingest.
+        zmq_broker_xpub: Broker XPUB endpoint to subscribe on.
+        heartbeat_interval_ms: Existing ZMQ heartbeat cadence in milliseconds.
+    """
+    try:
+        interval_seconds = _egress_snapshot_interval_seconds(heartbeat_interval_ms)
+        cache = EgressSnapshotCache(
+            own_container=own_container,
+            stale_after_seconds=interval_seconds * _EGRESS_SNAPSHOT_STALE_MULTIPLIER,
+        )
+        await cache.start(zmq_broker_xpub)
+    except Exception:
+        logger.exception(
+            "EgressSnapshotCache startup failed — egress health falls back to local-only view"
+        )
+        return
+    app.state.egress_snapshot_cache = cache
+    logger.info("EgressSnapshotCache started (own={})", own_container)
+
+
+async def _stop_egress_snapshot_cache(app: FastAPI) -> None:
+    """Stop the cross-process egress snapshot cache if attached.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    cache: EgressSnapshotCache | None = getattr(app.state, "egress_snapshot_cache", None)
+    if cache is None:
+        return
+    await cache.stop()
+
+
+async def _start_egress_snapshot_publisher(
+    app: FastAPI,
+    *,
+    container: str,
+    publisher: MessagePublisher,
+    heartbeat_interval_ms: int,
+) -> None:
+    """Start the API process's own egress snapshot publisher.
+
+    Args:
+        app: FastAPI application instance whose state holds the publisher.
+        container: Local source id included in payloads.
+        publisher: Existing audit/control bus publisher.
+        heartbeat_interval_ms: Existing ZMQ heartbeat cadence in milliseconds.
+    """
+    try:
+        snapshot_publisher = EgressSnapshotPublisher(
+            container=container,
+            publisher=publisher,
+            interval_seconds=_egress_snapshot_interval_seconds(heartbeat_interval_ms),
+        )
+        snapshot_publisher.start()
+    except Exception:
+        logger.exception("EgressSnapshotPublisher startup failed")
+        return
+    app.state.egress_snapshot_publisher = snapshot_publisher
+    logger.info("EgressSnapshotPublisher started (container={})", container)
+
+
+async def _stop_egress_snapshot_publisher(app: FastAPI) -> None:
+    """Stop the API process's egress snapshot publisher if attached.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    publisher: EgressSnapshotPublisher | None = getattr(
+        app.state, "egress_snapshot_publisher", None
+    )
+    if publisher is None:
+        return
+    await publisher.stop()
+
+
 async def _start_retention_scheduler(app: FastAPI, *, db_url: str) -> None:
     """Build + start the :class:`RetentionScheduler` singleton.
 
@@ -711,6 +813,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.market_cache = None
     app.state.market_stats_worker = None
     app.state.remote_summary_cache = None
+    app.state.egress_snapshot_cache = None
+    app.state.egress_snapshot_publisher = None
+    app.state.egress_container = None
     try:
         settings_service = await _initialize_settings_service(settings)
         settings = get_settings_with_service(settings_service)
@@ -816,6 +921,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             own_coordinator=process_factory.coordinator_topic_slug(),
             zmq_broker_xpub=settings.zmq_broker_xpub,
         )
+        egress_container = resolve_egress_container_id(
+            f"api:{process_factory.coordinator_topic_slug()}"
+        )
+        app.state.egress_container = egress_container
+        await _start_egress_snapshot_cache(
+            app,
+            own_container=egress_container,
+            zmq_broker_xpub=settings.zmq_broker_xpub,
+            heartbeat_interval_ms=settings.zmq_heartbeat_interval_ms,
+        )
+        await _start_egress_snapshot_publisher(
+            app,
+            container=egress_container,
+            publisher=user_publisher,
+            heartbeat_interval_ms=settings.zmq_heartbeat_interval_ms,
+        )
         logger.info("Application startup complete")
         await _warn_on_tradfi_near_expiry(settings)
         mcp_sub_app = app.state.mcp_sub_app
@@ -835,6 +956,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         raise
     finally:
         logger.info("Starting application shutdown sequence")
+        await _stop_egress_snapshot_publisher(app)
+        await _stop_egress_snapshot_cache(app)
         await _stop_remote_summary_cache(app)
         await _stop_db_stats_snapshotter(app)
         await _stop_retention_scheduler(app)
