@@ -13,8 +13,12 @@ package.
 
 from pathlib import Path
 
+from scripts.ui_refresh import collect_dependency_specs
+from scripts.ui_refresh import guard_against_downgrades
+from scripts.ui_refresh import read_package_json
 from scripts.ui_refresh import remove_node_modules
 from scripts.ui_refresh import run_cmd
+from scripts.ui_refresh import write_package_json
 
 MCP_DIR_NAME = "integrations/snapper-mcp"
 NPM_LOCK_FILE = "package-lock.json"
@@ -39,12 +43,18 @@ def remove_npm_lock_file(mcp_dir: Path) -> bool:
 
 
 def upgrade_dependencies_npm(mcp_dir: Path) -> None:
-    """Upgrade direct snapper-mcp dependencies to latest versions.
+    """Upgrade direct snapper-mcp dependencies to latest versions, never regressing.
 
     Runs ``npx --yes npm-check-updates -u`` excluding protected dependency
     names, so the bumped package.json keeps the protected entries at their
     current major range while every other dependency is rewritten to the
-    latest available version.
+    latest available version. npm-check-updates resolves its default ``latest``
+    target against the mutable ``latest`` dist-tag, so a stale metadata cache or
+    a dist-tag pointing at an older release can rewrite a dependency below the
+    committed version. The same downgrade guard used by the UI refresh restores
+    any such regression, keeping the snapper-mcp refresh monotonic. The
+    subsequent clean ``npm install`` re-resolves the lock file from the
+    corrected package.json, so no interim re-resolve step is needed.
 
     Args:
         mcp_dir: Path to the snapper-mcp directory containing package.json.
@@ -53,6 +63,8 @@ def upgrade_dependencies_npm(mcp_dir: Path) -> None:
     if not package_json.exists():
         print(f"Skipping dependency upgrade (missing {package_json})")
         return
+
+    specs_before = collect_dependency_specs(read_package_json(package_json))
 
     print("Upgrading snapper-mcp direct dependencies to latest...")
     run_cmd(
@@ -67,6 +79,11 @@ def upgrade_dependencies_npm(mcp_dir: Path) -> None:
         cwd=mcp_dir,
         check=True,
     )
+
+    package_data_after = read_package_json(package_json)
+    if guard_against_downgrades(package_data_after, specs_before):
+        print("Restoring non-regressing snapper-mcp dependency version ranges...")
+        write_package_json(package_json, package_data_after)
 
 
 def install_dependencies_npm(mcp_dir: Path) -> None:

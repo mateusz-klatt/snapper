@@ -279,7 +279,7 @@ def _version_sort_key(spec: str) -> tuple[int, int, int] | None:
     return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
 
 
-def _collect_dependency_specs(package_data: dict[str, Any]) -> dict[str, tuple[str, str]]:
+def collect_dependency_specs(package_data: dict[str, Any]) -> dict[str, tuple[str, str]]:
     """Map every direct dependency name to its (section, version spec).
 
     Walks the four standard dependency sections and records string specs only;
@@ -302,18 +302,20 @@ def _collect_dependency_specs(package_data: dict[str, Any]) -> dict[str, tuple[s
     return collected
 
 
-def _guard_against_downgrades(
+def guard_against_downgrades(
     package_data: dict[str, Any],
     specs_before: dict[str, tuple[str, str]],
 ) -> bool:
     """Restore any dependency whose spec regressed below its prior version.
 
-    After ``pnpm up --latest`` selects versions against npm's registry, a stale
-    metadata cache or a registry snapshot taken before a newer release can yield
-    a spec below the committed one. For every dependency present both before and
-    after, the prior (higher) spec is restored when the new spec resolves to a
-    strictly lower stable version, keeping the refresh monotonic so it can never
-    introduce a regression.
+    When an upgrade tool selects versions against a mutable ``latest`` dist-tag
+    (``pnpm up --latest`` or ``npm-check-updates`` with the default ``latest``
+    target), a stale metadata cache or a dist-tag pointing at an older release
+    can yield a spec below the committed one. For every dependency present both
+    before and after, the prior (higher) spec is restored when the new spec
+    resolves to a strictly lower stable version, keeping the refresh monotonic
+    so it can never introduce a regression. Shared by the UI (pnpm) and
+    snapper-mcp (npm) refresh paths.
 
     Args:
         package_data: Parsed package.json data after the latest upgrade.
@@ -323,7 +325,7 @@ def _guard_against_downgrades(
         True if any spec was restored, False otherwise.
     """
     modified = False
-    specs_after = _collect_dependency_specs(package_data)
+    specs_after = collect_dependency_specs(package_data)
     for name, (section_before, spec_before) in specs_before.items():
         after = specs_after.get(name)
         if after is None:
@@ -365,7 +367,7 @@ def upgrade_dependencies(ui_dir: Path) -> None:
         section, spec = get_dependency_spec(package_data_before, dep_name)
         if section is not None and spec is not None:
             protected_specs[dep_name] = (section, spec)
-    specs_before = _collect_dependency_specs(package_data_before)
+    specs_before = collect_dependency_specs(package_data_before)
 
     print("Upgrading UI direct dependencies to latest...")
     run_cmd(["pnpm", "up", "--latest"], cwd=ui_dir, check=True)
@@ -374,7 +376,7 @@ def upgrade_dependencies(ui_dir: Path) -> None:
     modified = False
     for dep_name, (section, spec) in protected_specs.items():
         modified = restore_dependency_spec(package_data_after, dep_name, section, spec) or modified
-    modified = _guard_against_downgrades(package_data_after, specs_before) or modified
+    modified = guard_against_downgrades(package_data_after, specs_before) or modified
 
     if not modified:
         return

@@ -9,12 +9,12 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.ui_refresh import _collect_dependency_specs
 from scripts.ui_refresh import _current_corepack_version
-from scripts.ui_refresh import _guard_against_downgrades
 from scripts.ui_refresh import _version_sort_key
+from scripts.ui_refresh import collect_dependency_specs
 from scripts.ui_refresh import ensure_corepack_installed
 from scripts.ui_refresh import get_dependency_spec
+from scripts.ui_refresh import guard_against_downgrades
 from scripts.ui_refresh import install_dependencies
 from scripts.ui_refresh import main
 from scripts.ui_refresh import read_package_json
@@ -626,7 +626,7 @@ class TestCollectDependencySpecs:
         """String specs are captured; non-dict sections and non-string specs are skipped.
 
         Given: dependencies with a string and a numeric spec, plus a non-dict devDependencies,
-        When: _collect_dependency_specs walks the sections,
+        When: collect_dependency_specs walks the sections,
         Then: only the string spec from the dict section is recorded.
         """
         package_data: dict[str, Any] = {
@@ -634,7 +634,7 @@ class TestCollectDependencySpecs:
             "devDependencies": "not-a-dict",
         }
 
-        result = _collect_dependency_specs(package_data)
+        result = collect_dependency_specs(package_data)
 
         assert result == {"a": ("dependencies", "^1.0.0")}
 
@@ -647,7 +647,7 @@ class TestGuardAgainstDowngrades:
         package_data: dict[str, Any] = {"devDependencies": {"knip": "^6.17.2"}}
         specs_before = {"knip": ("devDependencies", "^6.18.0")}
 
-        modified = _guard_against_downgrades(package_data, specs_before)
+        modified = guard_against_downgrades(package_data, specs_before)
 
         assert modified is True
         assert package_data["devDependencies"]["knip"] == "^6.18.0"
@@ -657,7 +657,7 @@ class TestGuardAgainstDowngrades:
         package_data: dict[str, Any] = {"devDependencies": {"knip": "^6.19.0"}}
         specs_before = {"knip": ("devDependencies", "^6.18.0")}
 
-        modified = _guard_against_downgrades(package_data, specs_before)
+        modified = guard_against_downgrades(package_data, specs_before)
 
         assert modified is False
         assert package_data["devDependencies"]["knip"] == "^6.19.0"
@@ -667,14 +667,14 @@ class TestGuardAgainstDowngrades:
         package_data: dict[str, Any] = {"devDependencies": {}}
         specs_before = {"knip": ("devDependencies", "^6.18.0")}
 
-        assert _guard_against_downgrades(package_data, specs_before) is False
+        assert guard_against_downgrades(package_data, specs_before) is False
 
     def test_skips_uncomparable_prior_spec(self) -> None:
         """A non-comparable prior spec disables the guard for that dependency."""
         package_data: dict[str, Any] = {"dependencies": {"pkg": "^1.2.3"}}
         specs_before = {"pkg": ("dependencies", "workspace:*")}
 
-        assert _guard_against_downgrades(package_data, specs_before) is False
+        assert guard_against_downgrades(package_data, specs_before) is False
         assert package_data["dependencies"]["pkg"] == "^1.2.3"
 
     def test_skips_uncomparable_resolved_spec(self) -> None:
@@ -682,7 +682,7 @@ class TestGuardAgainstDowngrades:
         package_data: dict[str, Any] = {"dependencies": {"pkg": "workspace:*"}}
         specs_before = {"pkg": ("dependencies", "^1.2.3")}
 
-        assert _guard_against_downgrades(package_data, specs_before) is False
+        assert guard_against_downgrades(package_data, specs_before) is False
         assert package_data["dependencies"]["pkg"] == "workspace:*"
 
 

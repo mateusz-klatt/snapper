@@ -1,7 +1,9 @@
 """Tests for snapper-mcp dependency refresh script."""
 
+import json
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import call
 from unittest.mock import patch
 
@@ -99,6 +101,71 @@ class TestUpgradeDependenciesNpm:
             )
             captured = capsys.readouterr()
             assert "Upgrading snapper-mcp direct dependencies" in captured.out
+
+    def test_restores_downgraded_dep_after_ncu(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verify upgrade_dependencies_npm reverts a dependency ncu lowered below the committed spec.
+
+        Given: package.json pins knip ^6.18.0 and npm-check-updates rewrites it
+            down to ^6.17.2 (a stale ``latest`` dist-tag),
+        When: upgrade_dependencies_npm runs,
+        Then: The downgrade guard restores ^6.18.0, the corrected package.json is
+            written, and a prevention message is printed.
+        """
+        package_json = tmp_path / "package.json"
+        package_json.write_text(json.dumps({"devDependencies": {"knip": "^6.18.0"}}) + "\n")
+
+        def fake_ncu(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            package_json.write_text(json.dumps({"devDependencies": {"knip": "^6.17.2"}}) + "\n")
+            return subprocess.CompletedProcess([], 0)
+
+        with patch("scripts.mcp_refresh.run_cmd", side_effect=fake_ncu) as mock_run:
+            upgrade_dependencies_npm(tmp_path)
+
+        restored = json.loads(package_json.read_text(encoding="utf-8"))
+        assert restored["devDependencies"]["knip"] == "^6.18.0"
+        mock_run.assert_called_once_with(
+            [
+                "npx",
+                "--yes",
+                "npm-check-updates",
+                "-u",
+                "--reject",
+                ",".join(PROTECTED_DEPENDENCIES),
+            ],
+            cwd=tmp_path,
+            check=True,
+        )
+        captured = capsys.readouterr()
+        assert "Preventing downgrade of knip" in captured.out
+        assert "Restoring non-regressing snapper-mcp dependency version ranges" in captured.out
+
+    def test_keeps_upgraded_dep_when_ncu_advances(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verify upgrade_dependencies_npm leaves a genuine ncu upgrade untouched.
+
+        Given: package.json pins knip ^6.17.2 and npm-check-updates advances it
+            to ^6.18.0,
+        When: upgrade_dependencies_npm runs,
+        Then: The guard keeps the higher version with no restore and no prevention message.
+        """
+        package_json = tmp_path / "package.json"
+        package_json.write_text(json.dumps({"devDependencies": {"knip": "^6.17.2"}}) + "\n")
+
+        def fake_ncu(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            package_json.write_text(json.dumps({"devDependencies": {"knip": "^6.18.0"}}) + "\n")
+            return subprocess.CompletedProcess([], 0)
+
+        with patch("scripts.mcp_refresh.run_cmd", side_effect=fake_ncu):
+            upgrade_dependencies_npm(tmp_path)
+
+        upgraded = json.loads(package_json.read_text(encoding="utf-8"))
+        assert upgraded["devDependencies"]["knip"] == "^6.18.0"
+        captured = capsys.readouterr()
+        assert "Preventing downgrade" not in captured.out
+        assert "Restoring non-regressing" not in captured.out
 
 
 class TestInstallDependenciesNpm:
