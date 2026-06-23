@@ -1802,14 +1802,28 @@ class KrakenExchangeClient(ExchangeClientBase):
         Wakes every second, asks :attr:`_trade_built_candle_builder` for any
         bucket whose minute has finished beyond the configured late-trade
         grace, and routes each into :attr:`_trade_built_candle_queue`.
+
+        A failing tick (e.g. a transient settings read) is logged with its
+        traceback and swallowed rather than propagated: the aggregator runs as
+        an unsupervised task, so an unhandled exception would silently kill it
+        and stall Spot candle production while trades keep flowing (the
+        2026-06-23 trade-built stall). ``asyncio.CancelledError`` is a
+        ``BaseException`` and is therefore NOT caught here, so a publisher
+        shutdown can still cancel the task cleanly.
         """
         while True:
             await asyncio.sleep(1.0)
-            cutoff = datetime.now(UTC) - timedelta(
-                seconds=self.settings.trade_built_finalize_grace_seconds
-            )
-            for candle in self._trade_built_candle_builder.pop_completed(cutoff):
-                enqueue_or_drop_oldest_candle(self._trade_built_candle_queue, candle, "Candle")
+            try:
+                cutoff = datetime.now(UTC) - timedelta(
+                    seconds=self.settings.trade_built_finalize_grace_seconds
+                )
+                for candle in self._trade_built_candle_builder.pop_completed(cutoff):
+                    enqueue_or_drop_oldest_candle(self._trade_built_candle_queue, candle, "Candle")
+            except Exception:
+                logger.exception(
+                    "trade-built candle aggregator tick failed; continuing so a "
+                    "transient fault does not silently stall Spot candle production"
+                )
 
     def _expand_spot_symbols(
         self, symbols: list[str], *, channel_label: str, wildcard_note: str

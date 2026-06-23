@@ -8517,6 +8517,54 @@ async def test_trade_built_candle_aggregator_enqueues_completed_candles(
 
 
 @pytest.mark.asyncio
+async def test_trade_built_candle_aggregator_survives_tick_failure(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A failing aggregator tick is logged and swallowed so the task survives.
+
+    Given: A builder whose ``pop_completed`` raises on the first tick (mirroring
+        the 2026-06-23 serviceless-settings RuntimeError) then succeeds,
+    When: ``_trade_built_candle_aggregator`` runs across ticks,
+    Then: The failure does not kill the unsupervised task; the next tick's candle
+        is still enqueued, proving Spot candle production is not silently stalled.
+
+    Returns:
+        None.
+    """
+    client = _client()
+    candle = _trade_built_candle()
+    calls = {"n": 0}
+
+    def _pop_completed(now_utc: datetime) -> list[CandleUpdate]:
+        """Raise on the first tick, then return one completed candle.
+
+        Args:
+            now_utc: Grace-adjusted completion cutoff.
+
+        Returns:
+            Completed candle list on later ticks.
+
+        Raises:
+            RuntimeError: On the first tick to simulate a transient fault.
+        """
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated transient aggregator fault")
+        return [candle]
+
+    monkeypatch.setattr(client._trade_built_candle_builder, "pop_completed", _pop_completed)
+    task = asyncio.create_task(client._trade_built_candle_aggregator())
+    try:
+        got = await asyncio.wait_for(client._trade_built_candle_queue.get(), timeout=5.0)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert got is candle
+    assert calls["n"] >= 2
+
+
+@pytest.mark.asyncio
 async def test_subscribe_trade_built_candles_reuses_running_aggregator_task() -> None:
     """A second subscription reuses the already-running aggregator task.
 

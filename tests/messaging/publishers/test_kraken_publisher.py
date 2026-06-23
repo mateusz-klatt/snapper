@@ -185,6 +185,24 @@ class TestKrakenMarketDataPublisher:
         client = publisher._create_exchange_client()
         assert isinstance(client, KrakenExchangeClient)
 
+    def test_create_exchange_client_wires_db_backed_settings_into_client(self) -> None:
+        """The exchange client must receive the publisher's DB-backed settings.
+
+        Given a KrakenMarketDataPublisher whose settings expose a live
+            SettingsService (start() replaces the bootstrap settings),
+        When _create_exchange_client builds the client,
+        Then the client carries those settings — not its own serviceless
+            get_settings() bootstrap — so the trade-built candle aggregator can
+            read trade_built_finalize_grace_seconds without raising RuntimeError
+            and silently killing the unsupervised aggregator task (the 2026-06-23
+            Spot trade-built candle stall).
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        settings = cast(AppSettings, _ShadowSettings(False, "trade_built"))
+        publisher.settings = settings
+        client = publisher._create_exchange_client()
+        assert client.settings is settings
+
     def test_get_exchange_name_returns_kraken(self) -> None:
         """Verify exchange name returns 'kraken'.
 
