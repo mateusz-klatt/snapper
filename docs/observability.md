@@ -40,6 +40,16 @@ the `system.egress.snapshot` ZMQ topic, with sidecar
 `system.egress.transfer` samples joined to matching SOCKS5 route rows. See
 [api.md](api.md) (`GET /api/health/egress`) for the full wire schema.
 
+### Data-liveness watchdog
+
+Beyond the REST surface, each exchange feed runs a per-subscription
+data-liveness watchdog (`SubscriptionHealthTracker`,
+`infrastructure/exchanges/_subscription_health.py`): a confirmed
+subscription that receives no data for `data_stale_threshold_s` (default
+`300.0`s; `ack_timeout_s` default `15.0`s guards the initial subscribe
+ACK) is marked stale and emits a one-shot log line. It is log-only —
+stream-gap signals surface in the feed logs, not as a REST metric.
+
 ### Failure contract
 
 If the snapshotter singleton failed to start at lifespan time, the

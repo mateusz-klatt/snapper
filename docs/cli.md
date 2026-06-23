@@ -767,7 +767,7 @@ snapper kraken-equities-backfill-candles [OPTIONS]
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `-s, --symbol` | str[] | None | Native symbols to backfill (e.g. `MNQU6-CME`) |
+| `-s, --symbol` | str[] | None | Native symbols to backfill (e.g. `MNQM6-CME`) |
 | `--all` | bool | `false` | Backfill all mapped Kraken Equities symbols |
 | `-t, --timeframe` | str | `1h` | Candle interval (`1m`, `5m`, `15m`, `30m`, `1h`, `1d`) |
 | `-d, --days` | int | `30` | Days back to fetch |

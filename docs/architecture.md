@@ -192,7 +192,13 @@ Components:
   Synthesized bars are also persisted to the `candles` table (tagged
   `source='synthesized'` with a `complete` trustworthy-boundary flag) when a
   higher timeframe is configured for persistence — off by default — under the
-  same persist policy as `1m`. The candle `source` provenance vocabulary is
+  same persist policy as `1m`. Native 1m persistence runs through a
+  `NativeCandleFinalizer` (`publishers/native_candle_finalizer.py`) — the
+  persistence-side peer of `CandleAggregator` and `TradeCandleBuilder`: by
+  default the DB stores only the final `complete=true` bar per native 1m window
+  (eliminating intra-minute SCD2 churn), while the default-off
+  `persist_intermediate_candles` setting restores per-frame persistence (ZMQ
+  publishes every frame regardless). The candle `source` provenance vocabulary is
   `native | calculated | synthesized` (the `ck_candle_source` CHECK constraint
   on the `candles`/`shadow_candles` tables): `native` for venue OHLC bars,
   `calculated` for trade-built 1m bars (see the Kraken Spot sub-bullet below),

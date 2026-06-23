@@ -934,7 +934,7 @@ they publish ~10-minute-delayed candles + ticks but have no order API.
 
 See ``src/snapper/strategies/examples/tradfi_observe_crypto_execute.py``
 for a minimal EMA-crossover strategy that observes
-``MNQU6-CME`` on ``kraken_equities`` and targets ``BTC-USD`` on
+``MNQM6-CME`` on ``kraken_equities`` and targets ``BTC-USD`` on
 ``kraken``. The file is NOT registered with the process registry —
 it ships as a copy-paste starting point. Activation steps live in the
 module docstring; ``tests/meta/test_reference_strategy_not_registered.py``

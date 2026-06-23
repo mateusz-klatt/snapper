@@ -606,6 +606,11 @@ snapshots remain visible and are flagged in `containers`.
     "topic": null,
     "payload": {
         "type": "egress_health",
+        "sequence_id": 1,
+        "public_id": "<uuid7>",
+        "timestamp": "2026-01-18T12:00:00Z",
+        "session_id": "<server-session>",
+        "topic": null,
         "enabled": true,
         "on_all_quarantined": "wait",
         "private_fallback_route_id": "pl",
