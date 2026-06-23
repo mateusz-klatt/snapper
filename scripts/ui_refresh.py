@@ -9,6 +9,7 @@ which upgrades dependencies to the latest available versions.
 """
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from typing import cast
 IS_WINDOWS = sys.platform == "win32"
 COREPACK_PACKAGE = "corepack"
 PNPM_PACKAGE = "pnpm"
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?")
 
 
 def read_package_json(package_json: Path) -> dict[str, Any]:
@@ -256,11 +258,97 @@ def upgrade_package_manager(ui_dir: Path) -> None:
         write_package_json(package_json, package_data)
 
 
-def upgrade_dependencies(ui_dir: Path) -> None:
-    """Upgrade direct UI dependencies to latest versions.
+def _version_sort_key(spec: str) -> tuple[int, int, int] | None:
+    """Return a comparable (major, minor, patch) key for a stable version spec.
 
-    Runs ``pnpm up --latest``, restores protected dependency version ranges,
-    then runs ``pnpm up`` to resolve latest versions within those ranges.
+    Strips any leading range operator and extracts the first concrete
+    ``major.minor.patch``. Returns None when the spec carries no stable triple
+    (ranges such as ``*``, ``workspace:*``, ``1.2.x``, git URLs) or when it pins
+    a prerelease, signalling that the downgrade guard must skip the dependency
+    rather than risk an unsafe comparison.
+
+    Args:
+        spec: A package.json version spec string.
+
+    Returns:
+        The (major, minor, patch) tuple, or None when not safely comparable.
+    """
+    match = _VERSION_RE.search(spec)
+    if match is None or match.group(4) is not None:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def _collect_dependency_specs(package_data: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    """Map every direct dependency name to its (section, version spec).
+
+    Walks the four standard dependency sections and records string specs only;
+    non-dict sections and non-string specs are ignored.
+
+    Args:
+        package_data: Parsed package.json data.
+
+    Returns:
+        Mapping of dependency name to its (section, spec) pair.
+    """
+    collected: dict[str, tuple[str, str]] = {}
+    for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        section_data = package_data.get(section)
+        if not isinstance(section_data, dict):
+            continue
+        for name, spec in section_data.items():
+            if isinstance(name, str) and isinstance(spec, str):
+                collected[name] = (section, spec)
+    return collected
+
+
+def _guard_against_downgrades(
+    package_data: dict[str, Any],
+    specs_before: dict[str, tuple[str, str]],
+) -> bool:
+    """Restore any dependency whose spec regressed below its prior version.
+
+    After ``pnpm up --latest`` selects versions against npm's registry, a stale
+    metadata cache or a registry snapshot taken before a newer release can yield
+    a spec below the committed one. For every dependency present both before and
+    after, the prior (higher) spec is restored when the new spec resolves to a
+    strictly lower stable version, keeping the refresh monotonic so it can never
+    introduce a regression.
+
+    Args:
+        package_data: Parsed package.json data after the latest upgrade.
+        specs_before: Pre-upgrade (section, spec) per dependency name.
+
+    Returns:
+        True if any spec was restored, False otherwise.
+    """
+    modified = False
+    specs_after = _collect_dependency_specs(package_data)
+    for name, (section_before, spec_before) in specs_before.items():
+        after = specs_after.get(name)
+        if after is None:
+            continue
+        spec_after = after[1]
+        key_before = _version_sort_key(spec_before)
+        key_after = _version_sort_key(spec_after)
+        if key_before is None or key_after is None:
+            continue
+        if key_after < key_before:
+            print(f"Preventing downgrade of {name}: keeping {spec_before} over {spec_after}")
+            modified = (
+                restore_dependency_spec(package_data, name, section_before, spec_before) or modified
+            )
+    return modified
+
+
+def upgrade_dependencies(ui_dir: Path) -> None:
+    """Upgrade direct UI dependencies to latest versions, never regressing.
+
+    Runs ``pnpm up --latest``, restores protected dependency version ranges and
+    any dependency that the upgrade lowered below its prior version, then runs
+    ``pnpm up`` to re-resolve within the restored ranges. The downgrade guard
+    makes the refresh deterministic against regressions: a stale registry cache
+    can never push a dependency backward.
 
     Args:
         ui_dir: Path to the UI directory containing package.json.
@@ -277,23 +365,23 @@ def upgrade_dependencies(ui_dir: Path) -> None:
         section, spec = get_dependency_spec(package_data_before, dep_name)
         if section is not None and spec is not None:
             protected_specs[dep_name] = (section, spec)
+    specs_before = _collect_dependency_specs(package_data_before)
 
     print("Upgrading UI direct dependencies to latest...")
     run_cmd(["pnpm", "up", "--latest"], cwd=ui_dir, check=True)
-
-    if not protected_specs:
-        return
 
     package_data_after = read_package_json(package_json)
     modified = False
     for dep_name, (section, spec) in protected_specs.items():
         modified = restore_dependency_spec(package_data_after, dep_name, section, spec) or modified
+    modified = _guard_against_downgrades(package_data_after, specs_before) or modified
 
-    if modified:
-        print("Restoring protected dependency version ranges...")
-        write_package_json(package_json, package_data_after)
+    if not modified:
+        return
 
-    print("Updating protected dependencies within allowed ranges...")
+    print("Restoring protected and non-regressing dependency version ranges...")
+    write_package_json(package_json, package_data_after)
+    print("Re-resolving restored dependencies within allowed ranges...")
     run_cmd(["pnpm", "up"], cwd=ui_dir, check=True)
 
 

@@ -9,7 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
+from scripts.ui_refresh import _collect_dependency_specs
 from scripts.ui_refresh import _current_corepack_version
+from scripts.ui_refresh import _guard_against_downgrades
+from scripts.ui_refresh import _version_sort_key
 from scripts.ui_refresh import ensure_corepack_installed
 from scripts.ui_refresh import get_dependency_spec
 from scripts.ui_refresh import install_dependencies
@@ -524,12 +527,12 @@ class TestUpgradeDependencies:
             call(["pnpm", "up"], cwd=tmp_path, check=True),
         ]
 
-    def test_does_not_write_package_json_when_no_change_needed(self, tmp_path: Path) -> None:
-        """Verify upgrade_dependencies does not rewrite package.json when nothing changes.
+    def test_does_not_write_or_reresolve_when_no_change_needed(self, tmp_path: Path) -> None:
+        """Verify upgrade_dependencies skips the rewrite and re-resolve when nothing changes.
 
         Given: package.json includes eslint in a protected range,
-        When: pnpm up --latest does not modify eslint spec,
-        Then: write_package_json is not called.
+        When: pnpm up --latest does not modify any spec (no restore, no downgrade),
+        Then: write_package_json is not called and only the single latest upgrade runs.
         """
         package_json = tmp_path / "package.json"
         package_json.write_text(
@@ -550,8 +553,137 @@ class TestUpgradeDependencies:
             upgrade_dependencies(tmp_path)
 
             mock_write.assert_not_called()
-            assert mock_run.call_count == 2
-            assert mock_run.call_args_list[1] == call(["pnpm", "up"], cwd=tmp_path, check=True)
+            mock_run.assert_called_once_with(["pnpm", "up", "--latest"], cwd=tmp_path, check=True)
+
+    def test_restores_downgraded_dep_after_latest_upgrade(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verify upgrade_dependencies reverses an accidental downgrade from pnpm up --latest.
+
+        Given: package.json pins knip ^6.18.0 and typescript-eslint ^8.62.0,
+        When: pnpm up --latest lowers both to ^6.17.2 / ^8.61.1 (stale registry),
+        Then: the prior higher specs are restored and pnpm up re-resolves the ranges.
+        """
+        package_json = tmp_path / "package.json"
+        package_json.write_text(
+            json.dumps(
+                {"devDependencies": {"knip": "^6.18.0", "typescript-eslint": "^8.62.0"}},
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        def side_effect(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            _ = kwargs
+            if args == ["pnpm", "up", "--latest"]:
+                data = json.loads(package_json.read_text(encoding="utf-8"))
+                data["devDependencies"]["knip"] = "^6.17.2"
+                data["devDependencies"]["typescript-eslint"] = "^8.61.1"
+                package_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
+
+        with patch("scripts.ui_refresh.run_cmd", side_effect=side_effect) as mock_run:
+            upgrade_dependencies(tmp_path)
+
+        updated = json.loads(package_json.read_text(encoding="utf-8"))
+        assert updated["devDependencies"]["knip"] == "^6.18.0"
+        assert updated["devDependencies"]["typescript-eslint"] == "^8.62.0"
+        assert mock_run.call_args_list == [
+            call(["pnpm", "up", "--latest"], cwd=tmp_path, check=True),
+            call(["pnpm", "up"], cwd=tmp_path, check=True),
+        ]
+        captured = capsys.readouterr()
+        assert "Preventing downgrade of knip" in captured.out
+
+
+class TestVersionSortKey:
+    """Test suite for the version spec comparison key."""
+
+    def test_parses_stable_caret_range(self) -> None:
+        """A caret range yields its (major, minor, patch) tuple."""
+        assert _version_sort_key("^6.18.0") == (6, 18, 0)
+
+    def test_parses_pinned_and_tilde_ranges(self) -> None:
+        """Pinned and tilde ranges resolve to their concrete triples."""
+        assert _version_sort_key("1.2.3") == (1, 2, 3)
+        assert _version_sort_key("~2.0.5") == (2, 0, 5)
+
+    def test_returns_none_for_prerelease(self) -> None:
+        """A prerelease pin is treated as not safely comparable."""
+        assert _version_sort_key("^8.62.0-rc.1") is None
+
+    def test_returns_none_for_non_version_spec(self) -> None:
+        """Specs without a stable triple are not comparable."""
+        assert _version_sort_key("workspace:*") is None
+        assert _version_sort_key("1.2.x") is None
+
+
+class TestCollectDependencySpecs:
+    """Test suite for direct dependency spec collection."""
+
+    def test_collects_strings_and_skips_non_dict_and_non_string(self) -> None:
+        """String specs are captured; non-dict sections and non-string specs are skipped.
+
+        Given: dependencies with a string and a numeric spec, plus a non-dict devDependencies,
+        When: _collect_dependency_specs walks the sections,
+        Then: only the string spec from the dict section is recorded.
+        """
+        package_data: dict[str, Any] = {
+            "dependencies": {"a": "^1.0.0", "b": 5},
+            "devDependencies": "not-a-dict",
+        }
+
+        result = _collect_dependency_specs(package_data)
+
+        assert result == {"a": ("dependencies", "^1.0.0")}
+
+
+class TestGuardAgainstDowngrades:
+    """Test suite for the downgrade guard."""
+
+    def test_restores_spec_when_version_regressed(self) -> None:
+        """A spec lowered below its prior version is restored to the higher range."""
+        package_data: dict[str, Any] = {"devDependencies": {"knip": "^6.17.2"}}
+        specs_before = {"knip": ("devDependencies", "^6.18.0")}
+
+        modified = _guard_against_downgrades(package_data, specs_before)
+
+        assert modified is True
+        assert package_data["devDependencies"]["knip"] == "^6.18.0"
+
+    def test_keeps_spec_when_version_advanced(self) -> None:
+        """A genuine upgrade is left untouched."""
+        package_data: dict[str, Any] = {"devDependencies": {"knip": "^6.19.0"}}
+        specs_before = {"knip": ("devDependencies", "^6.18.0")}
+
+        modified = _guard_against_downgrades(package_data, specs_before)
+
+        assert modified is False
+        assert package_data["devDependencies"]["knip"] == "^6.19.0"
+
+    def test_skips_dependency_absent_after_upgrade(self) -> None:
+        """A dependency removed by the upgrade is ignored by the guard."""
+        package_data: dict[str, Any] = {"devDependencies": {}}
+        specs_before = {"knip": ("devDependencies", "^6.18.0")}
+
+        assert _guard_against_downgrades(package_data, specs_before) is False
+
+    def test_skips_uncomparable_prior_spec(self) -> None:
+        """A non-comparable prior spec disables the guard for that dependency."""
+        package_data: dict[str, Any] = {"dependencies": {"pkg": "^1.2.3"}}
+        specs_before = {"pkg": ("dependencies", "workspace:*")}
+
+        assert _guard_against_downgrades(package_data, specs_before) is False
+        assert package_data["dependencies"]["pkg"] == "^1.2.3"
+
+    def test_skips_uncomparable_resolved_spec(self) -> None:
+        """A non-comparable resolved spec disables the guard for that dependency."""
+        package_data: dict[str, Any] = {"dependencies": {"pkg": "workspace:*"}}
+        specs_before = {"pkg": ("dependencies", "^1.2.3")}
+
+        assert _guard_against_downgrades(package_data, specs_before) is False
+        assert package_data["dependencies"]["pkg"] == "workspace:*"
 
 
 class TestPackageJsonHelpers:
