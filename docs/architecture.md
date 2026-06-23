@@ -1155,11 +1155,13 @@ Deploy notes (see `docker-compose.yml` `snapper-feed` service):
   `private_fallback_route_id` when direct is unavailable; private REST
   mutations remain direct-only. Public/market-data traffic instead egresses through
   the per-venue `snapper-egress` SOCKS5/WireGuard routes, selected from the
-  `EgressPool` by the exchange allow-list (`egress_pool.py`). This public
-  routing is opt-in: by default feed publishers dial exchanges directly. Set
-  `feed_egress_enabled=true` and restart `snapper-feed` to enable
-  `snapper-egress` routing for public traffic, then confirm publisher
-  connections use the configured `snapper-egress` SOCKS routes. See
+  `EgressPool` by the exchange allow-list (`egress_pool.py`). The API process
+  initializes its own process-local pool from `egress_pool`; API-side Kraken
+  public REST reads may use that pool when configured. Feed-publisher public
+  routing is gated separately: by default feed publishers dial exchanges
+  directly. Set `feed_egress_enabled=true` and restart `snapper-feed` to enable
+  `snapper-egress` routing for feed traffic, then confirm publisher connections
+  use the configured `snapper-egress` SOCKS routes. See
   `docs/snapper-egress.md` for the sidecar deployment model. Each pool-bearing
   process publishes a read-only `system.egress.snapshot` frame on the
   heartbeat cadence; the API process subscribes to those frames and merges the

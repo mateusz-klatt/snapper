@@ -299,13 +299,15 @@ substitutes at simulated-fill time:
   which the simulated fill executes. The source feed's close price is
   no longer used on cross-asset runs.
 
-When `target_execution_exchange is None` (default), the fill is
-attributed to `event.exchange` + `signal.instrument`. The
-single-leg emitters (`rsi.py`, `macd.py`) always set
-`signal.instrument == event.instrument`, so for those strategies
-the recorded exchange / instrument / price are byte-identical with
-the pre-v1.2 path — every existing single-feed backtest keeps its
-exact fingerprint and result rows. `CointegrationPairs` does not
+When `target_execution_exchange is None` (default), the simulator passes
+`event.exchange` into the in-memory fill and uses `signal.instrument`
+plus `latest_closes[signal.instrument]` for execution. Persisted backtest
+trade and signal artifacts expose instrument and price only; source
+`exchange` and optional `target_execution_exchange` live on the run row,
+not per trade/signal. The single-leg emitters (`rsi.py`, `macd.py`)
+always set `signal.instrument == event.instrument`, so for those strategies
+the in-memory fill's exchange / instrument / price are byte-identical with
+the pre-v1.2 path. `CointegrationPairs` does not
 follow that convention: its `on_candle` returns a
 `[primary, hedge]` pair whose hedge leg targets the *partner*
 instrument, so that leg is attributed to `event.exchange` plus the

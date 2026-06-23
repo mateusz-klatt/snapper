@@ -785,9 +785,11 @@ With routing enabled, a TCP/SOCKS connect-level failure through a proxy
 route — timeout, connection refused, or a tunnel that went dark —
 quarantines that route for 30 s (`_WS_CONNECT_ERROR_QUARANTINE_S`), so
 the next reconnect fails over to another tunnel or the direct fallback
-instead of re-dialing the dead route. Direct routes are never
+instead of re-dialing the dead route. Public direct routes are not
 quarantined: a connect error with no proxy means the exchange or the
-local uplink is down, not the route.
+local uplink is down, not the route. Private executor WebSocket direct
+connect errors are the exception: direct is quarantined briefly
+(~15 s) so the next reconnect can use `private_fallback_route_id`.
 
 ### Spot candle source (`spot_candle_source`)
 

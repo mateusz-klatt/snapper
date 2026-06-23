@@ -61,8 +61,11 @@ subprocesses of the **snapper-feed** container (the API profile
 excludes market-data publishers; the FEED profile runs only them).
 Each publisher process builds its own process-local pool at start,
 gated on the `feed_egress_enabled` DB setting (default **off** —
-publishers dial direct until the gate is flipped). The pool reserves
-a route per Kraken WS handshake. A route is quarantined — and
+publishers dial direct until the gate is flipped). The API process also
+initializes its own process-local pool from `egress_pool`; API-side Kraken
+public REST reads may route through that pool even when `feed_egress_enabled`
+is false, because the gate applies only to feed-publisher subprocess pools.
+The pool reserves a route per Kraken WS handshake. A route is quarantined — and
 the next handshake fails over to an alternate (or the direct fallback) —
 on any of the `QuarantineReason` values: `http-429` (handshake 429),
 `close-1015` (Cloudflare close frame), `http-connect-error` (REST
@@ -241,6 +244,10 @@ In short: **public = VPN/SOCKS5 preferred** (priority + allow-list, with
 direct fallback), **private = direct-first**. A healthy direct route always
 wins for private traffic; `private_fallback_route_id` is used only when
 direct is unavailable, and private mutations remain direct-only.
+Private executor WebSocket direct connect errors briefly quarantine the direct
+route for about 15 seconds so the next reconnect can use the configured private
+fallback. Public direct routes are not quarantined on connect errors; proxy
+routes quarantine for about 30 seconds.
 
 Then enable the feed gate (DB setting `feed_egress_enabled=true`) if
 not already on, and restart both the API and the feed tier — the feed

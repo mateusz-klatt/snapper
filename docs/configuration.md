@@ -363,7 +363,7 @@ restart to take effect.
 | `auth_algorithm` | `HS256` | JWT signing algorithm |
 | `auth_access_token_expire_minutes` | `15` | Access token lifetime |
 | `auth_refresh_token_expire_days` | `7` | Refresh token lifetime |
-| `auth_refresh_token_expire_days_extended` | `30` | Extended refresh token lifetime |
+| `auth_refresh_token_expire_days_extended` | `30` | Reserved extended refresh token lifetime. `remember_me` is accepted by the login schema but is not currently wired through by `/api/auth/login`, so refresh JWTs use `auth_refresh_token_expire_days` and browser refresh cookies use a fixed 7-day Max-Age |
 | `ws_token_ttl_seconds` | `900` | WebSocket token lifetime |
 | `csrf_token_expire_minutes` | `60` | CSRF token lifetime |
 | `session_secure` | `false` | Require HTTPS for session cookies |

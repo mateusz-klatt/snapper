@@ -116,6 +116,12 @@ both carry the standard provenance fields (`type`, `sequence_id`, `public_id`,
 `null` in the cookie flow; they are populated only when the caller passes
 `?return_tokens=true` for headless integrations.
 
+`remember_me` is currently accepted for compatibility but is not wired into
+`/api/auth/login`: refresh JWTs use `auth_refresh_token_expire_days`, and
+browser refresh cookies use a fixed 7-day `Max-Age`.
+`auth_refresh_token_expire_days_extended` is reserved until login passes the
+flag through to token creation.
+
 **Cookies set:**
 
 | Cookie | HttpOnly | Secure | SameSite | Path | Max-Age | Description |
@@ -897,7 +903,7 @@ X-CSRF-Token: <csrf_token>
 | Field | Type | Required | Description |
 | ----- | ---- | -------- | ----------- |
 | `instrument` | string | yes | Native symbol (e.g., BTC-USD) |
-| `instrument_public_id` | string | yes | Instrument UUID |
+| `instrument_public_id` | string | yes | Required by the request schema for client-side consistency; the server resolves the persisted instrument UUID from `instrument` + `exchange`, so this field is not authoritative |
 | `exchange` | string | yes | Exchange name |
 | `mode` | string | no | `live` (default) or `paper` |
 | `side` | string | yes | `buy` or `sell` |
@@ -1720,6 +1726,11 @@ List configured process instances with runtime state. Requires
     "payload": [
         {
             "type": "configured_process",
+            "sequence_id": 1,
+            "public_id": "<uuid7>",
+            "timestamp": "2026-01-18T12:00:00Z",
+            "session_id": "<server-session>",
+            "topic": null,
             "name": "zmq_broker",
             "enabled": true,
             "running": true,
@@ -1762,6 +1773,11 @@ Lightweight process category counts for the overview dashboard. Requires
     "topic": null,
     "payload": {
         "type": "process_summary",
+        "sequence_id": 1,
+        "public_id": "<uuid7>",
+        "timestamp": "2026-01-18T12:00:00Z",
+        "session_id": "<server-session>",
+        "topic": null,
         "coordinator": "coord-0",
         "feeds": { "running": 2, "total": 3 },
         "strategies": { "running": 1, "total": 2 },
@@ -1978,6 +1994,10 @@ List historical process runs. Requires `manage:processes` permission.
         {
             "type": "process_run",
             "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+            "sequence_id": 1,
+            "timestamp": "2026-01-18T18:00:00Z",
+            "session_id": "<server-session>",
+            "topic": null,
             "process_name": "zmq_broker",
             "status": "succeeded",
             "role": "core",

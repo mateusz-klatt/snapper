@@ -15,9 +15,9 @@ flowchart TB
     end
 
     subgraph Broker["ZMQ Broker"]
-        XSUB["XSUB Socket<br/>tcp://*:7500"]
+        XSUB["XSUB Socket<br/>bind XSUB endpoint"]
         Proxy["Proxy Loop"]
-        XPUB["XPUB Socket<br/>tcp://*:7501"]
+        XPUB["XPUB Socket<br/>bind XPUB endpoint"]
         XSUB --> Proxy --> XPUB
     end
 
@@ -44,8 +44,16 @@ flowchart TB
 
 The broker is the central message hub:
 
-- **XSUB** (tcp://*:7500) — Publishers connect here
-- **XPUB** (tcp://*:7501) — Subscribers connect here
+- **XSUB** — Publishers connect here.
+- **XPUB** — Subscribers connect here.
+
+The broker binds to `ZMQ_BROKER_BIND_XSUB` / `ZMQ_BROKER_BIND_XPUB` when those
+bootstrap variables are set. When unset, the bind endpoints fall back to
+`ZMQ_BROKER_XSUB` / `ZMQ_BROKER_XPUB`, whose local defaults are
+`tcp://127.0.0.1:7500` and `tcp://127.0.0.1:7501`. Docker deployments set the
+bind endpoints to routable container interfaces such as
+`tcp://0.0.0.0:7500` and `tcp://0.0.0.0:7501` while clients keep using the
+connect endpoints.
 
 The broker forwards messages in both directions:
 
