@@ -657,6 +657,11 @@ from snapper.messaging.schemas.data import CandleData
 | `volume` | float | Total traded volume |
 | `vwap` | float \| None | Volume-weighted average price (optional) |
 | `trades` | int \| None | Number of trades in the candle (optional) |
+| `complete` | bool | `True` marks the final bar for its window; `False` marks a provisional intra-minute update of a still-forming "living" bar (default `True`) |
+
+> Note: strategies receiving non-final bars (`complete == False`) may want
+> to gate signal logic on `candle.complete` so they act only on closed
+> candles and ignore provisional intra-minute updates.
 
 ## Technical Indicators
 

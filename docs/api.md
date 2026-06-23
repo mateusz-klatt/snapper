@@ -718,7 +718,7 @@ GET /api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h&limit=100
 | --------- | ---- | -------- | ----------- |
 | `instrument` | string | yes | Instrument symbol (e.g., `BTC-USD`) |
 | `exchange` | string | yes | Exchange name (`kraken`, `kraken_futures`, `kraken_equities`, `walutomat`, `polygon`) |
-| `timeframe` | string | yes | Candle timeframe (e.g., `1m`, `5m`, `15m`, `1h`, `4h`, `1d`) |
+| `timeframe` | string | yes | Candle timeframe (e.g., `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`) |
 | `limit` | int | no | Number of candles, max 1000 (default 100) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
 | `start` | datetime | no | Market-time window start (`open_at`, UTC); pair with `end` |
@@ -761,12 +761,17 @@ Supplying only one of the pair, or `start >= end`, returns `400`.
             "close": 42300.0,
             "volume": 1234.56,
             "vwap": 42150.0,
-            "trades": 5678
+            "trades": 5678,
+            "complete": true
         }
     ],
     "count": 1
 }
 ```
+
+The `complete` flag marks a provisional intra-minute update of a
+still-forming bar when `false`, and the final bar for its window when
+`true` (default `true`).
 
 ### GET /api/candles/db
 
@@ -2866,9 +2871,14 @@ use these fields to detect gaps without server-side replay support.
     "close": 42300.0,
     "volume": 1234.56,
     "vwap": 42150.0,
-    "trades": 5678
+    "trades": 5678,
+    "complete": true
 }
 ```
+
+The `complete` flag marks a provisional intra-minute update of a
+still-forming bar when `false`, and the final bar for its window when
+`true` (default `true`).
 
 #### Tick
 

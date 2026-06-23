@@ -789,6 +789,38 @@ instead of re-dialing the dead route. Direct routes are never
 quarantined: a connect error with no proxy means the exchange or the
 local uplink is down, not the route.
 
+### Spot candle source (`spot_candle_source`)
+
+By default the Kraken Spot feed reads live 1m candles from the venue-native
+`ohlc:1m` WebSocket channel (`spot_candle_source=native`). Set the
+`spot_candle_source` setting to `trade_built` to switch the live Spot 1m
+source to candles synthesized locally from the already-consumed spot trade
+stream: the publisher then consumes
+`KrakenExchangeClient.subscribe_trade_built_candles` and **drops** the
+`ohlc:1m` subscription entirely (the native-candle subscription set goes
+empty — a bandwidth saving), tagging the persisted rows `source='calculated'`
+instead of `source='native'`.
+
+The setting value is read at feed startup, where the Spot 1m subscription
+(native `ohlc:1m` vs the trade-built stream) is established once — so **a flip
+only takes effect after a `snapper-feed` restart**. A live settings broadcast
+over ZMQ (`_handle_settings_update`) refreshes the publisher's cached value but
+does **not** re-establish the subscription, so it cannot switch the live source
+on its own; always restart the feed. Roll it out cautiously:
+
+1. Set `spot_candle_source=trade_built`.
+2. Restart `snapper-feed` (required — the subscription source is fixed at
+    startup; the live ZMQ broadcast updates the cached value only).
+3. Verify live Spot 1m rows are landing with `source='calculated'`, that no
+    new native `ohlc:1m` subscription is opened (the native-candle
+    subscription set is empty), and that the feed stays healthy.
+4. Note the illiquid-pair tradeoff: a minute with zero trades emits **no**
+    base 1m bar, and `candle_forward_fill` fills only higher timeframes — not
+    the base 1m — so thinly-traded pairs will show 1m gaps that the native
+    `ohlc:1m` channel would have carried.
+5. Revert instantly by setting `spot_candle_source=native` and restarting the
+    feed. The default is `native`.
+
 ## Per-wallet executors
 
 Executor process configs are templates named `executor_<exchange>`.
@@ -879,6 +911,33 @@ failures (HTTP 200 with `result=null` or non-empty `errors`) raise
 `RuntimeError` so they are distinguishable from legitimately-empty
 windows. See `src/snapper/infrastructure/exchanges/implementations/
 kraken_equities.py:get_ohlcv` for the error contract.
+
+To seed daily history for the single-source read cutover and the DB-first
+warmup, load cached Polygon grouped-daily rows as 1d candles. This loader is
+cache-only — it reads the on-disk grouped-daily cache and never contacts the
+Polygon API:
+
+```
+# Load every cached day strictly before the cut date as
+# source='native', complete=True 1d candles under the live-read venue.
+snapper polygon-load-grouped-candles --exchange kraken --cut-date 2026-01-01
+
+# Or the Makefile wrapper (equivalent)
+make run-polygon-grouped-candles EXCHANGE=kraken CUT_DATE=2026-01-01
+
+# Single symbol; or --all for every Polygon-mapped native symbol.
+snapper polygon-load-grouped-candles -e kraken --cut-date 2026-01-01 -s BTC-USD
+```
+
+`--exchange` is the **live-read venue** the persisted bars live under (e.g.
+`kraken`) — never `polygon`; the loader writes the 1d history under the same
+venue the read cutover and warmup resolve. `--cut-date` must sit at or before
+the first UTC day live synthesis owns: the loader writes only days **strictly
+before** it, keeping native backfill and synthesized live bars on disjoint day
+ranges. There is **no** Docker variant of this loader (`make
+docker-polygon-grouped` wraps the separate grouped-daily CSV download, not the
+candle load). See [docs/cli.md](cli.md) for the full option reference
+(`--symbol`/`-s`, `--all`, `--lookback-days`).
 
 ## Quarterly rotation
 

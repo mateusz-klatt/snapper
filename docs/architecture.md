@@ -192,7 +192,12 @@ Components:
   Synthesized bars are also persisted to the `candles` table (tagged
   `source='synthesized'` with a `complete` trustworthy-boundary flag) when a
   higher timeframe is configured for persistence — off by default — under the
-  same persist policy as `1m`; the single-source read cutover is gated by the
+  same persist policy as `1m`. The candle `source` provenance vocabulary is
+  `native | calculated | synthesized` (the `ck_candle_source` CHECK constraint
+  on the `candles`/`shadow_candles` tables): `native` for venue OHLC bars,
+  `calculated` for trade-built 1m bars (see the Kraken Spot sub-bullet below),
+  and `synthesized` for aggregator-derived higher timeframes. The single-source
+  read cutover is gated by the
   default-off `candle_single_source` setting (when ON, `/api/candles` serves
   `5m/15m/30m` from the persisted plane instead of on-read derivation, after
   `verify-candle-coverage` confirms the plane is populated)
@@ -206,6 +211,21 @@ Components:
   replay. The paper publisher synthesizes from replayed 1m too, anchoring the
   aggregator's live epoch at the replay start so historical higher-TF windows are
   emitted rather than suppressed.
+
+    - **Trade-built Spot 1m** — The Kraken Spot publisher
+      (`publishers/kraken.py`) can build live 1m bars from the public trade
+      feed instead of the native OHLC channel. A `TradeCandleBuilder`
+      (`infrastructure/exchanges/_trade_candle_builder.py`) folds each
+      `TradeUpdate` into its `(symbol, minute)` bucket and emits completed
+      minutes once they age past `trade_built_finalize_grace_seconds`
+      (default `12`). This path is gated by the `spot_candle_source` setting
+      (default `native`; set `trade_built` to enable), which tags persisted
+      rows `source='calculated'` and disables the native candle-only liveness
+      watchdog. The default-off `spot_trade_built_shadow_enabled` setting runs
+      a parallel A/B writer that persists trade-built 1m bars to the separate
+      `shadow_candles` table (`source='calculated'`) while leaving the live
+      native plane untouched — for comparing the two sources before any
+      cutover.
 - **Executors** (`executors/`) — Per-wallet order execution on
   exchanges. One executor process per `(exchange, wallet)` pair is
   spawned at boot from active `wallet_credentials` rows; each
@@ -1118,16 +1138,29 @@ Deploy notes (see `docker-compose.yml` `snapper-feed` service):
   In multi-instance deployments only coordinator instance `0` runs this
   replicated registry sync; non-zero instances skip it during FastAPI
   lifespan startup to avoid racing the same temporal `Setting` rows.
-- By default feed publishers dial exchanges directly. To verify egress
-  routing, set `feed_egress_enabled=true`, restart `snapper-feed`, then
-  confirm publisher connections use the configured `snapper-egress` SOCKS
-  routes. Each pool-bearing process publishes a read-only
-  `system.egress.snapshot` frame on the heartbeat cadence; the API
-  process subscribes to those frames and merges the latest per-container
-  snapshots into `GET /api/health/egress` for observability only. The
-  `snapper-egress` sidecar also publishes `system.egress.transfer` samples
-  from `wg show <iface> dump`; the API joins those onto SOCKS5 route rows
-  by listener port without changing route selection.
+- **Egress routing (`infrastructure/network/egress_*`)** — Outbound
+  exchange traffic is split into two classes by an `EgressIdentity`
+  (`egress_context.py`) carried on a `ContextVar`: its `traffic_class` is
+  `public` for market-data style traffic and `private` for authenticated
+  executor traffic. Executor client lifecycles enter an `egress_identity(...,
+  traffic_class="private")` scope (`executors/base.py`), so order and private
+  flows egress on a healthy direct route (or the configured
+  `private_fallback_route_id` when direct is unavailable) and never traverse
+  the public allow-list. Public/market-data traffic instead egresses through
+  the per-venue `snapper-egress` SOCKS5/WireGuard routes, selected from the
+  `EgressPool` by the exchange allow-list (`egress_pool.py`). This public
+  routing is opt-in: by default feed publishers dial exchanges directly. Set
+  `feed_egress_enabled=true` and restart `snapper-feed` to enable
+  `snapper-egress` routing for public traffic, then confirm publisher
+  connections use the configured `snapper-egress` SOCKS routes. See
+  `docs/snapper-egress.md` for the sidecar deployment model. Each pool-bearing
+  process publishes a read-only `system.egress.snapshot` frame on the
+  heartbeat cadence; the API process subscribes to those frames and merges the
+  latest per-container snapshots into `GET /api/health/egress` for
+  observability only. The `snapper-egress` sidecar also publishes
+  `system.egress.transfer` samples from `wg show <iface> dump`; the API joins
+  those onto SOCKS5 route rows by listener port without changing route
+  selection.
 
 **Multi-instance deployment (AI-review fanout dedup):**
 multi-worker uvicorn is a supported production topology. The

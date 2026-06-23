@@ -23,6 +23,18 @@ This sidecar is part of the egress-multiplexer subsystem.
   uses. The sidecar reads encrypted `egress_tunnel_*_private_key`
   settings via the same Fernet path; mismatched master passwords
   silently mean "no tunnels load".
+- **`DB_URL` and `ZMQ_BROKER_XSUB`** are both hard-required by the
+  sidecar entrypoint (`snapper.egress.__main__`). The process exits with
+  **code 2** at startup if either is missing: `DB_URL` lets the
+  SettingsService read tunnel descriptors + encrypted keys, and
+  `ZMQ_BROKER_XSUB` wires SettingsService change-broadcast support.
+  `DB_URL` is supplied via `env_file: .env`. In the Compose split,
+  `ZMQ_BROKER_XSUB` MUST be the routable broker host
+  `tcp://snapper:7500`, NOT the `.env` default `tcp://127.0.0.1:7500` —
+  the `docker-compose.yml` `snapper-egress` service overrides it for
+  exactly this reason. `snapper-egress` runs in a separate container, so
+  `localhost` would not reach the backend broker living in the `snapper`
+  container.
 
 ## Architecture (short)
 
@@ -129,6 +141,7 @@ Edit the `egress_pool` setting to add the new route:
 {
   "enabled": true,
   "on_all_quarantined": "wait",
+  "private_fallback_route_id": "wg-uk-1",
   "routes": [
     {"id": "default", "kind": "direct", "priority": 100, "enabled": true},
     {"id": "wg-uk-1", "kind": "socks5",
@@ -144,6 +157,18 @@ Edit the `egress_pool` setting to add the new route:
 `region`, `exit_ip`, and `provider` are optional operator metadata
 fields. They do not affect routing; they are surfaced through
 `GET /api/health/egress` so an operator can identify where a route exits.
+
+`private_fallback_route_id` is an optional top-level key (default
+`null`). It names a declared route used as the **private-traffic
+fallback only when no healthy direct route exists** — so executor (order)
+traffic CAN ride a SOCKS5 tunnel when configured, even though private
+traffic normally goes direct (see *Public vs private traffic* below).
+It is validated at config-load: when set, it MUST reference an existing
+route id, otherwise `EgressPoolConfig` rejects the pool. Its
+`allowed_exchanges` is **ignored** on the private fallback path (the
+route may be publicly pinned to one exchange while still serving as the
+private fallback for another). Kraken authenticated REST wires this
+route for private executor REST reads.
 
 **Priority semantics:** `EgressPool.reserve()` sorts by
 `(priority, in_use_count)` and picks the **lowest** number first.
@@ -189,6 +214,28 @@ current schema does not support per-exchange denial of direct fallback.
 Unknown exchange names (typos) are rejected by `EgressPoolConfig` at
 config-load time, so a `"krakeen"` typo never silently makes a route
 unreachable.
+
+### Public vs private traffic
+
+Routing depends on the reservation's **traffic class**
+(`TrafficClass = Literal["public", "private"]`, defaulting to
+`"public"`):
+
+- **Public** market-data traffic (Kraken WS publishers and other
+  feeds) routes over the VPN/SOCKS5 tunnels by the public selection
+  path — the `(priority, in_use_count)` sort honouring each route's
+  `allowed_exchanges` allow-list, with the direct route as fallback.
+- **Private** executor (order) traffic is deliberately routed
+  **direct**. Executors wrap their work in
+  `egress_identity(traffic_class="private", owner="executor")`, and the
+  pool routes `traffic_class="private"` through a separate selection
+  path (`_pick_private_locked`) that prefers a healthy `direct` route
+  regardless of route priority and ignores `allowed_exchanges`,
+  bypassing the public sort entirely. Kraken authenticated REST ops are
+  tagged the same way.
+
+In short: **public = VPN/SOCKS5** (priority + allow-list), **private =
+direct** (a healthy direct route always wins for order traffic).
 
 Then enable the feed gate (DB setting `feed_egress_enabled=true`) if
 not already on, and restart both the API and the feed tier — the feed

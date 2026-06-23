@@ -30,6 +30,15 @@ bypass CSRF per the project-wide auth contract.
 | GET    | `/api/metrics/retention`                            | Retention scheduler status and policy counters |
 | GET    | `/api/metrics/db/tables`                            | Per-table row-count and SCD2 lifecycle counters |
 
+### Sibling operator health endpoint
+
+`GET /api/health/egress` is a sibling operator health endpoint outside
+the `/api/metrics/*` surface. It shares the same
+`Permission.READ_SYSTEM_STATUS` gate as the metrics routes and returns a
+per-container egress pool status snapshot, aggregated cross-process over
+the `system.egress.snapshot` ZMQ topic. See
+[api.md](api.md) (`GET /api/health/egress`) for the full wire schema.
+
 ### Failure contract
 
 If the snapshotter singleton failed to start at lifespan time, the

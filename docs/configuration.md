@@ -330,6 +330,8 @@ controlled by these settings so high-volume feeds can be cache-first:
 | `spot_trade_built_shadow_enabled` | When `false` (default) Kraken Spot trade-built 1m candles are not persisted; `true` writes them to `shadow_candles` only for native-vs-trade-built A/B checks. |
 | `spot_candle_source` | Kraken Spot live 1m source. Default `native` keeps venue OHLC unchanged; explicit `trade_built` switches live 1m bars to the trade stream. |
 | `trade_built_finalize_grace_seconds` | Seconds to wait after a trade-built minute closes before finalizing it. Default `12` absorbs late Kraken trades. |
+| `candle_forward_fill` | When `false` (default) the higher-TF synthesis flush emits only data-backed bars; `true` forward-fills empty higher-TF windows with a flat carried-close bar. Enable ONLY for continuous-corpus venues (24/7 crypto like Kraken spot); leave off for session-based equities where it would manufacture non-trading-day bars. |
+| `candle_single_source` | When `false` (default) the `/api/candles` smart route derives `5m/15m/30m` on-read from the 1m cache; `true` serves those frames from the persisted `candles` plane (Phase 3 read-cutover, closing the cache-vs-persisted dual-source hazard). Keep off until the persisted higher-TF plane is populated and `verify-candle-coverage` passes. `1m` stays cache-served and `1h/4h/1d` are already DB-served. |
 | `market_persist_extra` | Explicit extra instrument allowlist |
 | `market_persist_exclude` | Explicit instrument denylist |
 

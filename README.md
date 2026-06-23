@@ -34,6 +34,14 @@ or rotate after first login via
 
 - **Market data collection** — Kraken (WebSocket; spot + futures +
   equities), Walutomat (REST polling), Polygon.io (REST)
+- **Candle synthesis** — Multi-timeframe candle synthesis from the 1m base
+    stream (in-process per-publisher rollups) with provenance tagging
+    (`native` / `calculated` / `synthesized`), controlled by the `timeframes`,
+    `candle_forward_fill`, and `persist_intermediate_candles` settings
+- **Egress routing** — Per-venue VPN egress routing gated by
+    `feed_egress_enabled`: public feed traffic routes through the
+    WireGuard/SOCKS5 `snapper-egress` sidecar while private/executor traffic
+    stays direct
 - **Symbol correlation** — Underlying asset model linking instruments across
     exchanges (e.g., SPY, ESM6-CME, SPYX-USD-PERP all map to S&P 500).
     YAML-driven pattern matching, front-month rollover, contract ladder API
@@ -230,9 +238,19 @@ flowchart TB
         Executor["Order Executor<br/>Venue Adapter"]
     end
 
+    subgraph Egress["Egress (feed_egress_enabled)"]
+        EgressSidecar["snapper-egress Sidecar<br/>WireGuard / SOCKS5"]
+    end
+
+    Venues["Venues / Exchanges<br/>Kraken + Walutomat + Polygon.io"]
+
     Dashboard --> FastAPI
     FastAPI --> Bridge
     Feed --> Broker
+    Feed -- "public feed" --> EgressSidecar
+    EgressSidecar --> Venues
+    Feed -- "direct fallback" --> Venues
+    Executor -- "private / direct" --> Venues
     Strategies --> Broker
     Broker --> Strategies
     Runtime --> Broker
