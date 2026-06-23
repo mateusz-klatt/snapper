@@ -41,7 +41,8 @@ or rotate after first login via
 - **Egress routing** — Per-venue VPN egress routing gated by
     `feed_egress_enabled`: public feed traffic routes through the
     WireGuard/SOCKS5 `snapper-egress` sidecar while private/executor traffic
-    stays direct
+    stays direct-first, with `private_fallback_route_id` used only when
+    direct is unavailable; private mutations remain direct-only
 - **Symbol correlation** — Underlying asset model linking instruments across
     exchanges (e.g., SPY, ESM6-CME, SPYX-USD-PERP all map to S&P 500).
     YAML-driven pattern matching, front-month rollover, contract ladder API
@@ -250,7 +251,8 @@ flowchart TB
     Feed -- "public feed" --> EgressSidecar
     EgressSidecar --> Venues
     Feed -- "direct fallback" --> Venues
-    Executor -- "private / direct" --> Venues
+    Executor -- "private direct-first" --> Venues
+    Executor -. "configured private fallback" .-> EgressSidecar
     Strategies --> Broker
     Broker --> Strategies
     Runtime --> Broker

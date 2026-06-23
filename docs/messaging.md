@@ -79,7 +79,7 @@ Topic format varies by category (see per-category tables below).
 | ----- | ----------- |
 | `market.kraken.BTC-USD.candles.1h` | Hourly BTC/USD candles from Kraken |
 | `market.kraken.BTC-USD.ticks` | BTC/USD ticks from Kraken |
-| `market.kraken_equities.AAPL.candles.1d` | Daily AAPL candles from Kraken Equities (note: live `market.*` topics exclude `polygon` — Polygon is replay-only via `market.paper.polygon.…`) |
+| `market.kraken_equities.MNQU6-CME.candles.1d` | Daily Nasdaq-100 Micro futures candles from Kraken Equities (note: live `market.*` topics exclude `polygon` — Polygon is replay-only via `market.paper.polygon.…`) |
 
 ### Signals
 

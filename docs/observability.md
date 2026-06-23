@@ -36,7 +36,8 @@ bypass CSRF per the project-wide auth contract.
 the `/api/metrics/*` surface. It shares the same
 `Permission.READ_SYSTEM_STATUS` gate as the metrics routes and returns a
 per-container egress pool status snapshot, aggregated cross-process over
-the `system.egress.snapshot` ZMQ topic. See
+the `system.egress.snapshot` ZMQ topic, with sidecar
+`system.egress.transfer` samples joined to matching SOCKS5 route rows. See
 [api.md](api.md) (`GET /api/health/egress`) for the full wire schema.
 
 ### Failure contract

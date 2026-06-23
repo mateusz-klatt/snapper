@@ -1,10 +1,10 @@
 # snapper-egress sidecar — operator runbook
 
 The `snapper-egress` sidecar runs N WireGuard tunnels plus N matching
-SOCKS5 listeners inside one container, so the Kraken Spot publisher
-(and any future market-data publisher) can route its WebSocket
-traffic out through an alternate egress IP without changing source
-code.
+SOCKS5 listeners inside one container, so Kraken Spot/Futures/Equities
+WebSocket publishers and Walutomat HTTP polling can route public
+market-data traffic out through alternate egress IPs without changing
+source code.
 
 This sidecar is part of the egress-multiplexer subsystem.
 
@@ -225,17 +225,22 @@ Routing depends on the reservation's **traffic class**
   feeds) routes over the VPN/SOCKS5 tunnels by the public selection
   path — the `(priority, in_use_count)` sort honouring each route's
   `allowed_exchanges` allow-list, with the direct route as fallback.
-- **Private** executor (order) traffic is deliberately routed
-  **direct**. Executors wrap their work in
+- **Private** executor (order) traffic is routed **direct-first**.
+  Executors wrap their work in
   `egress_identity(traffic_class="private", owner="executor")`, and the
   pool routes `traffic_class="private"` through a separate selection
   path (`_pick_private_locked`) that prefers a healthy `direct` route
   regardless of route priority and ignores `allowed_exchanges`,
-  bypassing the public sort entirely. Kraken authenticated REST ops are
+  bypassing the public sort entirely. When direct is unavailable and
+  `private_fallback_route_id` is configured, private idempotent REST reads
+  and the next private WebSocket reconnect can ride that fallback route.
+  Private mutations remain direct-only. Kraken authenticated REST ops are
   tagged the same way.
 
-In short: **public = VPN/SOCKS5** (priority + allow-list), **private =
-direct** (a healthy direct route always wins for order traffic).
+In short: **public = VPN/SOCKS5 preferred** (priority + allow-list, with
+direct fallback), **private = direct-first**. A healthy direct route always
+wins for private traffic; `private_fallback_route_id` is used only when
+direct is unavailable, and private mutations remain direct-only.
 
 Then enable the feed gate (DB setting `feed_egress_enabled=true`) if
 not already on, and restart both the API and the feed tier — the feed

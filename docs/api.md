@@ -546,10 +546,14 @@ are started by design).
     "topic": null,
     "payload": {
         "type": "health_check",
+        "sequence_id": 1,
+        "public_id": "<uuid7>",
+        "timestamp": "2026-01-18T12:00:00Z",
+        "session_id": "<server-session>",
+        "topic": null,
         "status": "healthy",
         "version": "0.1.0",
         "connections": {
-            "type": "connection_stats",
             "active_connections": 5,
             "zmq_subscribers": 12,
             "subscriber_tasks": 12,
@@ -557,14 +561,10 @@ are started by design).
             "active_clients": 3
         },
         "topics": {
-            "type": "health_topics",
-            "available": 7,
             "active": 3
         },
         "gap_detection": {
-            "type": "gap_detection_stats",
             "bridge": {
-                "type": "gap_stats",
                 "gaps_detected": 0,
                 "session_resets": 0,
                 "duplicates": 0,
@@ -1677,6 +1677,12 @@ List registered process templates that can be instantiated. Requires
     "topic": null,
     "payload": [
         {
+            "type": "available_process",
+            "sequence_id": 1,
+            "public_id": "<uuid7>",
+            "timestamp": "2026-01-18T12:00:00Z",
+            "session_id": "<server-session>",
+            "topic": null,
             "name": "zmq_broker",
             "class_path": "snapper.messaging.infrastructure.broker.ZmqBrokerProcess",
             "method": "start",
@@ -1874,8 +1880,13 @@ X-CSRF-Token: <csrf_token>
 ```
 
 All `payload` fields are optional. `mode` overrides the stored execution mode
-for this run only — it does not persist to Settings. Omitting it uses the
-stored value.
+for this run only; `parameters` supplies run-only constructor overrides.
+Neither field persists to Settings, and omitting either value uses the stored
+configuration. Strategy processes reject start-time `parameters` so their
+operator/wallet/output scope check always runs against persisted launch
+parameters. `operator_public_id` and `wallet_public_id` can never be
+overridden at start time. Executor templates cannot be started directly; start
+the generated `executor_<exchange>_w<wallet_short>` instance instead.
 
 **Response (200):**
 
@@ -3053,6 +3064,8 @@ the scoped prefixes documented in the WebSocket auth section above.
 - `system.heartbeats.executor.{exchange}.{wallet_short}` -- Per-wallet executor heartbeat; `wallet_short` is exactly 12 lowercase hex characters
 - `system.heartbeats.feed.{exchange}` -- Live feed heartbeat
 - `system.heartbeats.feed.paper.{source}` -- Paper replay feed heartbeat
+- `system.egress.snapshot` -- Egress pool route snapshots
+- `system.egress.transfer` -- WireGuard transfer samples
 - `admin.{resource}` -- Administrative events (admin only)
 - `processes.events.summary.{coord_slug}` -- Process summary snapshots
 - `processes.events.configured.{coord_slug}` -- Configured process-name snapshots

@@ -903,7 +903,7 @@ snapper kraken-equities-backfill-candles -t 1h -d 30
 make backfill-kraken-equities-candles
 
 # Single symbol, daily candles, 90 days
-snapper kraken-equities-backfill-candles -s MNQM6-CME -t 1d -d 90 --no-resume
+snapper kraken-equities-backfill-candles -s MNQU6-CME -t 1d -d 90 --no-resume
 ```
 
 The endpoint is undocumented/internal — upstream application-layer
@@ -946,7 +946,7 @@ The default `KRAKEN_EQUITIES` instruments setting is the wildcard
 so the default scope tracks every available contract automatically.
 Rotation discipline applies when an operator narrows the setting to
 an explicit allowlist: the chosen TradFi symbols are quarterly expiry
-contracts (`MNQM6-CME` = Jun 26, etc.) and must be rotated before the
+contracts (`MNQU6-CME` = Sep 26, etc.) and must be rotated before the
 `InstrumentSpec.expiry_at` timestamp on any listed symbol drops below
 14 days. Rotation cadence:
 
@@ -968,8 +968,8 @@ contracts (`MNQM6-CME` = Jun 26, etc.) and must be rotated before the
         WHERE i.exchange = 'kraken_equities'
               AND i.known_to = '9999-12-31 23:59:59.000000';"
    ```
-2. Identify the next quarterly (e.g. `MNQU6-CME` Sep 26 when
-   `MNQM6-CME` Jun 26 drops below 14 days).
+2. Identify the next quarterly (e.g. `MNQZ6-CME` Dec 26 when
+   `MNQU6-CME` Sep 26 drops below 14 days).
 3. Add the new nearest contract by either changing the default
    `KRAKEN_EQUITIES` entry inside the `AppSettings.instruments`
    property default literal in `src/snapper/config/app.py` (code

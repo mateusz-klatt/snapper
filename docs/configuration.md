@@ -287,6 +287,7 @@ through the Settings API/UI:
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
+| `ai_integration_enabled` | `true` | Feature gate for `/api/mcp` and `/api/ai-delegates/*`; `false` returns `503 {"error_code":"feature_disabled"}` from `/api/mcp` and hides AI integration in the frontend |
 | `feed_egress_enabled` | `false` | Route feed publishers through their own process-local egress pools at startup |
 | `egress_pool` | unset | JSON tunnel-pool definition, validated as `EgressPoolConfig` at startup. An absent, malformed, or validation-failing value disables egress routing with a log line. See [snapper-egress.md](snapper-egress.md) |
 | `paper_instruments` | `{"kraken": ["BTC-USD", "EUR-USD"], "kraken_futures": [], "walutomat": ["EUR-PLN", "USD-PLN"]}` | Source exchanges and symbols replayed by paper feeds |

@@ -253,7 +253,7 @@ after the picker moves.
 
 Cross-asset strategies observe market data on one venue / instrument
 and emit signals that execute on a *different* venue / instrument
-(for example `TradFiObserveCryptoExecute` observes MNQM6-CME candles
+(for example `TradFiObserveCryptoExecute` observes MNQU6-CME candles
 on `kraken_equities` and emits BUY/SELL signals on `BTC-USD` / `kraken`).
 The backtest engine supports this through a single config field.
 
@@ -272,7 +272,7 @@ current registry is queryable at
 BacktestConfig(
     strategy_class="TradFiObserveCryptoExecute",
     instruments={
-        "kraken_equities": ["<MNQM6-CME-public-id>"],
+        "kraken_equities": ["<MNQU6-CME-public-id>"],
         "kraken": ["<BTC-USD-public-id>"],
     },
     target_execution_exchange="kraken",

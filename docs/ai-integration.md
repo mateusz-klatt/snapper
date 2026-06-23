@@ -285,10 +285,12 @@ signals, and venue market data. Write and decision tools
 (`submit_manual_order`, `cancel_order`,
 `submit_ai_review_decision`) are gated by per-tool permissions.
 Only `submit_manual_order` is unconditionally guarded by
-`TradingCapsEnforcer.guard`; `cancel_order` invokes the guard only
-on the cancel paths that affect open exposure, and
-`submit_ai_review_decision` is not wired to `caps_enforcer_getter`
-at registration.
+`TradingCapsEnforcer.guard`; `cancel_order` requires the caps enforcer
+to be initialized, then the cancel service enters the guard only when
+emitting a venue cancel command for a plan with a child venue order.
+Plans without a child venue order use the bare cancellation transition
+and do not enter the guard. `submit_ai_review_decision` is not wired
+to `caps_enforcer_getter` at registration.
 
 - **`list_instruments(exchange: str)`** — returns sorted native symbols
     for the exchange inventory. It is not wallet/operator scoped;
@@ -398,9 +400,10 @@ optional; `null` means "unbounded on this axis".
 
 Caps are enforced at trade-command insert sites via the
 `TradingCapsEnforcer.guard()` surface — `submit_manual_order`
-routes through it unconditionally; `cancel_order` invokes the
-guard only on the cancel paths that affect open exposure (the
-bare-cancel fast path skips it). The other MCP tools
+routes through it unconditionally; `cancel_order` requires the caps
+enforcer to be initialized and only enters the guard when the cancel
+service emits a venue cancel command for a plan with a child venue order
+(the bare cancellation transition skips the guard). The other MCP tools
 (`submit_ai_review_decision`, etc.) are not currently wired to
 `caps_enforcer_getter` at registration.
 

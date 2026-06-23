@@ -1143,10 +1143,11 @@ Deploy notes (see `docker-compose.yml` `snapper-feed` service):
   (`egress_context.py`) carried on a `ContextVar`: its `traffic_class` is
   `public` for market-data style traffic and `private` for authenticated
   executor traffic. Executor client lifecycles enter an `egress_identity(...,
-  traffic_class="private")` scope (`executors/base.py`), so order and private
-  flows egress on a healthy direct route (or the configured
-  `private_fallback_route_id` when direct is unavailable) and never traverse
-  the public allow-list. Public/market-data traffic instead egresses through
+  traffic_class="private")` scope (`executors/base.py`), so private traffic is
+  direct-first and never traverses the public allow-list. Private idempotent
+  REST reads and the next private WebSocket reconnect may use
+  `private_fallback_route_id` when direct is unavailable; private REST
+  mutations remain direct-only. Public/market-data traffic instead egresses through
   the per-venue `snapper-egress` SOCKS5/WireGuard routes, selected from the
   `EgressPool` by the exchange allow-list (`egress_pool.py`). This public
   routing is opt-in: by default feed publishers dial exchanges directly. Set

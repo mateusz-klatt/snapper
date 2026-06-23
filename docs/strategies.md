@@ -15,6 +15,7 @@ flowchart TB
     subgraph Strategy["BaseStrategy"]
         OnBar["on_candle()"]
         OnTick["on_tick()"]
+        OnTrade["on_trade()"]
     end
 
     Strategy -->|signals.*| Broker
@@ -220,12 +221,13 @@ Common formats:
 - `market.{exchange}.{instrument}.candles.{timeframe}` — Candle streams
 - `market.{exchange}.{instrument}.ticks` — Tick streams
 - `market.{exchange}.{instrument}.trades` — Trade streams
+- `market.paper.{source_exchange}.{instrument}.{type}` — Paper replay streams from a historical source
 
 Examples:
 
 - `market.kraken.BTC-USD.candles.1h` — Hourly BTC/USD candles from Kraken
 - `market.kraken.ETH-USD.ticks` — ETH/USD ticks from Kraken
-- `market.polygon.AAPL.trades` — AAPL trade tape from Polygon
+- `market.paper.polygon.AAPL.trades` — Paper replay of AAPL trade tape from Polygon
 
 ### Output Topics (Signals)
 
@@ -709,7 +711,7 @@ flowchart TB
     Start --> Loop
 
     subgraph Loop["Listen loop"]
-        Receive["Receive message"] --> Process["on_candle() / on_tick()"]
+        Receive["Receive message"] --> Process["on_candle() / on_tick() / on_trade()"]
         Process -->|StrategySignal| SignalOut["StrategySignal"]
         Process --> Receive
     end
@@ -932,7 +934,7 @@ they publish ~10-minute-delayed candles + ticks but have no order API.
 
 See ``src/snapper/strategies/examples/tradfi_observe_crypto_execute.py``
 for a minimal EMA-crossover strategy that observes
-``MNQM6-CME`` on ``kraken_equities`` and targets ``BTC-USD`` on
+``MNQU6-CME`` on ``kraken_equities`` and targets ``BTC-USD`` on
 ``kraken``. The file is NOT registered with the process registry —
 it ships as a copy-paste starting point. Activation steps live in the
 module docstring; ``tests/meta/test_reference_strategy_not_registered.py``
