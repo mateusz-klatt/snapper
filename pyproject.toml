@@ -49,7 +49,7 @@ mcp = ">=1.28.0"
 aioapns = "^4.0"
 psutil = "^7.2.2"
 statsmodels = "^0.14.6"
-python-socks = {extras = ["asyncio"], version = "^2.8.1"}
+python-socks = {extras = ["asyncio"], version = "^2.8.2"}
 PySocks = "^1.7.1"
 pyroute2 = "^0.9.6"
 
