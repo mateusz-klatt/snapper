@@ -129,8 +129,8 @@ class TradeCandleBackfillService(RegisterableProcess):
             "exchange": ExchangeEnum.KRAKEN,
             "symbols": settings.instruments.get(ExchangeEnum.KRAKEN, []),
             "all_symbols": True,
-            "start": start,
-            "end": end,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
         }
 
     def __init__(

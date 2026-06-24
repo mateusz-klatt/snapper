@@ -1,5 +1,6 @@
 """Tests for trade-based calculated candle backfill."""
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from dataclasses import field
@@ -267,9 +268,10 @@ def test_time_helpers_and_default_parameters() -> None:
     assert params["symbols"] == ["BTC-USD"]
     start_param = params["start"]
     end_param = params["end"]
-    assert isinstance(start_param, datetime)
-    assert isinstance(end_param, datetime)
-    assert start_param < end_param
+    assert isinstance(start_param, str)
+    assert isinstance(end_param, str)
+    assert datetime.fromisoformat(start_param) < datetime.fromisoformat(end_param)
+    json.dumps(params)
 
 
 @pytest.mark.asyncio

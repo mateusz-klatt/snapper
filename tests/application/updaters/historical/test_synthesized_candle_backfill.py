@@ -1,5 +1,6 @@
 """Tests for synthesized higher-timeframe candle backfill."""
 
+import json
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
@@ -342,9 +343,10 @@ def test_time_helpers_timeframe_validation_and_default_parameters() -> None:
     assert params["cut_date"] is None
     start_param = params["start"]
     end_param = params["end"]
-    assert isinstance(start_param, datetime)
-    assert isinstance(end_param, datetime)
-    assert start_param < end_param
+    assert isinstance(start_param, str)
+    assert isinstance(end_param, str)
+    assert datetime.fromisoformat(start_param) < datetime.fromisoformat(end_param)
+    json.dumps(params)
 
 
 @pytest.mark.asyncio
