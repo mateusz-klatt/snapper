@@ -290,22 +290,32 @@ class ProcessRegistrySyncer:
         """Synchronize process registry with database configurations.
 
         Creates missing database entries and updates existing ones
-        with current metadata from the registry.
+        with current metadata from the registry. Each process is synced
+        inside its own fault boundary: a failure on one process (for
+        example a non-JSON-serializable default parameter) is logged and
+        skipped so a single malformed registration cannot abort server
+        startup and cascade to services that wait on its healthcheck.
         """
         registry = get_registered_processes()
         logger.info(f"Syncing {len(registry)} registered processes to database")
         repository = get_repository(self.settings.db_url)
         for name, entry in registry.items():
-            config_key = f"process_{name}"
-            async with repository.session() as session:
-                result = await session.execute(
-                    select(Setting).where(Setting.key == config_key, *where_active_now(Setting))
+            try:
+                config_key = f"process_{name}"
+                async with repository.session() as session:
+                    result = await session.execute(
+                        select(Setting).where(Setting.key == config_key, *where_active_now(Setting))
+                    )
+                    existing = result.scalar_one_or_none()
+                if existing is None:
+                    await self._sync_new_process(name, entry)
+                else:
+                    await self._sync_existing_process(name, entry, existing, repository)
+            except Exception as exc:
+                logger.exception(
+                    f"Failed to sync process '{name}' to database; skipping it so server "
+                    f"startup is not blocked: {exc!r}"
                 )
-                existing = result.scalar_one_or_none()
-            if existing is None:
-                await self._sync_new_process(name, entry)
-            else:
-                await self._sync_existing_process(name, entry, existing, repository)
 
     async def create_process_config(
         self,

@@ -344,6 +344,60 @@ class TestSyncRegistryTagsNotIterable:
         ):
             await launcher.sync_registry_to_database()
 
+    async def test_sync_registry_skips_process_that_fails_to_serialize(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-serializable default is logged and skipped, sync continues.
+
+        Given: Two new processes, the first returning a datetime default
+            (not JSON-serializable, since the syncer json.dumps the config).
+        When: sync_registry_to_database runs.
+        Then: The failing process does not abort the sync and the second
+            valid process is still reached (fault isolation per process).
+        """
+        launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
+        bad_class = MagicMock()
+        bad_class.get_default_parameters.return_value = {"start": datetime(2024, 1, 1, tzinfo=UTC)}
+        good_class = MagicMock()
+        good_class.get_default_parameters.return_value = {"symbols": ["BTC-USD"]}
+
+        def _entry(class_ref: MagicMock) -> ProcessRegistryEntry:
+            return ProcessRegistryEntry(
+                class_ref=class_ref,
+                class_path="test.Proc",
+                method="start",
+                description="Test process",
+                priority=10,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=(),
+                parameters_model=None,
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+            )
+
+        registry = {"bad_proc": _entry(bad_class), "good_proc": _entry(good_class)}
+        monkeypatch.setattr(
+            "snapper.application.process_manager.registry_syncer.get_registered_processes",
+            lambda: registry,
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session = AsyncMock(add=MagicMock())
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_context = AsyncMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_context.__aexit__ = AsyncMock(return_value=None)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_context
+        with patch(
+            "snapper.application.process_manager.registry_syncer.get_repository",
+            return_value=mock_repo,
+        ):
+            await launcher.sync_registry_to_database()
+        assert good_class.get_default_parameters.called
+
 
 @dataclass
 class _DummySettingsService:
