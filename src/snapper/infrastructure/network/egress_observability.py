@@ -95,17 +95,14 @@ class EgressSnapshotPublisher:
 
     async def _run_loop(self) -> None:
         """Publish snapshots on the configured cadence until stopped."""
-        try:
-            while self._running:
-                await asyncio.sleep(self._interval_seconds)
-                if not self._running:
-                    break
-                try:
-                    await self.publish_once()
-                except Exception as exc:
-                    logger.error("egress_snapshot: publish failed for {}: {}", self._container, exc)
-        except asyncio.CancelledError:
-            raise
+        while self._running:
+            await asyncio.sleep(self._interval_seconds)
+            if not self._running:
+                break
+            try:
+                await self.publish_once()
+            except Exception as exc:
+                logger.error("egress_snapshot: publish failed for {}: {}", self._container, exc)
 
     async def publish_once(self) -> bool:
         """Publish one snapshot if this process has an egress pool.

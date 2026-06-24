@@ -456,7 +456,7 @@ def _data_from_snapshot(
     )
 
 
-@router.get("/egress", response_model=EgressHealthResponse)
+@router.get("/egress")
 async def get_egress_health(
     request: Request,
     _principal: Annotated[

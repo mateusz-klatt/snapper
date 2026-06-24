@@ -4,6 +4,7 @@ import contextlib
 import errno
 import socket
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import MutableMapping
@@ -39,6 +40,7 @@ _PRESEND_ERRNOS = frozenset(
 )
 _MISSING = object()
 _REST_URL_ATTRS = ("url", "URL", "base_url", "baseUrl", "api_url", "apiUrl")
+_REST_URL_MAPPING_KEYS = ("api", "public", "private", "rest", "spot", "futures")
 
 
 @dataclass(frozen=True)
@@ -479,7 +481,6 @@ def _reserve_private_fallback(exchange: str, target_host: str | None) -> EgressR
         return None
     return pool.reserve_private_fallback(
         exchange=exchange,
-        purpose="http",
         target_host=target_host,
         connection_kind="rest",
     )
@@ -508,16 +509,25 @@ def _target_host_from_url_candidate(candidate: object) -> str | None:
     if isinstance(candidate, str):
         return _target_host_from_url_string(candidate)
     if isinstance(candidate, Mapping):
-        mapped: Mapping[object, object] = candidate
-        for key in ("api", "public", "private", "rest", "spot", "futures"):
-            if key in mapped:
-                host = _target_host_from_url_candidate(mapped[key])
-                if host is not None:
-                    return host
-        for value in mapped.values():
-            host = _target_host_from_url_candidate(value)
-            if host is not None:
-                return host
+        return _target_host_from_url_mapping(candidate)
+    return None
+
+
+def _target_host_from_url_mapping(mapped: Mapping[object, object]) -> str | None:
+    """Resolve the first safe host from a nested URL mapping."""
+    priority_values = (mapped[key] for key in _REST_URL_MAPPING_KEYS if key in mapped)
+    host = _first_target_host(priority_values)
+    if host is not None:
+        return host
+    return _first_target_host(mapped.values())
+
+
+def _first_target_host(candidates: Iterable[object]) -> str | None:
+    """Resolve the first safe host from candidate URL values."""
+    for candidate in candidates:
+        host = _target_host_from_url_candidate(candidate)
+        if host is not None:
+            return host
     return None
 
 

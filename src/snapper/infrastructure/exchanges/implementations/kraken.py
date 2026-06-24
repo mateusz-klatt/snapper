@@ -391,6 +391,79 @@ def _resolve_ccxt_fill_price(ccxt_order: dict[str, Any]) -> float | None:
     return float(average)
 
 
+def _kraken_user_order_descr(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the native Kraken order description mapping."""
+    descr_raw = payload.get("descr")
+    if isinstance(descr_raw, dict):
+        return descr_raw
+    return {}
+
+
+def _mapping_float_value(mapping: dict[str, Any], key: str) -> float:
+    """Return a float field value, treating missing or blank values as zero."""
+    value = mapping.get(key)
+    if value:
+        return float(value)
+    return 0.0
+
+
+def _mapping_optional_float_value(mapping: dict[str, Any], key: str) -> float | None:
+    """Return an optional float field value."""
+    value = mapping.get(key)
+    if value:
+        return float(value)
+    return None
+
+
+def _mapping_string_value(mapping: dict[str, Any], key: str) -> str:
+    """Return a string field value, treating missing values as blank."""
+    return str(mapping.get(key) or "")
+
+
+def _resolve_kraken_user_order_type(raw_type: str) -> ExchangeOrderTypeEnum:
+    """Resolve a native Kraken user-order type."""
+    try:
+        return ExchangeOrderTypeEnum(raw_type)
+    except ValueError:
+        logger.warning(f"Unknown raw Kraken ordertype {raw_type!r}; falling back to limit")
+        return ExchangeOrderTypeEnum.LIMIT
+
+
+def _resolve_kraken_user_limit_price(
+    descr: dict[str, Any], order_type: ExchangeOrderTypeEnum
+) -> float:
+    """Resolve the executable limit price field for a native Kraken order."""
+    price_key = "price2" if order_type in _TRIGGER_ORDER_TYPES else "price"
+    return _mapping_float_value(descr, price_key)
+
+
+def _resolve_native_order_price(
+    limit_price: float, filled: float, average_price: float
+) -> float | None:
+    """Resolve the snapshot price for a native Kraken order."""
+    if limit_price > 0:
+        return limit_price
+    if filled > 0 and average_price > 0:
+        return average_price
+    return None
+
+
+def _resolve_kraken_user_order_timestamp(opentm: Any) -> float:
+    """Resolve the snapshot timestamp for a native Kraken order."""
+    if opentm:
+        return float(opentm)
+    return time.time()
+
+
+def _resolve_kraken_user_fee_currency(
+    native_symbol: str, oflags: str, fee: float | None
+) -> str | None:
+    """Resolve native Kraken fee currency when fee data is present."""
+    if fee is None:
+        return None
+    return _native_fee_currency(native_symbol, oflags)
+
+
 class KrakenExchangeClient(ExchangeClientBase):
     """Kraken exchange client with REST and WebSocket support.
 
@@ -3243,46 +3316,29 @@ class KrakenExchangeClient(ExchangeClientBase):
         Raises:
             KeyError: If the order ``status`` is missing or unknown.
         """
-        descr_raw = payload.get("descr")
-        descr: dict[str, Any] = descr_raw if isinstance(descr_raw, dict) else {}
-        amount = float(payload.get("vol") or 0)
-        filled = float(payload.get("vol_exec") or 0)
-        raw_type = str(descr.get("ordertype") or "")
-        try:
-            order_type = ExchangeOrderTypeEnum(raw_type)
-        except ValueError:
-            logger.warning(f"Unknown raw Kraken ordertype {raw_type!r}; falling back to limit")
-            order_type = ExchangeOrderTypeEnum.LIMIT
-        if order_type in _TRIGGER_ORDER_TYPES:
-            limit_price = float(descr.get("price2") or 0)
-        else:
-            limit_price = float(descr.get("price") or 0)
-        average_price = float(payload.get("price") or 0)
-        if limit_price > 0:
-            price: float | None = limit_price
-        elif filled > 0 and average_price > 0:
-            price = average_price
-        else:
-            price = None
-        opentm = payload.get("opentm")
-        fee = float(payload["fee"]) if payload.get("fee") else None
+        descr = _kraken_user_order_descr(payload)
+        amount = _mapping_float_value(payload, "vol")
+        filled = _mapping_float_value(payload, "vol_exec")
+        order_type = _resolve_kraken_user_order_type(_mapping_string_value(descr, "ordertype"))
+        limit_price = _resolve_kraken_user_limit_price(descr, order_type)
+        average_price = _mapping_float_value(payload, "price")
+        price = _resolve_native_order_price(limit_price, filled, average_price)
+        fee = _mapping_optional_float_value(payload, "fee")
         return ExchangeOrderSnapshot(
             id=txid,
             client_order_id=payload.get("cl_ord_id"),
             symbol=native_symbol,
-            side=_CCXT_SIDE_MAP.get(str(descr.get("type") or ""), OrderSideEnum.BUY),
+            side=_CCXT_SIDE_MAP.get(_mapping_string_value(descr, "type"), OrderSideEnum.BUY),
             type=order_type,
             amount=amount,
             price=price,
             status=_CCXT_STATUS_MAP[str(payload["status"])],
             filled=filled,
             remaining=max(0.0, amount - filled),
-            timestamp=float(opentm) if opentm else time.time(),
+            timestamp=_resolve_kraken_user_order_timestamp(payload.get("opentm")),
             fee=fee,
-            fee_currency=(
-                _native_fee_currency(native_symbol, str(payload.get("oflags") or ""))
-                if fee is not None
-                else None
+            fee_currency=_resolve_kraken_user_fee_currency(
+                native_symbol, _mapping_string_value(payload, "oflags"), fee
             ),
         )
 

@@ -423,7 +423,6 @@ class EgressPool(EgressPoolBase):
         self,
         *,
         exchange: str,
-        purpose: Literal["websocket", "http"],
         target_host: str | None = None,
         connection_kind: ConnectionKind = "rest",
     ) -> EgressReservation | None:
@@ -437,7 +436,6 @@ class EgressPool(EgressPoolBase):
 
         Args:
             exchange: Exchange name attached to the active reservation map.
-            purpose: ``"websocket"`` or ``"http"`` for diagnostics.
             target_host: Parsed target hostname for read-only observability.
             connection_kind: ``"ws"`` or ``"rest"`` host bucket.
 

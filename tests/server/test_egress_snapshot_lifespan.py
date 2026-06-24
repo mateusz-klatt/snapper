@@ -135,14 +135,13 @@ class TestEgressSnapshotCacheLifespan:
 class TestEgressSnapshotPublisherLifespan:
     """Startup and shutdown behaviour for the API-side publisher."""
 
-    @pytest.mark.asyncio
-    async def test_start_success_assigns_attribute(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_start_success_assigns_attribute(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Spec — a successful publisher start attaches it to app state."""
         monkeypatch.setattr("snapper.server.app.EgressSnapshotPublisher", _SucceedingPublisher)
         app = SimpleNamespace(state=SimpleNamespace())
         publisher = MagicMock()
 
-        await _start_egress_snapshot_publisher(
+        _start_egress_snapshot_publisher(
             app,
             container="api@host",
             publisher=publisher,
@@ -155,15 +154,12 @@ class TestEgressSnapshotPublisherLifespan:
         assert app.state.egress_snapshot_publisher.interval_seconds == 0.5
         assert app.state.egress_snapshot_publisher.started is True
 
-    @pytest.mark.asyncio
-    async def test_start_failure_leaves_attribute_absent(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_start_failure_leaves_attribute_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Spec — publisher startup failure degrades without attaching state."""
         monkeypatch.setattr("snapper.server.app.EgressSnapshotPublisher", _FailingPublisher)
         app = SimpleNamespace(state=SimpleNamespace())
 
-        await _start_egress_snapshot_publisher(
+        _start_egress_snapshot_publisher(
             app,
             container="api@host",
             publisher=MagicMock(),

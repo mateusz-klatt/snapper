@@ -67,17 +67,14 @@ class EgressTransferPublisher:
 
     async def _run_loop(self) -> None:
         """Publish transfer samples on the configured cadence until stopped."""
-        try:
-            while self._running:
-                await asyncio.sleep(self._interval_seconds)
-                if not self._running:
-                    break
-                try:
-                    await self.publish_once()
-                except Exception as exc:
-                    logger.error("egress_transfer: publish failed: {}", exc)
-        except asyncio.CancelledError:
-            raise
+        while self._running:
+            await asyncio.sleep(self._interval_seconds)
+            if not self._running:
+                break
+            try:
+                await self.publish_once()
+            except Exception as exc:
+                logger.error("egress_transfer: publish failed: {}", exc)
 
     async def publish_once(self) -> bool:
         """Publish one transfer event if the sampler has tunnel rows.

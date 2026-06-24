@@ -644,14 +644,14 @@ class TestPrivateTrafficSelection:
         """
         pool = EgressPool(self._private_config())
 
-        fallback = pool.reserve_private_fallback(exchange="kraken", purpose="http")
+        fallback = pool.reserve_private_fallback(exchange="kraken")
         assert fallback is not None
         assert fallback.route_id == "pl"
         assert fallback.proxy_url == "socks5h://x:1084"
         fallback.quarantine(120.0, reason="http-429")
         fallback.release()
 
-        assert pool.reserve_private_fallback(exchange="kraken", purpose="http") is None
+        assert pool.reserve_private_fallback(exchange="kraken") is None
 
     def test_private_fallback_reservation_returns_none_when_unconfigured(self) -> None:
         """Spec — fallback-only reservation does not infer a fallback route.
@@ -674,7 +674,7 @@ class TestPrivateTrafficSelection:
         )
         pool = EgressPool(config)
 
-        assert pool.reserve_private_fallback(exchange="kraken", purpose="http") is None
+        assert pool.reserve_private_fallback(exchange="kraken") is None
 
     def test_selection_log_emitted_for_websocket_reserve(self) -> None:
         """Spec — reserve emits one structured WS selection log.

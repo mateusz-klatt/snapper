@@ -604,7 +604,7 @@ async def _stop_egress_snapshot_cache(app: FastAPI) -> None:
     await cache.stop()
 
 
-async def _start_egress_snapshot_publisher(
+def _start_egress_snapshot_publisher(
     app: FastAPI,
     *,
     container: str,
@@ -931,7 +931,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             zmq_broker_xpub=settings.zmq_broker_xpub,
             heartbeat_interval_ms=settings.zmq_heartbeat_interval_ms,
         )
-        await _start_egress_snapshot_publisher(
+        _start_egress_snapshot_publisher(
             app,
             container=egress_container,
             publisher=user_publisher,
