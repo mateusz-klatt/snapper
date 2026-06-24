@@ -5927,7 +5927,12 @@ class SQLAlchemyRepository(Repository):
         Companion to :meth:`iter_ticks` for the equally-high-cardinality
         Trade table. Yields rows in event-time ASC order using
         coalesce(executed_at, timestamp) as the event time, falling back
-        to bus-time for rows without executed_at.
+        to bus-time for rows without executed_at. The primary-key ``id`` is
+        a secondary sort key so trades sharing an event time always stream
+        in a stable order; without it, ties reorder across queries and the
+        order-dependent float accumulation of trade-built candle vwap/volume
+        drifts by a ULP, making the candle backfill non-idempotent (a fresh
+        SCD2 version on every re-run).
         """
         async with self.session() as s:
             inst = await self._resolve_active_instrument(s, instrument, exchange, as_of)
@@ -5950,7 +5955,7 @@ class SQLAlchemyRepository(Repository):
                     Trade.timestamp <= as_of,
                     Trade.known_to > as_of,
                 )
-                .order_by(event_time.asc())
+                .order_by(event_time.asc(), Trade.id.asc())
                 .execution_options(yield_per=_HIGH_CARDINALITY_STREAM_CHUNK_SIZE)
             )
             stream = await s.stream(stmt)
