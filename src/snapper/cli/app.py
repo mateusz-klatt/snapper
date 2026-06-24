@@ -27,6 +27,7 @@ Data Updates:
     - ``polygon-backfill-aggregates``: Backfill historical data
     - ``kraken-futures-backfill-candles``: Backfill Kraken Futures OHLCV
     - ``kraken-equities-backfill-candles``: Backfill Kraken Equities (FCM) OHLCV
+    - ``backfill-candles-from-trades``: Backfill calculated 1m candles from trades
     - ``update-kraken-futures-funding-rates``: Backfill funding rates
 
 Example:
@@ -100,6 +101,7 @@ from snapper.application.updaters.historical.kraken_futures_aggregates import (
 from snapper.application.updaters.historical.kraken_futures_funding import (
     KrakenFuturesFundingBackfillService,
 )
+from snapper.application.updaters.historical.trade_candle_backfill import TradeCandleBackfillService
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
 from snapper.application.updaters.symbols.kraken_equities import KrakenEquitiesSymbolUpdaterService
@@ -1656,6 +1658,50 @@ def kraken_equities_backfill_candles(
             typer.echo("Kraken Equities candle backfill complete!")
         except Exception as e:
             typer.echo(f"Error during Kraken Equities candle backfill: {e}")
+            raise typer.Exit(code=1) from e
+
+    asyncio.run(run_backfill())
+
+
+@app.command(name="backfill-candles-from-trades")
+def backfill_candles_from_trades(
+    exchange: Annotated[str, typer.Option("--exchange", help="Exchange to backfill")],
+    start: Annotated[str, typer.Option("--start", help="UTC start date or datetime")],
+    end: Annotated[str, typer.Option("--end", help="UTC end date or datetime")],
+    symbols: Annotated[
+        list[str] | None,
+        typer.Option("--symbol", "-s", help="Native symbols to backfill"),
+    ] = None,
+    all_symbols: bool = typer.Option(False, "--all", help="Backfill all active symbols"),
+) -> None:
+    """Backfill calculated 1-minute candles from persisted trades.
+
+    Args:
+        exchange: Exchange whose trades should be aggregated.
+        start: Inclusive UTC event-time lower bound.
+        end: Inclusive UTC event-time upper bound.
+        symbols: Native symbols to backfill.
+        all_symbols: Backfill all active symbols on the exchange.
+    """
+
+    async def run_backfill() -> None:
+        try:
+            service = TradeCandleBackfillService(
+                exchange=ExchangeEnum(exchange),
+                start=_parse_utc(start),
+                end=_parse_utc(end),
+                symbols=symbols,
+                all_symbols=all_symbols,
+            )
+            symbol_source = _CLI_SYMBOL_SOURCE_ALL_MAPPED if all_symbols else "selected symbols"
+            typer.echo(
+                f"Starting trade candle backfill "
+                f"({exchange}, {start} to {end}, {symbol_source})..."
+            )
+            await service.start()
+            typer.echo("Trade candle backfill complete!")
+        except Exception as e:
+            typer.echo(f"Error during trade candle backfill: {e}")
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_backfill())

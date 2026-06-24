@@ -13,6 +13,7 @@ parameters externally, then instantiates via keyword unpacking.
 """
 
 from datetime import date
+from datetime import datetime
 
 from snapper.api.schemas.base import StrictBody
 from snapper.core.json_types import JsonObject
@@ -189,6 +190,24 @@ class KrakenEquitiesBackfillParameters(StrictBody):
     timeframe: str = "1h"
     days_back: int = 30
     resume: bool = True
+
+
+class TradeCandleBackfillParameters(StrictBody):
+    """Parameters for TradeCandleBackfillService.
+
+    Attributes:
+        exchange: Exchange whose active instruments should be read.
+        symbols: Native symbols to backfill.
+        all_symbols: If True, backfill every active instrument on the exchange.
+        start: Inclusive UTC event-time lower bound.
+        end: Inclusive UTC event-time upper bound.
+    """
+
+    exchange: ExchangeEnum = ExchangeEnum.KRAKEN
+    symbols: list[str] = []
+    all_symbols: bool = False
+    start: datetime
+    end: datetime
 
 
 class GroupedDailyBackfillParameters(StrictBody):
