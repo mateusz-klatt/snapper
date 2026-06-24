@@ -210,6 +210,28 @@ class TradeCandleBackfillParameters(StrictBody):
     end: datetime
 
 
+class SynthesizedCandleBackfillParameters(StrictBody):
+    """Parameters for SynthesizedCandleBackfillService.
+
+    Attributes:
+        exchange: Exchange whose active instruments should be read.
+        symbols: Native symbols to backfill.
+        all_symbols: If True, backfill every active instrument on the exchange.
+        start: Inclusive UTC 1m candle lower bound.
+        end: UTC upper bound used to seal closed higher-timeframe windows.
+        timeframes: Higher timeframe labels to synthesize.
+        cut_date: First UTC day synthesized ``1d`` rows may own.
+    """
+
+    exchange: ExchangeEnum = ExchangeEnum.KRAKEN
+    symbols: list[str] = []
+    all_symbols: bool = False
+    start: datetime
+    end: datetime
+    timeframes: list[str] = ["5m", "15m", "30m", "1h", "4h", "1d"]
+    cut_date: date | None = None
+
+
 class GroupedDailyBackfillParameters(StrictBody):
     """Parameters for PolygonGroupedDailyBackfillService.
 

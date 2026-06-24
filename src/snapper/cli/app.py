@@ -28,6 +28,7 @@ Data Updates:
     - ``kraken-futures-backfill-candles``: Backfill Kraken Futures OHLCV
     - ``kraken-equities-backfill-candles``: Backfill Kraken Equities (FCM) OHLCV
     - ``backfill-candles-from-trades``: Backfill calculated 1m candles from trades
+    - ``backfill-synthesized-candles``: Backfill synthesized higher-timeframe candles
     - ``update-kraken-futures-funding-rates``: Backfill funding rates
 
 Example:
@@ -100,6 +101,9 @@ from snapper.application.updaters.historical.kraken_futures_aggregates import (
 )
 from snapper.application.updaters.historical.kraken_futures_funding import (
     KrakenFuturesFundingBackfillService,
+)
+from snapper.application.updaters.historical.synthesized_candle_backfill import (
+    SynthesizedCandleBackfillService,
 )
 from snapper.application.updaters.historical.trade_candle_backfill import TradeCandleBackfillService
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
@@ -1702,6 +1706,66 @@ def backfill_candles_from_trades(
             typer.echo("Trade candle backfill complete!")
         except Exception as e:
             typer.echo(f"Error during trade candle backfill: {e}")
+            raise typer.Exit(code=1) from e
+
+    asyncio.run(run_backfill())
+
+
+@app.command(name="backfill-synthesized-candles")
+def backfill_synthesized_candles(
+    exchange: Annotated[str, typer.Option("--exchange", help="Exchange to backfill")],
+    start: Annotated[str, typer.Option("--start", help="UTC start date or datetime")],
+    end: Annotated[str, typer.Option("--end", help="UTC end date or datetime")],
+    symbols: Annotated[
+        list[str] | None,
+        typer.Option("--symbol", "-s", help="Native symbols to backfill"),
+    ] = None,
+    all_symbols: bool = typer.Option(False, "--all", help="Backfill all active symbols"),
+    timeframes: Annotated[
+        str,
+        typer.Option("--timeframes", help="Comma-separated higher timeframes to synthesize"),
+    ] = "5m,15m,30m,1h,4h,1d",
+    cut_date: Annotated[
+        str | None,
+        typer.Option("--cut-date", help="UTC date where synthesized 1d ownership begins"),
+    ] = None,
+) -> None:
+    """Backfill synthesized higher-timeframe candles from persisted 1m candles.
+
+    Args:
+        exchange: Exchange whose 1m candles should be aggregated.
+        start: Inclusive UTC 1m candle lower bound.
+        end: UTC upper bound used to seal higher-timeframe windows.
+        symbols: Native symbols to backfill.
+        all_symbols: Backfill all active symbols on the exchange.
+        timeframes: Comma-separated higher timeframe labels.
+        cut_date: First UTC day synthesized ``1d`` rows may own.
+    """
+
+    async def run_backfill() -> None:
+        try:
+            requested_timeframes = [
+                timeframe.strip() for timeframe in timeframes.split(",") if timeframe.strip()
+            ]
+            parsed_cut_date = date_type.fromisoformat(cut_date) if cut_date is not None else None
+            service = SynthesizedCandleBackfillService(
+                exchange=ExchangeEnum(exchange),
+                start=_parse_utc(start),
+                end=_parse_utc(end),
+                symbols=symbols,
+                all_symbols=all_symbols,
+                timeframes=requested_timeframes,
+                cut_date=parsed_cut_date,
+            )
+            symbol_source = _CLI_SYMBOL_SOURCE_ALL_MAPPED if all_symbols else "selected symbols"
+            typer.echo(
+                f"Starting synthesized candle backfill "
+                f"({exchange}, {start} to {end}, {timeframes}, {symbol_source})..."
+            )
+            await service.start()
+            typer.echo("Synthesized candle backfill complete!")
+        except Exception as e:
+            typer.echo(f"Error during synthesized candle backfill: {e}")
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_backfill())
