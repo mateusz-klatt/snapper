@@ -44,7 +44,7 @@ class FakeRepository:
         self,
         active_symbols: list[str],
         instrument_ids: dict[str, str],
-        trades_by_symbol: dict[str, list[TradeRow]],
+        trade_stream: list[tuple[str, TradeRow]],
         upsert_results: list[int] | None = None,
     ) -> None:
         """Initialize fake repository state.
@@ -52,16 +52,18 @@ class FakeRepository:
         Args:
             active_symbols: Symbols returned by get_exchange_instruments.
             instrument_ids: Native-symbol to instrument-public-id mapping.
-            trades_by_symbol: Trade streams keyed by native symbol.
+            trade_stream: Bulk trade stream keyed by instrument public ID.
             upsert_results: Optional changed-row counts returned by each upsert.
         """
         self.active_symbols = active_symbols
         self.instrument_ids = instrument_ids
-        self.trades_by_symbol = trades_by_symbol
+        self.trade_stream = trade_stream
         self.upsert_results = list(upsert_results) if upsert_results else []
         self.exchange_calls: list[tuple[str, datetime]] = []
         self.instrument_id_calls: list[tuple[set[str], str, datetime]] = []
-        self.iter_calls: list[tuple[str, datetime, datetime, ExchangeEnum, datetime]] = []
+        self.iter_exchange_calls: list[
+            tuple[str, datetime, datetime, datetime, list[str] | None]
+        ] = []
         self.upsert_batches: list[list[CandleUpsertRow]] = []
         self.upsert_sessions: list[object | None] = []
 
@@ -101,29 +103,39 @@ class FakeRepository:
             if symbol in self.instrument_ids
         }
 
-    async def iter_trades(
+    async def iter_exchange_trades(
         self,
-        instrument: str,
+        exchange: str,
         start: datetime,
         end: datetime,
-        exchange: ExchangeEnum | str,
         as_of: datetime,
-    ) -> AsyncIterator[TradeRow]:
-        """Yield configured trade rows for the requested instrument.
+        instrument_public_ids: list[str] | None = None,
+    ) -> AsyncIterator[tuple[str, TradeRow]]:
+        """Yield configured bulk trade rows for the requested instruments.
 
         Args:
-            instrument: Native symbol.
+            exchange: Exchange name.
             start: Inclusive event-time lower bound.
             end: Inclusive event-time upper bound.
-            exchange: Exchange name.
             as_of: Point-in-time read timestamp.
+            instrument_public_ids: Optional selected instrument IDs.
 
         Yields:
-            Trade rows in configured order.
+            Trade rows in configured order with instrument IDs.
         """
-        self.iter_calls.append((instrument, start, end, ExchangeEnum(exchange), as_of))
-        for trade in self.trades_by_symbol.get(instrument, []):
-            yield trade
+        self.iter_exchange_calls.append(
+            (
+                exchange,
+                start,
+                end,
+                as_of,
+                list(instrument_public_ids) if instrument_public_ids else None,
+            )
+        )
+        selected_ids = set(instrument_public_ids) if instrument_public_ids is not None else set()
+        for instrument_public_id, trade in self.trade_stream:
+            if instrument_public_ids is None or instrument_public_id in selected_ids:
+                yield instrument_public_id, trade
 
     async def upsert_candles(
         self,
@@ -268,10 +280,29 @@ async def test_empty_trade_window_flushes_no_rows() -> None:
     When: The service runs,
     Then: Trades are read but no candle rows are upserted.
     """
-    repo = FakeRepository(["BTC-USD"], {"BTC-USD": "inst-btc"}, {})
+    repo = FakeRepository(["BTC-USD"], {"BTC-USD": "inst-btc"}, [])
     service = _make_service(["BTC-USD"], False)
     await _run_service(service, repo)
-    assert [call[0] for call in repo.iter_calls] == ["BTC-USD"]
+    assert repo.iter_exchange_calls == [("kraken", _dt(0), _dt(3), _BUS_TIME, ["inst-btc"])]
+    assert repo.upsert_batches == []
+
+
+@pytest.mark.asyncio
+async def test_trailing_partial_only_flushes_no_rows() -> None:
+    """A single trailing partial minute produces no candle rows.
+
+    Given: One trade in the same minute as the floored window end,
+    When: The service finalizes the instrument,
+    Then: The pending builder state is not upserted as a complete candle.
+    """
+    repo = FakeRepository(
+        ["BTC-USD"],
+        {"BTC-USD": "inst-btc"},
+        [("inst-btc", _trade(_dt(0, 1), 100.0))],
+    )
+    service = _make_service(["BTC-USD"], False, end=_dt(0, 30))
+    await _run_service(service, repo)
+    assert repo.iter_exchange_calls[0][4] == ["inst-btc"]
     assert repo.upsert_batches == []
 
 
@@ -286,14 +317,12 @@ async def test_single_instrument_multiple_minutes_skips_trailing_partial() -> No
     repo = FakeRepository(
         ["BTC-USD"],
         {"BTC-USD": "inst-btc"},
-        {
-            "BTC-USD": [
-                _trade(_dt(0, 1), 100.0, executed_at=_dt(0, 5), trade_id="t1"),
-                _trade(_dt(0, 30), 110.0, size=2.0, side="sell", trade_id="t2"),
-                _trade(_dt(1, 5), 120.0, trade_id="t3"),
-                _trade(_dt(2, 10), 90.0, trade_id="t4"),
-            ]
-        },
+        [
+            ("inst-btc", _trade(_dt(0, 1), 100.0, executed_at=_dt(0, 5), trade_id="t1")),
+            ("inst-btc", _trade(_dt(0, 30), 110.0, size=2.0, side="sell", trade_id="t2")),
+            ("inst-btc", _trade(_dt(1, 5), 120.0, trade_id="t3")),
+            ("inst-btc", _trade(_dt(2, 10), 90.0, trade_id="t4")),
+        ],
     )
     service = _make_service(["BTC-USD"], False, end=_dt(2, 30))
     await _run_service(service, repo)
@@ -328,14 +357,15 @@ async def test_all_symbols_processes_multiple_instruments_and_skips_unresolved()
     repo = FakeRepository(
         ["BTC-USD", "ETH-USD", "ORPHAN-USD"],
         {"BTC-USD": "inst-btc", "ETH-USD": "inst-eth"},
-        {
-            "BTC-USD": [_trade(_dt(0, 1), 100.0)],
-            "ETH-USD": [_trade(_dt(0, 2), 200.0)],
-        },
+        [
+            ("inst-btc", _trade(_dt(0, 1), 100.0)),
+            ("inst-eth", _trade(_dt(0, 2), 200.0)),
+        ],
     )
     service = _make_service(None, True, end=_dt(2))
     await _run_service(service, repo)
-    assert [call[0] for call in repo.iter_calls] == ["BTC-USD", "ETH-USD"]
+    assert repo.iter_exchange_calls[0][4] == ["inst-btc", "inst-eth"]
+    assert [len(batch) for batch in repo.upsert_batches] == [1, 1]
     assert [batch[0]["instrument_public_id"] for batch in repo.upsert_batches] == [
         "inst-btc",
         "inst-eth",
@@ -350,11 +380,11 @@ async def test_requested_symbols_are_deduped_and_filtered_against_active() -> No
     When: The service resolves selected symbols,
     Then: The trade stream is opened once for that symbol.
     """
-    repo = FakeRepository(["BTC-USD", "ETH-USD"], {"ETH-USD": "inst-eth"}, {})
+    repo = FakeRepository(["BTC-USD", "ETH-USD"], {"ETH-USD": "inst-eth"}, [])
     service = _make_service(["ETH-USD", "ETH-USD"], False)
     await _run_service(service, repo)
     assert repo.instrument_id_calls[0][0] == {"ETH-USD"}
-    assert [call[0] for call in repo.iter_calls] == ["ETH-USD"]
+    assert repo.iter_exchange_calls[0][4] == ["inst-eth"]
 
 
 @pytest.mark.asyncio
@@ -368,13 +398,11 @@ async def test_batch_flushing_bounds_memory() -> None:
     repo = FakeRepository(
         ["BTC-USD"],
         {"BTC-USD": "inst-btc"},
-        {
-            "BTC-USD": [
-                _trade(_dt(0, 1), 100.0),
-                _trade(_dt(1, 1), 101.0),
-                _trade(_dt(2, 1), 102.0),
-            ]
-        },
+        [
+            ("inst-btc", _trade(_dt(0, 1), 100.0)),
+            ("inst-btc", _trade(_dt(1, 1), 101.0)),
+            ("inst-btc", _trade(_dt(2, 1), 102.0)),
+        ],
     )
     service = _make_service(["BTC-USD"], False, end=_dt(4))
     service.BATCH_COMMIT_SIZE = 2
@@ -398,7 +426,7 @@ async def test_idempotent_upsert_noop_path_accepts_zero_changed_rows() -> None:
     repo = FakeRepository(
         ["BTC-USD"],
         {"BTC-USD": "inst-btc"},
-        {"BTC-USD": [_trade(_dt(0, 1), 100.0)]},
+        [("inst-btc", _trade(_dt(0, 1), 100.0))],
         upsert_results=[0],
     )
     service = _make_service(["BTC-USD"], False, end=_dt(2))
@@ -415,11 +443,11 @@ async def test_start_returns_when_no_active_instruments() -> None:
     When: The service runs in all-symbol mode,
     Then: No trade streams or upserts are attempted.
     """
-    repo = FakeRepository([], {}, {})
+    repo = FakeRepository([], {}, [])
     service = _make_service(None, True)
     await _run_service(service, repo)
     assert repo.instrument_id_calls == []
-    assert repo.iter_calls == []
+    assert repo.iter_exchange_calls == []
     assert repo.upsert_batches == []
 
 
@@ -431,7 +459,7 @@ async def test_requested_inactive_symbol_raises() -> None:
     When: The service resolves instruments,
     Then: It raises a validation error.
     """
-    repo = FakeRepository(["BTC-USD"], {"BTC-USD": "inst-btc"}, {})
+    repo = FakeRepository(["BTC-USD"], {"BTC-USD": "inst-btc"}, [])
     service = _make_service(["DOGE-USD"], False)
     with pytest.raises(ValueError, match="symbols are not active"):
         await _run_service(service, repo)

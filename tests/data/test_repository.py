@@ -22,6 +22,7 @@ from unittest.mock import Mock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import Select
 from sqlalchemy import select as _sa_select
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
@@ -137,6 +138,45 @@ def _make_repo(session_factory: Callable[[], Any], dialect: str = "other") -> SQ
     )
     repo.session_factory = cast(async_sessionmaker[AsyncSession], session_factory)
     return repo
+
+
+async def _iter_stream_records(rows: list[SimpleNamespace]) -> AsyncIterator[SimpleNamespace]:
+    for row in rows:
+        yield row
+
+
+class _StreamingSession:
+    def __init__(self, rows: list[SimpleNamespace]) -> None:
+        self.rows = rows
+        self.streamed_statements: list[object] = []
+        self.rollback_called = False
+
+    async def stream(self, stmt: object) -> AsyncIterator[SimpleNamespace]:
+        self.streamed_statements.append(stmt)
+        return _iter_stream_records(self.rows)
+
+    async def rollback(self) -> None:
+        self.rollback_called = True
+
+
+@asynccontextmanager
+async def _streaming_session_factory(
+    session: _StreamingSession,
+) -> AsyncIterator[_StreamingSession]:
+    yield session
+
+
+def _make_streaming_repo(
+    rows: list[SimpleNamespace],
+) -> tuple[SQLAlchemyRepository, _StreamingSession]:
+    session = _StreamingSession(rows)
+    repo = _make_repo(lambda: _streaming_session_factory(session))
+    return repo, session
+
+
+def _stream_sql(session: _StreamingSession) -> str:
+    stmt = cast(Select[tuple[object, ...]], session.streamed_statements[0])
+    return " ".join(str(stmt).split())
 
 
 @pytest.mark.asyncio
@@ -1823,6 +1863,19 @@ class DummyRepository(Repository):
         for row in self._empty_stub_iter():
             yield row
 
+    async def iter_exchange_trades(
+        self,
+        exchange: str,
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        instrument_public_ids: list[str] | None = None,
+    ) -> AsyncIterator[tuple[str, TradeRow]]:
+        """Stream exchange trades - yields nothing (empty stub)."""
+        del exchange, start, end, as_of, instrument_public_ids
+        for row in self._empty_exchange_trade_iter():
+            yield row
+
     async def get_market_snapshots(
         self,
         instrument_public_ids: list[str],
@@ -1847,6 +1900,11 @@ class DummyRepository(Repository):
     @staticmethod
     def _empty_stub_iter() -> list[dict[str, Any]]:
         """Return an empty iterable so the streaming stubs are real generators."""
+        return []
+
+    @staticmethod
+    def _empty_exchange_trade_iter() -> list[tuple[str, TradeRow]]:
+        """Return an empty iterable for exchange trade streaming stubs."""
         return []
 
     async def upsert_market_snapshots(self, rows: list[dict[str, Any]]) -> int:
@@ -2959,6 +3017,18 @@ class _MinimalRepository(Repository):
         for row in self._empty_stub_iter():
             yield row
 
+    async def iter_exchange_trades(
+        self,
+        exchange: str,
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        instrument_public_ids: list[str] | None = None,
+    ) -> AsyncIterator[tuple[str, TradeRow]]:
+        del exchange, start, end, as_of, instrument_public_ids
+        for row in self._empty_exchange_trade_iter():
+            yield row
+
     async def get_market_snapshots(
         self,
         instrument_public_ids: list[str],
@@ -2981,6 +3051,10 @@ class _MinimalRepository(Repository):
     @staticmethod
     def _empty_stub_iter() -> list[dict[str, Any]]:
         """Return an empty iterable so the streaming stubs are real generators."""
+        return []
+
+    @staticmethod
+    def _empty_exchange_trade_iter() -> list[tuple[str, TradeRow]]:
         return []
 
     async def upsert_market_snapshots(self, rows: list[dict[str, Any]]) -> int:
@@ -3111,6 +3185,27 @@ async def _seed_full_repo(tmp_path: Path) -> tuple[SQLAlchemyRepository, str, st
         timestamp=now,
     )
     return r, sym.public_id, inst_pid
+
+
+async def _collect_exchange_trades(
+    r: SQLAlchemyRepository,
+    exchange: str,
+    start: datetime,
+    end: datetime,
+    as_of: datetime,
+    instrument_public_ids: list[str] | None = None,
+) -> list[tuple[str, TradeRow]]:
+    """Collect the exchange trade async iterator for assertions."""
+    rows: list[tuple[str, TradeRow]] = []
+    async for row in r.iter_exchange_trades(
+        exchange=exchange,
+        start=start,
+        end=end,
+        as_of=as_of,
+        instrument_public_ids=instrument_public_ids,
+    ):
+        rows.append(row)
+    return rows
 
 
 @pytest.mark.asyncio
@@ -4808,6 +4903,156 @@ async def test_iter_trades_streams_all(
     assert len(streamed) == 25
     assert streamed[0]["executed_at"] == base
     assert streamed[-1]["executed_at"] == base + timedelta(seconds=24)
+
+
+@pytest.mark.asyncio
+async def test_iter_exchange_trades_empty_instrument_filter_short_circuits() -> None:
+    """``iter_exchange_trades`` yields nothing for an empty instrument filter."""
+    r, session = _make_streaming_repo([])
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    rows = await _collect_exchange_trades(
+        r,
+        "kraken",
+        base,
+        base + timedelta(seconds=30),
+        as_of=base + timedelta(minutes=1),
+        instrument_public_ids=[],
+    )
+    assert rows == []
+    assert session.streamed_statements == []
+
+
+@pytest.mark.asyncio
+async def test_iter_exchange_trades_streams_single_instrument() -> None:
+    """``iter_exchange_trades`` streams selected instrument trades."""
+    base = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    r, session = _make_streaming_repo(
+        [
+            SimpleNamespace(
+                instrument_public_id="inst-btc",
+                timestamp=base + timedelta(seconds=5),
+                executed_at=None,
+                price=100.0,
+                size=1.5,
+                side="buy",
+                trade_id="bulk-single-1",
+            )
+        ]
+    )
+    rows = await _collect_exchange_trades(
+        r,
+        "kraken",
+        base,
+        base + timedelta(seconds=30),
+        as_of=base + timedelta(minutes=1),
+        instrument_public_ids=["inst-btc"],
+    )
+    assert rows == [
+        (
+            "inst-btc",
+            {
+                "timestamp": base + timedelta(seconds=5),
+                "executed_at": None,
+                "price": 100.0,
+                "size": 1.5,
+                "side": "buy",
+                "trade_id": "bulk-single-1",
+            },
+        )
+    ]
+    sql = _stream_sql(session)
+    assert "trades.instrument_public_id IN" in sql
+
+
+@pytest.mark.asyncio
+async def test_iter_exchange_trades_groups_and_stably_orders_multiple_instruments() -> None:
+    """``iter_exchange_trades`` orders by instrument, event time, then trade id."""
+    base = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    r, session = _make_streaming_repo(
+        [
+            SimpleNamespace(
+                instrument_public_id="inst-btc",
+                timestamp=base + timedelta(seconds=5),
+                executed_at=base + timedelta(seconds=5),
+                price=100.0,
+                size=1.0,
+                side="buy",
+                trade_id="bulk-btc-1",
+            ),
+            SimpleNamespace(
+                instrument_public_id="inst-btc",
+                timestamp=base + timedelta(seconds=6),
+                executed_at=base + timedelta(seconds=5),
+                price=101.0,
+                size=1.0,
+                side="sell",
+                trade_id="bulk-btc-2",
+            ),
+            SimpleNamespace(
+                instrument_public_id="inst-eth",
+                timestamp=base + timedelta(seconds=1),
+                executed_at=None,
+                price=201.0,
+                size=1.0,
+                side="sell",
+                trade_id="bulk-eth-2",
+            ),
+        ]
+    )
+    rows = await _collect_exchange_trades(
+        r,
+        "kraken",
+        base,
+        base + timedelta(seconds=30),
+        as_of=base + timedelta(minutes=1),
+        instrument_public_ids=["inst-eth", "inst-btc"],
+    )
+    sql = _stream_sql(session)
+    assert [instrument_public_id for instrument_public_id, _trade in rows] == [
+        "inst-btc",
+        "inst-btc",
+        "inst-eth",
+    ]
+    assert (
+        "ORDER BY trades.instrument_public_id ASC, "
+        "coalesce(trades.executed_at, trades.timestamp) ASC, trades.id ASC"
+    ) in sql
+
+
+@pytest.mark.asyncio
+async def test_iter_exchange_trades_filters_instrument_public_ids() -> None:
+    """``iter_exchange_trades`` restricts rows to preselected instrument IDs."""
+    r, session = _make_streaming_repo([])
+    base = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    await _collect_exchange_trades(
+        r,
+        "kraken",
+        base,
+        base + timedelta(seconds=30),
+        as_of=base + timedelta(minutes=1),
+        instrument_public_ids=["inst-eth"],
+    )
+    sql = _stream_sql(session)
+    assert "trades.instrument_public_id IN" in sql
+    assert "JOIN instruments" not in sql
+
+
+@pytest.mark.asyncio
+async def test_iter_exchange_trades_filters_exchange_without_instrument_ids() -> None:
+    """``iter_exchange_trades`` restricts joined streams to the requested exchange."""
+    r, session = _make_streaming_repo([])
+    base = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    await _collect_exchange_trades(
+        r,
+        "kraken",
+        base,
+        base + timedelta(seconds=30),
+        as_of=base + timedelta(minutes=1),
+    )
+    sql = _stream_sql(session)
+    assert "JOIN instruments ON instruments.public_id = trades.instrument_public_id" in sql
+    assert "JOIN symbols ON symbols.public_id = instruments.symbol_public_id" in sql
+    assert "instruments.exchange = :exchange_1" in sql
 
 
 @pytest.mark.asyncio

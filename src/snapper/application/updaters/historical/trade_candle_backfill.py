@@ -181,8 +181,7 @@ class TradeCandleBackfillService(RegisterableProcess):
         if not instruments:
             logger.warning(f"No active instruments matched for {self._exchange.value}")
             return
-        for native_symbol, instrument_public_id in instruments:
-            await self._process_instrument(native_symbol, instrument_public_id, as_of)
+        await self._process_exchange_stream(instruments, as_of)
 
     async def _resolve_instruments(self, as_of: datetime) -> list[tuple[str, str]]:
         """Resolve selected native symbols to active instrument IDs.
@@ -226,47 +225,118 @@ class TradeCandleBackfillService(RegisterableProcess):
             if symbol in instrument_ids
         ]
 
-    async def _process_instrument(
+    async def _process_exchange_stream(
         self,
-        native_symbol: str,
-        instrument_public_id: str,
+        instruments: list[tuple[str, str]],
         as_of: datetime,
     ) -> None:
-        """Backfill one instrument from its trade stream.
+        """Backfill selected instruments from one grouped trade stream.
 
         Args:
-            native_symbol: Native symbol used by repository trade reads.
-            instrument_public_id: Active instrument public ID used by
-                candle upserts.
+            instruments: Pairs of native symbol and instrument public ID.
             as_of: Point-in-time read timestamp.
         """
         assert self._db is not None
-        builder = TradeCandleBuilder(interval_seconds=60)
+        instrument_public_ids = [instrument_public_id for _, instrument_public_id in instruments]
+        symbol_by_instrument_public_id = {
+            instrument_public_id: native_symbol
+            for native_symbol, instrument_public_id in instruments
+        }
+        seen_instrument_public_ids: set[str] = set()
+        current_instrument_public_id: str | None = None
+        builder: TradeCandleBuilder | None = None
         batch: list[CandleUpsertRow] = []
-        total_trades = 0
-        total_rows = 0
-        total_changed = 0
-        async for trade in self._db.iter_trades(
-            instrument=native_symbol,
+        current_trades = 0
+        current_rows = 0
+        current_changed = 0
+        async for instrument_public_id, trade in self._db.iter_exchange_trades(
+            exchange=self._exchange.value,
             start=self._start,
             end=self._end,
-            exchange=self._exchange,
             as_of=as_of,
+            instrument_public_ids=instrument_public_ids,
         ):
+            if current_instrument_public_id != instrument_public_id:
+                if current_instrument_public_id is not None and builder is not None:
+                    changed, rows = await self._finish_instrument(
+                        builder, current_instrument_public_id, batch
+                    )
+                    current_changed += changed
+                    current_rows += rows
+                    self._log_instrument_complete(
+                        symbol_by_instrument_public_id[current_instrument_public_id],
+                        current_changed,
+                        current_rows,
+                        current_trades,
+                    )
+                current_instrument_public_id = instrument_public_id
+                seen_instrument_public_ids.add(instrument_public_id)
+                builder = TradeCandleBuilder(interval_seconds=60)
+                current_trades = 0
+                current_rows = 0
+                current_changed = 0
             event_time = self._trade_event_time(trade)
+            assert builder is not None
             builder.update(self._build_trade_update(trade, instrument_public_id, event_time))
-            total_trades += 1
+            current_trades += 1
             changed, rows = await self._append_completed_candles(
                 builder.pop_completed(event_time), instrument_public_id, batch
             )
-            total_changed += changed
-            total_rows += rows
+            current_changed += changed
+            current_rows += rows
+        if current_instrument_public_id is not None and builder is not None:
+            changed, rows = await self._finish_instrument(
+                builder, current_instrument_public_id, batch
+            )
+            current_changed += changed
+            current_rows += rows
+            self._log_instrument_complete(
+                symbol_by_instrument_public_id[current_instrument_public_id],
+                current_changed,
+                current_rows,
+                current_trades,
+            )
+        for native_symbol, instrument_public_id in instruments:
+            if instrument_public_id not in seen_instrument_public_ids:
+                self._log_instrument_complete(native_symbol, 0, 0, 0)
+
+    async def _finish_instrument(
+        self,
+        builder: TradeCandleBuilder,
+        instrument_public_id: str,
+        batch: list[CandleUpsertRow],
+    ) -> tuple[int, int]:
+        """Flush the final completed candles for one streamed instrument.
+
+        Args:
+            builder: Builder containing the current instrument buckets.
+            instrument_public_id: Instrument ID used by candle rows.
+            batch: Mutable pending upsert batch.
+
+        Returns:
+            Pair of changed-row count and appended-row count.
+        """
         changed, rows = await self._append_completed_candles(
             builder.pop_completed(_floor_minute(self._end)), instrument_public_id, batch
         )
-        total_changed += changed
-        total_rows += rows
-        total_changed += await self._flush_batch(batch)
+        changed += await self._flush_batch(batch)
+        return changed, rows
+
+    @staticmethod
+    def _log_instrument_complete(
+        native_symbol: str,
+        total_changed: int,
+        total_rows: int,
+        total_trades: int,
+    ) -> None:
+        """Log one instrument's backfill summary.
+
+        Args:
+            native_symbol: Native symbol represented by the completed stream.
+            total_changed: Repository-reported changed candle rows.
+            total_rows: Built candle rows before idempotent upsert comparison.
+            total_trades: Folded trade count.
+        """
         logger.info(
             f"Trade candle backfill complete for {native_symbol}: "
             f"{total_changed} changed from {total_rows} candles and {total_trades} trades"

@@ -1108,6 +1108,23 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    def iter_exchange_trades(
+        self,
+        exchange: str,
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        instrument_public_ids: list[str] | None = None,
+    ) -> AsyncIterator[tuple[str, TradeRow]]:
+        """Stream trades for an exchange without materialising the full result.
+
+        Implementations yield ``(instrument_public_id, row)`` pairs ordered
+        by ``instrument_public_id ASC``, ``event_time ASC``, and stable
+        primary-key order for deterministic candle reconstruction.
+        """
+        ...
+
+    @abstractmethod
     async def get_market_snapshots(
         self,
         instrument_public_ids: list[str],
@@ -5968,6 +5985,76 @@ class SQLAlchemyRepository(Repository):
                     "side": r.side,
                     "trade_id": r.trade_id,
                 }
+
+    async def iter_exchange_trades(
+        self,
+        exchange: str,
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        instrument_public_ids: list[str] | None = None,
+    ) -> AsyncIterator[tuple[str, TradeRow]]:
+        """Stream trades for an exchange in grouped deterministic order.
+
+        The stream is ordered by instrument first so callers can fold one
+        bounded in-memory builder at a time, then by event time and primary
+        key so trade-built candle arithmetic is reproducible across reruns.
+        When ``instrument_public_ids`` is provided, it is treated as the
+        already-resolved exchange instrument set and avoids extra temporal
+        joins on the high-cardinality read path.
+        """
+        if instrument_public_ids is not None and not instrument_public_ids:
+            return
+        async with self.session() as s:
+            event_time = func.coalesce(Trade.executed_at, Trade.timestamp)
+            stmt = select(
+                Trade.instrument_public_id,
+                Trade.timestamp,
+                Trade.executed_at,
+                Trade.price,
+                Trade.size,
+                Trade.side,
+                Trade.trade_id,
+            ).where(
+                event_time >= start,
+                event_time <= end,
+                Trade.timestamp <= as_of,
+                Trade.known_to > as_of,
+            )
+            if instrument_public_ids is None:
+                s_ts, s_kt = where_active(Symbol, as_of)
+                i_ts, i_kt = where_active(Instrument, as_of)
+                stmt = (
+                    stmt.join(Instrument, Instrument.public_id == Trade.instrument_public_id)
+                    .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
+                    .where(
+                        Instrument.exchange == exchange,
+                        s_ts,
+                        s_kt,
+                        i_ts,
+                        i_kt,
+                    )
+                )
+            else:
+                stmt = stmt.where(Trade.instrument_public_id.in_(tuple(instrument_public_ids)))
+            stmt = stmt.order_by(
+                Trade.instrument_public_id.asc(),
+                event_time.asc(),
+                Trade.id.asc(),
+            ).execution_options(yield_per=_HIGH_CARDINALITY_STREAM_CHUNK_SIZE)
+            stream = await s.stream(stmt)
+            async for r in stream:
+                yield (
+                    r.instrument_public_id,
+                    {
+                        "timestamp": r.timestamp,
+                        "executed_at": r.executed_at,
+                        "price": r.price,
+                        "size": r.size,
+                        "side": r.side,
+                        "trade_id": r.trade_id,
+                    },
+                )
 
     async def iter_market_snapshots(
         self,
