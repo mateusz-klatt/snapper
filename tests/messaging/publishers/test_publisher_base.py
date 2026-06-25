@@ -8726,19 +8726,72 @@ async def test_seed_aggregator_seeds_finalized_bar_with_preclose_timestamp() -> 
 
 
 @pytest.mark.asyncio
-async def test_seed_aggregator_skips_wildcard_subscription() -> None:
-    """Verify the seed is skipped (with no DB read) for a wildcard subscription.
+async def test_seed_aggregator_expands_wildcard_subscription() -> None:
+    """Verify a wildcard subscription is expanded to active symbols and seeded.
 
-    Given: the wildcard ["*"] symbol set,
+    Given: the wildcard ["*"] symbol set and an exchange with one active symbol,
     When: the aggregator is seeded,
-    Then: no DB read happens (concrete symbols are not enumerable here).
+    Then: the active instrument list is enumerated and that symbol's open 1d
+        bucket is reconstructed (previously the whole window was left unseeded).
     """
     pub: Any = DummyPublisher(symbols=["*"])
     pub._candle_aggregator = CandleAggregator(["1d"])
-    pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=[]))
+    now = datetime(2026, 6, 14, 10, 30, 30, tzinfo=UTC)
+
+    async def fake_get_candles(
+        symbol: str, timeframe: str, start: datetime, end: datetime, *_a: Any, **_k: Any
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "open_at": start,
+                "timeframe": "1m",
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 2.0,
+                "vwap": 1.0,
+                "trades": 1,
+                "public_id": "p",
+                "timestamp": now,
+                "complete": True,
+                "session_id": "s",
+                "sequence_id": 1,
+            }
+        ]
+
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(side_effect=fake_get_candles),
+        get_exchange_instruments=AsyncMock(return_value=["BTC-USD"]),
+    )
+    await pub._seed_aggregator_from_db(["*"], ["1d"], now)
+    pub.repository.get_exchange_instruments.assert_awaited_once()
+    assert (
+        "BTC-USD",
+        "1d",
+        int(datetime(2026, 6, 14, tzinfo=UTC).timestamp()),
+    ) in pub._candle_aggregator._buckets
+
+
+@pytest.mark.asyncio
+async def test_seed_aggregator_wildcard_no_active_instruments_noop() -> None:
+    """Verify wildcard seeding is a safe no-op when no active instruments exist.
+
+    Given: the wildcard ["*"] symbol set and an empty active-instrument list,
+    When: the aggregator is seeded,
+    Then: no 1m read happens and no buckets are built (it self-heals on rollover).
+    """
+    pub: Any = DummyPublisher(symbols=["*"])
+    pub._candle_aggregator = CandleAggregator(["1d"])
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(return_value=[]),
+        get_exchange_instruments=AsyncMock(return_value=[]),
+    )
     now = datetime(2026, 6, 14, 10, 30, tzinfo=UTC)
     await pub._seed_aggregator_from_db(["*"], ["1d"], now)
+    pub.repository.get_exchange_instruments.assert_awaited_once()
     pub.repository.get_candles.assert_not_awaited()
+    assert pub._candle_aggregator._buckets == {}
 
 
 @pytest.mark.asyncio

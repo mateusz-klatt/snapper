@@ -477,9 +477,13 @@ class CandleAggregator:
 
         A window is trustworthy when it was seeded from the durable plane or it
         OPENED at or after the live epoch (so every one of its minutes was
-        observed live). In the data path (forward-fill OFF) the bucket must ALSO
-        have been opened by the window's first minute — a conservative guard
-        against a mid-stream join publishing a truncated bar. In forward-fill mode
+        observed live). In the data path (forward-fill OFF) a window that opened
+        STRICTLY AFTER the live epoch was fully observed, so a missing opening
+        minute is a genuine no-trade minute and the bucket is trusted; the epoch
+        window itself and any seeded window must ALSO have been opened by the
+        window's first minute — a conservative guard against a mid-stream join
+        (or a seed not reaching the window open) publishing a truncated bar. In
+        forward-fill mode
         a missing opening minute of a fully-live window is a genuine no-trade
         minute (forward-fill ASSERTS a continuous corpus per feed), so the
         first-minute requirement is dropped and the partially-filled window is the
@@ -509,7 +513,11 @@ class CandleAggregator:
         trustworthy = seeded or begin_ts >= self._live_epoch_ts
         if self._forward_fill:
             return trustworthy
-        return int(first_minute.timestamp()) == begin_ts and trustworthy
+        if not trustworthy:
+            return False
+        if not seeded and begin_ts > self._live_epoch_ts:
+            return True
+        return int(first_minute.timestamp()) == begin_ts
 
     def _emit_closed(self, sym: str) -> list[tuple[str, CandleUpdate]]:
         """Emit and remove every closed bucket for one symbol.

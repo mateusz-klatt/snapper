@@ -2284,10 +2284,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         it lets it publish once the first live minute finalizes — never a
         duplicate, since a window cannot emit during its own first minute.
 
-        No-op without a repository or aggregator, and for the wildcard (``["*"]``)
-        subscription (concrete symbols are not enumerable here; the unseeded
-        current open window is suppressed by the aggregator's complete-window
-        guard until it rolls over and self-heals).
+        No-op without a repository or aggregator. A wildcard (``["*"]``)
+        subscription is expanded to the exchange's active instrument list (via
+        :meth:`_resolve_seed_symbols`) so a subscribe-all publisher (Kraken spot,
+        walutomat) rebuilds its current higher-TF buckets on restart exactly like
+        the concrete-symbol publishers — without it the whole current window (most
+        visibly the 24h 1d bar) is left unseeded and suppressed until the next
+        rollover.
 
         Args:
             symbols: Symbols to seed.
@@ -2299,29 +2302,64 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         aggregator = self._candle_aggregator
         if repository is None or aggregator is None:
             return
-        if "*" in symbols:
-            logger.warning(
-                f"{self.__class__.__name__}: wildcard candle subscription cannot seed "
-                "higher-timeframe buckets on restart; the current open window is suppressed "
-                "until it rolls over (synthesized bars self-heal on the next fully-observed "
-                "window)"
-            )
-            return
         now = now if now is not None else datetime.now(UTC)
         minute_floor = CandleAggregator._floor(now, 60)
         end = minute_floor - timedelta(microseconds=1)
         exchange = self._get_exchange_name()
+        seed_symbols = await self._resolve_seed_symbols(repository, symbols, exchange, now)
+        if not seed_symbols:
+            return
         for timeframe in higher:
             await self._seed_timeframe_from_db(
                 repository,
                 aggregator,
-                symbols,
+                seed_symbols,
                 timeframe,
                 now,
                 minute_floor,
                 end,
                 exchange,
             )
+
+    async def _resolve_seed_symbols(
+        self,
+        repository: Repository,
+        symbols: list[str],
+        exchange: AllExchange,
+        now: datetime,
+    ) -> list[str]:
+        """Resolve the concrete native symbols whose higher-TF buckets to seed.
+
+        Concrete-symbol subscriptions seed themselves. A wildcard (``["*"]``)
+        subscription is expanded to the exchange's active instrument list from the
+        durable plane, so a subscribe-all publisher rebuilds its current
+        higher-TF buckets on restart instead of leaving the whole current window
+        unseeded (which silently stalled the 24h 1d bar for wildcard venues).
+
+        Args:
+            repository: Repository used to enumerate active instruments.
+            symbols: The publisher's subscription symbol list (possibly ``["*"]``).
+            exchange: Exchange whose active instruments to enumerate.
+            now: Point-in-time snapshot for the active-instrument read.
+
+        Returns:
+            Concrete native symbols to seed; empty when a wildcard expansion finds
+            no active instruments.
+        """
+        if "*" not in symbols:
+            return symbols
+        active = await repository.get_exchange_instruments(exchange, now)
+        if not active:
+            logger.warning(
+                f"{self.__class__.__name__}: wildcard candle seed found no active instruments "
+                f"for {exchange}; current higher-timeframe window left unseeded (it self-heals "
+                "on the next fully-observed window)"
+            )
+            return []
+        logger.info(
+            f"{self.__class__.__name__}: wildcard candle seed expanded -> {len(active)} symbols"
+        )
+        return active
 
     async def _seed_timeframe_from_db(
         self,

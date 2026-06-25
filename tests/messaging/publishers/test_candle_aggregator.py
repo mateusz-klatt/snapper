@@ -211,12 +211,48 @@ class TestEmitOnClose:
         assert labels["1d"].interval_begin == _BASE
 
     def test_incomplete_window_joined_midstream_is_suppressed(self) -> None:
-        """A window whose opening minute was never observed is not emitted."""
-        agg = CandleAggregator(["5m"])
+        """A pre-epoch window (mid-stream join) whose open minute was never observed is not emitted.
+
+        Modelled with a live epoch inside the window: the window opened before the
+        aggregator went live, so it is not trustworthy and is suppressed even
+        though a later minute folds into it.
+        """
+        agg = CandleAggregator(["5m"], live_epoch=_at(10, 2))
         agg.fold(_candle("A", _at(10, 2)))
         agg.fold(_candle("A", _at(10, 3)))
         agg.fold(_candle("A", _at(10, 5)))
         assert agg.fold(_candle("A", _at(10, 6))) == []
+
+    def test_post_epoch_window_missing_open_minute_is_emitted(self) -> None:
+        """A fully-observed post-epoch window emits even with no opening-minute trade.
+
+        The window opened strictly after the live epoch, so every minute was
+        observed; a missing opening minute is a genuine no-trade minute and the
+        bar opens at its first traded minute rather than being suppressed.
+        """
+        agg = CandleAggregator(["5m"], live_epoch=_at(9, 59))
+        emitted: list[tuple[str, CandleUpdate]] = []
+        for minute in (2, 3, 4, 5, 6):
+            emitted += agg.fold(_candle("A", _at(10, minute)))
+        begins = [bar.interval_begin for _label, bar in emitted]
+        assert _at(10, 0) in begins
+
+    def test_seeded_window_missing_open_minute_is_suppressed(self) -> None:
+        """A seeded window whose opening minute is absent is suppressed, not truncated.
+
+        The restart seed reconstructs the current window from the durable plane;
+        seeding makes it trustworthy, but if the seed does not reach the window's
+        opening minute the bucket must still NOT publish a truncated bar. This
+        guard must hold even though seeding runs before the live epoch is set
+        (the epoch is still 0 during seeding).
+        """
+        agg = CandleAggregator(["1d"])
+        agg.seed_1m("1d", _candle("A", _at(0, 2)))
+        agg.seed_1m("1d", _candle("A", _at(0, 3)))
+        agg.set_live_epoch(_at(0, 4))
+        agg.fold(_candle("A", _at(0, 0, day=15)))
+        emitted = agg.fold(_candle("A", _at(0, 1, day=15)))
+        assert [label for label, _bar in emitted if label == "1d"] == []
 
     def test_pre_epoch_window_suppressed_post_epoch_self_heals(self) -> None:
         """A pre-epoch window is suppressed even if its open minute folds late."""
