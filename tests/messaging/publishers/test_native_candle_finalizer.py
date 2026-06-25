@@ -102,6 +102,21 @@ def test_observe_late_frame_dropped_and_counted() -> None:
     assert fin.late_count == 1
 
 
+def test_observe_late_complete_frame_is_released_for_correction() -> None:
+    """A completed late row is released so the durable 1m can supersede.
+
+    Given: a finalizer that already released a window,
+    When: a complete late frame for that same window arrives,
+    Then: it is returned for persistence and not counted as a dropped late row.
+    """
+    fin = NativeCandleFinalizer(persist_intermediate=False, flush_grace_seconds=5.0)
+    fin.observe("BTC-USD", _row(open_at=_T0))
+    fin.observe("BTC-USD", _row(open_at=_T0 + timedelta(minutes=1)))
+    correction = _row(open_at=_T0, complete=True)
+    assert fin.observe("BTC-USD", correction) == [("BTC-USD", correction)]
+    assert fin.late_count == 0
+
+
 def test_observe_on_mode_first_frame_emits_intermediate() -> None:
     """ON-mode emits the in-progress frame immediately as an intermediate.
 

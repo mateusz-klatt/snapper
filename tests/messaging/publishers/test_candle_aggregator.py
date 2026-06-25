@@ -13,6 +13,7 @@ import pytest
 
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
+from snapper.messaging.publishers.candle_aggregator import LateCandleDrop
 
 _BASE = datetime(2026, 6, 14, tzinfo=UTC)
 
@@ -123,6 +124,37 @@ class TestFinalization:
             agg.fold(_candle("A", _at(10, minute), close=1.0))
         assert agg.late_rolls_after_close == 3
         assert len(agg._warned_late) < 3
+
+    def test_late_drop_signal_is_drainable(self) -> None:
+        """Late drops expose a pure signal without changing fold output.
+
+        Given: a finalized minute watermark,
+        When: an older corrective 1m arrives,
+        Then: the aggregator drops it from in-memory folding and exposes one
+            drainable late-drop signal for the publisher repair path.
+        """
+        agg = CandleAggregator(["5m"])
+        agg.fold(_candle("A", _at(10, 0)))
+        agg.fold(_candle("A", _at(10, 1)))
+        assert agg.fold(_candle("A", _at(10, 0), close=999.0)) == []
+        assert agg.pop_late_drops() == [LateCandleDrop("A", _at(10, 0))]
+        assert agg.pop_late_drops() == []
+
+    def test_timeframes_and_closed_window_frontier_are_exposed(self) -> None:
+        """The publisher can map late minutes and wait for sealed windows.
+
+        Given: an aggregator configured for multiple higher timeframes,
+        When: a 5m window is emitted,
+        Then: the configured timeframes are visible and the emitted window is
+            reported as closed while future windows are not.
+        """
+        agg = CandleAggregator(["5m", "1h"])
+        assert agg.timeframes == ("5m", "1h")
+        assert not agg.has_closed_window("A", "5m", _at(10, 0))
+        for minute in range(7):
+            agg.fold(_candle("A", _at(10, minute)))
+        assert agg.has_closed_window("A", "5m", _at(10, 0))
+        assert not agg.has_closed_window("A", "5m", _at(10, 5))
 
 
 class TestRollup:

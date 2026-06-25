@@ -76,6 +76,19 @@ class _HtfBucket:
     complete: bool
 
 
+@dataclass(frozen=True)
+class LateCandleDrop:
+    """Pure signal that a finalized 1m frame was dropped from live folding.
+
+    Attributes:
+        symbol: Native symbol of the dropped 1m frame.
+        minute: UTC minute start of the dropped 1m frame.
+    """
+
+    symbol: str
+    minute: datetime
+
+
 class CandleAggregator:
     """Roll finalized 1m candles up into configured higher timeframes.
 
@@ -176,6 +189,7 @@ class CandleAggregator:
         self._last_real_window: dict[tuple[str, str], int] = {}
         self._late_rolls_after_close: int = 0
         self._warned_late: set[tuple[str, int]] = set()
+        self._late_drops: list[LateCandleDrop] = []
         self._warned_fill_overflow: set[tuple[str, str]] = set()
 
     @staticmethod
@@ -378,6 +392,42 @@ class CandleAggregator:
             The timeframe width in seconds.
         """
         return self._tf_seconds[timeframe]
+
+    @property
+    def timeframes(self) -> tuple[str, ...]:
+        """Return the higher timeframes this aggregator synthesizes.
+
+        Returns:
+            Configured supported timeframe labels in fold order.
+        """
+        return tuple(self._tf_seconds)
+
+    def has_closed_window(self, symbol: str, timeframe: str, window_begin: datetime) -> bool:
+        """Return whether a synthesized window has already been sealed.
+
+        Args:
+            symbol: Native symbol key.
+            timeframe: Higher timeframe label.
+            window_begin: Canonical UTC window start.
+
+        Returns:
+            True when the per-symbol/timeframe frontier is at or beyond
+            ``window_begin``.
+        """
+        frontier = self._closed_window.get((symbol, timeframe))
+        if frontier is None:
+            return False
+        return int(window_begin.timestamp()) <= frontier
+
+    def pop_late_drops(self) -> list[LateCandleDrop]:
+        """Drain and return late-drop signals accumulated by recent folds.
+
+        Returns:
+            Late 1m drop signals in observation order.
+        """
+        drops = self._late_drops
+        self._late_drops = []
+        return drops
 
     @property
     def late_rolls_after_close(self) -> int:
@@ -791,12 +841,13 @@ class CandleAggregator:
         """
         self._late_rolls_after_close += 1
         marker = (sym, minute_ts)
+        minute = datetime.fromtimestamp(minute_ts, UTC)
+        self._late_drops.append(LateCandleDrop(symbol=sym, minute=minute))
         if marker in self._warned_late:
             return
         if len(self._warned_late) >= _WARNED_LATE_CAP:
             self._warned_late.clear()
         self._warned_late.add(marker)
-        minute = datetime.fromtimestamp(minute_ts, UTC)
         logger.warning(
             f"late 1m at/below finalized minute dropped: symbol={sym} "
             f"minute={minute.isoformat()} (its corrective value is NOT "

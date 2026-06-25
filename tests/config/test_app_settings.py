@@ -85,6 +85,24 @@ class TestAppSettingsMarketDataProperties:
         assert settings.polygon_api_key == "poly-key"
 
 
+class TestAppSettingsWriteBufferBatchSizes:
+    """Tests for the publisher write-buffer batch-size and flush-age getters."""
+
+    def test_write_buffer_getters_return_defaults_when_absent(self) -> None:
+        """Verify the write-buffer getters return their documented defaults.
+
+        Given: AppSettings backed by an empty settings service,
+        When: reading the candle/tick/trade batch-size and flush-age getters,
+        Then: each returns its default (50ms flush, 100 candle, 500 tick, 500 trade).
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        settings = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert settings.write_buffer_flush_ms == 50
+        assert settings.write_buffer_candle_max_rows == 100
+        assert settings.write_buffer_tick_max_rows == 500
+        assert settings.write_buffer_trade_max_rows == 500
+
+
 class TestAppSettingsFeedEgress:
     """Tests for the feed_egress_enabled gate (default off, robust coercion)."""
 

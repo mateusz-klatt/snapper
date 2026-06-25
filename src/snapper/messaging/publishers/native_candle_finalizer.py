@@ -17,12 +17,14 @@ window and releases it as a final ``complete=True`` row exactly once:
 
 A monotonic per-key released watermark makes the three paths mutually
 at-most-once (a window finalized by one is a no-op for the others) and drops
-late frames at/below a finalized window (it never re-opens a sealed window — the
-SCD2 re-fragment hazard the aggregator avoids). With ``persist_intermediate``
-enabled the in-progress frames are also released (as built, ``complete`` carrying
-the window-closed flag) ahead of the final, restoring per-frame persistence with
-one extra final version per window; the default leaves the DB with exactly one
-final bar per window.
+incomplete late frames at/below a finalized window. A completed late row is
+released to the writer so a genuine correction can SCD2-supersede the durable
+1m plane; identical re-emits remain repository no-ops. With
+``persist_intermediate`` enabled the in-progress frames are also released (as
+built, ``complete`` carrying the window-closed flag) ahead of the final,
+restoring per-frame persistence with one extra final version per window; the
+default leaves the DB with exactly one final bar per window unless a completed
+correction arrives.
 
 It is the persistence-side analogue of
 :class:`snapper.infrastructure.exchanges._trade_candle_builder.TradeCandleBuilder`
@@ -128,13 +130,15 @@ class NativeCandleFinalizer:
             (``complete=True``) when ``open_at`` advances past the held window,
             plus — only when ``persist_intermediate`` is set — the current frame
             as built, in finalized-then-intermediate order. Empty in the default
-            mode until a window finalizes, and for a frame at/below a finalized
-            window (dropped as late).
+            mode until a window finalizes, and for an incomplete frame at/below
+            a finalized window.
         """
         key = (row["instrument_public_id"], row["timeframe"])
         open_at = row["open_at"]
         released = self._released_open_at.get(key)
         if released is not None and open_at <= released:
+            if row["complete"]:
+                return [(native_symbol, row)]
             self._record_late(key, open_at)
             return []
         out: list[tuple[str, CandleUpsertRow]] = []

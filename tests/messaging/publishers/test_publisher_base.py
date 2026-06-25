@@ -1,9 +1,11 @@
 """Tests for the base market data publisher service."""
 
 import asyncio
+import contextlib
 import importlib
 import json
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -28,6 +30,7 @@ from snapper.application.process_manager.launcher import _TOTAL_RESET_UPTIME_S
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
+from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.data.repository_types import TickUpsertRow
@@ -51,16 +54,23 @@ from snapper.messaging.publishers.base import _TRADE_ID_LRU_MAX_PER_SYMBOL
 from snapper.messaging.publishers.base import FeedDarkTooLongError
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.base import _candle_writer_drop_counters
+from snapper.messaging.publishers.base import _CandleRepairKey
+from snapper.messaging.publishers.base import _CandleRepairResult
 from snapper.messaging.publishers.base import _cleanup_pending_future
 from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_candle_write
 from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_tick_write
 from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_trade_write
 from snapper.messaging.publishers.base import _is_disconnect_error
+from snapper.messaging.publishers.base import _LateCandleDropKey
+from snapper.messaging.publishers.base import _PendingCandleRepair
+from snapper.messaging.publishers.base import _PendingLateCandleDrop
 from snapper.messaging.publishers.base import _tick_writer_drop_counters
 from snapper.messaging.publishers.base import _trade_writer_drop_counters
+from snapper.messaging.publishers.base import _WriterBatchState
 from snapper.messaging.publishers.base import _WriterSessionLostError
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
+from snapper.messaging.publishers.candle_aggregator import LateCandleDrop
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
 from snapper.messaging.schemas.data import CandleData
@@ -3498,6 +3508,10 @@ class TestFeedPublisherCoverage:
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
         mock_settings.db_url = TEST_DB_URL
         mock_settings.zmq_heartbeat_interval_ms = 1000
+        mock_settings.timeframes = ["1m"]
+        mock_settings.candle_forward_fill = False
+        mock_settings.persist_intermediate_candles = False
+        mock_settings.feed_egress_enabled = False
         mock_get_settings.return_value = mock_settings
         mock_settings_service = AsyncMock()
         mock_get_settings_service.return_value = mock_settings_service
@@ -3514,6 +3528,16 @@ class TestFeedPublisherCoverage:
         mock_get_repository.return_value = mock_repo
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         with (
+            patch("snapper.messaging.publishers.base.get_settings", return_value=mock_settings),
+            patch(
+                "snapper.messaging.publishers.base.get_settings_service",
+                new=AsyncMock(return_value=mock_settings_service),
+            ),
+            patch(
+                "snapper.messaging.publishers.base.get_settings_with_service",
+                return_value=mock_settings,
+            ),
+            patch("snapper.messaging.publishers.base.get_repository", return_value=mock_repo),
             patch.object(publisher, "_heartbeat_loop", new=AsyncMock()),
             patch.object(publisher, "_symbol_aliases_loop", new=AsyncMock()),
             patch.object(publisher, "_feed_health_flush_loop", new=AsyncMock()),
@@ -3524,6 +3548,7 @@ class TestFeedPublisherCoverage:
             ),
             patch.object(publisher, "_candle_loop", new=AsyncMock()),
             patch.object(publisher, "_candle_writer_loop", new=AsyncMock()),
+            patch.object(publisher, "_candle_repair_loop", new=AsyncMock()),
             patch.object(publisher, "_native_finalize_flush_loop", new=AsyncMock()),
             patch.object(publisher, "_tick_loop", new=AsyncMock()),
             patch.object(publisher, "_tick_writer_loop", new=AsyncMock()),
@@ -7831,9 +7856,11 @@ async def test_higher_timeframes_create_aggregator_and_single_consumer(
     assert isinstance(pub._candle_aggregator, CandleAggregator)
     assert set(pub._candle_aggregator._tf_seconds) == {"1h", "1d"}
     assert pub._candle_aggregator._live_epoch_ts > 0
+    assert pub._candle_repair_loop_task is not None
     assert len(pub._candle_consumer_tasks) == 1
     seed_mock.assert_awaited_once()
     await pub.stop()
+    assert pub._candle_repair_loop_task is None
 
 
 @pytest.mark.asyncio
@@ -7854,6 +7881,7 @@ async def test_single_timeframe_creates_no_aggregator(
     pub._seed_aggregator_from_db = seed_mock
     await pub.start()
     assert pub._candle_aggregator is None
+    assert pub._candle_repair_loop_task is None
     assert len(pub._candle_consumer_tasks) == 1
     seed_mock.assert_not_awaited()
     await pub.stop()
@@ -8088,6 +8116,87 @@ async def test_candle_loop_folds_synchronously_before_processing(
 
 
 @pytest.mark.asyncio
+async def test_handle_late_complete_1m_keeps_signal_until_row_release() -> None:
+    """A held complete late row binds to its earlier durable late signal.
+
+    Given: the aggregator drops a corrective 1m while the native finalizer still
+        holds that complete row,
+    When: the finalizer later releases the held row,
+    Then: the retained late signal schedules a repair for the exact write
+        sequence of that correction.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    pub._candle_aggregator.fold(_candle_update(begin=_candle_minute(10, 0)))
+    pub._candle_aggregator.fold(_candle_update(begin=_candle_minute(10, 1)))
+    pub._native_finalizer = NativeCandleFinalizer(
+        persist_intermediate=False, flush_grace_seconds=5.0
+    )
+    pub._process_candle = AsyncMock(
+        return_value=_finalized_row(open_at=_candle_minute(10, 0), complete=True)
+    )
+
+    def _allow_persist(_kind: str, _exchange: object, _symbol: str) -> bool:
+        return True
+
+    pub._should_persist_row = _allow_persist
+    pub._publish_synthesized_candle = AsyncMock()
+    handled = await pub._handle_candle_stream_item(
+        _candle_update(begin=_candle_minute(10, 0), close=999.0),
+        ExchangeEnum.KRAKEN,
+        "kraken",
+        "1m",
+    )
+    key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    late_key = _LateCandleDropKey("BTC-USD", _candle_minute(10, 0))
+    assert handled is True
+    assert pub._candle_write_queue.qsize() == 0
+    assert pub._pending_late_candle_drops[late_key].write_sequence is None
+    assert pub._pending_candle_repairs == {}
+    released = pub._observe_native_candle(
+        "BTC-USD", _finalized_row(open_at=_candle_minute(10, 1), complete=True)
+    )
+    enqueued = pub._enqueue_finalized_candles(released, ExchangeEnum.KRAKEN, "kraken")
+    assert len(enqueued) == 1
+    assert pub._pending_late_candle_drops[late_key].write_sequence == enqueued[0].sequence
+    assert pub._pending_candle_repairs[key].required_sequence == enqueued[0].sequence
+
+
+def test_late_repair_waits_for_specific_correction_commit() -> None:
+    """An unrelated candle commit does not satisfy a repair's commit gate.
+
+    Given: one late signal and an unrelated candle queued before the matching
+        correction,
+    When: only the unrelated row is marked committed,
+    Then: the repair is not due until the exact correction row sequence commits.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    minute = _candle_minute(10, 0)
+    key = _CandleRepairKey("BTC-USD", "5m", minute)
+    pub._record_late_candle_drops([LateCandleDrop("BTC-USD", minute)])
+
+    def _allow_persist(_kind: str, _exchange: object, _symbol: str) -> bool:
+        return True
+
+    pub._should_persist_row = _allow_persist
+    unrelated = _finalized_row(ipid="inst-eth", open_at=_candle_minute(10, 2), complete=True)
+    correction = _finalized_row(open_at=minute, complete=True)
+    enqueued = pub._enqueue_finalized_candles(
+        [("ETH-USD", unrelated), ("BTC-USD", correction)],
+        ExchangeEnum.KRAKEN,
+        "kraken",
+    )
+    assert [item.sequence for item in enqueued] == [1, 2]
+    assert pub._pending_candle_repairs[key].required_sequence == 2
+    pub._candle_aggregator._closed_window[("BTC-USD", "5m")] = int(minute.timestamp())
+    pub._mark_candle_writes_committed([unrelated])
+    assert pub._due_candle_repair_groups() == {}
+    pub._mark_candle_writes_committed([correction])
+    assert pub._due_candle_repair_groups() == {("BTC-USD", minute): [(key, 2)]}
+
+
+@pytest.mark.asyncio
 async def test_candle_flush_loop_propagates_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8108,7 +8217,9 @@ async def test_candle_flush_loop_propagates_cancellation(
         await pub._candle_flush_loop(cast(Any, "kraken"))
 
 
-def _finalized_row(*, ipid: str = "inst-1", open_at: datetime) -> CandleUpsertRow:
+def _finalized_row(
+    *, ipid: str = "inst-1", open_at: datetime, complete: bool = False
+) -> CandleUpsertRow:
     """Build a candle row for native-finalizer wiring tests."""
     return CandleUpsertRow(
         instrument_public_id=ipid,
@@ -8123,8 +8234,58 @@ def _finalized_row(*, ipid: str = "inst-1", open_at: datetime) -> CandleUpsertRo
         vwap=1.25,
         trades=3,
         source="native",
-        complete=False,
+        complete=complete,
     )
+
+
+def _persisted_candle_row(
+    *,
+    open_at: datetime,
+    open_: float = 1.0,
+    high: float = 2.0,
+    low: float = 0.5,
+    close: float = 1.5,
+    volume: float = 10.0,
+    vwap: float | None = 1.25,
+    trades: int | None = 3,
+    complete: bool = True,
+) -> CandleRow:
+    """Build a persisted 1m candle row for repair tests."""
+    return CandleRow(
+        open_at=open_at,
+        timeframe="1m",
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+        vwap=vwap,
+        trades=trades,
+        source="native",
+        complete=complete,
+        public_id=f"p-{open_at.isoformat()}",
+        timestamp=open_at + timedelta(seconds=61),
+        session_id="s",
+        sequence_id=1,
+    )
+
+
+def _install_repair_dependents(
+    pub: DummyPublisher, *, sequence: int, symbol: str, minute: datetime
+) -> tuple[_LateCandleDropKey, set[_CandleRepairKey]]:
+    """Install multi-timeframe repair state for one correction write sequence."""
+    late_key = _LateCandleDropKey(symbol, minute)
+    repair_keys = {
+        _CandleRepairKey(symbol, "5m", CandleAggregator._floor(minute, 300)),
+        _CandleRepairKey(symbol, "1h", CandleAggregator._floor(minute, 3600)),
+    }
+    pub._pending_late_candle_drops[late_key] = _PendingLateCandleDrop(
+        write_sequence=sequence, repair_keys=set(repair_keys)
+    )
+    for repair_key in repair_keys:
+        pub._pending_candle_repairs[repair_key] = _PendingCandleRepair(required_sequence=sequence)
+        pub._repair_drop_key_by_repair_key[repair_key] = late_key
+    return late_key, repair_keys
 
 
 def test_observe_native_candle_passthrough_without_finalizer() -> None:
@@ -8171,11 +8332,64 @@ def test_enqueue_finalized_candles_respects_persist_gate() -> None:
     pub._should_persist_row = lambda _kind, _exch, sym: sym == "A-USD"
     row_a = _finalized_row(ipid="inst-a", open_at=_candle_minute(10, 0))
     row_b = _finalized_row(ipid="inst-b", open_at=_candle_minute(10, 0))
-    pub._enqueue_finalized_candles(
+    enqueued = pub._enqueue_finalized_candles(
         [("A-USD", row_a), ("B-USD", row_b)], cast(Any, "kraken"), "kraken"
     )
+    assert len(enqueued) == 1
+    assert enqueued[0].sequence == 1
     assert pub._candle_write_queue.qsize() == 1
     assert pub._candle_write_queue.get_nowait()["instrument_public_id"] == "inst-a"
+
+
+def test_enqueue_finalized_candles_forgets_evicted_write_sequence() -> None:
+    """Evicting a queued candle row removes its pending write sequence.
+
+    Given: a full candle writer queue containing one tracked row,
+    When: another finalized row is enqueued,
+    Then: sequence tracking for the evicted row is removed.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD", "ETH-USD"])
+    pub._candle_write_queue = asyncio.Queue(maxsize=1)
+
+    def _allow_persist(_kind: str, _exchange: object, _symbol: str) -> bool:
+        return True
+
+    pub._should_persist_row = _allow_persist
+    first = _finalized_row(open_at=_candle_minute(10, 0), complete=True)
+    second = _finalized_row(ipid="inst-2", open_at=_candle_minute(10, 1), complete=True)
+    pub._enqueue_finalized_candles([("BTC-USD", first)], ExchangeEnum.KRAKEN, "kraken")
+    assert pub._candle_write_sequence_by_row_id[id(first)] == 1
+    pub._enqueue_finalized_candles([("ETH-USD", second)], ExchangeEnum.KRAKEN, "kraken")
+    assert id(first) not in pub._candle_write_sequence_by_row_id
+    assert pub._candle_write_sequence_by_row_id[id(second)] == 2
+
+
+def test_evicted_correction_write_cleans_all_dependent_repairs() -> None:
+    """Evicting a correction write removes every repair waiting on its sequence.
+
+    Given: one late correction fans out to 5m and 1h repair keys,
+    When: that correction row is evicted from the bounded candle writer queue,
+    Then: all dependent repair and late-drop state is removed with one warning.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD", "ETH-USD"])
+    pub._candle_write_queue = asyncio.Queue(maxsize=1)
+    pub._candle_aggregator = CandleAggregator(["5m", "1h"])
+    minute = _candle_minute(10, 7)
+
+    def _allow_persist(_kind: str, _exchange: object, _symbol: str) -> bool:
+        return True
+
+    pub._should_persist_row = _allow_persist
+    pub._record_late_candle_drops([LateCandleDrop("BTC-USD", minute)])
+    correction = _finalized_row(open_at=minute, complete=True)
+    pub._enqueue_finalized_candles([("BTC-USD", correction)], ExchangeEnum.KRAKEN, "kraken")
+    assert len(pub._pending_candle_repairs) == 2
+    replacement = _finalized_row(ipid="inst-2", open_at=_candle_minute(10, 8), complete=True)
+    with patch("snapper.messaging.publishers.base.logger.warning") as warning:
+        pub._enqueue_finalized_candles([("ETH-USD", replacement)], ExchangeEnum.KRAKEN, "kraken")
+    warning.assert_called_once()
+    assert pub._pending_candle_repairs == {}
+    assert pub._pending_late_candle_drops == {}
 
 
 @pytest.mark.asyncio
@@ -8284,6 +8498,266 @@ async def test_native_finalize_flush_loop_propagates_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_candle_repair_loop_runs_due_repairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repair loop waits for a signal, debounces, and runs due repairs.
+
+    Given: a running repair loop with its event already set,
+    When: the debounce sleep completes,
+    Then: due repairs run once and the loop exits when running is cleared.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_repair_event.set()
+
+    async def _run_due(_exchange: object) -> None:
+        pub.running = False
+
+    pub._run_due_candle_repairs = AsyncMock(side_effect=_run_due)
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep", AsyncMock(return_value=None)
+    )
+    await pub._candle_repair_loop(ExchangeEnum.KRAKEN)
+    pub._run_due_candle_repairs.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_candle_repair_loop_logs_and_survives_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repair-loop tick error is swallowed without killing shutdown.
+
+    Given: due repair processing raises,
+    When: the repair loop ticks,
+    Then: the exception is logged internally and the loop exits via the running
+        flag instead of propagating.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_repair_event.set()
+
+    async def _raise_once(_exchange: object) -> None:
+        pub.running = False
+        raise RuntimeError("boom")
+
+    pub._run_due_candle_repairs = AsyncMock(side_effect=_raise_once)
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep", AsyncMock(return_value=None)
+    )
+    await pub._candle_repair_loop(ExchangeEnum.KRAKEN)
+    pub._run_due_candle_repairs.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_candle_repair_loop_breaks_when_stopped_after_debounce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repair loop exits without work when stop lands during debounce.
+
+    Given: a running repair loop with a pending signal,
+    When: ``running`` flips false during debounce sleep,
+    Then: due repairs are not invoked.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_repair_event.set()
+    pub._run_due_candle_repairs = AsyncMock()
+
+    async def _stop_during_sleep(_seconds: float) -> None:
+        pub.running = False
+
+    monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", _stop_during_sleep)
+    await pub._candle_repair_loop(ExchangeEnum.KRAKEN)
+    pub._run_due_candle_repairs.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_candle_repair_loop_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repair-loop cancellation propagates for normal task shutdown.
+
+    Given: a repair loop whose debounce sleep is cancelled,
+    When: it ticks,
+    Then: ``CancelledError`` is re-raised.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_repair_event.set()
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await pub._candle_repair_loop(ExchangeEnum.KRAKEN)
+
+
+def test_mark_candle_writes_committed_acks_exact_rows_and_wakes_event() -> None:
+    """Committed candle rows ack only their assigned write sequences.
+
+    Given: two tracked candle rows and one untracked row,
+    When: a subset is marked committed,
+    Then: only the assigned sequences for those exact row objects are retained.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    first = _finalized_row(open_at=_candle_minute(10, 0), complete=True)
+    second = _finalized_row(open_at=_candle_minute(10, 1), complete=True)
+    untracked = _finalized_row(open_at=_candle_minute(10, 2), complete=True)
+    assert pub._assign_candle_write_sequence(first) == 1
+    assert pub._assign_candle_write_sequence(second) == 2
+    assert not pub._candle_repair_event.is_set()
+    pub._mark_candle_writes_committed([first, untracked])
+    assert pub._committed_candle_write_sequences == set()
+    assert pub._candle_write_sequence_by_row_id == {id(second): 2}
+    assert pub._candle_repair_event.is_set()
+    late_key = _LateCandleDropKey("BTC-USD", _candle_minute(10, 1))
+    pub._pending_late_candle_drops[late_key] = _PendingLateCandleDrop(write_sequence=2)
+    pub._mark_candle_writes_committed([second])
+    assert pub._committed_candle_write_sequences == {2}
+
+
+@pytest.mark.asyncio
+async def test_stop_keeps_candle_writer_alive_until_finalizer_drain() -> None:
+    """Top-level stop keepalive preserves final native 1m shutdown rows.
+
+    Given: shutdown has several awaited phases before candle cleanup and a
+        candle writer that would exit if the keepalive were false,
+    When: ``stop`` runs,
+    Then: the keepalive is already active during pre-candle shutdown and the
+        finalizer-drained native 1m row is consumed by the writer.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+
+    def _allow_persist(_kind: str, _exchange: object, _symbol: str) -> bool:
+        return True
+
+    pub._should_persist_row = _allow_persist
+    finalizer = NativeCandleFinalizer(persist_intermediate=False, flush_grace_seconds=5.0)
+    finalizer.observe("BTC-USD", _finalized_row(open_at=_candle_minute(10, 0)))
+    pub._native_finalizer = finalizer
+    writer_started = asyncio.Event()
+    drained_rows: list[CandleUpsertRow] = []
+
+    async def _fake_writer() -> None:
+        await writer_started.wait()
+        while pub._candle_shutdown_repair_drain_active or not pub._candle_write_queue.empty():
+            try:
+                row = await asyncio.wait_for(pub._candle_write_queue.get(), timeout=0.01)
+            except TimeoutError:
+                await asyncio.sleep(0)
+                continue
+            drained_rows.append(row)
+            pub._mark_candle_writes_committed([row])
+            pub._candle_write_queue.task_done()
+
+    async def _stop_tick_pipeline() -> None:
+        assert pub.running is False
+        assert pub._candle_shutdown_repair_drain_active is True
+        writer_started.set()
+        await asyncio.sleep(0)
+
+    writer_task = asyncio.create_task(_fake_writer())
+    pub._candle_writer_task = writer_task
+    pub._stop_egress_snapshot_publisher = AsyncMock()
+    pub._stop_feed_health_loop = AsyncMock()
+    pub._stop_extra_background_tasks = AsyncMock()
+    pub._stop_tick_pipeline = AsyncMock(side_effect=_stop_tick_pipeline)
+    pub._stop_trade_pipeline = AsyncMock()
+    pub._close_runtime_resources = AsyncMock()
+    await pub.stop()
+    assert pub._candle_shutdown_repair_drain_active is False
+    assert len(drained_rows) == 1
+    assert drained_rows[0]["complete"] is True
+    assert writer_task.done()
+
+
+def test_writer_loop_has_work_keeps_candle_writer_alive_for_shutdown_repairs() -> None:
+    """The candle writer stays alive while shutdown repairs can enqueue rows.
+
+    Given: shutdown has stopped normal running with empty writer state,
+    When: candle repair drain keepalive is active,
+    Then: only the candle writer loop reports work so it can consume repaired
+        synthesized rows enqueued after the first queue join.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = False
+    candle_state = _WriterBatchState[CandleUpsertRow]([])
+    tick_state = _WriterBatchState[TickUpsertRow]([])
+    assert not pub._writer_loop_has_work(pub._candle_write_queue, candle_state)
+    pub._candle_shutdown_repair_drain_active = True
+    assert pub._writer_loop_has_work(pub._candle_write_queue, candle_state)
+    assert not pub._writer_loop_has_work(pub._tick_write_queue, tick_state)
+
+
+@pytest.mark.asyncio
+async def test_join_candle_shutdown_queue_returns_false_for_dead_writer_with_rows() -> None:
+    """Dead writer detection skips queue join when rows are still queued.
+
+    Given: an already-finished candle writer task and one queued row,
+    When: the shutdown join helper runs,
+    Then: it returns False and logs abandonment instead of awaiting queue join.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+
+    async def _done() -> None:
+        return None
+
+    writer_task = asyncio.create_task(_done())
+    await writer_task
+    pub._candle_writer_task = writer_task
+    await pub._candle_write_queue.put(_finalized_row(open_at=_candle_minute(10, 0)))
+    with patch("snapper.messaging.publishers.base.logger.warning") as warning:
+        assert await pub._join_candle_shutdown_queue() is False
+    warning.assert_called_once()
+    pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+
+
+@pytest.mark.asyncio
+async def test_join_candle_shutdown_queue_returns_true_when_join_wins() -> None:
+    """A live writer with an empty queue lets the shutdown join complete normally.
+
+    Given: a live candle writer task and an empty candle write queue,
+    When: the shutdown join helper races the queue join against the writer task,
+    Then: the join wins and the helper returns True (drain rows were consumed).
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    writer_task = asyncio.create_task(asyncio.sleep(60))
+    pub._candle_writer_task = writer_task
+    try:
+        assert await pub._join_candle_shutdown_queue() is True
+    finally:
+        writer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await writer_task
+
+
+@pytest.mark.asyncio
+async def test_join_candle_shutdown_queue_returns_false_when_writer_finishes_first() -> None:
+    """The shutdown join helper abandons rows if the writer exits first.
+
+    Given: one queued row keeping queue join pending and a writer task that ends,
+    When: both are raced by the shutdown join helper,
+    Then: the join task is cancelled and abandonment is logged.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+
+    async def _finish_next_tick() -> None:
+        await asyncio.sleep(0)
+
+    writer_task = asyncio.create_task(_finish_next_tick())
+    pub._candle_writer_task = writer_task
+    await pub._candle_write_queue.put(_finalized_row(open_at=_candle_minute(10, 0)))
+    with patch("snapper.messaging.publishers.base.logger.warning") as warning:
+        assert await pub._join_candle_shutdown_queue() is False
+    warning.assert_called_once()
+    pub._candle_write_queue.get_nowait()
+    pub._candle_write_queue.task_done()
+
+
+@pytest.mark.asyncio
 async def test_stop_candle_pipeline_drains_finalizer_before_join() -> None:
     """Shutdown drains the finalizer's ended bars before joining the write queue.
 
@@ -8296,18 +8770,131 @@ async def test_stop_candle_pipeline_drains_finalizer_before_join() -> None:
     pub._candle_write_queue = asyncio.Queue()
     pub._should_persist_row = lambda *_a, **_k: True
     pub._candle_consumer_tasks = []
-    pub._candle_writer_task = None
+    writer_task = asyncio.create_task(asyncio.sleep(60))
+    pub._candle_writer_task = writer_task
     pub._candle_flush_loop_task = None
-    pub._join_shutdown_queue = AsyncMock()
+    pub._join_candle_shutdown_queue = AsyncMock(return_value=True)
     pub._await_shutdown_task = AsyncMock()
     pub._await_shutdown_tasks = AsyncMock()
     pub._native_finalize_flush_task = asyncio.create_task(asyncio.sleep(60))
     finalizer = NativeCandleFinalizer(persist_intermediate=False, flush_grace_seconds=5.0)
     finalizer.observe("BTC-USD", _finalized_row(open_at=_candle_minute(10, 0)))
     pub._native_finalizer = finalizer
-    await pub._stop_candle_pipeline()
+    try:
+        await pub._stop_candle_pipeline()
+    finally:
+        writer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await writer_task
     assert pub._candle_write_queue.qsize() == 1
     assert pub._native_finalize_flush_task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_candle_pipeline_dead_writer_does_not_hang_and_abandons() -> None:
+    """Shutdown never joins or enqueues against an already-finished writer.
+
+    Given: the candle writer task finished before candle shutdown starts and
+        finalizer plus repair state still have pending rows,
+    When: the candle pipeline stops,
+    Then: shutdown returns without hanging, finalizer rows are not enqueued, and
+        pending repairs are abandoned with warnings.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    minute = _candle_minute(10, 0)
+    repair_key = _CandleRepairKey("BTC-USD", "5m", minute)
+    late_key = _LateCandleDropKey("BTC-USD", minute)
+
+    async def _done() -> None:
+        return None
+
+    writer_task = asyncio.create_task(_done())
+    await writer_task
+    pub._candle_writer_task = writer_task
+    pub._candle_consumer_tasks = []
+    pub._candle_flush_loop_task = None
+    pub._candle_repair_loop_task = None
+    pub._native_finalize_flush_task = None
+    finalizer = NativeCandleFinalizer(persist_intermediate=False, flush_grace_seconds=5.0)
+    finalizer.observe("BTC-USD", _finalized_row(open_at=minute))
+    pub._native_finalizer = finalizer
+    pub._pending_candle_repairs[repair_key] = _PendingCandleRepair(required_sequence=1)
+    pub._pending_late_candle_drops[late_key] = _PendingLateCandleDrop(
+        write_sequence=1, repair_keys={repair_key}
+    )
+    pub._repair_drop_key_by_repair_key[repair_key] = late_key
+    pub._await_shutdown_task = AsyncMock()
+    pub._await_shutdown_tasks = AsyncMock()
+    with patch("snapper.messaging.publishers.base.logger.warning") as warning:
+        await asyncio.wait_for(pub._stop_candle_pipeline(), timeout=1.0)
+    assert pub._candle_write_queue.qsize() == 0
+    assert pub._pending_candle_repairs == {}
+    assert pub._pending_late_candle_drops == {}
+    assert warning.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stop_candle_pipeline_drains_committed_repairs_and_logs_abandoned() -> None:
+    """Shutdown drains committed closed repairs and logs the remaining work.
+
+    Given: one pending repair whose correction row committed and one uncommitted
+        pending repair,
+    When: the candle pipeline stops,
+    Then: the committed repair is published after the writer queue join and the
+        uncommitted remainder is abandoned with a warning.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    minute = _candle_minute(10, 0)
+    committed_key = _CandleRepairKey("BTC-USD", "5m", minute)
+    abandoned_key = _CandleRepairKey("ETH-USD", "5m", minute)
+    committed_late = _LateCandleDropKey("BTC-USD", minute)
+    abandoned_late = _LateCandleDropKey("ETH-USD", minute)
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    pub._candle_aggregator._closed_window[("BTC-USD", "5m")] = int(minute.timestamp())
+    pub._pending_candle_repairs[committed_key] = _PendingCandleRepair(required_sequence=1)
+    pub._pending_candle_repairs[abandoned_key] = _PendingCandleRepair(required_sequence=2)
+    pub._pending_late_candle_drops[committed_late] = _PendingLateCandleDrop(
+        write_sequence=1, repair_keys={committed_key}
+    )
+    pub._pending_late_candle_drops[abandoned_late] = _PendingLateCandleDrop(
+        write_sequence=2, repair_keys={abandoned_key}
+    )
+    pub._repair_drop_key_by_repair_key[committed_key] = committed_late
+    pub._repair_drop_key_by_repair_key[abandoned_key] = abandoned_late
+    pub._committed_candle_write_sequences.add(1)
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(return_value=[_persisted_candle_row(open_at=minute)])
+    )
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+
+    def _allow_persist(_kind: str, _exchange: object, _symbol: str) -> bool:
+        return True
+
+    pub._should_persist_row = _allow_persist
+    pub._candle_consumer_tasks = []
+    writer_task = asyncio.create_task(asyncio.sleep(60))
+    pub._candle_writer_task = writer_task
+    pub._candle_flush_loop_task = None
+    pub._candle_repair_loop_task = None
+    pub._native_finalize_flush_task = None
+    pub._native_finalizer = None
+    pub._join_candle_shutdown_queue = AsyncMock(return_value=True)
+    pub._await_shutdown_task = AsyncMock()
+    pub._await_shutdown_tasks = AsyncMock()
+    try:
+        with patch("snapper.messaging.publishers.base.logger.warning") as warning:
+            await pub._stop_candle_pipeline()
+    finally:
+        writer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await writer_task
+    assert pub._join_candle_shutdown_queue.await_count == 2
+    pub._publish_message.assert_awaited_once()
+    assert pub._candle_write_queue.qsize() == 1
+    warning.assert_called_once()
+    assert pub._pending_candle_repairs == {}
+    assert pub._pending_late_candle_drops == {}
 
 
 @pytest.mark.asyncio
@@ -8372,6 +8959,323 @@ async def test_candle_loop_without_aggregator_publishes_no_higher_tf() -> None:
     topics = [call.args[0] for call in pub._publish_message.await_args_list]
     assert topics
     assert all(topic.endswith(".candles.1m") for topic in topics)
+
+
+@pytest.mark.asyncio
+async def test_flush_path_late_drop_schedules_after_matching_correction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Late-drop signals emitted by ``flush`` are retained for repair binding.
+
+    Given: the time-driven flush path observes a late drop,
+    When: a matching complete 1m correction is later enqueued,
+    Then: the repair key is scheduled from the durable late signal.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    minute = _candle_minute(10, 0)
+
+    def _stop() -> None:
+        pub.running = False
+
+    class LateOnFlushAggregator(CandleAggregator):
+        def __init__(self, stop: Callable[[], None]) -> None:
+            super().__init__(["5m"])
+            self._stop = stop
+
+        def flush(self, now: datetime) -> list[tuple[str, CandleUpdate]]:
+            self._record_late("BTC-USD", int(minute.timestamp()))
+            self._stop()
+            return [("5m", _candle_update(begin=minute))]
+
+    def _allow_persist(_kind: str, _exchange: object, _symbol: str) -> bool:
+        return True
+
+    pub.running = True
+    pub._candle_aggregator = LateOnFlushAggregator(_stop)
+    pub._publish_synthesized_candle = AsyncMock()
+    pub._should_persist_row = _allow_persist
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep", AsyncMock(return_value=None)
+    )
+    await pub._candle_flush_loop(ExchangeEnum.KRAKEN)
+    late_key = _LateCandleDropKey("BTC-USD", minute)
+    repair_key = _CandleRepairKey("BTC-USD", "5m", minute)
+    pub._publish_synthesized_candle.assert_awaited_once()
+    assert late_key in pub._pending_late_candle_drops
+    enqueued = pub._enqueue_finalized_candles(
+        [("BTC-USD", _finalized_row(open_at=minute, complete=True))],
+        ExchangeEnum.KRAKEN,
+        "kraken",
+    )
+    assert pub._pending_late_candle_drops[late_key].write_sequence == enqueued[0].sequence
+    assert pub._pending_candle_repairs[repair_key].required_sequence == enqueued[0].sequence
+
+
+def test_record_late_candle_drops_deduplicates_and_bounds_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Late-drop retention deduplicates keys and evicts the oldest when bounded.
+
+    Given: one retained late signal already owning a repair key,
+    When: the same signal repeats and then capacity is exceeded,
+    Then: the duplicate is ignored and the old signal plus its repair are
+        removed before the new signal is retained.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    monkeypatch.setattr("snapper.messaging.publishers.base._CANDLE_REPAIR_PENDING_MAX", 1)
+    first_drop = LateCandleDrop("BTC-USD", _candle_minute(10, 0))
+    second_drop = LateCandleDrop("ETH-USD", _candle_minute(10, 0))
+    first_key = _LateCandleDropKey("BTC-USD", _candle_minute(10, 0))
+    second_key = _LateCandleDropKey("ETH-USD", _candle_minute(10, 0))
+    repair_key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    pub._record_late_candle_drops([first_drop])
+    pub._record_late_candle_drops([first_drop])
+    pub._pending_late_candle_drops[first_key].write_sequence = 1
+    pub._committed_candle_write_sequences.add(1)
+    pub._pending_late_candle_drops[first_key].repair_keys.add(repair_key)
+    pub._pending_candle_repairs[repair_key] = _PendingCandleRepair(required_sequence=1)
+    pub._repair_drop_key_by_repair_key[repair_key] = first_key
+    pub._record_late_candle_drops([second_drop])
+    assert first_key not in pub._pending_late_candle_drops
+    assert repair_key not in pub._pending_candle_repairs
+    assert 1 not in pub._committed_candle_write_sequences
+    assert second_key in pub._pending_late_candle_drops
+    pub._drop_late_candle_drop(first_key)
+
+
+@pytest.mark.asyncio
+async def test_repair_retry_does_not_suppress_live_bar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed repair retry leaves the live synthesized bar available.
+
+    Given: a pending repair whose source rows are incomplete on the first read,
+    When: a normal live flush emits the same synthesized window,
+    Then: the live bar is published, the repair retries, and the later complete
+        source plane supersedes through the repair publish.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    minute = _candle_minute(10, 0)
+    repair_key = _CandleRepairKey("BTC-USD", "5m", minute)
+
+    def _stop() -> None:
+        pub.running = False
+
+    class OneShotFlushAggregator(CandleAggregator):
+        def __init__(self, stop: Callable[[], None]) -> None:
+            super().__init__(["5m"])
+            self._stop = stop
+            self._closed_window[("BTC-USD", "5m")] = int(minute.timestamp())
+
+        def flush(self, now: datetime) -> list[tuple[str, CandleUpdate]]:
+            self._stop()
+            return [("5m", _candle_update(begin=minute, close=10.0))]
+
+    pub.running = True
+    pub._candle_aggregator = OneShotFlushAggregator(_stop)
+    pub._pending_candle_repairs[repair_key] = _PendingCandleRepair(required_sequence=1)
+    pub._committed_candle_write_sequences.add(1)
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(
+            side_effect=[
+                [_persisted_candle_row(open_at=minute, complete=False)],
+                [_persisted_candle_row(open_at=minute, close=22.0)],
+            ]
+        )
+    )
+    pub._publish_synthesized_candle = AsyncMock()
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep", AsyncMock(return_value=None)
+    )
+    await pub._candle_flush_loop(ExchangeEnum.KRAKEN)
+    pub._publish_synthesized_candle.assert_awaited_once()
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert repair_key in pub._pending_candle_repairs
+    assert pub._publish_synthesized_candle.await_count == 1
+    pub._candle_repair_event.clear()
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert repair_key not in pub._pending_candle_repairs
+    assert pub._publish_synthesized_candle.await_count == 2
+
+
+def test_schedule_late_candle_repairs_maps_each_configured_timeframe() -> None:
+    """Late 1m signals expand to every configured higher timeframe key.
+
+    Given: an aggregator configured for 5m and 1h,
+    When: one late 1m drop is scheduled,
+    Then: both affected higher-timeframe windows are debounced to the same
+        correction write sequence.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["5m", "1h"])
+    late_key = _LateCandleDropKey("BTC-USD", _candle_minute(10, 7))
+    pub._pending_late_candle_drops[late_key] = _PendingLateCandleDrop(write_sequence=4)
+    pub._schedule_late_candle_repairs(late_key, required_sequence=4)
+    key_5m = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 5))
+    key_1h = _CandleRepairKey("BTC-USD", "1h", _candle_minute(10, 0))
+    assert pub._pending_late_candle_drops[late_key].repair_keys == {key_5m, key_1h}
+    assert pub._pending_candle_repairs[key_5m].required_sequence == 4
+    assert pub._pending_candle_repairs[key_1h].required_sequence == 4
+
+
+def test_schedule_late_candle_repairs_noops_without_aggregator() -> None:
+    """Late repair scheduling is inert when synthesis is not configured.
+
+    Given: no candle aggregator,
+    When: a late-drop signal is scheduled,
+    Then: no pending repair key is retained.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    late_key = _LateCandleDropKey("BTC-USD", _candle_minute(10, 0))
+    pub._pending_late_candle_drops[late_key] = _PendingLateCandleDrop(write_sequence=1)
+    pub._schedule_late_candle_repairs(late_key, required_sequence=1)
+    assert pub._pending_candle_repairs == {}
+
+
+def test_schedule_candle_repair_key_updates_existing_and_bounds_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repair keys are debounced in place and the pending map is bounded.
+
+    Given: a pending repair map with capacity one,
+    When: an existing key is refreshed and then a second key is scheduled,
+    Then: the existing key keeps the highest sequence and the oldest key is
+        evicted when capacity is exceeded.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    monkeypatch.setattr("snapper.messaging.publishers.base._CANDLE_REPAIR_PENDING_MAX", 1)
+    first = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    second = _CandleRepairKey("ETH-USD", "5m", _candle_minute(10, 0))
+    first_late = _LateCandleDropKey("BTC-USD", _candle_minute(10, 0))
+    newer_first_late = _LateCandleDropKey("BTC-USD", _candle_minute(10, 1))
+    second_late = _LateCandleDropKey("ETH-USD", _candle_minute(10, 0))
+    pub._pending_late_candle_drops[first_late] = _PendingLateCandleDrop(write_sequence=2)
+    pub._pending_late_candle_drops[newer_first_late] = _PendingLateCandleDrop(write_sequence=4)
+    pub._pending_late_candle_drops[second_late] = _PendingLateCandleDrop(write_sequence=3)
+    pub._schedule_candle_repair_key(first, 2, first_late)
+    pub._schedule_candle_repair_key(first, 1, first_late)
+    assert pub._pending_candle_repairs[first].required_sequence == 2
+    pub._schedule_candle_repair_key(first, 4, newer_first_late)
+    assert first_late not in pub._pending_late_candle_drops
+    assert pub._pending_late_candle_drops[newer_first_late].repair_keys == {first}
+    assert pub._pending_candle_repairs[first].required_sequence == 4
+    pub._committed_candle_write_sequences.add(4)
+    pub._schedule_candle_repair_key(second, 3, second_late)
+    assert first not in pub._pending_candle_repairs
+    assert newer_first_late not in pub._pending_late_candle_drops
+    assert 4 not in pub._committed_candle_write_sequences
+    assert pub._pending_candle_repairs[second].required_sequence == 3
+
+
+def test_late_drop_link_cleanup_handles_missing_and_uncommitted_records() -> None:
+    """Repair-to-late-drop cleanup tolerates missing and uncommitted records.
+
+    Given: repair links whose late-drop records are absent or not yet bound to
+        a write sequence,
+    When: links are added, removed, and commit acks are cleaned up,
+    Then: missing records are ignored, uncommitted records remain, and retained
+        late-drop write sequences keep their commit ack.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    missing_late = _LateCandleDropKey("BTC-USD", _candle_minute(10, 1))
+    uncommitted_late = _LateCandleDropKey("BTC-USD", _candle_minute(10, 2))
+    committed_late = _LateCandleDropKey("BTC-USD", _candle_minute(10, 3))
+    pub._link_repair_to_late_drop(key, missing_late)
+    assert pub._repair_drop_key_by_repair_key[key] == missing_late
+    pub._unlink_repair_from_late_drop(key)
+    pub._pending_late_candle_drops[uncommitted_late] = _PendingLateCandleDrop(repair_keys={key})
+    pub._repair_drop_key_by_repair_key[key] = uncommitted_late
+    pub._unlink_repair_from_late_drop(key)
+    assert uncommitted_late in pub._pending_late_candle_drops
+    pub._repair_drop_key_by_repair_key[key] = missing_late
+    pub._unlink_repair_from_late_drop(key)
+    pub._pending_late_candle_drops[committed_late] = _PendingLateCandleDrop(write_sequence=5)
+    pub._committed_candle_write_sequences.add(5)
+    pub._cleanup_committed_candle_write_sequence(5)
+    assert 5 in pub._committed_candle_write_sequences
+
+
+def test_repair_cleanup_handles_stale_and_partially_missing_records() -> None:
+    """Repair cleanup tolerates stale results and partially missing links.
+
+    Given: late-drop and repair-key metadata with missing companion records,
+    When: cleanup helpers run,
+    Then: they take the no-op branches without raising or retaining stale state.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    late_key = _LateCandleDropKey("BTC-USD", _candle_minute(10, 0))
+    pub._pending_late_candle_drops[late_key] = _PendingLateCandleDrop(repair_keys={key})
+    pub._repair_drop_key_by_repair_key[key] = late_key
+    assert pub._sequences_for_repair_key(key) == set()
+    pub._drop_late_candle_drop(late_key)
+    assert pub._repair_drop_key_by_repair_key == {}
+    assert pub._record_failed_candle_repair_attempt(key, 1) is False
+    pub._pending_candle_repairs[key] = _PendingCandleRepair(required_sequence=2)
+    assert pub._record_failed_candle_repair_attempt(key, 1) is False
+
+
+@pytest.mark.asyncio
+async def test_generic_dropped_correction_write_cleans_all_dependent_repairs() -> None:
+    """A non-committed writer drop clears every repair waiting on that row.
+
+    Given: one correction write sequence owns multiple higher-timeframe repairs,
+    When: a generic non-disconnect writer error drops that row,
+    Then: every dependent repair and late-drop record is removed with one
+        warning so no never-due repair leaks.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    minute = _candle_minute(10, 7)
+    row = _finalized_row(open_at=minute, complete=True)
+    sequence = pub._assign_candle_write_sequence(row)
+    late_key, repair_keys = _install_repair_dependents(
+        pub, sequence=sequence, symbol="BTC-USD", minute=minute
+    )
+    unrelated_late = _LateCandleDropKey("ETH-USD", minute)
+    pub._pending_late_candle_drops[unrelated_late] = _PendingLateCandleDrop(
+        repair_keys=set(repair_keys)
+    )
+    pub.repository = SimpleNamespace(
+        upsert_candles=AsyncMock(side_effect=RuntimeError("statement timeout"))
+    )
+    with patch("snapper.messaging.publishers.base.logger.warning") as warning:
+        dropped = await pub._flush_single_candle_row(row)
+    assert dropped is True
+    warning.assert_called_once()
+    assert late_key not in pub._pending_late_candle_drops
+    assert pub._pending_late_candle_drops[unrelated_late].repair_keys == set()
+    assert all(repair_key not in pub._pending_candle_repairs for repair_key in repair_keys)
+    assert pub._repair_drop_key_by_repair_key == {}
+
+
+@pytest.mark.asyncio
+async def test_disconnect_for_correction_write_keeps_gate_for_retry() -> None:
+    """Ambiguous writer-session loss keeps the correction sequence retryable.
+
+    Given: one correction write sequence owns multiple higher-timeframe repairs,
+    When: the writer loses its DB session before commit acknowledgement,
+    Then: the row sequence and repair gates remain so the writer retry can prove
+        the specific correction later committed.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    minute = _candle_minute(10, 7)
+    row = _finalized_row(open_at=minute, complete=True)
+    sequence = pub._assign_candle_write_sequence(row)
+    late_key, repair_keys = _install_repair_dependents(
+        pub, sequence=sequence, symbol="BTC-USD", minute=minute
+    )
+    pub.repository = SimpleNamespace(
+        upsert_candles=AsyncMock(side_effect=ConnectionRefusedError("Connection refused"))
+    )
+    with pytest.raises(_WriterSessionLostError):
+        await pub._flush_single_candle_row(row)
+    assert pub._candle_write_sequence_by_row_id[id(row)] == sequence
+    assert pub._pending_late_candle_drops[late_key].write_sequence == sequence
+    assert all(
+        pub._pending_candle_repairs[repair_key].required_sequence == sequence
+        for repair_key in repair_keys
+    )
 
 
 @pytest.mark.asyncio
@@ -8477,6 +9381,28 @@ async def test_publish_synthesized_candle_reemits_with_stable_public_id() -> Non
 
 
 @pytest.mark.asyncio
+async def test_publish_synthesized_candle_forgets_evicted_write_sequence() -> None:
+    """Synthesized publish cleanup forgets an evicted tracked candle row.
+
+    Given: a full candle writer queue containing a tracked native correction,
+    When: a synthesized candle publish enqueues another row,
+    Then: the evicted correction row's sequence tracking is removed.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_write_queue = asyncio.Queue(maxsize=1)
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    tracked = _finalized_row(open_at=_candle_minute(10, 0), complete=True)
+    pub._assign_candle_write_sequence(tracked)
+    pub._candle_write_queue.put_nowait(tracked)
+    synth = _candle_update(begin=_candle_minute(10, 5))
+    await pub._publish_synthesized_candle(synth, ExchangeEnum.KRAKEN, "5m")
+    assert id(tracked) not in pub._candle_write_sequence_by_row_id
+    assert pub._candle_write_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
 async def test_publish_synthesized_candle_skips_unknown_instrument() -> None:
     """Verify an unresolved instrument suppresses the synthesized publish.
 
@@ -8491,6 +9417,264 @@ async def test_publish_synthesized_candle_skips_unknown_instrument() -> None:
     synth = _candle_update(begin=_candle_minute(10, 0))
     await pub._publish_synthesized_candle(synth, cast(Any, "kraken"), "1h")
     pub._publish_message.assert_not_awaited()
+
+
+def test_due_candle_repair_groups_waits_for_commit_and_closed_frontier() -> None:
+    """Due repair collection waits for exact row commit and closed frontier.
+
+    Given: pending repair keys in several readiness states,
+    When: due groups are collected,
+    Then: only keys whose correction sequence is committed and whose live
+        frontier has sealed the window are returned.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    pub._pending_candle_repairs[key] = _PendingCandleRepair(required_sequence=1)
+    assert pub._due_candle_repair_groups() == {}
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    assert pub._due_candle_repair_groups() == {}
+    pub._committed_candle_write_sequences.add(1)
+    assert pub._due_candle_repair_groups() == {}
+    pub._candle_aggregator._closed_window[("BTC-USD", "5m")] = int(
+        _candle_minute(10, 0).timestamp()
+    )
+    assert pub._due_candle_repair_groups() == {("BTC-USD", _candle_minute(10, 0)): [(key, 1)]}
+
+
+@pytest.mark.asyncio
+async def test_repair_candle_group_runs_entries_under_semaphore() -> None:
+    """A repair group returns one result per key.
+
+    Given: two pending keys and a repair method returning mixed outcomes,
+    When: the group is repaired,
+    Then: the result preserves each key and required sequence.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    first = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    second = _CandleRepairKey("BTC-USD", "1h", _candle_minute(10, 0))
+    pub._repair_candle_key = AsyncMock(side_effect=[True, False])
+    results = await pub._repair_candle_group(
+        [(first, 1), (second, 2)],
+        ExchangeEnum.KRAKEN,
+        asyncio.Semaphore(1),
+    )
+    assert results == [
+        _CandleRepairResult(first, 1, True),
+        _CandleRepairResult(second, 2, False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_due_candle_repairs_removes_done_and_retries_failed() -> None:
+    """The repair runner clears completed keys and wakes failed ones.
+
+    Given: one successful and one failed due repair result,
+    When: the due runner completes,
+    Then: only the failed key remains pending and the repair event is set.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    done_key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    retry_key = _CandleRepairKey("BTC-USD", "1h", _candle_minute(10, 0))
+    pub._pending_candle_repairs[done_key] = _PendingCandleRepair(required_sequence=1)
+    pub._pending_candle_repairs[retry_key] = _PendingCandleRepair(required_sequence=1)
+    pub._committed_candle_write_sequences.add(1)
+    pub._due_candle_repair_groups = Mock(
+        return_value={("BTC-USD", _candle_minute(10, 0)): [(done_key, 1), (retry_key, 1)]}
+    )
+    pub._repair_candle_group = AsyncMock(
+        return_value=[
+            _CandleRepairResult(done_key, 1, True),
+            _CandleRepairResult(retry_key, 1, False),
+        ]
+    )
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert done_key not in pub._pending_candle_repairs
+    assert retry_key in pub._pending_candle_repairs
+    assert pub._candle_repair_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_run_due_candle_repairs_drops_permanently_incomplete_after_retry_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated incomplete source windows are abandoned after a bounded retry.
+
+    Given: a committed repair that keeps returning no derivable candle,
+    When: the failed attempt count reaches the configured bound,
+    Then: the repair is dropped, its committed ack is cleaned, and exactly one
+        warning is logged.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    monkeypatch.setattr("snapper.messaging.publishers.base._CANDLE_REPAIR_MAX_ATTEMPTS", 2)
+    key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    pub._pending_candle_repairs[key] = _PendingCandleRepair(required_sequence=1)
+    pub._committed_candle_write_sequences.add(1)
+    pub._due_candle_repair_groups = Mock(
+        return_value={("BTC-USD", _candle_minute(10, 0)): [(key, 1)]}
+    )
+    pub._repair_candle_group = AsyncMock(return_value=[_CandleRepairResult(key, 1, False)])
+    with patch("snapper.messaging.publishers.base.logger.warning") as warning:
+        await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+        assert key in pub._pending_candle_repairs
+        assert pub._pending_candle_repairs[key].attempts == 1
+        assert pub._candle_repair_event.is_set()
+        pub._candle_repair_event.clear()
+        await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    warning.assert_called_once()
+    assert key not in pub._pending_candle_repairs
+    assert 1 not in pub._committed_candle_write_sequences
+    assert not pub._candle_repair_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_run_due_candle_repairs_noops_without_due_groups() -> None:
+    """The repair runner returns without work when no key is due.
+
+    Given: no due repair groups,
+    When: the due runner is called,
+    Then: no worker tasks are created.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._due_candle_repair_groups = Mock(return_value={})
+    pub._repair_candle_group = AsyncMock()
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    pub._repair_candle_group.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_due_candle_repairs_leaves_newer_pending_sequence() -> None:
+    """Done results do not remove a newer pending sequence for the same key.
+
+    Given: one done result for the current sequence and one stale done result,
+    When: due repairs complete without failures,
+    Then: only the current-sequence key is removed and no retry event is set.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    current_key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    stale_key = _CandleRepairKey("BTC-USD", "1h", _candle_minute(10, 0))
+    pub._pending_candle_repairs[current_key] = _PendingCandleRepair(required_sequence=1)
+    pub._pending_candle_repairs[stale_key] = _PendingCandleRepair(required_sequence=2)
+    pub._due_candle_repair_groups = Mock(
+        return_value={("BTC-USD", _candle_minute(10, 0)): [(current_key, 1), (stale_key, 1)]}
+    )
+    pub._repair_candle_group = AsyncMock(
+        return_value=[
+            _CandleRepairResult(current_key, 1, True),
+            _CandleRepairResult(stale_key, 1, True),
+        ]
+    )
+    pub._candle_repair_event.clear()
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert current_key not in pub._pending_candle_repairs
+    assert stale_key in pub._pending_candle_repairs
+    assert not pub._candle_repair_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_derive_repaired_synthesized_candle_rebuilds_from_complete_1m() -> None:
+    """Repair re-derives a higher-TF bar from persisted complete 1m rows.
+
+    Given: complete persisted 1m rows for one 5m window,
+    When: the repair derivation runs,
+    Then: a fresh aggregator produces the corrected synthesized candle.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    rows = [
+        _persisted_candle_row(open_at=_candle_minute(10, 0), close=10.0, volume=2.0),
+        _persisted_candle_row(open_at=_candle_minute(10, 1), close=20.0, volume=3.0),
+    ]
+    pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=rows))
+    key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    candle = await pub._derive_repaired_synthesized_candle(key)
+    assert candle is not None
+    assert candle.interval_begin == _candle_minute(10, 0)
+    assert candle.close == 20.0
+    assert candle.volume == 5.0
+    pub.repository.get_candles.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_derive_repaired_synthesized_candle_skips_unsafe_sources() -> None:
+    """Repair derivation skips missing, incomplete, or unusable source planes.
+
+    Given: repair prerequisites are absent or the persisted 1m rows are unsafe,
+    When: derivation is attempted,
+    Then: no synthesized candle is returned.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    assert await pub._derive_repaired_synthesized_candle(key) is None
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    pub.repository = SimpleNamespace(get_candles=AsyncMock(return_value=[]))
+    assert await pub._derive_repaired_synthesized_candle(key) is None
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(
+            return_value=[_persisted_candle_row(open_at=_candle_minute(10, 0), complete=False)]
+        )
+    )
+    assert await pub._derive_repaired_synthesized_candle(key) is None
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(return_value=[_persisted_candle_row(open_at=_candle_minute(9, 59))])
+    )
+    assert await pub._derive_repaired_synthesized_candle(key) is None
+
+
+@pytest.mark.asyncio
+async def test_derive_repaired_synthesized_candle_ignores_nonmatching_emit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repair derivation ignores emitted candles for a different natural key.
+
+    Given: the fresh aggregator emits a candle whose window does not match the
+        requested repair key,
+    When: derivation scans emitted repairs,
+    Then: no repaired candle is returned.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(return_value=[_persisted_candle_row(open_at=_candle_minute(10, 0))])
+    )
+    key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+
+    class WrongWindowAggregator:
+        def __init__(
+            self, _timeframes: list[str], *, live_epoch: datetime, forward_fill: bool
+        ) -> None:
+            self.live_epoch = live_epoch
+            self.forward_fill = forward_fill
+
+        def fold(self, _candle: CandleUpdate) -> list[tuple[str, CandleUpdate]]:
+            return []
+
+        def flush(self, _window_end: datetime) -> list[tuple[str, CandleUpdate]]:
+            return [("5m", _candle_update(begin=_candle_minute(10, 5)))]
+
+    monkeypatch.setattr("snapper.messaging.publishers.base.CandleAggregator", WrongWindowAggregator)
+    assert await pub._derive_repaired_synthesized_candle(key) is None
+
+
+@pytest.mark.asyncio
+async def test_repair_candle_key_publishes_and_handles_failures() -> None:
+    """A repair key publishes derived output and keeps failed keys retryable.
+
+    Given: repair derivation succeeds, then returns no candle, then raises,
+    When: one key is repaired in each state,
+    Then: only successful repairs are done while skipped rows and exceptions retry.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    key = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    pub._publish_synthesized_candle = AsyncMock()
+    pub._derive_repaired_synthesized_candle = AsyncMock(
+        return_value=_candle_update(begin=_candle_minute(10, 0), close=22.0)
+    )
+    assert await pub._repair_candle_key(key, ExchangeEnum.KRAKEN) is True
+    pub._publish_synthesized_candle.assert_awaited_once()
+    pub._derive_repaired_synthesized_candle = AsyncMock(return_value=None)
+    assert await pub._repair_candle_key(key, ExchangeEnum.KRAKEN) is False
+    pub._derive_repaired_synthesized_candle = AsyncMock(side_effect=RuntimeError("db"))
+    assert await pub._repair_candle_key(key, ExchangeEnum.KRAKEN) is False
 
 
 @pytest.mark.asyncio

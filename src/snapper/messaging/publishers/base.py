@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -75,6 +76,7 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedSubscribe
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
+from snapper.messaging.publishers.candle_aggregator import LateCandleDrop
 from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
 from snapper.messaging.publishers.native_candle_finalizer import window_seconds
 from snapper.messaging.schemas.data import CandleData
@@ -208,6 +210,18 @@ frame is dropped and the higher-TF bar is sealed with a stale value. Comfortably
 covers typical kraken OHLC frame latency while keeping a forward-filled bar at most
 ~one flush interval plus this grace late."""
 
+_CANDLE_REPAIR_DEBOUNCE_S: Final = 1.0
+"""Debounce interval for coalescing late 1m corrections into one repair key."""
+
+_CANDLE_REPAIR_MAX_CONCURRENCY: Final = 4
+"""Maximum concurrent durable re-derivation groups run by the repair loop."""
+
+_CANDLE_REPAIR_PENDING_MAX: Final = 100_000
+"""Maximum number of pending synthesized-candle repair keys retained in memory."""
+
+_CANDLE_REPAIR_MAX_ATTEMPTS: Final = 3
+"""Maximum repair attempts before abandoning a permanently unavailable source window."""
+
 _PERSIST_SKIPPED_LOG_INTERVAL_S = 60.0
 """Cadence for the rate-limited ``persist_skipped_total`` log line.
 
@@ -304,6 +318,57 @@ class _WriterBatchState[WriterRow]:
     started_at: float | None = None
 
 
+@dataclass(frozen=True)
+class _CandleRepairKey:
+    """Natural key of a synthesized candle that must be re-derived."""
+
+    symbol: str
+    timeframe: str
+    window_begin: datetime
+
+
+@dataclass
+class _PendingCandleRepair:
+    """Repair key state retained until its source correction is committed."""
+
+    required_sequence: int
+    attempts: int = 0
+
+
+@dataclass(frozen=True)
+class _CandleRepairResult:
+    """Result of attempting one pending synthesized-candle repair."""
+
+    key: _CandleRepairKey
+    required_sequence: int
+    done: bool
+
+
+@dataclass(frozen=True)
+class _LateCandleDropKey:
+    """Natural key of a late 1m drop emitted by the pure aggregator."""
+
+    symbol: str
+    minute: datetime
+
+
+@dataclass
+class _PendingLateCandleDrop:
+    """Late-drop state waiting for a matching committed correction row."""
+
+    write_sequence: int | None = None
+    repair_keys: set[_CandleRepairKey] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class _EnqueuedCandleWrite:
+    """Candle writer queue row with its publisher-assigned write sequence."""
+
+    native_symbol: str
+    row: CandleUpsertRow
+    sequence: int
+
+
 type TickPayloadValue = float | bool | None
 """Union of every value type in the tick payload deduplication tuple."""
 
@@ -352,7 +417,7 @@ def _enqueue_or_drop_oldest_tick_write(
 
 def _enqueue_or_drop_oldest_candle_write(
     queue: asyncio.Queue[CandleUpsertRow], row: CandleUpsertRow, label: str
-) -> None:
+) -> CandleUpsertRow | None:
     """Put a candle row on the writer queue, dropping the oldest if full.
 
     Mirrors :func:`_enqueue_or_drop_oldest_tick_write`; see that
@@ -364,9 +429,13 @@ def _enqueue_or_drop_oldest_candle_write(
         queue: Bounded writer queue.
         row: Candle row to enqueue for persistence.
         label: Human-readable label (typically the exchange name).
+
+    Returns:
+        The evicted row when the queue was full, otherwise ``None``.
     """
     try:
         queue.put_nowait(row)
+        return None
     except asyncio.QueueFull:
         counters = _candle_writer_drop_counters.setdefault(label, [0.0, 0.0])
         counters[0] += 1
@@ -381,8 +450,8 @@ def _enqueue_or_drop_oldest_candle_write(
             counters[1] = now
         evicted = queue.get_nowait()
         queue.task_done()
-        del evicted
         queue.put_nowait(row)
+        return evicted
 
 
 def _enqueue_or_drop_oldest_trade_write(
@@ -496,6 +565,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._candle_consumer_tasks: list[asyncio.Task[None]] = []
         self._candle_aggregator: CandleAggregator | None = None
         self._candle_flush_loop_task: asyncio.Task[None] | None = None
+        self._candle_repair_loop_task: asyncio.Task[None] | None = None
+        self._pending_candle_repairs: dict[_CandleRepairKey, _PendingCandleRepair] = {}
+        self._pending_late_candle_drops: dict[_LateCandleDropKey, _PendingLateCandleDrop] = {}
+        self._repair_drop_key_by_repair_key: dict[_CandleRepairKey, _LateCandleDropKey] = {}
+        self._candle_repair_event: asyncio.Event = asyncio.Event()
+        self._next_candle_write_sequence: int = 0
+        self._candle_write_sequence_by_row_id: dict[int, int] = {}
+        self._committed_candle_write_sequences: set[int] = set()
+        self._candle_shutdown_repair_drain_active: bool = False
         self._native_finalizer: NativeCandleFinalizer | None = None
         self._native_finalize_flush_task: asyncio.Task[None] | None = None
         self._persist_intermediate_candles: bool = False
@@ -842,6 +920,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             symbols_to_subscribe, supported_higher, datetime.now(UTC)
         )
         self._candle_aggregator.set_live_epoch(self._candle_live_epoch())
+        self._candle_repair_loop_task = asyncio.create_task(
+            self._candle_repair_loop(self._get_data_exchange())
+        )
+        tasks.append(self._candle_repair_loop_task)
         if self._candle_aggregator.forward_fill:
             self._candle_flush_loop_task = asyncio.create_task(
                 self._candle_flush_loop(self._get_data_exchange())
@@ -1053,23 +1135,27 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         ):
             return
         self.running = False
-        recovery_tasks = list(self._recovery_tasks)
-        for task in recovery_tasks:
-            task.cancel()
-        if recovery_tasks:
-            await asyncio.gather(*recovery_tasks, return_exceptions=True)
-            self._recovery_tasks.difference_update(recovery_tasks)
-        if self._exchange_client is not None:
-            await self._exchange_client.stop_health_loop()
-        await self._stop_egress_snapshot_publisher()
-        await self._stop_feed_health_loop()
-        await self._stop_extra_background_tasks()
-        await self._stop_tick_pipeline()
-        await self._stop_candle_pipeline()
-        await self._stop_trade_pipeline()
-        await self._close_runtime_resources()
-        exchange_name = self._get_exchange_name()
-        logger.info(f"{exchange_name}_feed_publisher: Stopped")
+        self._candle_shutdown_repair_drain_active = self._candle_writer_can_drain()
+        try:
+            recovery_tasks = list(self._recovery_tasks)
+            for task in recovery_tasks:
+                task.cancel()
+            if recovery_tasks:
+                await asyncio.gather(*recovery_tasks, return_exceptions=True)
+                self._recovery_tasks.difference_update(recovery_tasks)
+            if self._exchange_client is not None:
+                await self._exchange_client.stop_health_loop()
+            await self._stop_egress_snapshot_publisher()
+            await self._stop_feed_health_loop()
+            await self._stop_extra_background_tasks()
+            await self._stop_tick_pipeline()
+            await self._stop_candle_pipeline()
+            await self._stop_trade_pipeline()
+            await self._close_runtime_resources()
+            exchange_name = self._get_exchange_name()
+            logger.info(f"{exchange_name}_feed_publisher: Stopped")
+        finally:
+            self._candle_shutdown_repair_drain_active = False
 
     async def _start_extra_background_tasks(
         self, symbols_to_subscribe: list[str]
@@ -1163,10 +1249,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         written — draining after the join would silently lose every held ended
         bar on a clean shutdown.
         """
+        self._candle_shutdown_repair_drain_active = self._candle_writer_can_drain()
         if self._candle_flush_loop_task is not None:
             self._candle_flush_loop_task.cancel()
         await self._await_shutdown_task(self._candle_flush_loop_task)
         self._candle_flush_loop_task = None
+        if self._candle_repair_loop_task is not None:
+            self._candle_repair_loop_task.cancel()
+        await self._await_shutdown_task(self._candle_repair_loop_task)
+        self._candle_repair_loop_task = None
         if self._native_finalize_flush_task is not None:
             self._native_finalize_flush_task.cancel()
         await self._await_shutdown_task(self._native_finalize_flush_task)
@@ -1176,14 +1267,73 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         await self._await_shutdown_tasks(self._candle_consumer_tasks)
         self._candle_consumer_tasks = []
         if self._native_finalizer is not None:
-            self._enqueue_finalized_candles(
-                self._native_finalizer.drain(datetime.now(UTC)),
-                self._get_data_exchange(),
-                self._get_exchange_name(),
-            )
-        await self._join_shutdown_queue(self._candle_write_queue)
+            drained = self._native_finalizer.drain(datetime.now(UTC))
+            if drained and self._candle_writer_can_drain():
+                self._enqueue_finalized_candles(
+                    drained,
+                    self._get_data_exchange(),
+                    self._get_exchange_name(),
+                )
+            elif drained:
+                self._warn_abandoned_shutdown_candle_writes("native finalizer drain", len(drained))
+        try:
+            joined = await self._join_candle_shutdown_queue()
+            if joined and self._candle_writer_can_drain():
+                await self._drain_candle_repairs_on_shutdown(self._get_data_exchange())
+                await self._join_candle_shutdown_queue()
+        finally:
+            self._candle_shutdown_repair_drain_active = False
+        self._abandon_remaining_candle_repairs()
         await self._await_shutdown_task(self._candle_writer_task)
         self._candle_writer_task = None
+
+    def _candle_writer_can_drain(self) -> bool:
+        """Return whether the candle writer task can consume shutdown enqueues.
+
+        Returns:
+            True when a candle writer task exists and has not completed.
+        """
+        task = self._candle_writer_task
+        return task is not None and not task.done()
+
+    async def _join_candle_shutdown_queue(self) -> bool:
+        """Join the candle writer queue without waiting behind a dead writer.
+
+        Returns:
+            True when the queue joined, False when the writer finished first.
+        """
+        task = self._candle_writer_task
+        queue = self._candle_write_queue
+        if queue is None:
+            return True
+        if task is None or task.done():
+            if not queue.empty():
+                self._warn_abandoned_shutdown_candle_writes("dead candle writer", queue.qsize())
+            return False
+        join_task = asyncio.create_task(queue.join())
+        done, pending = await asyncio.wait({join_task, task}, return_when=asyncio.FIRST_COMPLETED)
+        if join_task in done:
+            await join_task
+            return True
+        for pending_task in pending:
+            pending_task.cancel()
+            await self._await_shutdown_task(pending_task)
+        self._warn_abandoned_shutdown_candle_writes(
+            "candle writer exited before queue join", queue.qsize()
+        )
+        return False
+
+    def _warn_abandoned_shutdown_candle_writes(self, reason: str, row_count: int) -> None:
+        """Log shutdown candle rows that cannot be consumed by the writer.
+
+        Args:
+            reason: Human-readable reason the rows cannot be drained.
+            row_count: Number of rows affected.
+        """
+        logger.warning(
+            f"abandoned candle shutdown writes: reason={reason} rows={row_count}; "
+            "higher-timeframe rows resync on the next correction or manual backfill"
+        )
 
     async def _stop_trade_pipeline(self) -> None:
         """Stop and drain the trade consumer and writer pipeline."""
@@ -1653,7 +1803,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             True while the publisher is running, queued rows remain, or
             the current batch still needs flushing.
         """
-        return self.running or not queue.empty() or bool(state.batch)
+        return (
+            self.running
+            or (queue is self._candle_write_queue and self._candle_shutdown_repair_drain_active)
+            or not queue.empty()
+            or bool(state.batch)
+        )
 
     def _writer_shutdown_flush_needed[WriterRow: _WriterRow](
         self,
@@ -1911,15 +2066,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return False
         candle_update = cast(CandleUpdate, candle)
         synthesized: list[tuple[str, CandleUpdate]] = []
-        if self._candle_aggregator is not None and timeframe == "1m":
-            synthesized = self._candle_aggregator.fold(candle_update)
+        aggregator = self._candle_aggregator
+        if aggregator is not None and timeframe == "1m":
+            synthesized = aggregator.fold(candle_update)
+            self._record_late_candle_drops(self._pop_aggregator_late_drops())
         row = await self._process_candle(candle_update, exchange, timeframe)
         if row is not None:
-            self._enqueue_finalized_candles(
-                self._observe_native_candle(candle_update.symbol, row),
-                exchange,
-                exchange_label,
-            )
+            released = self._observe_native_candle(candle_update.symbol, row)
+            self._enqueue_finalized_candles(released, exchange, exchange_label)
         for tf_label, synth in synthesized:
             await self._publish_synthesized_candle(synth, exchange, tf_label)
         return True
@@ -1947,17 +2101,128 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         released: list[tuple[str, CandleUpsertRow]],
         exchange: MarketDataExchange,
         exchange_label: str,
-    ) -> None:
+    ) -> list[_EnqueuedCandleWrite]:
         """Enqueue each released candle row that passes the per-symbol persist gate.
 
         Args:
             released: ``(native_symbol, row)`` pairs released by the finalizer.
             exchange: Exchange for the persist-policy lookup.
             exchange_label: Exchange label for write-queue drop logging.
+
+        Returns:
+            Enqueued rows paired with their write sequence.
         """
+        enqueued: list[_EnqueuedCandleWrite] = []
         for native_symbol, row in released:
             if self._should_persist_row("candles", exchange, native_symbol):
-                _enqueue_or_drop_oldest_candle_write(self._candle_write_queue, row, exchange_label)
+                sequence = self._assign_candle_write_sequence(row)
+                evicted = _enqueue_or_drop_oldest_candle_write(
+                    self._candle_write_queue, row, exchange_label
+                )
+                if evicted is not None:
+                    self._forget_candle_write_sequence(evicted)
+                enqueued.append(_EnqueuedCandleWrite(native_symbol, row, sequence))
+        self._bind_enqueued_corrections_to_late_drops(enqueued)
+        return enqueued
+
+    def _assign_candle_write_sequence(self, row: CandleUpsertRow) -> int:
+        """Assign and remember the monotonic write sequence for a queued row.
+
+        Args:
+            row: Candle row placed on the writer queue.
+
+        Returns:
+            Monotonic publisher-local write sequence.
+        """
+        self._next_candle_write_sequence += 1
+        sequence = self._next_candle_write_sequence
+        self._candle_write_sequence_by_row_id[id(row)] = sequence
+        return sequence
+
+    def _forget_candle_write_sequence(self, row: CandleUpsertRow) -> int | None:
+        """Drop tracking for a row that will not be committed by the writer.
+
+        Args:
+            row: Candle row leaving the queue without a successful commit.
+
+        Returns:
+            The forgotten sequence if the row was tracked.
+        """
+        sequence = self._pop_candle_write_sequence(row)
+        if sequence is not None:
+            self._drop_uncommitted_candle_write_dependents(sequence)
+        return sequence
+
+    def _pop_candle_write_sequence(self, row: CandleUpsertRow) -> int | None:
+        """Drop row-to-sequence tracking without changing repair state.
+
+        Args:
+            row: Candle row whose tracking should be removed.
+
+        Returns:
+            The forgotten sequence if the row was tracked.
+        """
+        return self._candle_write_sequence_by_row_id.pop(id(row), None)
+
+    def _mark_candle_writes_committed(self, rows: list[CandleUpsertRow]) -> None:
+        """Mark queued candle rows as durably committed by exact sequence.
+
+        Args:
+            rows: Candle rows successfully committed by the writer.
+        """
+        committed = False
+        for row in rows:
+            sequence = self._pop_candle_write_sequence(row)
+            if sequence is None:
+                continue
+            self._committed_candle_write_sequences.add(sequence)
+            self._cleanup_committed_candle_write_sequence(sequence)
+            committed = True
+        if committed:
+            self._candle_repair_event.set()
+
+    def _forget_candle_writes(self, rows: list[CandleUpsertRow]) -> None:
+        """Forget queued rows that the writer dropped without a commit.
+
+        Args:
+            rows: Candle rows that will not be retried.
+        """
+        for row in rows:
+            self._forget_candle_write_sequence(row)
+
+    def _drop_uncommitted_candle_write_dependents(self, sequence: int) -> None:
+        """Remove repair gates that waited on an uncommitted candle write.
+
+        Args:
+            sequence: Forgotten write sequence that did not commit.
+        """
+        late_keys = {
+            late_key
+            for late_key, pending in self._pending_late_candle_drops.items()
+            if pending.write_sequence == sequence
+        }
+        repair_keys = {
+            key
+            for key, pending in self._pending_candle_repairs.items()
+            if pending.required_sequence == sequence
+        }
+        for late_key in late_keys:
+            repair_keys.update(self._pending_late_candle_drops[late_key].repair_keys)
+        if not late_keys and not repair_keys:
+            return
+        for repair_key in repair_keys:
+            self._pending_candle_repairs.pop(repair_key, None)
+            self._repair_drop_key_by_repair_key.pop(repair_key, None)
+        for late_key in late_keys:
+            self._pending_late_candle_drops.pop(late_key, None)
+        for pending in self._pending_late_candle_drops.values():
+            pending.repair_keys.difference_update(repair_keys)
+        self._committed_candle_write_sequences.discard(sequence)
+        logger.warning(
+            f"abandoned candle repairs for uncommitted correction write: "
+            f"sequence={sequence} repairs={len(repair_keys)} late_drops={len(late_keys)}; "
+            "higher-timeframe rows resync on the next correction or manual backfill"
+        )
 
     async def _native_finalize_flush_loop(self, exchange: MarketDataExchange) -> None:
         """Release native bars whose window has ended (illiquid/stalled symbols).
@@ -2008,12 +2273,441 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     break
                 if self._candle_aggregator is None:
                     continue
-                for tf_label, synth in self._candle_aggregator.flush(datetime.now(UTC)):
+                flushed = self._candle_aggregator.flush(datetime.now(UTC))
+                self._record_late_candle_drops(self._pop_aggregator_late_drops())
+                for tf_label, synth in flushed:
                     await self._publish_synthesized_candle(synth, exchange, tf_label)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.error(f"Candle flush loop error: {e}")
+
+    def _pop_aggregator_late_drops(self) -> list[LateCandleDrop]:
+        """Drain late-drop signals from the configured real aggregator.
+
+        Returns:
+            Late-drop signals, or an empty list when synthesis is not active.
+        """
+        aggregator = self._candle_aggregator
+        if isinstance(aggregator, CandleAggregator):
+            return aggregator.pop_late_drops()
+        return []
+
+    def _record_late_candle_drops(self, drops: list[LateCandleDrop]) -> None:
+        """Remember late drops until a matching correction write commits.
+
+        Args:
+            drops: Pure late-drop signals drained from the aggregator.
+        """
+        for drop in drops:
+            key = _LateCandleDropKey(drop.symbol, drop.minute)
+            if key in self._pending_late_candle_drops:
+                continue
+            if len(self._pending_late_candle_drops) >= _CANDLE_REPAIR_PENDING_MAX:
+                dropped = next(iter(self._pending_late_candle_drops))
+                self._drop_late_candle_drop(dropped)
+                logger.error(
+                    f"late candle repair queue exceeded {_CANDLE_REPAIR_PENDING_MAX}; "
+                    f"dropped oldest late signal symbol={dropped.symbol} "
+                    f"minute={dropped.minute.isoformat()}"
+                )
+            self._pending_late_candle_drops[key] = _PendingLateCandleDrop()
+
+    def _bind_enqueued_corrections_to_late_drops(
+        self, enqueued: list[_EnqueuedCandleWrite]
+    ) -> None:
+        """Bind complete 1m writes to matching late-drop repair work.
+
+        Args:
+            enqueued: Candle writes accepted by the writer queue.
+        """
+        for item in enqueued:
+            row = item.row
+            if row["timeframe"] != "1m" or not row["complete"]:
+                continue
+            late_key = _LateCandleDropKey(item.native_symbol, row["open_at"])
+            pending = self._pending_late_candle_drops.get(late_key)
+            if pending is None:
+                continue
+            pending.write_sequence = item.sequence
+            self._schedule_late_candle_repairs(late_key, item.sequence)
+
+    def _schedule_late_candle_repairs(
+        self, late_key: _LateCandleDropKey, required_sequence: int
+    ) -> None:
+        """Schedule higher-timeframe repairs for one late drop and correction.
+
+        Args:
+            late_key: Late 1m drop key.
+            required_sequence: Exact correction write sequence that must commit.
+        """
+        aggregator = self._candle_aggregator
+        pending_drop = self._pending_late_candle_drops.get(late_key)
+        if aggregator is None or pending_drop is None:
+            return
+        for timeframe in aggregator.timeframes:
+            begin = CandleAggregator._floor(
+                late_key.minute, aggregator.timeframe_seconds(timeframe)
+            )
+            repair_key = _CandleRepairKey(late_key.symbol, timeframe, begin)
+            self._schedule_candle_repair_key(repair_key, required_sequence, late_key)
+
+    def _schedule_candle_repair_key(
+        self, key: _CandleRepairKey, required_sequence: int, late_key: _LateCandleDropKey
+    ) -> None:
+        """Add or refresh one debounced synthesized-candle repair key.
+
+        Args:
+            key: Synthesized candle natural key to repair.
+            required_sequence: Exact correction write sequence that must commit.
+            late_key: Late 1m drop this repair came from.
+        """
+        pending = self._pending_candle_repairs.get(key)
+        if pending is not None:
+            if pending.required_sequence < required_sequence:
+                old_sequence = pending.required_sequence
+                self._unlink_repair_from_late_drop(key)
+                pending.required_sequence = required_sequence
+                pending.attempts = 0
+                self._link_repair_to_late_drop(key, late_key)
+                self._cleanup_committed_candle_write_sequence(old_sequence)
+            self._candle_repair_event.set()
+            return
+        if len(self._pending_candle_repairs) >= _CANDLE_REPAIR_PENDING_MAX:
+            dropped = next(iter(self._pending_candle_repairs))
+            self._drop_pending_candle_repair(dropped)
+            logger.error(
+                f"candle repair queue exceeded {_CANDLE_REPAIR_PENDING_MAX}; "
+                f"dropped oldest key symbol={dropped.symbol} "
+                f"timeframe={dropped.timeframe} window={dropped.window_begin.isoformat()}"
+            )
+        self._pending_candle_repairs[key] = _PendingCandleRepair(required_sequence)
+        self._link_repair_to_late_drop(key, late_key)
+        self._candle_repair_event.set()
+
+    def _link_repair_to_late_drop(
+        self, key: _CandleRepairKey, late_key: _LateCandleDropKey
+    ) -> None:
+        """Record which late drop owns a repair key.
+
+        Args:
+            key: Repair key.
+            late_key: Late-drop key.
+        """
+        self._repair_drop_key_by_repair_key[key] = late_key
+        pending_drop = self._pending_late_candle_drops.get(late_key)
+        if pending_drop is not None:
+            pending_drop.repair_keys.add(key)
+
+    def _unlink_repair_from_late_drop(self, key: _CandleRepairKey) -> None:
+        """Remove a repair key from its owning late-drop record.
+
+        Args:
+            key: Repair key to unlink.
+        """
+        late_key = self._repair_drop_key_by_repair_key.pop(key, None)
+        if late_key is None:
+            return
+        pending_drop = self._pending_late_candle_drops.get(late_key)
+        if pending_drop is None:
+            return
+        pending_drop.repair_keys.discard(key)
+        if not pending_drop.repair_keys and pending_drop.write_sequence is not None:
+            del self._pending_late_candle_drops[late_key]
+
+    def _drop_pending_candle_repair(self, key: _CandleRepairKey) -> None:
+        """Drop one pending repair and unlink its late-drop owner.
+
+        Args:
+            key: Repair key to remove.
+        """
+        sequences = self._sequences_for_repair_key(key)
+        self._pending_candle_repairs.pop(key, None)
+        self._unlink_repair_from_late_drop(key)
+        for sequence in sequences:
+            self._cleanup_committed_candle_write_sequence(sequence)
+
+    def _drop_late_candle_drop(self, late_key: _LateCandleDropKey) -> None:
+        """Drop one pending late signal and all repair keys it owns.
+
+        Args:
+            late_key: Late-drop key to remove.
+        """
+        pending_drop = self._pending_late_candle_drops.pop(late_key, None)
+        if pending_drop is None:
+            return
+        sequences: set[int] = set()
+        if pending_drop.write_sequence is not None:
+            sequences.add(pending_drop.write_sequence)
+        for repair_key in tuple(pending_drop.repair_keys):
+            pending_repair = self._pending_candle_repairs.get(repair_key)
+            if pending_repair is not None:
+                sequences.add(pending_repair.required_sequence)
+            self._pending_candle_repairs.pop(repair_key, None)
+            self._repair_drop_key_by_repair_key.pop(repair_key, None)
+        for sequence in sequences:
+            self._cleanup_committed_candle_write_sequence(sequence)
+
+    def _sequences_for_repair_key(self, key: _CandleRepairKey) -> set[int]:
+        """Collect committed-ack candidates referenced by one repair key.
+
+        Args:
+            key: Repair key whose sequence references should be collected.
+
+        Returns:
+            Sequence values that may become unreferenced after the key is dropped.
+        """
+        sequences: set[int] = set()
+        pending_repair = self._pending_candle_repairs.get(key)
+        if pending_repair is not None:
+            sequences.add(pending_repair.required_sequence)
+        late_key = self._repair_drop_key_by_repair_key.get(key)
+        if late_key is None:
+            return sequences
+        pending_drop = self._pending_late_candle_drops.get(late_key)
+        if pending_drop is not None and pending_drop.write_sequence is not None:
+            sequences.add(pending_drop.write_sequence)
+        return sequences
+
+    def _cleanup_committed_candle_write_sequence(self, sequence: int) -> None:
+        """Forget an exact commit ack once no pending repair needs it.
+
+        Args:
+            sequence: Candle write sequence to consider for cleanup.
+        """
+        if any(
+            pending.required_sequence == sequence
+            for pending in self._pending_candle_repairs.values()
+        ):
+            return
+        if any(
+            pending.write_sequence == sequence
+            for pending in self._pending_late_candle_drops.values()
+        ):
+            return
+        self._committed_candle_write_sequences.discard(sequence)
+
+    async def _candle_repair_loop(self, exchange: MarketDataExchange) -> None:
+        """Run debounced durable re-derivation for late 1m corrections.
+
+        Args:
+            exchange: Exchange name for synthesized repair publication.
+        """
+        while self.running:
+            try:
+                await self._candle_repair_event.wait()
+                self._candle_repair_event.clear()
+                await asyncio.sleep(_CANDLE_REPAIR_DEBOUNCE_S)
+                if not self.running:
+                    break
+                await self._run_due_candle_repairs(exchange)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Candle repair loop error: {e}")
+
+    async def _run_due_candle_repairs(self, exchange: MarketDataExchange) -> None:
+        """Repair every pending key whose source commit and frontier are ready.
+
+        Args:
+            exchange: Exchange name for synthesized repair publication.
+        """
+        groups = self._due_candle_repair_groups()
+        if not groups:
+            return
+        semaphore = asyncio.Semaphore(_CANDLE_REPAIR_MAX_CONCURRENCY)
+        tasks = [
+            asyncio.create_task(self._repair_candle_group(entries, exchange, semaphore))
+            for entries in groups.values()
+        ]
+        results_by_group = await asyncio.gather(*tasks)
+        retry = False
+        for results in results_by_group:
+            for result in results:
+                pending = self._pending_candle_repairs.get(result.key)
+                if result.done:
+                    if (
+                        pending is not None
+                        and pending.required_sequence == result.required_sequence
+                    ):
+                        self._drop_pending_candle_repair(result.key)
+                        self._cleanup_committed_candle_write_sequence(result.required_sequence)
+                else:
+                    retry = (
+                        self._record_failed_candle_repair_attempt(
+                            result.key, result.required_sequence
+                        )
+                        or retry
+                    )
+        if retry:
+            self._candle_repair_event.set()
+
+    def _record_failed_candle_repair_attempt(
+        self, key: _CandleRepairKey, required_sequence: int
+    ) -> bool:
+        """Record a failed repair attempt and decide whether it may retry.
+
+        Args:
+            key: Repair key that failed to produce a candle.
+            required_sequence: Correction sequence used by the failed attempt.
+
+        Returns:
+            True when the repair should be retried, False when it was dropped or
+            no longer matches the pending state.
+        """
+        pending = self._pending_candle_repairs.get(key)
+        if pending is None or pending.required_sequence != required_sequence:
+            return False
+        pending.attempts += 1
+        if pending.attempts < _CANDLE_REPAIR_MAX_ATTEMPTS:
+            return True
+        self._drop_pending_candle_repair(key)
+        self._cleanup_committed_candle_write_sequence(required_sequence)
+        logger.warning(
+            f"abandoned candle repair after retry limit: symbol={key.symbol} "
+            f"timeframe={key.timeframe} window={key.window_begin.isoformat()} "
+            f"attempts={pending.attempts}; source 1m remains incomplete or unavailable; "
+            "manual backfill resyncs the synthesized window"
+        )
+        return False
+
+    async def _drain_candle_repairs_on_shutdown(self, exchange: MarketDataExchange) -> None:
+        """Drain committed and closed candle repairs during graceful shutdown.
+
+        Args:
+            exchange: Exchange name for synthesized repair publication.
+        """
+        if not self._pending_candle_repairs:
+            return
+        await self._run_due_candle_repairs(exchange)
+
+    def _abandon_remaining_candle_repairs(self) -> None:
+        """Log and clear repair state that cannot be completed on shutdown."""
+        repair_count = len(self._pending_candle_repairs)
+        late_count = len(self._pending_late_candle_drops)
+        if repair_count == 0 and late_count == 0:
+            return
+        logger.warning(
+            f"abandoned pending candle repairs during shutdown: repairs={repair_count} "
+            f"late_drops={late_count}; committed 1m plane remains the source of truth "
+            "and higher-timeframe rows resync on the next correction or manual backfill"
+        )
+        self._pending_candle_repairs.clear()
+        self._pending_late_candle_drops.clear()
+        self._repair_drop_key_by_repair_key.clear()
+        self._committed_candle_write_sequences.clear()
+        self._candle_write_sequence_by_row_id.clear()
+
+    def _due_candle_repair_groups(
+        self,
+    ) -> dict[tuple[str, datetime], list[tuple[_CandleRepairKey, int]]]:
+        """Collect repair keys whose writer sequence and frontier are ready.
+
+        Returns:
+            Pending repair entries grouped by native symbol and window start.
+        """
+        aggregator = self._candle_aggregator
+        if aggregator is None:
+            return {}
+        groups: dict[tuple[str, datetime], list[tuple[_CandleRepairKey, int]]] = {}
+        for key, pending in self._pending_candle_repairs.items():
+            if pending.required_sequence not in self._committed_candle_write_sequences:
+                continue
+            if not aggregator.has_closed_window(key.symbol, key.timeframe, key.window_begin):
+                continue
+            group_key = (key.symbol, key.window_begin)
+            groups.setdefault(group_key, []).append((key, pending.required_sequence))
+        return groups
+
+    async def _repair_candle_group(
+        self,
+        entries: list[tuple[_CandleRepairKey, int]],
+        exchange: MarketDataExchange,
+        semaphore: asyncio.Semaphore,
+    ) -> list[_CandleRepairResult]:
+        """Repair a group of keys under the shared concurrency cap.
+
+        Args:
+            entries: Pending repair keys and their required sequences.
+            exchange: Exchange name for synthesized repair publication.
+            semaphore: Shared concurrency limiter.
+
+        Returns:
+            Repair results for each entry.
+        """
+        async with semaphore:
+            results: list[_CandleRepairResult] = []
+            for key, required_sequence in entries:
+                done = await self._repair_candle_key(key, exchange)
+                results.append(_CandleRepairResult(key, required_sequence, done))
+            return results
+
+    async def _repair_candle_key(self, key: _CandleRepairKey, exchange: MarketDataExchange) -> bool:
+        """Re-derive and publish one synthesized candle from persisted 1m rows.
+
+        Args:
+            key: Synthesized candle natural key to repair.
+            exchange: Exchange name for synthesized repair publication.
+
+        Returns:
+            True when the pending key should be removed, False when it should be
+            retried after another debounce interval.
+        """
+        try:
+            candle = await self._derive_repaired_synthesized_candle(key)
+            if candle is None:
+                return False
+            await self._publish_synthesized_candle(candle, exchange, key.timeframe)
+            return True
+        except Exception as e:
+            logger.error(
+                f"candle repair failed: symbol={key.symbol} timeframe={key.timeframe} "
+                f"window={key.window_begin.isoformat()} error={e}"
+            )
+            return False
+
+    async def _derive_repaired_synthesized_candle(
+        self, key: _CandleRepairKey
+    ) -> CandleUpdate | None:
+        """Read persisted 1m rows and rebuild one higher-timeframe candle.
+
+        Args:
+            key: Synthesized candle natural key to repair.
+
+        Returns:
+            Re-derived synthesized candle, or ``None`` when fail-safe guards
+            suppress the repair.
+        """
+        repository = self.repository
+        aggregator = self._candle_aggregator
+        if repository is None or aggregator is None:
+            return None
+        tf_seconds = aggregator.timeframe_seconds(key.timeframe)
+        window_end = key.window_begin + timedelta(seconds=tf_seconds)
+        rows = await repository.get_candles(
+            key.symbol,
+            "1m",
+            key.window_begin,
+            window_end - timedelta(microseconds=1),
+            self._get_exchange_name(),
+            datetime.now(UTC),
+            order="asc",
+        )
+        if not rows:
+            return None
+        if any(not row["complete"] for row in rows):
+            return None
+        repair_aggregator = CandleAggregator(
+            [key.timeframe],
+            live_epoch=key.window_begin,
+            forward_fill=True,
+        )
+        for row in rows:
+            repair_aggregator.fold(self._candle_update_from_row(row, key.symbol))
+        for timeframe, candle in repair_aggregator.flush(window_end):
+            if timeframe == key.timeframe and candle.interval_begin == key.window_begin:
+                return candle
+        return None
 
     async def _candle_writer_loop(self) -> None:
         """Drain :attr:`_candle_write_queue` and flush candles to the database.
@@ -2238,9 +2932,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         )
         await self._publish_message(topic, candle_msg)
         if self._should_persist_row("candles", exchange, native_symbol):
-            _enqueue_or_drop_oldest_candle_write(
+            evicted = _enqueue_or_drop_oldest_candle_write(
                 self._candle_write_queue, row, self._get_exchange_name()
             )
+            if evicted is not None:
+                self._forget_candle_write_sequence(evicted)
 
     async def _seed_aggregator_from_db(
         self, symbols: list[str], higher: list[str], now: datetime | None = None
@@ -3206,6 +3902,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 await writer_session.commit()
             else:
                 await repository.upsert_candles(batch)
+            self._mark_candle_writes_committed(batch)
             self._flush_errors["candle"] = 0
         except IntegrityError:
             writer_session = self._candle_writer_session
@@ -3222,6 +3919,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     await writer_session.rollback()
             if _is_disconnect_error(e):
                 raise _WriterSessionLostError(str(e)) from e
+            self._forget_candle_writes(batch)
 
     async def _flush_single_candle_row(self, row: CandleUpsertRow) -> bool:
         """Flush one candle row during row-by-row fallback.
@@ -3245,6 +3943,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 await writer_session.commit()
             else:
                 await repository.upsert_candles([row])
+            self._mark_candle_writes_committed([row])
             return False
         except IntegrityError as exc:
             logger.warning(
@@ -3254,6 +3953,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             if writer_session is not None:
                 with contextlib.suppress(Exception):
                     await writer_session.rollback()
+            self._forget_candle_write_sequence(row)
             return False
         except Exception as e:
             self._flush_errors["candle"] += 1
@@ -3263,6 +3963,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     await writer_session.rollback()
             if _is_disconnect_error(e):
                 raise _WriterSessionLostError(str(e)) from e
+            self._forget_candle_write_sequence(row)
             return True
 
     @staticmethod
