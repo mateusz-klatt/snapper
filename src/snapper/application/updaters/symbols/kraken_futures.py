@@ -20,6 +20,9 @@ from datetime import datetime
 from typing import Any
 
 from loguru import logger
+from sqlalchemy import select
+from sqlalchemy import update
+from sqlalchemy.orm import Session as SyncSession
 
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
@@ -31,12 +34,15 @@ from snapper.core.types import ExchangeEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import SymbolMarketDataChannelCapability
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesInstrumentSchema
 
 _SEQ_KEY_CAPABILITIES = "capabilities"
+_RUNTIME_CHANNEL_SOURCE = "kraken_futures_publisher_runtime"
 
 _INVERSE_TYPES = frozenset({"futures_inverse"})
 _RR_PREFIX = "rr_"
@@ -148,15 +154,59 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
                     next_sequence_fn=lambda: self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
                 )
                 closed_aliases = self._reconcile_aliases(session, ExchangeEnum.KRAKEN_FUTURES, now)
+                closed_channel_capabilities = self._close_runtime_trade_channel_capabilities(
+                    session,
+                    processed_symbol_public_ids,
+                    now,
+                )
                 session.commit()
                 logger.info(
                     f"Kraken Futures update complete: {created_count} processed, "
                     f"{skipped_count} skipped, {deactivated} deactivated, "
-                    f"{closed_aliases} aliases closed (total: {len(symbols)})"
+                    f"{closed_aliases} aliases closed, "
+                    f"{closed_channel_capabilities} trade channel rows reopened "
+                    f"(total: {len(symbols)})"
                 )
         except Exception as e:
             logger.error(f"Error updating Kraken Futures database: {e}")
             raise
+
+    @staticmethod
+    def _close_runtime_trade_channel_capabilities(
+        session: SyncSession,
+        active_symbol_public_ids: set[str],
+        now: datetime,
+    ) -> int:
+        """Close runtime-learned trade denials for current market-data symbols."""
+        if not active_symbol_public_ids:
+            return 0
+        active_market_data_symbols = select(SymbolExchangeCapability.symbol_public_id).where(
+            SymbolExchangeCapability.exchange == ExchangeEnum.KRAKEN_FUTURES,
+            SymbolExchangeCapability.can_market_data.is_(True),
+            SymbolExchangeCapability.timestamp <= now,
+            SymbolExchangeCapability.known_to > now,
+        )
+        result = session.execute(
+            update(SymbolMarketDataChannelCapability)
+            .where(
+                SymbolMarketDataChannelCapability.exchange == ExchangeEnum.KRAKEN_FUTURES,
+                SymbolMarketDataChannelCapability.channel == "trade",
+                SymbolMarketDataChannelCapability.can_market_data.is_(False),
+                SymbolMarketDataChannelCapability.source == _RUNTIME_CHANNEL_SOURCE,
+                SymbolMarketDataChannelCapability.timestamp <= now,
+                SymbolMarketDataChannelCapability.known_to > now,
+                SymbolMarketDataChannelCapability.symbol_public_id.in_(active_symbol_public_ids),
+                SymbolMarketDataChannelCapability.symbol_public_id.in_(active_market_data_symbols),
+            )
+            .values(known_to=now)
+        )
+        rowcount = getattr(result, "rowcount", None)
+        closed = rowcount if isinstance(rowcount, int) and rowcount > 0 else 0
+        if closed:
+            logger.info(
+                "Kraken Futures reopened {} runtime trade channel capability row(s)", closed
+            )
+        return closed
 
     def _validate_instrument_schema(
         self,
@@ -314,7 +364,7 @@ def _parse_expiry_datetime(schema: KrakenFuturesInstrumentSchema) -> datetime | 
         return None
     try:
         return datetime.fromisoformat(ltt.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         logger.warning(f"Failed to parse last_trading_time '{ltt}' for {schema.symbol}")
         return None
 
@@ -391,7 +441,7 @@ def _extract_expiry(schema: KrakenFuturesInstrumentSchema) -> str | None:
     try:
         dt = datetime.fromisoformat(ltt.replace("Z", "+00:00"))
         return dt.strftime("%y%m%d")
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         return None
 
 

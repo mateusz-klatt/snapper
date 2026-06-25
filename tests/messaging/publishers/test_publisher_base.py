@@ -167,6 +167,22 @@ class DummyPublisher(MarketDataPublisherService[Any]):
         return symbols
 
 
+class EmptyTradePublisher(DummyPublisher):
+    """Publisher stub with no trade-eligible symbols."""
+
+    def _symbols_for_trade_loop(self, symbols: list[str]) -> list[str]:
+        """Return no trade-loop symbols."""
+        return []
+
+
+class FirstTradePublisher(DummyPublisher):
+    """Publisher stub that keeps only the first trade-loop symbol."""
+
+    def _symbols_for_trade_loop(self, symbols: list[str]) -> list[str]:
+        """Return the first trade-loop symbol."""
+        return symbols[:1]
+
+
 class HookPublisher(DummyPublisher):
     """Publisher stub that exposes the extra background task hook."""
 
@@ -1942,6 +1958,63 @@ async def test_trade_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -
     pub._exchange_client.subscribe_trades = lambda symbols: gen()
     await pub._trade_loop(["BTC-USD"])
     pub.msg_publisher.send.assert_awaited()
+
+
+def test_symbols_for_trade_loop_default_returns_input_identity() -> None:
+    """The base trade-symbol hook preserves existing publisher behavior.
+
+    Given: A publisher using the default trade-symbol hook,
+    When: The hook receives a symbol list,
+    Then: The same list object is returned unchanged.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    symbols = ["BTC-USD", "ETH-USD"]
+    assert pub._symbols_for_trade_loop(symbols) is symbols
+
+
+@pytest.mark.asyncio
+async def test_trade_loop_uses_filtered_trade_symbols() -> None:
+    """The trade loop subscribes only to symbols returned by the hook.
+
+    Given: A publisher that filters trade symbols to the first item,
+    When: _trade_loop starts,
+    Then: subscribe_trades receives only that filtered list.
+    """
+    pub = FirstTradePublisher(symbols=["BTC-USD", "ETH-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    received_symbols: list[str] = []
+
+    async def gen() -> AsyncIterator[TradeUpdate]:
+        pub.running = False
+        if False:
+            yield _trade_update()
+
+    def subscribe_trades(symbols: list[str]) -> AsyncIterator[TradeUpdate]:
+        received_symbols.extend(symbols)
+        return gen()
+
+    pub._exchange_client = SimpleNamespace(subscribe_trades=subscribe_trades)
+    await pub._trade_loop(["BTC-USD", "ETH-USD"])
+    assert received_symbols == ["BTC-USD"]
+
+
+@pytest.mark.asyncio
+async def test_trade_loop_returns_when_filtered_symbols_empty() -> None:
+    """The trade loop exits before subscribing when no trade symbols remain.
+
+    Given: A publisher whose hook returns an empty list,
+    When: _trade_loop starts,
+    Then: subscribe_trades is not called.
+    """
+    pub = EmptyTradePublisher(symbols=["BTC-USD"])
+    pub.running = True
+    subscribe_trades = Mock()
+    pub._exchange_client = SimpleNamespace(subscribe_trades=subscribe_trades)
+    await pub._trade_loop(["BTC-USD"])
+    subscribe_trades.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -7654,6 +7727,38 @@ class TestFeedHealthFlush:
         rows = await_args.args[0]
         assert len(rows) == 1
         assert rows[0]["symbol"] == "BTC/USD"
+
+    @pytest.mark.asyncio
+    async def test_flush_invokes_snapshot_hook_before_upsert(self) -> None:
+        """The feed-health hook receives the snapshot before repository upsert."""
+        pub = self._pub_with_settings()
+        mono_now = monotonic()
+        entry = self._entry(requested_at=mono_now - 5.0)
+        snapshot = {(entry.channel, entry.symbol): entry}
+        pub._exchange_client = SimpleNamespace(subscription_health_snapshot=lambda: snapshot)
+        upsert = AsyncMock()
+        pub.repository = SimpleNamespace(upsert_instrument_feed_health=upsert)
+        hook = AsyncMock()
+        pub._after_feed_health_snapshot = hook
+        await pub._flush_feed_health()
+        hook.assert_awaited_once_with(snapshot)
+        upsert.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_flush_swallows_snapshot_hook_exception(self) -> None:
+        """A hook failure does not prevent feed-health persistence."""
+        pub = self._pub_with_settings()
+        mono_now = monotonic()
+        entry = self._entry(requested_at=mono_now - 5.0)
+        snapshot = {(entry.channel, entry.symbol): entry}
+        pub._exchange_client = SimpleNamespace(subscription_health_snapshot=lambda: snapshot)
+        upsert = AsyncMock()
+        pub.repository = SimpleNamespace(upsert_instrument_feed_health=upsert)
+        hook = AsyncMock(side_effect=RuntimeError("hook down"))
+        pub._after_feed_health_snapshot = hook
+        await pub._flush_feed_health()
+        hook.assert_awaited_once_with(snapshot)
+        upsert.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_flush_noop_without_client(self) -> None:

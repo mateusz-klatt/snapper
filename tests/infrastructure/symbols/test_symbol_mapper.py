@@ -1,17 +1,22 @@
 """Tests for symbol mapping service and conversion functions."""
 
 import importlib.util
+from datetime import UTC
+from datetime import datetime
 from functools import lru_cache
 from types import ModuleType
+from types import SimpleNamespace
 from typing import Any
 from typing import cast
 from typing import get_args
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import Mock
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import ProgrammingError
 
 import snapper.infrastructure.symbols.functions as functions
 import snapper.infrastructure.symbols.mapper as symbol_mapper_module
@@ -43,6 +48,7 @@ from snapper.infrastructure.symbols.functions import get_market_subscribe_exchan
 from snapper.infrastructure.symbols.functions import get_tradeable_symbols
 from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
 from snapper.infrastructure.symbols.functions import is_market_data_available
+from snapper.infrastructure.symbols.functions import is_market_data_channel_available
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.functions import kraken_equities_ws_to_native
 from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
@@ -62,6 +68,7 @@ from snapper.infrastructure.symbols.functions import validate_symbol
 from snapper.infrastructure.symbols.functions import walutomat_rest_to_native
 from snapper.infrastructure.symbols.functions import walutomat_ws_to_native
 from snapper.infrastructure.symbols.mapper import CapabilityInfo
+from snapper.infrastructure.symbols.mapper import ChannelCapabilityInfo
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.infrastructure.symbols.mapper import make_native_symbol
 
@@ -594,6 +601,7 @@ def _make_mapper_with_empty_cache() -> SymbolMapperService:
     mapper.native_to_polygon_rest = {}
     mapper.polygon_rest_to_native = {}
     mapper.capabilities = {}
+    mapper.channel_capabilities = {}
     mapper._cache_loaded = False
     mapper.context = None
     mapper.subscriber = None
@@ -2130,6 +2138,13 @@ class TestGetAvailableMarketDataFiltering:
             ("BTC-USD", ExchangeEnum.POLYGON): live,
             ("DEAD-COIN", ExchangeEnum.POLYGON): dead,
         }
+        mapper.channel_capabilities = {
+            ("ETH-USD-PERP", ExchangeEnum.KRAKEN_FUTURES, "trade"): ChannelCapabilityInfo(
+                False,
+                "kraken_futures_publisher_runtime",
+                "learned",
+            ),
+        }
         return mapper
 
     def test_kraken_futures_filters_disabled_capability(
@@ -2146,6 +2161,21 @@ class TestGetAvailableMarketDataFiltering:
             return_value=mock_mapper_with_mixed_capabilities,
         ):
             assert get_available_kraken_futures_symbols() == ["BTC-USD-PERP", "ETH-USD-PERP"]
+
+    def test_kraken_futures_trade_channel_filters_disabled_channel(
+        self, mock_mapper_with_mixed_capabilities: MagicMock
+    ) -> None:
+        """Channel filtering omits only the trade-denied live symbol.
+
+        Given: ``ETH-USD-PERP`` has symbol-level market data but trade=False,
+        When: ``get_available_kraken_futures_symbols(channel="trade")`` is called,
+        Then: Only the live symbol without a trade-channel denial is returned.
+        """
+        with patch(
+            "snapper.infrastructure.symbols.functions._get_db_mapper",
+            return_value=mock_mapper_with_mixed_capabilities,
+        ):
+            assert get_available_kraken_futures_symbols(channel="trade") == ["BTC-USD-PERP"]
 
     def test_kraken_equities_filters_disabled_capability(
         self, mock_mapper_with_mixed_capabilities: MagicMock
@@ -2356,6 +2386,22 @@ class TestCapabilityInfo:
         cap_b = CapabilityInfo(True, True, "source_a", None)
         assert cap_a == cap_b
 
+    def test_channel_capability_info_fields(self) -> None:
+        """Access all fields on ChannelCapabilityInfo.
+
+        Given: A ChannelCapabilityInfo with all fields set,
+        When: Individual fields are accessed,
+        Then: Each field returns the expected value.
+        """
+        cap = ChannelCapabilityInfo(
+            can_market_data=False,
+            source="kraken_futures_publisher_runtime",
+            reason="trade unavailable",
+        )
+        assert cap.can_market_data is False
+        assert cap.source == "kraken_futures_publisher_runtime"
+        assert cap.reason == "trade unavailable"
+
 
 class TestLoadCapabilitiesFromDb:
     """Tests for SymbolMapperService.load_capabilities_from_db."""
@@ -2430,6 +2476,207 @@ class TestLoadCapabilitiesFromDb:
                 mapper.load_capabilities_from_db()
 
 
+class TestLoadChannelCapabilitiesFromDb:
+    """Tests for SymbolMapperService.load_channel_capabilities_from_db."""
+
+    @pytest.fixture(autouse=True)
+    def clear_singleton(self) -> None:
+        """Clear singleton instance before each test."""
+        SymbolMapperService.clear_instance()
+
+    def test_load_channel_capabilities_from_db_no_such_table(
+        self, mock_settings: MagicMock, mock_repository: MagicMock
+    ) -> None:
+        """Return empty list when channel capability table does not exist.
+
+        Given: Session that raises no such table for channel capabilities,
+        When: load_channel_capabilities_from_db is called,
+        Then: Returns empty list.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch(
+                "snapper.infrastructure.symbols.mapper.DatabaseRepository",
+                return_value=mock_repository,
+            ),
+            patch.object(SymbolMapperService, "trigger_cache_invalidation"),
+        ):
+            mapper = SymbolMapperService()
+            mock_session = MagicMock()
+            mock_repository.get_session.return_value.__enter__.return_value = mock_session
+            error = Exception("no such table: symbol_market_data_channel_capabilities")
+            mock_session.execute.side_effect = OperationalError(
+                "no such table: symbol_market_data_channel_capabilities",
+                params=None,
+                orig=error,
+            )
+            result = mapper.load_channel_capabilities_from_db()
+            assert result == []
+
+    def test_load_channel_capabilities_from_db_missing_symbols_table(
+        self, mock_settings: MagicMock, mock_repository: MagicMock
+    ) -> None:
+        """Return empty list when the joined symbols table does not exist.
+
+        Given: Session that raises no such table for symbols,
+        When: load_channel_capabilities_from_db is called,
+        Then: Returns empty list.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch(
+                "snapper.infrastructure.symbols.mapper.DatabaseRepository",
+                return_value=mock_repository,
+            ),
+            patch.object(SymbolMapperService, "trigger_cache_invalidation"),
+        ):
+            mapper = SymbolMapperService()
+            mock_session = MagicMock()
+            mock_repository.get_session.return_value.__enter__.return_value = mock_session
+            error = Exception("no such table: symbols")
+            mock_session.execute.side_effect = OperationalError(
+                "no such table: symbols",
+                params=None,
+                orig=error,
+            )
+            result = mapper.load_channel_capabilities_from_db()
+            assert result == []
+
+    def test_load_channel_capabilities_from_db_pg_missing_table(
+        self, mock_settings: MagicMock, mock_repository: MagicMock
+    ) -> None:
+        """Return empty list for asyncpg-shaped undefined-table rollout races.
+
+        Given: PostgreSQL reports that channel capabilities relation is missing,
+        When: load_channel_capabilities_from_db is called,
+        Then: Returns empty list.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch(
+                "snapper.infrastructure.symbols.mapper.DatabaseRepository",
+                return_value=mock_repository,
+            ),
+            patch.object(SymbolMapperService, "trigger_cache_invalidation"),
+        ):
+            mapper = SymbolMapperService()
+            mock_session = MagicMock()
+            mock_repository.get_session.return_value.__enter__.return_value = mock_session
+            orig = SimpleNamespace(sqlstate="42P01")
+            mock_session.execute.side_effect = ProgrammingError(
+                'relation "symbol_market_data_channel_capabilities" does not exist',
+                params=None,
+                orig=orig,
+            )
+            result = mapper.load_channel_capabilities_from_db()
+            assert result == []
+
+    def test_load_channel_capabilities_from_db_psycopg2_missing_table(
+        self, mock_settings: MagicMock, mock_repository: MagicMock
+    ) -> None:
+        """Return empty list for psycopg2-shaped undefined-table rollout races.
+
+        Given: PostgreSQL reports SQLSTATE 42P01 through pgcode,
+        When: load_channel_capabilities_from_db is called,
+        Then: Returns empty list.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch(
+                "snapper.infrastructure.symbols.mapper.DatabaseRepository",
+                return_value=mock_repository,
+            ),
+            patch.object(SymbolMapperService, "trigger_cache_invalidation"),
+        ):
+            mapper = SymbolMapperService()
+            mock_session = MagicMock()
+            mock_repository.get_session.return_value.__enter__.return_value = mock_session
+            orig = SimpleNamespace(pgcode="42P01")
+            mock_session.execute.side_effect = ProgrammingError(
+                'relation "symbol_market_data_channel_capabilities" does not exist',
+                params=None,
+                orig=orig,
+            )
+            result = mapper.load_channel_capabilities_from_db()
+            assert result == []
+
+    def test_load_channel_capabilities_from_db_pg_undefined_column_raises(
+        self, mock_settings: MagicMock, mock_repository: MagicMock
+    ) -> None:
+        """Propagate PostgreSQL schema mismatches that are not missing tables.
+
+        Given: PostgreSQL reports an undefined column on the channel table,
+        When: load_channel_capabilities_from_db is called,
+        Then: Raises ProgrammingError.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch(
+                "snapper.infrastructure.symbols.mapper.DatabaseRepository",
+                return_value=mock_repository,
+            ),
+            patch.object(SymbolMapperService, "trigger_cache_invalidation"),
+        ):
+            mapper = SymbolMapperService()
+            mock_session = MagicMock()
+            mock_repository.get_session.return_value.__enter__.return_value = mock_session
+            orig = SimpleNamespace(sqlstate="42703")
+            mock_session.execute.side_effect = ProgrammingError(
+                "column symbol_market_data_channel_capabilities.channel does not exist",
+                params=None,
+                orig=orig,
+            )
+            with pytest.raises(ProgrammingError):
+                mapper.load_channel_capabilities_from_db()
+
+    def test_load_channel_capabilities_from_db_other_error_raises(
+        self, mock_settings: MagicMock, mock_repository: MagicMock
+    ) -> None:
+        """Propagate non-table-missing operational errors.
+
+        Given: Session that raises a database lock error,
+        When: load_channel_capabilities_from_db is called,
+        Then: Raises OperationalError.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch(
+                "snapper.infrastructure.symbols.mapper.DatabaseRepository",
+                return_value=mock_repository,
+            ),
+            patch.object(SymbolMapperService, "trigger_cache_invalidation"),
+        ):
+            mapper = SymbolMapperService()
+            mock_session = MagicMock()
+            mock_repository.get_session.return_value.__enter__.return_value = mock_session
+            error = Exception("database is locked")
+            mock_session.execute.side_effect = OperationalError(
+                "database is locked",
+                params=None,
+                orig=error,
+            )
+            with pytest.raises(OperationalError, match="database is locked"):
+                mapper.load_channel_capabilities_from_db()
+
+
 class TestPopulateCapabilitiesFromRows:
     """Tests for SymbolMapperService._populate_capabilities_from_rows."""
 
@@ -2453,6 +2700,38 @@ class TestPopulateCapabilitiesFromRows:
         SymbolMapperService.clear_instance()
 
 
+class TestPopulateChannelCapabilitiesFromRows:
+    """Tests for SymbolMapperService._populate_channel_capabilities_from_rows."""
+
+    def test_populate_channel_capabilities_from_rows(self) -> None:
+        """Build channel capabilities dict from joined tuples.
+
+        Given: Joined channel capability tuples,
+        When: _populate_channel_capabilities_from_rows is called,
+        Then: Mapper channel_capabilities dict is populated.
+        """
+        mapper = _make_mapper_with_empty_cache()
+        rows = [
+            (
+                "BTC-USD-PERP",
+                "kraken_futures",
+                "trade",
+                False,
+                "kraken_futures_publisher_runtime",
+                "learned",
+            ),
+            ("ETH-USD-PERP", "kraken_futures", "ticker", True, "manual", None),
+        ]
+        mapper._populate_channel_capabilities_from_rows(rows)
+        assert mapper.channel_capabilities[("BTC-USD-PERP", "kraken_futures", "trade")] == (
+            ChannelCapabilityInfo(False, "kraken_futures_publisher_runtime", "learned")
+        )
+        assert mapper.channel_capabilities[("ETH-USD-PERP", "kraken_futures", "ticker")] == (
+            ChannelCapabilityInfo(True, "manual", None)
+        )
+        SymbolMapperService.clear_instance()
+
+
 class TestLoadCacheIfNeededCapabilities:
     """Tests for load_cache_if_needed populating capabilities."""
 
@@ -2469,19 +2748,55 @@ class TestLoadCacheIfNeededCapabilities:
         cap_tuples = [
             ("BTC-USD", "kraken", True, True, "kraken_updater", None),
         ]
+        channel_cap_tuples = [
+            ("BTC-USD", "kraken", "trade", False, "runtime", "learned"),
+        ]
         mapper = _make_mapper_with_empty_cache()
         cast(Any, mapper).load_mappings_from_db = MagicMock(return_value=alias_tuples)
         cast(Any, mapper).load_capabilities_from_db = MagicMock(return_value=cap_tuples)
+        mapper.load_channel_capabilities_from_db = MagicMock(return_value=channel_cap_tuples)
         mapper._cache_loaded = False
         _call_original_load_cache_if_needed(mapper)
         assert mapper.native_to_kraken_ws["BTC-USD"] == "BTC/USD"
         assert ("BTC-USD", "kraken") in mapper.capabilities
         assert mapper.capabilities[("BTC-USD", "kraken")].can_trade is True
+        assert mapper.channel_capabilities[("BTC-USD", "kraken", "trade")] == (
+            ChannelCapabilityInfo(False, "runtime", "learned")
+        )
         SymbolMapperService.clear_instance()
 
 
 class TestCapabilityQueryFunctions:
     """Tests for capability query functions: is_tradeable, is_market_data_available, etc."""
+
+    @pytest.mark.asyncio
+    async def test_resolve_symbol_public_id_returns_active_row_or_none(self) -> None:
+        """Resolve symbol public IDs through the repository session."""
+        first_result = MagicMock()
+        first_result.scalar_one_or_none.return_value = "symbol-public-id"
+        second_result = MagicMock()
+        second_result.scalar_one_or_none.return_value = None
+        session = MagicMock()
+        session.execute = AsyncMock(side_effect=[first_result, second_result])
+
+        class SessionContext:
+            """Async context manager for the fake repository session."""
+
+            async def __aenter__(self) -> MagicMock:
+                """Return the mocked session."""
+                return session
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+                """Do not suppress exceptions."""
+                return None
+
+        repository = MagicMock()
+        repository.session.return_value = SessionContext()
+        now = datetime.now(UTC)
+        assert await functions.resolve_symbol_public_id(repository, "BTC-USD", now) == (
+            "symbol-public-id"
+        )
+        assert await functions.resolve_symbol_public_id(repository, "ETH-USD", now) is None
 
     def test_is_tradeable_paper_known_symbol_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Paper exchange returns True for symbol that has aliases.
@@ -2590,6 +2905,84 @@ class TestCapabilityQueryFunctions:
         }
         monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
         assert is_market_data_available("BTC-USD", "walutomat") is False
+
+    def test_is_market_data_channel_available_symbol_false_wins(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Return False when symbol-level market data is disabled.
+
+        Given: Mapper with symbol capability can_market_data=False,
+        When: is_market_data_channel_available is called,
+        Then: Returns False even if the channel row allows market data.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD-PERP", "kraken_futures"): CapabilityInfo(False, False, "updater", "expired"),
+        }
+        mock_mapper.channel_capabilities = {
+            ("BTC-USD-PERP", "kraken_futures", "trade"): ChannelCapabilityInfo(
+                True, "manual", None
+            ),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_market_data_channel_available("BTC-USD-PERP", "kraken_futures", "trade") is False
+
+    def test_is_market_data_channel_available_no_row_inherits_allowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Return True when symbol-level allows market data and no channel row exists.
+
+        Given: Mapper with symbol market data enabled and no channel override,
+        When: is_market_data_channel_available is called,
+        Then: Returns True for backward-compatible deploys.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD-PERP", "kraken_futures"): CapabilityInfo(True, False, "updater", None),
+        }
+        mock_mapper.channel_capabilities = {}
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_market_data_channel_available("BTC-USD-PERP", "kraken_futures", "trade") is True
+
+    def test_is_market_data_channel_available_false_row_blocks_channel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Return False when an active channel row disables market data.
+
+        Given: Mapper with symbol market data enabled and trade disabled,
+        When: is_market_data_channel_available is called,
+        Then: Returns False for that channel.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD-PERP", "kraken_futures"): CapabilityInfo(True, False, "updater", None),
+        }
+        mock_mapper.channel_capabilities = {
+            ("BTC-USD-PERP", "kraken_futures", "trade"): ChannelCapabilityInfo(
+                False,
+                "kraken_futures_publisher_runtime",
+                "learned",
+            ),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_market_data_channel_available("BTC-USD-PERP", "kraken_futures", "TRADE") is False
+
+    def test_is_market_data_channel_available_empty_channel_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Return False when the requested channel is empty after stripping.
+
+        Given: Mapper with symbol market data enabled,
+        When: is_market_data_channel_available receives a blank channel,
+        Then: Returns False.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD-PERP", "kraken_futures"): CapabilityInfo(True, False, "updater", None),
+        }
+        mock_mapper.channel_capabilities = {}
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        assert is_market_data_channel_available("BTC-USD-PERP", "kraken_futures", "  ") is False
 
     def test_get_tradeable_symbols_kraken(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Return sorted tradeable symbols for a live exchange.

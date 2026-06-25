@@ -1,9 +1,14 @@
 """Tests for Kraken Futures symbol updater."""
 
+from datetime import UTC
+from datetime import datetime
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
 from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSymbolUpdaterService
 from snapper.application.updaters.symbols.kraken_futures import _build_ccxt_symbol
@@ -14,6 +19,10 @@ from snapper.application.updaters.symbols.kraken_futures import _normalize_curre
 from snapper.application.updaters.symbols.kraken_futures import _parse_expiry_datetime
 from snapper.config.app import AppSettings
 from snapper.core.types import AliasChannelEnum
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Base
+from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import SymbolMarketDataChannelCapability
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
@@ -615,6 +624,255 @@ class TestUpdateDatabase:
             assert call_kwargs.kwargs["funding_type"] is None
             assert call_kwargs.kwargs["funding_frequency_hours"] is None
             assert call_kwargs.kwargs["max_funding_rate"] is None
+
+
+class TestRuntimeTradeChannelRevalidation:
+    """Tests for updater-driven runtime trade-channel reset."""
+
+    def test_close_runtime_trade_channel_capabilities_empty_processed_set(self) -> None:
+        """Return zero when no catalog symbols were processed."""
+        session = MagicMock()
+        closed = KrakenFuturesSymbolUpdaterService._close_runtime_trade_channel_capabilities(
+            session,
+            set(),
+            datetime.now(UTC),
+        )
+        assert closed == 0
+        session.execute.assert_not_called()
+
+    def test_close_runtime_trade_channel_capabilities_handles_missing_rowcount(self) -> None:
+        """Non-integer rowcount is treated as zero closed rows."""
+        session = MagicMock()
+        session.execute.return_value.rowcount = None
+        closed = KrakenFuturesSymbolUpdaterService._close_runtime_trade_channel_capabilities(
+            session,
+            {"11111111-1111-7111-8111-111111111111"},
+            datetime.now(UTC),
+        )
+        assert closed == 0
+
+    def test_close_runtime_trade_channel_capabilities_closes_only_runtime_trade_rows(
+        self,
+    ) -> None:
+        """Close only current runtime-learned trade denials for market-data symbols."""
+        engine = create_engine("sqlite:///:memory:", future=True)
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, future=True)
+        now = datetime.now(UTC)
+        current_symbol = "11111111-1111-7111-8111-111111111111"
+        disabled_symbol = "22222222-2222-7222-8222-222222222222"
+        unprocessed_symbol = "33333333-3333-7333-8333-333333333333"
+        manual_symbol = "66666666-6666-7666-8666-666666666666"
+        try:
+            with session_factory() as session:
+                session.add_all(
+                    [
+                        SymbolExchangeCapability(
+                            symbol_public_id=current_symbol,
+                            exchange="kraken_futures",
+                            can_market_data=True,
+                            can_trade=False,
+                            source="updater",
+                            reason=None,
+                            created_at=now,
+                            session_id="44444444-4444-7444-8444-444444444444",
+                            sequence_id=1,
+                            timestamp=now,
+                            known_to=KNOWN_TO_MAX,
+                        ),
+                        SymbolExchangeCapability(
+                            symbol_public_id=disabled_symbol,
+                            exchange="kraken_futures",
+                            can_market_data=False,
+                            can_trade=False,
+                            source="updater",
+                            reason="delisted",
+                            created_at=now,
+                            session_id="44444444-4444-7444-8444-444444444444",
+                            sequence_id=2,
+                            timestamp=now,
+                            known_to=KNOWN_TO_MAX,
+                        ),
+                        SymbolExchangeCapability(
+                            symbol_public_id=unprocessed_symbol,
+                            exchange="kraken_futures",
+                            can_market_data=True,
+                            can_trade=False,
+                            source="updater",
+                            reason=None,
+                            created_at=now,
+                            session_id="44444444-4444-7444-8444-444444444444",
+                            sequence_id=3,
+                            timestamp=now,
+                            known_to=KNOWN_TO_MAX,
+                        ),
+                        SymbolExchangeCapability(
+                            symbol_public_id=manual_symbol,
+                            exchange="kraken_futures",
+                            can_market_data=True,
+                            can_trade=False,
+                            source="updater",
+                            reason=None,
+                            created_at=now,
+                            session_id="44444444-4444-7444-8444-444444444444",
+                            sequence_id=4,
+                            timestamp=now,
+                            known_to=KNOWN_TO_MAX,
+                        ),
+                    ]
+                )
+                channel_rows = [
+                    SymbolMarketDataChannelCapability(
+                        symbol_public_id=current_symbol,
+                        exchange="kraken_futures",
+                        channel="trade",
+                        can_market_data=False,
+                        source="kraken_futures_publisher_runtime",
+                        reason="learned",
+                        created_at=now,
+                        session_id="55555555-5555-7555-8555-555555555555",
+                        sequence_id=1,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                    SymbolMarketDataChannelCapability(
+                        symbol_public_id=disabled_symbol,
+                        exchange="kraken_futures",
+                        channel="trade",
+                        can_market_data=False,
+                        source="kraken_futures_publisher_runtime",
+                        reason="learned",
+                        created_at=now,
+                        session_id="55555555-5555-7555-8555-555555555555",
+                        sequence_id=2,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                    SymbolMarketDataChannelCapability(
+                        symbol_public_id=unprocessed_symbol,
+                        exchange="kraken_futures",
+                        channel="trade",
+                        can_market_data=False,
+                        source="kraken_futures_publisher_runtime",
+                        reason="learned",
+                        created_at=now,
+                        session_id="55555555-5555-7555-8555-555555555555",
+                        sequence_id=3,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                    SymbolMarketDataChannelCapability(
+                        symbol_public_id=current_symbol,
+                        exchange="kraken_futures",
+                        channel="ticker",
+                        can_market_data=False,
+                        source="kraken_futures_publisher_runtime",
+                        reason="learned",
+                        created_at=now,
+                        session_id="55555555-5555-7555-8555-555555555555",
+                        sequence_id=4,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                    SymbolMarketDataChannelCapability(
+                        symbol_public_id=manual_symbol,
+                        exchange="kraken_futures",
+                        channel="trade",
+                        can_market_data=False,
+                        source="manual",
+                        reason="operator",
+                        created_at=now,
+                        session_id="55555555-5555-7555-8555-555555555555",
+                        sequence_id=5,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                ]
+                session.add_all(channel_rows)
+                session.commit()
+                closed = (
+                    KrakenFuturesSymbolUpdaterService._close_runtime_trade_channel_capabilities(
+                        session,
+                        {current_symbol, disabled_symbol, manual_symbol},
+                        datetime.now(UTC),
+                    )
+                )
+                session.commit()
+                rows = session.execute(
+                    select(SymbolMarketDataChannelCapability)
+                    .where(SymbolMarketDataChannelCapability.exchange == "kraken_futures")
+                    .order_by(SymbolMarketDataChannelCapability.sequence_id)
+                ).scalars()
+                known_to_by_sequence = {row.sequence_id: row.known_to for row in rows}
+            assert closed == 1
+            assert known_to_by_sequence[1] != KNOWN_TO_MAX
+            assert known_to_by_sequence[2] == KNOWN_TO_MAX
+            assert known_to_by_sequence[3] == KNOWN_TO_MAX
+            assert known_to_by_sequence[4] == KNOWN_TO_MAX
+            assert known_to_by_sequence[5] == KNOWN_TO_MAX
+        finally:
+            engine.dispose()
+
+    def test_close_runtime_trade_channel_capabilities_preserves_non_runtime_false_row(
+        self,
+    ) -> None:
+        """Do not reopen operator-owned trade channel denials."""
+        engine = create_engine("sqlite:///:memory:", future=True)
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine, future=True)
+        now = datetime.now(UTC)
+        symbol_public_id = "77777777-7777-7777-8777-777777777777"
+        try:
+            with session_factory() as session:
+                session.add(
+                    SymbolExchangeCapability(
+                        symbol_public_id=symbol_public_id,
+                        exchange="kraken_futures",
+                        can_market_data=True,
+                        can_trade=False,
+                        source="updater",
+                        reason=None,
+                        created_at=now,
+                        session_id="88888888-8888-7888-8888-888888888888",
+                        sequence_id=1,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    )
+                )
+                session.add(
+                    SymbolMarketDataChannelCapability(
+                        symbol_public_id=symbol_public_id,
+                        exchange="kraken_futures",
+                        channel="trade",
+                        can_market_data=False,
+                        source="operator",
+                        reason="disabled by operator",
+                        created_at=now,
+                        session_id="88888888-8888-7888-8888-888888888888",
+                        sequence_id=2,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    )
+                )
+                session.commit()
+
+                closed = (
+                    KrakenFuturesSymbolUpdaterService._close_runtime_trade_channel_capabilities(
+                        session,
+                        {symbol_public_id},
+                        datetime.now(UTC),
+                    )
+                )
+                session.commit()
+                row = session.execute(
+                    select(SymbolMarketDataChannelCapability).where(
+                        SymbolMarketDataChannelCapability.symbol_public_id == symbol_public_id
+                    )
+                ).scalar_one()
+            assert closed == 0
+            assert row.known_to == KNOWN_TO_MAX
+        finally:
+            engine.dispose()
 
 
 class TestBuildCcxtSymbol:

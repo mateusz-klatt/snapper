@@ -28,6 +28,7 @@ from typing import NamedTuple
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import ProgrammingError
 
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.types import AliasChannelEnum
@@ -35,6 +36,7 @@ from snapper.core.types import ExchangeEnum
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import SymbolMarketDataChannelCapability
 from snapper.data.repository import DatabaseRepository
 
 
@@ -54,6 +56,37 @@ class CapabilityInfo(NamedTuple):
     reason: str | None
 
 
+class ChannelCapabilityInfo(NamedTuple):
+    """Cached channel capability data for a (native_symbol, exchange, channel) key.
+
+    Attributes:
+        can_market_data: Whether this market-data channel is enabled.
+        source: Origin of the channel capability information.
+        reason: Human-readable explanation for the channel capability value.
+    """
+
+    can_market_data: bool
+    source: str | None
+    reason: str | None
+
+
+def _is_missing_channel_capability_table_error(
+    exc: OperationalError | ProgrammingError,
+) -> bool:
+    """Return True when channel capability loading raced a missing table."""
+    orig = getattr(exc, "orig", None)
+    sqlstates = {
+        getattr(orig, "sqlstate", None),
+        getattr(orig, "pgcode", None),
+        getattr(getattr(orig, "diag", None), "sqlstate", None),
+    }
+    if "42P01" in sqlstates:
+        return True
+    error_message = str(orig if orig is not None else exc).strip().lower()
+    table_names = ("symbol_market_data_channel_capabilities", "symbols")
+    return error_message in {f"no such table: {table_name}" for table_name in table_names}
+
+
 def _get_bootstrap_settings() -> BootstrapSettingsLoader:
     """Get bootstrap settings loader for database configuration.
 
@@ -63,7 +96,13 @@ def _get_bootstrap_settings() -> BootstrapSettingsLoader:
     return BootstrapSettingsLoader()
 
 
-__all__ = ["SymbolMapperService", "make_native_symbol", "NATIVE_SEPARATOR", "CapabilityInfo"]
+__all__ = [
+    "SymbolMapperService",
+    "make_native_symbol",
+    "NATIVE_SEPARATOR",
+    "CapabilityInfo",
+    "ChannelCapabilityInfo",
+]
 NATIVE_SEPARATOR = "-"
 
 
@@ -226,6 +265,7 @@ class SymbolMapperService:
         self.native_to_polygon_rest: dict[str, str] = {}
         self.polygon_rest_to_native: dict[str, str] = {}
         self.capabilities: dict[tuple[str, str], CapabilityInfo] = {}
+        self.channel_capabilities: dict[tuple[str, str, str], ChannelCapabilityInfo] = {}
         self._cache_loaded = False
         try:
             self.trigger_cache_invalidation(fail_fast=True)
@@ -392,6 +432,75 @@ class SymbolMapperService:
             )
         self.capabilities = caps
 
+    def load_channel_capabilities_from_db(
+        self,
+    ) -> list[tuple[str, str, str, bool, str | None, str | None]]:
+        """Load all active channel capabilities joined with active Symbol.
+
+        Returns an empty list when the table does not exist yet so a newly
+        deployed process can start before the migration has run.
+
+        Returns:
+            List of (native_symbol, exchange, channel, can_market_data,
+            source, reason) tuples.
+
+        Raises:
+            OperationalError: If database error occurs except missing table.
+            ProgrammingError: If database error occurs except missing table.
+        """
+        try:
+            with self.repository.get_session() as session:
+                now = datetime.now(UTC)
+                stmt = (
+                    select(
+                        Symbol.native_symbol,
+                        SymbolMarketDataChannelCapability.exchange,
+                        SymbolMarketDataChannelCapability.channel,
+                        SymbolMarketDataChannelCapability.can_market_data,
+                        SymbolMarketDataChannelCapability.source,
+                        SymbolMarketDataChannelCapability.reason,
+                    )
+                    .join(
+                        Symbol,
+                        Symbol.public_id == SymbolMarketDataChannelCapability.symbol_public_id,
+                    )
+                    .where(
+                        SymbolMarketDataChannelCapability.timestamp <= now,
+                        SymbolMarketDataChannelCapability.known_to > now,
+                        Symbol.timestamp <= now,
+                        Symbol.known_to > now,
+                    )
+                )
+                rows = session.execute(stmt).all()
+                logger.info(f"Loaded {len(rows)} symbol channel capabilities from database")
+                return [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows]
+        except (OperationalError, ProgrammingError) as exc:
+            if _is_missing_channel_capability_table_error(exc):
+                logger.warning(
+                    "Symbol channel capabilities table missing; skipping until migrations finish."
+                )
+                return []
+            raise
+
+    def _populate_channel_capabilities_from_rows(
+        self,
+        rows: list[tuple[str, str, str, bool, str | None, str | None]],
+    ) -> None:
+        """Populate channel capabilities cache from joined result tuples.
+
+        Args:
+            rows: List of (native_symbol, exchange, channel,
+                can_market_data, source, reason) tuples.
+        """
+        caps: dict[tuple[str, str, str], ChannelCapabilityInfo] = {}
+        for native_symbol, exchange, channel, can_market_data, source, reason in rows:
+            caps[(native_symbol, exchange, channel)] = ChannelCapabilityInfo(
+                can_market_data=can_market_data,
+                source=source,
+                reason=reason,
+            )
+        self.channel_capabilities = caps
+
     def to_exchange(self, native_symbol: str, exchange: str, channel: str) -> str:
         """Convert a native symbol to an exchange-specific format.
 
@@ -449,9 +558,12 @@ class SymbolMapperService:
             self._populate_maps_from_aliases(aliases)
             capabilities = self.load_capabilities_from_db()
             self._populate_capabilities_from_rows(capabilities)
+            channel_capabilities = self.load_channel_capabilities_from_db()
+            self._populate_channel_capabilities_from_rows(channel_capabilities)
             logger.info(
                 f"Loaded symbol maps cache with {len(self.native_to_kraken_ws)} native symbols "
-                f"and {len(self.capabilities)} capabilities"
+                f"and {len(self.capabilities)} capabilities "
+                f"and {len(self.channel_capabilities)} channel capabilities"
             )
         except Exception as e:
             logger.error(f"Error loading symbol maps cache: {e}")

@@ -145,6 +145,7 @@ __all__ = [
     "Symbol",
     "SymbolAlias",
     "SymbolExchangeCapability",
+    "SymbolMarketDataChannelCapability",
     "ProcessRun",
     "InstrumentSpec",
     "UnderlyingAsset",
@@ -230,6 +231,7 @@ _NOTIFICATION_DEVICE_ACTIVE_SQLITE = text(
 _CK_NOTIFICATION_DEVICE_TOKEN_STATUS = (
     "token_status IN ('active', 'unregistered', 'user_unregistered')"
 )
+_CK_CHANNEL_LOWER_NON_EMPTY = "channel = LOWER(channel) AND LENGTH(channel) > 0"
 
 
 class Base(DeclarativeBase):
@@ -912,6 +914,46 @@ class SymbolExchangeCapability(TemporalMixin, Base):
     can_market_data: Mapped[bool] = mapped_column(Boolean, default=False)
     can_trade: Mapped[bool] = mapped_column(Boolean, default=False)
     source: Mapped[str | None] = mapped_column(String(50))
+    reason: Mapped[str | None] = mapped_column(String(1024))
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
+class SymbolMarketDataChannelCapability(TemporalMixin, Base):
+    """Channel-specific market-data capability overlay.
+
+    The symbol-level ``SymbolExchangeCapability.can_market_data`` row remains
+    the coarse gate. Rows in this table only override individual market-data
+    channels for symbols that are otherwise market-data capable. Absence of a
+    current channel row means the channel inherits the symbol-level allowance.
+    """
+
+    __tablename__ = "symbol_market_data_channel_capabilities"
+    __table_args__ = (
+        Index(
+            "uq_smdcc_symbol_exchange_channel",
+            "symbol_public_id",
+            "exchange",
+            "channel",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_smdcc_exchange_lower"),
+        CheckConstraint(_CK_CHANNEL_LOWER_NON_EMPTY, name="ck_smdcc_channel_lower_non_empty"),
+        Index("ix_smdcc_exchange_channel", "exchange", "channel"),
+        Index(
+            "ix_symbol_market_data_channel_capabilities_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    exchange: Mapped[str] = mapped_column(String(32))
+    channel: Mapped[str] = mapped_column(String(64))
+    can_market_data: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str | None] = mapped_column(String(64))
     reason: Mapped[str | None] = mapped_column(String(1024))
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
 

@@ -81,6 +81,7 @@ from snapper.infrastructure.exchanges.kraken_rest_egress import futures_sdk_prox
 from snapper.infrastructure.exchanges.kraken_rest_egress import route_kraken_rest_sync_call
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
+from snapper.infrastructure.symbols.functions import is_market_data_channel_available
 from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 
@@ -325,6 +326,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._candle_builder = TradeCandleBuilder(interval_seconds=60)
         self._candle_aggregator_task: asyncio.Task[None] | None = None
         self._subscription_cache: dict[tuple[str, frozenset[str], str], SubscriptionRequest] = {}
+        self._suppressed_public_subscriptions: set[tuple[str, str]] = set()
+        self._pending_public_reprobes: set[tuple[Literal["ticker", "trade"], str]] = set()
         self._next_public_subscribe_at: float = 0.0
         self._last_rate_limited_log_at: float = -math.inf
         self._public_subscribe_lock: asyncio.Lock = asyncio.Lock()
@@ -750,6 +753,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 logger.info("Kraken Futures WebSocket connected")
                 if self._subscription_cache:
                     await self._replay_subscriptions()
+                if self._pending_public_reprobes:
+                    await self._reprobe_pending_public_subscriptions()
                 if self._ws_client is not client:
                     raise RuntimeError(_CONNECT_OWNERSHIP_LOST_MSG)
             except BaseException:
@@ -806,6 +811,129 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if channel not in {"ticker", "trade"}:
             raise ValueError(f"Unsupported subscription health channel: {channel}")
         await self._send_public_subscribe(feed=channel, product=symbol, preserve_retry_count=True)
+
+    def is_public_subscription_cached(
+        self,
+        channel: Literal["ticker", "trade"],
+        product: str,
+    ) -> bool:
+        """Return whether a public subscription remains in the replay cache.
+
+        Args:
+            channel: Public feed channel.
+            product: Kraken Futures product id.
+
+        Returns:
+            True when a cached subscription contains the product.
+        """
+        return any(
+            req.channel == channel and product in req.symbols
+            for req in self._subscription_cache.values()
+        )
+
+    def suppress_public_subscription(
+        self,
+        channel: Literal["ticker", "trade"],
+        product: str,
+        reason: str,
+    ) -> None:
+        """Remove a public product from replay cache and terminalize tracking.
+
+        Args:
+            channel: Public feed channel.
+            product: Kraken Futures product id.
+            reason: Terminal failure reason to surface in the tracker.
+
+        Returns:
+            None.
+        """
+        self._remove_public_subscription_from_cache(channel, product)
+        self._pending_public_reprobes.discard((channel, product))
+        self._suppressed_public_subscriptions.add((channel, product))
+        self._health_tracker.mark_failed(channel, product, reason)
+
+    def _remove_public_subscription_from_cache(
+        self,
+        channel: Literal["ticker", "trade"],
+        product: str,
+    ) -> None:
+        """Remove one public product from the replay cache."""
+        for key, req in list(self._subscription_cache.items()):
+            if req.channel != channel or product not in req.symbols:
+                continue
+            del self._subscription_cache[key]
+            remaining = tuple(symbol for symbol in req.symbols if symbol != product)
+            if remaining:
+                updated = SubscriptionRequest(
+                    channel=channel,
+                    symbols=remaining,
+                    parameters_json=req.parameters_json,
+                )
+                self._subscription_cache[updated.key()] = updated
+
+    async def reprobe_public_subscription(
+        self,
+        channel: Literal["ticker", "trade"],
+        product: str,
+    ) -> bool:
+        """Re-send one public subscription when a channel gate reopens.
+
+        Args:
+            channel: Public feed channel.
+            product: Kraken Futures product id.
+
+        Returns:
+            True when a subscribe was sent, False when already cached or
+            there is no active public WebSocket to send on.
+        """
+        key = (channel, product)
+        if self._ws_client is None:
+            if key in self._suppressed_public_subscriptions:
+                self._pending_public_reprobes.add(key)
+            return False
+        if self.is_public_subscription_cached(channel, product) and (
+            key not in self._suppressed_public_subscriptions
+        ):
+            self._pending_public_reprobes.discard(key)
+            return False
+        self._remove_public_subscription_from_cache(channel, product)
+        try:
+            await self._send_public_subscribe(
+                feed=channel,
+                product=product,
+                allow_suppressed=True,
+            )
+        except Exception:
+            if key in self._suppressed_public_subscriptions:
+                self._pending_public_reprobes.add(key)
+            raise
+        self._suppressed_public_subscriptions.discard(key)
+        self._pending_public_reprobes.discard(key)
+        return True
+
+    async def _reprobe_pending_public_subscriptions(self) -> None:
+        """Retry pending public re-probes after a successful reconnect."""
+        pending = sorted(self._pending_public_reprobes)
+        for channel, product in pending:
+            if not self._is_public_reprobe_allowed(channel, product):
+                self._pending_public_reprobes.discard((channel, product))
+                continue
+            await self.reprobe_public_subscription(channel, product)
+
+    @staticmethod
+    def _is_public_reprobe_allowed(channel: Literal["ticker", "trade"], product: str) -> bool:
+        """Return whether a pending public re-probe still passes the current gate."""
+        if channel != "trade":
+            return True
+        try:
+            native_symbol = kraken_futures_ws_to_native(product)
+        except ValueError:
+            return False
+        return is_market_data_channel_available(
+            native_symbol,
+            ExchangeEnum.KRAKEN_FUTURES,
+            "trade",
+        )
 
     async def _ensure_private_ws_connected(self) -> None:
         """Connect the authenticated FuturesWSClient if not already connected.
@@ -1211,7 +1339,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             return None
         try:
             fee_value = float(fee_raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
         if not math.isfinite(fee_value):
             return None
@@ -1278,7 +1406,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         try:
             price = float(price_raw)
             size = float(size_raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
         if not (math.isfinite(price) and math.isfinite(size)) or size <= 0.0:
             return None
@@ -1594,14 +1722,14 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             ts_str = entry.get("timestamp", "")
             try:
                 effective = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
+            except ValueError, AttributeError:
                 continue
             raw_rate = entry.get("relativeFundingRate")
             if raw_rate is None:
                 continue
             try:
                 rate = float(raw_rate)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
             snapshots.append(
                 FundingRateSnapshot(
@@ -1700,7 +1828,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             return None
         try:
             rate = float(raw_rate)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return None
         symbol_upper = symbol.upper()
         try:
@@ -1809,7 +1937,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         product: str,
         *,
         preserve_retry_count: bool = False,
-    ) -> None:
+        allow_suppressed: bool = False,
+    ) -> bool:
         """Send one public WS subscribe with global throttle + mark_pending.
 
         The lock serializes ticker, trade, replay, and retry paths so they
@@ -1835,6 +1964,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             RuntimeError: If no WebSocket client is connected.
             ValueError: If ``feed`` is not a supported public feed.
             TimeoutError: If the SDK send exceeds the per-send bound.
+
+        Returns:
+            True when sent, False when skipped by a suppression tombstone.
         """
         if self._ws_client is None:
             raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
@@ -1852,6 +1984,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             wait_s = self._next_public_subscribe_at - now
             if wait_s > 0:
                 await asyncio.sleep(wait_s)
+            if not allow_suppressed and (channel, product) in self._suppressed_public_subscriptions:
+                return False
             req = SubscriptionRequest(channel=channel, symbols=(product,), parameters_json="{}")
             self._subscription_cache[req.key()] = req
             self._health_tracker.mark_pending(
@@ -1860,6 +1994,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             async with asyncio.timeout(_SDK_SEND_TIMEOUT_S):
                 await client.subscribe(feed=channel, products=[product])
             self._next_public_subscribe_at = time.monotonic() + _PUBLIC_SUBSCRIBE_MIN_INTERVAL_S
+            return True
 
     async def _subscribe_ticks_impl(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Implement ticker subscription via callback-to-queue bridge.

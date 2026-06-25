@@ -1008,6 +1008,17 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         else:
             logger.info(f"{process_name}: Trade loop disabled (exchange has no public trade feed)")
 
+    def _symbols_for_trade_loop(self, symbols: list[str]) -> list[str]:
+        """Return symbols that should be subscribed by the trade loop.
+
+        Args:
+            symbols: Symbols selected for this publisher instance.
+
+        Returns:
+            Symbols to pass into the exchange client's trade subscription.
+        """
+        return symbols
+
     async def start(self) -> None:
         """Start the publisher service and connect to exchange."""
         exchange_name = self._get_exchange_name()
@@ -3428,10 +3439,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if not self._exchange_client:
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
+        trade_symbols = self._symbols_for_trade_loop(symbols)
+        if not trade_symbols:
+            logger.info(f"{self._get_exchange_name()}: Trade loop has no eligible symbols")
+            return
         trade_probe = get_trade_probe()
         exchange = self._get_data_exchange()
         exchange_label = self._get_exchange_name()
-        iterator = self._exchange_client.subscribe_trades(symbols).__aiter__()
+        iterator = self._exchange_client.subscribe_trades(trade_symbols).__aiter__()
         next_fut: asyncio.Future[TradeUpdate | object] | None = None
         try:
             t_iter_start = perf_counter_ns()
@@ -3460,7 +3475,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"Trade loop error for {symbols}: {e}")
+            logger.error(f"Trade loop error for {trade_symbols}: {e}")
         finally:
             _cleanup_pending_future(next_fut)
 
@@ -4182,12 +4197,31 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             snapshot = client.subscription_health_snapshot()
             if not snapshot:
                 return
+            try:
+                await self._after_feed_health_snapshot(snapshot)
+            except Exception as exc:
+                logger.error(
+                    f"{self._get_exchange_name()}_feed_publisher: feed-health hook failed: {exc}"
+                )
             rows = self._build_feed_health_rows(snapshot)
             await repository.upsert_instrument_feed_health(rows)
         except Exception as exc:
             logger.error(
                 f"{self._get_exchange_name()}_feed_publisher: feed-health flush failed: {exc}"
             )
+
+    async def _after_feed_health_snapshot(
+        self, snapshot: dict[tuple[str, str], _SymbolEntry]
+    ) -> None:
+        """Handle a feed-health snapshot before it is persisted.
+
+        Args:
+            snapshot: Point-in-time subscription-health entries.
+
+        Returns:
+            None.
+        """
+        return None
 
     def _build_feed_health_rows(
         self, snapshot: dict[tuple[str, str], _SymbolEntry]

@@ -16,10 +16,15 @@ Symbols are configured via settings.instruments["kraken_futures"].
 The publisher uses public (anonymous) WebSocket connections.
 """
 
+import asyncio
+from datetime import UTC
+from datetime import datetime
 from typing import Any
 from typing import Final
+from uuid import uuid7
 
 from loguru import logger
+from sqlalchemy import select
 
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
@@ -29,14 +34,22 @@ from snapper.core.types import MarketDataExchange
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.data.models import SymbolMarketDataChannelCapability
+from snapper.data.repository import Repository
+from snapper.data.repository import close_and_insert
+from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_futures_pool_routing
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.symbols.functions import get_available_kraken_futures_symbols
+from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.publishers.base import MarketDataPublisherService
+from snapper.messaging.schemas.data import SymbolAliasUpdateData
+from snapper.messaging.topics.builders import system_topic
 
 apply_kraken_futures_pool_routing()
 
@@ -47,6 +60,9 @@ Lowered from the 300 s base default: the Futures trade feed aggregates the
 whole perpetuals universe, which trades effectively continuously, so a 60 s
 silence reliably indicates a dark feed rather than a quiet market, and a
 multi-minute outage is detected and recovered in ~1 minute rather than five."""
+_RUNTIME_CHANNEL_SOURCE: Final[str] = "kraken_futures_publisher_runtime"
+_RUNTIME_CHANNEL_REASON: Final[str] = "Learned: trade not confirmed while ticker confirmed"
+_RUNTIME_TERMINAL_TRACKER_REASON: Final[str] = "runtime learned trade channel unavailable"
 
 
 @register_process(
@@ -187,6 +203,212 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
             seen_symbols.add(symbol)
             native_symbols.append(symbol)
         return native_symbols
+
+    def _symbols_for_trade_loop(self, symbols: list[str]) -> list[str]:
+        """Filter Kraken Futures trade subscriptions by channel capability.
+
+        Args:
+            symbols: Symbol-level market-data universe selected for this
+                publisher instance.
+
+        Returns:
+            Symbols whose ``trade`` channel is currently allowed.
+        """
+        allowed = set(get_available_kraken_futures_symbols(channel="trade"))
+        return [symbol for symbol in symbols if symbol in allowed]
+
+    def _invalidate_symbol_cache(self) -> None:
+        """Refresh mapper caches and re-probe newly allowed trade symbols."""
+        super()._invalidate_symbol_cache()
+        if not self.running:
+            return
+        task = asyncio.create_task(self._reprobe_trade_symbols())
+        task.add_done_callback(self._log_reprobe_task_result)
+
+    @staticmethod
+    def _log_reprobe_task_result(task: asyncio.Task[None]) -> None:
+        """Log an unexpected re-probe task failure.
+
+        Args:
+            task: Completed async task.
+
+        Returns:
+            None.
+        """
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.warning("Kraken Futures trade re-probe task failed: {}", exc)
+
+    async def _reprobe_trade_symbols(self) -> None:
+        """Re-subscribe trade products whose channel capability reopened."""
+        client = self._exchange_client
+        if client is None:
+            return
+        reprobed = 0
+        for symbol in self._symbols_for_trade_loop(self.symbols):
+            try:
+                product = native_to_kraken_futures_ws(symbol)
+            except ValueError:
+                continue
+            if await client.reprobe_public_subscription("trade", product):
+                reprobed += 1
+        if reprobed:
+            logger.info("Kraken Futures re-probed {} trade subscription(s)", reprobed)
+
+    async def _after_feed_health_snapshot(
+        self, snapshot: dict[tuple[str, str], _SymbolEntry]
+    ) -> None:
+        """Learn unsupported trade channels from stable subscription failures.
+
+        Args:
+            snapshot: Point-in-time subscription-health entries.
+
+        Returns:
+            None.
+        """
+        client = self._exchange_client
+        repository = self.repository
+        if client is None or repository is None:
+            return
+        learned = False
+        for entry in snapshot.values():
+            if not self._should_learn_trade_channel_false(entry, snapshot):
+                continue
+            try:
+                native_symbol = kraken_futures_ws_to_native(entry.symbol)
+                persisted = await self._persist_runtime_trade_channel_false(
+                    repository,
+                    native_symbol,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Kraken Futures runtime trade capability learning failed for {}: {}",
+                    entry.symbol,
+                    exc,
+                )
+                continue
+            if not persisted:
+                continue
+            client.suppress_public_subscription(
+                "trade",
+                entry.symbol,
+                _RUNTIME_TERMINAL_TRACKER_REASON,
+            )
+            learned = True
+        if learned:
+            await self._broadcast_runtime_capability_invalidation()
+
+    @staticmethod
+    def _should_learn_trade_channel_false(
+        entry: _SymbolEntry,
+        snapshot: dict[tuple[str, str], _SymbolEntry],
+    ) -> bool:
+        """Return True when a failed trade entry is safe to persist as false."""
+        if entry.channel != "trade":
+            return False
+        if entry.status != "failed" or entry.last_error != "retry budget exhausted":
+            return False
+        if entry.slow_retry_count < 1:
+            return False
+        ticker = snapshot.get(("ticker", entry.symbol))
+        return (
+            ticker is not None
+            and ticker.status == "confirmed"
+            and ticker.last_seen_data_at is not None
+        )
+
+    async def _persist_runtime_trade_channel_false(
+        self,
+        repository: Repository,
+        native_symbol: str,
+    ) -> bool:
+        """Persist or confirm a runtime-learned ``trade=False`` channel row.
+
+        Args:
+            repository: Async repository used by the publisher.
+            native_symbol: Snapper native symbol for the failed product.
+
+        Returns:
+            True when the row exists or was written, False when the symbol
+            identity cannot be resolved.
+        """
+        now = datetime.now(UTC)
+        symbol_public_id = await resolve_symbol_public_id(repository, native_symbol, now)
+        if symbol_public_id is None:
+            logger.warning(
+                "Kraken Futures runtime trade learning skipped unresolved symbol {}",
+                native_symbol,
+            )
+            return False
+        async with repository.session() as session:
+            result = await session.execute(
+                select(SymbolMarketDataChannelCapability).where(
+                    SymbolMarketDataChannelCapability.symbol_public_id == symbol_public_id,
+                    SymbolMarketDataChannelCapability.exchange == ExchangeEnum.KRAKEN_FUTURES,
+                    SymbolMarketDataChannelCapability.channel == "trade",
+                    SymbolMarketDataChannelCapability.timestamp <= now,
+                    SymbolMarketDataChannelCapability.known_to > now,
+                )
+            )
+            existing = result.scalar_one_or_none()
+            if (
+                existing is not None
+                and existing.can_market_data is False
+                and existing.source != _RUNTIME_CHANNEL_SOURCE
+            ):
+                return True
+            if (
+                existing is not None
+                and existing.can_market_data is False
+                and existing.source == _RUNTIME_CHANNEL_SOURCE
+                and existing.reason == _RUNTIME_CHANNEL_REASON
+            ):
+                return True
+            await close_and_insert(
+                session=session,
+                model=SymbolMarketDataChannelCapability,
+                match_filters=[
+                    SymbolMarketDataChannelCapability.symbol_public_id == symbol_public_id,
+                    SymbolMarketDataChannelCapability.exchange == ExchangeEnum.KRAKEN_FUTURES,
+                    SymbolMarketDataChannelCapability.channel == "trade",
+                ],
+                new_values={
+                    "symbol_public_id": symbol_public_id,
+                    "exchange": ExchangeEnum.KRAKEN_FUTURES,
+                    "channel": "trade",
+                    "can_market_data": False,
+                    "source": _RUNTIME_CHANNEL_SOURCE,
+                    "reason": _RUNTIME_CHANNEL_REASON,
+                    "created_at": existing.created_at if existing is not None else now,
+                    "session_id": self._tracker.session_id,
+                    "sequence_id": self._tracker.next_sequence("channel_capabilities"),
+                },
+                bus_time=now,
+            )
+            await session.commit()
+        logger.info(
+            "Kraken Futures learned trade channel unavailable for {}",
+            native_symbol,
+        )
+        return True
+
+    async def _broadcast_runtime_capability_invalidation(self) -> None:
+        """Broadcast the existing symbol-cache invalidation topic."""
+        self._invalidate_symbol_cache()
+        publisher = self.msg_publisher
+        if publisher is None:
+            return
+        topic = system_topic("symbol_aliases")
+        envelope = SymbolAliasUpdateData(
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
+            session_id=publisher.tracker.session_id,
+            sequence_id=publisher.tracker.next_sequence(topic),
+        )
+        await publisher.send(topic, envelope)
 
     def _get_max_symbols_per_connection(self) -> int:
         """Get Kraken Futures WebSocket symbol limit.

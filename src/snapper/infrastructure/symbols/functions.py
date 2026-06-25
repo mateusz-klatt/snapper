@@ -69,6 +69,7 @@ __all__ = [
     "get_available_walutomat_rest_symbols",
     "is_tradeable",
     "is_market_data_available",
+    "is_market_data_channel_available",
     "get_tradeable_symbols",
     "get_market_data_symbols",
     "get_market_data_capability_exclusions",
@@ -428,7 +429,7 @@ def kraken_futures_ws_to_native(symbol: str) -> str:
         raise ValueError(f"Unknown Kraken Futures WS symbol: {symbol}") from exc
 
 
-def get_available_kraken_futures_symbols() -> list[str]:
+def get_available_kraken_futures_symbols(channel: str | None = None) -> list[str]:
     """Get available Kraken Futures native symbols with active market-data capability.
 
     Filters out aliases whose ``symbol_exchange_capabilities`` row carries
@@ -438,10 +439,19 @@ def get_available_kraken_futures_symbols() -> list[str]:
     bitemporal history); the capability flag is the source of truth for
     "should we subscribe to this".
 
+    Args:
+        channel: Optional market-data channel to additionally filter by.
+
     Returns:
         Sorted list of native symbols with active Kraken Futures market data.
     """
     mapper = _get_db_mapper()
+    if channel is not None:
+        return sorted(
+            sym
+            for sym in mapper.native_to_kraken_futures_ws
+            if is_market_data_channel_available(sym, ExchangeEnum.KRAKEN_FUTURES, channel)
+        )
     return sorted(
         sym
         for sym in mapper.native_to_kraken_futures_ws
@@ -770,6 +780,34 @@ def is_market_data_available(native_symbol: str, exchange: str) -> bool:
     cap = mapper.capabilities.get((native_symbol, exchange))
     if cap is None:
         return False
+    return cap.can_market_data
+
+
+def is_market_data_channel_available(native_symbol: str, exchange: str, channel: str) -> bool:
+    """Check whether one market-data channel is available for a symbol.
+
+    Symbol-level market-data denial remains authoritative. When the
+    symbol-level row allows market data but no active channel row exists,
+    the channel inherits the symbol-level allowance for backward-compatible
+    deploys.
+
+    Args:
+        native_symbol: Native symbol (e.g., ``BTC-USD-PERP``).
+        exchange: Exchange identifier (e.g., ``kraken_futures``).
+        channel: Market-data channel name (e.g., ``trade``).
+
+    Returns:
+        True if the channel is available, False otherwise.
+    """
+    if not is_market_data_available(native_symbol, exchange):
+        return False
+    normalized_channel = channel.strip().lower()
+    if not normalized_channel:
+        return False
+    mapper = _get_db_mapper()
+    cap = mapper.channel_capabilities.get((native_symbol, exchange, normalized_channel))
+    if cap is None:
+        return True
     return cap.can_market_data
 
 

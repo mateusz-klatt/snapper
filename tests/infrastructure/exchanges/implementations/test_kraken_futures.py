@@ -42,6 +42,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
 )
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _enqueue_or_drop_oldest
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _timeframe_to_seconds
+from snapper.infrastructure.exchanges.implementations.kraken_futures import _tracker_feed_key
 
 _REAL_ASYNCIO_SLEEP = asyncio.sleep
 
@@ -234,6 +235,117 @@ class TestClientInit:
         assert c._trade_queue.maxsize == kf._QUEUE_MAX_SIZE
 
 
+def test_tracker_feed_key_normalizes_known_futures_feeds() -> None:
+    """Tracker feed keys collapse Futures aliases to ticker and trade.
+
+    Given: Kraken Futures feed names and feed aliases,
+    When: The tracker feed key helper normalizes them,
+    Then: Known ticker and trade variants collapse to their health channels.
+    """
+    assert _tracker_feed_key("ticker") == "ticker"
+    assert _tracker_feed_key("ticker_lite") == "ticker"
+    assert _tracker_feed_key("trade") == "trade"
+    assert _tracker_feed_key("trade_snapshot") == "trade"
+    assert _tracker_feed_key("book") == "book"
+
+
+def test_ws_message_handlers_tolerate_unparseable_payloads(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Malformed public WS payloads are skipped without raising.
+
+    Given: Public ticker and trade payloads with missing or invalid product data,
+    When: The low-level public message handlers process them,
+    Then: No updates are enqueued.
+    """
+    client._handle_ticker_feed({"feed": "ticker"})
+    client._handle_trade_feed("trade", {"feed": "trade", "product_id": 123})
+    assert client._tick_queue.empty()
+    assert client._trade_queue.empty()
+
+
+def test_subscribed_event_validation_branches(client: KrakenFuturesExchangeClient) -> None:
+    """Subscribed events with incomplete shapes are ignored safely.
+
+    Given: Subscribed event payloads without usable string product ids,
+    When: The subscribed-event handler processes them,
+    Then: Subscription health is left unchanged.
+    """
+    client._handle_subscribed_event({"event": "subscribed"})
+    client._handle_subscribed_event({"event": "subscribed", "feed": "trade", "product_ids": "x"})
+    client._handle_subscribed_event({"event": "subscribed", "feed": "trade", "product_ids": [123]})
+    assert client.subscription_health_snapshot() == {}
+
+
+def test_subscribed_event_marks_string_products_confirmed(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Subscribed events confirm string product identifiers.
+
+    Given: A subscribed event containing a string Futures product id,
+    When: The subscribed-event handler processes it,
+    Then: The trade health entry is marked confirmed.
+    """
+    client._handle_subscribed_event(
+        {"event": "subscribed", "feed": "trade_snapshot", "product_ids": ["PF_XBTUSD"]}
+    )
+    snapshot = client.subscription_health_snapshot()
+    assert snapshot[("trade", "PF_XBTUSD")].status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_alert_event_unattributed_logs_without_tracker_update(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Unattributed alert events do not mutate subscription health.
+
+    Given: An alert event without an attributable product,
+    When: The alert handler processes it,
+    Then: Subscription health remains empty.
+    """
+    with patch("snapper.infrastructure.exchanges.implementations.kraken_futures.logger.warning"):
+        await client._handle_alert_event({"message": 123})
+    assert client.subscription_health_snapshot() == {}
+
+
+@pytest.mark.asyncio
+async def test_retry_subscribe_requires_ws_and_supported_channel(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Retry subscribe validates connection and channel before sending.
+
+    Given: A missing public websocket and then an unsupported retry channel,
+    When: Retry subscribe is called,
+    Then: It raises before sending either invalid request.
+    """
+    client._ws_client = None
+    with pytest.raises(RuntimeError, match="connected"):
+        await client._retry_subscribe("trade", "PF_XBTUSD")
+    client._ws_client = AsyncMock()
+    with pytest.raises(ValueError, match="Unsupported subscription health channel"):
+        await client._retry_subscribe("book", "PF_XBTUSD")
+
+
+@pytest.mark.asyncio
+async def test_retry_subscribe_sends_supported_channel(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Retry subscribe forwards supported channels through the public sender.
+
+    Given: A connected public websocket and a supported trade channel,
+    When: Retry subscribe runs,
+    Then: It forwards the request through the public subscribe helper.
+    """
+    client._ws_client = AsyncMock()
+    with patch.object(client, "_send_public_subscribe", new_callable=AsyncMock) as send_mock:
+        await client._retry_subscribe("trade", "PF_XBTUSD")
+    send_mock.assert_awaited_once_with(
+        feed="trade",
+        product="PF_XBTUSD",
+        preserve_retry_count=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_subscribe_ticks_caches_products_not_symbols(
     client: KrakenFuturesExchangeClient,
@@ -267,6 +379,340 @@ async def test_subscribe_dedup_distinguishes_ticker_and_trade_feeds_with_same_pr
     await client._subscribe_in_chunks("trade", ["PF_XBTUSD"])
     assert len(client._subscription_cache) == 2
     assert {req.channel for req in client._subscription_cache.values()} == {"ticker", "trade"}
+
+
+def test_suppress_public_subscription_removes_product_and_terminalizes_tracker(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Runtime suppression removes only the denied product from replay cache.
+
+    Given: A cached multi-product trade subscription,
+    When: One product is suppressed,
+    Then: The remaining product stays cached and the denied tracker entry is terminal.
+    """
+    trade_req = SubscriptionRequest(
+        channel="trade",
+        symbols=("PF_XBTUSD", "PF_ETHUSD"),
+        parameters_json="{}",
+    )
+    ticker_req = SubscriptionRequest(
+        channel="ticker",
+        symbols=("PF_XBTUSD",),
+        parameters_json="{}",
+    )
+    client._subscription_cache[trade_req.key()] = trade_req
+    client._subscription_cache[ticker_req.key()] = ticker_req
+    client._health_tracker.mark_pending("trade", "PF_XBTUSD")
+    client.suppress_public_subscription("trade", "PF_XBTUSD", "learned false")
+    assert client.is_public_subscription_cached("trade", "PF_XBTUSD") is False
+    assert client.is_public_subscription_cached("trade", "PF_ETHUSD") is True
+    assert client.is_public_subscription_cached("ticker", "PF_XBTUSD") is True
+    snapshot = client.subscription_health_snapshot()
+    entry = snapshot[("trade", "PF_XBTUSD")]
+    assert entry.status == "failed"
+    assert entry.last_error == "learned false"
+    assert entry.next_attempt_at is None
+
+
+def test_suppress_public_subscription_removes_single_product_request(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Suppressing a single-product request removes the whole cached request.
+
+    Given: A cached single-product trade subscription,
+    When: The product is suppressed,
+    Then: The replay cache no longer contains the trade request.
+    """
+    req = SubscriptionRequest(channel="trade", symbols=("PF_XBTUSD",), parameters_json="{}")
+    client._subscription_cache[req.key()] = req
+    client.suppress_public_subscription("trade", "PF_XBTUSD", "learned false")
+    assert client._subscription_cache == {}
+    assert client.is_public_subscription_cached("trade", "PF_XBTUSD") is False
+
+
+@pytest.mark.asyncio
+async def test_suppressed_public_subscription_tombstone_blocks_stale_replay_send(
+    client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale replay send cannot re-cache a suppressed public subscription.
+
+    Given: A suppressed trade product and a stale replay send,
+    When: The public subscribe helper receives that product,
+    Then: It skips the websocket send and leaves the cache empty.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+    ws = _RecordingWsClient(clock)
+    client._ws_client = ws
+    req = SubscriptionRequest(channel="trade", symbols=("PF_XBTUSD",), parameters_json="{}")
+    client._subscription_cache[req.key()] = req
+    client.suppress_public_subscription("trade", "PF_XBTUSD", "learned false")
+
+    await client._send_public_subscribe(
+        feed="trade",
+        product="PF_XBTUSD",
+        preserve_retry_count=True,
+    )
+
+    assert ws.calls == []
+    assert client._subscription_cache == {}
+    assert client.is_public_subscription_cached("trade", "PF_XBTUSD") is False
+
+
+@pytest.mark.asyncio
+async def test_reprobe_public_subscription_skips_without_ws(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Reprobe returns False when no public websocket is connected.
+
+    Given: No active public websocket and no tombstone for the product,
+    When: The product is re-probed,
+    Then: No send happens and no pending re-probe is recorded.
+    """
+    with patch.object(client, "_send_public_subscribe", new_callable=AsyncMock) as send_mock:
+        result = await client.reprobe_public_subscription("trade", "PF_XBTUSD")
+    assert result is False
+    send_mock.assert_not_awaited()
+    assert client._pending_public_reprobes == set()
+
+
+@pytest.mark.asyncio
+async def test_reprobe_public_subscription_skips_cached_product(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Reprobe returns False when the product is already cached.
+
+    Given: A connected public websocket and an already cached trade product,
+    When: The product is re-probed,
+    Then: No duplicate public subscribe is sent.
+    """
+    req = SubscriptionRequest(channel="trade", symbols=("PF_XBTUSD",), parameters_json="{}")
+    client._subscription_cache[req.key()] = req
+    client._ws_client = AsyncMock()
+    with patch.object(client, "_send_public_subscribe", new_callable=AsyncMock) as send_mock:
+        result = await client.reprobe_public_subscription("trade", "PF_XBTUSD")
+    assert result is False
+    send_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reprobe_public_subscription_sends_uncached_product(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Reprobe sends one public subscribe when connected and uncached.
+
+    Given: A connected public websocket and an uncached product,
+    When: The product is re-probed,
+    Then: The public subscribe helper is called with suppression bypass enabled.
+    """
+    client._ws_client = AsyncMock()
+    with patch.object(client, "_send_public_subscribe", new_callable=AsyncMock) as send_mock:
+        result = await client.reprobe_public_subscription("trade", "PF_XBTUSD")
+    assert result is True
+    send_mock.assert_awaited_once_with(
+        feed="trade",
+        product="PF_XBTUSD",
+        allow_suppressed=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reprobe_public_subscription_keeps_tombstone_without_ws_then_retries_on_reconnect(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Disconnected re-probe is retried after the next successful public reconnect.
+
+    Given: A suppressed product whose channel gate has reopened while disconnected,
+    When: A reconnect succeeds,
+    Then: The pending re-probe is sent and the tombstone is cleared.
+    """
+    client.suppress_public_subscription("trade", "PF_XBTUSD", "learned false")
+
+    result = await client.reprobe_public_subscription("trade", "PF_XBTUSD")
+
+    assert result is False
+    assert ("trade", "PF_XBTUSD") in client._suppressed_public_subscriptions
+    assert ("trade", "PF_XBTUSD") in client._pending_public_reprobes
+
+    with (
+        patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+        ) as ws_cls,
+        patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ),
+        patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.is_market_data_channel_available",
+            return_value=True,
+        ),
+    ):
+        ws_cls.return_value.start = AsyncMock()
+        ws_cls.return_value.subscribe = AsyncMock()
+        await client._ensure_ws_connected()
+        ws_cls.return_value.subscribe.assert_awaited_once_with(
+            feed="trade",
+            products=["PF_XBTUSD"],
+        )
+
+    assert client.is_public_subscription_cached("trade", "PF_XBTUSD") is True
+    assert ("trade", "PF_XBTUSD") not in client._suppressed_public_subscriptions
+    assert client._pending_public_reprobes == set()
+
+
+@pytest.mark.asyncio
+async def test_pending_reprobe_drain_respects_current_gate_and_revocation(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Reconnect drains only still-allowed pending re-probes.
+
+    Given: Pending trade re-probes that include revoked, denied, and allowed products,
+    When: Public websocket reconnect drains pending re-probes,
+    Then: Only the currently allowed product is subscribed.
+    """
+    client.suppress_public_subscription("trade", "PF_XBTUSD", "learned false")
+    await client.reprobe_public_subscription("trade", "PF_XBTUSD")
+    client.suppress_public_subscription("trade", "PF_XBTUSD", "learned false again")
+    client.suppress_public_subscription("trade", "PF_ETHUSD", "learned false")
+    await client.reprobe_public_subscription("trade", "PF_ETHUSD")
+    client.suppress_public_subscription("trade", "PF_LTCUSD", "learned false")
+    await client.reprobe_public_subscription("trade", "PF_LTCUSD")
+
+    assert ("trade", "PF_XBTUSD") not in client._pending_public_reprobes
+    assert ("trade", "PF_ETHUSD") in client._pending_public_reprobes
+    assert ("trade", "PF_LTCUSD") in client._pending_public_reprobes
+
+    def map_product(product: str) -> str:
+        return {
+            "PF_XBTUSD": "BTC-USD-PERP",
+            "PF_ETHUSD": "ETH-USD-PERP",
+            "PF_LTCUSD": "LTC-USD-PERP",
+        }[product]
+
+    def is_channel_allowed(native_symbol: str, exchange: str, channel: str) -> bool:
+        assert exchange == "kraken_futures"
+        assert channel == "trade"
+        return native_symbol == "ETH-USD-PERP"
+
+    with (
+        patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+        ) as ws_cls,
+        patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            side_effect=map_product,
+        ),
+        patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.is_market_data_channel_available",
+            side_effect=is_channel_allowed,
+        ),
+    ):
+        ws_cls.return_value.start = AsyncMock()
+        ws_cls.return_value.subscribe = AsyncMock()
+        await client._ensure_ws_connected()
+        ws_cls.return_value.subscribe.assert_awaited_once_with(
+            feed="trade",
+            products=["PF_ETHUSD"],
+        )
+
+    assert client.is_public_subscription_cached("trade", "PF_ETHUSD") is True
+    assert client.is_public_subscription_cached("trade", "PF_XBTUSD") is False
+    assert client.is_public_subscription_cached("trade", "PF_LTCUSD") is False
+    assert ("trade", "PF_ETHUSD") not in client._suppressed_public_subscriptions
+    assert ("trade", "PF_XBTUSD") in client._suppressed_public_subscriptions
+    assert ("trade", "PF_LTCUSD") in client._suppressed_public_subscriptions
+    assert client._pending_public_reprobes == set()
+
+
+@pytest.mark.asyncio
+async def test_reprobe_public_subscription_keeps_pending_on_send_failure(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """A connected send failure keeps the tombstone pending for later reconnect.
+
+    Given: A tombstoned product and a connected websocket send failure,
+    When: The product is re-probed,
+    Then: The error propagates and the pending re-probe remains recorded.
+    """
+    client._ws_client = AsyncMock()
+    client.suppress_public_subscription("trade", "PF_XBTUSD", "learned false")
+    with (
+        patch.object(
+            client,
+            "_send_public_subscribe",
+            new=AsyncMock(side_effect=RuntimeError("send failed")),
+        ),
+        pytest.raises(RuntimeError, match="send failed"),
+    ):
+        await client.reprobe_public_subscription("trade", "PF_XBTUSD")
+
+    assert ("trade", "PF_XBTUSD") in client._suppressed_public_subscriptions
+    assert ("trade", "PF_XBTUSD") in client._pending_public_reprobes
+
+
+@pytest.mark.asyncio
+async def test_reprobe_public_subscription_reraises_non_tombstoned_send_failure(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """A non-tombstoned send failure propagates without adding pending state.
+
+    Given: A connected websocket send failure for a product without a tombstone,
+    When: The product is re-probed,
+    Then: The error propagates without adding pending re-probe state.
+    """
+    client._ws_client = AsyncMock()
+    with (
+        patch.object(
+            client,
+            "_send_public_subscribe",
+            new=AsyncMock(side_effect=RuntimeError("send failed")),
+        ),
+        pytest.raises(RuntimeError, match="send failed"),
+    ):
+        await client.reprobe_public_subscription("trade", "PF_XBTUSD")
+
+    assert client._pending_public_reprobes == set()
+
+
+@pytest.mark.asyncio
+async def test_reprobe_public_subscription_clears_tombstone_and_resubscribes(
+    client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reprobe re-adds a previously suppressed product after the gate reopens.
+
+    Given: A suppressed product and an active public websocket,
+    When: The product is re-probed,
+    Then: The product is subscribed, cached, and no longer tombstoned.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+    ws = _RecordingWsClient(clock)
+    client._ws_client = ws
+    client.suppress_public_subscription("trade", "PF_XBTUSD", "learned false")
+
+    result = await client.reprobe_public_subscription("trade", "PF_XBTUSD")
+
+    assert result is True
+    assert ws.calls == [("trade", ("PF_XBTUSD",), 0.0)]
+    assert client.is_public_subscription_cached("trade", "PF_XBTUSD") is True
+    assert ("trade", "PF_XBTUSD") not in client._suppressed_public_subscriptions
+
+
+def test_public_reprobe_allowed_handles_non_trade_and_invalid_products(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Pending re-probe gate allows non-trade and rejects unmapped products.
+
+    Given: A non-trade channel and an invalid trade product,
+    When: The pending re-probe gate evaluates them,
+    Then: Non-trade is allowed and the invalid trade product is denied.
+    """
+    assert client._is_public_reprobe_allowed("ticker", "PF_XBTUSD") is True
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+        side_effect=ValueError("unknown"),
+    ):
+        assert client._is_public_reprobe_allowed("trade", "UNKNOWN") is False
 
 
 @pytest.mark.asyncio
@@ -1261,8 +1707,7 @@ class TestConnect:
         mock_ws.close.side_effect = TimeoutError
         client._ws_client = mock_ws
         with patch(
-            "snapper.infrastructure.exchanges.implementations.kraken_futures."
-            "force_close_ws_client",
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.force_close_ws_client",
             new_callable=AsyncMock,
         ) as force_close:
             await client.disconnect()
