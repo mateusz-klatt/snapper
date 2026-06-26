@@ -33,7 +33,12 @@ class TestSubscriptionHealthTrackerTransitions:
         _set_clock(monkeypatch, 12.0)
         tracker.mark_confirmed("ticker", "BTC/USD")
         entry = tracker.snapshot()[("ticker", "BTC/USD")]
-        assert (entry.status, entry.confirmed_at, entry.last_error) == ("confirmed", 12.0, None)
+        assert (entry.status, entry.confirmed_at, entry.last_error, entry.ever_confirmed) == (
+            "confirmed",
+            12.0,
+            None,
+            True,
+        )
 
     def test_ack_creates_confirmed_entry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """ACK creates an entry when no pending row exists.
@@ -46,10 +51,11 @@ class TestSubscriptionHealthTrackerTransitions:
         _set_clock(monkeypatch, 15.0)
         tracker.mark_confirmed("ticker", "ETH/USD")
         entry = tracker.snapshot()[("ticker", "ETH/USD")]
-        assert (entry.status, entry.requested_at, entry.confirmed_at) == (
+        assert (entry.status, entry.requested_at, entry.confirmed_at, entry.ever_confirmed) == (
             "confirmed",
             15.0,
             15.0,
+            True,
         )
 
     def test_pending_to_confirmed_via_data(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,10 +71,18 @@ class TestSubscriptionHealthTrackerTransitions:
         _set_clock(monkeypatch, 25.0)
         tracker.mark_data_seen("trade", "BTC/USD")
         entry = tracker.snapshot()[("trade", "BTC/USD")]
-        assert (entry.status, entry.confirmed_at, entry.last_seen_data_at) == (
+        assert (
+            entry.status,
+            entry.confirmed_at,
+            entry.last_seen_data_at,
+            entry.ever_seen_data,
+            entry.ever_confirmed,
+        ) == (
             "confirmed",
             25.0,
             25.0,
+            True,
+            True,
         )
 
     def test_pending_to_failed_via_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -278,11 +292,20 @@ class TestSubscriptionHealthTrackerTransitions:
         _set_clock(monkeypatch, 95.0)
         tracker.mark_data_seen("ticker", "BTC/USD")
         entry = tracker.snapshot()[("ticker", "BTC/USD")]
-        assert (entry.status, entry.requested_at, entry.confirmed_at, entry.last_seen_data_at) == (
+        assert (
+            entry.status,
+            entry.requested_at,
+            entry.confirmed_at,
+            entry.last_seen_data_at,
+            entry.ever_seen_data,
+            entry.ever_confirmed,
+        ) == (
             "confirmed",
             95.0,
             95.0,
             95.0,
+            True,
+            True,
         )
 
     def test_channel_keys_are_independent(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -482,6 +505,23 @@ class TestSubscriptionHealthQueries:
         snapshot = tracker.snapshot()
         snapshot[("ticker", "BTC/USD")].status = "failed"
         assert tracker.snapshot()[("ticker", "BTC/USD")].status == "pending"
+
+    def test_snapshot_carries_lifetime_confirmation_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Snapshot carries lifetime confirmation without exposing internals.
+
+        Given: A tracker entry confirmed by ACK,
+        When: A snapshot is read and then locally mutated,
+        Then: The snapshot row includes ever_confirmed and the tracker keeps
+            its internal lifetime flag.
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 610.0)
+        tracker.mark_confirmed("trade", "BTC/USD")
+        snapshot = tracker.snapshot()
+        snapshot[("trade", "BTC/USD")].ever_confirmed = False
+        assert tracker.snapshot()[("trade", "BTC/USD")].ever_confirmed is True
 
 
 class TestSubscriptionHealthValidation:
@@ -1581,8 +1621,36 @@ class TestNeverDataQuarantine:
         tracker.mark_pending("ticker", "NEW/USD", preserve_retry_count=True)
         live = tracker.snapshot()[("ticker", "LIVE/USD")]
         new = tracker.snapshot()[("ticker", "NEW/USD")]
-        assert (live.ever_seen_data, live.last_seen_data_at) == (True, None)
-        assert (new.ever_seen_data, new.last_seen_data_at) == (False, None)
+        assert (live.ever_seen_data, live.ever_confirmed, live.last_seen_data_at) == (
+            True,
+            True,
+            None,
+        )
+        assert (new.ever_seen_data, new.ever_confirmed, new.last_seen_data_at) == (
+            False,
+            True,
+            None,
+        )
+
+    def test_mark_pending_preserves_lifetime_confirmation_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In-process re-arms preserve lifetime confirmation.
+
+        Given: A trade entry that ACK-confirmed once,
+        When: mark_pending re-arms it for reconnect replay and then for a
+            fresh in-process subscribe,
+        Then: ever_confirmed stays True so later failures cannot masquerade
+            as never-confirmed subscriptions.
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("trade", "PF_XBTUSD")
+        tracker.mark_pending("trade", "PF_XBTUSD", preserve_retry_count=True)
+        replay = tracker.snapshot()[("trade", "PF_XBTUSD")]
+        tracker.mark_pending("trade", "PF_XBTUSD")
+        fresh = tracker.snapshot()[("trade", "PF_XBTUSD")]
+        assert (replay.ever_confirmed, fresh.ever_confirmed) == (True, True)
 
     def test_mark_confirmed_leaves_quarantine_terminal(
         self, monkeypatch: pytest.MonkeyPatch

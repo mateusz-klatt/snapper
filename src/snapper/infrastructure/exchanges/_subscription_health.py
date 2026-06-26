@@ -107,6 +107,15 @@ class _SymbolEntry:
             that streamed before a reconnect is never mistaken for a
             never-streamer and never wrongly quarantined. A fresh subscribe
             or process boot clears it so liveness is re-probed.
+        ever_confirmed: Lifetime flag — True once this subscription
+            identity has been confirmed by either an ACK
+            (:meth:`mark_confirmed`) or a data frame
+            (:meth:`mark_data_seen`). It is preserved by
+            :meth:`mark_pending` for the lifetime of the process, including
+            reconnect replay and fresh in-process subscribes, so a channel
+            that proved it exists once is never later mistaken for a
+            never-confirmed subscription because an outage happened before a
+            periodic health snapshot observed it.
     """
 
     channel: str
@@ -124,6 +133,7 @@ class _SymbolEntry:
     dark_recovery_count: int = 0
     quarantined: bool = False
     ever_seen_data: bool = False
+    ever_confirmed: bool = False
 
     def stale_reference(self) -> float:
         """Return the monotonic timestamp staleness is measured from.
@@ -321,7 +331,11 @@ class SubscriptionHealthTracker:
                 its dark backoff on every reconnect, and the lifetime
                 ``ever_seen_data`` flag is preserved so a symbol that
                 streamed before the reconnect is never mistaken for a
-                never-streamer. A reconnect replay of an ALREADY-quarantined
+                never-streamer. The lifetime ``ever_confirmed`` flag is
+                preserved for any in-process re-arm, including fresh
+                subscribes, so an ACK-confirmed subscription remains
+                protected from later never-confirmed learning. A reconnect
+                replay of an ALREADY-quarantined
                 entry is a no-op: the entry is left terminal (failed,
                 quarantined) rather than re-armed to pending, so a
                 never-streaming instrument is neither re-probed nor
@@ -337,6 +351,9 @@ class SubscriptionHealthTracker:
         """
         key = self._validate_key(channel, symbol)
         existing = self._entries.get(key)
+        ever_confirmed = False
+        if existing is not None:
+            ever_confirmed = existing.ever_confirmed
         if existing is not None and preserve_retry_count:
             if existing.quarantined:
                 return
@@ -358,6 +375,7 @@ class SubscriptionHealthTracker:
             slow_retry_count=slow_retry_count,
             dark_recovery_count=dark_recovery_count,
             ever_seen_data=ever_seen_data,
+            ever_confirmed=ever_confirmed,
         )
 
     def mark_confirmed(
@@ -407,9 +425,11 @@ class SubscriptionHealthTracker:
                 requested_at=now,
                 confirmed_at=now,
                 dark_recovery_enabled=dark_recovery_enabled,
+                ever_confirmed=True,
             )
             return
         if entry.quarantined:
+            entry.ever_confirmed = True
             return
         entry.status = "confirmed"
         entry.confirmed_at = now
@@ -419,6 +439,7 @@ class SubscriptionHealthTracker:
         entry.slow_retry_count = 0
         entry.next_attempt_at = None
         entry.dark_recovery_enabled = dark_recovery_enabled
+        entry.ever_confirmed = True
 
     def mark_failed(self, channel: str, symbol: str, error: str) -> None:
         """Mark a subscription as terminally failed by explicit rejection.
@@ -505,10 +526,12 @@ class SubscriptionHealthTracker:
                 confirmed_at=now,
                 last_seen_data_at=now,
                 ever_seen_data=True,
+                ever_confirmed=True,
             )
             return
         entry.last_seen_data_at = now
         entry.stale_logged = False
+        entry.ever_confirmed = True
         if not entry.ever_seen_data:
             entry.ever_seen_data = True
         if entry.dark_recovery_count:

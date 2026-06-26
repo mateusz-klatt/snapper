@@ -93,6 +93,15 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
         Inherits all attributes from MarketDataPublisherService.
     """
 
+    def __init__(self, symbols: list[str]) -> None:
+        """Initialize Kraken Futures publisher runtime-learning state.
+
+        Args:
+            symbols: Native symbols selected for this publisher process.
+        """
+        super().__init__(symbols)
+        self._trade_confirmed_products: set[str] = set()
+
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
         """Get default parameters from settings.
@@ -269,13 +278,18 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
         Returns:
             None.
         """
+        self._record_trade_confirmations(snapshot)
         client = self._exchange_client
         repository = self.repository
         if client is None or repository is None:
             return
         learned = False
         for entry in snapshot.values():
-            if not self._should_learn_trade_channel_false(entry, snapshot):
+            if not self._should_learn_trade_channel_false(
+                entry,
+                snapshot,
+                entry.symbol in self._trade_confirmed_products,
+            ):
                 continue
             try:
                 native_symbol = kraken_futures_ws_to_native(entry.symbol)
@@ -301,12 +315,35 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
         if learned:
             await self._broadcast_runtime_capability_invalidation()
 
+    def _record_trade_confirmations(self, snapshot: dict[tuple[str, str], _SymbolEntry]) -> None:
+        """Record trade products that have confirmed in this publisher process.
+
+        Args:
+            snapshot: Point-in-time subscription-health entries.
+
+        Returns:
+            None.
+        """
+        for entry in snapshot.values():
+            if entry.channel != "trade":
+                continue
+            if (
+                entry.status == "confirmed"
+                or entry.last_seen_data_at is not None
+                or entry.ever_seen_data
+                or entry.ever_confirmed
+            ):
+                self._trade_confirmed_products.add(entry.symbol)
+
     @staticmethod
     def _should_learn_trade_channel_false(
         entry: _SymbolEntry,
         snapshot: dict[tuple[str, str], _SymbolEntry],
+        trade_confirmed_since_start: bool,
     ) -> bool:
         """Return True when a failed trade entry is safe to persist as false."""
+        if entry.ever_confirmed or trade_confirmed_since_start:
+            return False
         if entry.channel != "trade":
             return False
         if entry.status != "failed" or entry.last_error != "retry budget exhausted":

@@ -44,6 +44,8 @@ def _health_entry(
     last_error: str | None = None,
     slow_retry_count: int = 0,
     last_seen_data_at: float | None = None,
+    ever_seen_data: bool = False,
+    ever_confirmed: bool = False,
 ) -> _SymbolEntry:
     """Build a subscription-health entry for publisher runtime-learning tests."""
     return _SymbolEntry(
@@ -54,6 +56,8 @@ def _health_entry(
         last_error=last_error,
         slow_retry_count=slow_retry_count,
         last_seen_data_at=last_seen_data_at,
+        ever_seen_data=ever_seen_data,
+        ever_confirmed=ever_confirmed,
     )
 
 
@@ -177,8 +181,67 @@ class TestKrakenFuturesMarketDataPublisher:
         available_mock.assert_called_once_with(channel="trade")
         assert symbols == ["BTC-USD-PERP"]
 
+    def test_record_trade_confirmations_sticks_ack_data_and_lifetime_flags(self) -> None:
+        """Trade confirmations are recorded from ACKs and data evidence.
+
+        Given: A feed-health snapshot with confirmed, data-seen, and lifetime flags,
+        When: The publisher records trade confirmations,
+        Then: Only trade products with ACK or data evidence become sticky.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
+        snapshot = {
+            ("ticker", "PF_XBTUSD"): _health_entry(
+                channel="ticker",
+                symbol="PF_XBTUSD",
+                status="confirmed",
+                last_seen_data_at=101.0,
+            ),
+            ("trade", "PF_XBTUSD"): _health_entry(
+                channel="trade",
+                symbol="PF_XBTUSD",
+                status="confirmed",
+            ),
+            ("trade", "PF_ETHUSD"): _health_entry(
+                channel="trade",
+                symbol="PF_ETHUSD",
+                status="pending",
+                last_seen_data_at=102.0,
+            ),
+            ("trade", "PF_SOLUSD"): _health_entry(
+                channel="trade",
+                symbol="PF_SOLUSD",
+                status="pending",
+                ever_seen_data=True,
+            ),
+            ("trade", "PF_ADAUSD"): _health_entry(
+                channel="trade",
+                symbol="PF_ADAUSD",
+                status="pending",
+                ever_confirmed=True,
+            ),
+            ("trade", "PF_LDOUSD"): _health_entry(
+                channel="trade",
+                symbol="PF_LDOUSD",
+                status="pending",
+            ),
+        }
+
+        publisher._record_trade_confirmations(snapshot)
+
+        assert publisher._trade_confirmed_products == {
+            "PF_XBTUSD",
+            "PF_ETHUSD",
+            "PF_SOLUSD",
+            "PF_ADAUSD",
+        }
+
     def test_should_learn_trade_channel_false_requires_stable_failure(self) -> None:
-        """Runtime learning requires failed trade, slow retry, and confirmed ticker data."""
+        """Runtime learning requires stable failure and no prior trade confirmation.
+
+        Given: A trade subscription that exhausted after slow retry and ticker has data,
+        When: The trade product has never confirmed in this publisher process,
+        Then: Runtime learning accepts the failure as safe to persist.
+        """
         trade = _health_entry(
             channel="trade",
             status="failed",
@@ -191,12 +254,13 @@ class TestKrakenFuturesMarketDataPublisher:
             KrakenFuturesMarketDataPublisher._should_learn_trade_channel_false(
                 trade,
                 snapshot,
+                False,
             )
             is True
         )
 
     @pytest.mark.parametrize(
-        ("entry", "ticker", "expected"),
+        ("entry", "ticker", "trade_confirmed_since_start", "expected"),
         [
             (
                 _health_entry(
@@ -206,6 +270,7 @@ class TestKrakenFuturesMarketDataPublisher:
                     slow_retry_count=1,
                 ),
                 _health_entry(channel="ticker", status="confirmed", last_seen_data_at=101.0),
+                False,
                 False,
             ),
             (
@@ -217,10 +282,12 @@ class TestKrakenFuturesMarketDataPublisher:
                 ),
                 _health_entry(channel="ticker", status="confirmed", last_seen_data_at=101.0),
                 False,
+                False,
             ),
             (
                 _health_entry(channel="trade", status="failed", last_error="rejected"),
                 _health_entry(channel="ticker", status="confirmed", last_seen_data_at=101.0),
+                False,
                 False,
             ),
             (
@@ -232,6 +299,7 @@ class TestKrakenFuturesMarketDataPublisher:
                 ),
                 _health_entry(channel="ticker", status="confirmed", last_seen_data_at=101.0),
                 False,
+                False,
             ),
             (
                 _health_entry(
@@ -241,6 +309,7 @@ class TestKrakenFuturesMarketDataPublisher:
                     slow_retry_count=1,
                 ),
                 None,
+                False,
                 False,
             ),
             (
@@ -252,6 +321,7 @@ class TestKrakenFuturesMarketDataPublisher:
                 ),
                 _health_entry(channel="ticker", status="pending", last_seen_data_at=101.0),
                 False,
+                False,
             ),
             (
                 _health_entry(
@@ -262,6 +332,30 @@ class TestKrakenFuturesMarketDataPublisher:
                 ),
                 _health_entry(channel="ticker", status="confirmed", last_seen_data_at=None),
                 False,
+                False,
+            ),
+            (
+                _health_entry(
+                    channel="trade",
+                    status="failed",
+                    last_error="retry budget exhausted",
+                    slow_retry_count=1,
+                    ever_confirmed=True,
+                ),
+                _health_entry(channel="ticker", status="confirmed", last_seen_data_at=101.0),
+                False,
+                False,
+            ),
+            (
+                _health_entry(
+                    channel="trade",
+                    status="failed",
+                    last_error="retry budget exhausted",
+                    slow_retry_count=1,
+                ),
+                _health_entry(channel="ticker", status="confirmed", last_seen_data_at=101.0),
+                True,
+                False,
             ),
         ],
     )
@@ -269,9 +363,15 @@ class TestKrakenFuturesMarketDataPublisher:
         self,
         entry: _SymbolEntry,
         ticker: _SymbolEntry | None,
+        trade_confirmed_since_start: bool,
         expected: bool,
     ) -> None:
-        """Runtime learning rejects incomplete or unsafe failure evidence."""
+        """Runtime learning rejects incomplete, transient, or unsafe evidence.
+
+        Given: A trade failure candidate with missing evidence or prior trade confirmation,
+        When: The runtime-learning predicate evaluates it,
+        Then: The failure is rejected.
+        """
         snapshot = {("trade", entry.symbol): entry}
         if ticker is not None:
             snapshot[("ticker", entry.symbol)] = ticker
@@ -279,6 +379,7 @@ class TestKrakenFuturesMarketDataPublisher:
             KrakenFuturesMarketDataPublisher._should_learn_trade_channel_false(
                 entry,
                 snapshot,
+                trade_confirmed_since_start,
             )
             is expected
         )
@@ -354,6 +455,27 @@ class TestKrakenFuturesMarketDataPublisher:
         await publisher._attempt_liveness_recovery("stale")
         client.disconnect.assert_awaited_once()
         client._ensure_ws_connected.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_attempt_liveness_recovery_preserves_trade_confirmation_sticky_flag(
+        self,
+    ) -> None:
+        """Futures liveness recovery does not reset trade confirmation memory.
+
+        Given: A publisher process whose trade feed confirmed for one product,
+        When: Liveness recovery rebuilds the websocket client,
+        Then: The process-local trade confirmation flag remains set.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
+        publisher._trade_confirmed_products.add("PF_XBTUSD")
+        client = MagicMock()
+        client.disconnect = AsyncMock()
+        client._ensure_ws_connected = AsyncMock()
+        publisher._exchange_client = client
+
+        await publisher._attempt_liveness_recovery("stale")
+
+        assert publisher._trade_confirmed_products == {"PF_XBTUSD"}
 
     @pytest.mark.asyncio
     async def test_attempt_liveness_recovery_skips_without_client(self) -> None:
@@ -546,6 +668,201 @@ class TestKrakenFuturesMarketDataPublisher:
         )
         invalidate_mock.assert_called_once()
         publisher.msg_publisher.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_after_feed_health_snapshot_skips_confirmed_then_exhausted_trade(
+        self,
+    ) -> None:
+        """Previously confirmed trade products are left to self-heal.
+
+        Given: A trade product that confirmed once in this publisher process,
+        When: The same product later exhausts retry budget while ticker has data,
+        Then: Runtime learning does not persist or suppress a channel denial.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
+        client = MagicMock()
+        client.suppress_public_subscription = MagicMock()
+        publisher._exchange_client = client
+        publisher.repository = MagicMock()
+        confirmed_snapshot = {
+            ("trade", "PF_XBTUSD"): _health_entry(
+                channel="trade",
+                status="confirmed",
+            )
+        }
+        failed_snapshot = {
+            ("trade", "PF_XBTUSD"): _health_entry(
+                channel="trade",
+                status="failed",
+                last_error="retry budget exhausted",
+                slow_retry_count=1,
+            ),
+            ("ticker", "PF_XBTUSD"): _health_entry(
+                channel="ticker",
+                status="confirmed",
+                last_seen_data_at=101.0,
+            ),
+        }
+        with patch.object(
+            publisher,
+            "_persist_runtime_trade_channel_false",
+            new=AsyncMock(return_value=True),
+        ) as persist_mock:
+            await publisher._after_feed_health_snapshot(confirmed_snapshot)
+            await publisher._after_feed_health_snapshot(failed_snapshot)
+
+        assert publisher._trade_confirmed_products == {"PF_XBTUSD"}
+        persist_mock.assert_not_awaited()
+        client.suppress_public_subscription.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_after_feed_health_snapshot_skips_tracker_ever_confirmed_trade(
+        self,
+    ) -> None:
+        """Tracker lifetime confirmation blocks runtime learning.
+
+        Given: A trade product ACK-confirmed before the publisher observed a
+            health snapshot and later exhausted after reconnect,
+        When: The failed snapshot carries ever_confirmed from the tracker,
+        Then: Runtime learning leaves the product to self-heal.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
+        client = MagicMock()
+        client.suppress_public_subscription = MagicMock()
+        publisher._exchange_client = client
+        publisher.repository = MagicMock()
+        failed_snapshot = {
+            ("trade", "PF_XBTUSD"): _health_entry(
+                channel="trade",
+                status="failed",
+                last_error="retry budget exhausted",
+                slow_retry_count=1,
+                ever_confirmed=True,
+            ),
+            ("ticker", "PF_XBTUSD"): _health_entry(
+                channel="ticker",
+                status="confirmed",
+                last_seen_data_at=101.0,
+            ),
+        }
+        with patch.object(
+            publisher,
+            "_persist_runtime_trade_channel_false",
+            new=AsyncMock(return_value=True),
+        ) as persist_mock:
+            await publisher._after_feed_health_snapshot(failed_snapshot)
+
+        assert publisher._trade_confirmed_products == {"PF_XBTUSD"}
+        persist_mock.assert_not_awaited()
+        client.suppress_public_subscription.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_after_feed_health_snapshot_learns_never_confirmed_trade(
+        self,
+    ) -> None:
+        """Never-confirmed trade products are still learned as unavailable.
+
+        Given: A trade product that never confirmed while ticker has data,
+        When: The trade subscription exhausts retry budget after slow retry,
+        Then: Runtime learning persists and suppresses the channel denial.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=["LDO-USD-PERP"])
+        client = MagicMock()
+        client.suppress_public_subscription = MagicMock()
+        publisher._exchange_client = client
+        publisher.repository = MagicMock()
+        snapshot = {
+            ("trade", "PF_LDOUSD"): _health_entry(
+                channel="trade",
+                symbol="PF_LDOUSD",
+                status="failed",
+                last_error="retry budget exhausted",
+                slow_retry_count=1,
+            ),
+            ("ticker", "PF_LDOUSD"): _health_entry(
+                channel="ticker",
+                symbol="PF_LDOUSD",
+                status="confirmed",
+                last_seen_data_at=101.0,
+            ),
+        }
+        with (
+            patch(
+                "snapper.messaging.publishers.kraken_futures.kraken_futures_ws_to_native",
+                return_value="LDO-USD-PERP",
+            ),
+            patch.object(
+                publisher,
+                "_persist_runtime_trade_channel_false",
+                new=AsyncMock(return_value=True),
+            ) as persist_mock,
+            patch.object(publisher, "_broadcast_runtime_capability_invalidation") as broadcast,
+        ):
+            await publisher._after_feed_health_snapshot(snapshot)
+
+        assert publisher._trade_confirmed_products == set()
+        persist_mock.assert_awaited_once_with(publisher.repository, "LDO-USD-PERP")
+        client.suppress_public_subscription.assert_called_once_with(
+            "trade",
+            "PF_LDOUSD",
+            "runtime learned trade channel unavailable",
+        )
+        broadcast.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_after_feed_health_snapshot_keeps_trade_sticky_per_symbol(self) -> None:
+        """Trade confirmation memory is scoped per product.
+
+        Given: One product confirmed trade and another product never confirmed,
+        When: The never-confirmed product exhausts while ticker has data,
+        Then: Runtime learning suppresses only the never-confirmed product.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP", "LDO-USD-PERP"])
+        client = MagicMock()
+        client.suppress_public_subscription = MagicMock()
+        publisher._exchange_client = client
+        publisher.repository = MagicMock()
+        snapshot = {
+            ("trade", "PF_XBTUSD"): _health_entry(
+                channel="trade",
+                symbol="PF_XBTUSD",
+                status="confirmed",
+            ),
+            ("trade", "PF_LDOUSD"): _health_entry(
+                channel="trade",
+                symbol="PF_LDOUSD",
+                status="failed",
+                last_error="retry budget exhausted",
+                slow_retry_count=1,
+            ),
+            ("ticker", "PF_LDOUSD"): _health_entry(
+                channel="ticker",
+                symbol="PF_LDOUSD",
+                status="confirmed",
+                last_seen_data_at=101.0,
+            ),
+        }
+        with (
+            patch(
+                "snapper.messaging.publishers.kraken_futures.kraken_futures_ws_to_native",
+                return_value="LDO-USD-PERP",
+            ),
+            patch.object(
+                publisher,
+                "_persist_runtime_trade_channel_false",
+                new=AsyncMock(return_value=True),
+            ) as persist_mock,
+            patch.object(publisher, "_broadcast_runtime_capability_invalidation"),
+        ):
+            await publisher._after_feed_health_snapshot(snapshot)
+
+        assert publisher._trade_confirmed_products == {"PF_XBTUSD"}
+        persist_mock.assert_awaited_once_with(publisher.repository, "LDO-USD-PERP")
+        client.suppress_public_subscription.assert_called_once_with(
+            "trade",
+            "PF_LDOUSD",
+            "runtime learned trade channel unavailable",
+        )
 
     @pytest.mark.asyncio
     async def test_after_feed_health_snapshot_skips_when_persist_returns_false(
