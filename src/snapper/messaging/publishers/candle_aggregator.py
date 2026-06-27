@@ -74,6 +74,9 @@ class _HtfBucket:
     open_ts: datetime
     close_ts: datetime
     complete: bool
+    seeded: bool
+    expected_minute_count: int
+    counted_minutes: set[datetime]
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,27 @@ class LateCandleDrop:
 
     symbol: str
     minute: datetime
+
+
+@dataclass(frozen=True)
+class SeededIncompleteWindow:
+    """Pure signal that a suppressed seeded window needs settled-plane repair.
+
+    Attributes:
+        symbol: Native symbol of the suppressed higher-timeframe window.
+        timeframe: Higher timeframe label.
+        window_begin: Canonical UTC window start.
+        expected_minute_count: Distinct complete 1m minutes folded into the
+            suppressed bucket.
+        counted_minutes: Distinct complete 1m minute starts folded into the
+            suppressed bucket.
+    """
+
+    symbol: str
+    timeframe: str
+    window_begin: datetime
+    expected_minute_count: int
+    counted_minutes: frozenset[datetime]
 
 
 class CandleAggregator:
@@ -190,6 +214,7 @@ class CandleAggregator:
         self._late_rolls_after_close: int = 0
         self._warned_late: set[tuple[str, int]] = set()
         self._late_drops: list[LateCandleDrop] = []
+        self._seeded_incomplete_windows: list[SeededIncompleteWindow] = []
         self._warned_fill_overflow: set[tuple[str, str]] = set()
 
     @staticmethod
@@ -429,6 +454,16 @@ class CandleAggregator:
         self._late_drops = []
         return drops
 
+    def pop_seeded_incomplete_windows(self) -> list[SeededIncompleteWindow]:
+        """Drain and return seeded incomplete close signals.
+
+        Returns:
+            Suppressed seeded windows in close order.
+        """
+        windows = self._seeded_incomplete_windows
+        self._seeded_incomplete_windows = []
+        return windows
+
     @property
     def late_rolls_after_close(self) -> int:
         """Return how many late 1m frames were dropped to avoid double-counting.
@@ -493,6 +528,7 @@ class CandleAggregator:
                 return
         key = (candle.symbol, tf, begin_ts)
         bucket = self._buckets.get(key)
+        counted_minutes = {candle.interval_begin} if candle.complete else set()
         if bucket is None:
             self._buckets[key] = _HtfBucket(
                 symbol=candle.symbol,
@@ -508,8 +544,16 @@ class CandleAggregator:
                 open_ts=candle.interval_begin,
                 close_ts=candle.interval_begin,
                 complete=self._is_complete_on_open(candle.interval_begin, begin_ts, seeded=seeded),
+                seeded=seeded,
+                expected_minute_count=len(counted_minutes),
+                counted_minutes=counted_minutes,
             )
             return
+        if seeded:
+            bucket.seeded = True
+        if candle.complete and candle.interval_begin not in bucket.counted_minutes:
+            bucket.counted_minutes.add(candle.interval_begin)
+            bucket.expected_minute_count += 1
         bucket.high = max(bucket.high, candle.high)
         bucket.low = min(bucket.low, candle.low)
         bucket.volume += candle.volume
@@ -612,6 +656,16 @@ class CandleAggregator:
                 continue
             self._closed_window[fkey] = begin_ts
             if not bucket.complete:
+                if bucket.seeded:
+                    self._seeded_incomplete_windows.append(
+                        SeededIncompleteWindow(
+                            bucket.symbol,
+                            bucket.timeframe,
+                            bucket.interval_begin,
+                            bucket.expected_minute_count,
+                            frozenset(bucket.counted_minutes),
+                        )
+                    )
                 continue
             self._last_close[fkey] = bucket.close
             self._last_real_window[fkey] = begin_ts

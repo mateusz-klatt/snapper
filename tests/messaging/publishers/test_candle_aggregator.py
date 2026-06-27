@@ -14,6 +14,7 @@ import pytest
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.candle_aggregator import LateCandleDrop
+from snapper.messaging.publishers.candle_aggregator import SeededIncompleteWindow
 
 _BASE = datetime(2026, 6, 14, tzinfo=UTC)
 
@@ -254,6 +255,7 @@ class TestEmitOnClose:
         agg.fold(_candle("A", _at(10, 3)))
         agg.fold(_candle("A", _at(10, 5)))
         assert agg.fold(_candle("A", _at(10, 6))) == []
+        assert agg.pop_seeded_incomplete_windows() == []
 
     def test_post_epoch_window_missing_open_minute_is_emitted(self) -> None:
         """A fully-observed post-epoch window emits even with no opening-minute trade.
@@ -268,6 +270,7 @@ class TestEmitOnClose:
             emitted += agg.fold(_candle("A", _at(10, minute)))
         begins = [bar.interval_begin for _label, bar in emitted]
         assert _at(10, 0) in begins
+        assert agg.pop_seeded_incomplete_windows() == []
 
     def test_seeded_window_missing_open_minute_is_suppressed(self) -> None:
         """A seeded window whose opening minute is absent is suppressed, not truncated.
@@ -285,6 +288,23 @@ class TestEmitOnClose:
         agg.fold(_candle("A", _at(0, 0, day=15)))
         emitted = agg.fold(_candle("A", _at(0, 1, day=15)))
         assert [label for label, _bar in emitted if label == "1d"] == []
+        assert agg.pop_seeded_incomplete_windows() == [
+            SeededIncompleteWindow("A", "1d", _BASE, 2, frozenset({_at(0, 2), _at(0, 3)}))
+        ]
+        assert agg.pop_seeded_incomplete_windows() == []
+
+    def test_seeded_incomplete_expected_count_tracks_distinct_complete_minutes(self) -> None:
+        """A seeded incomplete signal counts each folded complete 1m minute once."""
+        agg = CandleAggregator(["1d"])
+        agg.seed_1m("1d", _candle("A", _at(0, 2)))
+        agg.seed_1m("1d", _candle("A", _at(0, 2), close=200.0))
+        agg.seed_1m("1d", _candle("A", _at(0, 3)))
+        agg.set_live_epoch(_at(0, 4))
+        agg.fold(_candle("A", _at(0, 0, day=15)))
+        agg.fold(_candle("A", _at(0, 1, day=15)))
+        assert agg.pop_seeded_incomplete_windows() == [
+            SeededIncompleteWindow("A", "1d", _BASE, 2, frozenset({_at(0, 2), _at(0, 3)}))
+        ]
 
     def test_pre_epoch_window_suppressed_post_epoch_self_heals(self) -> None:
         """A pre-epoch window is suppressed even if its open minute folds late."""
@@ -424,6 +444,7 @@ class TestSeed:
         _label, bar = emitted[0]
         assert bar.interval_begin == _at(10, 0)
         assert bar.volume == 7.0
+        assert agg.pop_seeded_incomplete_windows() == []
 
 
 class TestCeil:

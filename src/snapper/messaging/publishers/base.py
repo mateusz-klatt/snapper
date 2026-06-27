@@ -77,6 +77,7 @@ from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.candle_aggregator import LateCandleDrop
+from snapper.messaging.publishers.candle_aggregator import SeededIncompleteWindow
 from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
 from snapper.messaging.publishers.native_candle_finalizer import window_seconds
 from snapper.messaging.schemas.data import CandleData
@@ -222,6 +223,9 @@ _CANDLE_REPAIR_PENDING_MAX: Final = 100_000
 _CANDLE_REPAIR_MAX_ATTEMPTS: Final = 3
 """Maximum repair attempts before abandoning a permanently unavailable source window."""
 
+_SEEDED_INCOMPLETE_REPAIR_MAX_ATTEMPTS: Final = 60
+"""Maximum source-gated seeded repair attempts before manual backfill warning."""
+
 _PERSIST_SKIPPED_LOG_INTERVAL_S = 60.0
 """Cadence for the rate-limited ``persist_skipped_total`` log line.
 
@@ -331,8 +335,11 @@ class _CandleRepairKey:
 class _PendingCandleRepair:
     """Repair key state retained until its source correction is committed."""
 
-    required_sequence: int
+    required_sequence: int | None = None
     attempts: int = 0
+    expected_minute_count: int | None = None
+    expected_source_minutes: frozenset[datetime] | None = None
+    last_observed_minute_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -340,7 +347,7 @@ class _CandleRepairResult:
     """Result of attempting one pending synthesized-candle repair."""
 
     key: _CandleRepairKey
-    required_sequence: int
+    required_sequence: int | None
     done: bool
 
 
@@ -2080,7 +2087,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         aggregator = self._candle_aggregator
         if aggregator is not None and timeframe == "1m":
             synthesized = aggregator.fold(candle_update)
-            self._record_late_candle_drops(self._pop_aggregator_late_drops())
+            self._drain_aggregator_repair_signals()
         row = await self._process_candle(candle_update, exchange, timeframe)
         if row is not None:
             released = self._observe_native_candle(candle_update.symbol, row)
@@ -2285,7 +2292,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 if self._candle_aggregator is None:
                     continue
                 flushed = self._candle_aggregator.flush(datetime.now(UTC))
-                self._record_late_candle_drops(self._pop_aggregator_late_drops())
+                self._drain_aggregator_repair_signals()
                 for tf_label, synth in flushed:
                     await self._publish_synthesized_candle(synth, exchange, tf_label)
             except asyncio.CancelledError:
@@ -2303,6 +2310,25 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if isinstance(aggregator, CandleAggregator):
             return aggregator.pop_late_drops()
         return []
+
+    def _pop_aggregator_seeded_incomplete_windows(self) -> list[SeededIncompleteWindow]:
+        """Drain seeded-incomplete close signals from the configured aggregator.
+
+        Returns:
+            Suppressed seeded windows that should be count-gated against the
+            persisted 1m plane.
+        """
+        aggregator = self._candle_aggregator
+        if isinstance(aggregator, CandleAggregator):
+            return aggregator.pop_seeded_incomplete_windows()
+        return []
+
+    def _drain_aggregator_repair_signals(self) -> None:
+        """Drain pure aggregator repair signals into publisher repair queues."""
+        self._record_late_candle_drops(self._pop_aggregator_late_drops())
+        self._record_seeded_incomplete_window_repairs(
+            self._pop_aggregator_seeded_incomplete_windows()
+        )
 
     def _record_late_candle_drops(self, drops: list[LateCandleDrop]) -> None:
         """Remember late drops until a matching correction write commits.
@@ -2323,6 +2349,19 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     f"minute={dropped.minute.isoformat()}"
                 )
             self._pending_late_candle_drops[key] = _PendingLateCandleDrop()
+
+    def _record_seeded_incomplete_window_repairs(
+        self, windows: list[SeededIncompleteWindow]
+    ) -> None:
+        """Schedule source-gated repairs for suppressed seeded windows.
+
+        Args:
+            windows: Pure seeded incomplete close signals drained from the
+                aggregator.
+        """
+        for window in windows:
+            key = _CandleRepairKey(window.symbol, window.timeframe, window.window_begin)
+            self._schedule_seeded_incomplete_candle_repair_key(key, window.counted_minutes)
 
     def _bind_enqueued_corrections_to_late_drops(
         self, enqueued: list[_EnqueuedCandleWrite]
@@ -2363,6 +2402,47 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             repair_key = _CandleRepairKey(late_key.symbol, timeframe, begin)
             self._schedule_candle_repair_key(repair_key, required_sequence, late_key)
 
+    def _schedule_seeded_incomplete_candle_repair_key(
+        self, key: _CandleRepairKey, counted_minutes: frozenset[datetime]
+    ) -> None:
+        """Add or refresh one source-gated seeded-incomplete repair key.
+
+        Args:
+            key: Synthesized candle natural key to repair.
+            counted_minutes: Distinct complete 1m minutes folded live or from
+                the seed before the bucket was suppressed.
+        """
+        pending = self._pending_candle_repairs.get(key)
+        if pending is not None:
+            previous_minutes = pending.expected_source_minutes
+            if previous_minutes is None:
+                pending.expected_source_minutes = counted_minutes
+                pending.expected_minute_count = len(counted_minutes)
+                pending.last_observed_minute_count = None
+                pending.attempts = 0
+            else:
+                merged_minutes = previous_minutes | counted_minutes
+                if merged_minutes != previous_minutes:
+                    pending.expected_source_minutes = frozenset(merged_minutes)
+                    pending.expected_minute_count = len(merged_minutes)
+                    pending.last_observed_minute_count = None
+                    pending.attempts = 0
+            self._candle_repair_event.set()
+            return
+        if len(self._pending_candle_repairs) >= _CANDLE_REPAIR_PENDING_MAX:
+            dropped = next(iter(self._pending_candle_repairs))
+            self._drop_pending_candle_repair(dropped)
+            logger.error(
+                f"candle repair queue exceeded {_CANDLE_REPAIR_PENDING_MAX}; "
+                f"dropped oldest key symbol={dropped.symbol} "
+                f"timeframe={dropped.timeframe} window={dropped.window_begin.isoformat()}"
+            )
+        self._pending_candle_repairs[key] = _PendingCandleRepair(
+            expected_minute_count=len(counted_minutes),
+            expected_source_minutes=counted_minutes,
+        )
+        self._candle_repair_event.set()
+
     def _schedule_candle_repair_key(
         self, key: _CandleRepairKey, required_sequence: int, late_key: _LateCandleDropKey
     ) -> None:
@@ -2375,13 +2455,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         pending = self._pending_candle_repairs.get(key)
         if pending is not None:
-            if pending.required_sequence < required_sequence:
+            if pending.required_sequence is None or pending.required_sequence < required_sequence:
                 old_sequence = pending.required_sequence
                 self._unlink_repair_from_late_drop(key)
                 pending.required_sequence = required_sequence
                 pending.attempts = 0
                 self._link_repair_to_late_drop(key, late_key)
-                self._cleanup_committed_candle_write_sequence(old_sequence)
+                if old_sequence is not None:
+                    self._cleanup_committed_candle_write_sequence(old_sequence)
             self._candle_repair_event.set()
             return
         if len(self._pending_candle_repairs) >= _CANDLE_REPAIR_PENDING_MAX:
@@ -2452,7 +2533,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             sequences.add(pending_drop.write_sequence)
         for repair_key in tuple(pending_drop.repair_keys):
             pending_repair = self._pending_candle_repairs.get(repair_key)
-            if pending_repair is not None:
+            if pending_repair is not None and pending_repair.required_sequence is not None:
                 sequences.add(pending_repair.required_sequence)
             self._pending_candle_repairs.pop(repair_key, None)
             self._repair_drop_key_by_repair_key.pop(repair_key, None)
@@ -2470,7 +2551,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         sequences: set[int] = set()
         pending_repair = self._pending_candle_repairs.get(key)
-        if pending_repair is not None:
+        if pending_repair is not None and pending_repair.required_sequence is not None:
             sequences.add(pending_repair.required_sequence)
         late_key = self._repair_drop_key_by_repair_key.get(key)
         if late_key is None:
@@ -2480,12 +2561,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             sequences.add(pending_drop.write_sequence)
         return sequences
 
-    def _cleanup_committed_candle_write_sequence(self, sequence: int) -> None:
+    def _cleanup_committed_candle_write_sequence(self, sequence: int | None) -> None:
         """Forget an exact commit ack once no pending repair needs it.
 
         Args:
-            sequence: Candle write sequence to consider for cleanup.
+            sequence: Candle write sequence to consider for cleanup, or
+                ``None`` for count-only repairs.
         """
+        if sequence is None:
+            return
         if any(
             pending.required_sequence == sequence
             for pending in self._pending_candle_repairs.values()
@@ -2554,13 +2638,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             self._candle_repair_event.set()
 
     def _record_failed_candle_repair_attempt(
-        self, key: _CandleRepairKey, required_sequence: int
+        self, key: _CandleRepairKey, required_sequence: int | None
     ) -> bool:
         """Record a failed repair attempt and decide whether it may retry.
 
         Args:
             key: Repair key that failed to produce a candle.
-            required_sequence: Correction sequence used by the failed attempt.
+            required_sequence: Correction sequence used by the failed attempt,
+                or ``None`` for count-only seeded repairs.
 
         Returns:
             True when the repair should be retried, False when it was dropped or
@@ -2570,10 +2655,29 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if pending is None or pending.required_sequence != required_sequence:
             return False
         pending.attempts += 1
-        if pending.attempts < _CANDLE_REPAIR_MAX_ATTEMPTS:
+        max_attempts = (
+            _SEEDED_INCOMPLETE_REPAIR_MAX_ATTEMPTS
+            if pending.expected_source_minutes is not None
+            else _CANDLE_REPAIR_MAX_ATTEMPTS
+        )
+        if pending.attempts < max_attempts:
             return True
         self._drop_pending_candle_repair(key)
         self._cleanup_committed_candle_write_sequence(required_sequence)
+        if pending.expected_source_minutes is not None:
+            observed = (
+                pending.last_observed_minute_count
+                if pending.last_observed_minute_count is not None
+                else 0
+            )
+            logger.warning(
+                f"abandoned seeded incomplete candle repair after source-set gate: "
+                f"symbol={key.symbol} timeframe={key.timeframe} "
+                f"window={key.window_begin.isoformat()} "
+                f"source_1m_count={observed}/{pending.expected_minute_count} "
+                f"attempts={pending.attempts}; manual backfill required"
+            )
+            return False
         logger.warning(
             f"abandoned candle repair after retry limit: symbol={key.symbol} "
             f"timeframe={key.timeframe} window={key.window_begin.isoformat()} "
@@ -2611,7 +2715,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
     def _due_candle_repair_groups(
         self,
-    ) -> dict[tuple[str, datetime], list[tuple[_CandleRepairKey, int]]]:
+    ) -> dict[
+        tuple[str, datetime], list[tuple[_CandleRepairKey, int | None, frozenset[datetime] | None]]
+    ]:
         """Collect repair keys whose writer sequence and frontier are ready.
 
         Returns:
@@ -2620,26 +2726,34 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         aggregator = self._candle_aggregator
         if aggregator is None:
             return {}
-        groups: dict[tuple[str, datetime], list[tuple[_CandleRepairKey, int]]] = {}
+        groups: dict[
+            tuple[str, datetime],
+            list[tuple[_CandleRepairKey, int | None, frozenset[datetime] | None]],
+        ] = {}
         for key, pending in self._pending_candle_repairs.items():
-            if pending.required_sequence not in self._committed_candle_write_sequences:
+            if (
+                pending.required_sequence is not None
+                and pending.required_sequence not in self._committed_candle_write_sequences
+            ):
                 continue
             if not aggregator.has_closed_window(key.symbol, key.timeframe, key.window_begin):
                 continue
             group_key = (key.symbol, key.window_begin)
-            groups.setdefault(group_key, []).append((key, pending.required_sequence))
+            groups.setdefault(group_key, []).append(
+                (key, pending.required_sequence, pending.expected_source_minutes)
+            )
         return groups
 
     async def _repair_candle_group(
         self,
-        entries: list[tuple[_CandleRepairKey, int]],
+        entries: list[tuple[_CandleRepairKey, int | None, frozenset[datetime] | None]],
         exchange: MarketDataExchange,
         semaphore: asyncio.Semaphore,
     ) -> list[_CandleRepairResult]:
         """Repair a group of keys under the shared concurrency cap.
 
         Args:
-            entries: Pending repair keys and their required sequences.
+            entries: Pending repair keys, required sequences, and count gates.
             exchange: Exchange name for synthesized repair publication.
             semaphore: Shared concurrency limiter.
 
@@ -2648,24 +2762,31 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         async with semaphore:
             results: list[_CandleRepairResult] = []
-            for key, required_sequence in entries:
-                done = await self._repair_candle_key(key, exchange)
+            for key, required_sequence, expected_source_minutes in entries:
+                done = await self._repair_candle_key(key, exchange, expected_source_minutes)
                 results.append(_CandleRepairResult(key, required_sequence, done))
             return results
 
-    async def _repair_candle_key(self, key: _CandleRepairKey, exchange: MarketDataExchange) -> bool:
+    async def _repair_candle_key(
+        self,
+        key: _CandleRepairKey,
+        exchange: MarketDataExchange,
+        expected_source_minutes: frozenset[datetime] | None = None,
+    ) -> bool:
         """Re-derive and publish one synthesized candle from persisted 1m rows.
 
         Args:
             key: Synthesized candle natural key to repair.
             exchange: Exchange name for synthesized repair publication.
+            expected_source_minutes: Source-set gate for seeded-incomplete repairs, or
+                ``None`` for exact late-correction repairs.
 
         Returns:
             True when the pending key should be removed, False when it should be
             retried after another debounce interval.
         """
         try:
-            candle = await self._derive_repaired_synthesized_candle(key)
+            candle = await self._derive_repaired_synthesized_candle(key, expected_source_minutes)
             if candle is None:
                 return False
             await self._publish_synthesized_candle(candle, exchange, key.timeframe)
@@ -2678,12 +2799,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return False
 
     async def _derive_repaired_synthesized_candle(
-        self, key: _CandleRepairKey
+        self, key: _CandleRepairKey, expected_source_minutes: frozenset[datetime] | None = None
     ) -> CandleUpdate | None:
         """Read persisted 1m rows and rebuild one higher-timeframe candle.
 
         Args:
             key: Synthesized candle natural key to repair.
+            expected_source_minutes: Distinct complete 1m source minutes that
+                must be present for a seeded-incomplete repair, or ``None`` for
+                exact repairs.
 
         Returns:
             Re-derived synthesized candle, or ``None`` when fail-safe guards
@@ -2704,9 +2828,17 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             datetime.now(UTC),
             order="asc",
         )
+        pending = self._pending_candle_repairs.get(key)
+        observed_source_minutes = {row["open_at"] for row in rows if row["complete"]}
+        if pending is not None and expected_source_minutes is not None:
+            pending.last_observed_minute_count = len(observed_source_minutes)
         if not rows:
             return None
         if any(not row["complete"] for row in rows):
+            return None
+        if expected_source_minutes is not None and not observed_source_minutes.issuperset(
+            expected_source_minutes
+        ):
             return None
         repair_aggregator = CandleAggregator(
             [key.timeframe],

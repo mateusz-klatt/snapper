@@ -71,6 +71,7 @@ from snapper.messaging.publishers.base import _WriterSessionLostError
 from snapper.messaging.publishers.candle_aggregator import SUPPORTED_SYNTHESIS_TIMEFRAMES
 from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.candle_aggregator import LateCandleDrop
+from snapper.messaging.publishers.candle_aggregator import SeededIncompleteWindow
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
 from snapper.messaging.schemas.data import CandleData
@@ -7914,6 +7915,13 @@ def _candle_minute(hour: int, minute: int, *, day: int = 14) -> datetime:
     return datetime(2026, 6, day, hour, minute, tzinfo=UTC)
 
 
+def _seeded_signal(
+    symbol: str, timeframe: str, window: datetime, *minutes: datetime
+) -> SeededIncompleteWindow:
+    """Build a seeded-incomplete repair signal with a folded minute set."""
+    return SeededIncompleteWindow(symbol, timeframe, window, len(minutes), frozenset(minutes))
+
+
 def _candle_update(
     *,
     begin: datetime,
@@ -8298,7 +8306,7 @@ def test_late_repair_waits_for_specific_correction_commit() -> None:
     pub._mark_candle_writes_committed([unrelated])
     assert pub._due_candle_repair_groups() == {}
     pub._mark_candle_writes_committed([correction])
-    assert pub._due_candle_repair_groups() == {("BTC-USD", minute): [(key, 2)]}
+    assert pub._due_candle_repair_groups() == {("BTC-USD", minute): [(key, 2, None)]}
 
 
 @pytest.mark.asyncio
@@ -9543,7 +9551,94 @@ def test_due_candle_repair_groups_waits_for_commit_and_closed_frontier() -> None
     pub._candle_aggregator._closed_window[("BTC-USD", "5m")] = int(
         _candle_minute(10, 0).timestamp()
     )
-    assert pub._due_candle_repair_groups() == {("BTC-USD", _candle_minute(10, 0)): [(key, 1)]}
+    assert pub._due_candle_repair_groups() == {("BTC-USD", _candle_minute(10, 0)): [(key, 1, None)]}
+
+
+def test_seeded_and_exact_repair_modes_merge_without_dropping_gates() -> None:
+    """A shared repair key retains both the exact and source-set gates.
+
+    Given: exact and seeded-incomplete scheduling both target the same repair key,
+    When: the two scheduling paths run in either order,
+    Then: the pending repair keeps the exact sequence and expected source set.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    first_window = _candle_minute(10, 0)
+    first_key = _CandleRepairKey("BTC-USD", "5m", first_window)
+    first_late = _LateCandleDropKey("BTC-USD", _candle_minute(10, 1))
+    pub._pending_late_candle_drops[first_late] = _PendingLateCandleDrop(write_sequence=4)
+    pub._schedule_candle_repair_key(first_key, 4, first_late)
+    pub._record_seeded_incomplete_window_repairs(
+        [_seeded_signal("BTC-USD", "5m", first_window, _candle_minute(10, 1))]
+    )
+    first_pending = pub._pending_candle_repairs[first_key]
+    assert first_pending.required_sequence == 4
+    assert first_pending.expected_source_minutes == frozenset({_candle_minute(10, 1)})
+
+    second_window = _candle_minute(11, 0)
+    second_key = _CandleRepairKey("BTC-USD", "5m", second_window)
+    second_late = _LateCandleDropKey("BTC-USD", _candle_minute(11, 1))
+    pub._pending_late_candle_drops[second_late] = _PendingLateCandleDrop(write_sequence=5)
+    pub._record_seeded_incomplete_window_repairs(
+        [_seeded_signal("BTC-USD", "5m", second_window, _candle_minute(11, 1))]
+    )
+    pub._schedule_candle_repair_key(second_key, 5, second_late)
+    second_pending = pub._pending_candle_repairs[second_key]
+    assert second_pending.required_sequence == 5
+    assert second_pending.expected_source_minutes == frozenset({_candle_minute(11, 1)})
+
+
+@pytest.mark.asyncio
+async def test_mixed_exact_and_seeded_repair_requires_both_gates() -> None:
+    """A shared repair waits for exact commit and source-set inclusion.
+
+    Given: one key has both an uncommitted exact sequence and a folded source set,
+    When: the exact sequence commits before the source set is fully persisted,
+    Then: repair reads and publish remain blocked until both gates pass.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    window = _candle_minute(10, 0)
+    key = _CandleRepairKey("BTC-USD", "5m", window)
+    late_key = _LateCandleDropKey("BTC-USD", _candle_minute(10, 1))
+    pub._pending_late_candle_drops[late_key] = _PendingLateCandleDrop(write_sequence=7)
+    pub._schedule_candle_repair_key(key, 7, late_key)
+    pub._record_seeded_incomplete_window_repairs(
+        [
+            _seeded_signal(
+                "BTC-USD",
+                "5m",
+                window,
+                _candle_minute(10, 1),
+                _candle_minute(10, 2),
+            )
+        ]
+    )
+    pub._candle_aggregator._closed_window[("BTC-USD", "5m")] = int(window.timestamp())
+    get_candles = AsyncMock(
+        side_effect=[
+            [
+                _persisted_candle_row(open_at=_candle_minute(10, 1)),
+                _persisted_candle_row(open_at=_candle_minute(10, 3)),
+            ],
+            [
+                _persisted_candle_row(open_at=_candle_minute(10, 1), open_=11.0),
+                _persisted_candle_row(open_at=_candle_minute(10, 2), close=12.0),
+            ],
+        ]
+    )
+    pub.repository = SimpleNamespace(get_candles=get_candles)
+    pub._publish_synthesized_candle = AsyncMock()
+    assert pub._due_candle_repair_groups() == {}
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    get_candles.assert_not_awaited()
+    pub._committed_candle_write_sequences.add(7)
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    pub._publish_synthesized_candle.assert_not_awaited()
+    assert pub._pending_candle_repairs[key].attempts == 1
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    pub._publish_synthesized_candle.assert_awaited_once()
+    assert key not in pub._pending_candle_repairs
+    assert 7 not in pub._committed_candle_write_sequences
 
 
 @pytest.mark.asyncio
@@ -9559,7 +9654,7 @@ async def test_repair_candle_group_runs_entries_under_semaphore() -> None:
     second = _CandleRepairKey("BTC-USD", "1h", _candle_minute(10, 0))
     pub._repair_candle_key = AsyncMock(side_effect=[True, False])
     results = await pub._repair_candle_group(
-        [(first, 1), (second, 2)],
+        [(first, 1, None), (second, 2, None)],
         ExchangeEnum.KRAKEN,
         asyncio.Semaphore(1),
     )
@@ -9584,7 +9679,9 @@ async def test_run_due_candle_repairs_removes_done_and_retries_failed() -> None:
     pub._pending_candle_repairs[retry_key] = _PendingCandleRepair(required_sequence=1)
     pub._committed_candle_write_sequences.add(1)
     pub._due_candle_repair_groups = Mock(
-        return_value={("BTC-USD", _candle_minute(10, 0)): [(done_key, 1), (retry_key, 1)]}
+        return_value={
+            ("BTC-USD", _candle_minute(10, 0)): [(done_key, 1, None), (retry_key, 1, None)]
+        }
     )
     pub._repair_candle_group = AsyncMock(
         return_value=[
@@ -9615,7 +9712,7 @@ async def test_run_due_candle_repairs_drops_permanently_incomplete_after_retry_b
     pub._pending_candle_repairs[key] = _PendingCandleRepair(required_sequence=1)
     pub._committed_candle_write_sequences.add(1)
     pub._due_candle_repair_groups = Mock(
-        return_value={("BTC-USD", _candle_minute(10, 0)): [(key, 1)]}
+        return_value={("BTC-USD", _candle_minute(10, 0)): [(key, 1, None)]}
     )
     pub._repair_candle_group = AsyncMock(return_value=[_CandleRepairResult(key, 1, False)])
     with patch("snapper.messaging.publishers.base.logger.warning") as warning:
@@ -9660,7 +9757,9 @@ async def test_run_due_candle_repairs_leaves_newer_pending_sequence() -> None:
     pub._pending_candle_repairs[current_key] = _PendingCandleRepair(required_sequence=1)
     pub._pending_candle_repairs[stale_key] = _PendingCandleRepair(required_sequence=2)
     pub._due_candle_repair_groups = Mock(
-        return_value={("BTC-USD", _candle_minute(10, 0)): [(current_key, 1), (stale_key, 1)]}
+        return_value={
+            ("BTC-USD", _candle_minute(10, 0)): [(current_key, 1, None), (stale_key, 1, None)]
+        }
     )
     pub._repair_candle_group = AsyncMock(
         return_value=[
@@ -9673,6 +9772,274 @@ async def test_run_due_candle_repairs_leaves_newer_pending_sequence() -> None:
     assert current_key not in pub._pending_candle_repairs
     assert stale_key in pub._pending_candle_repairs
     assert not pub._candle_repair_event.is_set()
+
+
+def test_seeded_incomplete_signal_schedules_one_count_gated_repair() -> None:
+    """Seeded incomplete close signals dedupe into one source-gated repair.
+
+    Given: duplicate seeded-incomplete signals for one suppressed window,
+    When: the publisher records the drained aggregator signals,
+    Then: exactly one pending repair carries the folded complete-minute set.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    window = _candle_minute(10, 0)
+    key = _CandleRepairKey("BTC-USD", "5m", window)
+    minutes = frozenset({_candle_minute(10, 1), _candle_minute(10, 2)})
+    signal = _seeded_signal("BTC-USD", "5m", window, *minutes)
+    pub._record_seeded_incomplete_window_repairs([signal, signal])
+    assert list(pub._pending_candle_repairs) == [key]
+    pending = pub._pending_candle_repairs[key]
+    assert pending.required_sequence is None
+    assert pending.expected_minute_count == 2
+    assert pending.expected_source_minutes == minutes
+    assert pub._candle_repair_event.is_set()
+
+
+def test_seeded_incomplete_repair_refreshes_to_higher_expected_count() -> None:
+    """Repeated seeded-incomplete signals merge their folded source minutes.
+
+    Given: a pending seeded repair already has one expected source minute,
+    When: a later signal for the same key includes additional source minutes,
+    Then: the repair keeps the union and resets retry state for the larger set.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    window = _candle_minute(10, 0)
+    key = _CandleRepairKey("BTC-USD", "5m", window)
+    pub._record_seeded_incomplete_window_repairs(
+        [_seeded_signal("BTC-USD", "5m", window, _candle_minute(10, 1))]
+    )
+    pub._pending_candle_repairs[key].attempts = 2
+    pub._record_seeded_incomplete_window_repairs(
+        [
+            _seeded_signal(
+                "BTC-USD",
+                "5m",
+                window,
+                _candle_minute(10, 1),
+                _candle_minute(10, 2),
+                _candle_minute(10, 3),
+            )
+        ]
+    )
+    pending = pub._pending_candle_repairs[key]
+    assert pending.expected_minute_count == 3
+    assert pending.expected_source_minutes == frozenset(
+        {_candle_minute(10, 1), _candle_minute(10, 2), _candle_minute(10, 3)}
+    )
+    assert pending.attempts == 0
+
+
+def test_seeded_incomplete_repair_scheduling_bounds_pending_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seeded repair scheduling evicts the oldest pending key at capacity.
+
+    Given: the pending repair queue is at its configured capacity,
+    When: a new seeded-incomplete repair key is scheduled,
+    Then: the oldest key is dropped and the new expected source set is retained.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    monkeypatch.setattr("snapper.messaging.publishers.base._CANDLE_REPAIR_PENDING_MAX", 1)
+    first = _CandleRepairKey("BTC-USD", "5m", _candle_minute(10, 0))
+    second = _CandleRepairKey("ETH-USD", "5m", _candle_minute(10, 0))
+    pub._schedule_seeded_incomplete_candle_repair_key(first, frozenset({_candle_minute(10, 1)}))
+    with patch("snapper.messaging.publishers.base.logger.error") as error:
+        pub._schedule_seeded_incomplete_candle_repair_key(
+            second,
+            frozenset({_candle_minute(10, 1), _candle_minute(10, 2)}),
+        )
+    error.assert_called_once()
+    assert first not in pub._pending_candle_repairs
+    assert pub._pending_candle_repairs[second].expected_minute_count == 2
+
+
+@pytest.mark.asyncio
+async def test_seeded_incomplete_repair_waits_until_count_reaches_expected() -> None:
+    """A seeded repair publishes only after the settled plane catches up.
+
+    Given: a seeded-incomplete repair expects two folded complete source minutes,
+    When: the first settled-plane read contains only one of those minutes,
+    Then: the repair retries and later publishes once the source set is present.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    window = _candle_minute(10, 0)
+    key = _CandleRepairKey("BTC-USD", "5m", window)
+    pub._candle_aggregator._closed_window[("BTC-USD", "5m")] = int(window.timestamp())
+    pub._record_seeded_incomplete_window_repairs(
+        [
+            _seeded_signal(
+                "BTC-USD",
+                "5m",
+                window,
+                _candle_minute(10, 1),
+                _candle_minute(10, 2),
+            )
+        ]
+    )
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(
+            side_effect=[
+                [_persisted_candle_row(open_at=_candle_minute(10, 1), open_=11.0)],
+                [
+                    _persisted_candle_row(open_at=_candle_minute(10, 1), open_=11.0),
+                    _persisted_candle_row(open_at=_candle_minute(10, 2), close=12.0),
+                ],
+            ]
+        )
+    )
+    pub._publish_synthesized_candle = AsyncMock()
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    pub._publish_synthesized_candle.assert_not_awaited()
+    assert pub._pending_candle_repairs[key].attempts == 1
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    pub._publish_synthesized_candle.assert_awaited_once()
+    published = pub._publish_synthesized_candle.await_args
+    assert published is not None
+    candle = published.args[0]
+    assert isinstance(candle, CandleUpdate)
+    assert candle.interval_begin == window
+    assert candle.open == 11.0
+    assert candle.close == 12.0
+    assert key not in pub._pending_candle_repairs
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    pub._publish_synthesized_candle.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_seeded_incomplete_repair_abandons_when_count_never_reaches_expected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permanently short source plane is warned without publishing.
+
+    Given: a seeded-incomplete repair expects a source minute that never appears,
+    When: retries exhaust the bounded seeded repair budget,
+    Then: the repair is abandoned with a warning and no truncated publish occurs.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base._SEEDED_INCOMPLETE_REPAIR_MAX_ATTEMPTS", 2
+    )
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    window = _candle_minute(10, 0)
+    key = _CandleRepairKey("BTC-USD", "5m", window)
+    pub._candle_aggregator._closed_window[("BTC-USD", "5m")] = int(window.timestamp())
+    pub._record_seeded_incomplete_window_repairs(
+        [
+            _seeded_signal(
+                "BTC-USD",
+                "5m",
+                window,
+                _candle_minute(10, 1),
+                _candle_minute(10, 2),
+            )
+        ]
+    )
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(return_value=[_persisted_candle_row(open_at=_candle_minute(10, 1))])
+    )
+    pub._publish_synthesized_candle = AsyncMock()
+    with patch("snapper.messaging.publishers.base.logger.warning") as warning:
+        await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+        await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    pub._publish_synthesized_candle.assert_not_awaited()
+    warning.assert_called_once()
+    message = warning.call_args.args[0]
+    assert "source_1m_count=1/2" in message
+    assert key not in pub._pending_candle_repairs
+
+
+@pytest.mark.asyncio
+async def test_seeded_incomplete_repair_abandons_when_count_passes_but_set_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replacement minute cannot mask a missing folded source minute.
+
+    Given: a seeded repair expects two specific folded source minutes,
+    When: the settled plane has the same count but one different minute,
+    Then: source-set inclusion fails and the repair abandons without publishing.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base._SEEDED_INCOMPLETE_REPAIR_MAX_ATTEMPTS", 2
+    )
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    window = _candle_minute(10, 0)
+    key = _CandleRepairKey("BTC-USD", "5m", window)
+    pub._candle_aggregator._closed_window[("BTC-USD", "5m")] = int(window.timestamp())
+    pub._record_seeded_incomplete_window_repairs(
+        [
+            _seeded_signal(
+                "BTC-USD",
+                "5m",
+                window,
+                _candle_minute(10, 1),
+                _candle_minute(10, 2),
+            )
+        ]
+    )
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(
+            return_value=[
+                _persisted_candle_row(open_at=_candle_minute(10, 1)),
+                _persisted_candle_row(open_at=_candle_minute(10, 3)),
+            ]
+        )
+    )
+    pub._publish_synthesized_candle = AsyncMock()
+    with patch("snapper.messaging.publishers.base.logger.warning") as warning:
+        await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+        await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    pub._publish_synthesized_candle.assert_not_awaited()
+    warning.assert_called_once()
+    message = warning.call_args.args[0]
+    assert "source_1m_count=2/2" in message
+    assert key not in pub._pending_candle_repairs
+
+
+@pytest.mark.asyncio
+async def test_seeded_incomplete_repair_publishes_fuller_plane_when_count_exceeds_expected() -> (
+    None
+):
+    """A very-late extra complete minute is included in the repaired bar.
+
+    Given: a seeded repair expects two specific folded source minutes,
+    When: the settled plane contains those minutes plus an extra complete minute,
+    Then: the repair publishes from the fuller settled plane.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    window = _candle_minute(10, 0)
+    pub._candle_aggregator._closed_window[("BTC-USD", "5m")] = int(window.timestamp())
+    pub._record_seeded_incomplete_window_repairs(
+        [
+            _seeded_signal(
+                "BTC-USD",
+                "5m",
+                window,
+                _candle_minute(10, 1),
+                _candle_minute(10, 2),
+            )
+        ]
+    )
+    pub.repository = SimpleNamespace(
+        get_candles=AsyncMock(
+            return_value=[
+                _persisted_candle_row(open_at=_candle_minute(10, 1), close=11.0),
+                _persisted_candle_row(open_at=_candle_minute(10, 2), close=12.0),
+                _persisted_candle_row(open_at=_candle_minute(10, 3), close=33.0),
+            ]
+        )
+    )
+    pub._publish_synthesized_candle = AsyncMock()
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    pub._publish_synthesized_candle.assert_awaited_once()
+    published = pub._publish_synthesized_candle.await_args
+    assert published is not None
+    candle = published.args[0]
+    assert isinstance(candle, CandleUpdate)
+    assert candle.close == 33.0
+    assert candle.volume == 30.0
 
 
 @pytest.mark.asyncio
