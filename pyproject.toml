@@ -28,7 +28,7 @@ pydantic = "^2.13.4"
 pydantic-settings = "^2.14.2"
 sqlalchemy = {extras = ["asyncio"], version = "^2.0.51"}
 aiosqlite = "^0.22.1"
-pandas = "^3.0.4"
+pandas = "^3.0.3"
 numpy = "^2.5.0"
 typer = {extras = ["all"], version = "^0.26.8"}
 python-dotenv = "^1.2.2"
