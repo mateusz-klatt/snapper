@@ -4347,13 +4347,17 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     ) -> None:
         """Handle a feed-health snapshot before it is persisted.
 
+        The base implementation is an awaitable no-op so subclasses can
+        override the hook with asynchronous persistence or rebroadcast work
+        while callers use one consistent await site.
+
         Args:
             snapshot: Point-in-time subscription-health entries.
 
         Returns:
             None.
         """
-        return None
+        await asyncio.sleep(0)
 
     def _build_feed_health_rows(
         self, snapshot: dict[tuple[str, str], _SymbolEntry]

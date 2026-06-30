@@ -1012,7 +1012,9 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             return False
         client.WS_URL = endpoint
         setattr(connector, endpoint_attr, endpoint)
-        return endpoint == client.WS_URL and getattr(connector, endpoint_attr, None) == endpoint
+        client_endpoint = client.WS_URL
+        connector_endpoint = getattr(connector, endpoint_attr, None)
+        return client_endpoint == endpoint and connector_endpoint == endpoint
 
     async def _send_ws_subscribe(
         self,

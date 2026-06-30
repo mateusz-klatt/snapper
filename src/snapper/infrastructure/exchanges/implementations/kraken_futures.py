@@ -857,10 +857,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         channel: Literal["ticker", "trade"],
         product: str,
     ) -> None:
-        """Remove one public product from the replay cache."""
-        for key, req in list(self._subscription_cache.items()):
-            if req.channel != channel or product not in req.symbols:
-                continue
+        """Remove one public product from a replay-cache snapshot."""
+        matching_requests = [
+            (key, req)
+            for key, req in self._subscription_cache.items()
+            if req.channel == channel and product in req.symbols
+        ]
+        for key, req in matching_requests:
             del self._subscription_cache[key]
             remaining = tuple(symbol for symbol in req.symbols if symbol != product)
             if remaining:
