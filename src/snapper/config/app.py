@@ -442,16 +442,16 @@ class AppSettings:
 
     @property
     def kraken_equities_realtime_wallet_public_id(self) -> str:
-        """Return the wallet whose Kraken Spot key mints Equities WS tokens.
+        """Return the optional wallet whose Kraken Spot key mints tokens.
 
         The authenticated Equities feed accepts tokens minted through Kraken
-        Spot ``GetWebSocketsToken``. This setting identifies the wallet row in
-        ``wallet_credentials`` whose ``exchange='kraken'`` API key/secret is
-        used for that mint. Empty string keeps realtime auth unavailable and
-        therefore falls back to the public delayed feed.
+        Spot ``GetWebSocketsToken``. When non-empty, this setting pins the
+        wallet row in ``wallet_credentials`` whose ``exchange='kraken'`` API
+        key/secret is used for that mint. Empty string lets the Equities
+        client auto-select an active Kraken Spot ``api_key_secret`` wallet.
 
         Returns:
-            Wallet public id string, or empty string when unset.
+            Wallet public id string, or empty string for auto-selection.
         """
         return self._get_db_setting("kraken_equities_realtime_wallet_public_id", "")
 

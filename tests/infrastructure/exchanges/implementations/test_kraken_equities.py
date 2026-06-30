@@ -17,6 +17,7 @@ from loguru import logger
 
 from snapper.config.credentials import CredentialNotFoundError
 from snapper.core.json_types import JsonValue
+from snapper.data.repository_types import WalletCredentialRow
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
@@ -99,6 +100,26 @@ class _SdkShapedWsClient:
 def _proxy_snapshot(session: requests.Session) -> dict[str, str]:
     """Return a plain proxy mapping snapshot for assertions."""
     return {str(key): str(value) for key, value in session.proxies.items()}
+
+
+def _wallet_credential_row(
+    wallet_public_id: str,
+    *,
+    exchange: str = "kraken",
+    credential_type: str = "api_key_secret",
+) -> WalletCredentialRow:
+    """Build an active wallet credential row for repository doubles."""
+    return {
+        "public_id": f"credential-{wallet_public_id}",
+        "wallet_public_id": wallet_public_id,
+        "exchange": exchange,
+        "credential_type": credential_type,
+        "encrypted_payload": "encrypted-payload",
+        "label": None,
+        "timestamp": _dt(2026, 6, 30, tzinfo=_UTC),
+        "session_id": "session-1",
+        "sequence_id": 1,
+    }
 
 
 def _equities_public_pool_config() -> EgressPoolConfig:
@@ -203,6 +224,9 @@ class TestRealtimeAuthWebSocket:
         Then: The auth endpoint is used and token state remains in memory only.
         """
         repository = MagicMock()
+        repository.list_active_wallet_credentials = AsyncMock(
+            return_value=[_wallet_credential_row("wallet-auto")]
+        )
         c = KrakenEquitiesExchangeClient(
             repository=repository,
             realtime_ws_enabled=True,
@@ -220,34 +244,241 @@ class TestRealtimeAuthWebSocket:
                     "CredentialResolver",
                     return_value=resolver,
                 ) as resolver_cls,
-                patch(
-                    "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotClient"
-                ) as spot_cls,
+                patch.object(
+                    c,
+                    "_dispatch_blocking",
+                    new_callable=AsyncMock,
+                    return_value={"token": "token-1", "expires": 900},
+                ) as dispatch,
                 patch(
                     "snapper.infrastructure.exchanges.implementations.kraken_equities."
                     "SpotWSClient"
                 ) as ws_cls,
             ):
-                spot_cls.return_value.request.return_value = {"token": "token-1", "expires": 900}
                 ws_cls.return_value.start = AsyncMock()
+                ws_cls.return_value.close = AsyncMock()
                 await c._ensure_ws_connected()
 
             resolver_cls.assert_called_once_with(repository)
+            repository.list_active_wallet_credentials.assert_not_awaited()
             resolver.get_credentials.assert_awaited_once_with(
                 exchange="kraken",
                 wallet_public_id="wallet-1",
             )
-            spot_cls.assert_called_once_with(key="api-key", secret="api-secret")
-            spot_cls.return_value.request.assert_called_once_with(
-                "POST",
-                "/0/private/GetWebSocketsToken",
-                timeout=10,
-            )
+            dispatch.assert_awaited_once()
+            dispatch_await_args = dispatch.await_args
+            assert dispatch_await_args is not None
+            dispatch_args = dispatch_await_args.args
+            assert dispatch_args[1:] == ("api-key", "api-secret")
             assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_AUTH_URL
             assert c._ws_auth_active is True
             assert c._ws_token == "token-1"
         finally:
             await c.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_realtime_autolookup_single_wallet_mints_token(self) -> None:
+        """An empty realtime wallet setting auto-selects one Kraken Spot key."""
+        repository = MagicMock()
+        repository.list_active_wallet_credentials = AsyncMock(
+            return_value=[_wallet_credential_row("wallet-auto")]
+        )
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="",
+        )
+        resolver = MagicMock()
+        resolver.get_credentials = AsyncMock(
+            return_value={"api_key": "api-key", "api_secret": "api-secret"}
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver",
+                return_value=resolver,
+            ) as resolver_cls,
+            patch.object(
+                c,
+                "_dispatch_blocking",
+                new_callable=AsyncMock,
+                return_value={"token": "token-1", "expires": 900},
+            ),
+        ):
+            assert await c._refresh_realtime_ws_token() is True
+
+        resolver_cls.assert_called_once_with(repository)
+        repository.list_active_wallet_credentials.assert_awaited_once()
+        as_of = repository.list_active_wallet_credentials.await_args.kwargs["as_of"]
+        assert isinstance(as_of, _dt)
+        assert as_of.tzinfo is _UTC
+        resolver.get_credentials.assert_awaited_once_with(
+            exchange="kraken",
+            wallet_public_id="wallet-auto",
+        )
+        assert c._resolved_realtime_wallet_public_id == "wallet-auto"
+        assert c._ws_auth_active is True
+        assert c._ws_token == "token-1"
+
+    @pytest.mark.asyncio
+    async def test_realtime_autolookup_multiple_wallets_picks_first_and_warns(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Multiple auto candidates use deterministic order and warn to pin."""
+        repository = MagicMock()
+        repository.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                _wallet_credential_row(
+                    "wallet-paper",
+                    credential_type="paper",
+                ),
+                _wallet_credential_row("wallet-a"),
+                _wallet_credential_row("wallet-b"),
+            ]
+        )
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="",
+        )
+        resolver = MagicMock()
+        resolver.get_credentials = AsyncMock(
+            return_value={"api_key": "api-key", "api_secret": "api-secret"}
+        )
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            with (
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                    "CredentialResolver",
+                    return_value=resolver,
+                ),
+                patch.object(
+                    c,
+                    "_dispatch_blocking",
+                    new_callable=AsyncMock,
+                    return_value={"token": "token-1", "expires": 900},
+                ),
+            ):
+                assert await c._refresh_realtime_ws_token() is True
+        finally:
+            logger.remove(sink_id)
+
+        resolver.get_credentials.assert_awaited_once_with(
+            exchange="kraken",
+            wallet_public_id="wallet-a",
+        )
+        logged = "\n".join(record.message for record in caplog.records)
+        assert "multiple Kraken Spot api_key_secret wallet credentials" in logged
+        assert "wallet-a" in logged
+        assert "kraken_equities_realtime_wallet_public_id" in logged
+
+    @pytest.mark.asyncio
+    async def test_realtime_autolookup_cache_invalidates_after_failures(self) -> None:
+        """Cached auto wallet lookup survives success and refreshes after failures."""
+        repository = MagicMock()
+        repository.list_active_wallet_credentials = AsyncMock(
+            side_effect=[
+                [_wallet_credential_row("wallet-a")],
+                [_wallet_credential_row("wallet-b")],
+                [_wallet_credential_row("wallet-c")],
+            ]
+        )
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="",
+        )
+        resolver = MagicMock()
+        resolver.get_credentials = AsyncMock(
+            side_effect=[
+                {"api_key": "api-key-a", "api_secret": "api-secret-a"},
+                {"api_key": "api-key-a", "api_secret": "api-secret-a"},
+                {"api_key": "api-key-a", "api_secret": "api-secret-a"},
+                CredentialNotFoundError(exchange="kraken", wallet_public_id="wallet-b"),
+                {"api_key": "api-key-c", "api_secret": "api-secret-c"},
+            ]
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver",
+                return_value=resolver,
+            ),
+            patch.object(
+                c,
+                "_dispatch_blocking",
+                new_callable=AsyncMock,
+                side_effect=[
+                    {"token": "token-1", "expires": 900},
+                    {"token": "token-2", "expires": 900},
+                    RuntimeError("mint failed"),
+                    {"token": "token-3", "expires": 900},
+                ],
+            ),
+        ):
+            assert await c._refresh_realtime_ws_token() is True
+            assert await c._refresh_realtime_ws_token() is True
+            assert await c._refresh_realtime_ws_token(clear_on_failure=False) is False
+            assert await c._refresh_realtime_ws_token(clear_on_failure=False) is False
+            assert await c._refresh_realtime_ws_token() is True
+
+        assert repository.list_active_wallet_credentials.await_count == 3
+        wallet_public_ids = [
+            call.kwargs["wallet_public_id"] for call in resolver.get_credentials.await_args_list
+        ]
+        assert wallet_public_ids == [
+            "wallet-a",
+            "wallet-a",
+            "wallet-a",
+            "wallet-b",
+            "wallet-c",
+        ]
+        assert c._resolved_realtime_wallet_public_id == "wallet-c"
+        assert c._ws_token == "token-3"
+
+    @pytest.mark.asyncio
+    async def test_realtime_autolookup_exception_clears_auth_state(self) -> None:
+        """Realtime token refresh falls back when wallet autolookup raises."""
+        c = KrakenEquitiesExchangeClient(repository=MagicMock(), realtime_ws_enabled=True)
+        c._ws_token = "stale-token"
+        c._ws_token_refresh_at = 10.0
+        c._ws_token_expires_at = 20.0
+        c._ws_auth_active = True
+        with patch.object(
+            c,
+            "_resolve_realtime_wallet_public_id",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("repository unavailable"),
+        ):
+            assert await c._refresh_realtime_ws_token() is False
+
+        assert c._ws_token is None
+        assert c._ws_token_refresh_at == 0.0
+        assert c._ws_token_expires_at == 0.0
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_realtime_autolookup_exception_preserves_auth_state(self) -> None:
+        """Lazy realtime refresh preserves auth state when wallet autolookup raises."""
+        c = KrakenEquitiesExchangeClient(repository=MagicMock(), realtime_ws_enabled=True)
+        c._ws_token = "stale-token"
+        c._ws_token_refresh_at = 10.0
+        c._ws_token_expires_at = 20.0
+        c._ws_auth_active = True
+        with patch.object(
+            c,
+            "_resolve_realtime_wallet_public_id",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("repository unavailable"),
+        ):
+            assert await c._refresh_realtime_ws_token(clear_on_failure=False) is False
+
+        assert c._ws_token == "stale-token"
+        assert c._ws_token_refresh_at == 10.0
+        assert c._ws_token_expires_at == 20.0
+        assert c._ws_auth_active is True
 
     def test_token_mint_routes_through_equities_public_egress_pool(self) -> None:
         """Realtime token mint uses the same public Equities egress route as WS.
@@ -376,9 +607,22 @@ class TestRealtimeAuthWebSocket:
 
     @pytest.mark.asyncio
     async def test_realtime_missing_wallet_setting_falls_back_to_public(self) -> None:
-        """An enabled feed without a wallet id fails open to public WS."""
+        """An enabled feed without an auto credential fails open to public WS."""
+        repository = MagicMock()
+        repository.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                _wallet_credential_row(
+                    "wallet-paper",
+                    credential_type="paper",
+                ),
+                _wallet_credential_row(
+                    "wallet-futures",
+                    exchange="kraken_futures",
+                ),
+            ]
+        )
         c = KrakenEquitiesExchangeClient(
-            repository=MagicMock(),
+            repository=repository,
             realtime_ws_enabled=True,
             realtime_wallet_public_id="",
         )
@@ -393,6 +637,7 @@ class TestRealtimeAuthWebSocket:
         ):
             ws_cls.return_value.start = AsyncMock()
             await c._ensure_ws_connected()
+        repository.list_active_wallet_credentials.assert_awaited_once()
         resolver_cls.assert_not_called()
         assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
         assert c._ws_auth_active is False
@@ -467,14 +712,16 @@ class TestRealtimeAuthWebSocket:
                 "CredentialResolver",
                 return_value=resolver,
             ),
-            patch(
-                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotClient"
-            ) as spot_cls,
+            patch.object(
+                c,
+                "_dispatch_blocking",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("permission denied"),
+            ),
             patch(
                 "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
             ) as ws_cls,
         ):
-            spot_cls.return_value.request.side_effect = RuntimeError("permission denied")
             ws_cls.return_value.start = AsyncMock()
             await c._ensure_ws_connected()
         assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL

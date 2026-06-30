@@ -273,13 +273,18 @@ execution subscriptions, or account channels in Snapper. To enable it:
 1. Seed or select a wallet credential row with `exchange='kraken'`,
     `credential_type='api_key_secret'`, and Kraken's WebSocket interface
     permission.
-2. Set `kraken_equities_realtime_wallet_public_id=<wallet_public_id>`.
+2. Optionally set
+    `kraken_equities_realtime_wallet_public_id=<wallet_public_id>` to pin
+    a specific wallet. When this setting is empty, Snapper auto-selects the
+    first active Kraken Spot `api_key_secret` wallet credential in
+    deterministic repository order.
 3. Set `kraken_equities_realtime_ws_enabled=true`.
 4. Restart `snapper-feed`; these settings are read when the
     `kraken_equities_feed_publisher` constructs its exchange client.
 5. Verify incoming ticker frames have `is_delayed=false`. If token minting
-    fails, the same publisher keeps running against
-    `wss://ws-equities.kraken.com` and frames remain `is_delayed=true`.
+    fails, or no matching Kraken Spot credential exists, the same publisher
+    keeps running against `wss://ws-equities.kraken.com` and frames remain
+    `is_delayed=true`.
 
 Tokens are never persisted in `SubscriptionRequest.parameters_json` or any
 settings row. Reconnect recovery rebuilds the SDK client and replays

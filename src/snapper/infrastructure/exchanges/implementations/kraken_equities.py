@@ -44,6 +44,8 @@ import threading
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from collections.abc import Collection
+from datetime import UTC
+from datetime import datetime
 from time import monotonic
 from typing import Any
 from typing import cast
@@ -424,8 +426,8 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             repository: Database repository for logging (optional).
             realtime_ws_enabled: When True, try the authenticated
                 realtime Equities WS feed before falling back to public.
-            realtime_wallet_public_id: Wallet whose Kraken Spot
-                ``api_key_secret`` credential mints WS tokens.
+            realtime_wallet_public_id: Optional wallet override whose
+                Kraken Spot ``api_key_secret`` credential mints WS tokens.
         """
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN_EQUITIES)
         self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker()
@@ -441,6 +443,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         self._subscription_cache: dict[tuple[str, frozenset[str], str], SubscriptionRequest] = {}
         self._realtime_ws_enabled = realtime_ws_enabled
         self._realtime_wallet_public_id = realtime_wallet_public_id.strip()
+        self._resolved_realtime_wallet_public_id: str | None = None
         self._ws_token: str | None = None
         self._ws_token_refresh_at: float = 0.0
         self._ws_token_expires_at: float = 0.0
@@ -801,6 +804,41 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             return False
         return await self._refresh_realtime_ws_token()
 
+    async def _resolve_realtime_wallet_public_id(self, repository: Repository | None) -> str:
+        """Resolve the wallet used to mint Kraken Equities realtime WS tokens.
+
+        An explicitly configured wallet remains a hard override. When the
+        setting is empty, the first active Kraken Spot ``api_key_secret``
+        wallet credential is selected from the repository's deterministic
+        ordering and cached for later token refreshes.
+        """
+        if self._realtime_wallet_public_id:
+            return self._realtime_wallet_public_id
+        cached_wallet_public_id = self._resolved_realtime_wallet_public_id
+        if cached_wallet_public_id is not None:
+            return cached_wallet_public_id
+        if repository is None:
+            return ""
+        credentials = await repository.list_active_wallet_credentials(as_of=datetime.now(UTC))
+        wallet_public_ids = [
+            credential["wallet_public_id"]
+            for credential in credentials
+            if credential["exchange"].lower() == ExchangeEnum.KRAKEN
+            and credential["credential_type"].lower() == "api_key_secret"
+        ]
+        if not wallet_public_ids:
+            return ""
+        wallet_public_id = wallet_public_ids[0]
+        self._resolved_realtime_wallet_public_id = wallet_public_id
+        if len(wallet_public_ids) > 1:
+            logger.warning(
+                "Kraken Equities realtime WS found multiple Kraken Spot api_key_secret "
+                "wallet credentials; using {}. Set "
+                "kraken_equities_realtime_wallet_public_id to pin a specific wallet.",
+                wallet_public_id,
+            )
+        return wallet_public_id
+
     async def _refresh_realtime_ws_token(self, *, clear_on_failure: bool = True) -> bool:
         """Refresh the in-memory realtime WS token.
 
@@ -815,7 +853,18 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             logged without secrets or token values and leave callers on the
             public delayed fallback when no valid token remains.
         """
-        wallet_public_id = self._realtime_wallet_public_id
+        repository = self.repository
+        try:
+            wallet_public_id = await self._resolve_realtime_wallet_public_id(repository)
+        except Exception as exc:
+            logger.warning(
+                "Kraken Equities realtime WS token wallet autolookup unavailable ({}); "
+                "using public delayed feed",
+                type(exc).__name__,
+            )
+            if clear_on_failure:
+                self._clear_realtime_ws_auth()
+            return False
         if not wallet_public_id:
             logger.warning(
                 "Kraken Equities realtime WS enabled but no token wallet is configured; "
@@ -824,7 +873,6 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             if clear_on_failure:
                 self._clear_realtime_ws_auth()
             return False
-        repository = self.repository
         if repository is None:
             logger.warning(
                 "Kraken Equities realtime WS enabled but repository is unavailable; "
@@ -850,6 +898,8 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 "Kraken Equities realtime WS token unavailable ({}); using public delayed feed",
                 type(exc).__name__,
             )
+            if not self._realtime_wallet_public_id:
+                self._resolved_realtime_wallet_public_id = None
             if clear_on_failure:
                 self._clear_realtime_ws_auth()
             return False

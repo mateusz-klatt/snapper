@@ -1414,10 +1414,12 @@ these instruments as observation-only.
   The public feed is delayed ~10 minutes per FCM policy. When
   `kraken_equities_realtime_ws_enabled=true`, the publisher first mints
   a Kraken Spot WebSockets token from the configured
-  `kraken_equities_realtime_wallet_public_id` credential and connects to
-  `wss://ws-equities-auth.kraken.com/?f`; subscribe params receive the
-  token in memory only. Mint or credential failure falls back to the
-  public delayed URL. Under `feed_egress_enabled=true`, the token mint is
+  `kraken_equities_realtime_wallet_public_id` override, or auto-selects
+  the first active Kraken Spot `api_key_secret` wallet credential when the
+  setting is empty, and connects to `wss://ws-equities-auth.kraken.com/?f`;
+  subscribe params receive the token in memory only. Mint, credential, or
+  autolookup failure falls back to the public delayed URL. Under
+  `feed_egress_enabled=true`, the token mint is
   classified as public `kraken_equities` market-data traffic so it uses the
   same egress-pool route as the authenticated Equities WebSocket, preserving
   source-IP consistency for tokens that may be IP-bound. The outer envelope's
