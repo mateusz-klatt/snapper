@@ -49,6 +49,32 @@ def test_db_setting_returns_default_when_none_from_service() -> None:
     assert service.calls == [("auth_secret_key", "change-me-in-production-use-openssl-rand-hex-32")]
 
 
+def test_bootstrap_accessors_return_values() -> None:
+    """Bootstrap-backed accessors forward values from the loader.
+
+    Given: Bootstrap settings with non-default server and ZMQ values,
+    When: AppSettings reads bootstrap-backed properties,
+    Then: The facade returns the configured loader values.
+    """
+    bootstrap = BootstrapSettingsLoader(
+        DB_URL="sqlite:///:memory:",
+        SERVER_HOST="0.0.0.0",
+        SERVER_PORT=9001,
+        SERVER_API_ONLY=True,
+        ZMQ_BROKER_XSUB="tcp://127.0.0.1:7600",
+        ZMQ_BROKER_XPUB="tcp://127.0.0.1:7601",
+        TELEMETRY_RECORDING_ENABLED=True,
+    )
+    settings = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+    assert settings.db_url == "sqlite:///:memory:"
+    assert settings.server_host == "0.0.0.0"
+    assert settings.server_port == 9001
+    assert settings.server_api_only is True
+    assert settings.zmq_broker_xsub == "tcp://127.0.0.1:7600"
+    assert settings.zmq_broker_xpub == "tcp://127.0.0.1:7601"
+    assert settings.telemetry_recording_enabled is True
+
+
 class MockSettingsService:
     """Mock settings service for testing AppSettings properties."""
 
@@ -139,6 +165,52 @@ class TestAppSettingsFeedEgress:
         service = MockSettingsService({"feed_egress_enabled": 1})
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.feed_egress_enabled is True
+
+
+class TestAppSettingsKrakenEquitiesRealtimeWs:
+    """Tests for the Kraken Equities realtime WS feature gate."""
+
+    def test_defaults_off_when_absent(self) -> None:
+        """Absent settings keep Kraken Equities on the public delayed feed."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        settings = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert settings.kraken_equities_realtime_ws_enabled is False
+        assert settings.kraken_equities_realtime_wallet_public_id == ""
+
+    def test_true_bool_enables(self) -> None:
+        """A boolean True enables the authenticated realtime feed."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({"kraken_equities_realtime_ws_enabled": True})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.kraken_equities_realtime_ws_enabled is True
+
+    def test_truthy_string_enables(self) -> None:
+        """A truthy string enables the authenticated realtime feed."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({"kraken_equities_realtime_ws_enabled": "on"})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.kraken_equities_realtime_ws_enabled is True
+
+    def test_false_string_does_not_enable(self) -> None:
+        """A false string keeps the authenticated realtime feed disabled."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({"kraken_equities_realtime_ws_enabled": "false"})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.kraken_equities_realtime_ws_enabled is False
+
+    def test_nonstring_nonbool_coerced(self) -> None:
+        """A non-string value is coerced the same way as feed egress."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({"kraken_equities_realtime_ws_enabled": 1})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.kraken_equities_realtime_ws_enabled is True
+
+    def test_wallet_public_id_returns_value(self) -> None:
+        """The realtime token wallet id is DB-backed and defaults separately."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({"kraken_equities_realtime_wallet_public_id": "wallet-1"})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.kraken_equities_realtime_wallet_public_id == "wallet-1"
 
 
 class TestAppSettingsAuthProperties:

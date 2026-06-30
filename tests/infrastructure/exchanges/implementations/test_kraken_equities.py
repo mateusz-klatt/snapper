@@ -12,8 +12,11 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+import requests
 from loguru import logger
 
+from snapper.config.credentials import CredentialNotFoundError
+from snapper.core.json_types import JsonValue
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
@@ -26,12 +29,102 @@ from snapper.infrastructure.exchanges.implementations.kraken_equities import (
 )
 from snapper.infrastructure.exchanges.implementations.kraken_equities import _enqueue_or_drop_oldest
 from snapper.infrastructure.exchanges.implementations.kraken_equities import _timeframe_to_interval
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_CLOSE_TIMEOUT_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_INTERVAL_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_TIMEOUT_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _wrap_connect_factory
+from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_models import EgressPoolConfig
+from snapper.infrastructure.network.egress_models import RouteConfig
+from snapper.infrastructure.network.egress_pool import configure_egress_pool
+from snapper.infrastructure.network.egress_pool import reset_egress_pool
 
 
 @pytest.fixture()
 def client() -> KrakenEquitiesExchangeClient:
     """Create a KrakenEquitiesExchangeClient instance for testing."""
     return KrakenEquitiesExchangeClient()
+
+
+class _PublisherDouble:
+    """Publisher double exposing the exchange tag used by WS egress routing."""
+
+    def _get_exchange_name(self) -> str:
+        """Return the Kraken Equities venue tag."""
+        return "kraken_equities"
+
+
+class _FakeSpotTokenClient:
+    """Spot SDK token client double with mutable private proxy state."""
+
+    def __init__(self) -> None:
+        """Create SDK-shaped session and proxy attributes."""
+        self._SpotClient__session = requests.Session()
+        self._SpotClient__proxy = None
+        self.URL = "https://api.kraken.com"
+        self.seen_sdk_proxy: list[object] = []
+        self.seen_session_proxies: list[dict[str, str]] = []
+        self.seen_requests: list[tuple[str, str, int]] = []
+
+    def request(self, method: str, path: str, timeout: int) -> dict[str, object]:
+        """Capture proxy state during the token request and return a token."""
+        session = getattr(self, "_SpotClient__session")
+        assert isinstance(session, requests.Session)
+        self.seen_sdk_proxy.append(getattr(self, "_SpotClient__proxy"))
+        self.seen_session_proxies.append(_proxy_snapshot(session))
+        self.seen_requests.append((method, path, timeout))
+        return {"token": "token-1", "expires": 900}
+
+
+class _SdkShapedWsClient:
+    """WebSocket double whose close awaits the SDK-shaped parent run task."""
+
+    def __init__(self) -> None:
+        """Create close-observation state."""
+        self.parent_task: asyncio.Task[None] | None = None
+        self.close_started = asyncio.Event()
+        self.close_finished = asyncio.Event()
+        self.closed = False
+
+    async def close(self) -> None:
+        """Mirror SDK close waiting for the connector parent task."""
+        self.close_started.set()
+        parent_task = self.parent_task
+        if parent_task is not None:
+            await parent_task
+        self.closed = True
+        self.close_finished.set()
+
+
+def _proxy_snapshot(session: requests.Session) -> dict[str, str]:
+    """Return a plain proxy mapping snapshot for assertions."""
+    return {str(key): str(value) for key, value in session.proxies.items()}
+
+
+def _equities_public_pool_config() -> EgressPoolConfig:
+    """Build a pool whose public Equities route is a NY SOCKS tunnel."""
+    return EgressPoolConfig(
+        enabled=True,
+        routes=[
+            RouteConfig(id="default", kind="direct", priority=100),
+            RouteConfig(
+                id="ny",
+                kind="socks5",
+                proxy_url="socks5h://snapper-egress-ny:1080",
+                priority=1,
+                allowed_exchanges=("kraken_equities",),
+            ),
+        ],
+    )
+
+
+async def _await_public_demotion(client: KrakenEquitiesExchangeClient) -> None:
+    """Wait for a scheduled public demotion task to finish in tests."""
+    task = client._ws_public_demotion_task
+    if task is None:
+        return
+    await asyncio.wait_for(task, timeout=1.0)
+    await asyncio.sleep(0)
 
 
 class TestClientInit:
@@ -50,6 +143,1582 @@ class TestClientInit:
         assert c._tick_queue.empty()
         assert c._trade_queue.empty()
         assert c._ws_client is None
+
+
+class TestRealtimeAuthWebSocket:
+    """Tests for the optional Kraken Equities realtime auth feed."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_egress_state(self) -> Generator[None]:
+        """Reset egress pool and publisher context around auth WS tests."""
+        reset_egress_pool()
+        token = _CURRENT_PUBLISHER.set(None)
+        try:
+            yield
+        finally:
+            reset_egress_pool()
+            _CURRENT_PUBLISHER.reset(token)
+
+    def test_subscription_ack_confirms_success_and_idempotent_error(self) -> None:
+        """ACK confirmation helper accepts success and already-subscribed errors."""
+        assert ke._subscription_ack_confirms(success=True, error=None) is True
+        assert ke._subscription_ack_confirms(success=False, error="Already subscribed") is True
+        assert ke._subscription_ack_confirms(success=False, error="invalid symbol") is False
+        assert ke._is_realtime_auth_subscribe_error(None) is False
+        assert ke._redact_sensitive_payload(({"token": "secret"},)) == (
+            {"token": "***REDACTED***"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_flag_off_uses_public_url_without_token(self) -> None:
+        """Default-off keeps today's public delayed WS behavior.
+
+        Given: A default client with no realtime config,
+        When: The WS client is built,
+        Then: SpotWSClient receives the public URL and no token is minted.
+        """
+        c = KrakenEquitiesExchangeClient()
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+            ) as ws_cls,
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotClient"
+            ) as spot_cls,
+        ):
+            ws_cls.return_value.start = AsyncMock()
+            await c._ensure_ws_connected()
+        assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
+        assert ws_cls.call_args.kwargs["no_public"] is False
+        assert c._ws_auth_active is False
+        assert c._ws_token is None
+        spot_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_flag_on_with_credentials_uses_auth_url_and_stores_token(self) -> None:
+        """Realtime mode mints a token before connecting to the auth URL.
+
+        Given: Realtime is enabled and a Kraken Spot wallet credential resolves,
+        When: The WS client is built,
+        Then: The auth endpoint is used and token state remains in memory only.
+        """
+        repository = MagicMock()
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="wallet-1",
+        )
+        resolver = MagicMock()
+        resolver.get_credentials = AsyncMock(
+            return_value={"api_key": "api-key", "api_secret": "api-secret"}
+        )
+
+        try:
+            with (
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                    "CredentialResolver",
+                    return_value=resolver,
+                ) as resolver_cls,
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotClient"
+                ) as spot_cls,
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                    "SpotWSClient"
+                ) as ws_cls,
+            ):
+                spot_cls.return_value.request.return_value = {"token": "token-1", "expires": 900}
+                ws_cls.return_value.start = AsyncMock()
+                await c._ensure_ws_connected()
+
+            resolver_cls.assert_called_once_with(repository)
+            resolver.get_credentials.assert_awaited_once_with(
+                exchange="kraken",
+                wallet_public_id="wallet-1",
+            )
+            spot_cls.assert_called_once_with(key="api-key", secret="api-secret")
+            spot_cls.return_value.request.assert_called_once_with(
+                "POST",
+                "/0/private/GetWebSocketsToken",
+                timeout=10,
+            )
+            assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_AUTH_URL
+            assert c._ws_auth_active is True
+            assert c._ws_token == "token-1"
+        finally:
+            await c.disconnect()
+
+    def test_token_mint_routes_through_equities_public_egress_pool(self) -> None:
+        """Realtime token mint uses the same public Equities egress route as WS.
+
+        Given: The feed egress pool has a NY route pinned to ``kraken_equities``,
+        When: A Kraken WebSockets token is minted,
+        Then: The Spot SDK request runs with the NY SOCKS proxy scoped onto the
+            SDK client and requests session, then restores both afterward.
+        """
+        configure_egress_pool(_equities_public_pool_config())
+        c = KrakenEquitiesExchangeClient(realtime_ws_enabled=True)
+        fake_spot_client = _FakeSpotTokenClient()
+        session = getattr(fake_spot_client, "_SpotClient__session")
+        assert isinstance(session, requests.Session)
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotClient",
+            return_value=fake_spot_client,
+        ) as spot_cls:
+            payload = c._request_realtime_ws_token("api-key", "api-secret")
+
+        assert payload == {"token": "token-1", "expires": 900}
+        spot_cls.assert_called_once_with(key="api-key", secret="api-secret")
+        assert fake_spot_client.seen_requests == [("POST", "/0/private/GetWebSocketsToken", 10)]
+        assert fake_spot_client.seen_sdk_proxy == ["socks5h://snapper-egress-ny:1080"]
+        assert fake_spot_client.seen_session_proxies == [
+            {
+                "http": "socks5h://snapper-egress-ny:1080",
+                "https": "socks5h://snapper-egress-ny:1080",
+            }
+        ]
+        assert getattr(fake_spot_client, "_SpotClient__proxy") is None
+        assert session.proxies == {}
+
+    def test_token_mint_remains_direct_without_egress_pool(self) -> None:
+        """Realtime token mint remains direct when feed egress is absent."""
+        c = KrakenEquitiesExchangeClient(realtime_ws_enabled=True)
+        fake_spot_client = _FakeSpotTokenClient()
+        session = getattr(fake_spot_client, "_SpotClient__session")
+        assert isinstance(session, requests.Session)
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotClient",
+            return_value=fake_spot_client,
+        ):
+            payload = c._request_realtime_ws_token("api-key", "api-secret")
+
+        assert payload == {"token": "token-1", "expires": 900}
+        assert fake_spot_client.seen_sdk_proxy == [None]
+        assert fake_spot_client.seen_session_proxies == [{}]
+        assert getattr(fake_spot_client, "_SpotClient__proxy") is None
+        assert session.proxies == {}
+
+    @pytest.mark.asyncio
+    async def test_disconnect_shuts_down_rest_pool_after_token_mint(self) -> None:
+        """Token mint uses the blocking REST pool that disconnect must close."""
+        repository = MagicMock()
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="wallet-1",
+        )
+        resolver = MagicMock()
+        resolver.get_credentials = AsyncMock(
+            return_value={"api_key": "api-key", "api_secret": "api-secret"}
+        )
+        fake_spot_client = _FakeSpotTokenClient()
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver",
+                return_value=resolver,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotClient",
+                return_value=fake_spot_client,
+            ),
+        ):
+            assert await c._refresh_realtime_ws_token() is True
+        assert c._rest_pool is not None
+        assert c._rest_pool_closed is False
+        await c.disconnect()
+        assert c._rest_pool is None
+        assert c._rest_pool_closed is True
+        await c.connect()
+        assert c._rest_pool_closed is False
+
+    def test_auth_ws_endpoint_patch_preserves_egress_proxy_injection(self) -> None:
+        """Auth URL patching still leaves WS handshakes on the egress shim path.
+
+        Given: Auth mode corrects the SDK connector endpoint to the exact
+            ``?f`` URL,
+        And: The publisher context tags traffic as ``kraken_equities``,
+        When: The patched connect shim receives that endpoint,
+        Then: It reserves the public Equities route and injects the NY SOCKS
+            proxy exactly as the public feed path does.
+        """
+        configure_egress_pool(_equities_public_pool_config())
+        c = KrakenEquitiesExchangeClient(realtime_ws_enabled=True)
+        sdk_client = MagicMock()
+        connector = MagicMock()
+        sdk_client._pub_conn = connector
+        c._force_sdk_public_endpoint(sdk_client, ke._WS_AUTH_URL)
+        endpoint = getattr(connector, "_ConnectSpotWebsocketBase__ws_endpoint")
+        seen_kwargs: dict[str, object] = {}
+
+        def fake_connect(*args: object, **kwargs: object) -> MagicMock:
+            seen_kwargs.update(kwargs)
+            return MagicMock()
+
+        publisher = _PublisherDouble()
+        token = _CURRENT_PUBLISHER.set(publisher)
+        try:
+            shim_cls = _wrap_connect_factory(fake_connect)
+            shim_cls(endpoint)
+        finally:
+            _CURRENT_PUBLISHER.reset(token)
+
+        assert endpoint == ke._WS_AUTH_URL
+        assert seen_kwargs == {
+            "proxy": "socks5h://snapper-egress-ny:1080",
+            "ping_interval": _WS_PING_INTERVAL_S,
+            "ping_timeout": _WS_PING_TIMEOUT_S,
+            "close_timeout": _WS_CLOSE_TIMEOUT_S,
+        }
+
+    @pytest.mark.asyncio
+    async def test_realtime_missing_wallet_setting_falls_back_to_public(self) -> None:
+        """An enabled feed without a wallet id fails open to public WS."""
+        c = KrakenEquitiesExchangeClient(
+            repository=MagicMock(),
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="",
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver"
+            ) as resolver_cls,
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+            ) as ws_cls,
+        ):
+            ws_cls.return_value.start = AsyncMock()
+            await c._ensure_ws_connected()
+        resolver_cls.assert_not_called()
+        assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_realtime_missing_repository_falls_back_to_public(self) -> None:
+        """An enabled feed without repository cannot resolve credentials."""
+        c = KrakenEquitiesExchangeClient(
+            repository=None,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="wallet-1",
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver"
+            ) as resolver_cls,
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+            ) as ws_cls,
+        ):
+            ws_cls.return_value.start = AsyncMock()
+            await c._ensure_ws_connected()
+        resolver_cls.assert_not_called()
+        assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_realtime_missing_credential_row_falls_back_to_public(self) -> None:
+        """A missing wallet credential row fails open to public WS."""
+        repository = MagicMock()
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="wallet-1",
+        )
+        resolver = MagicMock()
+        resolver.get_credentials = AsyncMock(
+            side_effect=CredentialNotFoundError(exchange="kraken", wallet_public_id="wallet-1")
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver",
+                return_value=resolver,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+            ) as ws_cls,
+        ):
+            ws_cls.return_value.start = AsyncMock()
+            await c._ensure_ws_connected()
+        assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_realtime_mint_permission_failure_falls_back_to_public(self) -> None:
+        """A token mint failure fails open to public delayed WS."""
+        repository = MagicMock()
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="wallet-1",
+        )
+        resolver = MagicMock()
+        resolver.get_credentials = AsyncMock(
+            return_value={"api_key": "api-key", "api_secret": "api-secret"}
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver",
+                return_value=resolver,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotClient"
+            ) as spot_cls,
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+            ) as ws_cls,
+        ):
+            spot_cls.return_value.request.side_effect = RuntimeError("permission denied")
+            ws_cls.return_value.start = AsyncMock()
+            await c._ensure_ws_connected()
+        assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_without_clear_preserves_auth_state(self) -> None:
+        """Lazy refresh failures do not clear auth before callers demote."""
+        missing_wallet = KrakenEquitiesExchangeClient(realtime_ws_enabled=True)
+        missing_wallet._ws_auth_active = True
+        assert await missing_wallet._refresh_realtime_ws_token(clear_on_failure=False) is False
+        assert missing_wallet._ws_auth_active is True
+
+        missing_repository = KrakenEquitiesExchangeClient(
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="wallet-1",
+        )
+        missing_repository._ws_auth_active = True
+        assert await missing_repository._refresh_realtime_ws_token(clear_on_failure=False) is False
+        assert missing_repository._ws_auth_active is True
+
+        repository = MagicMock()
+        mint_failure = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="wallet-1",
+        )
+        mint_failure._ws_auth_active = True
+        resolver = MagicMock()
+        resolver.get_credentials = AsyncMock(
+            return_value={"api_key": "api-key", "api_secret": "api-secret"}
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver",
+                return_value=resolver,
+            ),
+            patch.object(
+                mint_failure,
+                "_dispatch_blocking",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("mint failed"),
+            ),
+        ):
+            assert await mint_failure._refresh_realtime_ws_token(clear_on_failure=False) is False
+        assert mint_failure._ws_auth_active is True
+
+    @pytest.mark.asyncio
+    async def test_auth_start_failure_falls_back_to_public_feed(self) -> None:
+        """Auth startup failure degrades to the public delayed feed.
+
+        Given: Token minting succeeded but the auth WebSocket cannot start,
+        When: _ensure_ws_connected runs,
+        Then: The auth client is closed and a fresh public client is started.
+        """
+        c = KrakenEquitiesExchangeClient(realtime_ws_enabled=True)
+        c._ws_auth_active = True
+        auth_ws = AsyncMock()
+        auth_ws.start.side_effect = RuntimeError("auth down")
+        public_ws = AsyncMock()
+        c._prepare_realtime_ws_auth = AsyncMock(return_value=True)
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+            side_effect=[auth_ws, public_ws],
+        ) as ws_cls:
+            await c._ensure_ws_connected()
+        assert [call.kwargs["ws_url"] for call in ws_cls.call_args_list] == [
+            ke._WS_AUTH_URL,
+            ke._WS_URL,
+        ]
+        auth_ws.close.assert_awaited_once()
+        public_ws.start.assert_awaited_once()
+        assert c._ws_client is public_ws
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_auth_replay_failure_falls_back_to_public_feed(self) -> None:
+        """Auth replay failure degrades to the public delayed feed.
+
+        Given: Auth connect succeeds but tokenized subscription replay fails,
+        When: _ensure_ws_connected runs,
+        Then: The auth client is closed and public replay is attempted.
+        """
+        c = KrakenEquitiesExchangeClient(realtime_ws_enabled=True)
+        c._ws_auth_active = True
+        req = SubscriptionRequest(channel="ticker", symbols=("CLM6.NYMEX",), parameters_json="{}")
+        c._subscription_cache[req.key()] = req
+        auth_ws = AsyncMock()
+        public_ws = AsyncMock()
+        c._prepare_realtime_ws_auth = AsyncMock(return_value=True)
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+                side_effect=[auth_ws, public_ws],
+            ) as ws_cls,
+            patch.object(
+                c,
+                "_replay_subscriptions",
+                new_callable=AsyncMock,
+                side_effect=[RuntimeError("auth replay failed"), None],
+            ) as replay,
+        ):
+            await c._ensure_ws_connected()
+        assert [call.kwargs["ws_url"] for call in ws_cls.call_args_list] == [
+            ke._WS_AUTH_URL,
+            ke._WS_URL,
+        ]
+        auth_ws.close.assert_awaited_once()
+        public_ws.start.assert_awaited_once()
+        assert replay.await_count == 2
+        assert c._ws_client is public_ws
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_auth_sdk_patch_failure_falls_back_before_auth_start(self) -> None:
+        """SDK private patch failure prevents connecting to a malformed auth URL.
+
+        Given: Token minting succeeded but the SDK endpoint patch fails,
+        When: _ensure_ws_connected runs,
+        Then: The unstarted auth client is closed and public WS is used.
+        """
+        c = KrakenEquitiesExchangeClient(realtime_ws_enabled=True)
+        c._ws_auth_active = True
+        auth_ws = AsyncMock()
+        public_ws = AsyncMock()
+        c._prepare_realtime_ws_auth = AsyncMock(return_value=True)
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+                side_effect=[auth_ws, public_ws],
+            ) as ws_cls,
+            patch.object(c, "_force_sdk_public_endpoint", return_value=False),
+        ):
+            await c._ensure_ws_connected()
+        assert [call.kwargs["ws_url"] for call in ws_cls.call_args_list] == [
+            ke._WS_AUTH_URL,
+            ke._WS_URL,
+        ]
+        auth_ws.start.assert_not_awaited()
+        auth_ws.close.assert_awaited_once()
+        public_ws.start.assert_awaited_once()
+        assert c._ws_client is public_ws
+        assert c._ws_auth_active is False
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            [],
+            {"token": "", "expires": 900},
+            {"token": "token-1", "expires": "900"},
+            {"token": "token-1", "expires": True},
+            {"token": "token-1", "expires": 0},
+            {"expires": 900},
+            {"token": "token-1"},
+        ],
+    )
+    def test_parse_ws_token_response_rejects_invalid_payload(self, payload: object) -> None:
+        """Token payload validation rejects malformed SDK responses."""
+        c = KrakenEquitiesExchangeClient()
+        with pytest.raises(RuntimeError):
+            c._parse_realtime_ws_token_response(payload)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_decorate_params_single_flights_token_refresh(self) -> None:
+        """Concurrent subscribe decoration refreshes an expired token once."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_token = None
+        c._ws_token_refresh_at = 0.0
+        c._ws_token_expires_at = 0.0
+        refresh_calls = 0
+
+        async def _refresh(*, clear_on_failure: bool = True) -> bool:
+            nonlocal refresh_calls
+            assert clear_on_failure is False
+            refresh_calls += 1
+            await asyncio.sleep(0)
+            c._ws_token = "fresh-token"
+            c._ws_token_refresh_at = ke.monotonic() + 100.0
+            c._ws_token_expires_at = ke.monotonic() + 200.0
+            return True
+
+        with patch.object(c, "_refresh_realtime_ws_token", side_effect=_refresh):
+            first, second = await asyncio.gather(
+                c._decorate_ws_subscribe_params({"channel": "ticker"}),
+                c._decorate_ws_subscribe_params({"channel": "trade"}),
+            )
+
+        assert refresh_calls == 1
+        assert first["token"] == "fresh-token"
+        assert second["token"] == "fresh-token"
+
+    @pytest.mark.asyncio
+    async def test_decorate_params_keeps_valid_token_after_refresh_failure(self) -> None:
+        """A transient refresh failure keeps using an unexpired token."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_token = "old-token"
+        c._ws_token_refresh_at = 0.0
+        c._ws_token_expires_at = ke.monotonic() + 100.0
+        params: dict[str, JsonValue] = {"channel": "ticker"}
+        with patch.object(
+            c,
+            "_refresh_realtime_ws_token",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as refresh:
+            decorated = await c._decorate_ws_subscribe_params(params)
+        refresh.assert_awaited_once_with(clear_on_failure=False)
+        assert decorated["token"] == "old-token"
+        assert c._ws_auth_active is True
+
+    @pytest.mark.asyncio
+    async def test_expired_token_refresh_failure_rebuilds_public_before_subscribe(
+        self,
+    ) -> None:
+        """Expired auth token never sends an untokened subscribe to auth WS.
+
+        Given: The auth socket is active but no valid token remains,
+        When: A retry subscribe needs a token and refresh fails,
+        Then: The auth client is closed, public WS is started, and the
+            outbound subscribe is sent without token on the public client.
+        """
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_token = "expired-token"
+        c._ws_token_refresh_at = 0.0
+        c._ws_token_expires_at = 0.0
+        auth_ws = AsyncMock()
+        public_ws = AsyncMock()
+        c._ws_client = auth_ws
+        with (
+            patch.object(
+                c,
+                "_refresh_realtime_ws_token",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as refresh,
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+                return_value=public_ws,
+            ) as ws_cls,
+        ):
+            await c._retry_subscribe("ticker", "CLM6.NYMEX")
+
+        refresh.assert_awaited_once_with(clear_on_failure=False)
+        auth_ws.subscribe.assert_not_awaited()
+        auth_ws.close.assert_awaited_once()
+        public_ws.start.assert_awaited_once()
+        public_ws.subscribe.assert_awaited_once()
+        assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
+        assert "token" not in public_ws.subscribe.await_args.kwargs["params"]
+        assert c._ws_client is public_ws
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_successful_refresh_without_token_raises_auth_unavailable(self) -> None:
+        """A malformed refresh success without token does not send a subscribe."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_token = None
+        c._ws_token_refresh_at = 0.0
+        c._ws_token_expires_at = 0.0
+        with (
+            patch.object(
+                c,
+                "_refresh_realtime_ws_token",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            pytest.raises(ke._RealtimeWsAuthUnavailableError),
+        ):
+            await c._decorate_ws_subscribe_params({"channel": "ticker"})
+
+    @pytest.mark.asyncio
+    async def test_send_ws_subscribe_requires_connected_client(self) -> None:
+        """Subscribe helper still fails loudly without any WS client."""
+        c = KrakenEquitiesExchangeClient()
+        with pytest.raises(RuntimeError, match="WebSocket client not connected"):
+            await c._send_ws_subscribe({"channel": "ticker"}, allow_auth_demote=True)
+
+    @pytest.mark.asyncio
+    async def test_send_ws_subscribe_propagates_auth_unavailable_when_demote_disallowed(
+        self,
+    ) -> None:
+        """Replay send path propagates auth exhaustion to the caller."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_client = AsyncMock()
+        with (
+            patch.object(
+                c,
+                "_decorate_ws_subscribe_params",
+                new_callable=AsyncMock,
+                side_effect=ke._RealtimeWsAuthUnavailableError("expired"),
+            ),
+            pytest.raises(ke._RealtimeWsAuthUnavailableError),
+        ):
+            await c._send_ws_subscribe({"channel": "ticker"}, allow_auth_demote=False)
+
+    @pytest.mark.asyncio
+    async def test_send_ws_subscribe_requires_public_client_after_demote(self) -> None:
+        """Subscribe helper fails if demotion cannot install a public client."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_client = AsyncMock()
+
+        async def _demote(_: str) -> None:
+            c._ws_client = None
+
+        with (
+            patch.object(
+                c,
+                "_decorate_ws_subscribe_params",
+                new_callable=AsyncMock,
+                side_effect=ke._RealtimeWsAuthUnavailableError("expired"),
+            ),
+            patch.object(c, "_demote_realtime_ws_to_public", side_effect=_demote),
+            pytest.raises(RuntimeError, match="WebSocket client not connected"),
+        ):
+            await c._send_ws_subscribe({"channel": "ticker"}, allow_auth_demote=True)
+
+    @pytest.mark.asyncio
+    async def test_send_ws_subscribe_aborts_when_client_changes_during_decoration(self) -> None:
+        """Subscribe helper never sends on a client replaced during token decoration."""
+        c = KrakenEquitiesExchangeClient()
+        stale_ws = AsyncMock()
+        replacement_ws = AsyncMock()
+        c._ws_client = stale_ws
+
+        async def _decorate(params: dict[str, JsonValue]) -> dict[str, JsonValue]:
+            c._ws_client = replacement_ws
+            await asyncio.sleep(0)
+            return dict(params)
+
+        with (
+            patch.object(c, "_decorate_ws_subscribe_params", side_effect=_decorate),
+            pytest.raises(RuntimeError, match=ke._REPLAY_CLIENT_REPLACED_MSG),
+        ):
+            await c._send_ws_subscribe({"channel": "ticker"}, allow_auth_demote=True)
+
+        stale_ws.subscribe.assert_not_awaited()
+        replacement_ws.subscribe.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_ws_subscribe_does_not_demote_replacement_after_refresh_failure(
+        self,
+    ) -> None:
+        """Stale auth-refresh failure cannot close a replacement client."""
+        c = KrakenEquitiesExchangeClient()
+        stale_ws = AsyncMock()
+        replacement_ws = AsyncMock()
+        c._ws_client = stale_ws
+
+        async def _decorate(_: dict[str, JsonValue]) -> dict[str, JsonValue]:
+            c._ws_client = replacement_ws
+            raise ke._RealtimeWsAuthUnavailableError("expired")
+
+        with (
+            patch.object(c, "_decorate_ws_subscribe_params", side_effect=_decorate),
+            patch.object(c, "_demote_realtime_ws_to_public", new_callable=AsyncMock) as demote,
+            pytest.raises(RuntimeError, match=ke._REPLAY_CLIENT_REPLACED_MSG),
+        ):
+            await c._send_ws_subscribe({"channel": "ticker"}, allow_auth_demote=True)
+
+        demote.assert_not_awaited()
+        stale_ws.subscribe.assert_not_awaited()
+        replacement_ws.subscribe.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pending_public_demotion_never_sends_token_free_on_auth_client(self) -> None:
+        """Scheduled demotion keeps auth endpoint sends token-consistent."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_token = "auth-token"
+        c._ws_token_refresh_at = ke.monotonic() + 100.0
+        c._ws_token_expires_at = ke.monotonic() + 200.0
+        auth_ws = AsyncMock()
+        public_ws = AsyncMock()
+        c._ws_client = auth_ws
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+        send_task: asyncio.Task[None] | None = None
+
+        async def _close(client: object) -> None:
+            assert client is auth_ws
+            close_started.set()
+            await release_close.wait()
+            if c._ws_client is client:
+                c._ws_client = None
+
+        with (
+            patch.object(c, "_close_ws_client", side_effect=_close),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+                return_value=public_ws,
+            ),
+        ):
+            c._schedule_realtime_ws_public_demotion("auth rejected")
+            try:
+                await asyncio.wait_for(close_started.wait(), timeout=1.0)
+                assert c._ws_client is auth_ws
+                assert c._ws_auth_active is True
+
+                send_task = asyncio.create_task(
+                    c._send_ws_subscribe(
+                        {"channel": "ticker", "symbol": ["CLM6.NYMEX"]},
+                        allow_auth_demote=True,
+                    )
+                )
+                await asyncio.sleep(0)
+
+                if auth_ws.subscribe.await_count:
+                    auth_params = auth_ws.subscribe.await_args.kwargs["params"]
+                    assert auth_params["token"] == "auth-token"
+                else:
+                    assert send_task.done() is False
+            finally:
+                release_close.set()
+                if send_task is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(send_task, timeout=1.0)
+                task = c._ws_public_demotion_task
+                if task is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(task, timeout=1.0)
+
+        if auth_ws.subscribe.await_count:
+            auth_params = auth_ws.subscribe.await_args.kwargs["params"]
+            assert auth_params["token"] == "auth-token"
+        else:
+            public_ws.subscribe.assert_awaited_once()
+            assert "token" not in public_ws.subscribe.await_args.kwargs["params"]
+        assert c._ws_client is public_ws
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_ticker_subscribe_and_cleanup_inject_token_without_caching_it(self) -> None:
+        """Ticker subscribe sends tokenized params but caches stable params.
+
+        Given: The authenticated feed is active,
+        When: A ticker subscription starts and closes,
+        Then: Both outbound SDK calls carry a token and the replay cache does not.
+        """
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_token = "token-1"
+        c._ws_token_refresh_at = ke.monotonic() + 100.0
+        c._ws_token_expires_at = ke.monotonic() + 200.0
+        ws = AsyncMock()
+        c._ws_client = ws
+        c._ensure_ws_connected = AsyncMock()
+        await c._tick_queue.put(
+            TickerUpdate(
+                symbol="CLM6-NYMEX",
+                bid=90.0,
+                bid_qty=1.0,
+                ask=90.1,
+                ask_qty=1.0,
+                last=90.05,
+                volume=10.0,
+                vwap=90.0,
+                low=89.0,
+                high=91.0,
+                change=0.1,
+                change_pct=0.1,
+            )
+        )
+        gen = c.subscribe_ticks(["CLM6-NYMEX"])
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities."
+            "native_to_kraken_equities_ws",
+            return_value="CLM6.NYMEX",
+        ):
+            await anext(gen)
+            await gen.aclose()
+        assert ws.subscribe.await_count == 2
+        for call_args in ws.subscribe.await_args_list:
+            assert call_args.kwargs["params"]["token"] == "token-1"
+        req = next(iter(c._subscription_cache.values()))
+        assert "token" not in req.parameters_json
+
+    @pytest.mark.asyncio
+    async def test_trade_subscribe_and_cleanup_inject_token_without_caching_it(self) -> None:
+        """Trade subscribe sends tokenized params but caches stable params."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_token = "token-1"
+        c._ws_token_refresh_at = ke.monotonic() + 100.0
+        c._ws_token_expires_at = ke.monotonic() + 200.0
+        ws = AsyncMock()
+        c._ws_client = ws
+        c._ensure_ws_connected = AsyncMock()
+        await c._trade_queue.put(
+            TradeUpdate(
+                symbol="CLM6-NYMEX",
+                price=90.0,
+                quantity=1.0,
+                side="buy",
+                ord_type="fill",
+                trade_id="trade-1",
+                timestamp=_dt.now(_UTC),
+            )
+        )
+        gen = c.subscribe_trades(["CLM6-NYMEX"])
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities."
+            "native_to_kraken_equities_ws",
+            return_value="CLM6.NYMEX",
+        ):
+            await anext(gen)
+            await gen.aclose()
+        assert ws.subscribe.await_count == 2
+        for call_args in ws.subscribe.await_args_list:
+            assert call_args.kwargs["params"]["token"] == "token-1"
+        req = next(iter(c._subscription_cache.values()))
+        assert "token" not in req.parameters_json
+
+    @pytest.mark.asyncio
+    async def test_ticker_initial_replaced_client_error_is_supervisor_signal(self) -> None:
+        """Ticker initial send intentionally propagates replaced-client restart signal."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_client = AsyncMock()
+        c._ensure_ws_connected = AsyncMock()
+        gen = c.subscribe_ticks(["CLM6-NYMEX"])
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "native_to_kraken_equities_ws",
+                return_value="CLM6.NYMEX",
+            ),
+            patch.object(
+                c,
+                "_send_ws_subscribe",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError(ke._REPLAY_CLIENT_REPLACED_MSG),
+            ),
+            pytest.raises(RuntimeError, match=ke._REPLAY_CLIENT_REPLACED_MSG),
+        ):
+            await anext(gen)
+
+    @pytest.mark.asyncio
+    async def test_trade_initial_replaced_client_error_is_supervisor_signal(self) -> None:
+        """Trade initial send intentionally propagates replaced-client restart signal."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_client = AsyncMock()
+        c._ensure_ws_connected = AsyncMock()
+        gen = c.subscribe_trades(["CLM6-NYMEX"])
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "native_to_kraken_equities_ws",
+                return_value="CLM6.NYMEX",
+            ),
+            patch.object(
+                c,
+                "_send_ws_subscribe",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError(ke._REPLAY_CLIENT_REPLACED_MSG),
+            ),
+            pytest.raises(RuntimeError, match=ke._REPLAY_CLIENT_REPLACED_MSG),
+        ):
+            await anext(gen)
+
+    @pytest.mark.asyncio
+    async def test_retry_subscribe_injects_token(self) -> None:
+        """Health-loop single-symbol retries use the token decorator."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_token = "token-1"
+        c._ws_token_refresh_at = ke.monotonic() + 100.0
+        c._ws_token_expires_at = ke.monotonic() + 200.0
+        ws = AsyncMock()
+        c._ws_client = ws
+        await c._retry_subscribe("ticker", "CLM6.NYMEX")
+        assert ws.subscribe.await_args.kwargs["params"]["token"] == "token-1"
+
+    @pytest.mark.asyncio
+    async def test_retry_subscribe_requires_connected_client(self) -> None:
+        """Health-loop retry fails loudly without a connected SDK client."""
+        c = KrakenEquitiesExchangeClient()
+        with pytest.raises(RuntimeError, match="WebSocket client not connected"):
+            await c._retry_subscribe("ticker", "CLM6.NYMEX")
+
+    @pytest.mark.asyncio
+    async def test_retry_subscribe_rejects_unknown_channel(self) -> None:
+        """Health-loop retry rejects unsupported tracker channels."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_client = AsyncMock()
+        with pytest.raises(ValueError, match="Unsupported subscription health channel"):
+            await c._retry_subscribe("book", "CLM6.NYMEX")
+
+    @pytest.mark.asyncio
+    async def test_replay_refreshes_near_expiry_token(self) -> None:
+        """Reconnect replay decorates cached params with a freshly minted token.
+
+        Given: A cached subscription and an auth token inside its refresh window,
+        When: Snapper-owned replay runs,
+        Then: The outgoing params carry the refreshed token while the cache stays clean.
+        """
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_token = "old-token"
+        c._ws_token_refresh_at = 0.0
+        c._ws_token_expires_at = ke.monotonic() + 10.0
+        ws = AsyncMock()
+        c._ws_client = ws
+        req = SubscriptionRequest(
+            channel="ticker",
+            symbols=("CLM6.NYMEX",),
+            parameters_json='{"asset_class": "futures_contract", "snapshot": true, "throttle": 5000}',
+        )
+        c._subscription_cache[req.key()] = req
+
+        async def _refresh(*, clear_on_failure: bool = True) -> bool:
+            assert clear_on_failure is False
+            c._ws_token = "fresh-token"
+            c._ws_token_refresh_at = ke.monotonic() + 100.0
+            c._ws_token_expires_at = ke.monotonic() + 200.0
+            return True
+
+        with patch.object(c, "_refresh_realtime_ws_token", side_effect=_refresh) as refresh:
+            await c._replay_subscriptions()
+        refresh.assert_awaited_once()
+        assert ws.subscribe.await_args.kwargs["params"]["token"] == "fresh-token"
+        assert "token" not in req.parameters_json
+
+    @pytest.mark.asyncio
+    async def test_sdk_reconnect_replay_refreshes_token_and_resubscribes_once(self) -> None:
+        """Auth SDK reconnect replay re-mints and restores Snapper subscriptions.
+
+        Given: The SDK internally reconnects an auth Equities socket while
+            Snapper's token-free cache has one ticker subscription,
+        When: The patched SDK recover hook runs,
+        Then: It mints a fresh token immediately and sends exactly one
+            tokenized subscribe on the current SDK client.
+        """
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        connector = MagicMock()
+        sdk_client._pub_conn = connector
+        sdk_client.subscribe = AsyncMock()
+        c._ws_client = sdk_client
+        c._ws_auth_active = True
+        c._ws_token = "stale-token"
+        c._ws_token_refresh_at = ke.monotonic() + 300.0
+        c._ws_token_expires_at = ke.monotonic() + 600.0
+        req = SubscriptionRequest(
+            channel="ticker",
+            symbols=("CLM6.NYMEX",),
+            parameters_json='{"asset_class": "futures_contract", "snapshot": true, "throttle": 5000}',
+        )
+        c._subscription_cache[req.key()] = req
+
+        async def _refresh(*, clear_on_failure: bool = True) -> bool:
+            assert clear_on_failure is False
+            c._ws_token = "fresh-token"
+            c._ws_token_refresh_at = ke.monotonic() + 300.0
+            c._ws_token_expires_at = ke.monotonic() + 600.0
+            return True
+
+        assert c._disable_sdk_reconnect_replay_for_auth(sdk_client) is True
+        event = asyncio.Event()
+        event.set()
+        with patch.object(c, "_refresh_realtime_ws_token", side_effect=_refresh) as refresh:
+            await connector._recover_subscriptions(event)
+        refresh.assert_awaited_once_with(clear_on_failure=False)
+        sdk_client.subscribe.assert_awaited_once()
+        subscribe_args = sdk_client.subscribe.await_args
+        assert subscribe_args is not None
+        params = subscribe_args.kwargs["params"]
+        assert params["token"] == "fresh-token"
+        assert params["symbol"] == ["CLM6.NYMEX"]
+        assert "stale-token" not in str(params)
+        assert "token" not in req.parameters_json
+
+    @pytest.mark.asyncio
+    async def test_sdk_reconnect_replay_skips_when_client_slot_was_swapped(self) -> None:
+        """Auth SDK reconnect replay never sends through a disowned client."""
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        connector = MagicMock()
+        sdk_client._pub_conn = connector
+        sdk_client.subscribe = AsyncMock()
+        c._ws_client = AsyncMock()
+        c._ws_auth_active = True
+        req = SubscriptionRequest(channel="ticker", symbols=("CLM6.NYMEX",), parameters_json="{}")
+        c._subscription_cache[req.key()] = req
+        assert c._disable_sdk_reconnect_replay_for_auth(sdk_client) is True
+        event = asyncio.Event()
+        event.set()
+        with patch.object(
+            c,
+            "_refresh_realtime_ws_token",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as refresh:
+            await connector._recover_subscriptions(event)
+        refresh.assert_not_awaited()
+        sdk_client.subscribe.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sdk_reconnect_replay_demotes_when_fresh_token_unavailable(self) -> None:
+        """Auth SDK reconnect replay falls back to public when token refresh fails."""
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        connector = MagicMock()
+        sdk_client._pub_conn = connector
+        sdk_client.subscribe = AsyncMock()
+        sdk_client.close = AsyncMock()
+        c._ws_client = sdk_client
+        c._ws_auth_active = True
+        req = SubscriptionRequest(channel="ticker", symbols=("CLM6.NYMEX",), parameters_json="{}")
+        c._subscription_cache[req.key()] = req
+        public_ws = AsyncMock()
+        assert c._disable_sdk_reconnect_replay_for_auth(sdk_client) is True
+        event = asyncio.Event()
+        event.set()
+        with (
+            patch.object(
+                c,
+                "_refresh_realtime_ws_token",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as refresh,
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+                return_value=public_ws,
+            ) as ws_cls,
+        ):
+            await connector._recover_subscriptions(event)
+            await _await_public_demotion(c)
+        refresh.assert_awaited_once_with(clear_on_failure=False)
+        sdk_client.subscribe.assert_not_awaited()
+        sdk_client.close.assert_awaited_once()
+        public_ws.start.assert_awaited_once()
+        assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
+        assert c._ws_client is public_ws
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_sdk_reconnect_replay_skips_demote_when_refresh_failure_swaps_client(
+        self,
+    ) -> None:
+        """SDK reconnect refresh failure does not demote a replaced client."""
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        connector = MagicMock()
+        sdk_client._pub_conn = connector
+        sdk_client.subscribe = AsyncMock()
+        c._ws_client = sdk_client
+        c._ws_auth_active = True
+        replacement_ws = AsyncMock()
+        assert c._disable_sdk_reconnect_replay_for_auth(sdk_client) is True
+        event = asyncio.Event()
+        event.set()
+
+        async def _refresh(*, clear_on_failure: bool = True) -> bool:
+            assert clear_on_failure is False
+            c._ws_client = replacement_ws
+            return False
+
+        with patch.object(c, "_refresh_realtime_ws_token", side_effect=_refresh) as refresh:
+            await connector._recover_subscriptions(event)
+
+        refresh.assert_awaited_once_with(clear_on_failure=False)
+        sdk_client.subscribe.assert_not_awaited()
+        assert c._ws_public_demotion_task is None
+        assert c._ws_client is replacement_ws
+
+    @pytest.mark.asyncio
+    async def test_sdk_reconnect_replay_demotes_when_replay_fails(self) -> None:
+        """Auth SDK reconnect replay falls back to public when replay raises."""
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        connector = MagicMock()
+        sdk_client._pub_conn = connector
+        sdk_client.subscribe = AsyncMock()
+        sdk_client.close = AsyncMock()
+        c._ws_client = sdk_client
+        c._ws_auth_active = True
+        public_ws = AsyncMock()
+        assert c._disable_sdk_reconnect_replay_for_auth(sdk_client) is True
+        event = asyncio.Event()
+        event.set()
+        with (
+            patch.object(
+                c,
+                "_refresh_realtime_ws_token",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as refresh,
+            patch.object(
+                c,
+                "_replay_subscriptions",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("replay failed"),
+            ) as replay,
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+                return_value=public_ws,
+            ),
+        ):
+            await connector._recover_subscriptions(event)
+            await _await_public_demotion(c)
+        refresh.assert_awaited_once_with(clear_on_failure=False)
+        replay.assert_awaited_once()
+        sdk_client.close.assert_awaited_once()
+        public_ws.start.assert_awaited_once()
+        assert c._ws_client is public_ws
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_sdk_reconnect_replay_skips_when_replay_lost_auth_client(
+        self,
+    ) -> None:
+        """Auth SDK reconnect replay treats replaced-client replay as stale."""
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        connector = MagicMock()
+        sdk_client._pub_conn = connector
+        sdk_client.subscribe = AsyncMock()
+        sdk_client.close = AsyncMock()
+        public_ws = AsyncMock()
+        replacement_ws = AsyncMock()
+        c._ws_client = sdk_client
+        c._ws_auth_active = True
+
+        async def _replay() -> None:
+            c._ws_client = public_ws
+            c._ws_auth_active = False
+            raise RuntimeError(ke._REPLAY_CLIENT_REPLACED_MSG)
+
+        assert c._disable_sdk_reconnect_replay_for_auth(sdk_client) is True
+        event = asyncio.Event()
+        event.set()
+        with (
+            patch.object(
+                c,
+                "_refresh_realtime_ws_token",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as refresh,
+            patch.object(c, "_replay_subscriptions", side_effect=_replay) as replay,
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+                return_value=replacement_ws,
+            ) as ws_cls,
+        ):
+            await connector._recover_subscriptions(event)
+            await _await_public_demotion(c)
+
+        refresh.assert_awaited_once_with(clear_on_failure=False)
+        replay.assert_awaited_once()
+        sdk_client.close.assert_not_awaited()
+        public_ws.close.assert_not_awaited()
+        replacement_ws.start.assert_not_awaited()
+        ws_cls.assert_not_called()
+        assert c._ws_public_demotion_task is None
+        assert c._ws_client is public_ws
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_sdk_reconnect_replay_skips_when_refresh_swaps_client(self) -> None:
+        """Auth SDK reconnect replay rechecks ownership after token refresh."""
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        connector = MagicMock()
+        sdk_client._pub_conn = connector
+        sdk_client.subscribe = AsyncMock()
+        c._ws_client = sdk_client
+        c._ws_auth_active = True
+        req = SubscriptionRequest(channel="ticker", symbols=("CLM6.NYMEX",), parameters_json="{}")
+        c._subscription_cache[req.key()] = req
+
+        async def _refresh(*, clear_on_failure: bool = True) -> bool:
+            assert clear_on_failure is False
+            c._ws_client = AsyncMock()
+            c._ws_token = "fresh-token"
+            c._ws_token_refresh_at = ke.monotonic() + 100.0
+            c._ws_token_expires_at = ke.monotonic() + 200.0
+            return True
+
+        assert c._disable_sdk_reconnect_replay_for_auth(sdk_client) is True
+        event = asyncio.Event()
+        event.set()
+        with patch.object(c, "_refresh_realtime_ws_token", side_effect=_refresh):
+            await connector._recover_subscriptions(event)
+        sdk_client.subscribe.assert_not_awaited()
+
+    def test_disable_sdk_reconnect_replay_tolerates_missing_public_connector(self) -> None:
+        """The SDK replay guard is a no-op if the public connector is absent."""
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        sdk_client._pub_conn = None
+        assert c._disable_sdk_reconnect_replay_for_auth(sdk_client) is False
+
+    def test_disable_sdk_reconnect_replay_fails_without_recover_attr(self) -> None:
+        """SDK replay guard fails closed if the private recover hook is absent."""
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        sdk_client._pub_conn = object()
+        assert c._disable_sdk_reconnect_replay_for_auth(sdk_client) is False
+
+    def test_force_sdk_public_endpoint_preserves_exact_auth_url(self) -> None:
+        """Auth mode corrects the SDK endpoint after its automatic /v2 append.
+
+        Given: An SDK client whose public connector exists,
+        When: the auth endpoint override runs,
+        Then: Both the client URL and connector endpoint use the exact auth URL.
+        """
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        connector = MagicMock()
+        sdk_client._pub_conn = connector
+        connector._ConnectSpotWebsocketBase__ws_endpoint = "bad"
+        assert c._force_sdk_public_endpoint(sdk_client, ke._WS_AUTH_URL) is True
+        assert sdk_client.WS_URL == ke._WS_AUTH_URL
+        assert getattr(connector, "_ConnectSpotWebsocketBase__ws_endpoint") == ke._WS_AUTH_URL
+
+    def test_force_sdk_public_endpoint_tolerates_missing_public_connector(self) -> None:
+        """Endpoint correction is a no-op if the SDK public connector is absent.
+
+        Given: An SDK client without a public connector,
+        When: the auth endpoint override runs,
+        Then: No exception is raised.
+        """
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        sdk_client._pub_conn = None
+        assert c._force_sdk_public_endpoint(sdk_client, ke._WS_AUTH_URL) is False
+
+    def test_force_sdk_public_endpoint_fails_when_private_endpoint_attr_is_missing(
+        self,
+    ) -> None:
+        """Endpoint correction fails closed when the SDK private attr is absent."""
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = MagicMock()
+        sdk_client._pub_conn = object()
+        assert c._force_sdk_public_endpoint(sdk_client, ke._WS_AUTH_URL) is False
+
+    @pytest.mark.asyncio
+    async def test_demote_noops_when_already_public(self) -> None:
+        """Public clients are not rebuilt when demotion has already happened."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = False
+        c._ws_client = AsyncMock()
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+        ) as ws_cls:
+            await c._demote_realtime_ws_to_public("already public")
+        ws_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_demote_installs_public_when_auth_state_has_no_client(self) -> None:
+        """Auth demotion can install public WS even after the auth slot is empty."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_client = None
+        public_ws = AsyncMock()
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+            return_value=public_ws,
+        ) as ws_cls:
+            await c._demote_realtime_ws_to_public("missing auth client")
+        assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
+        public_ws.start.assert_awaited_once()
+        assert c._ws_client is public_ws
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_schedule_public_demotion_is_single_flight(self) -> None:
+        """Duplicate auth failures share one pending public demotion task."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _demote(
+            reason: str,
+            *,
+            force: bool = False,
+            expected_generation: int | None = None,
+        ) -> None:
+            assert reason == "first"
+            assert force is True
+            assert expected_generation == c._ws_connection_generation
+            started.set()
+            await release.wait()
+            c._ws_auth_active = False
+
+        with patch.object(c, "_demote_realtime_ws_to_public", side_effect=_demote) as demote:
+            c._schedule_realtime_ws_public_demotion("first")
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            c._schedule_realtime_ws_public_demotion("second")
+            assert demote.await_count == 1
+            release.set()
+            await _await_public_demotion(c)
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_late_demotion_scheduler_is_ignored_during_disconnect(self) -> None:
+        """A late auth ACK cannot install public WS after disconnect starts."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        auth_ws = AsyncMock()
+        c._ws_client = auth_ws
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+
+        async def _close(client: object) -> None:
+            assert client is auth_ws
+            close_started.set()
+            await release_close.wait()
+            if c._ws_client is client:
+                c._ws_client = None
+
+        public_ws = AsyncMock()
+        with (
+            patch.object(c, "_close_ws_client", side_effect=_close),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+                return_value=public_ws,
+            ) as ws_cls,
+        ):
+            disconnect_task = asyncio.create_task(c.disconnect())
+            await asyncio.wait_for(close_started.wait(), timeout=1.0)
+            c._schedule_realtime_ws_public_demotion("late auth ACK")
+            release_close.set()
+            await asyncio.wait_for(disconnect_task, timeout=1.0)
+            await asyncio.sleep(0)
+
+        ws_cls.assert_not_called()
+        public_ws.start.assert_not_awaited()
+        assert c._ws_public_demotion_task is None
+        assert c._ws_client is None
+        assert c._ws_closing is True
+
+    @pytest.mark.asyncio
+    async def test_stale_generation_demotion_does_not_install_public_client(self) -> None:
+        """A superseded demotion task exits before building a public client."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_client = AsyncMock()
+        c._ws_connection_generation = 2
+
+        with patch.object(c, "_install_ws_client", new_callable=AsyncMock) as install:
+            await c._demote_realtime_ws_to_public(
+                "stale",
+                force=True,
+                expected_generation=1,
+            )
+
+        install.assert_not_awaited()
+        assert c._ws_client is not None
+
+    @pytest.mark.asyncio
+    async def test_locked_demotion_exits_when_disconnect_already_started(self) -> None:
+        """Locked demotion does not install public when shutdown already won."""
+        c = KrakenEquitiesExchangeClient()
+        c._ws_auth_active = True
+        c._ws_client = AsyncMock()
+        c._ws_connection_generation = 3
+        c._ws_closing = True
+
+        with patch.object(c, "_install_ws_client", new_callable=AsyncMock) as install:
+            await c._demote_realtime_ws_to_public_locked(
+                "closing",
+                force=True,
+                expected_generation=3,
+            )
+
+        install.assert_not_awaited()
+        assert c._ws_client is not None
+
+    @pytest.mark.asyncio
+    async def test_demotion_does_not_install_public_if_disconnect_starts_after_close(
+        self,
+    ) -> None:
+        """Demotion rechecks generation after closing the old auth client."""
+        c = KrakenEquitiesExchangeClient()
+        auth_ws = AsyncMock()
+        c._ws_auth_active = True
+        c._ws_client = auth_ws
+        c._ws_connection_generation = 5
+
+        async def _close(client: object) -> None:
+            assert client is auth_ws
+            c._ws_connection_generation += 1
+            c._ws_closing = True
+            c._ws_client = None
+
+        with (
+            patch.object(c, "_close_ws_client", side_effect=_close) as close,
+            patch.object(c, "_install_ws_client", new_callable=AsyncMock) as install,
+        ):
+            await c._demote_realtime_ws_to_public(
+                "disconnect raced",
+                force=True,
+                expected_generation=5,
+            )
+
+        close.assert_awaited_once_with(auth_ws)
+        install.assert_not_awaited()
+        assert c._ws_client is None
+
+    def test_recent_token_cache_prunes_expired_and_oldest_values(self) -> None:
+        """Recent-token redaction cache stays bounded and expiry-aware."""
+        c = KrakenEquitiesExchangeClient()
+        now = ke.monotonic()
+        c._ws_recent_tokens = {
+            "expired-token": now - 1.0,
+            "oldest-token": now + 1.0,
+            "older-token": now + 2.0,
+            "keep-a": now + 3.0,
+            "keep-b": now + 4.0,
+            "keep-c": now + 5.0,
+        }
+
+        c._prune_recent_ws_tokens()
+
+        assert "expired-token" not in c._ws_recent_tokens
+        assert "oldest-token" not in c._ws_recent_tokens
+        assert set(c._ws_recent_tokens) == {"older-token", "keep-a", "keep-b", "keep-c"}
+
+    @pytest.mark.asyncio
+    async def test_scheduled_public_demotion_logs_failure_and_clears_slot(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Scheduled demotion task failures are observed and redacted."""
+        c = KrakenEquitiesExchangeClient()
+        secret_value = "demotion-secret-value"
+
+        async def _demote(
+            reason: str,
+            *,
+            force: bool = False,
+            expected_generation: int | None = None,
+        ) -> None:
+            assert reason == "auth rejected"
+            assert force is True
+            assert expected_generation == c._ws_connection_generation
+            raise RuntimeError(f"fallback failed token={secret_value}")
+
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            with patch.object(c, "_demote_realtime_ws_to_public", side_effect=_demote):
+                c._schedule_realtime_ws_public_demotion("auth rejected")
+                task = c._ws_public_demotion_task
+                assert task is not None
+                with contextlib.suppress(RuntimeError):
+                    await asyncio.wait_for(task, timeout=1.0)
+                await asyncio.sleep(0)
+        finally:
+            logger.remove(sink_id)
+
+        logged = "\n".join(record.message for record in caplog.records)
+        assert c._ws_public_demotion_task is None
+        assert "scheduled public demotion failed" in logged
+        assert secret_value not in logged
+        assert "***REDACTED***" in logged
+
+    @pytest.mark.asyncio
+    async def test_public_demotion_done_callback_preserves_newer_task_on_cancel(self) -> None:
+        """Done callback ignores cancelled tasks that no longer own the slot."""
+        c = KrakenEquitiesExchangeClient()
+        task = asyncio.create_task(asyncio.sleep(30.0))
+        newer_task = asyncio.create_task(asyncio.sleep(30.0))
+        c._ws_public_demotion_task = newer_task
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        c._handle_realtime_ws_public_demotion_done(task)
+
+        assert c._ws_public_demotion_task is newer_task
+        newer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await newer_task
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_pending_public_demotion_task(self) -> None:
+        """Disconnect cancels an unfinished callback-scheduled demotion task."""
+        c = KrakenEquitiesExchangeClient()
+        task = asyncio.create_task(asyncio.sleep(30.0))
+        c._ws_public_demotion_task = task
+
+        await c.disconnect()
+
+        assert task.cancelled()
+        assert c._ws_public_demotion_task is None
+
+    @pytest.mark.asyncio
+    async def test_installed_sdk_auth_patches_take_effect(self) -> None:
+        """Installed SpotWSClient private patches are verified under an event loop.
+
+        Given: The real installed python-kraken-sdk SpotWSClient,
+        When: Auth endpoint and reconnect replay patches are applied,
+        Then: The public connector dials the exact ``?f`` endpoint and
+            Snapper-owned reconnect replay sends a freshly tokenized subscribe.
+        """
+        c = KrakenEquitiesExchangeClient()
+        sdk_client = ke.SpotWSClient(
+            ws_url=ke._WS_AUTH_URL,
+            callback=AsyncMock(),
+            no_public=False,
+        )
+        try:
+            c._ws_client = sdk_client
+            c._ws_auth_active = True
+            req = SubscriptionRequest(
+                channel="trade",
+                symbols=("CLM6.NYMEX",),
+                parameters_json='{"asset_class": "futures_contract", "snapshot": true, "throttle": 5000}',
+            )
+            c._subscription_cache[req.key()] = req
+            connector = getattr(sdk_client, "_pub_conn")
+            assert getattr(connector, "_ConnectSpotWebsocketBase__ws_endpoint").endswith("?f/v2")
+            assert c._force_sdk_public_endpoint(sdk_client, ke._WS_AUTH_URL) is True
+            assert getattr(connector, "_ConnectSpotWebsocketBase__ws_endpoint") == ke._WS_AUTH_URL
+            subscribe_mock = AsyncMock()
+            sdk_client.subscribe = subscribe_mock
+            assert c._disable_sdk_reconnect_replay_for_auth(sdk_client) is True
+            event = asyncio.Event()
+            event.set()
+            with patch.object(
+                c,
+                "_refresh_realtime_ws_token",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as refresh:
+                c._ws_token = "fresh-token"
+                c._ws_token_refresh_at = ke.monotonic() + 100.0
+                c._ws_token_expires_at = ke.monotonic() + 200.0
+                await connector._recover_subscriptions(event)
+            refresh.assert_awaited_once_with(clear_on_failure=False)
+            subscribe_mock.assert_awaited_once()
+            subscribe_args = subscribe_mock.await_args
+            assert subscribe_args is not None
+            assert subscribe_args.kwargs["params"]["token"] == "fresh-token"
+        finally:
+            await sdk_client.close()
 
 
 @pytest.mark.asyncio
@@ -468,6 +2137,24 @@ class TestOnWsMessage:
         assert not client._tick_queue.empty()
 
     @pytest.mark.asyncio
+    async def test_ticker_message_handles_non_symbol_items(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Ticker updates tolerate non-dict items and dicts without symbols.
+
+        Given: A ticker update includes payload items without a usable symbol,
+        When: _on_ws_message is called,
+        Then: Parsing still runs and enqueueing succeeds without health-key errors.
+        """
+        msg = {
+            "channel": "ticker",
+            "type": "update",
+            "data": ["not-a-dict", {"last": 90.15}],
+        }
+        await client._on_ws_message(msg)
+        assert client._tick_queue.qsize() == 2
+
+    @pytest.mark.asyncio
     async def test_on_ws_message_drops_trade_snapshot(
         self, client: KrakenEquitiesExchangeClient
     ) -> None:
@@ -530,6 +2217,49 @@ class TestOnWsMessage:
         assert client._candle_builder.active_buckets() == 1
 
     @pytest.mark.asyncio
+    async def test_trade_message_handles_non_symbol_items(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Trade updates tolerate non-dict items and dicts without symbols.
+
+        Given: A trade update includes payload items without a usable symbol,
+        When: _on_ws_message is called,
+        Then: Parsing still runs and the trade queue receives both parsed items.
+        """
+        msg = {
+            "channel": "trade",
+            "type": "update",
+            "data": ["not-a-dict", {"price": 90.12}],
+        }
+        trades = [
+            TradeUpdate(
+                symbol="CLM6-NYMEX",
+                side="buy",
+                quantity=1.0,
+                price=90.12,
+                ord_type="fill",
+                timestamp=_dt(2026, 6, 29, 12, 0, tzinfo=_UTC),
+                trade_id="trade-1",
+            ),
+            TradeUpdate(
+                symbol="CLM6-NYMEX",
+                side="buy",
+                quantity=1.0,
+                price=90.13,
+                ord_type="fill",
+                timestamp=_dt(2026, 6, 29, 12, 1, tzinfo=_UTC),
+                trade_id="trade-2",
+            ),
+        ]
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities."
+            "parse_kraken_equities_trade",
+            side_effect=trades,
+        ):
+            await client._on_ws_message(msg)
+        assert client._trade_queue.qsize() == 2
+
+    @pytest.mark.asyncio
     async def test_heartbeat_ignored(self, client: KrakenEquitiesExchangeClient) -> None:
         """Ignore heartbeat messages.
 
@@ -552,6 +2282,426 @@ class TestOnWsMessage:
         await client._on_ws_message([1, 2, 3])
         assert client._tick_queue.empty()
         assert client._trade_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_ticker_subscription_ack_marks_confirmed(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Ticker subscribe ACKs mark the symbol confirmed.
+
+        Given: A successful ticker subscribe ACK,
+        When: _on_ws_message handles it,
+        Then: The health tracker records a confirmed ticker subscription.
+        """
+        msg = {
+            "method": "subscribe",
+            "result": {
+                "channel": "ticker",
+                "symbol": "CLM6.NYMEX",
+                "snapshot": True,
+            },
+            "success": True,
+        }
+        await client._on_ws_message(msg)
+        entry = client._health_tracker.snapshot()[("ticker", "CLM6.NYMEX")]
+        assert entry.status == "confirmed"
+
+    @pytest.mark.asyncio
+    async def test_ticker_subscription_ack_marks_failed(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Ticker subscribe rejection marks the symbol failed.
+
+        Given: A failed ticker subscribe ACK,
+        When: _on_ws_message handles it,
+        Then: The health tracker records a terminal failed ticker subscription.
+        """
+        msg = {
+            "method": "subscribe",
+            "result": {
+                "channel": "ticker",
+                "symbol": "CLM6.NYMEX",
+                "snapshot": True,
+            },
+            "success": False,
+            "error": "invalid symbol",
+        }
+        await client._on_ws_message(msg)
+        entry = client._health_tracker.snapshot()[("ticker", "CLM6.NYMEX")]
+        assert entry.status == "failed"
+        assert entry.last_error == "invalid symbol"
+
+    @pytest.mark.asyncio
+    async def test_ticker_subscription_ack_failure_log_redacts_token(
+        self,
+        client: KrakenEquitiesExchangeClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Subscribe failure logs redact current and token-shaped values."""
+        known_token = "short-active-token"
+        token_like_value = "T" * 43
+        client._ws_auth_active = True
+        client._ws_token = known_token
+        client._ws_token_refresh_at = ke.monotonic() + 100.0
+        client._ws_token_expires_at = ke.monotonic() + 200.0
+        msg = {
+            "method": "subscribe",
+            "result": {
+                "channel": "ticker",
+                "symbol": "CLM6.NYMEX",
+                "snapshot": True,
+            },
+            "success": False,
+            "error": f"invalid token {known_token} echoed {token_like_value}",
+        }
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            with patch.object(client, "_schedule_realtime_ws_public_demotion"):
+                await client._on_ws_message(msg)
+        finally:
+            logger.remove(sink_id)
+        logged = "\n".join(record.message for record in caplog.records)
+        assert known_token not in logged
+        assert token_like_value not in logged
+        assert "***REDACTED***" in logged
+
+    @pytest.mark.asyncio
+    async def test_ticker_subscription_ack_health_error_redacts_active_token(
+        self,
+        client: KrakenEquitiesExchangeClient,
+    ) -> None:
+        """Ticker ACK health storage redacts token while demotion still fires."""
+        known_token = "short-active-token"
+        client._ws_auth_active = True
+        client._ws_token = known_token
+        client._ws_token_refresh_at = ke.monotonic() + 100.0
+        client._ws_token_expires_at = ke.monotonic() + 200.0
+        msg = {
+            "method": "subscribe",
+            "result": {
+                "channel": "ticker",
+                "symbol": "CLM6.NYMEX",
+                "snapshot": True,
+            },
+            "success": False,
+            "error": f"invalid token {known_token}",
+        }
+        with patch.object(client, "_schedule_realtime_ws_public_demotion") as demote:
+            await client._on_ws_message(msg)
+
+        entry = client._health_tracker.snapshot()[("ticker", "CLM6.NYMEX")]
+        assert entry.status == "failed"
+        assert known_token not in (entry.last_error or "")
+        assert "***REDACTED***" in (entry.last_error or "")
+        demote.assert_called_once_with("auth subscribe ACK rejected")
+
+    @pytest.mark.asyncio
+    async def test_subscription_ack_failure_log_redacts_previous_token(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Delayed subscribe failure logs redact rotated-out auth tokens."""
+        repository = MagicMock()
+        client = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="wallet-1",
+        )
+        previous_token = "previous-ws-token"
+        current_token = "current-ws-token"
+        resolver = MagicMock()
+        resolver.get_credentials = AsyncMock(
+            return_value={"api_key": "api-key", "api_secret": "api-secret"}
+        )
+        payloads: list[object] = [
+            {"token": previous_token, "expires": 900},
+            {"token": current_token, "expires": 900},
+        ]
+
+        async def _dispatch(func: object, api_key: str, api_secret: str) -> object:
+            assert callable(func)
+            assert api_key == "api-key"
+            assert api_secret == "api-secret"
+            return payloads.pop(0)
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver",
+                return_value=resolver,
+            ),
+            patch.object(client, "_dispatch_blocking", side_effect=_dispatch),
+        ):
+            assert await client._refresh_realtime_ws_token() is True
+            assert await client._refresh_realtime_ws_token() is True
+
+        msg = {
+            "method": "subscribe",
+            "result": {
+                "channel": "ticker",
+                "symbol": "CLM6.NYMEX",
+                "snapshot": True,
+            },
+            "success": False,
+            "error": f"invalid token {previous_token}",
+        }
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            with patch.object(client, "_schedule_realtime_ws_public_demotion"):
+                await client._on_ws_message(msg)
+        finally:
+            logger.remove(sink_id)
+        logged = "\n".join(record.message for record in caplog.records)
+        assert previous_token not in logged
+        assert current_token not in logged
+        assert "***REDACTED***" in logged
+
+    def test_redact_sensitive_payload_masks_token_echoes_and_query_params(self) -> None:
+        """Payload redaction masks token fields, echoes, and query strings."""
+        field_token = "field-token"
+        query_token = "query-token"
+        payload = {
+            "params": {"token": field_token},
+            "error": (
+                f"invalid {field_token} at "
+                f"wss://ws-equities-auth.kraken.com/?token={query_token}&channel=ticker"
+            ),
+            "nested": [f"retry echoed {field_token}"],
+        }
+
+        redacted = ke._redact_sensitive_payload(payload)
+
+        rendered = str(redacted)
+        assert field_token not in rendered
+        assert query_token not in rendered
+        assert "token=***REDACTED***" in rendered
+        assert "***REDACTED***" in rendered
+
+    @pytest.mark.asyncio
+    async def test_auth_token_ack_error_demotes_to_public_feed(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Auth/token subscribe rejection schedules callback-safe demotion.
+
+        Given: The authenticated feed is active,
+        When: Kraken rejects a subscribe from inside an SDK callback child task,
+        Then: The callback returns without deadlock and a public socket is started.
+        """
+        client._ws_auth_active = True
+        auth_ws = _SdkShapedWsClient()
+        public_ws = AsyncMock()
+        client._ws_client = auth_ws
+        msg = {
+            "method": "subscribe",
+            "result": {
+                "channel": "ticker",
+                "symbol": "CLM6.NYMEX",
+                "snapshot": True,
+            },
+            "success": False,
+            "error": "invalid token",
+        }
+
+        async def _child_callback() -> None:
+            await client._on_ws_message(msg)
+
+        async def _parent_connector() -> None:
+            child_task = asyncio.create_task(_child_callback())
+            await child_task
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+            return_value=public_ws,
+        ) as ws_cls:
+            parent_task = asyncio.create_task(_parent_connector())
+            auth_ws.parent_task = parent_task
+            await asyncio.wait_for(parent_task, timeout=0.5)
+            assert client._ws_auth_active is True
+            await _await_public_demotion(client)
+        assert auth_ws.closed is True
+        assert auth_ws.close_started.is_set()
+        assert auth_ws.close_finished.is_set()
+        public_ws.start.assert_awaited_once()
+        assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
+        assert client._ws_client is public_ws
+        assert client._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_ticker_subscription_ack_without_symbol_is_ignored(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Ticker ACKs without a string symbol do not create health entries."""
+        ack = MagicMock(success=True, error=None)
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities."
+            "KrakenTickerSubscriptionAckSchema.model_validate",
+            return_value=ack,
+        ):
+            await client._on_ws_message(
+                {
+                    "method": "subscribe",
+                    "result": {"channel": "ticker"},
+                    "success": True,
+                }
+            )
+        assert client._health_tracker.snapshot() == {}
+
+    @pytest.mark.asyncio
+    async def test_logged_ws_control_message_redacts_token(
+        self,
+        client: KrakenEquitiesExchangeClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Whole-message control logs never expose token-like secrets."""
+        ack = MagicMock(success=True, error=None)
+        sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+        try:
+            with patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "KrakenTickerSubscriptionAckSchema.model_validate",
+                return_value=ack,
+            ):
+                await client._on_ws_message(
+                    {
+                        "method": "subscribe",
+                        "result": {"channel": "ticker"},
+                        "params": {
+                            "token": "secret-token",
+                            "api_key": "secret-key",
+                            "nested": {"api_secret": "secret-value"},
+                        },
+                        "success": True,
+                    }
+                )
+        finally:
+            logger.remove(sink_id)
+        logged = "\n".join(record.message for record in caplog.records)
+        assert "secret-token" not in logged
+        assert "secret-key" not in logged
+        assert "secret-value" not in logged
+        assert "***REDACTED***" in logged
+
+    @pytest.mark.asyncio
+    async def test_ticker_subscription_ack_validation_error_is_ignored(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Non-standard ticker control messages do not raise."""
+        await client._on_ws_message(
+            {
+                "method": "subscribe",
+                "result": {"channel": "ticker"},
+                "success": True,
+            }
+        )
+        assert client._health_tracker.snapshot() == {}
+
+    @pytest.mark.asyncio
+    async def test_trade_subscription_ack_marks_confirmed(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Trade subscribe ACKs mark the symbol confirmed.
+
+        Given: A successful trade subscribe ACK,
+        When: _on_ws_message handles it,
+        Then: The health tracker records a confirmed trade subscription.
+        """
+        msg = {
+            "method": "subscribe",
+            "result": {"channel": "trade", "symbol": "CLM6.NYMEX"},
+            "success": True,
+        }
+        await client._on_ws_message(msg)
+        entry = client._health_tracker.snapshot()[("trade", "CLM6.NYMEX")]
+        assert entry.status == "confirmed"
+
+    @pytest.mark.asyncio
+    async def test_trade_subscription_ack_marks_failed_with_default_error(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Trade subscribe rejection without error uses the default message.
+
+        Given: A failed trade subscribe ACK without an error string,
+        When: _on_ws_message handles it,
+        Then: The health tracker records a failed trade subscription.
+        """
+        msg = {
+            "method": "subscribe",
+            "result": {"channel": "trade", "symbol": "CLM6.NYMEX"},
+            "success": False,
+        }
+        await client._on_ws_message(msg)
+        entry = client._health_tracker.snapshot()[("trade", "CLM6.NYMEX")]
+        assert entry.status == "failed"
+        assert entry.last_error == "unknown subscription error"
+
+    @pytest.mark.asyncio
+    async def test_trade_subscription_ack_health_error_redacts_recent_token(
+        self,
+        client: KrakenEquitiesExchangeClient,
+    ) -> None:
+        """Trade ACK health storage redacts recently issued token values."""
+        previous_token = "previous-ws-token"
+        client._ws_auth_active = True
+        client._ws_token = "current-ws-token"
+        client._ws_token_refresh_at = ke.monotonic() + 100.0
+        client._ws_token_expires_at = ke.monotonic() + 200.0
+        client._remember_realtime_ws_token(previous_token, ke.monotonic() + 200.0)
+        msg = {
+            "method": "subscribe",
+            "result": {"channel": "trade", "symbol": "CLM6.NYMEX"},
+            "success": False,
+            "error": f"invalid token {previous_token}",
+        }
+        with patch.object(client, "_schedule_realtime_ws_public_demotion") as demote:
+            await client._on_ws_message(msg)
+
+        entry = client._health_tracker.snapshot()[("trade", "CLM6.NYMEX")]
+        assert entry.status == "failed"
+        assert previous_token not in (entry.last_error or "")
+        assert "***REDACTED***" in (entry.last_error or "")
+        demote.assert_called_once_with("auth subscribe ACK rejected")
+
+    @pytest.mark.asyncio
+    async def test_trade_subscription_ack_without_symbol_is_ignored(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Trade ACKs without a string symbol do not create health entries."""
+        await client._on_ws_message(
+            {
+                "method": "subscribe",
+                "result": {"channel": "trade"},
+                "success": True,
+            }
+        )
+        assert client._health_tracker.snapshot() == {}
+
+    @pytest.mark.asyncio
+    async def test_trade_subscription_ack_validation_error_is_ignored(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Non-standard trade control messages do not raise."""
+        await client._on_ws_message(
+            {
+                "method": "subscribe",
+                "result": {"channel": "trade", "symbol": "CLM6.NYMEX"},
+                "success": [],
+            }
+        )
+        assert client._health_tracker.snapshot() == {}
+
+    @pytest.mark.asyncio
+    async def test_unknown_subscription_ack_channel_is_ignored(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Subscribe ACKs for unsupported channels do not mutate health state."""
+        await client._on_ws_message(
+            {
+                "method": "subscribe",
+                "result": {"channel": "book", "symbol": "CLM6.NYMEX"},
+                "success": True,
+            }
+        )
+        assert client._health_tracker.snapshot() == {}
 
     @pytest.mark.asyncio
     async def test_unparseable_ticker_skipped(self, client: KrakenEquitiesExchangeClient) -> None:

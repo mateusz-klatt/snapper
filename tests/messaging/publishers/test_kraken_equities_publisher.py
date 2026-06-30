@@ -1,14 +1,17 @@
 """Unit tests for KrakenEquitiesMarketDataPublisher."""
 
+import asyncio
 from datetime import UTC
 from datetime import datetime
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import PropertyMock
 from unittest.mock import patch
 
 import pytest
 
 from snapper.config.settings import AppSettings
+from snapper.infrastructure.exchanges.implementations import kraken_equities as ke
 from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
@@ -35,6 +38,62 @@ class TestKrakenEquitiesMarketDataPublisher:
             mock_cls.return_value = MagicMock(spec=KrakenEquitiesExchangeClient)
             client = publisher._create_exchange_client()
             assert isinstance(client, KrakenEquitiesExchangeClient)
+        mock_cls.assert_called_once_with(
+            repository=None,
+            realtime_ws_enabled=False,
+            realtime_wallet_public_id="",
+        )
+
+    def test_create_exchange_client_passes_realtime_settings(self) -> None:
+        """Verify factory method wires DB-backed realtime settings.
+
+        Given: A started publisher with repository and settings installed,
+        When: _create_exchange_client is called,
+        Then: The client receives repository plus realtime auth settings.
+        """
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        repository = MagicMock()
+        settings = MagicMock(spec=AppSettings)
+        settings.kraken_equities_realtime_ws_enabled = True
+        settings.kraken_equities_realtime_wallet_public_id = "wallet-1"
+        publisher.repository = repository
+        publisher.settings = settings
+
+        with patch(
+            "snapper.messaging.publishers.kraken_equities.KrakenEquitiesExchangeClient"
+        ) as mock_cls:
+            mock_cls.return_value = MagicMock(spec=KrakenEquitiesExchangeClient)
+            client = publisher._create_exchange_client()
+            assert isinstance(client, KrakenEquitiesExchangeClient)
+        mock_cls.assert_called_once_with(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="wallet-1",
+        )
+
+    def test_realtime_settings_default_when_db_unavailable(self) -> None:
+        """Bootstrap-only settings keep realtime disabled."""
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        settings = MagicMock(spec=AppSettings)
+        publisher.settings = settings
+        with (
+            patch.object(
+                type(settings),
+                "kraken_equities_realtime_ws_enabled",
+                new_callable=PropertyMock,
+                create=True,
+            ) as enabled_prop,
+            patch.object(
+                type(settings),
+                "kraken_equities_realtime_wallet_public_id",
+                new_callable=PropertyMock,
+                create=True,
+            ) as wallet_prop,
+        ):
+            enabled_prop.side_effect = RuntimeError("no db")
+            wallet_prop.side_effect = RuntimeError("no db")
+            assert publisher._kraken_equities_realtime_ws_enabled() is False
+            assert publisher._kraken_equities_realtime_wallet_public_id() == ""
 
     def test_get_exchange_name_returns_kraken_equities(self) -> None:
         """Verify exchange name returns 'kraken_equities'.
@@ -233,11 +292,69 @@ class TestKrakenEquitiesMarketDataPublisher:
         publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
         client = MagicMock()
         client.disconnect = AsyncMock()
+        client.connect = AsyncMock()
         client._ensure_ws_connected = AsyncMock()
         publisher._exchange_client = client
         await publisher._attempt_liveness_recovery("stale")
         client.disconnect.assert_awaited_once()
+        client.connect.assert_awaited_once()
         client._ensure_ws_connected.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_liveness_recovery_reopens_lifecycle_for_auth_demotion(self) -> None:
+        """Realtime liveness rebuild allows later auth rejection demotion."""
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        client = KrakenEquitiesExchangeClient(realtime_ws_enabled=True)
+        publisher._exchange_client = client
+        auth_ws = AsyncMock()
+        public_ws = AsyncMock()
+
+        async def _prepare_auth() -> bool:
+            client._ws_auth_active = True
+            client._ws_token = "token-1"
+            client._ws_token_refresh_at = ke.monotonic() + 100.0
+            client._ws_token_expires_at = ke.monotonic() + 200.0
+            return True
+
+        ack = {
+            "method": "subscribe",
+            "result": {
+                "channel": "ticker",
+                "symbol": "CLM6.NYMEX",
+                "snapshot": True,
+            },
+            "success": False,
+            "error": "invalid token",
+        }
+        try:
+            with (
+                patch.object(client, "_prepare_realtime_ws_auth", side_effect=_prepare_auth),
+                patch.object(client, "_force_sdk_public_endpoint", return_value=True),
+                patch.object(client, "_disable_sdk_reconnect_replay_for_auth", return_value=True),
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                    "SpotWSClient",
+                    side_effect=[auth_ws, public_ws],
+                ) as ws_cls,
+            ):
+                await publisher._attempt_liveness_recovery("stale")
+                assert client._ws_closing is False
+                assert client._ws_client is auth_ws
+                await client._on_ws_message(ack)
+                task = client._ws_public_demotion_task
+                assert task is not None
+                await asyncio.wait_for(task, timeout=1.0)
+
+            assert [call.kwargs["ws_url"] for call in ws_cls.call_args_list] == [
+                ke._WS_AUTH_URL,
+                ke._WS_URL,
+            ]
+            auth_ws.close.assert_awaited_once()
+            public_ws.start.assert_awaited_once()
+            assert client._ws_client is public_ws
+            assert client._ws_auth_active is False
+        finally:
+            await client.disconnect()
 
     @pytest.mark.asyncio
     async def test_attempt_liveness_recovery_skips_without_client(self) -> None:

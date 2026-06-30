@@ -43,11 +43,15 @@ Public API:
 
 import asyncio
 import contextvars
+import logging
+import re
 import weakref
 from collections.abc import Callable
+from collections.abc import Collection
 from collections.abc import Mapping
 from typing import Any
 from typing import Final
+from typing import cast
 from urllib.parse import urlsplit
 
 import kraken.futures.websocket as _kraken_futures_ws
@@ -150,6 +154,9 @@ _ALREADY_SUBSCRIBED_PATCH_LOGGED: list[bool] = [False]
 filter patch's ``applied`` INFO confirmation has been emitted
 post-sink-ready."""
 
+_SDK_LOG_REDACTION_FILTER_APPLIED: list[bool] = [False]
+"""Single-element list flag tracking whether SDK raw WS logging is redacted."""
+
 _RESUBSCRIBE_PACE_PATCH_APPLIED: list[bool] = [False]
 """Single-element list flag tracking whether the reconnect re-subscribe
 pacing patch is installed."""
@@ -218,6 +225,19 @@ Benign: fires on the race between our publisher health-loop's replay
 path and the SDK's existing in-memory subscription set. Real subscribe
 failures (e.g. ``Invalid arguments``, unknown symbol) use a different
 ``error`` string and must remain visible at WARNING level."""
+
+_REDACTED_VALUE: Final[str] = "***REDACTED***"
+"""Replacement text for token material in SDK log payloads."""
+
+_SENSITIVE_LOG_KEYS: Final[frozenset[str]] = frozenset({"token", "api_key", "api_secret"})
+"""Case-insensitive payload keys whose values must never be logged."""
+
+_TOKEN_SHAPED_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])")
+"""Conservative Kraken-token-shaped substring matcher for log redaction."""
+_SENSITIVE_TEXT_PARAM_RE = re.compile(
+    r"(?i)(\b(?:token|api_key|api_secret)\s*[:=]\s*)([^&\s\"'<>)}\]]+)"
+)
+"""Cheap sensitive key/value matcher for SDK log redaction."""
 
 _PENDING_RETRY_AFTER_S: dict[int, float] = {}
 """Maps ``id(connector_self)`` to its pending Retry-After deadline in seconds."""
@@ -1125,6 +1145,7 @@ def apply_kraken_ws_teardown_hardening() -> None:
     tasks (#143 — the first fix attempt was reverted exactly because parent
     cancellation orphaned the reconnect children).
     """
+    _apply_kraken_sdk_log_redaction_filter()
     if _TEARDOWN_PATCH_APPLIED[0]:
         return
     setattr(
@@ -1161,6 +1182,7 @@ def apply_kraken_retry_after_honoring() -> None:
     ``websockets.asyncio.client`` so rebinding the top-level alias would
     have no effect on the SDK's handshake path.
     """
+    _apply_kraken_sdk_log_redaction_filter()
     if _PATCH_APPLIED[0]:
         return
     setattr(
@@ -1223,6 +1245,107 @@ def apply_kraken_futures_pool_routing() -> None:
     log_kraken_sdk_patches_status()
 
 
+def _collect_ws_log_tokens(value: object) -> set[str]:
+    """Collect explicit sensitive field values from an SDK log payload.
+
+    Args:
+        value: External SDK message or nested value.
+
+    Returns:
+        Non-empty string values found under case-insensitive sensitive keys.
+    """
+    tokens: set[str] = set()
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if (
+                isinstance(key, str)
+                and key.lower() in _SENSITIVE_LOG_KEYS
+                and isinstance(item, str)
+                and item
+            ):
+                tokens.add(item)
+            tokens.update(_collect_ws_log_tokens(item))
+        return tokens
+    if isinstance(value, list | tuple):
+        for item in value:
+            tokens.update(_collect_ws_log_tokens(item))
+    return tokens
+
+
+def _redact_ws_log_text(value: str, known_tokens: Collection[str]) -> str:
+    """Redact known token values and token-shaped substrings from text.
+
+    Args:
+        value: Free-form text from an SDK payload.
+        known_tokens: Explicit token values collected from the same payload.
+
+    Returns:
+        Text safe for logging.
+    """
+    redacted = value
+    for token in known_tokens:
+        redacted = redacted.replace(token, _REDACTED_VALUE)
+    redacted = _SENSITIVE_TEXT_PARAM_RE.sub(
+        lambda match: f"{match.group(1)}{_REDACTED_VALUE}",
+        redacted,
+    )
+    return _TOKEN_SHAPED_RE.sub(_REDACTED_VALUE, redacted)
+
+
+def _redact_ws_log_payload(
+    value: object,
+    known_tokens: Collection[str] | None = None,
+) -> object:
+    """Recursively redact token material from an SDK log payload.
+
+    Args:
+        value: External SDK message or nested value.
+        known_tokens: Explicit token values collected from the payload. When
+            absent, they are collected from ``value`` first so echoed token
+            strings outside a token key are also masked.
+
+    Returns:
+        Structurally similar payload with token material masked.
+    """
+    active_tokens = _collect_ws_log_tokens(value) if known_tokens is None else known_tokens
+    if isinstance(value, Mapping):
+        redacted: dict[object, object] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and key.lower() in _SENSITIVE_LOG_KEYS:
+                redacted[key] = _REDACTED_VALUE
+            else:
+                redacted[key] = _redact_ws_log_payload(item, active_tokens)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_ws_log_payload(item, active_tokens) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_ws_log_payload(item, active_tokens) for item in value)
+    if isinstance(value, str):
+        return _redact_ws_log_text(value, active_tokens)
+    return value
+
+
+class _KrakenSdkWsLogRedactionFilter(logging.Filter):
+    """Redact SDK raw WebSocket log records before handlers format them."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Mask token material in a standard logging record."""
+        record.msg = _redact_ws_log_payload(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact_ws_log_payload(item) for item in record.args)
+        elif isinstance(record.args, Mapping):
+            record.args = cast(Mapping[str, object], _redact_ws_log_payload(record.args))
+        return True
+
+
+def _apply_kraken_sdk_log_redaction_filter() -> None:
+    """Install the raw SDK WebSocket logging redactor once."""
+    if _SDK_LOG_REDACTION_FILTER_APPLIED[0]:
+        return
+    _kraken_connectors.LOG.addFilter(_KrakenSdkWsLogRedactionFilter())
+    _SDK_LOG_REDACTION_FILTER_APPLIED[0] = True
+
+
 def _patched_manage_subscriptions(self: ConnectSpotWebsocketBase, message: JsonObject) -> None:
     """Replacement for ``ConnectSpotWebsocket._manage_subscriptions``.
 
@@ -1244,20 +1367,21 @@ def _patched_manage_subscriptions(self: ConnectSpotWebsocketBase, message: JsonO
     transform: Any = getattr(self, "_ConnectSpotWebsocket__transform_subscription")
     append: Any = getattr(self, "_ConnectSpotWebsocket__append_subscription")
     remove: Any = getattr(self, "_ConnectSpotWebsocket__remove_subscription")
+    log_message = _redact_ws_log_payload(message)
     if message.get("method") == "subscribe":
         if message.get("success") and message.get("result"):
             transformed = transform(subscription=message)
             append(subscription=transformed["result"])
         elif message.get("error") == _ALREADY_SUBSCRIBED_ERROR:
-            logger.debug("kraken-sdk subscribe race (already subscribed): {}", message)
+            logger.debug("kraken-sdk subscribe race (already subscribed): {}", log_message)
         else:
-            logger.warning("kraken-sdk subscribe failed: {}", message)
+            logger.warning("kraken-sdk subscribe failed: {}", log_message)
     elif message.get("method") == "unsubscribe":
         if message.get("success") and message.get("result"):
             transformed = transform(subscription=message)
             remove(subscription=transformed["result"])
         else:
-            logger.warning("kraken-sdk unsubscribe failed: {}", message)
+            logger.warning("kraken-sdk unsubscribe failed: {}", log_message)
 
 
 def apply_kraken_already_subscribed_filter() -> None:

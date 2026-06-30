@@ -423,6 +423,39 @@ class AppSettings:
         return bool(raw)
 
     @property
+    def kraken_equities_realtime_ws_enabled(self) -> bool:
+        """Return whether Kraken Equities should use the authenticated realtime WS.
+
+        Default off: the publisher keeps using the public delayed feed unless
+        this DB setting is explicitly enabled. Coerced defensively so string
+        values from admin/UI writes do not accidentally enable the feed.
+
+        Returns:
+            True when the authenticated realtime feed is enabled, else False.
+        """
+        raw = self._get_db_setting("kraken_equities_realtime_ws_enabled", False)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in ("true", "1", "yes", "on")
+        return bool(raw)
+
+    @property
+    def kraken_equities_realtime_wallet_public_id(self) -> str:
+        """Return the wallet whose Kraken Spot key mints Equities WS tokens.
+
+        The authenticated Equities feed accepts tokens minted through Kraken
+        Spot ``GetWebSocketsToken``. This setting identifies the wallet row in
+        ``wallet_credentials`` whose ``exchange='kraken'`` API key/secret is
+        used for that mint. Empty string keeps realtime auth unavailable and
+        therefore falls back to the public delayed feed.
+
+        Returns:
+            Wallet public id string, or empty string when unset.
+        """
+        return self._get_db_setting("kraken_equities_realtime_wallet_public_id", "")
+
+    @property
     def instruments(self) -> dict[str, list[str]]:
         """Return configured trading instruments per exchange.
 

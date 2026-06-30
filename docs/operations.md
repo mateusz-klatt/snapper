@@ -249,11 +249,45 @@ Contracts used by this flow:
 - WS: `wss://ws-equities.kraken.com` for live delayed (~10 min)
   ticks + trades. The outer envelope's `delayed` flag propagates
   into every `TickData` message as `is_delayed`.
+- Optional realtime WS: `wss://ws-equities-auth.kraken.com/?f`, gated by
+  `kraken_equities_realtime_ws_enabled=false` by default. The client mints
+  a short-lived token from the configured `exchange='kraken'` Spot wallet
+  credential and injects it only into outbound subscribe params. If the
+  wallet id is empty, the credential row is missing, or Kraken rejects the
+  token mint, the publisher logs the fallback and stays on the public
+  delayed feed. When `feed_egress_enabled=true`, the token mint is routed
+  through the same `kraken_equities` public egress pool selection as the
+  Equities WebSocket so the mint and WS handshake originate from the same
+  configured tunnel.
 - No order API — every submit route (`POST /api/orders`,
   `POST /api/execution-plans`, `POST /api/trailing-stops`) calls
   `snapper.server._capability_guard.require_tradable` and rejects
   TradFi instruments with HTTP 422
   `error_code=instrument_market_data_only`.
+
+## Realtime authenticated feed
+
+The realtime feed is market-data only. It does not enable orders,
+execution subscriptions, or account channels in Snapper. To enable it:
+
+1. Seed or select a wallet credential row with `exchange='kraken'`,
+    `credential_type='api_key_secret'`, and Kraken's WebSocket interface
+    permission.
+2. Set `kraken_equities_realtime_wallet_public_id=<wallet_public_id>`.
+3. Set `kraken_equities_realtime_ws_enabled=true`.
+4. Restart `snapper-feed`; these settings are read when the
+    `kraken_equities_feed_publisher` constructs its exchange client.
+5. Verify incoming ticker frames have `is_delayed=false`. If token minting
+    fails, the same publisher keeps running against
+    `wss://ws-equities.kraken.com` and frames remain `is_delayed=true`.
+
+Tokens are never persisted in `SubscriptionRequest.parameters_json` or any
+settings row. Reconnect recovery rebuilds the SDK client and replays
+Snapper's stable subscription cache with a freshly minted token. Although
+Kraken exposes `GetWebSocketsToken` under `/0/private/`, Snapper treats this
+read-only market-data session credential as public Equities feed traffic for
+egress routing so it shares the auth WebSocket source IP. If feed egress is
+off or no pool is configured, the mint remains direct.
 
 ## Market diagnostics
 

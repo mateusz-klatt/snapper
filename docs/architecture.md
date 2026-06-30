@@ -1409,11 +1409,20 @@ these instruments as observation-only.
   `KrakenEquitiesExchangeClient.get_ohlcv()` and the
   `kraken_equities_aggregates_backfill` process. Intervals
   `{1, 5, 15, 30, 60, 1440}` minutes accepted.
-- WebSocket ticks + trades: `wss://ws-equities.kraken.com` (Kraken
-  Spot WS v2 protocol with `asset_class: futures_contract`). Feed is
-  delayed ~10 minutes per FCM policy. The outer envelope's
-  `delayed: true` flag propagates onto every
-  `TickData.is_delayed=True` so ZMQ subscribers can gate accordingly.
+- WebSocket ticks + trades: `wss://ws-equities.kraken.com` by default
+  (Kraken Spot WS v2 protocol with `asset_class: futures_contract`).
+  The public feed is delayed ~10 minutes per FCM policy. When
+  `kraken_equities_realtime_ws_enabled=true`, the publisher first mints
+  a Kraken Spot WebSockets token from the configured
+  `kraken_equities_realtime_wallet_public_id` credential and connects to
+  `wss://ws-equities-auth.kraken.com/?f`; subscribe params receive the
+  token in memory only. Mint or credential failure falls back to the
+  public delayed URL. Under `feed_egress_enabled=true`, the token mint is
+  classified as public `kraken_equities` market-data traffic so it uses the
+  same egress-pool route as the authenticated Equities WebSocket, preserving
+  source-IP consistency for tokens that may be IP-bound. The outer envelope's
+  `delayed` flag propagates onto every `TickData.is_delayed` value so ZMQ
+  subscribers can distinguish delayed and realtime frames.
 
 ### Capability model
 

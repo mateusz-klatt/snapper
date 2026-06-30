@@ -17,6 +17,7 @@ clears them on entry to keep the suite order-independent.
 import asyncio
 import contextlib
 import gc
+import logging
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -41,6 +42,7 @@ from websockets.frames import Close
 from websockets.http11 import Headers
 from websockets.http11 import Response
 
+from snapper.core.json_types import JsonObject
 from snapper.infrastructure.exchanges import kraken_sdk_patches
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _ALREADY_SUBSCRIBED_PATCH_APPLIED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _ALREADY_SUBSCRIBED_PATCH_LOGGED
@@ -2619,6 +2621,185 @@ class TestPatchedManageSubscriptions:
         finally:
             _logger.remove(handler_id)
         assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_subscribe_error_log_redacts_token_payload(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Spec — failed subscribe payload logging never exposes tokens.
+
+        Given an SDK subscribe failure with a token key and a token-shaped
+        value echoed inside the error string,
+        When ``_patched_manage_subscriptions`` logs the failure,
+        Then neither sensitive value appears in the emitted record.
+        """
+        connector = MagicMock(spec=ConnectSpotWebsocket)
+        known_token = "short-active-token"
+        token_like_value = "S" * 43
+        message: JsonObject = {
+            "method": "subscribe",
+            "success": False,
+            "error": f"Invalid token {known_token} echoed {token_like_value}",
+            "params": {
+                "token": known_token,
+                "symbol": ["CLM6.NYMEX"],
+            },
+        }
+        handler_id = _logger.add(caplog.handler, format="{message}", level="DEBUG")
+        try:
+            _patched_manage_subscriptions(connector, message)
+        finally:
+            _logger.remove(handler_id)
+        logged = "\n".join(record.message for record in caplog.records)
+        assert known_token not in logged
+        assert token_like_value not in logged
+        assert "***REDACTED***" in logged
+
+    def test_redact_ws_log_payload_handles_tuple_values(self) -> None:
+        """Spec — SDK payload redaction recurses through tuple values."""
+        known_token = "tuple-active-token"
+        payload = ({"token": known_token}, f"echoed {known_token}")
+
+        result = kraken_sdk_patches._redact_ws_log_payload(payload)
+
+        rendered = str(result)
+        assert known_token not in rendered
+        assert "***REDACTED***" in rendered
+
+    def test_redact_ws_log_payload_masks_token_query_params(self) -> None:
+        """Spec — SDK payload redaction masks sensitive query-parameter values."""
+        query_token = "query-token"
+        api_key = "query-api-key"
+        api_secret = "query-api-secret"
+        payload: JsonObject = {
+            "method": "subscribe",
+            "success": False,
+            "error": (
+                f"failed wss://example.test/ws?token={query_token}&api_key={api_key}"
+                f"&api_secret={api_secret}&x=1"
+            ),
+        }
+
+        result = kraken_sdk_patches._redact_ws_log_payload(payload)
+
+        rendered = str(result)
+        assert query_token not in rendered
+        assert api_key not in rendered
+        assert api_secret not in rendered
+        assert "token=***REDACTED***" in rendered
+        assert "api_key=***REDACTED***" in rendered
+        assert "api_secret=***REDACTED***" in rendered
+
+    def test_sdk_raw_debug_log_filter_redacts_token_payload(self) -> None:
+        """Spec — SDK raw run-loop DEBUG records are redacted before handlers format them.
+
+        ``apply_kraken_ws_teardown_hardening`` installs the redaction filter on the
+        SDK connector logger, and that filter masks token/api_key/api_secret material
+        in both nested mapping values and free-text fields of one record. The filter
+        is exercised directly on a constructed record rather than through a live
+        ``logger.debug`` emission, which is fragile under the global logging state
+        (``logging.disable`` / ``Logger.disabled``) other suite tests can leave behind.
+        """
+        known_token = "raw-debug-token"
+        api_key = "raw-api-key"
+        api_secret = "raw-api-secret"
+        kraken_sdk_patches.apply_kraken_ws_teardown_hardening()
+        sdk_logger = kraken_sdk_patches._kraken_connectors.LOG
+        assert any(
+            isinstance(existing, kraken_sdk_patches._KrakenSdkWsLogRedactionFilter)
+            for existing in sdk_logger.filters
+        )
+        record = logging.LogRecord(
+            name="kraken.spot.websocket.connectors",
+            level=logging.DEBUG,
+            pathname=__file__,
+            lineno=1,
+            msg={
+                "method": "subscribe",
+                "params": {
+                    "token": known_token,
+                    "api_key": api_key,
+                    "api_secret": api_secret,
+                },
+                "error": (f"Invalid token {known_token} api_key={api_key} api_secret={api_secret}"),
+            },
+            args=None,
+            exc_info=None,
+        )
+        log_filter = kraken_sdk_patches._KrakenSdkWsLogRedactionFilter()
+
+        assert log_filter.filter(record) is True
+        rendered = record.getMessage()
+        assert known_token not in rendered
+        assert api_key not in rendered
+        assert api_secret not in rendered
+        assert "***REDACTED***" in rendered
+
+    def test_sdk_raw_debug_log_filter_handles_record_without_tuple_args(self) -> None:
+        """Spec — SDK log redaction also handles records without positional args."""
+        known_token = "record-token"
+        record = logging.LogRecord(
+            name="kraken.spot.websocket.connectors",
+            level=logging.DEBUG,
+            pathname=__file__,
+            lineno=1,
+            msg={"params": {"token": known_token}},
+            args=None,
+            exc_info=None,
+        )
+        log_filter = kraken_sdk_patches._KrakenSdkWsLogRedactionFilter()
+
+        assert log_filter.filter(record) is True
+        rendered = record.getMessage()
+        assert known_token not in rendered
+        assert "***REDACTED***" in rendered
+
+    def test_sdk_raw_debug_log_filter_redacts_mapping_args(self) -> None:
+        """Spec — SDK log redaction handles mapping-style format args."""
+        api_key = "mapping-api-key"
+        api_secret = "mapping-api-secret"
+        record = logging.LogRecord(
+            name="kraken.spot.websocket.connectors",
+            level=logging.DEBUG,
+            pathname=__file__,
+            lineno=1,
+            msg="api_key=%(api_key)s api_secret=%(api_secret)s plain=%(plain)s",
+            args={"api_key": api_key, "api_secret": api_secret, "plain": "visible"},
+            exc_info=None,
+        )
+        log_filter = kraken_sdk_patches._KrakenSdkWsLogRedactionFilter()
+
+        assert log_filter.filter(record) is True
+        rendered = record.getMessage()
+        assert api_key not in rendered
+        assert api_secret not in rendered
+        assert "plain=visible" in rendered
+        assert "***REDACTED***" in rendered
+
+    def test_sdk_raw_debug_log_filter_redacts_tuple_args(self) -> None:
+        """Spec — SDK log redaction masks secrets in tuple-style positional args.
+
+        Uses a two-element ``args`` tuple so ``LogRecord`` keeps it as a tuple:
+        a single-element tuple whose only item is a mapping is auto-unwrapped to
+        that mapping, which would route through the mapping branch instead.
+        """
+        known_token = "tuple-token"
+        record = logging.LogRecord(
+            name="kraken.spot.websocket.connectors",
+            level=logging.DEBUG,
+            pathname=__file__,
+            lineno=1,
+            msg="subscribe rejected: %s %s",
+            args=({"params": {"token": known_token}}, "context"),
+            exc_info=None,
+        )
+        log_filter = kraken_sdk_patches._KrakenSdkWsLogRedactionFilter()
+
+        assert log_filter.filter(record) is True
+        assert isinstance(record.args, tuple)
+        rendered = str(record.args)
+        assert known_token not in rendered
+        assert "***REDACTED***" in rendered
 
     def test_successful_subscribe_appends_subscription(self) -> None:
         """Spec — successful subscribe still delegates to SDK helpers.

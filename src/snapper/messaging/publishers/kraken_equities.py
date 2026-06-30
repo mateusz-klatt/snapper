@@ -1,16 +1,17 @@
 """Kraken Equities (FCM Futures) market data publisher.
 
 This module provides a market data feed publisher for FCM commodity/index
-futures on Kraken's equities platform. It streams delayed ticks, trades, and
-trade-synthesized 1-minute candles via the Kraken Equities WebSocket
-(``wss://ws-equities.kraken.com``) and publishes normalized data to the ZMQ
-messaging bus.
+futures on Kraken's equities platform. It streams ticks, trades, and
+trade-synthesized 1-minute candles via the Kraken Equities WebSocket and
+publishes normalized data to the ZMQ messaging bus.
 
 Configuration
 -------------
 Symbols are configured via settings.instruments["kraken_equities"].
-The publisher uses public (anonymous) WebSocket connections.
-Data is delayed (~10 minutes).
+The publisher uses public delayed WebSocket connections by default. When
+``kraken_equities_realtime_ws_enabled`` is enabled and token mint succeeds,
+it uses the authenticated realtime market-data endpoint with tokenized
+subscribe calls.
 Historical and non-1m candles remain REST/backfill concerns.
 """
 
@@ -143,12 +144,45 @@ class KrakenEquitiesMarketDataPublisher(
         }
 
     def _create_exchange_client(self) -> KrakenEquitiesExchangeClient:
-        """Create anonymous Kraken Equities client for public data.
+        """Create Kraken Equities client with optional realtime auth config.
 
         Returns:
-            Configured KrakenEquitiesExchangeClient (no API keys needed).
+            Configured KrakenEquitiesExchangeClient.
         """
-        return KrakenEquitiesExchangeClient()
+        realtime_enabled = self._kraken_equities_realtime_ws_enabled()
+        wallet_public_id = (
+            self._kraken_equities_realtime_wallet_public_id() if realtime_enabled else ""
+        )
+        return KrakenEquitiesExchangeClient(
+            repository=self.repository,
+            realtime_ws_enabled=realtime_enabled,
+            realtime_wallet_public_id=wallet_public_id,
+        )
+
+    def _kraken_equities_realtime_ws_enabled(self) -> bool:
+        """Read the realtime gate, defaulting off before DB settings exist.
+
+        Returns:
+            True only when the DB-backed setting is available and enabled.
+        """
+        try:
+            value = self.settings.kraken_equities_realtime_ws_enabled
+        except RuntimeError:
+            return False
+        return value if isinstance(value, bool) else False
+
+    def _kraken_equities_realtime_wallet_public_id(self) -> str:
+        """Read the realtime token wallet id, defaulting empty pre-start.
+
+        Returns:
+            Wallet public id string, or empty string when settings are not
+            DB-backed yet.
+        """
+        try:
+            value = self.settings.kraken_equities_realtime_wallet_public_id
+        except RuntimeError:
+            return ""
+        return value if isinstance(value, str) else ""
 
     def _get_exchange_name(self) -> MarketDataExchange:
         """Get exchange identifier.
@@ -280,4 +314,5 @@ class KrakenEquitiesMarketDataPublisher(
         client = self._exchange_client
         if client is not None:
             await client.disconnect()
+            await client.connect()
             await client._ensure_ws_connected()

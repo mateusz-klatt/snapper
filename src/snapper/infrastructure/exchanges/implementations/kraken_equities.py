@@ -10,13 +10,16 @@ REST API Operations:
       backfill service — see ``get_ohlcv``.
 
 WebSocket Subscriptions (via SpotWSClient with overridden URL):
-    - Public: tickers, trades, and 1-minute candles synthesized
-      from trades.
+    - Public delayed by default: tickers, trades, and 1-minute candles
+      synthesized from trades.
+    - Optional authenticated realtime feed when
+      ``kraken_equities_realtime_ws_enabled`` is set and token minting
+      succeeds.
 
 The Kraken Equities WebSocket uses the same v2 protocol as Kraken Spot,
 with an additional ``asset_class`` field. This implementation reuses the
-``SpotWSClient`` from the Kraken SDK by pointing it at
-``wss://ws-equities.kraken.com``.
+``SpotWSClient`` from the Kraken SDK by pointing it at the Equities public
+or authenticated market-data endpoint.
 
 Limitations:
     - No order execution — ``create_order`` / ``cancel_order`` raise
@@ -28,24 +31,30 @@ Limitations:
       support only ``1m``; use REST ``get_ohlcv`` for historical and
       non-1m intervals.
     - ``supports_websocket_executions = False``.
-    - Feed is delayed (~10 minutes). TickerUpdate carries the
-      envelope-level delayed flag routed through ``_on_ws_message``.
+    - Public feed is delayed (~10 minutes). Authenticated realtime feed
+      reports ``delayed:false``. TickerUpdate carries the envelope-level
+      delayed flag routed through ``_on_ws_message``.
 """
 
 import asyncio
 import contextlib
 import json
+import re
+import threading
 from collections.abc import AsyncIterator
 from collections.abc import Callable
+from collections.abc import Collection
 from time import monotonic
 from typing import Any
 from typing import cast
 
 import httpx
+from kraken.spot import SpotClient
 from kraken.spot import SpotWSClient
 from loguru import logger
 from pydantic import ValidationError
 
+from snapper.config.credentials import CredentialResolver
 from snapper.core.json_types import JsonValue
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
@@ -71,6 +80,8 @@ from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.kraken_rest_egress import route_kraken_rest_sync_call
+from snapper.infrastructure.exchanges.kraken_rest_egress import spot_sdk_proxy_target
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscriptionAckSchema
@@ -165,6 +176,7 @@ Trade-off: tick freshness drops to <=5s — acceptable for Equities
 (no throttle there).
 """
 _WS_URL = "wss://ws-equities.kraken.com"
+_WS_AUTH_URL = "wss://ws-equities-auth.kraken.com/?f"
 _IAPI_BASE_URL = "https://iapi.kraken.com/api/internal/markets"
 _INSTRUMENTS_URL = f"{_IAPI_BASE_URL}/all/futures-contracts"
 _TICKER_HISTORY_URL_TEMPLATE = f"{_IAPI_BASE_URL}/{{ws_symbol}}/ticker/history"
@@ -186,6 +198,130 @@ _ALREADY_SUBSCRIBED_ERROR = "Already subscribed"
 _WS_CLIENT_NOT_CONNECTED_MSG = "WebSocket client not connected"
 _REPLAY_CLIENT_REPLACED_MSG = "WebSocket client replaced during subscription replay"
 _CONNECT_OWNERSHIP_LOST_MSG = "WebSocket client replaced during connect"
+_WS_TOKEN_REFRESH_GRACE_S = 60.0
+"""Seconds before Kraken's token TTL when Snapper proactively re-mints."""
+_WS_RECENT_TOKEN_LIMIT = 4
+"""Maximum number of issued WS tokens retained only for log redaction."""
+_REDACTED_VALUE = "***REDACTED***"
+_SENSITIVE_LOG_KEYS = frozenset({"token", "api_key", "api_secret"})
+_TOKEN_SHAPED_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])")
+_TOKEN_QUERY_PARAM_RE = re.compile(r"(?i)(token=)([^&\s\"'<>)}\]]+)")
+_AUTH_SUBSCRIBE_ERROR_MARKERS = (
+    "token",
+    "auth",
+    "permission",
+    "websocket interface",
+    "websockets api",
+)
+
+
+class _RealtimeWsAuthUnavailableError(RuntimeError):
+    """Signal that an auth WS subscribe cannot safely continue on auth."""
+
+
+def _redaction_tokens(*token_groups: Collection[str]) -> tuple[str, ...]:
+    """Return non-empty redaction tokens ordered by descending length."""
+    tokens: set[str] = set()
+    for group in token_groups:
+        tokens.update(token for token in group if token)
+    return tuple(sorted(tokens, key=len, reverse=True))
+
+
+def _collect_sensitive_payload_tokens(value: object) -> set[str]:
+    """Collect explicit sensitive field values that may be echoed elsewhere."""
+    tokens: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in cast(dict[object, object], value).items():
+            if (
+                isinstance(key, str)
+                and key.lower() in _SENSITIVE_LOG_KEYS
+                and isinstance(item, str)
+                and item
+            ):
+                tokens.add(item)
+            tokens.update(_collect_sensitive_payload_tokens(item))
+        return tokens
+    if isinstance(value, list | tuple):
+        for item in value:
+            tokens.update(_collect_sensitive_payload_tokens(item))
+    return tokens
+
+
+def _redact_sensitive_text(value: str, known_tokens: Collection[str] = ()) -> str:
+    """Mask sensitive token material in a free-form log string.
+
+    Args:
+        value: External text that may echo auth material.
+        known_tokens: In-memory Kraken WS tokens to mask even when they do
+            not match the generic token shape.
+
+    Returns:
+        Text with known-token, token query-param, and token-shaped substrings
+        redacted.
+    """
+    redacted = value
+    for known_token in known_tokens:
+        redacted = redacted.replace(known_token, _REDACTED_VALUE)
+    redacted = _TOKEN_QUERY_PARAM_RE.sub(
+        lambda match: f"{match.group(1)}{_REDACTED_VALUE}",
+        redacted,
+    )
+    return _TOKEN_SHAPED_RE.sub(_REDACTED_VALUE, redacted)
+
+
+def _redact_sensitive_payload(
+    value: object,
+    known_tokens: Collection[str] = (),
+) -> object:
+    """Return ``value`` with recursive token and API credential fields masked.
+
+    Args:
+        value: Arbitrary external WS/control payload.
+        known_tokens: Active or recently issued Kraken WS tokens to mask even
+            when they appear outside a token field.
+
+    Returns:
+        A structurally similar object with sensitive values replaced.
+    """
+    active_tokens = _redaction_tokens(known_tokens, _collect_sensitive_payload_tokens(value))
+    return _redact_sensitive_payload_value(value, active_tokens)
+
+
+def _redact_sensitive_payload_value(
+    value: object,
+    known_tokens: Collection[str],
+) -> object:
+    """Redact a payload value using an already collected token set."""
+    if isinstance(value, dict):
+        redacted: dict[object, object] = {}
+        for key, item in cast(dict[object, object], value).items():
+            if isinstance(key, str) and key.lower() in _SENSITIVE_LOG_KEYS:
+                redacted[key] = _REDACTED_VALUE
+            else:
+                redacted[key] = _redact_sensitive_payload_value(item, known_tokens)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_sensitive_payload_value(item, known_tokens) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_sensitive_payload_value(item, known_tokens) for item in value)
+    if isinstance(value, str):
+        return _redact_sensitive_text(value, known_tokens)
+    return value
+
+
+def _is_realtime_auth_subscribe_error(error: str | None) -> bool:
+    """Return whether a subscribe error indicates auth/token failure.
+
+    Args:
+        error: Optional venue subscribe error string.
+
+    Returns:
+        True when the error should demote realtime auth to public feed.
+    """
+    if not error:
+        return False
+    lowered = error.lower()
+    return any(marker in lowered for marker in _AUTH_SUBSCRIBE_ERROR_MARKERS)
 
 
 def _subscription_ack_confirms(success: bool, error: str | None) -> bool:
@@ -278,11 +414,18 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
     def __init__(
         self,
         repository: Repository | None = None,
+        *,
+        realtime_ws_enabled: bool = False,
+        realtime_wallet_public_id: str = "",
     ) -> None:
         """Initialize Kraken Equities exchange client.
 
         Args:
             repository: Database repository for logging (optional).
+            realtime_ws_enabled: When True, try the authenticated
+                realtime Equities WS feed before falling back to public.
+            realtime_wallet_public_id: Wallet whose Kraken Spot
+                ``api_key_secret`` credential mints WS tokens.
         """
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN_EQUITIES)
         self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker()
@@ -296,12 +439,28 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         self._candle_builder = TradeCandleBuilder(interval_seconds=60)
         self._candle_aggregator_task: asyncio.Task[None] | None = None
         self._subscription_cache: dict[tuple[str, frozenset[str], str], SubscriptionRequest] = {}
+        self._realtime_ws_enabled = realtime_ws_enabled
+        self._realtime_wallet_public_id = realtime_wallet_public_id.strip()
+        self._ws_token: str | None = None
+        self._ws_token_refresh_at: float = 0.0
+        self._ws_token_expires_at: float = 0.0
+        self._ws_recent_tokens: dict[str, float] = {}
+        self._ws_auth_active = False
+        self._ws_token_refresh_lock: asyncio.Lock = asyncio.Lock()
+        self._ws_endpoint_mode_lock: asyncio.Lock = asyncio.Lock()
+        self._ws_public_demotion_task: asyncio.Task[None] | None = None
+        self._ws_connection_generation = 0
+        self._ws_closing = False
+        self._realtime_ws_token_proxy_lock = threading.RLock()
 
     async def connect(self) -> None:
         """Establish connection (no-op until WS subscription).
 
         The SpotWSClient is created lazily on first subscription.
         """
+        self._ws_connection_generation += 1
+        self._ws_closing = False
+        self._reopen_rest_pool()
         logger.info("Kraken Equities client ready")
 
     async def disconnect(self) -> None:
@@ -315,20 +474,34 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         while this close was in flight, and unconditionally nulling the slot
         would detach that live client (callback still attached, no owner).
         """
-        client = self._ws_client
-        if client:
-            try:
-                async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
-                    await client.close()
-            except TimeoutError:
-                logger.warning("Kraken Equities WS close timed out - forcing cleanup")
-                await force_close_ws_client(client)
-            except Exception as e:
-                logger.warning(f"Error closing Kraken Equities WS: {e}")
-                await force_close_ws_client(client)
-            if self._ws_client is client:
-                self._ws_client = None
-        logger.info("Kraken Equities connections closed")
+        self._ws_closing = True
+        self._ws_connection_generation += 1
+        try:
+            await self._cancel_realtime_ws_public_demotion()
+            client = self._ws_client
+            if client:
+                await self._close_ws_client(client)
+        finally:
+            self._shutdown_rest_pool()
+            logger.info("Kraken Equities connections closed")
+
+    async def _close_ws_client(self, client: SpotWSClient) -> None:
+        """Close one SDK WebSocket client and clear the owned slot.
+
+        Args:
+            client: SDK client to close.
+        """
+        try:
+            async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                await client.close()
+        except TimeoutError:
+            logger.warning("Kraken Equities WS close timed out - forcing cleanup")
+            await force_close_ws_client(client)
+        except Exception as exc:
+            logger.warning(f"Error closing Kraken Equities WS: {exc}")
+            await force_close_ws_client(client)
+        if self._ws_client is client:
+            self._ws_client = None
 
     async def _on_ws_message(self, message: dict[str, Any] | list[Any]) -> None:
         """Route incoming WS messages to the appropriate queue.
@@ -350,7 +523,9 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         if channel in {"ticker", "trade"} and msg_type == "snapshot":
             return
         if message.get("method") == "subscribe" and isinstance(message.get("result"), dict):
-            self._handle_subscription_ack(message)
+            demote = self._handle_subscription_ack(message)
+            if demote:
+                self._schedule_realtime_ws_public_demotion("auth subscribe ACK rejected")
             return
         if channel == "ticker" and msg_type == "update":
             raw_delayed = message.get("delayed", False)
@@ -368,81 +543,109 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         if channel == "trade" and msg_type == "update":
             self._handle_trade_message(message)
 
-    def _handle_subscription_ack(self, message: dict[str, Any]) -> None:
+    def _handle_subscription_ack(self, message: dict[str, Any]) -> bool:
         """Process subscription acknowledgement messages by channel type.
 
         Args:
             message: WebSocket subscription ack message.
+
+        Returns:
+            True when auth should be demoted to public feed.
         """
         result_dict = cast(dict[str, Any], message["result"])
         channel_name = result_dict.get("channel")
-        ack_handlers: dict[str, Callable[..., None]] = {
+        ack_handlers: dict[str, Callable[..., bool]] = {
             "ticker": lambda: self._handle_ticker_subscription_ack(message, result_dict),
             "trade": lambda: self._handle_trade_subscription_ack(message, result_dict),
         }
         handler = ack_handlers.get(channel_name or "")
         if handler:
-            handler()
+            return handler()
+        return False
 
     def _handle_ticker_subscription_ack(
         self,
         message: dict[str, Any],
         result_dict: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         """Track ticker subscription acknowledgement result.
 
         Args:
             message: Full subscription ack message.
             result_dict: The result sub-dict from the ack.
+
+        Returns:
+            True when an auth/token error should demote to public feed.
         """
         try:
             ticker_ack = KrakenTickerSubscriptionAckSchema.model_validate(message)
             symbol = result_dict.get("symbol")
             if not isinstance(symbol, str):
-                logger.debug("Received equities ticker control message without symbol: {}", message)
-                return
+                logger.debug(
+                    "Received equities ticker control message without symbol: {}",
+                    _redact_sensitive_payload(message, self._active_ws_redaction_tokens()),
+                )
+                return False
             if _subscription_ack_confirms(ticker_ack.success, ticker_ack.error):
                 self._health_tracker.mark_confirmed("ticker", symbol)
-                return
+                return False
             error = ticker_ack.error or "unknown subscription error"
-            self._health_tracker.mark_failed("ticker", symbol, error)
+            safe_error = _redact_sensitive_text(error, self._active_ws_redaction_tokens())
+            self._health_tracker.mark_failed("ticker", symbol, safe_error)
             logger.warning(
                 "Kraken Equities ticker subscription failed symbol={} error={}",
                 symbol,
-                ticker_ack.error,
+                safe_error,
             )
+            return self._ws_auth_active and _is_realtime_auth_subscribe_error(error)
         except ValidationError:
-            logger.debug("Received non-standard equities ticker control message: {}", message)
+            logger.debug(
+                "Received non-standard equities ticker control message: {}",
+                _redact_sensitive_payload(message, self._active_ws_redaction_tokens()),
+            )
+        return False
 
     def _handle_trade_subscription_ack(
         self,
         message: dict[str, Any],
         result_dict: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         """Track trade subscription acknowledgement result.
 
         Args:
             message: Full subscription ack message.
             result_dict: The result sub-dict from the ack.
+
+        Returns:
+            True when an auth/token error should demote to public feed.
         """
         try:
             trade_ack = KrakenTradeSubscriptionAckSchema.model_validate(message)
             symbol = result_dict.get("symbol")
             if not isinstance(symbol, str):
-                logger.debug("Received equities trade control message without symbol: {}", message)
-                return
+                logger.debug(
+                    "Received equities trade control message without symbol: {}",
+                    _redact_sensitive_payload(message, self._active_ws_redaction_tokens()),
+                )
+                return False
             if _subscription_ack_confirms(trade_ack.success, trade_ack.error):
                 self._health_tracker.mark_confirmed("trade", symbol)
-                return
+                return False
             error = trade_ack.error or "unknown subscription error"
-            self._health_tracker.mark_failed("trade", symbol, error)
+            safe_error = _redact_sensitive_text(error, self._active_ws_redaction_tokens())
+            self._health_tracker.mark_failed("trade", symbol, safe_error)
             logger.warning(
                 "Kraken Equities trade subscription failed symbol={} error={}",
                 symbol,
-                trade_ack.error,
+                safe_error,
             )
+            return self._ws_auth_active and _is_realtime_auth_subscribe_error(error)
         except ValidationError:
-            logger.debug("Received non-standard equities trade control message: {}", message)
+            logger.debug(
+                "Received non-standard equities trade control message: {}",
+                _redact_sensitive_payload(message, self._active_ws_redaction_tokens()),
+            )
+        return False
 
     def _handle_ticker_message(
         self,
@@ -492,6 +695,566 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
             self._candle_builder.update(trade)
 
+    def _prune_recent_ws_tokens(self) -> None:
+        """Drop expired token-redaction values from the bounded cache."""
+        now = monotonic()
+        expired_tokens = [
+            token for token, expires_at in self._ws_recent_tokens.items() if expires_at <= now
+        ]
+        for token in expired_tokens:
+            del self._ws_recent_tokens[token]
+        while len(self._ws_recent_tokens) > _WS_RECENT_TOKEN_LIMIT:
+            oldest_token = min(self._ws_recent_tokens, key=self._ws_recent_tokens.__getitem__)
+            del self._ws_recent_tokens[oldest_token]
+
+    def _remember_realtime_ws_token(self, token: str, expires_at: float) -> None:
+        """Remember an issued token until expiry for delayed-log redaction."""
+        self._ws_recent_tokens[token] = expires_at
+        self._prune_recent_ws_tokens()
+
+    def _active_ws_redaction_tokens(self) -> tuple[str, ...]:
+        """Return current and recently issued WS tokens still within TTL."""
+        self._prune_recent_ws_tokens()
+        if self._ws_token is not None:
+            expires_at = max(self._ws_token_expires_at, monotonic() + _WS_TOKEN_REFRESH_GRACE_S)
+            self._ws_recent_tokens.setdefault(self._ws_token, expires_at)
+        return _redaction_tokens(tuple(self._ws_recent_tokens))
+
+    def _clear_realtime_ws_auth(self) -> None:
+        """Clear in-memory realtime WS token state."""
+        self._ws_token = None
+        self._ws_token_refresh_at = 0.0
+        self._ws_token_expires_at = 0.0
+        self._ws_auth_active = False
+
+    def _request_realtime_ws_token(self, api_key: str, api_secret: str) -> object:
+        """Synchronously request a Kraken Spot WebSockets token via feed egress.
+
+        ``GetWebSocketsToken`` is a private Kraken Spot path, but this call
+        is a read-only market-data session credential for the authenticated
+        Equities WebSocket. Kraken may bind that token to the minting source
+        IP, so it is intentionally classified as ``public_read`` and tagged
+        with ``kraken_equities`` to reserve the same public market-data tunnel
+        the Equities WS shim uses. When feed egress is disabled or no pool is
+        configured, the router applies the existing direct behavior.
+
+        Args:
+            api_key: Kraken Spot API key from ``wallet_credentials``.
+            api_secret: Kraken Spot API secret from ``wallet_credentials``.
+
+        Returns:
+            Raw SDK response object from ``GetWebSocketsToken``.
+        """
+        spot_client = SpotClient(key=api_key, secret=api_secret)
+
+        def _request() -> object:
+            return cast(
+                object,
+                spot_client.request("POST", "/0/private/GetWebSocketsToken", timeout=10),
+            )
+
+        return route_kraken_rest_sync_call(
+            exchange=str(ExchangeEnum.KRAKEN_EQUITIES),
+            operation="equities_realtime_ws_token",
+            kind="public_read",
+            target=spot_sdk_proxy_target(spot_client),
+            proxy_lock=self._realtime_ws_token_proxy_lock,
+            sync_call=_request,
+        )
+
+    def _parse_realtime_ws_token_response(self, payload: object) -> tuple[str, float]:
+        """Validate a Kraken Spot WebSockets token response.
+
+        Args:
+            payload: Raw SDK response object.
+
+        Returns:
+            Token string and numeric TTL seconds.
+
+        Raises:
+            RuntimeError: If the response is not the verified
+                ``{"token": str, "expires": number}`` shape.
+        """
+        if not isinstance(payload, dict):
+            raise RuntimeError("Kraken WebSockets token response is not an object")
+        payload_dict = cast(dict[object, object], payload)
+        token_value = payload_dict.get("token")
+        expires_value = payload_dict.get("expires")
+        if not isinstance(token_value, str) or not token_value:
+            raise RuntimeError("Kraken WebSockets token response missing token")
+        if isinstance(expires_value, bool) or not isinstance(expires_value, (int, float)):
+            raise RuntimeError("Kraken WebSockets token response missing numeric expires")
+        expires = float(expires_value)
+        if expires <= 0:
+            raise RuntimeError("Kraken WebSockets token response has non-positive expires")
+        return token_value, expires
+
+    async def _prepare_realtime_ws_auth(self) -> bool:
+        """Mint a realtime WS token when the feature flag is enabled.
+
+        Returns:
+            True when the authenticated Equities feed should be used, else
+            False for the public delayed feed.
+        """
+        if not self._realtime_ws_enabled:
+            self._clear_realtime_ws_auth()
+            return False
+        return await self._refresh_realtime_ws_token()
+
+    async def _refresh_realtime_ws_token(self, *, clear_on_failure: bool = True) -> bool:
+        """Refresh the in-memory realtime WS token.
+
+        Args:
+            clear_on_failure: When True, failed refresh clears auth state
+                for startup fallback. Lazy subscribe refreshes set this to
+                False so an unexpired token can survive a transient mint
+                failure.
+
+        Returns:
+            True when a fresh token was stored, else False. Failures are
+            logged without secrets or token values and leave callers on the
+            public delayed fallback when no valid token remains.
+        """
+        wallet_public_id = self._realtime_wallet_public_id
+        if not wallet_public_id:
+            logger.warning(
+                "Kraken Equities realtime WS enabled but no token wallet is configured; "
+                "using public delayed feed"
+            )
+            if clear_on_failure:
+                self._clear_realtime_ws_auth()
+            return False
+        repository = self.repository
+        if repository is None:
+            logger.warning(
+                "Kraken Equities realtime WS enabled but repository is unavailable; "
+                "using public delayed feed"
+            )
+            if clear_on_failure:
+                self._clear_realtime_ws_auth()
+            return False
+        try:
+            self._reopen_rest_pool()
+            credentials = await CredentialResolver(repository).get_credentials(
+                exchange=ExchangeEnum.KRAKEN,
+                wallet_public_id=wallet_public_id,
+            )
+            payload = await self._dispatch_blocking(
+                self._request_realtime_ws_token,
+                credentials["api_key"],
+                credentials["api_secret"],
+            )
+            token, expires = self._parse_realtime_ws_token_response(payload)
+        except Exception as exc:
+            logger.warning(
+                "Kraken Equities realtime WS token unavailable ({}); using public delayed feed",
+                type(exc).__name__,
+            )
+            if clear_on_failure:
+                self._clear_realtime_ws_auth()
+            return False
+        now = monotonic()
+        expires_at = now + expires
+        self._ws_token = token
+        self._ws_token_refresh_at = now + max(0.0, expires - _WS_TOKEN_REFRESH_GRACE_S)
+        self._ws_token_expires_at = expires_at
+        self._remember_realtime_ws_token(token, expires_at)
+        self._ws_auth_active = True
+        return True
+
+    async def _decorate_ws_subscribe_params(
+        self,
+        params: dict[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        """Return outbound subscribe params with a fresh auth token when active.
+
+        Args:
+            params: Stable subscription params used for replay caching.
+
+        Returns:
+            A copy of ``params`` with ``token`` added only for authenticated
+            outbound sends. The caller's dict is never mutated, keeping the
+            replay cache free of short-lived token material.
+
+        Raises:
+            _RealtimeWsAuthUnavailableError: If no valid token remains for the
+                current authenticated socket.
+        """
+        decorated = dict(params)
+        if not self._ws_auth_active:
+            return decorated
+        async with self._ws_token_refresh_lock:
+            now = monotonic()
+            token = self._ws_token
+            if token is not None and now < self._ws_token_refresh_at:
+                decorated["token"] = token
+                return decorated
+            previous_token = token
+            previous_expires_at = self._ws_token_expires_at
+            refreshed = await self._refresh_realtime_ws_token(clear_on_failure=False)
+            if not refreshed:
+                now = monotonic()
+                if previous_token is not None and now < previous_expires_at:
+                    decorated["token"] = previous_token
+                    return decorated
+                raise _RealtimeWsAuthUnavailableError("Kraken Equities auth token expired")
+            token = self._ws_token
+        if token is None:
+            raise _RealtimeWsAuthUnavailableError("Kraken Equities auth token missing")
+        decorated["token"] = token
+        return decorated
+
+    async def _replay_auth_subscriptions_after_sdk_reconnect(self, client: SpotWSClient) -> None:
+        """Replay auth subscriptions after the SDK reconnects the same socket.
+
+        Args:
+            client: SDK client whose connector just reported a reconnect.
+        """
+        if self._ws_client is not client:
+            logger.info(
+                "Kraken Equities auth WS SDK reconnect replay skipped; "
+                "client slot was already replaced"
+            )
+            return
+        refreshed = await self._refresh_realtime_ws_token(clear_on_failure=False)
+        if not refreshed:
+            if self._ws_client is not client or not self._ws_auth_active:
+                logger.info(
+                    "Kraken Equities auth WS SDK reconnect demotion skipped; "
+                    "client slot changed before token refresh failure handling"
+                )
+                return
+            logger.warning(
+                "Kraken Equities auth WS SDK reconnect replay failed; fresh token unavailable"
+            )
+            self._schedule_realtime_ws_public_demotion("SDK reconnect token refresh failed")
+            return
+        if self._ws_client is not client:
+            logger.info(
+                "Kraken Equities auth WS SDK reconnect replay skipped; "
+                "client slot changed during token refresh"
+            )
+            return
+        try:
+            await self._replay_subscriptions()
+        except Exception as exc:
+            stale_replay = isinstance(exc, RuntimeError) and str(exc) == _REPLAY_CLIENT_REPLACED_MSG
+            if stale_replay or self._ws_client is not client or not self._ws_auth_active:
+                logger.info(
+                    "Kraken Equities auth WS SDK reconnect replay skipped; "
+                    "client slot changed during subscription replay"
+                )
+                return
+            logger.warning(
+                "Kraken Equities auth WS SDK reconnect replay failed ({}); "
+                "falling back to public delayed feed",
+                type(exc).__name__,
+            )
+            self._schedule_realtime_ws_public_demotion("SDK reconnect replay failed")
+
+    def _disable_sdk_reconnect_replay_for_auth(self, client: SpotWSClient) -> bool:
+        """Replace SDK-owned reconnect replay for the authenticated Equities URL.
+
+        The installed python-kraken-sdk stores successful subscriptions in its
+        connector and replays them on internal reconnect. For the Equities auth
+        feed that cache is unsafe: it can either retain a stale token echoed by
+        the server or replay an untokened public-shaped payload against the
+        auth URL. Snapper therefore replaces the connector's internal replay
+        only for auth-mode Equities clients. After the SDK reports that the
+        reconnect completed, Snapper forces a fresh token mint and replays its
+        stable token-free cache through the existing subscribe path. If a
+        concurrent liveness rebuild already swapped ``self._ws_client``, the
+        SDK replay exits without sending on the disowned connection. If both
+        paths race against the same live connection, Kraken's idempotent
+        ``Already subscribed`` ACK is treated as confirmation by
+        ``_subscription_ack_confirms``.
+
+        Args:
+            client: SDK client whose public connector targets the auth URL.
+
+        Returns:
+            True when the installed SDK connector was patched and verified.
+        """
+        connector = getattr(client, "_pub_conn", None)
+        if connector is None:
+            return False
+        if not hasattr(connector, "_recover_subscriptions"):
+            return False
+
+        async def _snapper_owned_reconnect_replay(event: asyncio.Event) -> None:
+            await event.wait()
+            await self._replay_auth_subscriptions_after_sdk_reconnect(client)
+
+        connector._recover_subscriptions = _snapper_owned_reconnect_replay
+        return getattr(connector, "_recover_subscriptions", None) is _snapper_owned_reconnect_replay
+
+    def _force_sdk_public_endpoint(self, client: SpotWSClient, endpoint: str) -> bool:
+        """Force the SDK public connector to the exact Equities auth endpoint.
+
+        ``SpotWSClient`` appends ``/v2`` to every custom ``ws_url`` during
+        construction. That works for the public Equities base host but corrupts
+        the verified auth endpoint because it carries the ``?f`` query string.
+        Auth-mode Equities therefore patches the already-built public
+        connector's endpoint back to the exact URL before ``start()``.
+
+        Args:
+            client: SDK client whose public connector should be adjusted.
+            endpoint: Exact WebSocket endpoint to dial.
+
+        Returns:
+            True when the connector endpoint was patched and verified.
+        """
+        connector = getattr(client, "_pub_conn", None)
+        if connector is None:
+            return False
+        endpoint_attr = "_ConnectSpotWebsocketBase__ws_endpoint"
+        if not hasattr(connector, endpoint_attr):
+            return False
+        client.WS_URL = endpoint
+        setattr(connector, endpoint_attr, endpoint)
+        return endpoint == client.WS_URL and getattr(connector, endpoint_attr, None) == endpoint
+
+    async def _send_ws_subscribe(
+        self,
+        params: dict[str, JsonValue],
+        *,
+        allow_auth_demote: bool,
+    ) -> None:
+        """Send a subscribe payload, demoting auth if token refresh is exhausted.
+
+        Args:
+            params: Stable token-free subscribe parameters.
+            allow_auth_demote: Whether this call may rebuild public WS on
+                auth-token exhaustion.
+
+        Raises:
+            RuntimeError: If no WebSocket client is connected.
+            _RealtimeWsAuthUnavailableError: When auth demotion is disallowed and
+                no valid auth token remains.
+        """
+        try:
+            if self._ws_auth_active or self._ws_public_demotion_task is not None:
+                async with self._ws_endpoint_mode_lock:
+                    await self._send_ws_subscribe_once(params)
+            else:
+                await self._send_ws_subscribe_once(params)
+            return
+        except _RealtimeWsAuthUnavailableError:
+            if not allow_auth_demote:
+                raise
+        await self._demote_realtime_ws_to_public("auth token refresh failed")
+        await self._send_ws_subscribe_once(params)
+
+    async def _send_ws_subscribe_once(self, params: dict[str, JsonValue]) -> None:
+        """Decorate and send one subscribe payload on the current client.
+
+        Args:
+            params: Stable token-free subscribe parameters.
+
+        Raises:
+            RuntimeError: If no WebSocket client is connected or if the slot
+                changes while the payload is being decorated.
+            _RealtimeWsAuthUnavailableError: If auth is active but no valid
+                token can be attached.
+        """
+        client = self._ws_client
+        if client is None:
+            raise RuntimeError(_WS_CLIENT_NOT_CONNECTED_MSG)
+        try:
+            outbound = await self._decorate_ws_subscribe_params(params)
+        except _RealtimeWsAuthUnavailableError:
+            if self._ws_client is not client:
+                raise RuntimeError(_REPLAY_CLIENT_REPLACED_MSG) from None
+            raise
+        if self._ws_client is not client:
+            raise RuntimeError(_REPLAY_CLIENT_REPLACED_MSG)
+        await client.subscribe(params=outbound)
+
+    async def _install_ws_client(
+        self,
+        *,
+        auth_active: bool,
+        replay_subscriptions: bool = True,
+    ) -> None:
+        """Build, start, and optionally replay one SDK WebSocket client.
+
+        Args:
+            auth_active: True to install the authenticated realtime endpoint.
+            replay_subscriptions: False when the caller needs to release a
+                mode lock before replaying cached subscriptions.
+
+        Raises:
+            Exception: Propagates start/replay/SDK-patch failures after
+                closing the partial client.
+        """
+        ws_url = _WS_AUTH_URL if auth_active else _WS_URL
+        client = SpotWSClient(
+            ws_url=ws_url,
+            callback=self._on_ws_message,
+            no_public=False,
+        )
+        self._ws_client = client
+        if not auth_active:
+            self._clear_realtime_ws_auth()
+        try:
+            if auth_active and not (
+                self._force_sdk_public_endpoint(client, _WS_AUTH_URL)
+                and self._disable_sdk_reconnect_replay_for_auth(client)
+            ):
+                raise _RealtimeWsAuthUnavailableError("Kraken SDK auth WS patch unavailable")
+            async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
+                await client.start()
+            logger.info("Kraken Equities WebSocket connected")
+            if replay_subscriptions and self._subscription_cache:
+                await self._replay_subscriptions()
+            if self._ws_client is not client:
+                raise RuntimeError(_CONNECT_OWNERSHIP_LOST_MSG)
+        except BaseException:
+            if self._ws_client is client:
+                await self._close_ws_client(client)
+            else:
+                await self._close_disowned_ws_client(client)
+            raise
+
+    async def _close_disowned_ws_client(self, client: SpotWSClient) -> None:
+        """Close a client that no longer owns ``self._ws_client``.
+
+        Args:
+            client: SDK client to close.
+        """
+        try:
+            async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                await client.close()
+        except Exception as exc:
+            logger.warning(f"Error closing disowned Kraken Equities WS: {exc!r}")
+            await force_close_ws_client(client)
+
+    def _ws_generation_allows_client_install(self, expected_generation: int | None) -> bool:
+        """Return whether a demotion may still install a replacement client."""
+        return not self._ws_closing and (
+            expected_generation is None or expected_generation == self._ws_connection_generation
+        )
+
+    def _schedule_realtime_ws_public_demotion(self, reason: str) -> None:
+        """Schedule callback-safe auth demotion onto a separate task.
+
+        SpotWSClient invokes Snapper's message callback from a child task of
+        the SDK connector run task. Closing the SDK client from that callback
+        would await the parent connector task while the parent is awaiting the
+        callback child. This helper keeps auth mode active while the auth
+        client remains installed, then performs the client close and public
+        rebuild outside the callback stack. The task is single-flight because
+        duplicate auth ACK errors can arrive before the first demotion
+        finishes.
+
+        Args:
+            reason: Short operational reason for the demotion log.
+        """
+        generation = self._ws_connection_generation
+        if not self._ws_generation_allows_client_install(generation):
+            return
+        task = self._ws_public_demotion_task
+        if task is not None and not task.done():
+            return
+        task = asyncio.create_task(
+            self._demote_realtime_ws_to_public(
+                reason,
+                force=True,
+                expected_generation=generation,
+            )
+        )
+        self._ws_public_demotion_task = task
+        task.add_done_callback(self._handle_realtime_ws_public_demotion_done)
+
+    def _handle_realtime_ws_public_demotion_done(self, task: asyncio.Task[None]) -> None:
+        """Observe callback-scheduled demotion completion and log failures."""
+        if self._ws_public_demotion_task is task:
+            self._ws_public_demotion_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.warning(
+                "Kraken Equities scheduled public demotion failed: {}",
+                _redact_sensitive_text(repr(exc), self._active_ws_redaction_tokens()),
+            )
+
+    async def _cancel_realtime_ws_public_demotion(self) -> None:
+        """Cancel a pending callback-scheduled public demotion during shutdown."""
+        task = self._ws_public_demotion_task
+        self._ws_public_demotion_task = None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    async def _demote_realtime_ws_to_public(
+        self,
+        reason: str,
+        *,
+        force: bool = False,
+        expected_generation: int | None = None,
+    ) -> None:
+        """Replace an authenticated client with the public delayed feed.
+
+        Args:
+            reason: Short operational reason for the demotion log.
+            force: True when a callback-detected auth rejection needs the
+                underlying auth client replaced even if another path already
+                changed auth state.
+            expected_generation: Optional connection generation captured by
+                callback-scheduled demotion. A mismatch means shutdown or a
+                deliberate reconnect superseded this task.
+        """
+        if not self._ws_generation_allows_client_install(expected_generation):
+            return
+        async with self._ws_connect_lock:
+            await self._demote_realtime_ws_to_public_locked(
+                reason,
+                force=force,
+                expected_generation=expected_generation,
+            )
+
+    async def _demote_realtime_ws_to_public_locked(
+        self,
+        reason: str,
+        *,
+        force: bool,
+        expected_generation: int | None,
+    ) -> None:
+        """Install a public client while preventing auth/public send races.
+
+        The endpoint-mode lock covers the interval where the auth client is
+        still in ``_ws_client``. Auth state is cleared by ``_install_ws_client``
+        only after the replacement public client has been assigned, so token
+        decoration and endpoint mode cannot disagree.
+
+        Args:
+            reason: Short operational reason for the demotion log.
+            force: Whether to rebuild even if auth state has already changed.
+            expected_generation: Optional connection generation that must
+                still match before installing a replacement client.
+        """
+        async with self._ws_endpoint_mode_lock:
+            if not self._ws_generation_allows_client_install(expected_generation):
+                return
+            if not force and not self._ws_auth_active and self._ws_client is not None:
+                return
+            logger.warning(
+                "Kraken Equities auth WS unavailable ({}); falling back to public delayed feed",
+                reason,
+            )
+            client = self._ws_client
+            if client is not None:
+                await self._close_ws_client(client)
+            if not self._ws_generation_allows_client_install(expected_generation):
+                return
+            await self._install_ws_client(auth_active=False, replay_subscriptions=False)
+        if self._subscription_cache:
+            await self._replay_subscriptions()
+
     async def _ensure_ws_connected(self) -> None:
         """Connect the SpotWSClient if not already connected.
 
@@ -510,31 +1273,21 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         async with self._ws_connect_lock:
             if self._ws_client is not None:
                 return
-            client = SpotWSClient(
-                ws_url=_WS_URL,
-                callback=self._on_ws_message,
-                no_public=False,
-            )
-            self._ws_client = client
-            try:
-                async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
-                    await client.start()
-                logger.info("Kraken Equities WebSocket connected")
-                if self._subscription_cache:
-                    await self._replay_subscriptions()
-                if self._ws_client is not client:
-                    raise RuntimeError(_CONNECT_OWNERSHIP_LOST_MSG)
-            except BaseException:
-                if self._ws_client is client:
-                    await self.disconnect()
-                else:
-                    try:
-                        async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
-                            await client.close()
-                    except Exception as exc:
-                        logger.warning(f"Error closing disowned Kraken Equities WS: {exc!r}")
-                        await force_close_ws_client(client)
-                raise
+            auth_active = await self._prepare_realtime_ws_auth()
+            if auth_active:
+                try:
+                    await self._install_ws_client(auth_active=True)
+                    return
+                except Exception as exc:
+                    logger.warning(
+                        "Kraken Equities auth WS startup failed ({}); "
+                        "falling back to public delayed feed",
+                        type(exc).__name__,
+                    )
+                    self._clear_realtime_ws_auth()
+                    await self._install_ws_client(auth_active=False)
+                    return
+            await self._install_ws_client(auth_active=False)
 
     async def _replay_subscriptions(self) -> None:
         """Replay cached public subscriptions after reconnect.
@@ -555,7 +1308,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         for index, req in enumerate(requests):
             if self._ws_client is not client:
                 raise RuntimeError(_REPLAY_CLIENT_REPLACED_MSG)
-            params = {
+            params: dict[str, JsonValue] = {
                 "channel": req.channel,
                 "symbol": list(req.symbols),
                 **cast(dict[str, JsonValue], json.loads(req.parameters_json)),
@@ -566,7 +1319,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                     symbol,
                     preserve_retry_count=True,
                 )
-            await client.subscribe(params=params)
+            await self._send_ws_subscribe(params, allow_auth_demote=False)
             if index < len(requests) - 1:
                 await asyncio.sleep(_RESUBSCRIBE_CHUNK_DELAY_S)
 
@@ -595,7 +1348,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             "throttle": _WS_THROTTLE_MS,
             "asset_class": "futures_contract",
         }
-        await self._ws_client.subscribe(params=params)
+        await self._send_ws_subscribe(params, allow_auth_demote=True)
 
     async def get_ticker(self, symbol: str) -> TickerSnapshot:
         """Fetch current ticker (not implemented for equities REST).
@@ -803,6 +1556,11 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
 
         Yields:
             TickerUpdate for each price change.
+
+        Raises:
+            RuntimeError: If the WebSocket client is replaced during the
+                initial subscribe. The publisher supervisor treats this as a
+                restart signal and rebuilds through ``_ensure_ws_connected``.
         """
         await self._ensure_ws_connected()
         if self._ws_client is None:
@@ -824,7 +1582,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         self._subscription_cache[req.key()] = req
         for ws_symbol in ws_symbols:
             self._health_tracker.mark_pending("ticker", ws_symbol)
-        await self._ws_client.subscribe(params=params)
+        await self._send_ws_subscribe(params, allow_auth_demote=True)
         logger.info(f"Subscribed to Kraken Equities tickers: {symbols} -> {ws_symbols}")
         try:
             while True:
@@ -838,15 +1596,14 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         finally:
             if self._ws_client:
                 try:
-                    await self._ws_client.subscribe(
-                        params={
-                            "channel": "ticker",
-                            "symbol": ws_symbols,
-                            "snapshot": True,
-                            "throttle": _WS_THROTTLE_MS,
-                            "asset_class": "futures_contract",
-                        }
-                    )
+                    cleanup_params: dict[str, JsonValue] = {
+                        "channel": "ticker",
+                        "symbol": cast(list[JsonValue], list(ws_symbols)),
+                        "snapshot": True,
+                        "throttle": _WS_THROTTLE_MS,
+                        "asset_class": "futures_contract",
+                    }
+                    await self._send_ws_subscribe(cleanup_params, allow_auth_demote=True)
                 except Exception:
                     logger.debug("Failed to unsubscribe from equities tickers on cleanup")
 
@@ -985,6 +1742,11 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
 
         Yields:
             TradeUpdate for each execution.
+
+        Raises:
+            RuntimeError: If the WebSocket client is replaced during the
+                initial subscribe. The publisher supervisor treats this as a
+                restart signal and rebuilds through ``_ensure_ws_connected``.
         """
         await self._ensure_ws_connected()
         if self._ws_client is None:
@@ -1006,7 +1768,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         self._subscription_cache[req.key()] = req
         for ws_symbol in ws_symbols:
             self._health_tracker.mark_pending("trade", ws_symbol)
-        await self._ws_client.subscribe(params=params)
+        await self._send_ws_subscribe(params, allow_auth_demote=True)
         logger.info(f"Subscribed to Kraken Equities trades: {symbols} -> {ws_symbols}")
         try:
             while True:
@@ -1020,15 +1782,14 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         finally:
             if self._ws_client:
                 try:
-                    await self._ws_client.subscribe(
-                        params={
-                            "channel": "trade",
-                            "symbol": ws_symbols,
-                            "snapshot": True,
-                            "throttle": _WS_THROTTLE_MS,
-                            "asset_class": "futures_contract",
-                        }
-                    )
+                    cleanup_params: dict[str, JsonValue] = {
+                        "channel": "trade",
+                        "symbol": cast(list[JsonValue], list(ws_symbols)),
+                        "snapshot": True,
+                        "throttle": _WS_THROTTLE_MS,
+                        "asset_class": "futures_contract",
+                    }
+                    await self._send_ws_subscribe(cleanup_params, allow_auth_demote=True)
                 except Exception:
                     logger.debug("Failed to unsubscribe from equities trades on cleanup")
 
