@@ -1,6 +1,8 @@
 """Tests for process management REST API routes."""
 
 import json as _json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -23,10 +25,12 @@ from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import ProcessStartResult
 from snapper.application.process_manager.models import ProcessStopResult
+from snapper.application.process_manager.strategy_scope import StrategyOutputCoverageError
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Setting
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import WalletRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ProcessSummaryItem
 from snapper.server.process_routes import _enforce_strategy_outputs_covered
@@ -52,6 +56,90 @@ def _make_rest_request() -> MagicMock:
     mock_request = MagicMock()
     mock_request.app.state.rest_tracker = SequenceTracker()
     return mock_request
+
+
+def _wallet_row(public_id: str, *, is_paper: bool = False) -> WalletRow:
+    """Build a wallet row for process route tests."""
+    return WalletRow(
+        public_id=public_id,
+        label=public_id,
+        description=None,
+        is_paper=is_paper,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        session_id="test-sid",
+        sequence_id=1,
+    )
+
+
+def _strategy_params(**overrides: object) -> dict[str, object]:
+    """Build validated strategy parameters for process route tests."""
+    params: dict[str, object] = {
+        "name": "strategy",
+        "inputs": ["candles.BTC-USD"],
+        "outputs": ["signals.BTC-USD"],
+        "operator_public_id": "op-1",
+        "wallet_public_id": "w-1",
+    }
+    params.update(overrides)
+    return params
+
+
+class _SettingResultDouble:
+    """Scalar result double for process setting reads."""
+
+    def __init__(self, setting: Setting | None) -> None:
+        """Store one optional setting row."""
+        self._setting = setting
+
+    def scalar_one_or_none(self) -> Setting | None:
+        """Return the configured setting row."""
+        return self._setting
+
+
+class _SettingSessionDouble:
+    """Session double that stores at most one process setting row."""
+
+    def __init__(self, setting: Setting | None = None) -> None:
+        """Create a session double with an optional setting."""
+        self._setting = setting
+
+    async def execute(self, _statement: object) -> _SettingResultDouble:
+        """Return the stored setting as a scalar result."""
+        return _SettingResultDouble(self._setting)
+
+    def add(self, setting: Setting) -> None:
+        """Store a setting row."""
+        self._setting = setting
+
+    async def commit(self) -> None:
+        """Commit is a no-op for the in-memory setting."""
+
+
+def _process_setting(key: str, value: str) -> Setting:
+    """Build a process setting row for persisted-config tests."""
+    return Setting(
+        key=key,
+        value=value,
+        category="process",
+        is_encrypted=False,
+        timestamp=datetime.now(UTC),
+        session_id="t",
+        sequence_id=1,
+    )
+
+
+def _settings_repo(setting: Setting | None = None) -> SQLAlchemyRepository:
+    """Build a SQLAlchemyRepository-shaped persisted-setting double."""
+    repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    session = _SettingSessionDouble(setting)
+
+    @asynccontextmanager
+    async def session_context() -> AsyncIterator[_SettingSessionDouble]:
+        """Yield the in-memory setting session."""
+        yield session
+
+    repo.session = session_context
+    return repo
 
 
 class TestGetProcessFactory:
@@ -1682,13 +1770,36 @@ class TestEnforceStrategyScope:
         )
 
     @pytest.mark.asyncio
-    async def test_empty_defaults_allowed(self) -> None:
-        """Strategy with empty operator/wallet keeps default behavior."""
+    async def test_paper_empty_defaults_allowed(self) -> None:
+        """Paper strategy with empty operator/wallet keeps legacy behavior."""
         await _enforce_strategy_scope(
-            parameters={"operator_public_id": "", "wallet_public_id": ""},
+            parameters=_strategy_params(
+                operator_public_id="",
+                wallet_public_id="",
+                exchange="paper",
+            ),
             role=ProcessRoleEnum.STRATEGY,
             principal=MagicMock(operator_public_ids=[]),
             repo=MagicMock(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_empty_operator_and_wallet_rejected(self) -> None:
+        """Live strategy cannot bypass wallet resolution with empty scope."""
+        with pytest.raises(HTTPException) as exc_info:
+            await _enforce_strategy_scope(
+                parameters=_strategy_params(
+                    operator_public_id="",
+                    wallet_public_id="",
+                    exchange="kraken",
+                ),
+                role=ProcessRoleEnum.STRATEGY,
+                principal=MagicMock(operator_public_ids=["op-1"]),
+                repo=MagicMock(),
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == (
+            "operator_public_id required for live strategy wallet resolution"
         )
 
     @pytest.mark.asyncio
@@ -1696,7 +1807,7 @@ class TestEnforceStrategyScope:
         """Wallet supplied without operator -> 400."""
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_scope(
-                parameters={"operator_public_id": "", "wallet_public_id": "w-1"},
+                parameters=_strategy_params(operator_public_id="", wallet_public_id="w-1"),
                 role=ProcessRoleEnum.STRATEGY,
                 principal=MagicMock(operator_public_ids=[]),
                 repo=MagicMock(),
@@ -1708,7 +1819,7 @@ class TestEnforceStrategyScope:
         """Operator not in principal.operator_public_ids -> 403."""
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_scope(
-                parameters={"operator_public_id": "op-x", "wallet_public_id": ""},
+                parameters=_strategy_params(operator_public_id="op-x", wallet_public_id=""),
                 role=ProcessRoleEnum.STRATEGY,
                 principal=MagicMock(operator_public_ids=["op-1"], username="alice"),
                 repo=MagicMock(),
@@ -1719,22 +1830,47 @@ class TestEnforceStrategyScope:
 
     @pytest.mark.asyncio
     async def test_operator_only_passes_without_wallet(self) -> None:
-        """Operator membership without wallet skips the grant check."""
+        """Operator membership without wallet resolves a single accessible wallet."""
         repo = MagicMock()
-        repo.list_active_scope_grants_for_wallet = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_wallet_row("w-1")])
+        parameters = _strategy_params(
+            operator_public_id="op-1",
+            wallet_public_id="",
+            exchange="kraken",
+        )
         await _enforce_strategy_scope(
-            parameters={"operator_public_id": "op-1", "wallet_public_id": ""},
+            parameters=parameters,
             role=ProcessRoleEnum.STRATEGY,
             principal=MagicMock(operator_public_ids=["op-1"]),
             repo=repo,
         )
-        repo.list_active_scope_grants_for_wallet.assert_not_called()
+        assert parameters["wallet_public_id"] == "w-1"
+        repo.list_accessible_wallets_for_operators.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_operator_wallet_unresolved_maps_to_400(self) -> None:
+        """Operator-scoped wallet autolookup with no candidates returns 400."""
+        repo = MagicMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+        with pytest.raises(HTTPException) as exc_info:
+            await _enforce_strategy_scope(
+                parameters=_strategy_params(
+                    operator_public_id="op-1",
+                    wallet_public_id="",
+                    exchange="kraken",
+                ),
+                role=ProcessRoleEnum.STRATEGY,
+                principal=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "specify wallet_public_id; 0 wallets accessible"
 
     @pytest.mark.asyncio
     async def test_non_sqlalchemy_repo_skips_grant_check(self) -> None:
         """In-memory / non-SQLAlchemy repos defer to caller for grants."""
         await _enforce_strategy_scope(
-            parameters={"operator_public_id": "op-1", "wallet_public_id": "w-1"},
+            parameters=_strategy_params(operator_public_id="op-1", wallet_public_id="w-1"),
             role=ProcessRoleEnum.STRATEGY,
             principal=MagicMock(operator_public_ids=["op-1"]),
             repo=MagicMock(),
@@ -1748,7 +1884,7 @@ class TestEnforceStrategyScope:
             return_value=[{"operator_public_id": "op-1"}]
         )
         await _enforce_strategy_scope(
-            parameters={"operator_public_id": "op-1", "wallet_public_id": "w-1"},
+            parameters=_strategy_params(operator_public_id="op-1", wallet_public_id="w-1"),
             role=ProcessRoleEnum.STRATEGY,
             principal=MagicMock(operator_public_ids=["op-1"]),
             repo=repo,
@@ -1764,7 +1900,7 @@ class TestEnforceStrategyScope:
         )
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_scope(
-                parameters={"operator_public_id": "op-1", "wallet_public_id": "w-1"},
+                parameters=_strategy_params(operator_public_id="op-1", wallet_public_id="w-1"),
                 role=ProcessRoleEnum.STRATEGY,
                 principal=MagicMock(operator_public_ids=["op-1"]),
                 repo=repo,
@@ -1774,14 +1910,41 @@ class TestEnforceStrategyScope:
         assert "w-1" in exc_info.value.detail
 
     @pytest.mark.asyncio
-    async def test_non_string_parameters_treated_as_empty(self) -> None:
-        """Non-string operator/wallet values fall through the empty branch."""
-        await _enforce_strategy_scope(
-            parameters={"operator_public_id": 42, "wallet_public_id": ["x"]},
-            role=ProcessRoleEnum.STRATEGY,
-            principal=MagicMock(operator_public_ids=[]),
-            repo=MagicMock(),
-        )
+    async def test_non_string_parameters_rejected_by_strategy_validation(self) -> None:
+        """Non-string scope fields fail the strategy parameter validation gate."""
+        with pytest.raises(HTTPException) as exc_info:
+            await _enforce_strategy_scope(
+                parameters=_strategy_params(
+                    operator_public_id=42,
+                    wallet_public_id=["x"],
+                    exchange="paper",
+                ),
+                role=ProcessRoleEnum.STRATEGY,
+                principal=MagicMock(operator_public_ids=[]),
+                repo=MagicMock(),
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "invalid strategy parameters for wallet resolution"
+
+    @pytest.mark.asyncio
+    async def test_invalid_exchange_rejected_before_wallet_resolution(self) -> None:
+        """Unknown strategy exchange fails before autolookup can bind a wallet."""
+        repo = MagicMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock()
+        with pytest.raises(HTTPException) as exc_info:
+            await _enforce_strategy_scope(
+                parameters=_strategy_params(
+                    operator_public_id="op-1",
+                    wallet_public_id="",
+                    exchange="bogus",
+                ),
+                role=ProcessRoleEnum.STRATEGY,
+                principal=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "invalid strategy parameters for wallet resolution"
+        repo.list_accessible_wallets_for_operators.assert_not_called()
 
 
 class TestGetRepositoryForProcesses:
@@ -1896,7 +2059,7 @@ class TestScopeHelpers:
         repo = MagicMock(spec=SQLAlchemyRepository)
         repo.list_grant_covered_instrument_public_ids = AsyncMock(return_value={"i-eth"})
         repo.get_instrument_public_ids_by_symbols = AsyncMock(return_value={"BTC-USD": "i-btc"})
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(StrategyOutputCoverageError) as exc_info:
             await _enforce_strategy_outputs_covered(
                 repo,
                 {"outputs": ["BTC-USD"], "exchange": "kraken"},
@@ -1904,7 +2067,6 @@ class TestScopeHelpers:
                 "w-1",
                 datetime.now(UTC),
             )
-        assert exc_info.value.status_code == 403
         assert "BTC-USD" in exc_info.value.detail
 
     @pytest.mark.asyncio
@@ -1913,7 +2075,7 @@ class TestScopeHelpers:
         repo = MagicMock(spec=SQLAlchemyRepository)
         repo.list_grant_covered_instrument_public_ids = AsyncMock(return_value=set())
         repo.get_instrument_public_ids_by_symbols = AsyncMock(return_value={})
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(StrategyOutputCoverageError) as exc_info:
             await _enforce_strategy_outputs_covered(
                 repo,
                 {"outputs": ["XYZ-USD"], "exchange": "kraken"},
@@ -1921,7 +2083,7 @@ class TestScopeHelpers:
                 "w-1",
                 datetime.now(UTC),
             )
-        assert exc_info.value.status_code == 403
+        assert "XYZ-USD" in exc_info.value.detail
 
 
 class TestStartProcessScopeRecheck:
@@ -1977,6 +2139,770 @@ class TestStartProcessScopeRecheck:
             )
         assert exc_info.value.status_code == 400
 
+    @pytest.mark.asyncio
+    async def test_start_process_resolves_single_accessible_wallet(self) -> None:
+        """A strategy with empty wallet launches with the single scoped wallet."""
+        persisted_params: dict[str, object] = {
+            "name": "strategy",
+            "inputs": ["candles.BTC-USD"],
+            "outputs": ["signals.BTC-USD"],
+            "exchange": "kraken",
+            "operator_public_id": "op-1",
+            "wallet_public_id": "",
+        }
+        repo = MagicMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[
+                _wallet_row("wallet-paper", is_paper=True),
+                _wallet_row("wallet-live", is_paper=False),
+            ]
+        )
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="started")
+        )
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.StratClass",
+                    "parameters": persisted_params,
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=ProcessRoleEnum.STRATEGY,
+        ):
+            result = await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert result.payload.status == "success"
+        assert persisted_params["wallet_public_id"] == "wallet-live"
+        repo.list_accessible_wallets_for_operators.assert_awaited_once()
+        factory.start_process_by_name.assert_awaited_once_with(
+            name="strategy",
+            mode=None,
+            parameters=persisted_params,
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_process_rejects_multiple_accessible_wallets(self) -> None:
+        """Multiple scoped wallets reject launch until wallet_public_id is specified."""
+        persisted_params: dict[str, object] = {
+            "name": "strategy",
+            "inputs": ["candles.BTC-USD"],
+            "outputs": ["signals.BTC-USD"],
+            "exchange": "kraken",
+            "operator_public_id": "op-1",
+            "wallet_public_id": "",
+        }
+        repo = MagicMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-a"), _wallet_row("wallet-b")]
+        )
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.StratClass",
+                    "parameters": persisted_params,
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=ProcessRoleEnum.STRATEGY,
+        ), pytest.raises(
+            HTTPException
+        ) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "specify wallet_public_id; 2 wallets accessible"
+        factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_process_rejects_live_empty_operator_and_wallet(self) -> None:
+        """Live exchange strategy cannot launch with both scope fields empty."""
+        persisted_params: dict[str, object] = {
+            "name": "strategy",
+            "inputs": ["candles.BTC-USD"],
+            "outputs": ["signals.BTC-USD"],
+            "exchange": "kraken",
+            "operator_public_id": "",
+            "wallet_public_id": "",
+        }
+        repo = MagicMock()
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.StratClass",
+                    "parameters": persisted_params,
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=ProcessRoleEnum.STRATEGY,
+        ), pytest.raises(
+            HTTPException
+        ) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == (
+            "operator_public_id required for live strategy wallet resolution"
+        )
+        factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_process_enforces_persisted_strategy_role_when_unclassified(
+        self,
+    ) -> None:
+        """Persisted role strategy enforces scope even when registry lookup misses."""
+        persisted_params: dict[str, object] = {
+            "name": "strategy",
+            "inputs": ["candles.BTC-USD"],
+            "outputs": ["signals.BTC-USD"],
+            "exchange": "kraken",
+            "operator_public_id": "",
+            "wallet_public_id": "",
+        }
+        repo = MagicMock()
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.ImportableButUnregistered",
+                    "parameters": persisted_params,
+                    "role": "strategy",
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=None,
+        ), pytest.raises(
+            HTTPException
+        ) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == (
+            "operator_public_id required for live strategy wallet resolution"
+        )
+        factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_process_enforces_registry_strategy_despite_core_row_role(
+        self,
+    ) -> None:
+        """Registry strategy classification cannot be suppressed by row role core."""
+        persisted_params: dict[str, object] = {
+            "name": "strategy",
+            "inputs": ["candles.BTC-USD"],
+            "outputs": ["signals.BTC-USD"],
+            "exchange": "kraken",
+            "operator_public_id": "",
+            "wallet_public_id": "",
+        }
+        repo = MagicMock()
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.StratClass",
+                    "parameters": persisted_params,
+                    "role": "core",
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=ProcessRoleEnum.STRATEGY,
+        ), pytest.raises(
+            HTTPException
+        ) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == (
+            "operator_public_id required for live strategy wallet resolution"
+        )
+        factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_process_allows_unclassified_non_strategy_exchange_params(
+        self,
+    ) -> None:
+        """A persisted non-strategy config with only exchange is not strategy-shaped."""
+        repo = MagicMock()
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="started")
+        )
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.BackfillClass",
+                    "parameters": {"exchange": "kraken"},
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=None,
+        ):
+            await start_process(
+                http_request=_make_rest_request(),
+                name="backfill",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        factory.start_process_by_name.assert_awaited_once_with(
+            name="backfill",
+            mode=None,
+            parameters=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_process_allows_non_strategy_parameters_not_dict(self) -> None:
+        """Persisted non-strategy non-dict parameters skip strategy validation."""
+        repo = MagicMock()
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="started")
+        )
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.CoreClass",
+                    "parameters": "not-a-dict",
+                    "role": "core",
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=None,
+        ):
+            await start_process(
+                http_request=_make_rest_request(),
+                name="core",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        factory.start_process_by_name.assert_awaited_once_with(
+            name="core",
+            mode=None,
+            parameters=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_process_rejects_strategy_shape_with_invalid_role(self) -> None:
+        """Unparseable persisted strategy role fails closed before launch."""
+        persisted_params = _strategy_params(
+            exchange="kraken",
+            operator_public_id="op-1",
+            wallet_public_id="",
+        )
+        repo = MagicMock()
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.StratClass",
+                    "parameters": persisted_params,
+                    "role": "bogus",
+                }
+            ),
+        ), pytest.raises(HTTPException) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "invalid persisted process role for strategy launch"
+        factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_process_rejects_strategy_shape_with_missing_classification(
+        self,
+    ) -> None:
+        """Strategy-shaped persisted params fail closed with no role or registry hit."""
+        persisted_params = _strategy_params(
+            exchange="kraken",
+            operator_public_id="op-1",
+            wallet_public_id="",
+        )
+        repo = MagicMock()
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.ImportableButUnregistered",
+                    "parameters": persisted_params,
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=None,
+        ), pytest.raises(
+            HTTPException
+        ) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "unable to classify persisted strategy process"
+        factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_process_rejects_core_row_strategy_shape_without_registry(
+        self,
+    ) -> None:
+        """Unregistered strategy-shaped params fail closed despite row role core."""
+        persisted_params: dict[str, object] = {
+            "name": "strategy",
+            "inputs": ["candles.BTC-USD"],
+            "outputs": ["signals.BTC-USD"],
+            "exchange": "kraken",
+            "operator_public_id": "",
+            "wallet_public_id": "",
+        }
+        repo = MagicMock()
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.ImportableButUnregistered",
+                    "parameters": persisted_params,
+                    "role": "core",
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=None,
+        ), pytest.raises(
+            HTTPException
+        ) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "unable to classify persisted strategy process"
+        factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_process_rejects_live_exchange_with_only_paper_wallet(self) -> None:
+        """Live exchange autolookup filters out the lone paper wallet."""
+        persisted_params: dict[str, object] = {
+            "name": "strategy",
+            "inputs": ["candles.BTC-USD"],
+            "outputs": ["signals.BTC-USD"],
+            "exchange": "kraken",
+            "operator_public_id": "op-1",
+            "wallet_public_id": "",
+        }
+        repo = MagicMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-paper", is_paper=True)]
+        )
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.StratClass",
+                    "parameters": persisted_params,
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=ProcessRoleEnum.STRATEGY,
+        ), pytest.raises(
+            HTTPException
+        ) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "specify wallet_public_id; 0 wallets accessible"
+        factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_process_omitted_exchange_uses_paper_default(self) -> None:
+        """Omitted exchange resolves wallets as paper, matching strategy defaults."""
+        persisted_params: dict[str, object] = {
+            "name": "strategy",
+            "inputs": ["candles.BTC-USD"],
+            "outputs": ["signals.BTC-USD"],
+            "operator_public_id": "op-1",
+            "wallet_public_id": "",
+        }
+        repo = MagicMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[
+                _wallet_row("wallet-paper", is_paper=True),
+                _wallet_row("wallet-live", is_paper=False),
+            ]
+        )
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="started")
+        )
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.StratClass",
+                    "parameters": persisted_params,
+                    "role": ProcessRoleEnum.STRATEGY,
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=None,
+        ):
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert persisted_params["wallet_public_id"] == "wallet-paper"
+        factory.start_process_by_name.assert_awaited_once_with(
+            name="strategy",
+            mode=None,
+            parameters=persisted_params,
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_process_rejects_zero_accessible_wallets(self) -> None:
+        """Zero scoped wallets reject launch until wallet_public_id is specified."""
+        persisted_params: dict[str, object] = {
+            "name": "strategy",
+            "inputs": ["candles.BTC-USD"],
+            "outputs": ["signals.BTC-USD"],
+            "exchange": "kraken",
+            "operator_public_id": "op-1",
+            "wallet_public_id": "",
+        }
+        repo = MagicMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.StratClass",
+                    "parameters": persisted_params,
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=ProcessRoleEnum.STRATEGY,
+        ), pytest.raises(
+            HTTPException
+        ) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "specify wallet_public_id; 0 wallets accessible"
+        factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_process_keeps_explicit_wallet_unchanged(self) -> None:
+        """Explicit wallet_public_id bypasses autolookup and launches unchanged."""
+        persisted_params: dict[str, object] = {
+            "name": "strategy",
+            "inputs": ["candles.BTC-USD"],
+            "outputs": ["signals.BTC-USD"],
+            "exchange": "kraken",
+            "operator_public_id": "op-1",
+            "wallet_public_id": "wallet-pinned",
+        }
+        repo = MagicMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock()
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="started")
+        )
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.StratClass",
+                    "parameters": persisted_params,
+                }
+            ),
+        ), _patch(
+            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+            return_value=ProcessRoleEnum.STRATEGY,
+        ):
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert persisted_params["wallet_public_id"] == "wallet-pinned"
+        repo.list_accessible_wallets_for_operators.assert_not_called()
+        factory.start_process_by_name.assert_awaited_once_with(
+            name="strategy",
+            mode=None,
+            parameters=persisted_params,
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_process_rejects_explicit_wallet_without_active_grant(self) -> None:
+        """Persisted START maps shared grant enforcement failures to REST 403."""
+        persisted_params: dict[str, object] = {
+            "name": "strategy",
+            "inputs": ["candles.BTC-USD"],
+            "outputs": ["signals.BTC-USD"],
+            "exchange": "kraken",
+            "operator_public_id": "op-1",
+            "wallet_public_id": "wallet-pinned",
+        }
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+        factory = MagicMock()
+        factory.start_process_by_name = AsyncMock()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with _patch(
+            "snapper.server.process_routes._read_persisted_strategy_parameters",
+            new=AsyncMock(
+                return_value={
+                    "class_path": "snapper.fake.StratClass",
+                    "parameters": persisted_params,
+                    "role": "strategy",
+                }
+            ),
+        ), pytest.raises(HTTPException) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strategy",
+                body=body,
+                factory=factory,
+                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == (
+            "Operator 'op-1' has no active scope grant on wallet 'wallet-pinned'"
+        )
+        factory.start_process_by_name.assert_not_awaited()
+
 
 class TestReadPersistedStrategyParameters:
     """Tests for the persisted-config DB read used at start-time recheck."""
@@ -1999,34 +2925,24 @@ class TestResolveRoleForClassPath:
     @pytest.mark.asyncio
     async def test_returns_none_when_setting_missing(self, tmp_path: Path) -> None:
         """Returns None when no persisted setting row exists."""
-        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/p1.db")
-        await repo.create_all()
+        repo = _settings_repo()
         result = await _read_persisted_strategy_parameters(repo, "missing")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_returns_persisted_dict(self, tmp_path: Path) -> None:
         """Returns the parsed parameters dict and class_path for a real config."""
-        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/p2.db")
-        await repo.create_all()
-        async with repo.session() as session:
-            session.add(
-                Setting(
-                    key="process_strat-1",
-                    value=_json.dumps(
-                        {
-                            "class_path": "snapper.fake.StratClass",
-                            "parameters": {"name": "x", "wallet_public_id": "w-1"},
-                        }
-                    ),
-                    category="process",
-                    is_encrypted=False,
-                    timestamp=datetime.now(UTC),
-                    session_id="t",
-                    sequence_id=1,
-                )
+        repo = _settings_repo(
+            _process_setting(
+                "process_strat-1",
+                _json.dumps(
+                    {
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": {"name": "x", "wallet_public_id": "w-1"},
+                    }
+                ),
             )
-            await session.commit()
+        )
         result = await _read_persisted_strategy_parameters(repo, "strat-1")
         assert result is not None
         assert result["class_path"] == "snapper.fake.StratClass"
@@ -2037,42 +2953,14 @@ class TestResolveRoleForClassPath:
     @pytest.mark.asyncio
     async def test_returns_none_when_value_is_not_json(self, tmp_path: Path) -> None:
         """Malformed JSON value -> None (start endpoint silently skips recheck)."""
-        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/p3.db")
-        await repo.create_all()
-        async with repo.session() as session:
-            session.add(
-                Setting(
-                    key="process_bad",
-                    value="not-json",
-                    category="process",
-                    is_encrypted=False,
-                    timestamp=datetime.now(UTC),
-                    session_id="t",
-                    sequence_id=1,
-                )
-            )
-            await session.commit()
+        repo = _settings_repo(_process_setting("process_bad", "not-json"))
         result = await _read_persisted_strategy_parameters(repo, "bad")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_returns_none_when_value_is_not_dict(self, tmp_path: Path) -> None:
         """JSON value that isn't an object -> None."""
-        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/p4.db")
-        await repo.create_all()
-        async with repo.session() as session:
-            session.add(
-                Setting(
-                    key="process_arr",
-                    value="[1, 2, 3]",
-                    category="process",
-                    is_encrypted=False,
-                    timestamp=datetime.now(UTC),
-                    session_id="t",
-                    sequence_id=1,
-                )
-            )
-            await session.commit()
+        repo = _settings_repo(_process_setting("process_arr", "[1, 2, 3]"))
         result = await _read_persisted_strategy_parameters(repo, "arr")
         assert result is None
 
@@ -2088,29 +2976,20 @@ class TestResolveRoleForClassPath:
         Then: The recheck raises 403 before factory.start_process_by_name is
             invoked.
         """
-        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/start.db")
-        await repo.create_all()
-        async with repo.session() as session:
-            session.add(
-                Setting(
-                    key="process_strat-foreign",
-                    value=_json.dumps(
-                        {
-                            "class_path": "snapper.fake.StratClass",
-                            "parameters": {
-                                "operator_public_id": "op-other",
-                                "wallet_public_id": "",
-                            },
-                        }
-                    ),
-                    category="process",
-                    is_encrypted=False,
-                    timestamp=datetime.now(UTC),
-                    session_id="t",
-                    sequence_id=1,
-                )
+        repo = _settings_repo(
+            _process_setting(
+                "process_strat-foreign",
+                _json.dumps(
+                    {
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": _strategy_params(
+                            operator_public_id="op-other",
+                            wallet_public_id="",
+                        ),
+                    }
+                ),
             )
-            await session.commit()
+        )
         body = ProcessStartRequest(
             session_id="sid",
             sequence_id=1,
@@ -2136,7 +3015,8 @@ class TestResolveRoleForClassPath:
             )
         }
         with _patch(
-            "snapper.server.process_routes.get_registered_processes", return_value=registry
+            "snapper.application.process_manager.strategy_scope.get_registered_processes",
+            return_value=registry,
         ):
             mock_factory = MagicMock()
             mock_factory.start_process_by_name = AsyncMock()
@@ -2157,7 +3037,7 @@ class TestResolveRoleForClassPath:
     async def test_start_process_handles_persisted_parameters_not_dict(
         self, tmp_path: Path
     ) -> None:
-        """Persisted ``parameters`` field that isn't a dict is treated as None.
+        """Persisted strategy ``parameters`` that are not a dict fail closed.
 
         Regression: covers the false branch of
         ``isinstance(raw_params, dict)`` inside ``start_process`` so the
@@ -2169,32 +3049,20 @@ class TestResolveRoleForClassPath:
             ``parameters`` set to a JSON list (not a dict),
         When: ``start_process`` is called for that name and the class
             resolves to STRATEGY,
-        Then: The persisted_params stays None, the recheck still runs
-            against an empty params dict, and the call proceeds to
-            ``factory.start_process_by_name`` (no 403 because the
-            principal still controls the operator with no
-            wallet_public_id constraint).
+        Then: The route rejects before ``factory.start_process_by_name``
+            because the strategy scope cannot be validated safely.
         """
-        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/start_notdict.db")
-        await repo.create_all()
-        async with repo.session() as session:
-            session.add(
-                Setting(
-                    key="process_strat-listparams",
-                    value=_json.dumps(
-                        {
-                            "class_path": "snapper.fake.StratClass",
-                            "parameters": [1, 2, 3],
-                        }
-                    ),
-                    category="process",
-                    is_encrypted=False,
-                    timestamp=datetime.now(UTC),
-                    session_id="t",
-                    sequence_id=1,
-                )
+        repo = _settings_repo(
+            _process_setting(
+                "process_strat-listparams",
+                _json.dumps(
+                    {
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": [1, 2, 3],
+                    }
+                ),
             )
-            await session.commit()
+        )
         body = ProcessStartRequest(
             session_id="sid",
             sequence_id=1,
@@ -2220,26 +3088,30 @@ class TestResolveRoleForClassPath:
             )
         }
         with _patch(
-            "snapper.server.process_routes.get_registered_processes", return_value=registry
+            "snapper.application.process_manager.strategy_scope.get_registered_processes",
+            return_value=registry,
         ):
             mock_factory = MagicMock()
             mock_factory.start_process_by_name = AsyncMock(
                 return_value=ProcessStartResult(status="success", message="ok", public_id="run-1")
             )
-            await start_process(
-                http_request=_make_rest_request(),
-                name="strat-listparams",
-                body=body,
-                factory=mock_factory,
-                user=MagicMock(
-                    operator_public_ids=["op-mine"],
-                    primary_operator_public_id="op-mine",
-                    username="alice",
-                ),
-                repo=repo,
-                _csrf=None,
-            )
-            mock_factory.start_process_by_name.assert_awaited_once()
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=_make_rest_request(),
+                    name="strat-listparams",
+                    body=body,
+                    factory=mock_factory,
+                    user=MagicMock(
+                        operator_public_ids=["op-mine"],
+                        primary_operator_public_id="op-mine",
+                        username="alice",
+                    ),
+                    repo=repo,
+                    _csrf=None,
+                )
+            assert exc_info.value.status_code == 400
+            assert exc_info.value.detail == "invalid persisted strategy parameters"
+            mock_factory.start_process_by_name.assert_not_called()
 
 
 class TestResolveRoleForClassPathHit:
@@ -2262,7 +3134,7 @@ class TestResolveRoleForClassPathHit:
             mode="thread",
         )
         with _patch(
-            "snapper.server.process_routes.get_registered_processes",
+            "snapper.application.process_manager.strategy_scope.get_registered_processes",
             return_value={"x": entry},
         ):
             result = _resolve_role_for_class_path("snapper.fake.StratClass")
@@ -2271,21 +3143,9 @@ class TestResolveRoleForClassPathHit:
     @pytest.mark.asyncio
     async def test_start_process_skips_recheck_when_class_path_empty(self, tmp_path: Path) -> None:
         """Persisted config without class_path bypasses the recheck cleanly."""
-        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/sk1.db")
-        await repo.create_all()
-        async with repo.session() as session:
-            session.add(
-                Setting(
-                    key="process_no-class",
-                    value=_json.dumps({"class_path": "", "parameters": {}}),
-                    category="process",
-                    is_encrypted=False,
-                    timestamp=datetime.now(UTC),
-                    session_id="t",
-                    sequence_id=1,
-                )
-            )
-            await session.commit()
+        repo = _settings_repo(
+            _process_setting("process_no-class", _json.dumps({"class_path": "", "parameters": {}}))
+        )
         body = ProcessStartRequest(
             session_id="sid",
             sequence_id=1,
@@ -2313,23 +3173,12 @@ class TestResolveRoleForClassPathHit:
         self, tmp_path: Path
     ) -> None:
         """Persisted class_path that no template references skips the recheck."""
-        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/sk2.db")
-        await repo.create_all()
-        async with repo.session() as session:
-            session.add(
-                Setting(
-                    key="process_unreg",
-                    value=_json.dumps(
-                        {"class_path": "snapper.fake.Unregistered", "parameters": {}}
-                    ),
-                    category="process",
-                    is_encrypted=False,
-                    timestamp=datetime.now(UTC),
-                    session_id="t",
-                    sequence_id=1,
-                )
+        repo = _settings_repo(
+            _process_setting(
+                "process_unreg",
+                _json.dumps({"class_path": "snapper.fake.Unregistered", "parameters": {}}),
             )
-            await session.commit()
+        )
         body = ProcessStartRequest(
             session_id="sid",
             sequence_id=1,
@@ -2353,27 +3202,16 @@ class TestResolveRoleForClassPathHit:
         mock_factory.start_process_by_name.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_start_process_skips_recheck_when_parameters_not_dict(
+    async def test_start_process_rejects_strategy_when_parameters_not_dict(
         self, tmp_path: Path
     ) -> None:
-        """Persisted parameters that are not a dict skip the recheck cleanly."""
-        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/sk3.db")
-        await repo.create_all()
-        async with repo.session() as session:
-            session.add(
-                Setting(
-                    key="process_listparams",
-                    value=_json.dumps(
-                        {"class_path": "snapper.fake.StratClass", "parameters": "not-a-dict"}
-                    ),
-                    category="process",
-                    is_encrypted=False,
-                    timestamp=datetime.now(UTC),
-                    session_id="t",
-                    sequence_id=1,
-                )
+        """Persisted strategy parameters that are not a dict fail closed."""
+        repo = _settings_repo(
+            _process_setting(
+                "process_listparams",
+                _json.dumps({"class_path": "snapper.fake.StratClass", "parameters": "not-a-dict"}),
             )
-            await session.commit()
+        )
         body = ProcessStartRequest(
             session_id="sid",
             sequence_id=1,
@@ -2402,11 +3240,67 @@ class TestResolveRoleForClassPathHit:
             return_value=ProcessStartResult(status="success", message="ok")
         )
         with _patch(
-            "snapper.server.process_routes.get_registered_processes", return_value=registry
-        ):
+            "snapper.application.process_manager.strategy_scope.get_registered_processes",
+            return_value=registry,
+        ), pytest.raises(HTTPException) as exc_info:
             await start_process(
                 http_request=_make_rest_request(),
                 name="listparams",
+                body=body,
+                factory=mock_factory,
+                user=MagicMock(operator_public_ids=[]),
+                repo=repo,
+                _csrf=None,
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "invalid persisted strategy parameters"
+        mock_factory.start_process_by_name.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_start_process_skips_non_strategy_when_parameters_not_dict(
+        self, tmp_path: Path
+    ) -> None:
+        """Persisted non-strategy parameters that are not a dict skip cleanly."""
+        repo = _settings_repo(
+            _process_setting(
+                "process_core-listparams",
+                _json.dumps({"class_path": "snapper.fake.CoreClass", "parameters": "not-a-dict"}),
+            )
+        )
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        registry = {
+            "x": ProcessRegistryEntry(
+                class_ref=MagicMock(),
+                class_path="snapper.fake.CoreClass",
+                method="start",
+                description="",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.CORE,
+                tags=("core",),
+                parameters_model=None,
+                parameters_schema={"type": "object"},
+                enabled=False,
+                mode="thread",
+            )
+        }
+        mock_factory = MagicMock()
+        mock_factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="ok")
+        )
+        with _patch(
+            "snapper.application.process_manager.strategy_scope.get_registered_processes",
+            return_value=registry,
+        ):
+            await start_process(
+                http_request=_make_rest_request(),
+                name="core-listparams",
                 body=body,
                 factory=mock_factory,
                 user=MagicMock(operator_public_ids=[]),
@@ -2418,21 +3312,12 @@ class TestResolveRoleForClassPathHit:
     @pytest.mark.asyncio
     async def test_start_process_rejects_strategy_with_any_override(self, tmp_path: Path) -> None:
         """A persisted strategy + ANY parameters override is rejected with 400."""
-        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/sk4.db")
-        await repo.create_all()
-        async with repo.session() as session:
-            session.add(
-                Setting(
-                    key="process_strat-no-override",
-                    value=_json.dumps({"class": "snapper.fake.StratClass", "parameters": {}}),
-                    category="process",
-                    is_encrypted=False,
-                    timestamp=datetime.now(UTC),
-                    session_id="t",
-                    sequence_id=1,
-                )
+        repo = _settings_repo(
+            _process_setting(
+                "process_strat-no-override",
+                _json.dumps({"class": "snapper.fake.StratClass", "parameters": {}}),
             )
-            await session.commit()
+        )
         body = ProcessStartRequest(
             session_id="sid",
             sequence_id=1,
@@ -2457,7 +3342,8 @@ class TestResolveRoleForClassPathHit:
             )
         }
         with _patch(
-            "snapper.server.process_routes.get_registered_processes", return_value=registry
+            "snapper.application.process_manager.strategy_scope.get_registered_processes",
+            return_value=registry,
         ), pytest.raises(HTTPException) as exc_info:
             await start_process(
                 http_request=_make_rest_request(),

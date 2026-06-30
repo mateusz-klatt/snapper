@@ -37,6 +37,11 @@ from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.application.process_manager.spawner import ProcessSpawnerService
+from snapper.application.process_manager.strategy_scope import StrategyProcessClassification
+from snapper.application.process_manager.strategy_scope import StrategyScopeError
+from snapper.application.process_manager.strategy_scope import classify_strategy_process
+from snapper.application.process_manager.strategy_scope import resolve_classified_strategy_scope
+from snapper.application.process_manager.strategy_scope import resolve_strategy_process_scope
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
@@ -49,6 +54,8 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
 from snapper.data.models import ProcessRun
 from snapper.data.models import Setting
+from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import WalletRow
 
 
 class TestProcessConfig:
@@ -284,7 +291,6 @@ class TestStartProcess:
             await task
 
     @pytest.mark.asyncio
-    @pytest.mark.asyncio
     @patch("snapper.application.process_manager.launcher.ProcessLauncherService.import_class")
     async def test_start_process_empty_parameters_allowed(self, mock_import: MagicMock) -> None:
         """Verify start_process handles empty parameters correctly.
@@ -293,10 +299,13 @@ class TestStartProcess:
         When: start_process is called,
         Then: Class is instantiated without keyword arguments and process starts.
         """
+
+        async def long_running_task() -> None:
+            await asyncio.sleep(10)
+
         mock_class = MagicMock()
         mock_instance = MagicMock()
-        mock_method = MagicMock()
-        mock_instance.run = mock_method
+        mock_instance.run = long_running_task
         mock_class.return_value = mock_instance
         mock_import.return_value = mock_class
         settings = MagicMock()
@@ -312,6 +321,10 @@ class TestStartProcess:
         await factory.start_process(config)
         mock_class.assert_called_once_with()
         assert "no_kwargs" in factory.started_processes
+        task = factory.process_tasks["no_kwargs"]
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     @pytest.mark.asyncio
     @patch("snapper.application.process_manager.launcher.ProcessLauncherService.import_class")
@@ -604,6 +617,10 @@ class TestStartAllProcesses:
         When: start_all_processes is called,
         Then: Remaining processes are still started despite the failure.
         """
+
+        async def long_running_task() -> None:
+            await asyncio.sleep(10)
+
         config1 = ProcessConfigModel(
             name="good_process",
             enabled=True,
@@ -632,11 +649,11 @@ class TestStartAllProcesses:
         mock_get_configs.return_value = [config1, config2, config3]
         mock_good_class = MagicMock()
         mock_good_instance = MagicMock()
-        mock_good_instance.run = MagicMock()
+        mock_good_instance.run = long_running_task
         mock_good_class.return_value = mock_good_instance
         mock_another_good_class = MagicMock()
         mock_another_good_instance = MagicMock()
-        mock_another_good_instance.run = MagicMock()
+        mock_another_good_instance.run = long_running_task
         mock_another_good_class.return_value = mock_another_good_instance
 
         def import_side_effect(class_path: str, process_name: str | None = None) -> MagicMock:
@@ -654,6 +671,339 @@ class TestStartAllProcesses:
         assert "good_process" in factory.started_processes
         assert "another_good_process" in factory.started_processes
         assert "bad_process" not in factory.started_processes
+        for process_name in ("good_process", "another_good_process"):
+            task = factory.process_tasks[process_name]
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    @pytest.mark.asyncio
+    async def test_start_all_processes_resolves_strategy_wallet_for_operator(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Autostart resolves an empty strategy wallet in operator scope."""
+        config = _strategy_autostart_config()
+        repository = _WalletLookupRepository(operator_wallets=[_wallet_row("wallet-live")])
+        factory = ProcessLauncherService(_create_settings())
+        start_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+
+        await factory.start_all_processes()
+
+        start_mock.assert_awaited_once()
+        await_args = start_mock.await_args
+        assert await_args is not None
+        started_config = await_args.args[0]
+        assert isinstance(started_config, ProcessConfigModel)
+        assert started_config.parameters["wallet_public_id"] == "wallet-live"
+        assert config.parameters["wallet_public_id"] == ""
+        assert repository.operator_public_ids == ["op-1"]
+        assert repository.operator_lookup_count == 1
+        assert repository.active_lookup_count == 0
+
+    @pytest.mark.asyncio
+    async def test_start_all_processes_resolves_strategy_wallet_from_admin_catalog(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Autostart resolves a paper strategy wallet from admin scope."""
+        config = _strategy_autostart_config(operator_public_id="", exchange="paper")
+        repository = _WalletLookupRepository(
+            active_wallets=[
+                _wallet_row("wallet-paper", is_paper=True),
+                _wallet_row("wallet-live"),
+            ]
+        )
+        factory = ProcessLauncherService(_create_settings())
+        start_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+
+        await factory.start_all_processes()
+
+        start_mock.assert_awaited_once()
+        await_args = start_mock.await_args
+        assert await_args is not None
+        started_config = await_args.args[0]
+        assert isinstance(started_config, ProcessConfigModel)
+        assert started_config.parameters["wallet_public_id"] == "wallet-paper"
+        assert repository.active_lookup_count == 1
+        assert repository.operator_lookup_count == 0
+
+    @pytest.mark.asyncio
+    async def test_start_all_processes_skips_live_empty_wallet_without_operator(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Autostart skips a live strategy with no accountable operator."""
+        config = _strategy_autostart_config(operator_public_id="")
+        repository = _WalletLookupRepository(active_wallets=[_wallet_row("wallet-live")])
+        factory = ProcessLauncherService(_create_settings())
+        start_mock = mock.AsyncMock()
+        warning_mock = mock.MagicMock()
+        monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+        monkeypatch.setattr(launcher_module.logger, "warning", warning_mock)
+
+        await factory.start_all_processes()
+
+        start_mock.assert_not_awaited()
+        assert repository.active_lookup_count == 0
+        assert repository.operator_lookup_count == 0
+        warning_mock.assert_called_once_with(
+            "strategy {} not started: wallet unresolved/ambiguous; set wallet_public_id",
+            "strategy",
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_all_processes_skips_ambiguous_strategy_wallet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Autostart skips one strategy and warns when wallet lookup is ambiguous."""
+        config = _strategy_autostart_config()
+        repository = _WalletLookupRepository(
+            operator_wallets=[_wallet_row("wallet-a"), _wallet_row("wallet-b")]
+        )
+        factory = ProcessLauncherService(_create_settings())
+        start_mock = mock.AsyncMock()
+        warning_mock = mock.MagicMock()
+        monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+        monkeypatch.setattr(launcher_module.logger, "warning", warning_mock)
+
+        await factory.start_all_processes()
+
+        start_mock.assert_not_awaited()
+        warning_mock.assert_called_once_with(
+            "strategy {} not started: wallet unresolved/ambiguous; set wallet_public_id",
+            "strategy",
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_all_processes_skips_live_explicit_wallet_without_operator(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Autostart skips an explicit live wallet without an operator."""
+        config = _strategy_autostart_config(operator_public_id="", wallet_public_id="wallet-pinned")
+        repository = _WalletLookupRepository()
+        factory = ProcessLauncherService(_create_settings())
+        start_mock = mock.AsyncMock()
+        warning_mock = mock.MagicMock()
+        monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+        monkeypatch.setattr(launcher_module.logger, "warning", warning_mock)
+
+        await factory.start_all_processes()
+
+        start_mock.assert_not_awaited()
+        assert repository.active_lookup_count == 0
+        assert repository.operator_lookup_count == 0
+        warning_mock.assert_called_once_with(
+            "strategy {} not started: wallet unresolved/ambiguous; set wallet_public_id",
+            "strategy",
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_all_processes_skips_explicit_strategy_wallet_without_grant(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Autostart skips an explicit strategy wallet without an active grant."""
+        config = _strategy_autostart_config(wallet_public_id="wallet-pinned")
+        repository = MagicMock(spec=SQLAlchemyRepository)
+        repository.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+        factory = ProcessLauncherService(_create_settings())
+        start_mock = mock.AsyncMock()
+        warning_mock = mock.MagicMock()
+        monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+        monkeypatch.setattr(launcher_module.logger, "warning", warning_mock)
+
+        await factory.start_all_processes()
+
+        start_mock.assert_not_awaited()
+        repository.list_active_scope_grants_for_wallet.assert_awaited_once()
+        warning_mock.assert_called_once_with(
+            "strategy {} not started: wallet unresolved/ambiguous; set wallet_public_id",
+            "strategy",
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_all_processes_skips_autoresolved_wallet_without_output_coverage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Autostart skips a resolved wallet whose grant does not cover outputs."""
+        config = _strategy_autostart_config()
+        repository = MagicMock(spec=SQLAlchemyRepository)
+        repository.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-live")]
+        )
+        repository.list_active_scope_grants_for_wallet = AsyncMock(
+            return_value=[{"operator_public_id": "op-1"}]
+        )
+        repository.list_grant_covered_instrument_public_ids = AsyncMock(
+            return_value={"instrument-other"}
+        )
+        repository.get_instrument_public_ids_by_symbols = AsyncMock(
+            return_value={"orders.BTC-USD": "instrument-btc"}
+        )
+        factory = ProcessLauncherService(_create_settings())
+        start_mock = mock.AsyncMock()
+        warning_mock = mock.MagicMock()
+        monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+        monkeypatch.setattr(launcher_module.logger, "warning", warning_mock)
+
+        await factory.start_all_processes()
+
+        start_mock.assert_not_awaited()
+        repository.list_active_scope_grants_for_wallet.assert_awaited_once()
+        repository.list_grant_covered_instrument_public_ids.assert_awaited_once()
+        warning_mock.assert_called_once_with(
+            "strategy {} not started: wallet unresolved/ambiguous; set wallet_public_id",
+            "strategy",
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_all_processes_starts_valid_single_wallet_strategy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Autostart starts a strategy after complete wallet and grant enforcement."""
+        config = _strategy_autostart_config()
+        repository = MagicMock(spec=SQLAlchemyRepository)
+        repository.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-live")]
+        )
+        repository.list_active_scope_grants_for_wallet = AsyncMock(
+            return_value=[{"operator_public_id": "op-1"}]
+        )
+        repository.list_grant_covered_instrument_public_ids = AsyncMock(
+            return_value={"instrument-btc"}
+        )
+        repository.get_instrument_public_ids_by_symbols = AsyncMock(
+            return_value={"orders.BTC-USD": "instrument-btc"}
+        )
+        factory = ProcessLauncherService(_create_settings())
+        start_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+
+        await factory.start_all_processes()
+
+        start_mock.assert_awaited_once()
+        await_args = start_mock.await_args
+        assert await_args is not None
+        started_config = await_args.args[0]
+        assert isinstance(started_config, ProcessConfigModel)
+        assert started_config.parameters["wallet_public_id"] == "wallet-live"
+        repository.list_active_scope_grants_for_wallet.assert_awaited_once()
+        repository.list_grant_covered_instrument_public_ids.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_all_processes_enforces_registry_strategy_over_core_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Autostart treats registry strategy classification as authoritative."""
+        config = _strategy_autostart_config(role=ProcessRoleEnum.CORE)
+        repository = _WalletLookupRepository(operator_wallets=[_wallet_row("wallet-live")])
+        registry = {
+            "strategy": ProcessRegistryEntry(
+                class_ref=MagicMock(),
+                class_path="snapper.fake.StrategyProcess",
+                method="start",
+                description="",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.STRATEGY,
+                tags=("strategy",),
+                parameters_model=None,
+                parameters_schema={"type": "object"},
+                enabled=True,
+                mode="thread",
+            )
+        }
+        factory = ProcessLauncherService(_create_settings())
+        start_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+        monkeypatch.setattr(
+            "snapper.application.process_manager.strategy_scope.get_registered_processes",
+            lambda: registry,
+        )
+
+        await factory.start_all_processes()
+
+        start_mock.assert_awaited_once()
+        await_args = start_mock.await_args
+        assert await_args is not None
+        started_config = await_args.args[0]
+        assert isinstance(started_config, ProcessConfigModel)
+        assert started_config.parameters["wallet_public_id"] == "wallet-live"
+
+    @pytest.mark.asyncio
+    async def test_start_all_processes_leaves_non_strategy_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Autostart does not apply wallet resolution to non-strategy configs."""
+        config = ProcessConfigModel(
+            name="backfill",
+            enabled=True,
+            mode="thread",
+            class_path="snapper.fake.Backfill",
+            method="start",
+            parameters={"exchange": "kraken"},
+            role=ProcessRoleEnum.TASK,
+        )
+        factory = ProcessLauncherService(_create_settings())
+        start_mock = mock.AsyncMock()
+        get_repository_mock = mock.MagicMock()
+        monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", get_repository_mock)
+
+        await factory.start_all_processes()
+
+        start_mock.assert_awaited_once_with(config)
+        get_repository_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_start_all_processes_skips_unclassified_strategy_shape(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Autostart fails closed when strategy-shaped params lack trusted role."""
+        config = _strategy_autostart_config(role=ProcessRoleEnum.CORE)
+        factory = ProcessLauncherService(_create_settings())
+        start_mock = mock.AsyncMock()
+        warning_mock = mock.MagicMock()
+        monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module.logger, "warning", warning_mock)
+
+        await factory.start_all_processes()
+
+        start_mock.assert_not_awaited()
+        warning_mock.assert_called_once_with(
+            "strategy {} not started: wallet unresolved/ambiguous; set wallet_public_id",
+            "strategy",
+        )
 
 
 class TestStopAllProcesses:
@@ -1100,6 +1450,260 @@ class _DummySettingsService:
 def _create_settings() -> AppSettings:
     bootstrap = BootstrapSettingsLoader()
     return AppSettings(bootstrap, _DummySettingsService())
+
+
+def _wallet_row(public_id: str, *, is_paper: bool = False) -> WalletRow:
+    """Build a wallet row for autostart wallet-resolution tests."""
+    return WalletRow(
+        public_id=public_id,
+        label=public_id,
+        description=None,
+        is_paper=is_paper,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        session_id="test-session",
+        sequence_id=1,
+    )
+
+
+class _WalletLookupRepository:
+    """Wallet-resolution repository double for autostart tests."""
+
+    def __init__(
+        self,
+        *,
+        active_wallets: list[WalletRow] | None = None,
+        operator_wallets: list[WalletRow] | None = None,
+    ) -> None:
+        """Store wallet lookup fixtures."""
+        self.active_wallets = active_wallets or []
+        self.operator_wallets = operator_wallets or []
+        self.active_lookup_count = 0
+        self.operator_lookup_count = 0
+        self.operator_public_ids: list[str] = []
+
+    async def list_active_wallets(self, as_of: datetime) -> list[WalletRow]:
+        """Return active wallet fixtures."""
+        self.active_lookup_count += 1
+        return list(self.active_wallets)
+
+    async def list_accessible_wallets_for_operators(
+        self,
+        operator_public_ids: list[str],
+        as_of: datetime,
+    ) -> list[WalletRow]:
+        """Return operator-scoped wallet fixtures."""
+        self.operator_lookup_count += 1
+        self.operator_public_ids = list(operator_public_ids)
+        return list(self.operator_wallets)
+
+
+def _strategy_autostart_config(
+    *,
+    operator_public_id: str = "op-1",
+    wallet_public_id: str = "",
+    exchange: str | None = "kraken",
+    role: ProcessRoleEnum = ProcessRoleEnum.STRATEGY,
+) -> ProcessConfigModel:
+    """Build an enabled strategy config for autostart tests."""
+    parameters: JsonObject = {
+        "name": "strategy",
+        "inputs": ["candles.BTC-USD"],
+        "outputs": ["orders.BTC-USD"],
+        "operator_public_id": operator_public_id,
+        "wallet_public_id": wallet_public_id,
+    }
+    if exchange is not None:
+        parameters["exchange"] = exchange
+    return ProcessConfigModel(
+        name="strategy",
+        enabled=True,
+        mode="thread",
+        class_path="snapper.fake.StrategyProcess",
+        method="start",
+        parameters=parameters,
+        role=role,
+    )
+
+
+def test_classify_strategy_process_rejects_non_string_parameter_key() -> None:
+    """Reject strategy-shaped parameters with non-string keys.
+
+    Given: Strategy-shaped persisted parameters with a non-string key,
+    When: The shared classifier runs,
+    Then: It fails closed with the persisted-parameter error.
+    """
+    raw_parameters: dict[object, object] = {
+        "name": "strategy",
+        "inputs": ["candles.BTC-USD"],
+        "outputs": ["orders.BTC-USD"],
+        1: "invalid",
+    }
+    with pytest.raises(StrategyScopeError) as exc_info:
+        classify_strategy_process(
+            raw_role=ProcessRoleEnum.STRATEGY,
+            class_path="",
+            raw_parameters=raw_parameters,
+        )
+    assert exc_info.value.detail == "invalid persisted strategy parameters"
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_skips_non_strategy() -> None:
+    """Return an empty wallet scope for classified non-strategies.
+
+    Given: A classification that is not a strategy,
+    When: The shared wallet-scope resolver runs,
+    Then: It returns an empty scope without touching wallet lookups.
+    """
+    repository = _WalletLookupRepository(active_wallets=[_wallet_row("wallet-live")])
+    classification = StrategyProcessClassification(
+        treat_as_strategy=False,
+        parameters=None,
+        row_role=ProcessRoleEnum.CORE,
+        registry_role=None,
+    )
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=classification,
+        principal_operator_public_ids=None,
+        allow_admin_lookup_without_operator=True,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.treat_as_strategy is False
+    assert scope.parameters is None
+    assert repository.active_lookup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_rejects_live_admin_lookup_without_operator() -> (
+    None
+):
+    """Live strategies cannot admin-resolve a wallet without an operator.
+
+    Given: Strategy parameters with live exchange and no operator,
+    When: The shared resolver is called with admin lookup allowed,
+    Then: It fails closed before querying the wallet catalogue.
+    """
+    repository = _WalletLookupRepository(active_wallets=[_wallet_row("wallet-live")])
+    classification = StrategyProcessClassification(
+        treat_as_strategy=True,
+        parameters=dict(_strategy_autostart_config(operator_public_id="").parameters),
+        row_role=ProcessRoleEnum.STRATEGY,
+        registry_role=None,
+    )
+    with pytest.raises(StrategyScopeError) as exc_info:
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=None,
+            allow_admin_lookup_without_operator=True,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+    assert (
+        exc_info.value.detail == "operator_public_id required for live strategy wallet resolution"
+    )
+    assert repository.active_lookup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_rejects_live_explicit_wallet_without_operator() -> (
+    None
+):
+    """Live explicit wallets still require an accountable operator.
+
+    Given: Strategy parameters with live exchange, explicit wallet, and no operator,
+    When: The shared resolver is called with explicit wallets otherwise allowed,
+    Then: It fails closed before returning the wallet override.
+    """
+    repository = _WalletLookupRepository()
+    classification = StrategyProcessClassification(
+        treat_as_strategy=True,
+        parameters=dict(
+            _strategy_autostart_config(
+                operator_public_id="",
+                wallet_public_id="wallet-pinned",
+            ).parameters
+        ),
+        row_role=ProcessRoleEnum.STRATEGY,
+        registry_role=None,
+    )
+    with pytest.raises(StrategyScopeError) as exc_info:
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=None,
+            allow_admin_lookup_without_operator=True,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+    assert exc_info.value.detail == "wallet_public_id supplied without operator_public_id"
+    assert repository.active_lookup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_rejects_paper_without_operator_when_no_fallback() -> (
+    None
+):
+    """Paper strategies need an allowed fallback when no operator is pinned.
+
+    Given: Paper strategy parameters with no operator and no wallet,
+    When: The shared resolver forbids both unscoped paper and admin lookup,
+    Then: It rejects the launch before querying wallets.
+    """
+    repository = _WalletLookupRepository(
+        active_wallets=[_wallet_row("wallet-paper", is_paper=True)]
+    )
+    classification = StrategyProcessClassification(
+        treat_as_strategy=True,
+        parameters=dict(
+            _strategy_autostart_config(
+                operator_public_id="",
+                exchange="paper",
+            ).parameters
+        ),
+        row_role=ProcessRoleEnum.STRATEGY,
+        registry_role=None,
+    )
+    with pytest.raises(StrategyScopeError) as exc_info:
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=None,
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+    assert (
+        exc_info.value.detail == "operator_public_id required for live strategy wallet resolution"
+    )
+    assert repository.active_lookup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_strategy_process_scope_classifies_non_strategy() -> None:
+    """Classify-and-resolve returns an empty scope for non-strategies.
+
+    Given: A persisted process role that is not a strategy,
+    When: The classify-and-resolve helper runs,
+    Then: It returns an empty scope without binding any wallet.
+    """
+    scope = await resolve_strategy_process_scope(
+        _WalletLookupRepository(),
+        raw_role=ProcessRoleEnum.CORE,
+        class_path="",
+        raw_parameters={"exchange": "kraken"},
+        principal_operator_public_ids=None,
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=True,
+    )
+    assert scope.treat_as_strategy is False
+    assert scope.parameters is None
+    assert scope.operator_public_id == ""
+    assert scope.wallet_public_id == ""
+    assert scope.mode is None
 
 
 def _stub_run_tracking(factory: ProcessLauncherService) -> None:

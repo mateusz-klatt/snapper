@@ -34,6 +34,7 @@ from datetime import datetime
 from typing import Annotated
 from typing import Any
 from typing import Literal
+from typing import cast
 from uuid import uuid7
 
 from fastapi import APIRouter
@@ -70,14 +71,33 @@ from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
+from snapper.application.process_manager.strategy_scope import StrategyGrantScopeError
+from snapper.application.process_manager.strategy_scope import StrategyOperatorScopeError
+from snapper.application.process_manager.strategy_scope import StrategyOutputCoverageError
+from snapper.application.process_manager.strategy_scope import StrategyProcessClassification
+from snapper.application.process_manager.strategy_scope import StrategyScopeError
+from snapper.application.process_manager.strategy_scope import classify_strategy_process
+from snapper.application.process_manager.strategy_scope import (
+    enforce_classified_strategy_scope_complete,
+)
+from snapper.application.process_manager.strategy_scope import enforce_strategy_outputs_covered
+from snapper.application.process_manager.strategy_scope import (
+    enforce_strategy_process_scope_complete,
+)
+from snapper.application.process_manager.strategy_scope import enforce_wallet_grant_exists
+from snapper.application.process_manager.strategy_scope import find_uncovered_outputs
+from snapper.application.process_manager.strategy_scope import resolve_role_for_class_path
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
+from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.core.wallet_resolution import WalletAmbiguousError
+from snapper.core.wallet_resolution import WalletUnresolvedError
 from snapper.data.models import Setting
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
@@ -101,6 +121,10 @@ _PROCESS_START_RESPONSES: dict[int | str, dict[str, Any]] = {
     403: {"description": "Process scope denied"},
     422: {"description": "Bare executor template — start a per-wallet instance instead"},
 }
+_resolve_role_for_class_path = resolve_role_for_class_path
+_enforce_wallet_grant_exists = enforce_wallet_grant_exists
+_enforce_strategy_outputs_covered = enforce_strategy_outputs_covered
+_find_uncovered_outputs = find_uncovered_outputs
 
 
 def _mint_provenance(request: Request) -> tuple[str, int, str, datetime]:
@@ -220,9 +244,9 @@ async def _read_persisted_strategy_parameters(
 ) -> dict[str, object] | None:
     """Read the persisted process configuration for ``name``.
 
-    Returns a dict with ``template`` and ``parameters`` keys when the
-    persisted ``process_<name>`` settings row exists, otherwise None.
-    Mirrors the launcher's ``start_process_by_name`` DB read so the
+    Returns a dict with ``class_path``, ``parameters``, and ``role`` keys
+    when the persisted ``process_<name>`` settings row exists, otherwise
+    None. Mirrors the launcher's ``start_process_by_name`` DB read so the
     start endpoint can re-validate the same effective parameters the
     launcher will hand to the process constructor.
     """
@@ -245,106 +269,8 @@ async def _read_persisted_strategy_parameters(
         return None
     parameters = config_dict.get("parameters") or {}
     class_path = config_dict.get("class") or config_dict.get("class_path") or ""
-    return {"class_path": class_path, "parameters": parameters}
-
-
-def _resolve_role_for_class_path(class_path: str) -> ProcessRoleEnum | None:
-    """Look up a registered process entry by its class_path.
-
-    The launcher persists ``class_path`` in the process settings row
-    but not the template name, so the start endpoint maps class_path
-    back to a registry entry to read the role for the scope check.
-    Returns None when no matching entry exists (e.g. the template was
-    deregistered between create and start).
-    """
-    registry = get_registered_processes()
-    for entry in registry.values():
-        if entry.class_path == class_path:
-            return entry.role
-    return None
-
-
-async def _enforce_wallet_grant_exists(
-    repo: SQLAlchemyRepository,
-    operator_public_id: str,
-    wallet_public_id: str,
-    as_of: datetime,
-) -> None:
-    """Verify the operator holds at least one active grant on the wallet.
-
-    Raises 403 when the operator has zero matching grants. Coarse check
-    that runs before the per-output instrument coverage check.
-    """
-    grants = await repo.list_active_scope_grants_for_wallet(
-        wallet_public_id=wallet_public_id,
-        as_of=as_of,
-    )
-    matching = [g for g in grants if g["operator_public_id"] == operator_public_id]
-    if matching:
-        return
-    raise HTTPException(
-        status_code=403,
-        detail=(
-            f"Operator '{operator_public_id}' has no active scope grant on "
-            f"wallet '{wallet_public_id}'"
-        ),
-    )
-
-
-async def _enforce_strategy_outputs_covered(
-    repo: SQLAlchemyRepository,
-    parameters: dict[str, object],
-    operator_public_id: str,
-    wallet_public_id: str,
-    as_of: datetime,
-) -> None:
-    """Verify every output instrument is covered by an active grant.
-
-    Maps each ``outputs`` symbol on the strategy's exchange to its
-    instrument_public_id and checks membership against the union of
-    instruments covered by all active grants for the operator on the
-    wallet. Skipped for the paper exchange (no Instrument rows) and
-    when ``outputs`` / ``exchange`` are missing or non-string. Raises
-    403 listing every uncovered symbol when the check fails.
-    """
-    raw_outputs = parameters.get("outputs", [])
-    raw_exchange = parameters.get("exchange", "")
-    if not isinstance(raw_outputs, list) or not isinstance(raw_exchange, str):
-        return
-    outputs = [o for o in raw_outputs if isinstance(o, str)]
-    if not outputs or not raw_exchange or raw_exchange == "paper":
-        return
-    covered = await repo.list_grant_covered_instrument_public_ids(
-        operator_public_id=operator_public_id,
-        wallet_public_id=wallet_public_id,
-        as_of=as_of,
-    )
-    uncovered = await _find_uncovered_outputs(repo, outputs, raw_exchange, covered, as_of)
-    if not uncovered:
-        return
-    raise HTTPException(
-        status_code=403,
-        detail=(
-            f"Operator '{operator_public_id}' has no active grant covering "
-            f"instruments {sorted(uncovered)} on wallet '{wallet_public_id}'"
-        ),
-    )
-
-
-async def _find_uncovered_outputs(
-    repo: SQLAlchemyRepository,
-    outputs: list[str],
-    exchange: str,
-    covered: set[str],
-    as_of: datetime,
-) -> list[str]:
-    """Return the subset of output symbols whose instrument is not covered."""
-    instrument_public_ids = await repo.get_instrument_public_ids_by_symbols(
-        native_symbols=set(outputs),
-        exchange=exchange,
-        as_of=as_of,
-    )
-    return [symbol for symbol in outputs if instrument_public_ids.get(symbol) not in covered]
+    role = config_dict.get("role")
+    return {"class_path": class_path, "parameters": parameters, "role": role}
 
 
 async def _enforce_strategy_scope(
@@ -357,50 +283,61 @@ async def _enforce_strategy_scope(
 
     Non-strategy process templates are skipped because their
     parameters do not carry trading operator/wallet scope. Strategy
-    configs may be unscoped when both fields are empty, matching the
-    dataclass defaults used by existing strategy templates. A wallet
-    without an operator is invalid. A populated operator must already be
-    present on ``principal.operator_public_ids``; ADMIN principals
-    satisfy that check through the operator expansion performed during
-    principal construction. When both operator and wallet are populated,
-    SQL repositories must show an active grant for the pair and every
+    configs may be unscoped when both fields are empty only for paper
+    exchange templates, matching the dataclass defaults used by existing
+    paper strategy templates. A live strategy requires an operator. A
+    wallet without an operator is invalid. A populated operator must
+    already be present on ``principal.operator_public_ids``; ADMIN
+    principals satisfy that check through the operator expansion
+    performed during principal construction. When the wallet is empty
+    but the operator is present, the operator-scoped wallet set must
+    contain exactly one matching wallet for the strategy's exchange mode
+    and that resolved ID is written back into ``parameters``. SQL
+    repositories must show an active grant for the final pair and every
     configured live-exchange output instrument must be covered by that
-    grant set. Non-SQL repositories skip the DB-backed grant checks.
+    grant set. Non-SQL repositories skip the DB-backed grant checks after
+    the wallet-resolution gate.
 
     Raises:
         HTTPException: 403 on operator mismatch or missing grant; 400
-            when a wallet is supplied without an operator.
+            when a wallet is supplied without an operator or when
+            autolookup cannot resolve exactly one wallet.
     """
     if role is not ProcessRoleEnum.STRATEGY:
         return
-    raw_operator = parameters.get("operator_public_id", "")
-    raw_wallet = parameters.get("wallet_public_id", "")
-    operator_public_id = raw_operator if isinstance(raw_operator, str) else ""
-    wallet_public_id = raw_wallet if isinstance(raw_wallet, str) else ""
-    if not operator_public_id and not wallet_public_id:
-        return
-    if not operator_public_id:
-        raise HTTPException(
-            status_code=400,
-            detail="wallet_public_id supplied without operator_public_id",
+    try:
+        scope = await enforce_strategy_process_scope_complete(
+            repo,
+            raw_role=role,
+            class_path="",
+            raw_parameters=parameters,
+            principal_operator_public_ids=principal.operator_public_ids,
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=True,
+            require_operator_for_explicit_wallet=True,
         )
-    if operator_public_id not in principal.operator_public_ids:
+    except StrategyOperatorScopeError as exc:
         raise HTTPException(
             status_code=403,
-            detail=(
-                f"User '{principal.username}' has no membership on operator "
-                f"'{operator_public_id}'"
-            ),
-        )
-    if not wallet_public_id:
-        return
-    if not isinstance(repo, SQLAlchemyRepository):
-        return
-    as_of = datetime.now(UTC)
-    await _enforce_wallet_grant_exists(repo, operator_public_id, wallet_public_id, as_of)
-    await _enforce_strategy_outputs_covered(
-        repo, parameters, operator_public_id, wallet_public_id, as_of
-    )
+            detail=f"User '{principal.username}' has no membership on operator '{exc.detail}'",
+        ) from exc
+    except (WalletAmbiguousError, WalletUnresolvedError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"specify wallet_public_id; {len(exc.candidates)} wallets accessible",
+        ) from exc
+    except (StrategyGrantScopeError, StrategyOutputCoverageError) as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=exc.detail,
+        ) from exc
+    except StrategyScopeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=exc.detail,
+        ) from exc
+    parameters.clear()
+    parameters.update(cast(dict[str, object], scope.parameters))
 
 
 @router.get("/available")
@@ -689,10 +626,8 @@ async def create_process_configuration(
         body: Process creation request with template name and config.
         factory: Process launcher service.
         settings: Application settings.
-        user: Authenticated user with MANAGE_PROCESSES permission, used
-            for the strategy scope check on operator/wallet.
-        repo: Repository used to verify active scope grants for the
-            requested operator/wallet pair.
+        user: Authenticated user with MANAGE_PROCESSES permission.
+        repo: Repository dependency for route consistency.
         _csrf: CSRF token validation.
 
     Returns:
@@ -713,7 +648,6 @@ async def create_process_configuration(
         base_parameters = {}
     if payload.parameters:
         base_parameters.update(payload.parameters)
-    await _enforce_strategy_scope(base_parameters, entry.role, user, repo)
     final_mode = payload.mode or resolve_mode(entry.mode, payload.name)
     final_enabled = entry.enabled if payload.enabled is None else payload.enabled
     try:
@@ -850,16 +784,26 @@ async def start_process(
     payload = body.payload
     overrides = payload.parameters or {}
     persisted = await _read_persisted_strategy_parameters(repo, name)
-    persisted_role: ProcessRoleEnum | None = None
+    treat_as_strategy = False
+    classification: StrategyProcessClassification | None = None
     persisted_params: dict[str, object] | None = None
     if persisted is not None:
+        raw_role = persisted.get("role")
+        raw_params = persisted.get("parameters")
         class_path = persisted.get("class_path")
-        if isinstance(class_path, str) and class_path:
-            persisted_role = _resolve_role_for_class_path(class_path)
-            raw_params = persisted.get("parameters")
-            if isinstance(raw_params, dict):
-                persisted_params = raw_params
-    if persisted_role is ProcessRoleEnum.STRATEGY and overrides:
+        try:
+            classification = classify_strategy_process(
+                raw_role=raw_role,
+                class_path=class_path,
+                raw_parameters=raw_params,
+            )
+        except StrategyScopeError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=exc.detail,
+            ) from exc
+        treat_as_strategy = classification.treat_as_strategy
+    if treat_as_strategy and overrides:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -879,12 +823,47 @@ async def start_process(
                 "process configuration via the create endpoint instead."
             ),
         )
-    if persisted_role is ProcessRoleEnum.STRATEGY and persisted_params is not None:
-        await _enforce_strategy_scope(persisted_params, persisted_role, user, repo)
+    if treat_as_strategy and classification is not None:
+        try:
+            scope = await enforce_classified_strategy_scope_complete(
+                repo,
+                classification=classification,
+                principal_operator_public_ids=user.operator_public_ids,
+                allow_admin_lookup_without_operator=False,
+                allow_unscoped_paper=True,
+                require_operator_for_explicit_wallet=True,
+            )
+        except StrategyOperatorScopeError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail=f"User '{user.username}' has no membership on operator '{exc.detail}'",
+            ) from exc
+        except (WalletAmbiguousError, WalletUnresolvedError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"specify wallet_public_id; {len(exc.candidates)} wallets accessible",
+            ) from exc
+        except (StrategyGrantScopeError, StrategyOutputCoverageError) as exc:
+            raise HTTPException(
+                status_code=403,
+                detail=exc.detail,
+            ) from exc
+        except StrategyScopeError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=exc.detail,
+            ) from exc
+        persisted_params = cast(dict[str, object], scope.parameters)
+        raw_params_dict = cast(dict[str, object], raw_params)
+        raw_params_dict.clear()
+        raw_params_dict.update(persisted_params)
+        launch_parameters: dict[str, object] | JsonObject | None = persisted_params
+    else:
+        launch_parameters = payload.parameters
     result = await factory.start_process_by_name(
         name=name,
         mode=payload.mode,
-        parameters=payload.parameters,
+        parameters=launch_parameters,
     )
     sid, seq, pid, ts = _mint_provenance(http_request)
     data = ProcessStartData(

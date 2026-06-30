@@ -675,7 +675,11 @@ class TestStartProcess:
         When: start_process is called.
         Then: Method executes in executor and completes.
         """
-        executed = []
+        executed: list[bool] = []
+
+        async def run_in_executor(_executor: object, method: object) -> None:
+            if callable(method):
+                method()
 
         class SyncProcess:
             def start(self) -> None:
@@ -697,9 +701,13 @@ class TestStartProcess:
             ) as mock_create_run,
             patch.object(launcher, "import_class") as mock_import,
             patch.object(launcher, "_finalize_process_run", new_callable=AsyncMock),
+            patch(
+                "snapper.application.process_manager.launcher.asyncio.get_event_loop"
+            ) as mock_loop,
         ):
             mock_create_run.return_value = str(uuid4())
             mock_import.return_value = SyncProcess
+            mock_loop.return_value.run_in_executor = AsyncMock(side_effect=run_in_executor)
             await launcher.start_process(config)
             assert executed == [True]
 
@@ -749,6 +757,10 @@ class TestStartProcess:
         Then: Process run is finalized.
         """
 
+        async def run_in_executor(_executor: object, method: object) -> None:
+            if callable(method):
+                method()
+
         class OneShotProcess:
             def run(self) -> None:
                 """No-op run for OneShotProcess test stub."""
@@ -772,9 +784,13 @@ class TestStartProcess:
             patch.object(
                 launcher, "_finalize_process_run", new_callable=AsyncMock
             ) as mock_finalize,
+            patch(
+                "snapper.application.process_manager.launcher.asyncio.get_event_loop"
+            ) as mock_loop,
         ):
             mock_create_run.return_value = str(uuid4())
             mock_import.return_value = OneShotProcess
+            mock_loop.return_value.run_in_executor = AsyncMock(side_effect=run_in_executor)
             await launcher.start_process(config)
             mock_finalize.assert_called()
 
@@ -788,6 +804,10 @@ class TestStartProcess:
         When: start_process is called.
         Then: Process starts despite DB error.
         """
+
+        async def run_in_executor(_executor: object, method: object) -> None:
+            if callable(method):
+                method()
 
         class SimpleProcess:
             def start(self) -> None:
@@ -810,9 +830,13 @@ class TestStartProcess:
             ) as mock_create_run,
             patch.object(launcher, "import_class") as mock_import,
             patch.object(launcher, "_finalize_process_run", new_callable=AsyncMock),
+            patch(
+                "snapper.application.process_manager.launcher.asyncio.get_event_loop"
+            ) as mock_loop,
         ):
             mock_create_run.side_effect = Exception("DB error")
             mock_import.return_value = SimpleProcess
+            mock_loop.return_value.run_in_executor = AsyncMock(side_effect=run_in_executor)
             await launcher.start_process(config)
 
 

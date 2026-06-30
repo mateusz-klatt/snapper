@@ -27,6 +27,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 from typing import Final
+from typing import cast
 from uuid import uuid7
 
 import psutil
@@ -56,6 +57,11 @@ from snapper.application.process_manager.registry import get_registered_processe
 from snapper.application.process_manager.registry_syncer import ProcessRegistrySyncer
 from snapper.application.process_manager.run_recorder import ProcessRunRecorder
 from snapper.application.process_manager.spawner import ProcessSpawnerService
+from snapper.application.process_manager.strategy_scope import StrategyScopeError
+from snapper.application.process_manager.strategy_scope import classify_strategy_process
+from snapper.application.process_manager.strategy_scope import (
+    enforce_classified_strategy_scope_complete,
+)
 from snapper.application.services.market_persist_policy import MarketPersistPolicy
 from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
@@ -70,6 +76,8 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
 from snapper.core.types import StartProcessStatusEnum
 from snapper.core.types import StopProcessStatusEnum
+from snapper.core.wallet_resolution import WalletAmbiguousError
+from snapper.core.wallet_resolution import WalletUnresolvedError
 from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
@@ -227,6 +235,34 @@ def _copy_process_config_with_mode(
         class_path=config.class_path,
         method=config.method,
         parameters=config.parameters,
+        note=config.note,
+        lifecycle=config.lifecycle,
+        role=config.role,
+        restart_policy=config.restart_policy,
+        tags=config.tags,
+        parameters_schema=config.parameters_schema,
+    )
+
+
+def _copy_process_config_with_parameters(
+    config: ProcessConfigModel, parameters: JsonObject
+) -> ProcessConfigModel:
+    """Return a process config copy with different constructor parameters.
+
+    Args:
+        config: Process configuration to copy.
+        parameters: Constructor parameters for the returned configuration.
+
+    Returns:
+        ProcessConfigModel with all fields preserved except ``parameters``.
+    """
+    return ProcessConfigModel(
+        name=config.name,
+        enabled=config.enabled,
+        mode=config.mode,
+        class_path=config.class_path,
+        method=config.method,
+        parameters=parameters,
         note=config.note,
         lifecycle=config.lifecycle,
         role=config.role,
@@ -1071,6 +1107,49 @@ class ProcessLauncherService:
             return not is_market_data_publisher(config.tags)
         return True
 
+    async def _resolve_autostart_strategy_scope(
+        self, config: ProcessConfigModel
+    ) -> ProcessConfigModel:
+        """Return ``config`` with boot-time strategy wallet scope resolved.
+
+        Non-strategy configs return unchanged. Strategy configs use their
+        persisted operator when present; otherwise boot resolves against
+        the admin active-wallet catalogue. Explicit persisted wallet IDs
+        pass through unchanged.
+
+        Args:
+            config: Enabled process configuration selected for autostart.
+
+        Returns:
+            Original or copied config with resolved strategy wallet params.
+
+        Raises:
+            StrategyScopeError: Strategy classification or validation failed.
+            WalletUnresolvedError: No wallet matched the boot lookup scope.
+            WalletAmbiguousError: More than one wallet matched the boot lookup scope.
+        """
+        classification = classify_strategy_process(
+            raw_role=config.role,
+            class_path=config.class_path,
+            raw_parameters=config.parameters,
+        )
+        if not classification.treat_as_strategy:
+            return config
+        repository = get_repository(self.settings.db_url)
+        scope = await enforce_classified_strategy_scope_complete(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=None,
+            allow_admin_lookup_without_operator=True,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=True,
+        )
+        parameters = cast(JsonObject, dict(cast(dict[str, object], scope.parameters)))
+        return _copy_process_config_with_parameters(
+            config,
+            parameters,
+        )
+
     async def start_all_processes(self) -> None:
         """Start all enabled processes in priority order.
 
@@ -1103,9 +1182,16 @@ class ProcessLauncherService:
                 filtered_count += 1
                 continue
             try:
-                self._arm_desired_running(config.name)
-                await self.start_process(config)
+                process_config = await self._resolve_autostart_strategy_scope(config)
+                self._arm_desired_running(process_config.name)
+                await self.start_process(process_config)
                 started_count += 1
+            except (StrategyScopeError, WalletAmbiguousError, WalletUnresolvedError):
+                logger.warning(
+                    "strategy {} not started: wallet unresolved/ambiguous; set wallet_public_id",
+                    config.name,
+                )
+                failed_count += 1
             except Exception as e:
                 logger.error(f"Failed to start process '{config.name}': {e}")
                 failed_count += 1
