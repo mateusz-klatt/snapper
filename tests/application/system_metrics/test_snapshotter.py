@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import gc
 import importlib
+import logging
 import tracemalloc
 from collections.abc import Generator
 from datetime import UTC
@@ -22,14 +23,22 @@ from snapper.application.system_metrics import snapshotter
 from snapper.application.system_metrics.cgroup import CgroupReading
 from snapper.application.system_metrics.ring_buffer import DEFAULT_HISTORY_CAP
 from snapper.application.system_metrics.ring_buffer import MetricsRingBuffer
+from snapper.application.system_metrics.snapshot_types import DiskMetrics
 from snapper.application.system_metrics.snapshot_types import LimitsMetrics
 from snapper.application.system_metrics.snapshot_types import ProcessMetrics
 from snapper.application.system_metrics.snapshot_types import SystemMetricsSnapshot
+from snapper.application.system_metrics.snapshotter import DEFAULT_DISK_FREE_CRIT_BYTES
+from snapper.application.system_metrics.snapshotter import DEFAULT_DISK_FREE_WARN_BYTES
+from snapper.application.system_metrics.snapshotter import DEFAULT_DISK_MOUNT_PATH
 from snapper.application.system_metrics.snapshotter import DEFAULT_INTERVAL_SECONDS
 from snapper.application.system_metrics.snapshotter import SystemMetricsSnapshotter
+from snapper.application.system_metrics.snapshotter import _resolve_disk_mount_path
 from snapper.application.system_metrics.snapshotter import _resolve_history_cap
 from snapper.application.system_metrics.snapshotter import _resolve_interval
+from snapper.application.system_metrics.snapshotter import _resolve_positive_bytes
 from snapper.application.system_metrics.tracemalloc_controller import TracemallocController
+from snapper.core.types import HealthStatus
+from snapper.core.types import HealthStatusEnum
 
 
 class _FakeResourceModule:
@@ -94,6 +103,9 @@ class TestSnapshotter:
         *,
         interval_seconds: float = 5.0,
         history_cap: int = 10,
+        disk_free_warn_bytes: int = 1,
+        disk_free_crit_bytes: int = 1,
+        disk_mount_path: str = "/",
         process: MagicMock | None = None,
         tracemalloc_controller: MagicMock | None = None,
         history_buffer: MetricsRingBuffer | None = None,
@@ -101,6 +113,9 @@ class TestSnapshotter:
         return SystemMetricsSnapshotter(
             interval_seconds=interval_seconds,
             history_cap=history_cap,
+            disk_free_warn_bytes=disk_free_warn_bytes,
+            disk_free_crit_bytes=disk_free_crit_bytes,
+            disk_mount_path=disk_mount_path,
             process=process or self._make_process(),
             tracemalloc_controller=tracemalloc_controller
             or self._make_tracemalloc(active=False, traced=None),
@@ -145,6 +160,16 @@ class TestSnapshotter:
                 "pool_size": None,
                 "pool_checked_out": None,
             },
+            disk={
+                "mount_path": "/",
+                "total_bytes": 1000,
+                "used_bytes": 500,
+                "free_bytes": 500,
+                "percent_used": 50.0,
+                "disk_low": False,
+                "disk_critical": False,
+                "status": HealthStatusEnum.HEALTHY,
+            },
             tracemalloc_active=False,
             cgroup_version=None,
         )
@@ -156,6 +181,19 @@ class TestSnapshotter:
         version: Literal["v1", "v2"] | None,
     ) -> None:
         monkeypatch.setattr(snapshotter, "read_cgroup", lambda: (reading, version))
+
+    def _disk_metrics(self, status: HealthStatus) -> DiskMetrics:
+        """Return a minimal disk metrics block for logging tests."""
+        return DiskMetrics(
+            mount_path="/",
+            total_bytes=1000,
+            used_bytes=500,
+            free_bytes=500,
+            percent_used=50.0,
+            disk_low=status != HealthStatusEnum.HEALTHY,
+            disk_critical=status == HealthStatusEnum.ERROR,
+            status=status,
+        )
 
     @pytest.mark.parametrize(
         ("env_value", "expected"),
@@ -189,29 +227,74 @@ class TestSnapshotter:
         """Covered by test body."""
         assert _resolve_history_cap(env_value) == expected
 
+    @pytest.mark.parametrize(
+        ("env_value", "expected"),
+        [
+            (None, 123),
+            ("", 123),
+            ("   ", 123),
+            ("garbage", 123),
+            ("-1", 123),
+            ("0", 123),
+            ("4096", 4096),
+        ],
+    )
+    def test_resolve_positive_bytes(self, env_value: str | None, expected: int) -> None:
+        """Covered by test body."""
+        assert _resolve_positive_bytes(env_value, 123) == expected
+
+    @pytest.mark.parametrize(
+        ("env_value", "expected"),
+        [
+            (None, DEFAULT_DISK_MOUNT_PATH),
+            ("", DEFAULT_DISK_MOUNT_PATH),
+            ("   ", DEFAULT_DISK_MOUNT_PATH),
+            ("/data", "/data"),
+            ("  /data  ", "/data"),
+        ],
+    )
+    def test_resolve_disk_mount_path(self, env_value: str | None, expected: str) -> None:
+        """Covered by test body."""
+        assert _resolve_disk_mount_path(env_value) == expected
+
     def test_init_reads_environment_variables(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Covered by test body."""
         monkeypatch.setenv("SYSTEM_METRICS_INTERVAL_SECONDS", "0.25")
         monkeypatch.setenv("SYSTEM_METRICS_HISTORY_CAP", "3")
+        monkeypatch.setenv("SYSTEM_METRICS_DISK_FREE_WARN_BYTES", "4096")
+        monkeypatch.setenv("SYSTEM_METRICS_DISK_FREE_CRIT_BYTES", "2048")
+        monkeypatch.setenv("SYSTEM_METRICS_DISK_MOUNT_PATH", "  /data  ")
 
         metrics = SystemMetricsSnapshotter(process=self._make_process())
 
         assert metrics.interval_seconds == pytest.approx(0.25)
         assert metrics._history.maxlen == 3
+        assert metrics._disk_free_warn_bytes == 4096
+        assert metrics._disk_free_crit_bytes == 2048
+        assert metrics._disk_mount_path == "/data"
 
     def test_init_overrides_take_precedence(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Covered by test body."""
         monkeypatch.setenv("SYSTEM_METRICS_INTERVAL_SECONDS", "9")
         monkeypatch.setenv("SYSTEM_METRICS_HISTORY_CAP", "9")
+        monkeypatch.setenv("SYSTEM_METRICS_DISK_FREE_WARN_BYTES", "9")
+        monkeypatch.setenv("SYSTEM_METRICS_DISK_FREE_CRIT_BYTES", "9")
+        monkeypatch.setenv("SYSTEM_METRICS_DISK_MOUNT_PATH", "/env")
 
         metrics = SystemMetricsSnapshotter(
             interval_seconds=0.5,
             history_cap=2,
+            disk_free_warn_bytes=111,
+            disk_free_crit_bytes=55,
+            disk_mount_path="/override",
             process=self._make_process(),
         )
 
         assert metrics.interval_seconds == pytest.approx(0.5)
         assert metrics._history.maxlen == 2
+        assert metrics._disk_free_warn_bytes == 111
+        assert metrics._disk_free_crit_bytes == 55
+        assert metrics._disk_mount_path == "/override"
 
     def test_init_accepts_dependency_overrides(self) -> None:
         """Covered by test body."""
@@ -329,6 +412,172 @@ class TestSnapshotter:
             "pool_checked_out": None,
         }
 
+    def test_sample_disk_metrics_reports_healthy_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Covered by test body."""
+        monkeypatch.setattr(
+            snapshotter.shutil,
+            "disk_usage",
+            lambda path: SimpleNamespace(
+                total=40 * 1024**3,
+                used=10 * 1024**3,
+                free=30 * 1024**3,
+            ),
+        )
+        metrics = self._make_snapshotter(
+            disk_free_warn_bytes=DEFAULT_DISK_FREE_WARN_BYTES,
+            disk_free_crit_bytes=DEFAULT_DISK_FREE_CRIT_BYTES,
+            disk_mount_path="/data",
+        )._sample_disk_metrics()
+
+        assert metrics["mount_path"] == "/data"
+        assert metrics["disk_low"] is False
+        assert metrics["disk_critical"] is False
+        assert metrics["status"] == HealthStatusEnum.HEALTHY
+        assert metrics["percent_used"] == pytest.approx(25.0)
+
+    def test_sample_disk_metrics_reports_warning_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Covered by test body."""
+        monkeypatch.setattr(
+            snapshotter.shutil,
+            "disk_usage",
+            lambda path: SimpleNamespace(
+                total=40 * 1024**3,
+                used=25 * 1024**3,
+                free=15 * 1024**3,
+            ),
+        )
+        metrics = self._make_snapshotter(
+            disk_free_warn_bytes=DEFAULT_DISK_FREE_WARN_BYTES,
+            disk_free_crit_bytes=DEFAULT_DISK_FREE_CRIT_BYTES,
+        )._sample_disk_metrics()
+
+        assert metrics["disk_low"] is True
+        assert metrics["disk_critical"] is False
+        assert metrics["status"] == HealthStatusEnum.WARNING
+
+    def test_sample_disk_metrics_reports_critical_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Covered by test body."""
+        monkeypatch.setattr(
+            snapshotter.shutil,
+            "disk_usage",
+            lambda path: SimpleNamespace(
+                total=40 * 1024**3,
+                used=35 * 1024**3,
+                free=5 * 1024**3,
+            ),
+        )
+        metrics = self._make_snapshotter(
+            disk_free_warn_bytes=DEFAULT_DISK_FREE_WARN_BYTES,
+            disk_free_crit_bytes=DEFAULT_DISK_FREE_CRIT_BYTES,
+        )._sample_disk_metrics()
+
+        assert metrics["disk_low"] is True
+        assert metrics["disk_critical"] is True
+        assert metrics["status"] == HealthStatusEnum.ERROR
+
+    def test_sample_disk_metrics_critical_implies_low_with_inverted_thresholds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Covered by test body."""
+        monkeypatch.setattr(
+            snapshotter.shutil,
+            "disk_usage",
+            lambda path: SimpleNamespace(
+                total=40 * 1024**3,
+                used=25 * 1024**3,
+                free=15 * 1024**3,
+            ),
+        )
+        metrics = self._make_snapshotter(
+            disk_free_warn_bytes=10 * 1024**3,
+            disk_free_crit_bytes=20 * 1024**3,
+        )._sample_disk_metrics()
+
+        assert metrics["disk_critical"] is True
+        assert metrics["disk_low"] is True
+        assert metrics["status"] == HealthStatusEnum.ERROR
+
+    def test_sample_disk_metrics_handles_zero_total(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Covered by test body."""
+        monkeypatch.setattr(
+            snapshotter.shutil,
+            "disk_usage",
+            lambda path: SimpleNamespace(total=0, used=0, free=0),
+        )
+        metrics = self._make_snapshotter(
+            disk_free_warn_bytes=DEFAULT_DISK_FREE_WARN_BYTES,
+            disk_free_crit_bytes=DEFAULT_DISK_FREE_CRIT_BYTES,
+        )._sample_disk_metrics()
+
+        assert metrics["percent_used"] == pytest.approx(0.0)
+        assert metrics["status"] == HealthStatusEnum.ERROR
+
+    def test_sample_disk_metrics_handles_oserror(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Covered by test body."""
+
+        def raise_oserror(path: str) -> SimpleNamespace:
+            """Raise to simulate an unreadable mount path."""
+            raise OSError(f"cannot read {path}")
+
+        monkeypatch.setattr(snapshotter.shutil, "disk_usage", raise_oserror)
+        metrics = self._make_snapshotter(disk_mount_path="/missing")._sample_disk_metrics()
+
+        assert metrics == DiskMetrics(
+            mount_path="/missing",
+            total_bytes=None,
+            used_bytes=None,
+            free_bytes=None,
+            percent_used=None,
+            disk_low=False,
+            disk_critical=False,
+            status=HealthStatusEnum.WARNING,
+        )
+
+    def test_log_disk_pressure_ignores_healthy_status(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Covered by test body."""
+        with caplog.at_level(logging.WARNING, logger=snapshotter.__name__):
+            SystemMetricsSnapshotter._log_disk_pressure(
+                self._disk_metrics(HealthStatusEnum.HEALTHY)
+            )
+
+        assert [record for record in caplog.records if record.name == snapshotter.__name__] == []
+
+    def test_log_disk_pressure_warns_for_low_status(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Covered by test body."""
+        with caplog.at_level(logging.WARNING, logger=snapshotter.__name__):
+            SystemMetricsSnapshotter._log_disk_pressure(
+                self._disk_metrics(HealthStatusEnum.WARNING)
+            )
+
+        records = [record for record in caplog.records if record.name == snapshotter.__name__]
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        assert records[0].getMessage() == (
+            "disk_low mount=/ free_bytes=500 total_bytes=1000 percent_used=50.0"
+        )
+
+    def test_log_disk_pressure_errors_for_critical_status(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Covered by test body."""
+        with caplog.at_level(logging.WARNING, logger=snapshotter.__name__):
+            SystemMetricsSnapshotter._log_disk_pressure(self._disk_metrics(HealthStatusEnum.ERROR))
+
+        records = [record for record in caplog.records if record.name == snapshotter.__name__]
+        assert len(records) == 1
+        assert records[0].levelno == logging.ERROR
+        assert records[0].getMessage() == (
+            "disk_critical mount=/ free_bytes=500 total_bytes=1000 percent_used=50.0"
+        )
+
     def test_sample_process_metrics_returns_zero_when_num_fds_is_unavailable(self) -> None:
         """Windows psutil builds do not expose ``Process.num_fds``."""
         process = self._make_process()
@@ -357,6 +606,8 @@ class TestSnapshotter:
         assert snapshot["memory"]["rss_peak_bytes"] == 1000
         assert snapshot["cpu"]["cgroup_quota_microseconds"] is None
         assert snapshot["memory"]["cgroup_limit_bytes"] is None
+        assert snapshot["disk"]["mount_path"] == "/"
+        assert snapshot["disk"]["status"] == HealthStatusEnum.HEALTHY
 
     def test_build_snapshot_reports_native_bytes_when_tracemalloc_is_active(
         self, monkeypatch: pytest.MonkeyPatch

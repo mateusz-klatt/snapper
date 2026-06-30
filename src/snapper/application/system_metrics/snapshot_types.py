@@ -11,6 +11,8 @@ from datetime import datetime
 from typing import Literal
 from typing import TypedDict
 
+from snapper.core.types import HealthStatus
+
 
 class ProcessMetrics(TypedDict):
     """Process-level identifying + lifecycle counters."""
@@ -114,6 +116,19 @@ class DbInternalMetrics(TypedDict):
     pool_checked_out: int | None
 
 
+class DiskMetrics(TypedDict):
+    """Data-partition free-space counters + derived health status."""
+
+    mount_path: str
+    total_bytes: int | None
+    used_bytes: int | None
+    free_bytes: int | None
+    percent_used: float | None
+    disk_low: bool
+    disk_critical: bool
+    status: HealthStatus
+
+
 class SystemMetricsSnapshot(TypedDict):
     """One sampled snapshot held in the ring buffer.
 
@@ -132,5 +147,6 @@ class SystemMetricsSnapshot(TypedDict):
     limits: LimitsMetrics
     saturation: SaturationMetrics
     db_internal: DbInternalMetrics
+    disk: DiskMetrics
     tracemalloc_active: bool
     cgroup_version: Literal["v1", "v2"] | None

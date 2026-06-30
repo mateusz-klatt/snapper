@@ -10,6 +10,7 @@ import pytest
 from snapper.application.system_metrics.ring_buffer import DEFAULT_HISTORY_CAP
 from snapper.application.system_metrics.ring_buffer import MetricsRingBuffer
 from snapper.application.system_metrics.snapshot_types import SystemMetricsSnapshot
+from snapper.core.types import HealthStatusEnum
 
 
 class TestRingBuffer:
@@ -52,6 +53,16 @@ class TestRingBuffer:
                 "aiosqlite_live_connections": 0,
                 "pool_size": None,
                 "pool_checked_out": None,
+            },
+            disk={
+                "mount_path": "/",
+                "total_bytes": 1000,
+                "used_bytes": 500,
+                "free_bytes": 500,
+                "percent_used": 50.0,
+                "disk_low": False,
+                "disk_critical": False,
+                "status": HealthStatusEnum.HEALTHY,
             },
             tracemalloc_active=False,
             cgroup_version=None,

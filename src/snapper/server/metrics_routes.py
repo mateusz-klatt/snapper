@@ -46,6 +46,7 @@ from snapper.api.schemas.retention import RetentionRunResponse
 from snapper.api.schemas.system_metrics import AsyncioMetrics
 from snapper.api.schemas.system_metrics import CpuMetrics
 from snapper.api.schemas.system_metrics import DbInternalMetrics
+from snapper.api.schemas.system_metrics import DiskMetrics
 from snapper.api.schemas.system_metrics import GcMetrics
 from snapper.api.schemas.system_metrics import LimitsMetrics
 from snapper.api.schemas.system_metrics import MemoryMetrics
@@ -256,6 +257,7 @@ def _build_system_metrics_data(
         limits=LimitsMetrics(**snapshot["limits"]),
         saturation=SaturationMetrics(**snapshot["saturation"]),
         db_internal=DbInternalMetrics(**snapshot["db_internal"]),
+        disk=DiskMetrics(**snapshot["disk"]),
         tracemalloc_active=snapshot["tracemalloc_active"],
         cgroup_version=snapshot["cgroup_version"],
     )
@@ -290,6 +292,7 @@ def _build_system_metrics_history_item(
         limits=LimitsMetrics(**snapshot["limits"]),
         saturation=SaturationMetrics(**snapshot["saturation"]),
         db_internal=DbInternalMetrics(**snapshot["db_internal"]),
+        disk=DiskMetrics(**snapshot["disk"]),
         tracemalloc_active=snapshot["tracemalloc_active"],
         cgroup_version=snapshot["cgroup_version"],
     )

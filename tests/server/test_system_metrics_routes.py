@@ -36,6 +36,7 @@ from snapper.application.system_metrics.snapshot_types import CpuMetrics as CpuM
 from snapper.application.system_metrics.snapshot_types import (
     DbInternalMetrics as DbInternalMetricsTD,
 )
+from snapper.application.system_metrics.snapshot_types import DiskMetrics as DiskMetricsTD
 from snapper.application.system_metrics.snapshot_types import GcMetrics as GcMetricsTD
 from snapper.application.system_metrics.snapshot_types import LimitsMetrics as LimitsMetricsTD
 from snapper.application.system_metrics.snapshot_types import MemoryMetrics as MemoryMetricsTD
@@ -52,6 +53,7 @@ from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.types import HealthStatusEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.app import _start_system_metrics_snapshotter
 from snapper.server.app import _stop_system_metrics_snapshotter
@@ -117,6 +119,16 @@ def _build_synthetic_snapshot(
             aiosqlite_live_connections=3,
             pool_size=None,
             pool_checked_out=None,
+        ),
+        disk=DiskMetricsTD(
+            mount_path="/",
+            total_bytes=40 * 1024**3,
+            used_bytes=25 * 1024**3,
+            free_bytes=15 * 1024**3,
+            percent_used=62.5,
+            disk_low=True,
+            disk_critical=False,
+            status=HealthStatusEnum.WARNING,
         ),
         tracemalloc_active=tracemalloc_active,
         cgroup_version=cgroup_version,
@@ -211,6 +223,8 @@ class TestGetSystemMetrics:
         assert response.payload.limits.rlimit_nproc == 4096
         assert response.payload.saturation.threads_pct == pytest.approx(8 / 4096)
         assert response.payload.db_internal.aiosqlite_live_connections == 3
+        assert response.payload.disk.status == HealthStatusEnum.WARNING
+        assert response.payload.disk.free_bytes == 15 * 1024**3
         assert response.payload.tracemalloc_active is False
         assert response.payload.cgroup_version == "v2"
 
@@ -273,6 +287,8 @@ class TestGetSystemMetricsHistory:
 
         assert response.count == 3
         assert len(response.payload) == 3
+        assert response.payload[0].disk.status == HealthStatusEnum.WARNING
+        assert response.payload[0].disk.free_bytes == 15 * 1024**3
         bus_times = [item.bus_time for item in response.payload]
         assert bus_times == [
             base + timedelta(seconds=5),
@@ -512,6 +528,8 @@ class TestRouteAuthAndCsrf:
         body = response.json()
         assert body["type"] == "system_metrics_response"
         assert body["payload"]["type"] == "system_metrics"
+        assert body["payload"]["disk"]["status"] == "warning"
+        assert body["payload"]["disk"]["free_bytes"] == 15 * 1024**3
 
     def test_get_metrics_returns_401_without_auth(self) -> None:
         """No auth override → no Authorization header → 401 from auth dep."""

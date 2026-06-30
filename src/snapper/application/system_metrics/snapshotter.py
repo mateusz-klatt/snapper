@@ -22,20 +22,23 @@ Sampler hot-path invariants:
     when inactive (no ``tracemalloc.start()`` overhead paid).
 
 Configuration: ``SYSTEM_METRICS_INTERVAL_SECONDS`` (default 5),
-``SYSTEM_METRICS_HISTORY_CAP`` (default 17280) read directly from
-``os.environ.get(...)`` in :meth:`__init__`.
+``SYSTEM_METRICS_HISTORY_CAP`` (default 17280), and disk-pressure
+threshold settings read directly from ``os.environ.get(...)`` in
+:meth:`__init__`.
 """
 
 import asyncio
 import contextlib
 import gc
+import logging
 import os
+import shutil
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any
 from typing import Final
+from typing import Protocol
 
 import psutil
 
@@ -46,6 +49,7 @@ from snapper.application.system_metrics.ring_buffer import MetricsRingBuffer
 from snapper.application.system_metrics.snapshot_types import AsyncioMetrics
 from snapper.application.system_metrics.snapshot_types import CpuMetrics
 from snapper.application.system_metrics.snapshot_types import DbInternalMetrics
+from snapper.application.system_metrics.snapshot_types import DiskMetrics
 from snapper.application.system_metrics.snapshot_types import GcMetrics
 from snapper.application.system_metrics.snapshot_types import LimitsMetrics
 from snapper.application.system_metrics.snapshot_types import MemoryMetrics
@@ -53,18 +57,51 @@ from snapper.application.system_metrics.snapshot_types import ProcessMetrics
 from snapper.application.system_metrics.snapshot_types import SaturationMetrics
 from snapper.application.system_metrics.snapshot_types import SystemMetricsSnapshot
 from snapper.application.system_metrics.tracemalloc_controller import TracemallocController
+from snapper.core.types import HealthStatus
+from snapper.core.types import HealthStatusEnum
 from snapper.data.repository import _live_aiosqlite_connections
 
-_resource: Any = None
+logger = logging.getLogger(__name__)
+
+
+class _ResourceModule(Protocol):
+    """Subset of the POSIX ``resource`` module used by the sampler."""
+
+    RLIMIT_NPROC: int
+    RLIMIT_NOFILE: int
+    RLIMIT_AS: int
+    RLIM_INFINITY: int
+
+    def getrlimit(self, resource: int) -> tuple[int, int]:
+        """Return soft and hard process limits for the given resource."""
+
+
+_resource: _ResourceModule | None = None
 try:
-    import resource as _resource
+    import resource as _resource_module
+
+    _resource = _resource_module
 except ImportError:
     _resource = None
 
 DEFAULT_INTERVAL_SECONDS: Final = 5.0
+DEFAULT_DISK_FREE_WARN_BYTES: Final = 20 * 1024**3
+DEFAULT_DISK_FREE_CRIT_BYTES: Final = 10 * 1024**3
+DEFAULT_DISK_MOUNT_PATH: Final = "/"
 _INTERVAL_ENV_VAR: Final = "SYSTEM_METRICS_INTERVAL_SECONDS"
 _HISTORY_CAP_ENV_VAR: Final = "SYSTEM_METRICS_HISTORY_CAP"
-ENV_VARS: Final[frozenset[str]] = frozenset({_INTERVAL_ENV_VAR, _HISTORY_CAP_ENV_VAR})
+SYSTEM_METRICS_DISK_FREE_WARN_BYTES: Final = "SYSTEM_METRICS_DISK_FREE_WARN_BYTES"
+SYSTEM_METRICS_DISK_FREE_CRIT_BYTES: Final = "SYSTEM_METRICS_DISK_FREE_CRIT_BYTES"
+SYSTEM_METRICS_DISK_MOUNT_PATH: Final = "SYSTEM_METRICS_DISK_MOUNT_PATH"
+ENV_VARS: Final[frozenset[str]] = frozenset(
+    {
+        _INTERVAL_ENV_VAR,
+        _HISTORY_CAP_ENV_VAR,
+        SYSTEM_METRICS_DISK_FREE_WARN_BYTES,
+        SYSTEM_METRICS_DISK_FREE_CRIT_BYTES,
+        SYSTEM_METRICS_DISK_MOUNT_PATH,
+    }
+)
 """Public allowlist of env vars this module reads via ``os.environ``.
 
 Consumed by :mod:`snapper.config.env_contract` to validate ``.env`` keys
@@ -106,6 +143,29 @@ def _resolve_history_cap(env_value: str | None) -> int:
     return value
 
 
+def _resolve_positive_bytes(env_value: str | None, default: int) -> int:
+    """Coerce a byte-count env var to a positive integer."""
+    if env_value is None or env_value.strip() == "":
+        return default
+    try:
+        value = int(env_value)
+    except ValueError:
+        return default
+    if value <= 0:
+        return default
+    return value
+
+
+def _resolve_disk_mount_path(env_value: str | None) -> str:
+    """Coerce the disk mount path env var, defaulting to host root."""
+    if env_value is None:
+        return DEFAULT_DISK_MOUNT_PATH
+    value = env_value.strip()
+    if value == "":
+        return DEFAULT_DISK_MOUNT_PATH
+    return value
+
+
 class SystemMetricsSnapshotter:
     """Process-level metrics sampler + ring-buffer history.
 
@@ -119,6 +179,9 @@ class SystemMetricsSnapshotter:
         *,
         interval_seconds: float | None = None,
         history_cap: int | None = None,
+        disk_free_warn_bytes: int | None = None,
+        disk_free_crit_bytes: int | None = None,
+        disk_mount_path: str | None = None,
         process: psutil.Process | None = None,
         tracemalloc_controller: TracemallocController | None = None,
         history_buffer: MetricsRingBuffer | None = None,
@@ -132,6 +195,17 @@ class SystemMetricsSnapshotter:
             history_cap: Ring buffer cap. ``None`` reads
                 ``SYSTEM_METRICS_HISTORY_CAP`` env var or the default
                 17280 (24h at 5s).
+            disk_free_warn_bytes: Warning threshold for free bytes on
+                the data partition. ``None`` reads
+                ``SYSTEM_METRICS_DISK_FREE_WARN_BYTES`` or defaults to
+                20 GiB.
+            disk_free_crit_bytes: Critical threshold for free bytes on
+                the data partition. ``None`` reads
+                ``SYSTEM_METRICS_DISK_FREE_CRIT_BYTES`` or defaults to
+                10 GiB.
+            disk_mount_path: Mount path sampled by ``shutil.disk_usage``.
+                ``None`` reads ``SYSTEM_METRICS_DISK_MOUNT_PATH`` or
+                defaults to ``/``.
             process: psutil.Process handle. ``None`` uses the current
                 process.
             tracemalloc_controller: Override for tests; ``None``
@@ -143,7 +217,24 @@ class SystemMetricsSnapshotter:
             interval_seconds = _resolve_interval(os.environ.get(_INTERVAL_ENV_VAR))
         if history_cap is None:
             history_cap = _resolve_history_cap(os.environ.get(_HISTORY_CAP_ENV_VAR))
+        if disk_free_warn_bytes is None:
+            disk_free_warn_bytes = _resolve_positive_bytes(
+                os.environ.get(SYSTEM_METRICS_DISK_FREE_WARN_BYTES),
+                DEFAULT_DISK_FREE_WARN_BYTES,
+            )
+        if disk_free_crit_bytes is None:
+            disk_free_crit_bytes = _resolve_positive_bytes(
+                os.environ.get(SYSTEM_METRICS_DISK_FREE_CRIT_BYTES),
+                DEFAULT_DISK_FREE_CRIT_BYTES,
+            )
+        if disk_mount_path is None:
+            disk_mount_path = _resolve_disk_mount_path(
+                os.environ.get(SYSTEM_METRICS_DISK_MOUNT_PATH)
+            )
         self._interval_seconds = interval_seconds
+        self._disk_free_warn_bytes = disk_free_warn_bytes
+        self._disk_free_crit_bytes = disk_free_crit_bytes
+        self._disk_mount_path = disk_mount_path
         self._process = process or psutil.Process()
         self._tracemalloc = tracemalloc_controller or TracemallocController()
         self._history = history_buffer or MetricsRingBuffer(maxlen=history_cap)
@@ -180,6 +271,7 @@ class SystemMetricsSnapshotter:
         """
         snapshot = self._build_snapshot()
         await self._history.append(snapshot)
+        self._log_disk_pressure(snapshot["disk"])
         self._stopping.clear()
         self._sampler_task = asyncio.create_task(self._sampler_loop())
 
@@ -235,6 +327,7 @@ class SystemMetricsSnapshotter:
                 return
             snapshot = self._build_snapshot()
             await self._history.append(snapshot)
+            self._log_disk_pressure(snapshot["disk"])
 
     def _build_snapshot(self) -> SystemMetricsSnapshot:
         """Sample every metric group + assemble the snapshot.
@@ -257,6 +350,7 @@ class SystemMetricsSnapshotter:
             limits_metrics=limits_metrics,
         )
         db_internal_metrics = self._sample_db_internal_metrics()
+        disk_metrics = self._sample_disk_metrics()
         return SystemMetricsSnapshot(
             bus_time=datetime.now(UTC),
             process=process_metrics,
@@ -267,6 +361,7 @@ class SystemMetricsSnapshotter:
             limits=limits_metrics,
             saturation=saturation_metrics,
             db_internal=db_internal_metrics,
+            disk=disk_metrics,
             tracemalloc_active=self._tracemalloc.is_active(),
             cgroup_version=cgroup_version,
         )
@@ -474,3 +569,57 @@ class SystemMetricsSnapshotter:
             pool_size=pool_size,
             pool_checked_out=pool_checked_out,
         )
+
+    def _sample_disk_metrics(self) -> DiskMetrics:
+        """Sample free space on the configured data-partition mount."""
+        try:
+            usage = shutil.disk_usage(self._disk_mount_path)
+        except OSError:
+            return DiskMetrics(
+                mount_path=self._disk_mount_path,
+                total_bytes=None,
+                used_bytes=None,
+                free_bytes=None,
+                percent_used=None,
+                disk_low=False,
+                disk_critical=False,
+                status=HealthStatusEnum.WARNING,
+            )
+        disk_critical = usage.free < self._disk_free_crit_bytes
+        disk_low = disk_critical or usage.free < self._disk_free_warn_bytes
+        percent_used = usage.used / usage.total * 100 if usage.total > 0 else 0.0
+        status: HealthStatus = HealthStatusEnum.HEALTHY
+        if disk_critical:
+            status = HealthStatusEnum.ERROR
+        elif disk_low:
+            status = HealthStatusEnum.WARNING
+        return DiskMetrics(
+            mount_path=self._disk_mount_path,
+            total_bytes=usage.total,
+            used_bytes=usage.used,
+            free_bytes=usage.free,
+            percent_used=percent_used,
+            disk_low=disk_low,
+            disk_critical=disk_critical,
+            status=status,
+        )
+
+    @staticmethod
+    def _log_disk_pressure(disk: DiskMetrics) -> None:
+        """Emit structured disk-pressure logs while free space is degraded."""
+        if disk["status"] == HealthStatusEnum.ERROR:
+            logger.error(
+                "disk_critical mount=%s free_bytes=%s total_bytes=%s percent_used=%s",
+                disk["mount_path"],
+                disk["free_bytes"],
+                disk["total_bytes"],
+                disk["percent_used"],
+            )
+        elif disk["status"] == HealthStatusEnum.WARNING:
+            logger.warning(
+                "disk_low mount=%s free_bytes=%s total_bytes=%s percent_used=%s",
+                disk["mount_path"],
+                disk["free_bytes"],
+                disk["total_bytes"],
+                disk["percent_used"],
+            )

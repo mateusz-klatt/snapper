@@ -17,6 +17,7 @@ from snapper.api.schemas.base import PayloadListResponse
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.core.types import HealthStatus
 
 
 class ProcessMetrics(StrictBody):
@@ -145,6 +146,19 @@ class DbInternalMetrics(StrictBody):
     pool_checked_out: int | None
 
 
+class DiskMetrics(StrictBody):
+    """Data-partition free-space counters + derived health status."""
+
+    mount_path: str
+    total_bytes: int | None
+    used_bytes: int | None
+    free_bytes: int | None
+    percent_used: float | None
+    disk_low: bool
+    disk_critical: bool
+    status: HealthStatus
+
+
 class SystemMetricsData(StrictDataSchema[Literal["system_metrics"]]):
     """Latest sampled snapshot returned by ``GET /api/metrics/system``.
 
@@ -163,6 +177,7 @@ class SystemMetricsData(StrictDataSchema[Literal["system_metrics"]]):
         limits: ``rlimit`` soft limits.
         saturation: % toward exhaustion for thread / fd budgets.
         db_internal: SQLAlchemy / aiosqlite pool counters.
+        disk: Data-partition free-space counters + status.
         tracemalloc_active: ``True`` iff Python tracemalloc is currently
             tracing.
         cgroup_version: ``"v1"`` / ``"v2"`` when detected; ``None`` on
@@ -179,6 +194,7 @@ class SystemMetricsData(StrictDataSchema[Literal["system_metrics"]]):
     limits: LimitsMetrics
     saturation: SaturationMetrics
     db_internal: DbInternalMetrics
+    disk: DiskMetrics
     tracemalloc_active: bool
     cgroup_version: Literal["v1", "v2"] | None
 
@@ -200,6 +216,7 @@ class SystemMetricsHistoryItem(StrictDataSchema[Literal["system_metrics_history_
     limits: LimitsMetrics
     saturation: SaturationMetrics
     db_internal: DbInternalMetrics
+    disk: DiskMetrics
     tracemalloc_active: bool
     cgroup_version: Literal["v1", "v2"] | None
 
