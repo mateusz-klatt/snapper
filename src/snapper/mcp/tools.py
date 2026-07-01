@@ -64,6 +64,9 @@ from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderStatusEnum
 from snapper.core.types import TradeCommandStatusEnum
+from snapper.core.wallet_resolution import WalletAmbiguousError
+from snapper.core.wallet_resolution import WalletUnresolvedError
+from snapper.core.wallet_resolution import resolve_wallet_or_default
 from snapper.data.repository import Repository
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import ExecutionPlanInsertRow
@@ -104,7 +107,7 @@ class _ManualOrderInput:
     side: str
     order_type: str
     quantity: float
-    wallet_public_id: str
+    wallet_public_id: str | None
     idempotency_key: str
     price: float | None
     stop_price: float | None
@@ -544,13 +547,47 @@ def _get_write_dependencies(
     return repo, enforcer
 
 
+def _manual_order_wallet_resolution_result(
+    exc: WalletAmbiguousError | WalletUnresolvedError,
+) -> CallToolResult:
+    """Return the structured MCP envelope for manual-order wallet autolookup."""
+    if isinstance(exc, WalletAmbiguousError):
+        return to_call_tool_result(
+            success=False,
+            error_code="wallet_ambiguous",
+            message="Multiple accessible live wallets matched; specify wallet_public_id.",
+            details=sanitize_output({"candidate_wallet_public_ids": exc.candidates}),
+        )
+    return to_call_tool_result(
+        success=False,
+        error_code="wallet_unresolved",
+        message="No accessible live wallet matched; specify wallet_public_id.",
+        details=sanitize_output({"candidate_wallet_public_ids": exc.candidates}),
+    )
+
+
+def _manual_order_wallet_unresolved_result() -> CallToolResult:
+    """Return the structured no-wallet envelope for live manual orders."""
+    return _manual_order_wallet_resolution_result(WalletUnresolvedError(candidates=[]))
+
+
+def _manual_order_wallet_blank_result() -> CallToolResult:
+    """Return the structured envelope for blank explicit wallet IDs."""
+    return to_call_tool_result(
+        success=False,
+        error_code="invalid_argument",
+        message="wallet_public_id must not be blank.",
+        details=sanitize_output({"field": "wallet_public_id"}),
+    )
+
+
 async def _prepare_manual_order(
     *,
     repository_getter: Callable[[], Repository | None],
     caps_enforcer_getter: Callable[[], TradingCapsEnforcer | None],
     claims_getter: Callable[[], TokenClaims],
     order: _ManualOrderInput,
-) -> _PreparedManualOrder:
+) -> _PreparedManualOrder | CallToolResult:
     """Validate access and precompute immutable rows for manual-order dispatch.
 
     MCP manual orders are live-only because ``submit_manual_order``
@@ -569,22 +606,36 @@ async def _prepare_manual_order(
     )
     repo, enforcer = _get_write_dependencies(repository_getter, caps_enforcer_getter)
     created_at = datetime.now(UTC)
+    manual_order_mode = ExecutionModeEnum.LIVE
     ensure_operator_in_claims(claims, order.operator_public_id)
-    await validate_user_wallet_scope(claims, order.wallet_public_id, repo, as_of=created_at)
+    if order.wallet_public_id is not None and order.wallet_public_id.strip() == "":
+        return _manual_order_wallet_blank_result()
+    if order.wallet_public_id is None and not claims.operator_public_ids:
+        return _manual_order_wallet_unresolved_result()
+    try:
+        wallet_public_id = await resolve_wallet_or_default(
+            repo,
+            explicit_wallet_public_id=order.wallet_public_id,
+            operator_public_ids=list(claims.operator_public_ids),
+            mode=manual_order_mode,
+            as_of=created_at,
+        )
+    except (WalletAmbiguousError, WalletUnresolvedError) as exc:
+        return _manual_order_wallet_resolution_result(exc)
+    await validate_user_wallet_scope(claims, wallet_public_id, repo, as_of=created_at)
     if order.ai_review_public_id is not None:
         await validate_ai_review_citation(
             repo,
             ai_review_public_id=order.ai_review_public_id,
             expected_user_public_id=claims.user_public_id or claims.username,
-            expected_wallet_public_id=order.wallet_public_id,
+            expected_wallet_public_id=wallet_public_id,
         )
     bus_time = dt.datetime.now(dt.UTC)
-    manual_order_mode = ExecutionModeEnum.LIVE
     shard_key = compute_shard_key(
         instrument=order.instrument,
         exchange=cast(OrderExchange, order.exchange),
         mode=manual_order_mode,
-        wallet_public_id=order.wallet_public_id,
+        wallet_public_id=wallet_public_id,
         strategy_tag=None,
     )
     client_order_id = str(uuid7())
@@ -593,7 +644,7 @@ async def _prepare_manual_order(
     submission = TradeCommandSubmission(
         user_public_id=claims.user_public_id,
         operator_public_id=resolved_operator_public_id,
-        wallet_public_id=order.wallet_public_id,
+        wallet_public_id=wallet_public_id,
         instrument_public_id=order.instrument_public_id,
         command_type="create",
         side=order.side,
@@ -612,7 +663,7 @@ async def _prepare_manual_order(
         "exchange": order.exchange,
         "mode": manual_order_mode,
         "shard_key": shard_key,
-        "wallet_public_id": order.wallet_public_id,
+        "wallet_public_id": wallet_public_id,
         "operator_public_id": resolved_operator_public_id,
         "total_quantity": order.quantity,
         "side": order.side,
@@ -646,7 +697,7 @@ async def _prepare_manual_order(
         stop_price=order.stop_price,
         created_at=created_at,
         bus_time=bus_time,
-        wallet_public_id=order.wallet_public_id,
+        wallet_public_id=wallet_public_id,
         operator_public_id=resolved_operator_public_id,
         user_public_id=user_public_id,
         shard_key=shard_key,
@@ -1473,13 +1524,13 @@ def register_mcp_tools(
         side: str,
         order_type: str,
         quantity: float,
-        wallet_public_id: str,
         idempotency_key: str,
+        wallet_public_id: str | None = None,
         price: float | None = None,
         stop_price: float | None = None,
         operator_public_id: str | None = None,
         ai_review_public_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> object:
         """Submit a single manual order — wraps REST ``create_order`` via MCP.
 
         Caps are evaluated against the caller's
@@ -1495,11 +1546,12 @@ def register_mcp_tools(
             order_type: One of ``market``, ``limit``, ``stop``
                 ``stop_limit``.
             quantity: Order size in base asset units.
-            wallet_public_id: UUID7 of the wallet the order attaches
-                to. Caller must have scope access to this wallet.
             idempotency_key: Client-supplied uniqueness key; required
                 because MCP clients are the most
                 likely source of accidental retries.
+            wallet_public_id: Optional UUID7 of the wallet the order
+                attaches to. When omitted, the caller must have
+                exactly one accessible live wallet.
             price: Limit price. Required for ``limit`` and
                 ``stop_limit`` order types.
             stop_price: Trigger price. Required for ``stop`` and
@@ -1553,6 +1605,8 @@ def register_mcp_tools(
             claims_getter=claims_getter,
             order=order,
         )
+        if isinstance(prepared, CallToolResult):
+            return prepared
         async with prepared.enforcer.guard(prepared.submission):
             plan_public_id = await _insert_execution_plan_or_raise_conflict(
                 prepared.repo,

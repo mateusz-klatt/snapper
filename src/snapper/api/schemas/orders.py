@@ -3,6 +3,7 @@
 from typing import Literal
 
 from pydantic import Field
+from pydantic import field_validator
 
 from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import PayloadResponse
@@ -27,7 +28,9 @@ class CreateOrderBody(StrictBody):
         post_only: Post-only flag for maker orders.
         leverage: Optional leverage multiplier.
         reduce_only: Reduce-only flag for closing positions.
-        wallet_public_id: Target wallet UUID.
+        wallet_public_id: Optional target wallet UUID. When omitted,
+            the create-order path resolves the caller's single
+            accessible wallet for the requested mode.
         operator_public_id: Optional operator identity.
         idempotency_key: Optional idempotency key for dedup.
         ai_review_public_id: Optional UUID7 of the ``ai_reviews`` row that
@@ -52,10 +55,18 @@ class CreateOrderBody(StrictBody):
     post_only: bool = False
     leverage: int | None = None
     reduce_only: bool = False
-    wallet_public_id: str
+    wallet_public_id: str | None = None
     operator_public_id: str | None = None
     idempotency_key: str | None = None
     ai_review_public_id: str | None = None
+
+    @field_validator("wallet_public_id")
+    @classmethod
+    def _validate_wallet_public_id_not_blank(cls, value: str | None) -> str | None:
+        """Reject explicit blank wallet IDs while preserving omitted autolookup."""
+        if value is not None and value.strip() == "":
+            raise ValueError("wallet_public_id must not be blank")
+        return value
 
 
 class CreateOrderCommand(

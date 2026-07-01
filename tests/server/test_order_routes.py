@@ -17,9 +17,10 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
-from snapper.server.app import create_app
-from snapper.server.app import get_repository_dependency
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_caps_enforcer_dependency
+from snapper.server.dependencies import get_repository_dependency
+from snapper.server.order_routes import router as order_router
 
 
 async def _noop_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -101,6 +102,52 @@ def _create_order_body() -> dict[str, Any]:
     }
 
 
+def _wallet_row(public_id: str, *, is_paper: bool = False) -> dict[str, object]:
+    """Build the wallet row shape used by wallet resolution tests."""
+    return {"public_id": public_id, "is_paper": is_paper}
+
+
+def _create_order_repo(plan_wallet_public_id: str = "wallet-1") -> AsyncMock:
+    """Build a repository mock for successful create-order tests."""
+    repo = AsyncMock()
+    plan_row = _make_plan_row()
+    plan_row["wallet_public_id"] = plan_wallet_public_id
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+    repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
+    repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+    repo.update_execution_plan_status = AsyncMock(return_value=2)
+    repo.get_execution_plan = AsyncMock(return_value=plan_row)
+    return repo
+
+
+def _operator_principal(operator_public_ids: list[str] | None = None) -> AuthPrincipal:
+    """Build the operator principal used by create-order scope tests."""
+    return AuthPrincipal(
+        username="op_user",
+        role=UserRole.OPERATOR,
+        operator_public_ids=operator_public_ids if operator_public_ids is not None else ["op-1"],
+    )
+
+
+class _AdmitCapsGuard:
+    """Async context manager that admits cap-guarded submissions."""
+
+    async def __aenter__(self) -> None:
+        """Enter without rejecting the submission."""
+        return None
+
+    async def __aexit__(self, *_args: object) -> None:
+        """Exit without suppressing exceptions."""
+        return None
+
+
+def _admit_caps_enforcer() -> MagicMock:
+    """Build a caps enforcer mock that admits submissions."""
+    enforcer = MagicMock(spec=TradingCapsEnforcer)
+    enforcer.guard = MagicMock(return_value=_AdmitCapsGuard())
+    return enforcer
+
+
 def _cancel_body() -> dict[str, Any]:
     """Return a minimal CancelOrderCommand envelope for cap-violation tests."""
     return {
@@ -124,30 +171,47 @@ def _cancel_order_body() -> dict[str, Any]:
     }
 
 
-def _create_client(mock_repo: Any) -> TestClient:
-    """Create test client with auth bypassed and mock repository injected.
+def _build_order_test_app() -> FastAPI:
+    """Build a slim app containing only order routes."""
+    app = FastAPI()
+    app.router.lifespan_context = _noop_lifespan
+    app.state.settings = MagicMock()
+    app.state.rest_tracker = SequenceTracker()
+    app.include_router(order_router, prefix="/api")
+    return app
+
+
+def _create_client_with_principal(
+    mock_repo: object,
+    principal: AuthPrincipal,
+) -> TestClient:
+    """Create test client with auth bypassed for the supplied principal.
 
     Args:
         mock_repo: AsyncMock repository.
+        principal: Auth principal returned by the auth dependency.
 
     Returns:
         TestClient with overrides applied.
     """
-    app = create_app()
-    app.router.lifespan_context = _noop_lifespan
-    mock_settings = MagicMock()
-    app.state.settings = mock_settings
+    app = _build_order_test_app()
 
     def skip_csrf() -> None:
         return None
 
-    def skip_auth() -> AuthPrincipal:
-        return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
-
     app.dependency_overrides[validate_csrf_token] = skip_csrf
-    app.dependency_overrides[require_authentication] = skip_auth
+    app.dependency_overrides[require_authentication] = lambda: principal
     app.dependency_overrides[get_repository_dependency] = lambda: mock_repo
+    app.dependency_overrides[get_caps_enforcer_dependency] = _admit_caps_enforcer
     return TestClient(app)
+
+
+def _create_client(mock_repo: Any) -> TestClient:
+    """Create test client with ADMIN auth bypassed and mock repository injected."""
+    return _create_client_with_principal(
+        mock_repo,
+        AuthPrincipal(username="test_user", role=UserRole.ADMIN),
+    )
 
 
 class TestCreateOrder:
@@ -282,31 +346,134 @@ class TestCreateOrder:
     def test_create_order_wallet_not_accessible(self) -> None:
         """Given restricted wallet, When creating as OPERATOR, Then 403."""
         repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
         repo.list_accessible_wallets_for_operators = AsyncMock(
             return_value=[{"public_id": "other-wallet"}]
         )
-
-        app = create_app()
-        app.router.lifespan_context = _noop_lifespan
-        mock_settings = MagicMock()
-        app.state.settings = mock_settings
-
-        def skip_csrf() -> None:
-            return None
-
-        def skip_auth() -> AuthPrincipal:
-            return AuthPrincipal(
-                username="op_user",
-                role=UserRole.OPERATOR,
-                operator_public_ids=["op-1"],
-            )
-
-        app.dependency_overrides[validate_csrf_token] = skip_csrf
-        app.dependency_overrides[require_authentication] = skip_auth
-        app.dependency_overrides[get_repository_dependency] = lambda: repo
-        client = TestClient(app)
+        client = _create_client_with_principal(repo, _operator_principal())
         response = client.post("/api/orders", json=_create_order_body())
         assert response.status_code == 403
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+        client.close()
+
+    def test_create_order_resolves_omitted_wallet_for_single_live_operator_wallet(
+        self,
+    ) -> None:
+        """Omitted wallet resolves only when one live wallet is accessible."""
+        repo = _create_order_repo(plan_wallet_public_id="wallet-live")
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-live")]
+        )
+        client = _create_client_with_principal(repo, _operator_principal())
+        body = _create_order_body()
+        body["payload"].pop("wallet_public_id")
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 200
+        plan_insert = repo.insert_execution_plan.call_args[0][0]
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        assert plan_insert["wallet_public_id"] == "wallet-live"
+        assert cmd_insert["wallet_public_id"] == "wallet-live"
+        assert repo.list_accessible_wallets_for_operators.await_count == 2
+        client.close()
+
+    def test_create_order_omitted_wallet_with_multiple_live_wallets_returns_400(
+        self,
+    ) -> None:
+        """Multiple live candidates reject instead of silently picking."""
+        repo = AsyncMock()
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-a"), _wallet_row("wallet-b")]
+        )
+        client = _create_client_with_principal(repo, _operator_principal())
+        body = _create_order_body()
+        body["payload"].pop("wallet_public_id")
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "specify wallet_public_id; 2 wallets accessible"
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+        client.close()
+
+    def test_create_order_omitted_wallet_with_no_wallets_returns_400(self) -> None:
+        """Zero live candidates reject before any order row is written."""
+        repo = AsyncMock()
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+        client = _create_client_with_principal(repo, _operator_principal())
+        body = _create_order_body()
+        body["payload"].pop("wallet_public_id")
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "specify wallet_public_id; 0 wallets accessible"
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+        client.close()
+
+    def test_create_order_omitted_live_wallet_with_only_paper_wallet_returns_400(
+        self,
+    ) -> None:
+        """A live order never binds the caller's single paper wallet."""
+        repo = AsyncMock()
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-paper", is_paper=True)]
+        )
+        client = _create_client_with_principal(repo, _operator_principal())
+        body = _create_order_body()
+        body["payload"].pop("wallet_public_id")
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "specify wallet_public_id; 0 wallets accessible"
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+        client.close()
+
+    def test_create_order_omitted_live_wallet_without_operator_context_returns_400(
+        self,
+    ) -> None:
+        """Live autolookup fails closed when the caller has no operator context."""
+        repo = AsyncMock()
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock()
+        client = _create_client_with_principal(repo, _operator_principal([]))
+        body = _create_order_body()
+        body["payload"].pop("wallet_public_id")
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "specify wallet_public_id; 0 wallets accessible"
+        repo.list_accessible_wallets_for_operators.assert_not_called()
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+        client.close()
+
+    def test_create_order_explicit_wallet_stays_unchanged_with_multiple_wallets(
+        self,
+    ) -> None:
+        """Explicit in-scope wallet bypasses autolookup and still writes that wallet."""
+        repo = _create_order_repo()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-1"), _wallet_row("wallet-2")]
+        )
+        client = _create_client_with_principal(repo, _operator_principal())
+        response = client.post("/api/orders", json=_create_order_body())
+        assert response.status_code == 200
+        plan_insert = repo.insert_execution_plan.call_args[0][0]
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        assert plan_insert["wallet_public_id"] == "wallet-1"
+        assert cmd_insert["wallet_public_id"] == "wallet-1"
+        assert repo.list_accessible_wallets_for_operators.await_count == 1
         client.close()
 
     def test_create_order_generic_plan_error(self) -> None:
@@ -502,25 +669,13 @@ class TestCancelOrder:
         repo.list_accessible_wallets_for_operators = AsyncMock(
             return_value=[{"public_id": "wallet-other"}]
         )
-        app = create_app()
-        app.router.lifespan_context = _noop_lifespan
-        app.state.settings = MagicMock()
-
-        def skip_csrf() -> None:
-            return None
-
-        def operator_principal() -> AuthPrincipal:
-            return AuthPrincipal(
-                username="operator",
-                role=UserRole.OPERATOR,
-                user_public_id="operator-1",
-                operator_public_ids=["op-other"],
-            )
-
-        app.dependency_overrides[validate_csrf_token] = skip_csrf
-        app.dependency_overrides[require_authentication] = operator_principal
-        app.dependency_overrides[get_repository_dependency] = lambda: repo
-        client = TestClient(app)
+        principal = AuthPrincipal(
+            username="operator",
+            role=UserRole.OPERATOR,
+            user_public_id="operator-1",
+            operator_public_ids=["op-other"],
+        )
+        client = _create_client_with_principal(repo, principal)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
         assert response.status_code == 403
         client.close()

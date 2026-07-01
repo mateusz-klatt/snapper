@@ -47,9 +47,13 @@ def _make_claims(
     role: UserRole = UserRole.AI_DELEGATE,
     user_public_id: str = "user-1",
     username: str = "delegate-1",
+    operator_public_ids: list[str] | None = None,
 ) -> TokenClaims:
     """Build a :class:`TokenClaims` for tool-permission tests."""
     now = int(datetime.now(UTC).timestamp())
+    resolved_operator_public_ids = (
+        operator_public_ids if operator_public_ids is not None else ["op-1"]
+    )
     return TokenClaims(
         sub=user_public_id,
         username=username,
@@ -60,9 +64,16 @@ def _make_claims(
         jti="jti",
         sid="sid",
         user_public_id=user_public_id,
-        operator_public_ids=["op-1"],
-        primary_operator_public_id="op-1",
+        operator_public_ids=resolved_operator_public_ids,
+        primary_operator_public_id=(
+            resolved_operator_public_ids[0] if resolved_operator_public_ids else ""
+        ),
     )
+
+
+def _wallet_row(public_id: str, *, is_paper: bool = False) -> dict[str, object]:
+    """Build the wallet row shape consumed by the shared resolver."""
+    return {"public_id": public_id, "is_paper": is_paper}
 
 
 def _allow_wallet(repo: Any, wallet_public_id: str = "wallet-1") -> None:
@@ -73,7 +84,7 @@ def _allow_wallet(repo: Any, wallet_public_id: str = "wallet-1") -> None:
     test in this module uses. Call before dispatching the tool.
     """
     repo.list_accessible_wallets_for_operators = AsyncMock(
-        return_value=[{"public_id": wallet_public_id}]
+        return_value=[_wallet_row(wallet_public_id)]
     )
 
 
@@ -272,6 +283,260 @@ class TestSubmitManualOrderTool:
         assert plan_row["shard_key"] == expected_shard_key
         assert cmd_row["shard_key"] == expected_shard_key
         assert cmd_row["source_surface"] == "mcp"
+
+    @pytest.mark.asyncio
+    async def test_omitted_wallet_resolves_single_live_wallet(self) -> None:
+        """Omitted wallet resolves to the caller's single accessible live wallet."""
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-pid"))
+        repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-pid"))
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-live")]
+        )
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1.0,
+                "idempotency_key": "idem-auto-one",
+            },
+        )
+        assert result["plan_public_id"] == "plan-pid"
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert plan_row["wallet_public_id"] == "wallet-live"
+        assert cmd_row["wallet_public_id"] == "wallet-live"
+        assert repo.list_accessible_wallets_for_operators.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_omitted_wallet_with_multiple_live_wallets_returns_structured_ambiguity(
+        self,
+    ) -> None:
+        """Multiple live wallet candidates return ``wallet_ambiguous``."""
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-a"), _wallet_row("wallet-b")]
+        )
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1.0,
+                "idempotency_key": "idem-auto-many",
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "wallet_ambiguous"
+        assert envelope["details"]["candidate_wallet_public_ids"] == [
+            "wallet-a",
+            "wallet-b",
+        ]
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_omitted_wallet_with_no_live_wallets_returns_structured_unresolved(
+        self,
+    ) -> None:
+        """Zero wallet candidates return ``wallet_unresolved``."""
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1.0,
+                "idempotency_key": "idem-auto-zero",
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "wallet_unresolved"
+        assert envelope["details"]["candidate_wallet_public_ids"] == []
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_omitted_live_wallet_with_only_paper_wallet_returns_unresolved(
+        self,
+    ) -> None:
+        """A live MCP order never binds the caller's single paper wallet."""
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-paper", is_paper=True)]
+        )
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1.0,
+                "idempotency_key": "idem-auto-paper",
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "wallet_unresolved"
+        assert envelope["details"]["candidate_wallet_public_ids"] == []
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_omitted_live_wallet_without_operator_context_returns_unresolved(
+        self,
+    ) -> None:
+        """Live MCP autolookup fails closed without operator claims."""
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock()
+        claims = _make_claims(operator_public_ids=[])
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+            claims=claims,
+        )
+        result = await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1.0,
+                "idempotency_key": "idem-auto-no-operator",
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "wallet_unresolved"
+        repo.list_accessible_wallets_for_operators.assert_not_called()
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("wallet_public_id", "wallets"),
+        [
+            ("", [_wallet_row("wallet-live")]),
+            ("   ", [_wallet_row("wallet-a"), _wallet_row("wallet-b")]),
+        ],
+    )
+    async def test_blank_wallet_returns_invalid_argument_without_autolookup(
+        self,
+        wallet_public_id: str,
+        wallets: list[dict[str, object]],
+    ) -> None:
+        """Blank MCP wallet IDs are invalid explicit values.
+
+        Given: a blank explicit wallet ID and one or many accessible wallets,
+        When: ``submit_manual_order`` prepares the manual order,
+        Then: it returns a structured invalid-argument envelope without
+            resolving or writing against any wallet.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=wallets)
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1.0,
+                "wallet_public_id": wallet_public_id,
+                "idempotency_key": "idem-blank-wallet",
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "invalid_argument"
+        assert envelope["message"] == "wallet_public_id must not be blank."
+        assert envelope["details"]["field"] == "wallet_public_id"
+        repo.list_accessible_wallets_for_operators.assert_not_called()
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_explicit_wallet_with_multiple_accessible_wallets_is_unchanged(
+        self,
+    ) -> None:
+        """Explicit wallet bypasses autolookup and keeps scope validation."""
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-pid"))
+        repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-pid"))
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-1"), _wallet_row("wallet-2")]
+        )
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1.0,
+                "wallet_public_id": "wallet-1",
+                "idempotency_key": "idem-explicit-many",
+            },
+        )
+        assert result["command_public_id"] == "cmd-pid"
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert plan_row["wallet_public_id"] == "wallet-1"
+        assert cmd_row["wallet_public_id"] == "wallet-1"
+        assert repo.list_accessible_wallets_for_operators.await_count == 1
 
     @pytest.mark.asyncio
     async def test_stop_order_without_trigger_is_rejected_before_any_write(self) -> None:

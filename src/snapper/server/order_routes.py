@@ -50,8 +50,12 @@ from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import ExecutionMode
+from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import TradeCommandStatusEnum
+from snapper.core.wallet_resolution import WalletAmbiguousError
+from snapper.core.wallet_resolution import WalletUnresolvedError
+from snapper.core.wallet_resolution import resolve_wallet_or_default
 from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import ExecutionPlanRow
@@ -124,6 +128,7 @@ async def _validate_create_order_ai_review_citation(
     repo: Repository,
     principal: AuthPrincipal,
     body: CreateOrderBody,
+    wallet_public_id: str,
 ) -> None:
     """Gate ``ai_review_public_id`` citations.
 
@@ -141,7 +146,7 @@ async def _validate_create_order_ai_review_citation(
             repo,
             ai_review_public_id=body.ai_review_public_id,
             expected_user_public_id=principal.user_public_id or principal.username,
-            expected_wallet_public_id=body.wallet_public_id,
+            expected_wallet_public_id=wallet_public_id,
         )
     except AiReviewCitationError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -170,6 +175,56 @@ def _build_cancel_plan_response(
         timestamp=route_context.bus_time,
         payload=_plan_to_data(plan),
     )
+
+
+def _wallet_resolution_error_detail(candidate_count: int) -> str:
+    """Return the REST detail for strict wallet autolookup failures."""
+    return f"specify wallet_public_id; {candidate_count} wallets accessible"
+
+
+def _is_blank_wallet_public_id(wallet_public_id: str | None) -> bool:
+    """Return whether a present wallet ID is blank or whitespace."""
+    return wallet_public_id is not None and wallet_public_id.strip() == ""
+
+
+async def _resolve_create_order_wallet(
+    *,
+    repo: Repository,
+    principal: AuthPrincipal,
+    body: CreateOrderBody,
+    as_of: datetime,
+) -> str:
+    """Resolve and scope-check the wallet for a create-order request."""
+    if _is_blank_wallet_public_id(body.wallet_public_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="wallet_public_id must not be blank",
+        )
+    if body.wallet_public_id is None and body.mode == ExecutionModeEnum.LIVE.value:
+        if not principal.operator_public_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=_wallet_resolution_error_detail(0),
+            )
+    try:
+        wallet_public_id = await resolve_wallet_or_default(
+            repo,
+            explicit_wallet_public_id=body.wallet_public_id,
+            operator_public_ids=principal.operator_public_ids,
+            mode=body.mode,
+            as_of=as_of,
+        )
+    except (WalletAmbiguousError, WalletUnresolvedError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_wallet_resolution_error_detail(len(exc.candidates)),
+        ) from exc
+    await resolve_target_wallets(
+        principal=principal,
+        repo=repo,
+        wallet_public_id=wallet_public_id,
+    )
+    return wallet_public_id
 
 
 @router.post(
@@ -254,19 +309,25 @@ async def create_order(
             },
         )
 
-    await resolve_target_wallets(
-        principal=principal,
+    wallet_public_id = await _resolve_create_order_wallet(
         repo=repo,
-        wallet_public_id=body.wallet_public_id,
+        principal=principal,
+        body=body,
+        as_of=now,
     )
 
-    await _validate_create_order_ai_review_citation(repo=repo, principal=principal, body=body)
+    await _validate_create_order_ai_review_citation(
+        repo=repo,
+        principal=principal,
+        body=body,
+        wallet_public_id=wallet_public_id,
+    )
 
     shard_key = compute_shard_key(
         instrument=body.instrument,
         exchange=cast(OrderExchange, body.exchange),
         mode=cast(ExecutionMode, body.mode),
-        wallet_public_id=body.wallet_public_id,
+        wallet_public_id=wallet_public_id,
         strategy_tag=None,
     )
     sid = tracker.session_id
@@ -294,7 +355,7 @@ async def create_order(
     submission = TradeCommandSubmission(
         user_public_id=principal.user_public_id,
         operator_public_id=body.operator_public_id,
-        wallet_public_id=body.wallet_public_id,
+        wallet_public_id=wallet_public_id,
         instrument_public_id=resolved_instrument_public_id,
         command_type="create",
         side=body.side,
@@ -317,7 +378,7 @@ async def create_order(
                     "exchange": body.exchange,
                     "mode": body.mode,
                     "shard_key": shard_key,
-                    "wallet_public_id": body.wallet_public_id,
+                    "wallet_public_id": wallet_public_id,
                     "operator_public_id": body.operator_public_id,
                     "total_quantity": body.quantity,
                     "side": body.side,
@@ -367,7 +428,7 @@ async def create_order(
                     "session_id": sid,
                     "sequence_id": cmd_seq,
                     "timestamp": ts,
-                    "wallet_public_id": body.wallet_public_id,
+                    "wallet_public_id": wallet_public_id,
                     "operator_public_id": body.operator_public_id,
                     "user_public_id": user_pid,
                     "plan_public_id": plan_public_id,
