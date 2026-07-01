@@ -394,8 +394,8 @@ class SystemMetricsSnapshotter:
                 meta=meta,
             )
             await publisher.send(topic, frame)
-        except Exception as exc:
-            logger.error("disk heartbeat publish failed: %r", exc)
+        except Exception:
+            logger.exception("disk heartbeat publish failed")
 
     def _build_snapshot(self) -> SystemMetricsSnapshot:
         """Sample every metric group + assemble the snapshot.

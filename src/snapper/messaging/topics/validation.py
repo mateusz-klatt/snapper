@@ -570,6 +570,57 @@ def _is_valid_wallet_short(segment: str) -> bool:
     return all(c in _HEX_CHARSET for c in segment)
 
 
+def _validate_strategy_heartbeat(segments: list[str]) -> tuple[bool, str]:
+    """Validate strategy heartbeat topic structure."""
+    if len(segments) == 4:
+        return True, ""
+    return (
+        False,
+        "system.heartbeats.strategy requires exactly 4 segments: "
+        "system.heartbeats.strategy.{name}",
+    )
+
+
+def _validate_executor_heartbeat(segments: list[str]) -> tuple[bool, str]:
+    """Validate executor heartbeat topic structure."""
+    if len(segments) == 4:
+        return True, ""
+    if len(segments) != 5:
+        return (
+            False,
+            "system.heartbeats.executor requires 4 segments (template) "
+            "or 5 segments (per-wallet instance with wallet_short)",
+        )
+    wallet_short = segments[4]
+    if _is_valid_wallet_short(wallet_short):
+        return True, ""
+    return (
+        False,
+        "system.heartbeats.executor.{exchange}.{wallet_short}: "
+        "wallet_short must be 12 lowercase hex characters",
+    )
+
+
+def _validate_host_heartbeat(segments: list[str]) -> tuple[bool, str]:
+    """Validate host heartbeat topic structure."""
+    if len(segments) != 4:
+        return (
+            False,
+            "system.heartbeats.host requires exactly 4 segments: system.heartbeats.host.disk",
+        )
+    if segments[3] != "disk":
+        return False, "system.heartbeats.host supports only system.heartbeats.host.disk"
+    return True, ""
+
+
+_HEARTBEAT_COMPONENT_VALIDATORS: dict[str, Callable[[list[str]], tuple[bool, str]]] = {
+    "strategy": _validate_strategy_heartbeat,
+    "executor": _validate_executor_heartbeat,
+    "host": _validate_host_heartbeat,
+    "feed": _validate_feed_heartbeat,
+}
+
+
 def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
     """Validate heartbeat topic structure.
 
@@ -597,43 +648,10 @@ def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
     if len(segments) == 2:
         return True, ""
     component_type = segments[2]
-    if component_type == "strategy":
-        if len(segments) == 4:
-            return True, ""
-        return (
-            False,
-            "system.heartbeats.strategy requires exactly 4 segments: "
-            "system.heartbeats.strategy.{name}",
-        )
-    if component_type == "executor":
-        if len(segments) == 4:
-            return True, ""
-        if len(segments) == 5:
-            wallet_short = segments[4]
-            if _is_valid_wallet_short(wallet_short):
-                return True, ""
-            return (
-                False,
-                "system.heartbeats.executor.{exchange}.{wallet_short}: "
-                "wallet_short must be 12 lowercase hex characters",
-            )
-        return (
-            False,
-            "system.heartbeats.executor requires 4 segments (template) "
-            "or 5 segments (per-wallet instance with wallet_short)",
-        )
-    if component_type == "host":
-        if len(segments) == 4 and segments[3] == "disk":
-            return True, ""
-        if len(segments) == 4:
-            return False, "system.heartbeats.host supports only system.heartbeats.host.disk"
-        return (
-            False,
-            "system.heartbeats.host requires exactly 4 segments: system.heartbeats.host.disk",
-        )
-    if component_type == "feed":
-        return _validate_feed_heartbeat(segments)
-    return False, f"Invalid heartbeat component type '{component_type}'"
+    validator = _HEARTBEAT_COMPONENT_VALIDATORS.get(component_type)
+    if validator is None:
+        return False, f"Invalid heartbeat component type '{component_type}'"
+    return validator(segments)
 
 
 def _validate_system_topic(topic: str) -> tuple[bool, str]:

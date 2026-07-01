@@ -273,6 +273,151 @@ async def _read_persisted_strategy_parameters(
     return {"class_path": class_path, "parameters": parameters, "role": role}
 
 
+def _reject_executor_template_start(name: str) -> None:
+    """Reject starts against bare executor templates."""
+    if not is_executor_template(name):
+        return
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            f"'{name}' is an executor template — start "
+            f"'{name}_w<wallet_short>' for a specific wallet"
+        ),
+    )
+
+
+async def _classify_persisted_process_for_start(
+    repo: Repository, name: str
+) -> tuple[StrategyProcessClassification | None, dict[str, object] | None]:
+    """Classify the persisted process row used by the start endpoint."""
+    persisted = await _read_persisted_strategy_parameters(repo, name)
+    if persisted is None:
+        return None, None
+    raw_role = persisted.get("role")
+    raw_params = persisted.get("parameters")
+    class_path = persisted.get("class_path")
+    try:
+        classification = classify_strategy_process(
+            raw_role=raw_role,
+            class_path=class_path,
+            raw_parameters=raw_params,
+        )
+    except StrategyScopeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=exc.detail,
+        ) from exc
+    raw_params_dict = cast(dict[str, object], raw_params) if isinstance(raw_params, dict) else None
+    return classification, raw_params_dict
+
+
+def _classification_treats_as_strategy(
+    classification: StrategyProcessClassification | None,
+) -> bool:
+    """Return True when a start request targets a strategy process."""
+    if classification is None:
+        return False
+    return classification.treat_as_strategy
+
+
+def _reject_strategy_start_parameter_overrides(
+    treat_as_strategy: bool,
+    overrides: JsonObject,
+) -> None:
+    """Reject any start-time overrides for persisted strategy processes."""
+    if not treat_as_strategy:
+        return
+    if not overrides:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Strategy processes do not accept start-time parameter overrides; "
+            "update the persisted process configuration via the create endpoint "
+            "instead so the operator/wallet/output scope check runs against the "
+            "exact parameters that will launch."
+        ),
+    )
+
+
+def _reject_start_scope_overrides(overrides: JsonObject) -> None:
+    """Reject start-time operator and wallet overrides."""
+    forbidden = {"operator_public_id", "wallet_public_id"}.intersection(overrides.keys())
+    if not forbidden:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Cannot override "
+            f"{sorted(forbidden)} at start time; update the persisted "
+            "process configuration via the create endpoint instead."
+        ),
+    )
+
+
+async def _resolve_strategy_start_launch_parameters(
+    repo: Repository,
+    user: AuthPrincipal,
+    classification: StrategyProcessClassification,
+    raw_params: dict[str, object] | None,
+) -> dict[str, object]:
+    """Resolve persisted strategy launch parameters after scope enforcement."""
+    try:
+        scope = await enforce_classified_strategy_scope_complete(
+            repo,
+            classification=classification,
+            principal_operator_public_ids=user.operator_public_ids,
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=True,
+            require_operator_for_explicit_wallet=True,
+        )
+    except StrategyOperatorScopeError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"User '{user.username}' has no membership on operator '{exc.detail}'",
+        ) from exc
+    except (WalletAmbiguousError, WalletUnresolvedError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"specify wallet_public_id; {len(exc.candidates)} wallets accessible",
+        ) from exc
+    except (StrategyGrantScopeError, StrategyOutputCoverageError) as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=exc.detail,
+        ) from exc
+    except StrategyScopeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=exc.detail,
+        ) from exc
+    persisted_params = cast(dict[str, object], scope.parameters)
+    if raw_params is not None:
+        raw_params.clear()
+        raw_params.update(persisted_params)
+    return persisted_params
+
+
+async def _resolve_start_launch_parameters(
+    repo: Repository,
+    user: AuthPrincipal,
+    request_parameters: JsonObject | None,
+    classification: StrategyProcessClassification | None,
+    raw_params: dict[str, object] | None,
+) -> dict[str, object] | JsonObject | None:
+    """Return effective launch parameters for the start endpoint."""
+    if classification is None:
+        return request_parameters
+    if not classification.treat_as_strategy:
+        return request_parameters
+    return await _resolve_strategy_start_launch_parameters(
+        repo,
+        user,
+        classification,
+        raw_params,
+    )
+
+
 async def _enforce_strategy_scope(
     parameters: dict[str, object],
     role: ProcessRoleEnum,
@@ -773,93 +918,20 @@ async def start_process(
     between create-time and start-time fails closed instead of running
     on a wallet the caller no longer controls.
     """
-    if is_executor_template(name):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"'{name}' is an executor template — start "
-                f"'{name}_w<wallet_short>' for a specific wallet"
-            ),
-        )
+    _reject_executor_template_start(name)
     payload = body.payload
     overrides = payload.parameters or {}
-    persisted = await _read_persisted_strategy_parameters(repo, name)
-    treat_as_strategy = False
-    classification: StrategyProcessClassification | None = None
-    persisted_params: dict[str, object] | None = None
-    if persisted is not None:
-        raw_role = persisted.get("role")
-        raw_params = persisted.get("parameters")
-        class_path = persisted.get("class_path")
-        try:
-            classification = classify_strategy_process(
-                raw_role=raw_role,
-                class_path=class_path,
-                raw_parameters=raw_params,
-            )
-        except StrategyScopeError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=exc.detail,
-            ) from exc
-        treat_as_strategy = classification.treat_as_strategy
-    if treat_as_strategy and overrides:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Strategy processes do not accept start-time parameter overrides; "
-                "update the persisted process configuration via the create endpoint "
-                "instead so the operator/wallet/output scope check runs against the "
-                "exact parameters that will launch."
-            ),
-        )
-    forbidden = {"operator_public_id", "wallet_public_id"}.intersection(overrides.keys())
-    if forbidden:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Cannot override "
-                f"{sorted(forbidden)} at start time; update the persisted "
-                "process configuration via the create endpoint instead."
-            ),
-        )
-    if treat_as_strategy and classification is not None:
-        try:
-            scope = await enforce_classified_strategy_scope_complete(
-                repo,
-                classification=classification,
-                principal_operator_public_ids=user.operator_public_ids,
-                allow_admin_lookup_without_operator=False,
-                allow_unscoped_paper=True,
-                require_operator_for_explicit_wallet=True,
-            )
-        except StrategyOperatorScopeError as exc:
-            raise HTTPException(
-                status_code=403,
-                detail=f"User '{user.username}' has no membership on operator '{exc.detail}'",
-            ) from exc
-        except (WalletAmbiguousError, WalletUnresolvedError) as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"specify wallet_public_id; {len(exc.candidates)} wallets accessible",
-            ) from exc
-        except (StrategyGrantScopeError, StrategyOutputCoverageError) as exc:
-            raise HTTPException(
-                status_code=403,
-                detail=exc.detail,
-            ) from exc
-        except StrategyScopeError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=exc.detail,
-            ) from exc
-        persisted_params = cast(dict[str, object], scope.parameters)
-        raw_params_dict = cast(dict[str, object], raw_params)
-        raw_params_dict.clear()
-        raw_params_dict.update(persisted_params)
-        launch_parameters: dict[str, object] | JsonObject | None = persisted_params
-    else:
-        launch_parameters = payload.parameters
+    classification, raw_params = await _classify_persisted_process_for_start(repo, name)
+    treat_as_strategy = _classification_treats_as_strategy(classification)
+    _reject_strategy_start_parameter_overrides(treat_as_strategy, overrides)
+    _reject_start_scope_overrides(overrides)
+    launch_parameters = await _resolve_start_launch_parameters(
+        repo,
+        user,
+        payload.parameters,
+        classification,
+        raw_params,
+    )
     result = await factory.start_process_by_name(
         name=name,
         mode=payload.mode,

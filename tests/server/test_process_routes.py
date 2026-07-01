@@ -26,6 +26,8 @@ from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import ProcessStartResult
 from snapper.application.process_manager.models import ProcessStopResult
 from snapper.application.process_manager.strategy_scope import StrategyOutputCoverageError
+from snapper.application.process_manager.strategy_scope import StrategyProcessClassification
+from snapper.application.process_manager.strategy_scope import StrategyWalletScope
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Setting
@@ -38,6 +40,7 @@ from snapper.server.process_routes import _enforce_strategy_scope
 from snapper.server.process_routes import _enforce_wallet_grant_exists
 from snapper.server.process_routes import _read_persisted_strategy_parameters
 from snapper.server.process_routes import _resolve_role_for_class_path
+from snapper.server.process_routes import _resolve_strategy_start_launch_parameters
 from snapper.server.process_routes import create_process_configuration
 from snapper.server.process_routes import get_process_factory
 from snapper.server.process_routes import get_process_schema
@@ -1201,6 +1204,44 @@ class TestStopProcess:
         assert result.payload.status == "success"
         assert result.payload.name == "zmq_broker"
         mock_factory.stop_process_by_name.assert_awaited_once_with("zmq_broker")
+
+
+class TestResolveStrategyStartLaunchParameters:
+    """Tests for strategy start launch-parameter resolution."""
+
+    @pytest.mark.asyncio
+    async def test_returns_persisted_params_without_raw_mutation_target(self) -> None:
+        """Resolved parameters are still returned when no raw dict is present.
+
+        Given: A classified strategy and no mutable persisted params dict,
+        When: Start launch parameters are resolved,
+        Then: The enforced persisted parameters are returned unchanged.
+        """
+        persisted_params: dict[str, object] = {"wallet_public_id": "wallet-1"}
+        classification = StrategyProcessClassification(
+            treat_as_strategy=True,
+            parameters={"name": "strategy"},
+            row_role=ProcessRoleEnum.STRATEGY,
+            registry_role=None,
+        )
+        scope = StrategyWalletScope(
+            True,
+            persisted_params,
+            "",
+            "wallet-1",
+            None,
+        )
+        with patch(
+            "snapper.server.process_routes.enforce_classified_strategy_scope_complete",
+            new=AsyncMock(return_value=scope),
+        ):
+            result = await _resolve_strategy_start_launch_parameters(
+                MagicMock(),
+                MagicMock(operator_public_ids=[]),
+                classification,
+                None,
+            )
+        assert result == persisted_params
 
 
 class TestProcessStartRequest:

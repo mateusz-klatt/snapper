@@ -1682,6 +1682,44 @@ async def test_resolve_classified_strategy_scope_rejects_paper_without_operator_
 
 
 @pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_allows_paper_explicit_wallet_without_operator() -> (
+    None
+):
+    """Paper explicit wallet launches can bypass operator binding when allowed.
+
+    Given: Paper strategy parameters with a wallet and no operator,
+    When: Explicit wallets without operators are allowed,
+    Then: The resolver returns the pinned wallet without catalog lookup.
+    """
+    repository = _WalletLookupRepository()
+    classification = StrategyProcessClassification(
+        treat_as_strategy=True,
+        parameters=dict(
+            _strategy_autostart_config(
+                operator_public_id="",
+                wallet_public_id="wallet-paper",
+                exchange="paper",
+            ).parameters
+        ),
+        row_role=ProcessRoleEnum.STRATEGY,
+        registry_role=None,
+    )
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=classification,
+        principal_operator_public_ids=[],
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.treat_as_strategy is True
+    assert scope.operator_public_id == ""
+    assert scope.wallet_public_id == "wallet-paper"
+    assert repository.active_lookup_count == 0
+    assert repository.operator_lookup_count == 0
+
+
+@pytest.mark.asyncio
 async def test_resolve_strategy_process_scope_classifies_non_strategy() -> None:
     """Classify-and-resolve returns an empty scope for non-strategies.
 

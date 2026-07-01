@@ -16,6 +16,9 @@ from snapper.core.wallet_resolution import resolve_wallet_or_default
 from snapper.data.repository import SQLAlchemyRepository
 
 _STRATEGY_PARAMETER_KEYS = frozenset(("inputs", "outputs"))
+_STRATEGY_OPERATOR_REQUIRED_DETAIL = (
+    "operator_public_id required for live strategy wallet resolution"
+)
 
 
 class StrategyScopeError(ValueError):
@@ -193,6 +196,88 @@ def strategy_wallet_resolution_mode(parameters: dict[str, object]) -> ExecutionM
     )
 
 
+def _empty_strategy_wallet_scope() -> StrategyWalletScope:
+    """Return the scope sentinel used for non-strategy processes."""
+    return StrategyWalletScope(False, None, "", "", None)
+
+
+def _string_parameter(parameters: dict[str, object], key: str) -> str:
+    """Return a string parameter value or the empty string."""
+    value = parameters.get(key, "")
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+def _raise_missing_strategy_operator() -> None:
+    """Raise the canonical missing-operator strategy error."""
+    raise StrategyScopeError(_STRATEGY_OPERATOR_REQUIRED_DETAIL)
+
+
+def _resolve_no_operator_strategy_scope(
+    parameters: dict[str, object],
+    wallet_public_id: str,
+    wallet_resolution_mode: ExecutionModeEnum,
+    *,
+    allow_admin_lookup_without_operator: bool,
+    allow_unscoped_paper: bool,
+    require_operator_for_explicit_wallet: bool,
+) -> StrategyWalletScope | None:
+    """Resolve or reject a strategy scope that has no operator."""
+    if wallet_resolution_mode != ExecutionModeEnum.PAPER:
+        if wallet_public_id:
+            raise StrategyScopeError("wallet_public_id supplied without operator_public_id")
+        _raise_missing_strategy_operator()
+    if wallet_public_id:
+        if require_operator_for_explicit_wallet:
+            raise StrategyScopeError("wallet_public_id supplied without operator_public_id")
+        return None
+    if allow_unscoped_paper:
+        return StrategyWalletScope(True, parameters, "", "", wallet_resolution_mode)
+    if not allow_admin_lookup_without_operator:
+        _raise_missing_strategy_operator()
+    return None
+
+
+def _enforce_operator_membership(
+    operator_public_id: str,
+    principal_operator_public_ids: list[str] | None,
+) -> None:
+    """Verify the chosen operator belongs to the caller scope."""
+    if principal_operator_public_ids is None:
+        return
+    if not operator_public_id:
+        return
+    if operator_public_id in principal_operator_public_ids:
+        return
+    raise StrategyOperatorScopeError(operator_public_id)
+
+
+def _wallet_lookup_operator_ids(operator_public_id: str) -> list[str]:
+    """Return operator IDs for wallet lookup."""
+    if operator_public_id:
+        return [operator_public_id]
+    return []
+
+
+async def _resolve_missing_strategy_wallet(
+    repository: WalletResolutionRepository,
+    parameters: dict[str, object],
+    operator_public_id: str,
+    wallet_resolution_mode: ExecutionModeEnum,
+) -> str:
+    """Resolve and store the default wallet for a strategy scope."""
+    wallet_public_id = await resolve_wallet_or_default(
+        repository,
+        explicit_wallet_public_id=None,
+        operator_public_ids=_wallet_lookup_operator_ids(operator_public_id),
+        is_admin=not operator_public_id,
+        mode=wallet_resolution_mode,
+    )
+    parameters["wallet_public_id"] = wallet_public_id
+    return wallet_public_id
+
+
 async def resolve_classified_strategy_scope(
     repository: WalletResolutionRepository,
     *,
@@ -225,49 +310,30 @@ async def resolve_classified_strategy_scope(
         WalletAmbiguousError: More than one wallet matched the lookup scope.
     """
     if not classification.treat_as_strategy or classification.parameters is None:
-        return StrategyWalletScope(False, None, "", "", None)
+        return _empty_strategy_wallet_scope()
     parameters = dict(classification.parameters)
-    raw_operator = parameters.get("operator_public_id", "")
-    raw_wallet = parameters.get("wallet_public_id", "")
-    operator_public_id = raw_operator if isinstance(raw_operator, str) else ""
-    wallet_public_id = raw_wallet if isinstance(raw_wallet, str) else ""
+    operator_public_id = _string_parameter(parameters, "operator_public_id")
+    wallet_public_id = _string_parameter(parameters, "wallet_public_id")
     wallet_resolution_mode = strategy_wallet_resolution_mode(parameters)
     if not operator_public_id:
-        if wallet_resolution_mode != ExecutionModeEnum.PAPER:
-            if wallet_public_id:
-                raise StrategyScopeError("wallet_public_id supplied without operator_public_id")
-            raise StrategyScopeError(
-                "operator_public_id required for live strategy wallet resolution"
-            )
-        if wallet_public_id and require_operator_for_explicit_wallet:
-            raise StrategyScopeError("wallet_public_id supplied without operator_public_id")
-        if not wallet_public_id and allow_unscoped_paper:
-            return StrategyWalletScope(
-                True,
-                parameters,
-                operator_public_id,
-                wallet_public_id,
-                wallet_resolution_mode,
-            )
-        if not wallet_public_id and not allow_admin_lookup_without_operator:
-            raise StrategyScopeError(
-                "operator_public_id required for live strategy wallet resolution"
-            )
-    if (
-        principal_operator_public_ids is not None
-        and operator_public_id
-        and operator_public_id not in principal_operator_public_ids
-    ):
-        raise StrategyOperatorScopeError(operator_public_id)
-    if not wallet_public_id:
-        wallet_public_id = await resolve_wallet_or_default(
-            repository,
-            explicit_wallet_public_id=None,
-            operator_public_ids=[operator_public_id] if operator_public_id else [],
-            is_admin=not operator_public_id,
-            mode=wallet_resolution_mode,
+        scope = _resolve_no_operator_strategy_scope(
+            parameters,
+            wallet_public_id,
+            wallet_resolution_mode,
+            allow_admin_lookup_without_operator=allow_admin_lookup_without_operator,
+            allow_unscoped_paper=allow_unscoped_paper,
+            require_operator_for_explicit_wallet=require_operator_for_explicit_wallet,
         )
-        parameters["wallet_public_id"] = wallet_public_id
+        if scope is not None:
+            return scope
+    _enforce_operator_membership(operator_public_id, principal_operator_public_ids)
+    if not wallet_public_id:
+        wallet_public_id = await _resolve_missing_strategy_wallet(
+            repository,
+            parameters,
+            operator_public_id,
+            wallet_resolution_mode,
+        )
     return StrategyWalletScope(
         True,
         parameters,
