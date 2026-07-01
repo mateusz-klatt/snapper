@@ -1015,6 +1015,33 @@ class TestPosixResourceFallback:
             monkeypatch.setattr("builtins.__import__", original_import)
             importlib.reload(snapshotter)
 
+    def test_resource_import_success_binds_module(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Reload the module with ``import resource`` patched to succeed.
+
+        Given: the ``resource`` stdlib module is importable (the natural
+            case on POSIX; forced here so the SUCCESS branch is covered on
+            Windows too, where the real import raises ImportError),
+        When: the snapshotter module is reloaded so the top-level
+            try/except is re-executed,
+        Then: the module-level ``_resource`` symbol is the imported module.
+        """
+        original_import = builtins.__import__
+        fake_resource = object()
+
+        def mock_import(name: str, *args: object, **kwargs: object) -> object:
+            """Return a fake resource module; pass-through for everything else."""
+            if name == "resource":
+                return fake_resource
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.__import__", mock_import)
+        importlib.reload(snapshotter)
+        try:
+            assert snapshotter._resource is fake_resource
+        finally:
+            monkeypatch.setattr("builtins.__import__", original_import)
+            importlib.reload(snapshotter)
+
     def test_sample_limits_returns_zeros_when_resource_is_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
