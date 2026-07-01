@@ -319,7 +319,9 @@ Frontend at `http://localhost:3000/` with backend proxy.
 | `make ui-format` | Prettier check |
 | `make ui-typecheck` | TypeScript type check |
 | `make ui-dead-code` | Knip dead code |
-| `make ui-i18n-check` | Frontend locale/catalog consistency |
+| `make ui-i18n-check` | Hardcoded user-facing string scan (frontend TSX/TS) |
+| `make ui-i18n-check-alerts` | iOS alerts.* xcstrings and frontend alerts.json in sync |
+| `make ui-i18n-check-market` | Frontend market.* JSON and iOS xcstrings in sync |
 | `make ui-test` | Vitest tests |
 | `make ui-cov` | Tests with coverage |
 

@@ -227,8 +227,12 @@ Shape: `accruals.{exchange}.{instrument}.{accrual_type}` (4 segments).
 
 ### Alerts
 
-Per-user push-notification fanout consumed by the WS bridge and the
-APNs sidecar.
+Per-user alert fanout. The notify (APNs) sidecar consumes domain topics
+(`orders.events.`, `plans.decisions.`, `system.heartbeats.`), persists
+each alert, publishes it as an `AlertEventData` frame on this topic
+family before the APNs fanout, and also delivers iOS pushes in-process;
+the WS bridge is the consumer, forwarding frames to authenticated
+WebSocket clients with per-user scope enforcement.
 
 | Topic | Description |
 | ----- | ----------- |
@@ -358,6 +362,7 @@ Every Data class inherits from `StrictDataSchema` and carries:
 | `timestamp` | datetime | Message creation time |
 | `session_id` | string | UUID7 of the producer process session (required at construction) |
 | `sequence_id` | int | Monotonic counter per topic within the session (required at construction) |
+| `topic` | string \| None | Routing key stamped onto the payload by `publish_to()` at the publish call site; `None` on REST-only items and control frames |
 
 `session_id` and `sequence_id` are allocated by producers from a shared
 `SequenceTracker` before the payload is constructed. `MessagePublisher.send()`
@@ -486,7 +491,7 @@ signal = SignalData(
 | `strength` | float | Signal strength 0.0-1.0 |
 | `reason` | string | Reason |
 | `strategy_name` | string | Strategy name (required for paper exchange signals) |
-| `price` | float | Price |
+| `price` | float \| None | Suggested entry/exit price (optional) |
 | `fired_at` | datetime | Domain time when signal was generated |
 | `timestamp` | datetime | System timestamp |
 | `paired_group_id` | string \| None | Paired-execution group identifier; unset for standalone signals |
@@ -494,6 +499,11 @@ signal = SignalData(
 | `paired_group_index` | int \| None | This leg's position in the group (`0 <= index < size`) |
 | `paired_group_policy` | string \| None | Coordination policy: `simultaneous` or `sequential_handoff` |
 | `paired_group_key` | string \| None | Canonical sorted `{exchange}:{instrument}:{mode}` leg-set key |
+| `wallet_public_id` | string | Owning wallet public id (empty string when unscoped) |
+| `operator_public_id` | string \| None | Operator scope |
+| `user_public_id` | string \| None | User scope |
+| `ai_review_public_id` | string \| None | Citation of an approved AI delegate review (CONSULT outcome), threaded into the attribution-aware caps gate |
+| `ai_review_dispatch_version` | int \| None | Companion dispatch version for the bridge dedup contract (carried transport-only) |
 
 Paper signals (`exchange == "paper"`) require `strategy_name` to be set. The schema
 enforces this invariant at construction time so invalid paper signals cannot be created.
@@ -1285,8 +1295,11 @@ Two destination tables provide always-available observability for non-domain tra
   - **ZMQ bridge** — `_record_bridge_control()` records subscribe errors and
     client disconnects with `transport="zmq"`.
 
-  All control writes use a `finally` block so the record is persisted regardless of
-  whether the request succeeded or failed. The write is non-blocking: any DB failure
+  The REST middleware performs its control write in a `finally` block so mutations
+  are recorded even when the handler raises; the WS dispatch loop records
+  success/error outcomes inline and records an `exception` outcome from its
+  top-level exception handler; the bridge records at its explicit
+  error/disconnect sites. The write is non-blocking: any DB failure
   is logged and swallowed so the response already sent to the client is never
   invalidated.
 

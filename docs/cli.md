@@ -773,6 +773,44 @@ snapper kraken-equities-backfill-candles [OPTIONS]
 | `-d, --days` | int | `30` | Days back to fetch |
 | `--resume` / `--no-resume` | bool | `--resume` | Resume from latest stored candle |
 
+### `backfill-candles-from-trades`
+
+Backfills calculated 1-minute candles from persisted trades.
+
+```bash
+snapper backfill-candles-from-trades --exchange EXCHANGE --start START --end END [OPTIONS]
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `--exchange` | str | *required* | Exchange whose trades should be aggregated |
+| `--start` | str | *required* | Inclusive UTC start date or datetime |
+| `--end` | str | *required* | Inclusive UTC end date or datetime |
+| `-s, --symbol` | str[] | None | Native symbols to backfill |
+| `--all` | bool | `false` | Backfill all active symbols on the exchange |
+
+### `backfill-synthesized-candles`
+
+Backfills synthesized higher-timeframe candles from persisted 1m candles.
+
+```bash
+snapper backfill-synthesized-candles --exchange EXCHANGE --start START --end END [OPTIONS]
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `--exchange` | str | *required* | Exchange whose 1m candles should be aggregated |
+| `--start` | str | *required* | Inclusive UTC 1m candle lower bound (date or datetime) |
+| `--end` | str | *required* | UTC upper bound used to seal higher-timeframe windows |
+| `-s, --symbol` | str[] | None | Native symbols to backfill |
+| `--all` | bool | `false` | Backfill all active symbols on the exchange |
+| `--timeframes` | str | `5m,15m,30m,1h,4h,1d` | Comma-separated higher timeframes to synthesize |
+| `--cut-date` | str | None | UTC date (`YYYY-MM-DD`) where synthesized `1d` ownership begins |
+
 ### `build-continuous`
 
 Builds and displays a continuous-contract series for an underlying.

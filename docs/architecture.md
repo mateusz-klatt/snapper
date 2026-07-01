@@ -200,7 +200,8 @@ Components:
   `persist_intermediate_candles` setting restores per-frame persistence (ZMQ
   publishes every frame regardless). The candle `source` provenance vocabulary is
   `native | calculated | synthesized` (the `ck_candle_source` CHECK constraint
-  on the `candles`/`shadow_candles` tables): `native` for venue OHLC bars,
+  on `candles`, mirrored as `ck_shadow_candle_source` on `shadow_candles`):
+  `native` for venue OHLC bars,
   `calculated` for trade-built 1m bars (see the Kraken Spot sub-bullet below),
   and `synthesized` for aggregator-derived higher timeframes. The single-source
   read cutover is gated by the
@@ -561,8 +562,12 @@ Shared API schemas and WebSocket auth helpers (not route definitions):
 - **Auth** (`auth/`) — WebSocket token service and schemas
 
 Route modules live closer to their domains: `server/app.py` (assembly and
-data endpoints), `server/process_routes.py`, `server/strategy_routes.py`,
-`config/settings_routes.py`, and `auth/routes.py`.
+data endpoints), the per-domain `server/*_routes.py` modules (orders,
+execution plans, trailing stops, position cycles, paired execution,
+backtests, wallets, operators, credentials, AI reviews/delegates, alerts,
+alert defaults, devices, metrics, market cache/coverage/feed-health, scope
+grants, egress health, processes, strategies), `config/settings_routes.py`,
+and `auth/routes.py`.
 
 REST endpoints return the same Data schemas used by WebSocket messaging
 (`messaging.schemas.data`): `OrderData`, `SignalData`, `ExecutionData`,
@@ -647,6 +652,7 @@ SQLite for development, PostgreSQL for production.
 -- Market data (joined to instruments via instrument_public_id)
 instruments         -- Financial instruments (logical key: symbol_public_id + exchange)
 candles             -- OHLCV data
+shadow_candles      -- A/B shadow plane for trade-built 1m candles
 ticks               -- Real-time price snapshots
 trades              -- Transaction history
 market_snapshots    -- Real-time market data (SCD2 per instrument, one active row each)
@@ -683,6 +689,7 @@ user_trading_caps           -- Per-user trading-caps overrides
 symbols              -- Symbol identity + versioned attributes (SCD2)
 symbol_aliases       -- Exchange-specific symbol mappings
 symbol_exchange_capabilities -- Exchange-specific capabilities
+symbol_market_data_channel_capabilities -- Per-channel market-data capability flags
 underlying_assets    -- Underlying-asset definitions (YAML-sourced)
 instrument_underlying_mappings -- Active instrument → underlying mappings
 continuous_contract_configs -- Continuous-contract series config
@@ -1043,8 +1050,10 @@ used for SCD2 close-and-insert.
 
 The system manages processes through Process Manager:
 
-- **Core** — Broker, Feed, Bridge (required — startup is aborted if any
-  enabled long-running CORE process fails to start)
+- **Core** — Broker, feed publishers, executors, trader coordinator, plan
+  executor (required — startup is aborted if any enabled long-running CORE
+  process fails to start; the ZMQ-WebSocket bridge is not a managed process —
+  it starts with the FastAPI lifespan)
 - **Strategy** — Trading strategies
 - **Task** — One-time tasks
 - **Backtest** — Backtesting processes
@@ -1067,7 +1076,7 @@ being finalized FAILED and silently never restarted.
 
 When a process exhausts its restart budget, a CORE market-data
 publisher escalates to a feed-container restart; any other process is
-parked. Parking is level-triggered and visible: `/health` reports
+parked. Parking is level-triggered and visible: `/api/health` reports
 ERROR while any process is parked (checked before every other branch,
 including the API-only early return and the TTL cache), and for
 per-wallet executor instances the launcher bursts synthetic ERROR
@@ -1236,7 +1245,7 @@ REST-surface decision rows are logged without an outbox entry),
 `bracket` (shipped — attaches to a `position_cycles` row),
 `trailing_stop` (shipped — stateful ratcheting stop with
 checkpoint persistence, separate `/api/trailing-stops` route module),
-`peg`, `scheduler`.
+`passive_mm`, `peg`, `scheduler`.
 
 **Manual order create flow:** `POST /api/orders` creates a `manual_once`
 plan (pending), stamps `child_client_order_id` and `native_instrument`

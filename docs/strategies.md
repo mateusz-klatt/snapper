@@ -292,7 +292,7 @@ Trend-following strategy based on MACD.
 | --------- | ------- | ----------- |
 | `fast` | 12 | Fast EMA |
 | `slow` | 26 | Slow EMA |
-| `signal_period` | 9 | StrategySignal line period |
+| `signal_period` | 9 | Signal line EMA period |
 
 **Logic:**
 
@@ -922,13 +922,18 @@ they publish ~10-minute-delayed candles + ticks but have no order API.
   ``TickData.is_delayed=True`` before treating the price as current.
   Candle-driven cross-asset strategies inherit the source-feed latency
   implicitly; document the lag in the live runbook.
-- Output-coverage enforcement at startup is conditional: when both
-  ``operator_public_id`` and ``wallet_public_id`` are populated on
-  the process config, ``_enforce_strategy_outputs_covered`` checks
-  that every instrument in ``StrategyConfig.outputs`` falls within
-  the operator's active scope grants. The empty-default path
-  (neither field set) is permitted for backwards compatibility, and
-  operator-only launches skip the output-coverage check.
+- Output-coverage enforcement at startup: whenever ``operator_public_id``
+  is populated on the process config, the launch path resolves the wallet
+  (an explicit ``wallet_public_id`` passes through; an empty one is
+  auto-resolved to the operator's single accessible wallet, failing the
+  launch if zero or several match) and then
+  ``enforce_strategy_outputs_covered`` checks that every instrument in
+  ``StrategyConfig.outputs`` falls within the operator's active scope
+  grants — operator-only launches do NOT skip the check. The coverage
+  check applies to live outputs only (paper-exchange configs return
+  early), and the fully-unscoped paper path (neither field set) is still
+  permitted for backwards compatibility on the REST start route; live
+  launches without an operator are rejected.
 
 ### Reference implementation
 

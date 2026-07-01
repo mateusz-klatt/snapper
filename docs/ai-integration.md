@@ -36,8 +36,13 @@ The `/api/mcp` sub-app is always mounted and gated by the
     curl -X POST http://localhost:8000/api/settings/ai_integration_enabled/set \
       -H "Authorization: Bearer <admin-jwt>" \
       -H "Content-Type: application/json" \
-      -d '{"session_id":"cli","sequence_id":1,"public_id":"$(uuidgen)","timestamp":"2026-04-20T00:00:00Z","payload":{"value":"false","category":"system"}}'
+      -d '{"session_id":"cli","sequence_id":1,"public_id":"'$(uuidgen)'","timestamp":"2026-04-20T00:00:00Z","payload":{"value":"false","category":"system"}}'
     ```
+
+    Note: the REST settings write is cached verbatim as a string in the
+    serving process; the flag change takes effect only after the API
+    server restarts (setting values are parsed to booleans when settings
+    are loaded at startup).
 
 2. The feature endpoint itself is public, but the frontend route and
     navigation entry are role/permission-gated. After authentication,
@@ -46,9 +51,11 @@ The `/api/mcp` sub-app is always mounted and gated by the
     `/api/ai-delegates/*` return `503 feature_disabled` only when the
     flag is explicitly set to `false`.
 
-3. Whether the flag is on or off, the MCP endpoint requires every
-    request to carry a valid `Authorization: Bearer <jwt>` header.
-    Anonymous requests receive `401 missing_bearer_token`.
+3. When the flag is on, the MCP endpoint requires every request to
+    carry a valid `Authorization: Bearer <jwt>` header; anonymous
+    requests receive `401 missing_bearer_token`. When the flag is off,
+    all requests — anonymous or authenticated — short-circuit to
+    `503 feature_disabled` before any token verification runs.
 
 ---
 
@@ -63,6 +70,9 @@ mints per MCP client. Delegates:
     comes from the operator they are bound to.
 - Carry per-delegate safety caps independent of the operating
     operator's caps.
+
+Each operator may own at most 5 active delegates (deactivated
+delegates do not count toward the cap, so rotation is unbounded).
 
 Create one via `POST /api/ai-delegates`:
 
@@ -335,7 +345,7 @@ to `caps_enforcer_getter` at registration.
     on wallet scope violation (anti-enumeration).
 
 - **`submit_manual_order(exchange, instrument, instrument_public_id,
-    side, order_type, quantity, wallet_public_id, idempotency_key,
+    side, order_type, quantity, idempotency_key, wallet_public_id?,
     price?, stop_price?, operator_public_id?, ai_review_public_id?)`** —
     enqueues a trade command under the delegate's user_public_id
     with `source_surface='mcp'` + the caps check from
@@ -346,6 +356,10 @@ to `caps_enforcer_getter` at registration.
     Validates order params with the same evaluator rule as REST:
     `price` is required for `limit`/`stop_limit` and `stop_price` is
     required for `stop`/`stop_limit` order types.
+    `wallet_public_id` is optional — when omitted, Snapper resolves the
+    caller's single accessible live wallet; multiple candidates return
+    a structured `wallet_ambiguous` envelope and zero candidates
+    `wallet_unresolved` (a blank string returns `invalid_argument`).
     Wraps the REST `create_order` route.
 
 - **`cancel_order(plan_public_id, idempotency_key)`** — cancels an
@@ -388,14 +402,23 @@ curl -X POST http://localhost:8000/api/mcp/ \
 Every delegate has its own `user_trading_caps` row. All fields are
 optional; `null` means "unbounded on this axis".
 
-- `max_order_quantity_per_instrument` — JSON dict `{instrument:
-    max_qty}` OR a scalar applied to every instrument.
+- `max_order_quantity_per_instrument` — JSON dict
+    `{instrument_public_id: max_qty}` keyed by the Snapper instrument
+    UUID7 (NOT the native venue symbol). The delegate API accepts only
+    a JSON dict or `null`; a scalar value stored directly on the caps
+    row (legacy/manual writes) is applied to every instrument by the
+    enforcer, but cannot be set via `POST`/`PATCH /api/ai-delegates`.
 - `max_open_orders` — all-time count of the delegate's in-flight
     commands (every non-terminal status: `created/dispatched/
     direct_dispatched/accepted/partially_filled`).
 - `max_daily_notional_usd` — rolling 24h sum of `submit_quantity *
-    submit_price_usd` across non-rejected commands (submit-time
-    commitment basis; partial fills don't change accounting).
+    submit_price` per prior non-rejected command (raw submit-time
+    price, no USD re-conversion; prior market orders with no submit
+    price are skipped with a WARN log), plus the new submission's
+    USD-converted notional via the USD price oracle
+    (`price_unavailable` caps violation when the oracle is stale or
+    missing). Submit-time commitment basis; partial fills don't
+    change accounting.
 - `max_cancels_per_minute` — sliding-window cancel rate.
 
 Caps are enforced at trade-command insert sites via the
@@ -458,8 +481,9 @@ by a separate per-principal middleware on `/api/mcp` (default
 `60/minute`); the per-delegate `max_cancels_per_minute` cap then
 applies on top inside `cancel_order`. Bursts are served best-effort;
 sustained abuse over published exchange limits (Walutomat 20 req/s,
-Kraken 15 req/s, Polygon 5/min) surfaces as `rate_limited` warnings
-at 80/95% utilisation.
+Kraken 15 req/s, Polygon 5/min) surfaces as
+`REST utilization …% of limit` log entries — WARNING at 80% and ERROR
+at 95% utilisation, rate-limited to one log per exchange per 60 s.
 
 ---
 
@@ -498,6 +522,7 @@ Delegate CRUD:
 | 403    | `require_role(OPERATOR)`               | AI_DELEGATE or VIEWER trying to manage delegates            |
 | 404    | `Delegate not found`                   | Unknown ID OR cross-tenant (no existence leak)              |
 | 409    | `Could not derive a unique username …` | Label slug collides 8+ times (pathological)                 |
+| 409    | `Operator … already owns N active AI delegates (limit 5)` | Owner hit the 5-active-delegates-per-operator cap; deactivate an existing delegate before creating another |
 | 422    | `Operator '<id>' is not in …`          | Non-admin caller picked `operator_public_id` outside their claim set |
 | 422    | `Caller has no primary operator …`     | No explicit operator and no primary → binding is ambiguous  |
 

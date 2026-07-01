@@ -22,7 +22,7 @@ as a Bearer token instead.
 | Role | Access |
 | ---- | ------ |
 | `viewer` | Read-only market data, orders, positions, strategies, system status, backtests, notifications; can register and manage the caller's own notification devices |
-| `ai_delegate` | Scoped automation principal for MCP and AI-review workflows; can read market/orders/positions/strategies/signals/backtests/system status and create/cancel/manage scoped orders/positions, but cannot manage users, settings, processes, credentials, scope grants, notifications, or paired execution |
+| `ai_delegate` | Scoped automation principal for MCP and AI-review workflows; can read market/orders/positions/strategies/signals/backtests/system status and create/cancel/manage scoped orders/positions, but cannot manage users, settings, processes, credentials, scope grants, or paired execution, and cannot subscribe to `alerts.` WebSocket topics (device-registration and alert-history REST routes require only authentication) |
 | `operator` | Viewer permissions plus trade execution, process and strategy lifecycle management, backtest management, and paired-execution terminalization |
 | `admin` | Full access including user management, system configuration, wallet/credential management, scope grant management, operator impersonation |
 
@@ -537,8 +537,9 @@ Public health check endpoint. No authentication required.
 
 `status` reflects the health of enabled long-running CORE processes:
 `"healthy"` when all are running, `"error"` if any are missing. In
-`SERVER_API_ONLY` mode the status is always `"healthy"` (no processes
-are started by design).
+`SERVER_API_ONLY` mode the status is `"healthy"` (no processes are
+started by design) unless a manually started process has parked after
+exhausting its restart budget, in which case `"error"` is reported.
 
 **Response (200):**
 
@@ -787,14 +788,16 @@ still-forming bar when `false`, and the final bar for its window when
 ### GET /api/candles/db
 
 Explicit DB-only candle read for operators. Parameters and response
-shape match `GET /api/candles`, but the route bypasses the in-process
-market cache unconditionally so incident response can verify persisted
+shape match `GET /api/candles` except the `start`/`end` market-time
+window pair is not accepted; the route bypasses the in-process market
+cache unconditionally so incident response can verify persisted
 `candles` rows directly.
 
 ### GET /api/candles/cache
 
 Explicit cache-only candle diagnostic read. Parameters match
-`GET /api/candles` except `as_of` is not accepted. For cache-eligible
+`GET /api/candles` except `as_of` and the `start`/`end` window pair are
+not accepted, and `timeframe` is optional (default `1m`). For cache-eligible
 timeframes (`1m`, `5m`, `15m`, `30m`) the route returns cache-shaped
 payload data with diagnostic fields such as `is_warm`, `source`, and
 `sample_count`; cold cache returns an empty payload with `is_warm=false`
@@ -915,7 +918,7 @@ X-CSRF-Token: <csrf_token>
 | `post_only` | boolean | no | Maker-only order flag (`false` default) |
 | `leverage` | int | no | Optional leverage multiplier |
 | `reduce_only` | boolean | no | Reduce-only flag for closing exposure (`false` default) |
-| `wallet_public_id` | string | yes | Target wallet UUID |
+| `wallet_public_id` | string | no | Target wallet UUID; when omitted, the server resolves the caller's single accessible wallet for the requested mode |
 | `operator_public_id` | string | no | Operator identity |
 | `idempotency_key` | string | no | Dedup key (409 on duplicate) |
 | `ai_review_public_id` | string | no | Approved `ai_reviews` row cited for AI-mediated manual orders |
@@ -1540,7 +1543,7 @@ fields and this object under `payload`.
     "zmq_bridge": {
         "active_topics": 12,
         "subscriber_tasks": 12,
-        "available_topics": ["market.", "signals.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
+        "available_topics": ["market.", "signals.", "system.egress.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
     },
     "connections": {
         "active_connections": 5,
@@ -1604,7 +1607,7 @@ fields and this object under `payload`.
         "active_connections": 5
     },
     "config": {
-        "available_topics": ["market.", "signals.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
+        "available_topics": ["market.", "signals.", "system.egress.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
     },
     "connections": {
         "active_connections": 5,
@@ -2668,6 +2671,7 @@ Client-originated control frames (`authenticate`, `reauth`,
         "processes.events.summary.",
         "signals.",
         "strategies.events.list.",
+        "system.egress.",
         "system.heartbeats."
     ],
     "user_role": "operator",
@@ -2843,9 +2847,10 @@ If the client does not reauthenticate in time:
         "processes.events.summary.",
         "signals.",
         "strategies.events.list.",
+        "system.egress.",
         "system.heartbeats."
     ],
-    "total_available": 13
+    "total_available": 14
 }
 ```
 
@@ -3038,8 +3043,12 @@ still-forming bar when `false`, and the final bar for its window when
 ```json
 {
     "type": "error",
-    "message": "Topic 'invalid.topic' does not exist",
-    "timestamp": "2026-01-18T12:00:00Z"
+    "public_id": "019e1a2b-0000-7000-8000-000000000b01",
+    "session_id": "<server-ws-session>",
+    "sequence_id": 11,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "message": "Topic 'invalid.topic' does not exist"
 }
 ```
 

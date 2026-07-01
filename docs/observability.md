@@ -47,8 +47,12 @@ data-liveness watchdog (`SubscriptionHealthTracker`,
 `infrastructure/exchanges/_subscription_health.py`): a confirmed
 subscription that receives no data for `data_stale_threshold_s` (default
 `300.0`s; `ack_timeout_s` default `15.0`s guards the initial subscribe
-ACK) is marked stale and emits a one-shot log line. It is log-only —
-stream-gap signals surface in the feed logs, not as a REST metric.
+ACK) is marked stale and emits a one-shot log line. Beyond the one-shot
+log line, each publisher periodically flushes the tracker's current
+state into the `instrument_feed_health` table, and operators can query
+it via `GET /api/market/feed-health` (optional `exchange` and
+`fresh_within_seconds` filters; same `Permission.READ_SYSTEM_STATUS`
+gate as the metrics routes).
 
 ### Failure contract
 
@@ -79,7 +83,7 @@ for the `NotificationMetricsResponse` wire schema.
 
 ## Snapshot fields
 
-Each sample captures eight nested groups, a top-level `bus_time`
+Each sample captures nine nested groups, a top-level `bus_time`
 timestamp, and two top-level flags. All
 field names are stable; downstream consumers (frontend, iOS) regenerate
 from the backend OpenAPI / JSON-Schema export and pin the wire shape.
@@ -467,7 +471,11 @@ poll-with-backoff using the `Retry-After` header.
   registered policy (currently only `telemetry`).
 - **STATE tables** (SCD2-versioned — `orders`, `positions`,
   `instruments`, etc.): `current = COUNT(known_to == sentinel)`
-  (exact) counts active SCD2 versions; `total` comes from the
+  counts active SCD2 versions — exact, except on PostgreSQL for
+  tables with a registered active-index estimate (currently
+  `candles`, via the `uq_candle_itf_open` partial index), where
+  `current` is a `pg_class.reltuples` planner estimate; on the
+  SQLite fixture it is always exact; `total` comes from the
   dialect-aware row-count primitive (PG planner estimate / SQLite
   exact); `closed = max(0, total - current)` is derived and clamped
   at 0 to absorb stale PostgreSQL planner estimates where the exact

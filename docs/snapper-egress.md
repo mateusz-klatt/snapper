@@ -21,8 +21,11 @@ This sidecar is part of the egress-multiplexer subsystem.
   is up" semantics.
 - **`MASTER_PASSWORD`** in the same `.env` the `snapper` (API) container
   uses. The sidecar reads encrypted `egress_tunnel_*_private_key`
-  settings via the same Fernet path; mismatched master passwords
-  silently mean "no tunnels load".
+  settings via the same Fernet path; a mismatched master password makes
+  the settings load raise (`Failed to decrypt encrypted setting`) and
+  the sidecar exits at startup, so the container crash-loops, never
+  reports healthy, and blocks `snapper` / `snapper-feed` via
+  `depends_on: service_healthy`.
 - **`DB_URL` and `ZMQ_BROKER_XSUB`** are both hard-required by the
   sidecar entrypoint (`snapper.egress.__main__`). The process exits with
   **code 2** at startup if either is missing: `DB_URL` lets the
@@ -67,7 +70,9 @@ public REST reads may route through that pool even when `feed_egress_enabled`
 is false, because the gate applies only to feed-publisher subprocess pools.
 The pool reserves a route per Kraken WS handshake. A route is quarantined — and
 the next handshake fails over to an alternate (or the direct fallback) —
-on any of the `QuarantineReason` values: `http-429` (handshake 429),
+on any of the `QuarantineReason` values: `http-429` (a handshake 429
+carrying a positive numeric `Retry-After` header; a 429 without one
+does not quarantine the route),
 `close-1015` (Cloudflare close frame), `http-connect-error` (REST
 connect failure via the pooled transport), and `ws-connect-error` (a WS
 connect-level failure — TCP/SOCKS timeout, connection refused, or a
@@ -381,9 +386,12 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
 2. Delete the three settings (`egress_tunnel_<id>`,
    `egress_tunnel_<id>_private_key`,
    `egress_tunnel_<id>_preshared_key`).
-3. Restart snapper-egress. The orchestrator's startup `bring_down`
-   pass (idempotent cleanup before bring_up) removes any stale
-   interface / ip-rule / routing-table entry left over.
+3. Restart snapper-egress. The stopping sidecar's shutdown pass brings
+   the removed tunnel's interface / ip-rule / routing-table entries
+   down, and the container restart recreates the network namespace; the
+   idempotent cleanup-before-bring_up in `wg_control.bring_up` only
+   re-cleans interfaces and routing tables of tunnels that are still
+   declared.
 
 ## Rotating private keys
 

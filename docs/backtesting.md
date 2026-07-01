@@ -67,8 +67,9 @@ points. The `process_time_batch` helper enforces this with a single
 simulation.
 
 Both engines honour the gate identically; the parity test
-`tests/integration/test_backtest_hardening.py::test_warmup_gating_parity_between_engines`
-asserts field-for-field equality.
+`tests/integration/test_backtest_hardening.py::TestHardeningIntegration::test_warmup_gating_parity_between_engines`
+asserts equality of the per-signal (signal_time, signal_type, instrument)
+tuples and per-point (point_time, equity) tuples between the two engines.
 
 ## Signal and fill artifacts
 
@@ -148,8 +149,8 @@ promoted from the `extra_metrics` JSON blob
 - **`max_drawdown_duration_seconds`** — longest peak-to-recovery
   window; unrecovered runs use the final suffix from last peak to
   end-of-curve. Degenerate input (fewer than two points, flat
-  curve, strictly monotone) returns `None` + a
-  `metric_warning` event.
+  curve, monotonically non-decreasing (no drawdown ever
+  observed)) returns `None` + a `metric_warning` event.
 - **`exposure_ratio`** — fraction of total run duration during
   which the portfolio held a non-zero position; leading-edge
   interval attribution. Zero-trade runs with non-zero duration

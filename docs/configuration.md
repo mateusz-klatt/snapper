@@ -163,6 +163,12 @@ The two probe variables flush one log line roughly every 10 seconds
 with per-stage `count`, `rate`, `p50`, `p95`, `p99`, and `max`.
 Leave them unset outside targeted throughput investigations.
 
+### Indicators
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `USE_TALIB` | `true` | Selects the indicator backend in `src/snapper/indicators/ta_lib_adapter.py` (read directly via `os.getenv` at module import). Values `true`/`1`/`yes` (case-insensitive) use the TA-Lib C library; any other value — or a failed TA-Lib import — falls back to the pure-Python RSI/MACD implementations. Not part of the `.env` allowlist (`KNOWN_ENV_KEYS` in `config/env_contract.py`), so set it as a process environment variable only — adding it to `.env` fails startup validation with `UnknownEnvKeyError`. |
+
 ## Database Settings
 
 Sensitive data is stored encrypted in the `settings` table. Wallet-scoped
@@ -575,10 +581,12 @@ Content-Type: application/json
 
 ## Environment Configuration
 
+The application always reads `.env` (`SettingsConfigDict(env_file=".env")` on `BootstrapSettingsLoader`); switch environments by editing the values in that file — notably `SNAPPER_ENV` — not by renaming it.
+
 ### Development
 
 ```bash
-# .env.development
+# .env — development values
 DB_URL=sqlite+aiosqlite:///./data/snapper.db
 SNAPPER_ENV=development
 SERVER_HOST=127.0.0.1
@@ -591,7 +599,7 @@ SERVER_FORWARDED_ALLOW_IPS=127.0.0.1
 ### Production
 
 ```bash
-# .env.production
+# .env — production values
 DB_URL=postgresql+asyncpg://user:pass@db.example.com/snapper
 SNAPPER_ENV=production
 MASTER_PASSWORD=<strong_random_password>

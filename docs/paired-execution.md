@@ -73,7 +73,7 @@ scanner re-creates it on the next cycle while the group remains exposed.
 ## Triage: read the incident
 
 ```bash
-curl -s -H "Authorization: Bearer $SNAPPER_PAT" \
+curl -s -H "Authorization: Bearer $SNAPPER_TOKEN" \
     "$SNAPPER_BASE_URL/api/paired-execution/incidents" | jq
 ```
 
@@ -88,6 +88,10 @@ per-leg exposure: `status`, `filled_signed_qty`, `compensated_signed_qty`,
 - A `broken` group with zero-fill legs (e.g. an assembly timeout) is NOT an
     incident — the guard deliberately leaves it free to re-assemble.
 - Requires `READ_POSITIONS`; non-admin callers see only their wallets.
+- Use an OPERATOR or ADMIN access token. An AI-delegate PAT (the only
+    PAT-style token Snapper mints, e.g. via `make mcp-pat`) can read
+    incidents — AI_DELEGATE holds `READ_POSITIONS` — but always gets `403`
+    on terminalize, because AI_DELEGATE lacks `MANAGE_PAIRED_EXECUTION`.
 
 ## Resolve at the venue
 
@@ -109,7 +113,7 @@ resolved manually.
 ## Attest: terminalize the group
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer $SNAPPER_PAT" \
+curl -s -X POST -H "Authorization: Bearer $SNAPPER_TOKEN" \
     "$SNAPPER_BASE_URL/api/paired-execution/groups/$GROUP_ID/terminalize" | jq
 ```
 
