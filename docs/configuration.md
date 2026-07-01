@@ -147,6 +147,9 @@ underlying snapshots and the retention window math.
 | -------- | ------- | ----------- |
 | `SYSTEM_METRICS_INTERVAL_SECONDS` | `5` | Cadence for the in-process system-metrics snapshotter |
 | `SYSTEM_METRICS_HISTORY_CAP` | `17280` | Maximum number of snapshots retained in memory (≈ 24 h at 5 s cadence) |
+| `SYSTEM_METRICS_DISK_FREE_WARN_BYTES` | `21474836480` | Free-byte warning threshold for the sampled data partition |
+| `SYSTEM_METRICS_DISK_FREE_CRIT_BYTES` | `10737418240` | Free-byte critical threshold for the sampled data partition |
+| `SYSTEM_METRICS_DISK_MOUNT_PATH` | `/` | Mount path sampled for disk-pressure REST metrics and host/disk heartbeats |
 | `RETENTION_INTERVAL_SECONDS` | `3600` | Cadence for the retention archive+purge tick |
 | `RETENTION_DISABLED` | `false` | Disable the retention loop entirely (still allow on-demand archive via CLI) |
 | `RETENTION_DRY_RUN` | `false` | Compute the window and counts but skip writes/purges |
@@ -428,6 +431,9 @@ TRADE_COMMAND_DISPATCH_TTL_S=30.0
 # Observability pipeline (system-metrics snapshotter)
 SYSTEM_METRICS_INTERVAL_SECONDS=5
 SYSTEM_METRICS_HISTORY_CAP=17280
+SYSTEM_METRICS_DISK_FREE_WARN_BYTES=21474836480
+SYSTEM_METRICS_DISK_FREE_CRIT_BYTES=10737418240
+SYSTEM_METRICS_DISK_MOUNT_PATH=/
 
 # Retention policy framework
 RETENTION_INTERVAL_SECONDS=3600

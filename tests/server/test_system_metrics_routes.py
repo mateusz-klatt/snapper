@@ -658,6 +658,35 @@ class TestStartSystemMetricsSnapshotterHelper:
         assert started.await_count == 1
         assert isinstance(app.state.system_metrics_snapshotter, SucceedingSnapshotter)
 
+    @pytest.mark.asyncio
+    async def test_start_wires_publisher_when_provided(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Production startup passes the shared bus publisher to the snapshotter."""
+        publisher = MagicMock()
+        constructed_publishers: list[object | None] = []
+
+        class SucceedingSnapshotter:
+            """Stand-in that records constructor publisher injection."""
+
+            def __init__(self, *, msg_publisher: object | None = None) -> None:
+                """Capture the publisher passed by the startup helper."""
+                constructed_publishers.append(msg_publisher)
+
+            async def start(self) -> None:
+                """Complete startup without doing real I/O."""
+
+        monkeypatch.setattr(
+            "snapper.server.app.SystemMetricsSnapshotter",
+            SucceedingSnapshotter,
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        await _start_system_metrics_snapshotter(app, msg_publisher=publisher)
+
+        assert constructed_publishers == [publisher]
+        assert isinstance(app.state.system_metrics_snapshotter, SucceedingSnapshotter)
+
 
 class TestStopSystemMetricsSnapshotterHelper:
     """Lifespan shutdown helper — tolerates partial-init."""

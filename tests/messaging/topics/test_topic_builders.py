@@ -314,6 +314,11 @@ class TestHeartbeatTopic:
         result = heartbeat_topic("strategy", "macd_btc_1h")
         assert result == "system.heartbeats.strategy.macd_btc_1h"
 
+    def test_host_disk_heartbeat(self) -> None:
+        """Verify host disk heartbeat topic builds correctly."""
+        result = heartbeat_topic("host", "disk")
+        assert result == "system.heartbeats.host.disk"
+
     def test_executor_heartbeat_with_wallet_short_appends_5th_segment(self) -> None:
         """Per-wallet executor heartbeat appends wallet_short.
 

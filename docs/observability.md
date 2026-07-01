@@ -62,7 +62,9 @@ the application continues to serve other endpoints.
 
 `SystemMetricsSnapshotter.start()` takes one eager synchronous sample
 BEFORE returning, so the first request after lifespan startup completes
-hits a populated buffer.
+hits a populated buffer. When the API process has its ZMQ publisher
+wired, that same eager sample also publishes the first
+`system.heartbeats.host.disk` heartbeat.
 
 ### Notification delivery metrics
 
@@ -168,6 +170,28 @@ the leading indicator of a thread leak or fd leak.
 | `pool_size`                 | int \| null | Reserved for future pool instrumentation. Currently always `null`; the sampler does not yet reflect the SQLAlchemy queue pool. |
 | `pool_checked_out`          | int \| null | Reserved for future pool instrumentation. Currently always `null`. |
 
+### `disk`
+
+The snapshotter samples the configured data-partition mount on every
+tick and exposes the counters through the REST snapshot. The API
+process also publishes the same status as a `system.heartbeats.host.disk`
+`HeartbeatData` frame when its shared ZMQ publisher is available. The
+existing `critical_system_error` rule consumes that heartbeat, gates on
+three consecutive non-HEALTHY frames in its rolling window, dedups by
+host/disk/hour, and fans out to administrators with
+`read:system_status`.
+
+| Field             | Type                          | Description |
+|-------------------|-------------------------------|-------------|
+| `mount_path`      | str                           | Mount path passed to `shutil.disk_usage`. |
+| `total_bytes`     | int \| null                   | Total bytes on the mount, or `null` if the mount could not be sampled. |
+| `used_bytes`      | int \| null                   | Used bytes on the mount, or `null` on sampling failure. |
+| `free_bytes`      | int \| null                   | Free bytes on the mount, or `null` on sampling failure. |
+| `percent_used`    | float \| null                 | Used percentage, or `null` on sampling failure. |
+| `disk_low`        | bool                          | `true` when free bytes are below the warning threshold or the critical threshold. |
+| `disk_critical`   | bool                          | `true` when free bytes are below the critical threshold. |
+| `status`          | `healthy` \| `warning` \| `error` | `warning` below the warning threshold, `error` below the critical threshold, and `warning` when sampling the mount raises `OSError`. |
+
 ### Top-level flags
 
 | Field                 | Type                       | Description |
@@ -178,15 +202,18 @@ the leading indicator of a thread leak or fd leak.
 
 ## Configuration
 
-The snapshotter reads two environment variables directly (no
-`AppSettings` extension this iteration). Defaults match the in-code
+The snapshotter reads its environment variables directly (no
+`AppSettings` extension). Defaults match the in-code
 constants in
 [`snapper.application.system_metrics.snapshotter`](../src/snapper/application/system_metrics/snapshotter.py).
 
-| Variable                          | Default | Effect |
-|-----------------------------------|---------|--------|
-| `SYSTEM_METRICS_INTERVAL_SECONDS` | `5`     | Seconds between sampler ticks. Empty / unparseable / non-positive falls back to the default. |
-| `SYSTEM_METRICS_HISTORY_CAP`      | `17280` | Ring buffer cap (snapshot count). 17280 ≈ 24h at the default 5s interval. Empty / unparseable / non-positive falls back to the default. |
+| Variable                               | Default       | Effect |
+|----------------------------------------|---------------|--------|
+| `SYSTEM_METRICS_INTERVAL_SECONDS`      | `5`           | Seconds between sampler ticks. Empty / unparseable / non-positive falls back to the default. |
+| `SYSTEM_METRICS_HISTORY_CAP`           | `17280`       | Ring buffer cap (snapshot count). 17280 ≈ 24h at the default 5s interval. Empty / unparseable / non-positive falls back to the default. |
+| `SYSTEM_METRICS_DISK_FREE_WARN_BYTES`  | `21474836480` | Free-byte threshold below which disk status becomes `warning`. |
+| `SYSTEM_METRICS_DISK_FREE_CRIT_BYTES`  | `10737418240` | Free-byte threshold below which disk status becomes `error`. |
+| `SYSTEM_METRICS_DISK_MOUNT_PATH`       | `/`           | Mount path sampled by `shutil.disk_usage`. Empty falls back to `/`. |
 
 Operators can drop the ring buffer cap to reduce resident memory
 (720 ≈ 1h ≈ 360 KB).

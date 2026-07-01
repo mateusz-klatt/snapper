@@ -582,6 +582,8 @@ def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
     - ``system.heartbeats.executor.{exchange}.{wallet_short}`` (5 seg) —
       per-wallet executor instance. The 5th segment must be
       exactly 12 lowercase hex characters.
+    - ``system.heartbeats.host.disk`` (4 seg) — API host disk-pressure
+      heartbeat emitted by the system metrics snapshotter.
     - ``system.heartbeats.feed.{exchange}`` or
       ``system.heartbeats.feed.paper.{source}`` — delegated to
       :func:`_validate_feed_heartbeat`.
@@ -619,6 +621,15 @@ def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
             False,
             "system.heartbeats.executor requires 4 segments (template) "
             "or 5 segments (per-wallet instance with wallet_short)",
+        )
+    if component_type == "host":
+        if len(segments) == 4 and segments[3] == "disk":
+            return True, ""
+        if len(segments) == 4:
+            return False, "system.heartbeats.host supports only system.heartbeats.host.disk"
+        return (
+            False,
+            "system.heartbeats.host requires exactly 4 segments: system.heartbeats.host.disk",
         )
     if component_type == "feed":
         return _validate_feed_heartbeat(segments)

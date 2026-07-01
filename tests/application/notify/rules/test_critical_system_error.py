@@ -19,14 +19,14 @@ def _base_now() -> datetime:
     return datetime(2026, 4, 24, 12, 0, 0, tzinfo=UTC)
 
 
-def _heartbeat(status: str = "warning") -> bytes:
+def _heartbeat(status: str = "warning", component: str = "executor") -> bytes:
     """Build a HeartbeatData payload matching ``system.heartbeats.*`` frames."""
     hb = HeartbeatData(
         session_id="s1",
         sequence_id=1,
         public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
         timestamp=_base_now(),
-        component="executor",
+        component=component,
         sequence=1,
         status=status,
         lag_ms=0,
@@ -84,6 +84,28 @@ class TestCriticalSystemErrorRule:
         assert payload["title_loc_args"] == ["executor"]
         assert payload["body_loc_key"] == "alerts.body.critical_system_error"
         assert payload["body_loc_args"] == ["executor", "kraken", "warning", 3]
+
+    @pytest.mark.asyncio
+    async def test_host_disk_nonhealthy_heartbeat_fires_fan_out(self) -> None:
+        """The existing rule accepts host/disk without a component allowlist."""
+        rule = CriticalSystemErrorRule()
+        repo = MagicMock()
+        repo.list_users_with_permission = AsyncMock(return_value=["admin-1"])
+        repo.list_alert_events_with_dedup_key = AsyncMock(return_value=[])
+        now = _base_now()
+        topic = "system.heartbeats.host.disk"
+        payload = _heartbeat(status="error", component="host.disk")
+
+        await rule.evaluate(topic, payload, repo, now)
+        await rule.evaluate(topic, payload, repo, now + timedelta(seconds=30))
+        rows = await rule.evaluate(topic, payload, repo, now + timedelta(seconds=60))
+
+        assert len(rows) == 1
+        assert rows[0]["payload"] is not None
+        assert rows[0]["payload"]["body_loc_args"] == ["host", "disk", "error", 3]
+        dedup_key = rows[0]["dedup_key"]
+        assert dedup_key is not None
+        assert dedup_key.startswith("sys_error.host.disk.")
 
     @pytest.mark.asyncio
     async def test_healthy_heartbeat_resets_window(self) -> None:

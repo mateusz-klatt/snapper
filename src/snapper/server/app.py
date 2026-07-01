@@ -459,7 +459,11 @@ async def _warn_on_tradfi_near_expiry(settings: AppSettings) -> None:
         logger.warning("TradFi expiry check failed (non-fatal): {}", exc)
 
 
-async def _start_system_metrics_snapshotter(app: FastAPI) -> None:
+async def _start_system_metrics_snapshotter(
+    app: FastAPI,
+    *,
+    msg_publisher: MessagePublisher | None = None,
+) -> None:
     """Build + start the :class:`SystemMetricsSnapshotter` singleton.
 
     The attribute is assigned to ``app.state`` ONLY after a successful
@@ -473,9 +477,14 @@ async def _start_system_metrics_snapshotter(app: FastAPI) -> None:
     Args:
         app: FastAPI application instance whose ``state`` will hold the
             singleton on successful start.
+        msg_publisher: Optional shared ZMQ publisher used for host disk
+            heartbeats. ``None`` preserves metrics-only startup.
     """
     try:
-        snapshotter = SystemMetricsSnapshotter()
+        if msg_publisher is None:
+            snapshotter = SystemMetricsSnapshotter()
+        else:
+            snapshotter = SystemMetricsSnapshotter(msg_publisher=msg_publisher)
         await snapshotter.start()
     except Exception:
         logger.exception(
@@ -913,7 +922,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         app.state.plan_executor = plan_executor
         manager_ref: WebSocketConnectionManager = app.state.manager
         app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
-        await _start_system_metrics_snapshotter(app)
+        await _start_system_metrics_snapshotter(app, msg_publisher=user_publisher)
         await _start_retention_scheduler(app, db_url=settings.db_url)
         await _start_db_stats_snapshotter(app, db_url=settings.db_url)
         await _start_remote_summary_cache(

@@ -39,6 +39,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Final
 from typing import Protocol
+from uuid import uuid7
 
 import psutil
 
@@ -57,9 +58,12 @@ from snapper.application.system_metrics.snapshot_types import ProcessMetrics
 from snapper.application.system_metrics.snapshot_types import SaturationMetrics
 from snapper.application.system_metrics.snapshot_types import SystemMetricsSnapshot
 from snapper.application.system_metrics.tracemalloc_controller import TracemallocController
+from snapper.core.json_types import JsonObject
 from snapper.core.types import HealthStatus
 from snapper.core.types import HealthStatusEnum
 from snapper.data.repository import _live_aiosqlite_connections
+from snapper.messaging.schemas.data import HeartbeatData
+from snapper.messaging.topics.builders import heartbeat_topic
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +78,28 @@ class _ResourceModule(Protocol):
 
     def getrlimit(self, resource: int) -> tuple[int, int]:
         """Return soft and hard process limits for the given resource."""
+
+
+class _HeartbeatSequenceTracker(Protocol):
+    """Subset of ``SequenceTracker`` needed for heartbeat provenance."""
+
+    @property
+    def session_id(self) -> str:
+        """Return the publisher session id."""
+
+    def next_sequence(self, stream: str) -> int:
+        """Return the next transport sequence for a topic."""
+
+
+class _HeartbeatPublisher(Protocol):
+    """Subset of ``MessagePublisher`` needed by the snapshotter."""
+
+    @property
+    def tracker(self) -> _HeartbeatSequenceTracker:
+        """Return the publisher's shared sequence tracker."""
+
+    async def send(self, stream_key: str, data: HeartbeatData) -> None:
+        """Send one complete heartbeat frame."""
 
 
 _resource: _ResourceModule | None = None
@@ -93,6 +119,8 @@ _HISTORY_CAP_ENV_VAR: Final = "SYSTEM_METRICS_HISTORY_CAP"
 SYSTEM_METRICS_DISK_FREE_WARN_BYTES: Final = "SYSTEM_METRICS_DISK_FREE_WARN_BYTES"
 SYSTEM_METRICS_DISK_FREE_CRIT_BYTES: Final = "SYSTEM_METRICS_DISK_FREE_CRIT_BYTES"
 SYSTEM_METRICS_DISK_MOUNT_PATH: Final = "SYSTEM_METRICS_DISK_MOUNT_PATH"
+_DISK_HEARTBEAT_COMPONENT: Final = "host"
+_DISK_HEARTBEAT_NAME: Final = "disk"
 ENV_VARS: Final[frozenset[str]] = frozenset(
     {
         _INTERVAL_ENV_VAR,
@@ -185,6 +213,7 @@ class SystemMetricsSnapshotter:
         process: psutil.Process | None = None,
         tracemalloc_controller: TracemallocController | None = None,
         history_buffer: MetricsRingBuffer | None = None,
+        msg_publisher: _HeartbeatPublisher | None = None,
     ) -> None:
         """Wire dependencies.
 
@@ -212,6 +241,9 @@ class SystemMetricsSnapshotter:
                 builds a fresh one.
             history_buffer: Override for tests; ``None`` builds one
                 with ``history_cap``.
+            msg_publisher: Optional ZMQ publisher for host disk heartbeat
+                frames. ``None`` disables bus publication while keeping
+                local metrics and logs intact.
         """
         if interval_seconds is None:
             interval_seconds = _resolve_interval(os.environ.get(_INTERVAL_ENV_VAR))
@@ -238,6 +270,8 @@ class SystemMetricsSnapshotter:
         self._process = process or psutil.Process()
         self._tracemalloc = tracemalloc_controller or TracemallocController()
         self._history = history_buffer or MetricsRingBuffer(maxlen=history_cap)
+        self._msg_publisher = msg_publisher
+        self._disk_heartbeat_sequence = 0
         self._sampler_task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
         self._start_time = monotonic()
@@ -272,6 +306,7 @@ class SystemMetricsSnapshotter:
         snapshot = self._build_snapshot()
         await self._history.append(snapshot)
         self._log_disk_pressure(snapshot["disk"])
+        await self._publish_disk_heartbeat(snapshot["disk"])
         self._stopping.clear()
         self._sampler_task = asyncio.create_task(self._sampler_loop())
 
@@ -328,6 +363,39 @@ class SystemMetricsSnapshotter:
             snapshot = self._build_snapshot()
             await self._history.append(snapshot)
             self._log_disk_pressure(snapshot["disk"])
+            await self._publish_disk_heartbeat(snapshot["disk"])
+
+    async def _publish_disk_heartbeat(self, disk: DiskMetrics) -> None:
+        """Publish the host/disk heartbeat into the existing alert pipeline."""
+        publisher = self._msg_publisher
+        if publisher is None:
+            return
+        topic = heartbeat_topic(_DISK_HEARTBEAT_COMPONENT, _DISK_HEARTBEAT_NAME)
+        try:
+            tracker = publisher.tracker
+            self._disk_heartbeat_sequence += 1
+            meta: JsonObject = {
+                "mount_path": disk["mount_path"],
+                "free_bytes": disk["free_bytes"],
+                "total_bytes": disk["total_bytes"],
+                "percent_used": disk["percent_used"],
+                "disk_low": disk["disk_low"],
+                "disk_critical": disk["disk_critical"],
+            }
+            frame = HeartbeatData(
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence(topic),
+                component=f"{_DISK_HEARTBEAT_COMPONENT}.{_DISK_HEARTBEAT_NAME}",
+                sequence=self._disk_heartbeat_sequence,
+                status=disk["status"],
+                lag_ms=0,
+                meta=meta,
+            )
+            await publisher.send(topic, frame)
+        except Exception as exc:
+            logger.error("disk heartbeat publish failed: %r", exc)
 
     def _build_snapshot(self) -> SystemMetricsSnapshot:
         """Sample every metric group + assemble the snapshot.

@@ -123,6 +123,7 @@ database artifacts used by the trade runtime. They are not additional ZMQ topics
 | `system.heartbeats.executor.{exchange}.{wallet_short}` | Per-wallet executor heartbeat (5 segments). `wallet_short` is the **last** 12 lowercase hex characters of the wallet UUID (see `snapper.core.wallet_short`) |
 | `system.heartbeats.strategy.{name}` | Strategy heartbeat (e.g. `strategy.rsi_btc_1h`) |
 | `system.heartbeats.feed.{exchange}` | Feed heartbeat (e.g. `feed.kraken`, `feed.paper.kraken`) |
+| `system.heartbeats.host.disk` | API host disk-pressure heartbeat from `SystemMetricsSnapshotter` |
 | `system.egress.snapshot` | Read-only process-local egress pool snapshot for API aggregation |
 | `system.egress.transfer` | Read-only snapper-egress WireGuard transfer samples for API route load |
 | `system.settings` | Configuration change notifications |
@@ -130,10 +131,17 @@ database artifacts used by the trade runtime. They are not additional ZMQ topics
 
 Heartbeat `component` values use dot notation matching the topic path after
 `system.heartbeats.`: `executor.kraken`, `executor.kraken.019d6ca45f2e`,
-`strategy.rsi_btc_1h`, `feed.kraken`, `feed.paper.kraken`. The per-wallet
-executor heartbeat envelope additionally carries `meta.wallet_public_id` so
+`strategy.rsi_btc_1h`, `feed.kraken`, `feed.paper.kraken`, `host.disk`.
+The per-wallet executor heartbeat envelope additionally carries
+`meta.wallet_public_id` so
 subscribers that prefix-match the 4-segment parent topic can still
 disambiguate by reading the payload.
+
+The host disk heartbeat reuses the existing `critical_system_error`
+pipeline. The snapshotter publishes HEALTHY, WARNING, and ERROR frames
+every tick when the API publisher is wired; the notify rule owns the
+three-consecutive non-HEALTHY gate, per-admin fan-out, rolling cooldown,
+and dedup.
 
 Pool-bearing processes publish `system.egress.snapshot` on the heartbeat
 cadence with an `EgressPoolSnapshotEventData` payload. The payload

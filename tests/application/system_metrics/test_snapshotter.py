@@ -13,6 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
@@ -39,6 +40,9 @@ from snapper.application.system_metrics.snapshotter import _resolve_positive_byt
 from snapper.application.system_metrics.tracemalloc_controller import TracemallocController
 from snapper.core.types import HealthStatus
 from snapper.core.types import HealthStatusEnum
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import HeartbeatData
 
 
 class _FakeResourceModule:
@@ -98,6 +102,13 @@ class TestSnapshotter:
         controller.stop = AsyncMock()
         return controller
 
+    def _make_msg_publisher(self) -> MagicMock:
+        """Return a mock MessagePublisher with real sequence tracking."""
+        publisher = MagicMock()
+        publisher.tracker = SequenceTracker()
+        publisher.send = AsyncMock()
+        return publisher
+
     def _make_snapshotter(
         self,
         *,
@@ -109,6 +120,7 @@ class TestSnapshotter:
         process: MagicMock | None = None,
         tracemalloc_controller: MagicMock | None = None,
         history_buffer: MetricsRingBuffer | None = None,
+        msg_publisher: MessagePublisher | None = None,
     ) -> SystemMetricsSnapshotter:
         return SystemMetricsSnapshotter(
             interval_seconds=interval_seconds,
@@ -120,6 +132,7 @@ class TestSnapshotter:
             tracemalloc_controller=tracemalloc_controller
             or self._make_tracemalloc(active=False, traced=None),
             history_buffer=history_buffer,
+            msg_publisher=msg_publisher,
         )
 
     def _snapshot(self, seconds: int) -> SystemMetricsSnapshot:
@@ -327,6 +340,87 @@ class TestSnapshotter:
 
         assert latest is not None
         assert await metrics._history.size() == 1
+
+    async def test_start_publishes_eager_disk_heartbeat(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cold-start sample publishes host/disk when a publisher is wired."""
+        publisher = self._make_msg_publisher()
+        metrics = self._make_snapshotter(
+            interval_seconds=30.0,
+            msg_publisher=cast(MessagePublisher, publisher),
+        )
+        disk = self._disk_metrics(HealthStatusEnum.WARNING)
+        sample = self._snapshot(1)
+        sample["disk"] = disk
+
+        def build_snapshot() -> SystemMetricsSnapshot:
+            """Return the prebuilt warning snapshot."""
+            return sample
+
+        monkeypatch.setattr(metrics, "_build_snapshot", build_snapshot)
+
+        await metrics.start()
+        await metrics.stop()
+
+        publisher.send.assert_awaited_once()
+        topic, frame = publisher.send.await_args.args
+        assert topic == "system.heartbeats.host.disk"
+        assert isinstance(frame, HeartbeatData)
+        assert frame.component == "host.disk"
+        assert frame.status == HealthStatusEnum.WARNING
+        assert frame.sequence == 1
+        assert frame.sequence_id == 1
+        assert frame.session_id == publisher.tracker.session_id
+        assert frame.lag_ms == 0
+        assert frame.meta["mount_path"] == "/"
+        assert frame.meta["disk_low"] is True
+
+    async def test_sampler_loop_publishes_disk_heartbeat_each_tick(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The background sampler publishes a host/disk frame per tick."""
+
+        class OneTickStopper:
+            """Return ``False`` for one full sampler iteration, then stop."""
+
+            def __init__(self) -> None:
+                """Initialize the call counter."""
+                self.calls = 0
+
+            def is_set(self) -> bool:
+                """Stop after the top of the second loop iteration."""
+                self.calls += 1
+                return self.calls > 2
+
+        async def no_sleep(delay: float) -> None:
+            """Replace real sleep so the sampler tick is deterministic."""
+
+        publisher = self._make_msg_publisher()
+        metrics = self._make_snapshotter(
+            interval_seconds=30.0,
+            msg_publisher=cast(MessagePublisher, publisher),
+        )
+        disk = self._disk_metrics(HealthStatusEnum.ERROR)
+        sample = self._snapshot(2)
+        sample["disk"] = disk
+
+        def build_snapshot() -> SystemMetricsSnapshot:
+            """Return the prebuilt error snapshot."""
+            return sample
+
+        monkeypatch.setattr(snapshotter.asyncio, "sleep", no_sleep)
+        monkeypatch.setattr(metrics, "_build_snapshot", build_snapshot)
+        monkeypatch.setattr(metrics, "_stopping", OneTickStopper())
+
+        await metrics._sampler_loop()
+
+        publisher.send.assert_awaited_once()
+        topic, frame = publisher.send.await_args.args
+        assert topic == "system.heartbeats.host.disk"
+        assert isinstance(frame, HeartbeatData)
+        assert frame.status == HealthStatusEnum.ERROR
+        assert frame.sequence == 1
 
     async def test_sampler_loop_appends_additional_snapshots(
         self, monkeypatch: pytest.MonkeyPatch
@@ -538,6 +632,51 @@ class TestSnapshotter:
             disk_critical=False,
             status=HealthStatusEnum.WARNING,
         )
+
+    async def test_publish_disk_heartbeat_without_publisher_is_noop(self) -> None:
+        """Publisher-less snapshotters keep metrics local and emit no frame."""
+        metrics = self._make_snapshotter()
+
+        await metrics._publish_disk_heartbeat(self._disk_metrics(HealthStatusEnum.HEALTHY))
+
+        assert metrics._disk_heartbeat_sequence == 0
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            HealthStatusEnum.HEALTHY,
+            HealthStatusEnum.WARNING,
+            HealthStatusEnum.ERROR,
+        ],
+    )
+    async def test_publish_disk_heartbeat_carries_disk_status(self, status: HealthStatus) -> None:
+        """Healthy, warning, and error states are preserved on the bus frame."""
+        publisher = self._make_msg_publisher()
+        metrics = self._make_snapshotter(msg_publisher=cast(MessagePublisher, publisher))
+
+        await metrics._publish_disk_heartbeat(self._disk_metrics(status))
+
+        publisher.send.assert_awaited_once()
+        topic, frame = publisher.send.await_args.args
+        assert topic == "system.heartbeats.host.disk"
+        assert isinstance(frame, HeartbeatData)
+        assert frame.status == status
+        assert frame.component == "host.disk"
+        assert frame.sequence == 1
+
+    async def test_publish_disk_heartbeat_send_failure_is_nonfatal(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A ZMQ send failure does not break metrics sampling."""
+        publisher = self._make_msg_publisher()
+        publisher.send = AsyncMock(side_effect=RuntimeError("send failed"))
+        metrics = self._make_snapshotter(msg_publisher=cast(MessagePublisher, publisher))
+
+        with caplog.at_level(logging.ERROR, logger=snapshotter.__name__):
+            await metrics._publish_disk_heartbeat(self._disk_metrics(HealthStatusEnum.ERROR))
+
+        assert metrics._disk_heartbeat_sequence == 1
+        assert "disk heartbeat publish failed" in caplog.text
 
     def test_log_disk_pressure_ignores_healthy_status(
         self, caplog: pytest.LogCaptureFixture

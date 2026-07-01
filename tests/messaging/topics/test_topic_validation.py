@@ -1162,6 +1162,31 @@ class TestSystemTopicValidation:
         assert valid, f"Failed for feed heartbeat: {_err}"
         assert _err == ""
 
+    def test_hierarchical_heartbeat_host_disk(self) -> None:
+        """Test hierarchical heartbeat host disk topic."""
+        valid, _err = validate_topic("system.heartbeats.host.disk")
+        assert valid, f"Failed for host disk heartbeat: {_err}"
+        assert _err == ""
+
+    def test_hierarchical_heartbeat_host_rejects_unknown_name(self) -> None:
+        """Host heartbeats are allowlisted to disk pressure only."""
+        valid, _err = validate_topic("system.heartbeats.host.memory")
+        assert not valid
+        assert "host.disk" in _err
+
+    @pytest.mark.parametrize(
+        "topic",
+        [
+            "system.heartbeats.host",
+            "system.heartbeats.host.disk.extra",
+        ],
+    )
+    def test_hierarchical_heartbeat_host_requires_exact_disk_shape(self, topic: str) -> None:
+        """Host disk heartbeat requires the exact four-segment shape."""
+        valid, _err = validate_topic(topic)
+        assert not valid
+        assert "exactly 4 segments" in _err
+
     def test_hierarchical_heartbeat_feed_with_symbol_rejected(self) -> None:
         """Test non-paper feed heartbeat with extra segment is rejected.
 
@@ -3870,6 +3895,12 @@ class TestBacktestTopicFamily:
         valid, _ = _validate_backtest_topic(f"backtest.{self._WALLET}.{self._RUN}.started.extra")
         assert not valid
 
+    def test_rejects_wrong_backtest_category(self) -> None:
+        """A 4-segment topic with the wrong root category is rejected."""
+        valid, err = _validate_backtest_topic(f"replay.{self._WALLET}.{self._RUN}.started")
+        assert not valid
+        assert "Expected 'backtest' category" in err
+
     def test_rejects_non_uuid7_wallet_segment(self) -> None:
         """Malformed wallet segment fails UUID7 check."""
         valid, err = _validate_backtest_topic(f"backtest.not-a-uuid.{self._RUN}.started")
@@ -3897,6 +3928,30 @@ class TestBacktestTopicFamily:
         valid, err = _validate_backtest_prefix("backtest.not-a-uuid.")
         assert not valid
         assert "wallet" in err.lower()
+
+    def test_prefix_rejects_malformed_run(self) -> None:
+        """Non-UUID7 run segment in prefix is rejected."""
+        valid, err = _validate_backtest_prefix(f"backtest.{self._WALLET}.not-a-uuid.")
+        assert not valid
+        assert "run" in err.lower()
+
+    def test_prefix_requires_trailing_dot(self) -> None:
+        """Backtest prefixes must end with a dot."""
+        valid, err = _validate_backtest_prefix(f"backtest.{self._WALLET}")
+        assert not valid
+        assert "end with dot" in err
+
+    def test_prefix_rejects_empty_segment(self) -> None:
+        """Backtest prefixes cannot contain empty middle segments."""
+        valid, err = _validate_backtest_prefix("backtest..")
+        assert not valid
+        assert "cannot be empty" in err
+
+    def test_prefix_rejects_wrong_category(self) -> None:
+        """Backtest prefixes must start with the backtest root segment."""
+        valid, err = _validate_backtest_prefix(f"replay.{self._WALLET}.")
+        assert not valid
+        assert "Expected 'backtest' prefix" in err
 
     def test_prefix_rejects_too_many_segments(self) -> None:
         """More than 3 segments in a prefix is rejected."""
