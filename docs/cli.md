@@ -854,7 +854,7 @@ snapper polygon-backfill-grouped [OPTIONS]
 | `--market` / `-m` | str | `crypto` | Market type (`crypto`, `stocks`, `fx`) |
 | `--days` / `-d` | int | `3` | Number of recent days to fetch |
 | `--locale` / `-l` | str | `global` | Market locale (`global`, `us`) |
-| `--csv` / `--no-csv` | flag | `--csv` | Save data to CSV.gz files |
+| `--csv` / `--no-csv` | flag | `--csv` | Save data to CSV files |
 | `--adjusted` / `--unadjusted` | flag | `--adjusted` | Use adjusted prices |
 
 ## Data Archive

@@ -349,8 +349,9 @@ candles with the defaults above, and
 trades daily FET-USD/RENDER-USD paper candles with a screened hedge
 ratio (`beta=0.257463`, `lookback_window=60`). It opts into the
 A3-smoke Polygon crypto daily warm-up and sets `buffer_size=100`, so a
-fresh default process can prefill the 60-bar spread window when the
-local cache is present.
+fresh default process can prefill the 60-bar spread window from the
+persisted 1d history (falling back to the local Polygon crypto cache
+only when the DB plane is short for a leg).
 
 ## Proprietary strategies
 
@@ -395,7 +396,16 @@ Each active leg exits by one of three paths:
 
 1.  Favourable move reaches `tp_pct`: exit the current leg. If another
     leg remains, the callback returns `[exit_current, enter_next]` so the
-    handoff uses the multi-leg list return contract.
+    handoff uses the multi-leg list return contract. Note:
+    `ParlayCascade` does not currently declare
+    `PAIRED_EXECUTION_POLICY`, so this two-signal handoff only works on
+    the backtest recording path; on the live/paper ZMQ path
+    `BaseStrategy` fail-closes an undeclared multi-leg group with
+    `ValueError` at emission and the strategy's listen loop stops (see
+    "Signal pairing semantics"). Declaring
+    `PairedExecutionPolicyEnum.SEQUENTIAL_HANDOFF` on the class is
+    required before the registered paper process
+    (`parlay_cascade_btc_eth_sol`) can emit the handoff.
 2.  Adverse move reaches `sl_pct`: exit the current leg, mark the
     cascade busted, and start the cooldown.
 3.  `max_bars_per_leg` candles elapse: exit the current leg as a
@@ -905,7 +915,12 @@ Snapper enables strategies to subscribe to a market-data-only feed
 (``SymbolExchangeCapability.can_trade=False``) and emit signals whose
 target is an execution-capable instrument on a different venue.
 Kraken FCM index futures (``kraken_equities``) are the primary driver:
-they publish ~10-minute-delayed candles + ticks but have no order API.
+they have no order API, and the default public feed publishes
+~10-minute-delayed candles + ticks. When the
+``kraken_equities_realtime_ws_enabled`` DB setting is on and the
+authenticated realtime WS token mint succeeds, the feed is realtime
+instead; on any token/auth failure the publisher falls back to the
+public delayed feed. Ticks carry ``TickData.is_delayed`` accordingly.
 
 ### Rules
 

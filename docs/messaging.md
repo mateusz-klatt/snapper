@@ -260,7 +260,8 @@ background drain loop after broker outages; the same drain also runs once
 at startup, so decisions that never published before a restart replay
 from their durable rows. A row whose third publish attempt fails is
 marked `failed` terminally. The notify sidecar subscribes to turn
-stop-loss / take-profit fires into iOS pushes.
+stop-loss / trailing-stop fires into iOS pushes (take-profit fires are
+explicitly excluded as non-loss outcomes).
 
 | Topic | Description |
 | ----- | ----------- |

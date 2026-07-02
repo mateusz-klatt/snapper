@@ -497,12 +497,22 @@ OpenAPI route list; its tool contract is documented in
   for reads. Either way, it does not stamp provenance onto the response items
   beyond what was stored at write time.
 
-- **Mutations (POST)** — All mutations use command-style POST with a
-  `PayloadRequest` envelope carrying provenance (`public_id`, `session_id`,
-  `sequence_id`, `timestamp`) and domain intent in `payload`. The
-  server-side `ClientProvenanceMiddleware` extracts these fields, emits a
-  structured info log, and runs a per-session `GapDetector` to warn on
-  sequence gaps. Gaps are logged as warnings but never reject requests.
+- **Mutations (POST/PATCH/DELETE)** — Most mutation bodies use
+  command-style `PayloadRequest` envelopes carrying provenance
+  (`public_id`, `session_id`, `sequence_id`, `timestamp`) and domain
+  intent in `payload`; most write routes follow the `POST + verb`
+  convention, with a small number of PATCH surfaces (AI delegate caps,
+  device prefs, alert defaults) using the same envelope. Body-less or
+  query-only mutations — for example
+  `DELETE /api/devices/{device_public_id}`,
+  `POST /api/processes/{name}/stop`,
+  `POST /api/paired-execution/groups/{group_public_id}/terminalize`, and
+  the tracemalloc start/stop routes — carry no client envelope; their
+  control rows record server-side provenance with no extracted payload.
+  The server-side `ClientProvenanceMiddleware` extracts envelope fields
+  when a request body is present, emits a structured info log, and runs
+  a per-session `GapDetector` to warn on sequence gaps. Gaps are logged
+  as warnings but never reject requests.
 
 ### ClientProvenanceMiddleware
 
@@ -568,7 +578,7 @@ exhausting its restart budget, in which case `"error"` is reported.
             "active_clients": 3
         },
         "topics": {
-            "active": 3
+            "active": 8
         },
         "gap_detection": {
             "bridge": {
@@ -1368,7 +1378,7 @@ diagnosing orphaned cycles (open cycles without a matching trading engine).
 
 **Response (200):** `PositionCycleListResponse` envelope whose payload
 items carry `cycle_public_id`, `shard_key`, `instrument_public_id`,
-`exchange`, `mode`, `wallet_public_id`, `direction`, `max_qty`
+`exchange`, `mode`, `wallet_public_id`, `operator_public_id`, `direction`, `max_qty`
 (per-cycle peak, not lifetime), `opened_at`, and `age_hours`.
 
 ### POST /api/position-cycles/close-orphan
@@ -1577,7 +1587,7 @@ fields and this object under `payload`.
     },
     "config": {
         "broker_xpub": "tcp://127.0.0.1:7501",
-        "heartbeat_interval_ms": 15000
+        "heartbeat_interval_ms": 1000
     }
 }
 ```
@@ -2037,10 +2047,16 @@ List configured strategy processes with lightweight status. Requires
     "payload": [
         {
             "type": "strategy_process",
+            "public_id": "<uuid7>",
+            "session_id": "<server-session>",
+            "sequence_id": 1,
+            "timestamp": "2026-01-18T12:00:00Z",
+            "topic": null,
             "name": "strategy_rsi_btc_1h",
             "running": true,
             "enabled": true,
-            "mode": "process"
+            "mode": "process",
+            "strategy_class": "RSIReversion"
         }
     ],
     "count": 1
@@ -2491,8 +2507,9 @@ Query parameters:
 - `as_of` (optional): Point-in-time query timestamp
 
 Returns a continuous-series response with the selected contract windows
-and candle points. A successful response may be `continuous_full` or
-`continuous_partial`; partial responses include `failed_roll` and
+and candle points. A successful response is either a
+`continuous_candle_list` (full series) or a `continuous_partial`
+envelope; partial responses include `failed_roll` and
 `message` fields describing the unavailable roll window. Returns 400
 for invalid parameters and 404 when the underlying cannot be resolved.
 
@@ -3098,6 +3115,7 @@ the scoped prefixes documented in the WebSocket auth section above.
 - `system.heartbeats.executor.{exchange}.{wallet_short}` -- Per-wallet executor heartbeat; `wallet_short` is exactly 12 lowercase hex characters
 - `system.heartbeats.feed.{exchange}` -- Live feed heartbeat
 - `system.heartbeats.feed.paper.{source}` -- Paper replay feed heartbeat
+- `system.heartbeats.host.disk` -- API-host disk-pressure heartbeat emitted by the system metrics snapshotter
 - `system.egress.snapshot` -- Egress pool route snapshots
 - `system.egress.transfer` -- WireGuard transfer samples
 - `admin.{resource}` -- Administrative events (admin only)
@@ -3111,7 +3129,7 @@ the scoped prefixes documented in the WebSocket auth section above.
 - `alerts.{user_public_id}.{alert_type}` -- Notification stream
 - `plans.decisions.{plan_public_id}` -- Execution-plan decision events
 - `ai_reviews.{user_public_id}.{strategy_public_id}.{suffix}` -- AI delegate review frames
-- `accruals.{exchange}.{instrument}.{accrual_type}` -- Funding, rollover, and borrow accruals
+- `accruals.{exchange}.{instrument}.{accrual_type}` -- Funding, rollover, and borrow accruals (internal ZMQ bus topic; not currently subscribable over the WebSocket -- no role's category set includes `accruals`)
 - `backtest.{wallet_public_id}.{run_public_id}.{event}` -- Backtest lifecycle and progress frames
 
 ## Error Handling

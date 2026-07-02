@@ -182,8 +182,9 @@ process also publishes the same status as a `system.heartbeats.host.disk`
 `HeartbeatData` frame when its shared ZMQ publisher is available. The
 existing `critical_system_error` rule consumes that heartbeat, gates on
 three consecutive non-HEALTHY frames in its rolling window, dedups by
-host/disk/hour, and fans out to administrators with
-`read:system_status`.
+host/disk/hour, and fans out one alert row per current user SCD2 row
+whose role grants `read:system_status` (AI_DELEGATE, VIEWER, OPERATOR,
+ADMIN); the fan-out helper does not filter on `users.is_active`.
 
 | Field             | Type                          | Description |
 |-------------------|-------------------------------|-------------|
@@ -444,7 +445,7 @@ poll-with-backoff using the `Retry-After` header.
 |---|---|---|
 | `table` | `str` | Table name. Usually a key in `EVENT_TABLES` or `STATE_TABLES`; `candles` is also sampled (as a state-kind table) despite living outside both archiver registries. |
 | `table_kind` | `"event"` \| `"state"` | Discriminates wire semantics. |
-| `total` | `int \| null` | Total row count. On PostgreSQL this is a `pg_class.reltuples` planner estimate (`GREATEST(reltuples, 0)` — fast, accurate within `ANALYZE`/autovacuum drift, intended for growth-trend monitoring); on the SQLite dev fixture it is an exact `COUNT(*)`. `null` only on per-table query failure with no prior sample to clone. |
+| `total` | `int \| null` | Total row count. On PostgreSQL this is a `pg_class.reltuples` planner estimate (`GREATEST(reltuples, 0)` — fast, accurate within `ANALYZE`/autovacuum drift, intended for growth-trend monitoring); on the SQLite dev fixture it is an exact `COUNT(*)`. For state tables the published value is additionally clamped no lower than `current`. `null` only on per-table query failure with no prior sample to clone. |
 | `current` | `int \| null` | Active SCD2 versions (rows whose `known_to` equals the SCD2 sentinel) for state tables; `null` for event tables (no SCD2 lifecycle — reporting `0` would imply the dimension exists). |
 | `closed` | `int \| null` | Superseded SCD2 versions for state tables; `null` for event tables. |
 | `archivable` | `int \| null` | Row count in the policy retention window when a `RETENTION_POLICIES` entry applies; `null` when no policy applies (semantically distinct from `0`). |
@@ -477,9 +478,13 @@ poll-with-backoff using the `Retry-After` header.
   `current` is a `pg_class.reltuples` planner estimate; on the
   SQLite fixture it is always exact; `total` comes from the
   dialect-aware row-count primitive (PG planner estimate / SQLite
-  exact); `closed = max(0, total - current)` is derived and clamped
-  at 0 to absorb stale PostgreSQL planner estimates where the exact
-  `current` temporarily exceeds the estimated `total`. `archivable`
+  exact); `total` is clamped no lower than `current`
+  (`total = max(total, current)`) to absorb stale PostgreSQL planner
+  estimates where the exact `current` temporarily exceeds the
+  estimated `total`; `closed = max(0, total - current)` is then
+  derived from the clamped `total` (so it can never actually go
+  negative), and panels always see `Total >= Current >= 0` while
+  PostgreSQL `total` and `closed` remain estimates. `archivable`
   is `null` until a policy is registered for the table.
 
 ## Cluster B/C alignment
