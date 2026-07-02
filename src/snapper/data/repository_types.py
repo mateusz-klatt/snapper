@@ -2237,6 +2237,26 @@ class MarketDataCoverageRow(TypedDict):
     dark: int
 
 
+class MarketDataFreshnessRow(TypedDict):
+    """Per-exchange newest-candle freshness aggregate.
+
+    Returned by :meth:`Repository.get_latest_candle_open_at_by_exchange`.
+    Consumed by the market-data watchdog to detect whole-exchange
+    silence.
+
+    Attributes:
+        exchange: Exchange identifier (lowercase).
+        latest_open_at: ``open_at`` of the newest ``candles`` row
+            across the exchange's active instruments (any timeframe,
+            superseded bitemporal rows included — supersession never
+            moves the maximum). Aware UTC datetime, or ``None`` when
+            the exchange has no candle rows at all.
+    """
+
+    exchange: str
+    latest_open_at: datetime | None
+
+
 class InstrumentFeedHealthUpsertRow(TypedDict):
     """Upsert row for :meth:`Repository.upsert_instrument_feed_health`.
 

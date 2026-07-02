@@ -17,7 +17,6 @@ Historical and non-1m candles remain REST/backfill concerns.
 
 from datetime import UTC
 from datetime import datetime
-from datetime import time as datetime_time
 from typing import Any
 
 from loguru import logger
@@ -25,6 +24,7 @@ from loguru import logger
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.market_hours import is_cme_closed
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import ProcessModeEnum
@@ -74,9 +74,6 @@ Cloudflare 429 Retry-After / close-code backoff handling — the same gap that
 left a silently dead socket undetected until the app-level silence threshold.
 """
 
-_CME_DAILY_BREAK_START = datetime_time(hour=21)
-_CME_DAILY_BREAK_END = datetime_time(hour=22)
-
 _LIVENESS_RECOVERY_THRESHOLD_S = 120
 """Message-silence threshold (seconds) before Equities liveness recovery fires.
 
@@ -87,18 +84,23 @@ during genuine lulls. Scheduled CME closures still fully suppress recovery."""
 
 
 def _is_cme_closed(now_utc: datetime) -> bool:
-    """Return whether CME FCM contracts are in a scheduled closure window."""
-    current = now_utc if now_utc.tzinfo is not None else now_utc.replace(tzinfo=UTC)
-    current = current.astimezone(UTC)
-    weekday = current.weekday()
-    current_time = current.time()
-    if weekday == 5:
-        return True
-    if weekday == 6:
-        return current_time < _CME_DAILY_BREAK_END
-    if weekday == 4:
-        return current_time >= _CME_DAILY_BREAK_END
-    return _CME_DAILY_BREAK_START <= current_time < _CME_DAILY_BREAK_END
+    """Return whether CME FCM contracts are in a scheduled closure window.
+
+    Delegates to the shared :func:`snapper.core.market_hours.is_cme_closed`
+    calendar so the publisher's recovery suppression and the market-data
+    watchdog's alert suppression can never drift apart. The shared
+    version also closes the historical Friday blind spot — the old
+    local branch treated Friday 21:00-22:00 UTC as open, so recovery
+    could fire once into the closed venue before the weekend rule
+    kicked in at 22:00.
+
+    Args:
+        now_utc: Reference instant; a naive value is assumed UTC.
+
+    Returns:
+        ``True`` inside a scheduled CME closure window.
+    """
+    return is_cme_closed(now_utc)
 
 
 @register_process(

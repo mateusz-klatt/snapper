@@ -117,6 +117,7 @@ from snapper.application.db_stats.snapshotter import DbStatsSnapshotter
 from snapper.application.db_stats.snapshotter import (
     resolve_disabled as _resolve_db_metrics_disabled,
 )
+from snapper.application.market_data_watchdog.watchdog import MarketDataWatchdog
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.retention.scheduler import RetentionScheduler
@@ -512,6 +513,56 @@ async def _stop_system_metrics_snapshotter(app: FastAPI) -> None:
     await snapshotter.stop()
 
 
+async def _start_market_data_watchdog(
+    app: FastAPI,
+    *,
+    db_url: str,
+    msg_publisher: MessagePublisher | None = None,
+) -> None:
+    """Build + start the :class:`MarketDataWatchdog`.
+
+    The ``app.state`` attribute (pre-initialised to ``None`` at
+    lifespan entry) is assigned ONLY after a successful
+    :meth:`MarketDataWatchdog.start` call. Failure logs and does NOT
+    block the rest of the lifespan startup — the app still serves; the
+    watchdog is simply absent (the same contract as the metrics
+    snapshotter).
+
+    Args:
+        app: FastAPI application instance whose ``state`` will hold
+            the watchdog on successful start.
+        db_url: SQLAlchemy URL for the freshness-query repository.
+        msg_publisher: Shared ZMQ publisher for the synthetic silence
+            heartbeats. ``None`` degrades to detection + logging only.
+    """
+    try:
+        watchdog = MarketDataWatchdog(
+            repo=get_repository(db_url),
+            msg_publisher=msg_publisher,
+        )
+        await watchdog.start()
+    except Exception:
+        logger.exception("MarketDataWatchdog startup failed — exchange-silence alerting is offline")
+        return
+    app.state.market_data_watchdog = watchdog
+    logger.info("MarketDataWatchdog started")
+
+
+async def _stop_market_data_watchdog(app: FastAPI) -> None:
+    """Stop the :class:`MarketDataWatchdog` if attached.
+
+    Tolerates partial-init state where startup failed before the
+    attribute was assigned.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    watchdog: MarketDataWatchdog | None = getattr(app.state, "market_data_watchdog", None)
+    if watchdog is None:
+        return
+    await watchdog.stop()
+
+
 async def _start_remote_summary_cache(
     app: FastAPI, *, own_coordinator: str, zmq_broker_xpub: str
 ) -> None:
@@ -818,6 +869,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.system_metrics_snapshotter = None
     app.state.retention_scheduler = None
     app.state.db_stats_snapshotter = None
+    app.state.market_data_watchdog = None
     app.state.market_persist_policy = None
     app.state.market_cache = None
     app.state.market_stats_worker = None
@@ -923,6 +975,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         manager_ref: WebSocketConnectionManager = app.state.manager
         app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
         await _start_system_metrics_snapshotter(app, msg_publisher=user_publisher)
+        await _start_market_data_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_retention_scheduler(app, db_url=settings.db_url)
         await _start_db_stats_snapshotter(app, db_url=settings.db_url)
         await _start_remote_summary_cache(
@@ -970,6 +1023,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _stop_remote_summary_cache(app)
         await _stop_db_stats_snapshotter(app)
         await _stop_retention_scheduler(app)
+        await _stop_market_data_watchdog(app)
         await _stop_system_metrics_snapshotter(app)
         await _shutdown_zmq_bridge(app)
         if process_factory is not None:

@@ -156,6 +156,10 @@ underlying snapshots and the retention window math.
 | `RETENTION_OUTPUT_DIR` | `data` | Base directory for archive CSV writes (matches the CLI `--output-dir` default) |
 | `DB_METRICS_INTERVAL_SECONDS` | `60` | Cadence for the per-table SCD2 row-count sampler |
 | `DB_METRICS_DISABLED` | `false` | Disable the DB stats sampler |
+| `MARKET_DATA_WATCHDOG_DISABLED` | `false` | Park the silent-exchange market-data watchdog entirely |
+| `MARKET_DATA_WATCHDOG_INTERVAL_SECONDS` | `60` | Poll cadence for the per-exchange candle-freshness check (floor 5) |
+| `MARKET_DATA_WATCHDOG_THRESHOLD_SECONDS` | `600` | Whole-exchange silence threshold before the `critical_system_error` alert path fires (floor 120) |
+| `MARKET_DATA_WATCHDOG_EXCHANGE_THRESHOLDS` | unset | Per-exchange overrides as `exchange=seconds` CSV; `0` disables one exchange (e.g. `walutomat=1200,kraken_equities=900`) |
 | `SNAPPER_TICK_PROBE` | unset | Enable per-stage tick hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |
 | `SNAPPER_TRADE_PROBE` | unset | Enable per-stage trade hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |
 

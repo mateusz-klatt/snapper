@@ -251,12 +251,17 @@ class TestLifespan:
                 ),
             ),
             patch("snapper.server.app.get_repository"),
-            patch("snapper.server.app._start_system_metrics_snapshotter", new=AsyncMock()),
-            patch("snapper.server.app._stop_system_metrics_snapshotter", new=AsyncMock()),
-            patch("snapper.server.app._start_retention_scheduler", new=AsyncMock()),
-            patch("snapper.server.app._stop_retention_scheduler", new=AsyncMock()),
-            patch("snapper.server.app._start_db_stats_snapshotter", new=AsyncMock()),
-            patch("snapper.server.app._stop_db_stats_snapshotter", new=AsyncMock()),
+            patch.multiple(
+                "snapper.server.app",
+                _start_system_metrics_snapshotter=AsyncMock(),
+                _stop_system_metrics_snapshotter=AsyncMock(),
+                _start_market_data_watchdog=AsyncMock(),
+                _stop_market_data_watchdog=AsyncMock(),
+                _start_retention_scheduler=AsyncMock(),
+                _stop_retention_scheduler=AsyncMock(),
+                _start_db_stats_snapshotter=AsyncMock(),
+                _stop_db_stats_snapshotter=AsyncMock(),
+            ),
             patch(
                 "snapper.server.app.get_ws_auth_manager",
                 return_value=MagicMock(

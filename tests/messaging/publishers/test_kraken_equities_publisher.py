@@ -264,7 +264,8 @@ class TestKrakenEquitiesMarketDataPublisher:
             (datetime(2026, 5, 25, 21, 1, tzinfo=UTC), True),
             (datetime(2026, 5, 25, 21, 59, tzinfo=UTC), True),
             (datetime(2026, 5, 25, 22, 1, tzinfo=UTC), False),
-            (datetime(2026, 5, 22, 21, 59, tzinfo=UTC), False),
+            (datetime(2026, 5, 22, 20, 59, tzinfo=UTC), False),
+            (datetime(2026, 5, 22, 21, 59, tzinfo=UTC), True),
             (datetime(2026, 5, 22, 22, 1, tzinfo=UTC), True),
         ],
     )
@@ -277,7 +278,10 @@ class TestKrakenEquitiesMarketDataPublisher:
 
         Given: Representative UTC datetimes around the CME closure windows,
         When: _is_cme_closed is evaluated,
-        Then: It reports closed only inside the approved windows.
+        Then: It reports closed only inside the approved windows — the
+            shared calendar treats Friday 21:00-22:00 UTC as closed (the
+            daily break rolls into the weekend), unlike the old local
+            helper whose Friday branch only tested the weekend rule.
         """
         assert _is_cme_closed(now_utc) is expected
 

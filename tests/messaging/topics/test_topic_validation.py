@@ -1175,6 +1175,59 @@ class TestSystemTopicValidation:
         assert "host.disk" in _err
 
     @pytest.mark.parametrize(
+        "exchange",
+        ["kraken", "kraken_futures", "kraken_equities", "walutomat"],
+    )
+    def test_hierarchical_heartbeat_marketdata_accepts_live_exchanges(
+        self, exchange: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Market-data watchdog heartbeats accept every live feed exchange.
+
+        Given: A marketdata heartbeat topic for a live exchange (the
+            full production feed set patched over the module fixture's
+            reduced kraken/walutomat env),
+        When: Validated,
+        Then: Validation succeeds.
+        """
+        monkeypatch.setattr(
+            validation,
+            "get_market_subscribe_exchanges",
+            lambda: ["kraken", "kraken_futures", "kraken_equities", "walutomat"],
+        )
+        valid, _err = validate_topic(f"system.heartbeats.marketdata.{exchange}")
+        assert valid, f"Failed for marketdata heartbeat: {_err}"
+        assert _err == ""
+
+    def test_hierarchical_heartbeat_marketdata_rejects_unknown_exchange(self) -> None:
+        """Market-data watchdog heartbeats reject non-live exchanges.
+
+        Given: A marketdata heartbeat topic for an unknown exchange,
+        When: Validated,
+        Then: Validation fails with the market-source error.
+        """
+        valid, _err = validate_topic("system.heartbeats.marketdata.paper")
+        assert not valid
+        assert "Unknown market feed exchange" in _err
+
+    @pytest.mark.parametrize(
+        "topic",
+        [
+            "system.heartbeats.marketdata",
+            "system.heartbeats.marketdata.kraken.extra",
+        ],
+    )
+    def test_hierarchical_heartbeat_marketdata_requires_four_segments(self, topic: str) -> None:
+        """Market-data watchdog heartbeats require the exact 4-segment shape.
+
+        Given: Marketdata heartbeat topics with too few or too many segments,
+        When: Validated,
+        Then: Validation fails naming the required shape.
+        """
+        valid, _err = validate_topic(topic)
+        assert not valid
+        assert "exactly 4 segments" in _err
+
+    @pytest.mark.parametrize(
         "topic",
         [
             "system.heartbeats.host",

@@ -207,6 +207,7 @@ from snapper.data.repository_types import InstrumentRelatedRow
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import MarketDataCoverageRow
+from snapper.data.repository_types import MarketDataFreshnessRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
 from snapper.data.repository_types import NotificationDeviceRow
@@ -4516,6 +4517,31 @@ class Repository(ABC):
         Returns:
             One :class:`MarketDataCoverageRow` per exchange, ordered by
             exchange.
+        """
+        ...
+
+    @abstractmethod
+    async def get_latest_candle_open_at_by_exchange(
+        self,
+        *,
+        exchanges: Sequence[str],
+        now: datetime | None = None,
+    ) -> list[MarketDataFreshnessRow]:
+        """Newest candle ``open_at`` per exchange over active instruments.
+
+        See :meth:`SQLAlchemyRepository.get_latest_candle_open_at_by_exchange`
+        for the concrete cross-dialect implementation and semantics.
+
+        Args:
+            exchanges: Exchange identifiers to aggregate; exchanges
+                without active instruments produce no row.
+            now: Reference instant for the bitemporal active-instrument
+                predicate; defaults to ``datetime.now(UTC)``. Injectable
+                for deterministic tests.
+
+        Returns:
+            One :class:`MarketDataFreshnessRow` per exchange with at
+            least one active instrument, ordered by exchange.
         """
         ...
 
@@ -16610,6 +16636,74 @@ class SQLAlchemyRepository(Repository):
                     )
                 )
             return rows
+
+    async def get_latest_candle_open_at_by_exchange(
+        self,
+        *,
+        exchanges: Sequence[str],
+        now: datetime | None = None,
+    ) -> list[MarketDataFreshnessRow]:
+        """Newest candle ``open_at`` per exchange over active instruments.
+
+        Instrument-driven like :meth:`get_market_data_coverage`: the
+        outer query counts only active :class:`Instrument` rows and the
+        per-instrument maximum is a correlated scalar subquery, so the
+        whole statement is satisfied by descents of the
+        ``ix_candle_instrument_open (instrument_public_id, open_at)``
+        index — one per active instrument — on both PostgreSQL and the
+        SQLite test fixture. Two predicates are deliberately absent
+        from the subquery to keep it index-only:
+
+        * No ``timeframe`` filter — any candle row counts as market
+          data, and the newest row is in practice always the 1m one
+          (higher timeframes open at or before their newest 1m
+          constituent).
+        * No bitemporal ``known_to`` filter — a superseded candle row
+          shares its ``open_at`` with its successor, so supersession
+          can never move the per-instrument maximum.
+
+        Args:
+            exchanges: Exchange identifiers to aggregate; exchanges
+                without active instruments produce no row.
+            now: Reference instant for the bitemporal active-instrument
+                predicate; defaults to ``datetime.now(UTC)``. Injectable
+                for deterministic tests.
+
+        Returns:
+            One :class:`MarketDataFreshnessRow` per exchange with at
+            least one active instrument, ordered by exchange.
+            ``latest_open_at`` is ``None`` when no candle row exists
+            for any of the exchange's active instruments.
+        """
+        reference = now if now is not None else datetime.now(UTC)
+        latest_per_instrument = (
+            select(func.max(Candle.open_at))
+            .where(Candle.instrument_public_id == Instrument.public_id)
+            .correlate(Instrument)
+            .scalar_subquery()
+        )
+        statement = (
+            select(
+                Instrument.exchange.label("exchange"),
+                func.max(latest_per_instrument).label("latest_open_at"),
+            )
+            .select_from(Instrument)
+            .where(
+                Instrument.exchange.in_(list(exchanges)),
+                *where_active(Instrument, reference),
+            )
+            .group_by(Instrument.exchange)
+            .order_by(Instrument.exchange)
+        )
+        async with self.session() as s:
+            result = await s.execute(statement)
+            return [
+                MarketDataFreshnessRow(
+                    exchange=row.exchange,
+                    latest_open_at=row.latest_open_at,
+                )
+                for row in result.all()
+            ]
 
     async def upsert_instrument_feed_health(
         self, rows: list[InstrumentFeedHealthUpsertRow]

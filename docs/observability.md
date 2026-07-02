@@ -54,6 +54,41 @@ it via `GET /api/market/feed-health` (optional `exchange` and
 `fresh_within_seconds` filters; same `Permission.READ_SYSTEM_STATUS`
 gate as the metrics routes).
 
+### Market-data watchdog (whole-exchange silence)
+
+The per-subscription tracker cannot alert on a whole exchange going
+dark: feed heartbeats degrade only on DB flush errors (a venue whose
+matching engine is down behind a healthy WebSocket stays HEALTHY),
+in-process freshness clocks reset on every publisher respawn, and a
+fully hung publisher emits nothing at all. The API lifespan therefore
+runs `MarketDataWatchdog`
+(`application/market_data_watchdog/watchdog.py`), which every
+`MARKET_DATA_WATCHDOG_INTERVAL_SECONDS` (default 60) queries the
+database for the newest candle per live feed exchange (`kraken`,
+`kraken_futures`, `kraken_equities`, `walutomat`). When an exchange's
+silence — measured from its newest candle minute END — exceeds
+`MARKET_DATA_WATCHDOG_THRESHOLD_SECONDS` (default 600, floor 120), the
+watchdog publishes a synthetic 3-frame WARNING heartbeat burst on
+`system.heartbeats.marketdata.{exchange}` (frames spaced 2 s to clear
+the bridge's 1 s heartbeat throttle). The existing
+`critical_system_error` rule then supplies the 3-consecutive gate,
+rolling hourly cooldown, hour-bucket dedup, and fan-out to every user
+with `read:system_status` — about one page per hour per silent
+exchange, with `meta` carrying `silent_seconds`, `threshold_seconds`,
+and `latest_candle_open_at` for forensics.
+
+Scheduled venue closures are suppressed via the shared CME calendar
+(`core/market_hours.py`): `kraken_equities` never alerts inside the
+daily 21:00-22:00 UTC break or the Friday 21:00 UTC - Sunday
+22:00 UTC weekend closure, and after a closure ends its silence clock
+restarts at the reopen boundary instead of the last pre-closure
+candle. Per-exchange thresholds can be overridden (or one exchange
+disabled with `0`) via `MARKET_DATA_WATCHDOG_EXCHANGE_THRESHOLDS`
+(`exchange=seconds` CSV), and `MARKET_DATA_WATCHDOG_DISABLED=true`
+parks the watchdog entirely. Detection runs level-triggered — an
+exchange that stays silent keeps re-bursting each tick, so a notify
+sidecar restart cannot permanently miss an ongoing outage.
+
 ### Failure contract
 
 If the snapshotter singleton failed to start at lifespan time, the

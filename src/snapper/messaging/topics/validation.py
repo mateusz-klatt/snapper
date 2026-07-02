@@ -613,11 +613,38 @@ def _validate_host_heartbeat(segments: list[str]) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_marketdata_heartbeat(segments: list[str]) -> tuple[bool, str]:
+    """Validate market-data watchdog heartbeat topic structure.
+
+    ``system.heartbeats.marketdata.{exchange}`` carries the API-side
+    market-data watchdog's synthetic exchange-silence heartbeats. It is
+    a distinct component from ``feed`` on purpose: the live feed
+    publishes HEALTHY frames on ``system.heartbeats.feed.{exchange}``
+    every second, so a watchdog interleaving WARNING frames there could
+    never satisfy the critical-system-error rule's 3-consecutive gate.
+
+    Args:
+        segments: Split topic segments starting with
+            ``system.heartbeats.marketdata``.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    if len(segments) != 4:
+        return (
+            False,
+            "system.heartbeats.marketdata requires exactly 4 segments: "
+            "system.heartbeats.marketdata.{exchange}",
+        )
+    return _validate_market_source(segments[3])
+
+
 _HEARTBEAT_COMPONENT_VALIDATORS: dict[str, Callable[[list[str]], tuple[bool, str]]] = {
     "strategy": _validate_strategy_heartbeat,
     "executor": _validate_executor_heartbeat,
     "host": _validate_host_heartbeat,
     "feed": _validate_feed_heartbeat,
+    "marketdata": _validate_marketdata_heartbeat,
 }
 
 
@@ -638,6 +665,8 @@ def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
     - ``system.heartbeats.feed.{exchange}`` or
       ``system.heartbeats.feed.paper.{source}`` — delegated to
       :func:`_validate_feed_heartbeat`.
+    - ``system.heartbeats.marketdata.{exchange}`` (4 seg) — synthetic
+      exchange-silence heartbeats from the API market-data watchdog.
 
     Args:
         segments: Split topic segments (first two are 'system.heartbeats').
