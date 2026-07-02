@@ -8,6 +8,7 @@ import sys
 import threading
 from collections.abc import Callable
 from datetime import UTC
+from datetime import date as date_type_local
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,8 @@ import snapper.cli.app as app_module
 import snapper.messaging.infrastructure.publisher as publisher_module
 from snapper.application.services.continuous_contract_builder import BuildResult
 from snapper.application.services.continuous_contract_builder import RollPointInfo
+from snapper.application.updaters.historical.split_repair import SplitRepairCandidate
+from snapper.application.updaters.historical.split_repair import SplitRepairSummary
 from snapper.auth.domain.roles import UserRole
 from snapper.cli.app import _alembic_cfg
 from snapper.cli.app import app
@@ -45,6 +48,7 @@ from snapper.cli.app import server
 from snapper.cli.app import settings_rotate_encryption
 from snapper.cli.app import validate_api_keys
 from snapper.cli.app import zmq_logger
+from snapper.infrastructure.exchanges.implementations.polygon import PolygonSplitEvent
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 
 SYNC_MEMORY_DB_URL = "sqlite:///:memory:"
@@ -4991,3 +4995,102 @@ def test_await_shutdown_signal_returns_when_signalled(
         await app_module._await_shutdown_signal()
 
     asyncio.run(_drive())
+
+
+class TestPolygonRepairSplitsCommand:
+    """CLI surface of the split-repair orchestrator."""
+
+    @staticmethod
+    def _summary_with_break(unverified: bool, undetectable: bool = False) -> object:
+        """Build a run summary carrying one confirmed candidate."""
+        candidate = SplitRepairCandidate(
+            event=PolygonSplitEvent(
+                ticker="NFLX",
+                execution_date=date_type_local(2025, 11, 17),
+                split_from=1.0,
+                split_to=10.0,
+            ),
+            native_symbol="NFLX",
+            instrument_public_id="i-1",
+            symbol_public_id="s-1",
+            break_day=date_type_local(2023, 12, 18),
+        )
+        summary = SplitRepairSummary(splits_seen=3)
+        summary.candidates.append(candidate)
+        if undetectable:
+            summary.undetectable.append("HON")
+        if unverified:
+            summary.unverified.append("NFLX")
+        else:
+            summary.repaired.append("NFLX")
+        return summary
+
+    def test_success_reports_summary(
+        self, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """A verified repair prints the summary and exits cleanly.
+
+        Given: A patched repair run returning one repaired symbol,
+        When: polygon-repair-splits is invoked,
+        Then: The summary lines and the break detail are echoed with
+            exit code 0.
+        """
+        captured: dict[str, object] = {}
+
+        async def fake_run(**kwargs: object) -> object:
+            captured.update(kwargs)
+            return self._summary_with_break(unverified=False, undetectable=True)
+
+        monkeypatch.setattr(app_module, "run_polygon_split_repair", fake_run)
+        result = cli_runner.invoke(
+            app,
+            ["polygon-repair-splits", "-s", "NFLX", "--lookback-days", "30", "--dry-run"],
+        )
+        assert result.exit_code == 0
+        assert captured == {
+            "symbols": ["NFLX"],
+            "lookback_days": 30,
+            "window_days": 730,
+            "dry_run": True,
+        }
+        assert "repaired: 1" in result.stdout
+        assert "undetectable: 1" in result.stdout
+        assert "Micro-splits skipped (verify manually): HON" in result.stdout
+        assert "break at 2023-12-18" in result.stdout
+        assert "Polygon split repair complete!" in result.stdout
+
+    def test_unverified_symbols_exit_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """A repair that fails verification exits with code 1.
+
+        Given: A patched repair run leaving NFLX unverified,
+        When: polygon-repair-splits is invoked,
+        Then: The unverified line is echoed and the exit code is 1.
+        """
+
+        async def fake_run(**kwargs: object) -> object:
+            return self._summary_with_break(unverified=True)
+
+        monkeypatch.setattr(app_module, "run_polygon_split_repair", fake_run)
+        result = cli_runner.invoke(app, ["polygon-repair-splits"])
+        assert result.exit_code == 1
+        assert "UNVERIFIED after repair: NFLX" in result.stdout
+
+    def test_error_reports_and_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        """A failing repair run is reported gracefully.
+
+        Given: A patched repair run raising an error,
+        When: polygon-repair-splits is invoked,
+        Then: The error message is echoed with exit code 1.
+        """
+
+        async def fake_run(**kwargs: object) -> object:
+            raise RuntimeError("split-fail")
+
+        monkeypatch.setattr(app_module, "run_polygon_split_repair", fake_run)
+        result = cli_runner.invoke(app, ["polygon-repair-splits"])
+        assert result.exit_code == 1
+        assert "Error during polygon split repair" in result.stdout

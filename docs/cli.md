@@ -628,6 +628,76 @@ snapper polygon-load-csv --all --timespan minute
 snapper polygon-load-csv -s X:BTCUSD --since 2024-01-01 --until 2024-01-31
 ```
 
+### `polygon-repair-splits`
+
+Detects and repairs stale split-price bases in polygon equities. The
+incremental CSV cache freezes each day's file at the price-adjustment
+basis of its fetch time, so a stock split executed while the cache is
+being collected leaves an unadjusted discontinuity in both the cache
+and the database. This command automates the repair chain proven in
+the 2026-07-02 audit:
+
+1. Pulls split events from the Polygon reference endpoint for the
+    trailing `--lookback-days` window and maps them onto active
+    polygon instruments (crypto/FX never split and are skipped by
+    construction).
+2. Confirms via the current `1d` close history which symbols actually
+    carry a consecutive-close break matching the split's ratio — the
+    break sits at the fetch boundary between cache waves, not
+    necessarily at the execution date. Symbols whose whole history was
+    fetched after the split are already uniform and are skipped, so
+    the command is idempotent and safe to run on every fetch cycle.
+3. For confirmed symbols only: re-fetches the full `--window-days`
+    range (adjusted as of today), prunes cache files older than the
+    window (the plan's minute-data lookback limit means they can never
+    be refreshed and would reintroduce the stale basis on a future
+    full-range load), SCD2-supersedes every current candle row,
+    reloads the refreshed cache, re-synthesizes the higher timeframes,
+    and re-runs the detector.
+
+Two safety behaviors to know about:
+
+- Micro-splits whose ratio is closer to 1.0 than 1.4 (e.g. `20:21`,
+    `1000:1061`) are reported as `undetectable` and skipped — an
+    ordinary flat close would match them forever, so a price detector
+    cannot repair them without endless churn; verify those manually.
+- An EMPTY current `1d` history for a candidate confirms the repair
+    (it is the signature of a run that crashed between supersede and
+    reload), so simply rerunning the command self-heals a partial
+    repair.
+
+Exits non-zero when a repaired symbol still shows the matching break
+afterwards. MUST run on the host, not in a container — the fetch and
+prune steps write the `data/polygon` CSV cache, which containers mount
+read-only (for the same reason this service is deliberately not
+registered with the process manager).
+
+```bash
+snapper polygon-repair-splits [OPTIONS]
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `-s, --symbol` | string[] | all equities | Restrict the check to these native symbols |
+| `--lookback-days` | int | `45` | Trailing window of split executions to inspect |
+| `--window-days` | int | `730` | Re-fetch window in days (plan minute-data lookback limit) |
+| `--dry-run` | bool | `false` | Detect and report stale split bases without repairing |
+
+**Examples:**
+
+```bash
+# After each fetch cycle: check recent splits, repair what is broken
+snapper polygon-repair-splits
+
+# Preview without mutating anything
+snapper polygon-repair-splits --dry-run
+
+# Targeted re-check of one symbol
+snapper polygon-repair-splits -s NFLX
+```
+
 ### `polygon-load-grouped-candles`
 
 Loads the on-disk Polygon **grouped-daily** cache into the database as

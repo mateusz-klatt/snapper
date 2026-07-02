@@ -102,6 +102,7 @@ from snapper.application.updaters.historical.kraken_futures_aggregates import (
 from snapper.application.updaters.historical.kraken_futures_funding import (
     KrakenFuturesFundingBackfillService,
 )
+from snapper.application.updaters.historical.split_repair import run_polygon_split_repair
 from snapper.application.updaters.historical.synthesized_candle_backfill import (
     SynthesizedCandleBackfillService,
 )
@@ -1278,6 +1279,83 @@ def polygon_backfill_aggregates(
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_aggregates_backfill())
+
+
+@app.command(name="polygon-repair-splits")
+def polygon_repair_splits(
+    symbols: Annotated[
+        list[str] | None,
+        typer.Option("--symbol", "-s", help="Restrict the check to these native symbols"),
+    ] = None,
+    lookback_days: int = typer.Option(
+        45, "--lookback-days", help="Trailing window of split executions to inspect"
+    ),
+    window_days: int = typer.Option(
+        730, "--window-days", help="Re-fetch window in days (plan minute-data lookback limit)"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Detect and report stale split bases without repairing"
+    ),
+) -> None:
+    """Detect and repair stale split-price bases in polygon equities.
+
+    Pulls recent split events from the Polygon reference endpoint,
+    confirms via the 1d close history which symbols actually carry an
+    unadjusted break, and for those runs the full repair chain:
+    re-fetch (adjusted), cache prune, SCD2 supersede, reload,
+    re-synthesis, verification. Idempotent - repaired or uniformly
+    based symbols are skipped. MUST run on the host (writes the
+    data/polygon CSV cache, which containers mount read-only).
+
+    Args:
+        symbols: Restrict the check to these native symbols.
+        lookback_days: Trailing window of split executions to inspect.
+        window_days: Re-fetch window in days.
+        dry_run: Detect and report without repairing.
+    """
+
+    async def run_split_repair() -> None:
+        try:
+            typer.echo(
+                f"Starting polygon split repair (lookback {lookback_days}d, "
+                f"window {window_days}d{', DRY-RUN' if dry_run else ''})..."
+            )
+            summary = await run_polygon_split_repair(
+                symbols=symbols,
+                lookback_days=lookback_days,
+                window_days=window_days,
+                dry_run=dry_run,
+            )
+            typer.echo(
+                f"Splits seen: {summary.splits_seen}, in universe: "
+                f"{len(summary.candidates)}, clean: {len(summary.clean)}, "
+                f"repaired: {len(summary.repaired)}, unverified: "
+                f"{len(summary.unverified)}, undetectable: "
+                f"{len(summary.undetectable)}, pruned files: {summary.pruned_files}"
+            )
+            if summary.undetectable:
+                typer.echo(
+                    f"Micro-splits skipped (verify manually): {', '.join(summary.undetectable)}"
+                )
+            confirmed = [c for c in summary.candidates if c.break_day is not None]
+            for candidate in confirmed:
+                typer.echo(
+                    f"  {candidate.native_symbol}: split "
+                    f"{candidate.event.execution_date.isoformat()} "
+                    f"{candidate.event.split_from}:{candidate.event.split_to}, "
+                    f"break at {candidate.break_day}"
+                )
+            if summary.unverified:
+                typer.echo(f"UNVERIFIED after repair: {', '.join(summary.unverified)}")
+                raise typer.Exit(code=1)
+            typer.echo("Polygon split repair complete!")
+        except typer.Exit:
+            raise
+        except Exception as e:
+            typer.echo(f"Error during polygon split repair: {e}")
+            raise typer.Exit(code=1) from e
+
+    asyncio.run(run_split_repair())
 
 
 @app.command(name="polygon-load-csv")

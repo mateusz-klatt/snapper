@@ -60,6 +60,37 @@ _MARKET_DATA_ONLY_MSG = "PolygonExchangeClient provides market data only."
 
 
 @dataclass
+class PolygonSplitEvent:
+    """One corporate split action from the Polygon reference endpoint.
+
+    Attributes:
+        ticker: Polygon ticker the split applies to (equities use the
+            native symbol form, e.g. ``NFLX`` or ``BRK.B``).
+        execution_date: UTC calendar day the split took effect.
+        split_from: Pre-split share count of the ratio.
+        split_to: Post-split share count of the ratio.
+    """
+
+    ticker: str
+    execution_date: date
+    split_from: float
+    split_to: float
+
+    @property
+    def expected_break_ratio(self) -> float:
+        """Raw close-over-close ratio an UNADJUSTED boundary would show.
+
+        A forward split ``from:to`` divides the price by ``to/from``,
+        so mixed-basis data jumps by ``from/to`` at the basis boundary
+        (0.1 for a 1:10 forward split, 20.0 for a 20:1 reverse split).
+
+        Returns:
+            Expected consecutive-close ratio at a stale-basis boundary.
+        """
+        return self.split_from / self.split_to
+
+
+@dataclass
 class PolygonTickerSnapshot(TickerSnapshot):
     """Extended ticker snapshot with Polygon-specific fields.
 
@@ -351,6 +382,54 @@ class PolygonExchangeClient(ExchangeClientBase):
             except Exception as e:
                 logger.warning(f"Skipping invalid aggregate record: {e}")
         return validated
+
+    async def list_splits(
+        self,
+        *,
+        execution_date_gte: date | str,
+        limit: int = 1000,
+    ) -> list[PolygonSplitEvent]:
+        """Fetch stock split events from the Polygon reference endpoint.
+
+        Splits executed while the incremental CSV cache is being
+        collected freeze earlier files at a pre-split price basis, so
+        the split-repair tooling needs the authoritative event list to
+        decide which symbols must be re-fetched.
+
+        Args:
+            execution_date_gte: Inclusive lower bound on the split
+                execution date.
+            limit: Maximum events per page (the SDK iterator paginates
+                past it transparently).
+
+        Returns:
+            Validated split events; malformed records are skipped with
+            a warning.
+        """
+        formatted = (
+            execution_date_gte.isoformat()
+            if isinstance(execution_date_gte, date)
+            else str(execution_date_gte)
+        )
+
+        def _request() -> list[Any]:
+            return list(self._client.list_splits(execution_date_gte=formatted, limit=limit))
+
+        response = await self._make_request_with_retry(_request)
+        events: list[PolygonSplitEvent] = []
+        for item in response:
+            try:
+                events.append(
+                    PolygonSplitEvent(
+                        ticker=str(item.ticker),
+                        execution_date=date.fromisoformat(str(item.execution_date)),
+                        split_from=float(item.split_from),
+                        split_to=float(item.split_to),
+                    )
+                )
+            except (AttributeError, TypeError, ValueError) as e:
+                logger.warning(f"Skipping invalid split record: {e}")
+        return events
 
     async def get_grouped_daily_aggs(
         self,

@@ -2237,6 +2237,24 @@ class MarketDataCoverageRow(TypedDict):
     dark: int
 
 
+class InstrumentSymbolRow(TypedDict):
+    """Active instrument with its native symbol identifiers.
+
+    Returned by :meth:`Repository.list_instrument_symbols`. Consumed by
+    the polygon split-repair tooling to map split-event tickers onto
+    instruments and archive-cache directories.
+
+    Attributes:
+        native_symbol: Native symbol (e.g. ``NFLX``, ``BTC-USD``).
+        instrument_public_id: Active instrument public id.
+        symbol_public_id: Active symbol public id (archive-symbol map key).
+    """
+
+    native_symbol: str
+    instrument_public_id: str
+    symbol_public_id: str
+
+
 class MarketDataFreshnessRow(TypedDict):
     """Per-exchange newest-candle freshness aggregate.
 

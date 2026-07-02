@@ -205,6 +205,7 @@ from snapper.data.repository_types import InstrumentFrontMonthRow
 from snapper.data.repository_types import InstrumentOrderCapabilityRow
 from snapper.data.repository_types import InstrumentRelatedRow
 from snapper.data.repository_types import InstrumentSpecRow
+from snapper.data.repository_types import InstrumentSymbolRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import MarketDataCoverageRow
 from snapper.data.repository_types import MarketDataFreshnessRow
@@ -4519,6 +4520,53 @@ class Repository(ABC):
         Returns:
             One :class:`MarketDataCoverageRow` per exchange, ordered by
             exchange.
+        """
+        ...
+
+    @abstractmethod
+    async def list_instrument_symbols(
+        self,
+        *,
+        exchange: str,
+        now: datetime | None = None,
+    ) -> list[InstrumentSymbolRow]:
+        """Active instruments with native symbols for one exchange.
+
+        Args:
+            exchange: Exchange identifier (lowercase).
+            now: Reference instant for the bitemporal active-row
+                predicates; defaults to ``datetime.now(UTC)``.
+
+        Returns:
+            One :class:`InstrumentSymbolRow` per active instrument,
+            ordered by native symbol.
+        """
+        ...
+
+    @abstractmethod
+    async def supersede_current_candles(
+        self,
+        *,
+        instrument_public_id: str,
+        timeframe: str,
+        superseded_at: datetime | None = None,
+    ) -> int:
+        """Close every current candle row for one instrument + timeframe.
+
+        SCD2 supersede (never delete): sets ``known_to`` on rows still
+        carrying the open sentinel so a follow-up load can insert fresh
+        current versions. Used by the polygon split-repair tooling to
+        replace stale-price-basis history after an adjusted re-fetch.
+
+        Args:
+            instrument_public_id: Instrument whose rows to close.
+            timeframe: Single timeframe label (one call per timeframe
+                keeps each transaction bounded).
+            superseded_at: Effective close instant; defaults to
+                ``datetime.now(UTC)``.
+
+        Returns:
+            Number of rows superseded.
         """
         ...
 
@@ -16643,6 +16691,90 @@ class SQLAlchemyRepository(Repository):
                     )
                 )
             return rows
+
+    async def list_instrument_symbols(
+        self,
+        *,
+        exchange: str,
+        now: datetime | None = None,
+    ) -> list[InstrumentSymbolRow]:
+        """Active instruments with native symbols for one exchange.
+
+        Args:
+            exchange: Exchange identifier (lowercase).
+            now: Reference instant for the bitemporal active-row
+                predicates; defaults to ``datetime.now(UTC)``.
+
+        Returns:
+            One :class:`InstrumentSymbolRow` per active instrument,
+            ordered by native symbol.
+        """
+        reference = now if now is not None else datetime.now(UTC)
+        statement = (
+            select(
+                Symbol.native_symbol.label("native_symbol"),
+                Instrument.public_id.label("instrument_public_id"),
+                Symbol.public_id.label("symbol_public_id"),
+            )
+            .select_from(Instrument)
+            .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
+            .where(
+                Instrument.exchange == exchange,
+                *where_active(Instrument, reference),
+                *where_active(Symbol, reference),
+            )
+            .order_by(Symbol.native_symbol)
+        )
+        async with self.session() as s:
+            result = await s.execute(statement)
+            return [
+                InstrumentSymbolRow(
+                    native_symbol=row.native_symbol,
+                    instrument_public_id=row.instrument_public_id,
+                    symbol_public_id=row.symbol_public_id,
+                )
+                for row in result.all()
+            ]
+
+    async def supersede_current_candles(
+        self,
+        *,
+        instrument_public_id: str,
+        timeframe: str,
+        superseded_at: datetime | None = None,
+    ) -> int:
+        """Close every current candle row for one instrument + timeframe.
+
+        SCD2 supersede (never delete): flips ``known_to`` from the open
+        sentinel to ``superseded_at`` so a follow-up load can insert
+        fresh current versions. One timeframe per call keeps each
+        transaction bounded (a liquid instrument holds ~1.4M current 1m
+        rows; the sentinel equality predicate rides the partial
+        ``uq_candle_itf_open`` index).
+
+        Args:
+            instrument_public_id: Instrument whose rows to close.
+            timeframe: Single timeframe label.
+            superseded_at: Effective close instant; defaults to
+                ``datetime.now(UTC)``.
+
+        Returns:
+            Number of rows superseded.
+        """
+        reference = superseded_at if superseded_at is not None else datetime.now(UTC)
+        statement = (
+            update(Candle)
+            .where(
+                Candle.instrument_public_id == instrument_public_id,
+                Candle.timeframe == timeframe,
+                Candle.known_to == KNOWN_TO_MAX,
+            )
+            .values(known_to=reference)
+        )
+        async with self.session() as s:
+            superseded = await self._execute_statement_count(s, statement)
+            await s.commit()
+            return superseded
 
     async def get_latest_candle_open_at_by_exchange(
         self,

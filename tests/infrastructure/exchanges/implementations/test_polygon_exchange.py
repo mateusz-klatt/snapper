@@ -678,3 +678,87 @@ async def test_wait_for_rate_limit_waits_when_limit_exceeded(
     await client._wait_for_rate_limit()
     assert len(sleep_calls) >= 1
     assert sleep_calls[0] > 0
+
+
+class TestListSplits:
+    """Split-event fetch used by the split-repair tooling."""
+
+    @pytest.mark.asyncio
+    async def test_maps_valid_records_and_skips_malformed(
+        self, stubbed_client: PolygonExchangeClient
+    ) -> None:
+        """Valid split records map to events; malformed ones are skipped.
+
+        Given: A stubbed SDK returning one valid split, one with an
+            unparseable execution date, and one missing the ratio,
+        When: ``list_splits`` runs with a date lower bound,
+        Then: Only the valid event returns, the bound is forwarded in
+            ISO form, and the ratio helper reports the raw break ratio.
+        """
+        received: dict[str, Any] = {}
+
+        def fake_list_splits(**kwargs: Any) -> Iterator[Any]:
+            received.update(kwargs)
+            return iter(
+                [
+                    SimpleNamespace(
+                        ticker="NFLX",
+                        execution_date="2025-11-17",
+                        split_from=1,
+                        split_to=10,
+                    ),
+                    SimpleNamespace(
+                        ticker="BAD",
+                        execution_date="not-a-date",
+                        split_from=1,
+                        split_to=2,
+                    ),
+                    SimpleNamespace(
+                        ticker="NONE",
+                        execution_date="2025-11-18",
+                        split_from=None,
+                        split_to=2,
+                    ),
+                ]
+            )
+
+        client_impl = object.__getattribute__(stubbed_client, "_client")
+        client_impl.list_splits = fake_list_splits
+        events = await stubbed_client.list_splits(
+            execution_date_gte=datetime(2025, 11, 1, tzinfo=UTC).date()
+        )
+        assert received == {"execution_date_gte": "2025-11-01", "limit": 1000}
+        assert len(events) == 1
+        assert events[0].ticker == "NFLX"
+        assert events[0].execution_date.isoformat() == "2025-11-17"
+        assert events[0].expected_break_ratio == pytest.approx(0.1)
+
+    @pytest.mark.asyncio
+    async def test_accepts_string_lower_bound(self, stubbed_client: PolygonExchangeClient) -> None:
+        """A string date bound is forwarded verbatim.
+
+        Given: A stubbed SDK returning a reverse split,
+        When: ``list_splits`` runs with a string bound,
+        Then: The bound passes through unchanged and the reverse ratio
+            exceeds one.
+        """
+        received: dict[str, Any] = {}
+
+        def fake_list_splits(**kwargs: Any) -> Iterator[Any]:
+            received.update(kwargs)
+            return iter(
+                [
+                    SimpleNamespace(
+                        ticker="SPCE",
+                        execution_date="2024-06-17",
+                        split_from=20,
+                        split_to=1,
+                    )
+                ]
+            )
+
+        client_impl = object.__getattribute__(stubbed_client, "_client")
+        client_impl.list_splits = fake_list_splits
+        events = await stubbed_client.list_splits(execution_date_gte="2024-06-01", limit=50)
+        assert received == {"execution_date_gte": "2024-06-01", "limit": 50}
+        assert events[0].expected_break_ratio == pytest.approx(20.0)
