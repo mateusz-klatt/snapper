@@ -936,6 +936,52 @@ class TestListUsersWithPermission:
         assert set(result) == {"admin-user", "viewer-user"}
 
     @pytest.mark.asyncio
+    async def test_excludes_deactivated_users(self, repo: SQLAlchemyRepository) -> None:
+        """Deactivated users never receive fan-out alert rows.
+
+        Given: Two admins with current SCD2 rows, one deactivated
+            (``is_active=False`` — deactivation supersedes the row but
+            keeps it current),
+        When: The fan-out helper resolves ``read:system_status``,
+        Then: Only the active admin is returned.
+        """
+        async with repo.session() as s:
+            s.add_all(
+                [
+                    User(
+                        public_id="active-admin",
+                        username="active-admin",
+                        email="active-admin@example.test",
+                        password_hash="x",
+                        role="admin",
+                        created_at=_ts(),
+                        session_id="seed",
+                        sequence_id=1,
+                        timestamp=_ts(),
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                    User(
+                        public_id="deactivated-admin",
+                        username="deactivated-admin",
+                        email="deactivated-admin@example.test",
+                        password_hash="x",
+                        role="admin",
+                        is_active=False,
+                        created_at=_ts(),
+                        session_id="seed",
+                        sequence_id=2,
+                        timestamp=_ts(),
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                ]
+            )
+            await s.commit()
+
+        result = await repo.list_users_with_permission("read:system_status")
+
+        assert result == ["active-admin"]
+
+    @pytest.mark.asyncio
     async def test_unknown_permission_returns_empty(self, repo: SQLAlchemyRepository) -> None:
         """A permission no role grants yields an empty list (no error)."""
         result = await repo.list_users_with_permission("unknown:permission")

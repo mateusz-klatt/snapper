@@ -219,7 +219,8 @@ existing `critical_system_error` rule consumes that heartbeat, gates on
 three consecutive non-HEALTHY frames in its rolling window, dedups by
 host/disk/hour, and fans out one alert row per current user SCD2 row
 whose role grants `read:system_status` (AI_DELEGATE, VIEWER, OPERATOR,
-ADMIN); the fan-out helper does not filter on `users.is_active`.
+ADMIN); the fan-out helper excludes deactivated users
+(`users.is_active = FALSE`).
 
 | Field             | Type                          | Description |
 |-------------------|-------------------------------|-------------|

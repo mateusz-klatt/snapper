@@ -3762,8 +3762,10 @@ class Repository(ABC):
                 serializes to ``"read:system_status"``).
 
         Returns:
-            Newest-first list of user public_ids. Empty list when no
-            active user holds a role granting the permission.
+            Newest-first list of user public_ids — current SCD2 rows
+            with ``is_active`` TRUE only, so deactivated users never
+            receive fan-out alert rows. Empty list when no active user
+            holds a role granting the permission.
         """
         ...
 
@@ -15050,7 +15052,11 @@ class SQLAlchemyRepository(Repository):
         Role → permissions mapping is read from
         ``snapper.auth.domain.permissions.ROLE_PERMISSIONS``; the
         matched role names are then used to filter the ``users`` SCD2
-        table on its ``role`` column.
+        table on its ``role`` column. "Active" means BOTH the current
+        SCD2 row (``known_to`` sentinel) AND ``is_active`` TRUE — a
+        deactivated user keeps a current row but must not receive
+        alert fan-out (they can no longer log in to act on it, and
+        their devices should not be paged).
         """
         matching_roles: list[str] = [
             role.value
@@ -15065,6 +15071,7 @@ class SQLAlchemyRepository(Repository):
                 .where(
                     User.role.in_(matching_roles),
                     User.known_to == KNOWN_TO_MAX,
+                    User.is_active.is_(True),
                 )
                 .order_by(User.timestamp.desc())
             )
