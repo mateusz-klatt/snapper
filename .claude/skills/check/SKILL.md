@@ -12,6 +12,6 @@ Run the complete quality gate:
 make check-all
 ```
 
-This runs: format check → lint → typecheck → docstrings → exclusion scan → frontend checks → tests with 100% coverage.
+This runs: format check → lint → typecheck → backend policy scans → frontend lint/format/dead-code/typecheck/i18n scans → exclusion scan → backend coverage → frontend coverage, with 100% coverage required.
 
 If it fails, run `make fix-all` first to auto-fix what's possible, then address remaining issues manually.

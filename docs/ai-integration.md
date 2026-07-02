@@ -179,8 +179,9 @@ In any Claude Code session:
 /reload-plugins
 ```
 
-Claude Code prompts for two required values at install time
-(per the plugin's `userConfig` schema in `.claude-plugin/plugin.json`):
+Claude Code prompts for two required values at install time (per the
+plugin's `userConfig` schema in
+`integrations/snapper-mcp/.claude-plugin/plugin.json`):
 
 - **Snapper API URL** -- your backend's `/api/mcp` endpoint. The
   `@mateusz-klatt/snapper-mcp` bridge accepts the value with or without

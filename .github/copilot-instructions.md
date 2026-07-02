@@ -37,7 +37,7 @@ the complete quality gate using the consolidated Makefile targets before creatin
 
 - Tests MUST produce ZERO pytest warnings (RuntimeWarning, DeprecationWarning, etc.)
 - Common pitfall: `AsyncMock()` makes ALL attributes async, including synchronous methods like `session.add()`. Fix: `AsyncMock(add=MagicMock())` for synchronous methods on async mocks.
-- Run `python -m pytest tests/ -W error::RuntimeWarning` to verify no coroutine warnings.
+- Run `make test` for the default warning-clean suite (`tests/` plus `proprietary/tests/` when present). For targeted coroutine-warning debugging, run pytest with `-W error::RuntimeWarning` against the same paths under the isolated test DB.
 - Warnings degrade signal quality and mask real issues. Fix immediately, never leave for later.
 
 **Language Requirements (MANDATORY):**
@@ -51,7 +51,7 @@ the complete quality gate using the consolidated Makefile targets before creatin
 
 **Primary Quality Gate (REQUIRED):**
 
-- `make check-all` - Runs complete quality gate: backend checks + frontend checks + exclusion scan + tests with coverage (100%)
+- `make check-all` - Runs complete quality gate: backend checks + frontend checks + exclusion scan + backend coverage + frontend coverage (100%)
 
 **Individual steps (if needed for debugging):**
 
@@ -67,28 +67,45 @@ the complete quality gate using the consolidated Makefile targets before creatin
 
 - `make typecheck`
 
-4) Unit tests
+4) Backend policy scans
+
+- `make check-docstrings`
+- `make check-no-comments`
+- `make check-main-guard`
+- `make check-init-files`
+- `make check-temporal-mutations`
+- `make check-vendor-neutral`
+- `make check-pydantic-routes`
+- `make check-egress-compose`
+
+5) Unit tests
 
 - `make test`
 
-5) UI/Frontend checks
+6) UI/Frontend checks
 
 - `make ui-lint` - ESLint checks for frontend
 - `make ui-format` - Prettier format checks for frontend
 - `make ui-dead-code` - Dead code analysis for frontend
+- `make ui-typecheck` - TypeScript type checking
+- `make ui-i18n-check` - Frontend hardcoded-string i18n scan
+- `make ui-i18n-check-alerts` - Verify iOS alerts catalog parity
+- `make ui-i18n-check-market` - Verify iOS market catalog parity
 
-6) Exclusion scan (NO pragma/noqa/ignore comments allowed)
+7) Exclusion scan (NO pragma/noqa/ignore comments allowed)
 
 - `make check-exclusions` - Fails if any coverage/lint bypass comments exist
 
-7) Coverage (must be 100% - TDD requirement)
+8) Coverage (must be 100% - TDD requirement)
 
 - `make cov`
     - The repo enforces 100% coverage threshold via the `[tool.coverage.report]` `fail_under = 100` setting in `pyproject.toml` (TDD).
+- `make ui-cov`
+    - The frontend enforces 100% coverage thresholds via `frontend/vite.config.ts`.
 
-8) Full verification (REQUIRED before task completion)
+9) Full verification (REQUIRED before task completion)
 
-- `make check-all` - Complete quality gate: backend + frontend + exclusions + tests with coverage (100%)
+- `make check-all` - Complete quality gate: backend + frontend + exclusions + backend coverage + frontend coverage (100%)
 
 ## Database Backend for Tests vs. Local Server (MANDATORY)
 

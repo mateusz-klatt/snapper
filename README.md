@@ -6,14 +6,21 @@ Supports Kraken (WebSocket; spot + futures + equities), Walutomat
 
 ## Quick Steps
 
+From a fresh checkout:
+
 ```bash
-# One-time: install frontend deps and build the static UI so the
-# FastAPI server can serve the dashboard at `/`.
+# One-time bootstrap.
+make system-deps
+make setup
+cp .env.example .env
 make ui-setup
+
+# Build the static UI so the FastAPI server can serve the dashboard at `/`.
 make ui-build
 
 # Initialize the database + seed dev data, then refresh the verified
-# symbol mappings and market snapshots so the dashboard has data to show.
+# symbol mappings, underlying mappings, and non-Polygon market snapshots
+# so the dashboard has data to show.
 make migrate-dev run-static
 
 # Start the server
@@ -134,7 +141,7 @@ TRADE_COMMAND_DISPATCH_TTL_S=30.0
 make migrate-dev
 
 # Start server
-snapper server
+make run-server
 ```
 
 Two ways to bring up the dashboard:
@@ -149,6 +156,11 @@ Two ways to bring up the dashboard:
   with a backend proxy for `/api` and `/api/ws`. This does NOT
   produce `frontend/dist/`, so `http://localhost:8000/` will still
   return 404 for the UI until the build step is run.
+
+CLI snippets below use bare `snapper` for readability. In this repository,
+Makefile targets run the CLI as `.venv/bin/python -m snapper`; use that
+form unless your virtual environment is activated or the Poetry console
+script is already on `PATH`.
 
 ### Trade Runtime Dispatch
 
@@ -267,6 +279,10 @@ flowchart TB
 
 ## CLI Commands
 
+This is a quick command map, not the full inventory. Run
+`.venv/bin/python -m snapper --help` or see [docs/cli.md](docs/cli.md)
+for complete options and examples.
+
 ### Server and Infrastructure
 
 ```bash
@@ -276,6 +292,7 @@ snapper trade-zmq           # Trade runtime / coordinator (pass --instance-id + 
 snapper executor            # Standalone order executor helper
 snapper feed                # Direct Kraken market data publisher helper
 snapper feed-engine         # Dedicated feed container entrypoint
+snapper notify              # iOS Push Foundation sidecar
 snapper egress              # WireGuard + SOCKS5 egress sidecar entrypoint
 ```
 
@@ -285,6 +302,14 @@ snapper egress              # WireGuard + SOCKS5 egress sidecar entrypoint
 snapper db-init             # Initialize schema
 snapper db-upgrade          # Alembic migrations
 snapper db-downgrade        # Rollback migrations
+snapper db-seed             # Seed profile data
+```
+
+### Configuration and Maintenance
+
+```bash
+snapper settings-rotate-encryption  # Rotate encrypted settings rows
+snapper reconcile-symbol-aliases    # Close stale SCD2 alias rows
 ```
 
 ### Users
@@ -353,13 +378,27 @@ snapper update-kraken-equities-market-snapshot
 snapper update-walutomat-market-snapshot
 snapper polygon-backfill-aggregates  # Step 1: download history to CSV cache (no DB write)
 snapper polygon-load-csv --all       # Step 2: load the CSV cache into the database
+snapper polygon-backfill-grouped
+snapper polygon-load-grouped-candles
+snapper verify-candle-coverage
 snapper kraken-futures-backfill-candles
 snapper kraken-equities-backfill-candles
 snapper update-kraken-futures-funding-rates
+snapper build-continuous
 snapper archive --day 2024-01-15     # Export candle cache to CSV
 snapper archive --from 2024-01-01 --to 2024-01-31 --exchange polygon
 snapper archive --table ticks --day 2024-01-15 --exchange polygon
 snapper archive --table candles-audit --day 2024-01-15 --closed-only --purge
+snapper restore --table candles --dir data/archive/candles/polygon/BTC-USD/
+```
+
+### Backtests
+
+```bash
+snapper backtest-run
+snapper backtest-list
+snapper backtest-cancel
+snapper backtest-rerun
 ```
 
 See [docs/cli.md](docs/cli.md) for full options and examples.
