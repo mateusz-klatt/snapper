@@ -254,6 +254,47 @@ at-most-once ZMQ bus:
   fail closed to quarantine semantics (see egress runbook) until the
   sidecar is healthy again.
 
+### Flat-restart discipline (MANDATORY until venue-truth reconciliation lands)
+
+A strategies-container restart orphans every standing target: the P6
+re-assert layer is IN-SESSION repair only (`_target` starts empty), so
+after ANY restart that touches `snapper-strategies` — including a full
+stack down/up — the operator MUST verify positions are flat and flatten
+anything standing (`GET /api/positions`, then close) BEFORE trusting
+strategy output again. Start every soak or arming window from flat.
+This discipline is the compensating control for the documented pre-LIVE
+gap (venue-truth position reconciliation + strategy target-state
+recovery are NOT built yet).
+
+### Paper-soak checklist + LIVE go/no-go (P7)
+
+The 2026-07-03 P7 drill run verified on the split topology: all six
+restart domains heal (API ~25s, strategies ~30s incl. DB warmup,
+feed ~20s, broker ~30s with bus auto-reconnect, egress ~13s, full cold
+start), the P6 conventions live-fire (entry re-assert repriced each
+bar, `long_only` flat exits at `strength=0.0`, no same-bar duplicates),
+one poisoned bus frame is skipped without killing the listen loop, and
+the full MCP wake loop works container-to-host (consult admission →
+`ai_reviews` frame → host watch → delegate decision inside the deadline
+→ resume → attributed target-flat consumed by the trade runtime).
+
+Soak gating (all must hold over the soak window, ≥24h before LIVE
+go/no-go):
+
+- No unexplained container restarts; every strategy heartbeat stays
+  fresh (no zombie: a dead listen loop must surface as a process
+  restart, not a healthy heartbeat).
+- Zero signal-safety violations: no `side=sell strength>0` rows from
+  `long_only` strategies in `signals` scoped to the soak window.
+- Consult admission succeeds each heartbeat window while the delegate
+  watch is connected; missed windows are gating.
+- Transient SQLite `database is locked` noise is acceptable ONLY if all
+  drills, heartbeats and signal writes heal in-window (a SQLite soak
+  does not validate Postgres contention).
+- Still OPEN by design before LIVE: venue-truth reconciliation,
+  strategy target-state recovery after restart, proprietary parlay/spy
+  exit conversion, Postgres for prod, migration 0015 applied in prod.
+
 ## Verified environments
 
 Verified on 2026-04-18 against docker-compose-v2.29.7

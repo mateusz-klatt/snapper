@@ -113,3 +113,4 @@ plan-*.md
 
 # backfill_synth_candles.py resume/progress log (local run artifact, not source)
 scripts/.backfill_synth_progress.jsonl
+docker-compose.override.yml
