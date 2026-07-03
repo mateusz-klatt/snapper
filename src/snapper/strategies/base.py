@@ -508,17 +508,25 @@ class BaseStrategy(ABC):
         self._system_router.handle_settings_update(envelope)
 
     async def stop(self) -> None:
-        """Stop the strategy and clean up resources."""
+        """Stop the strategy and clean up resources.
+
+        The listen task is cancelled BEFORE the subscriber socket closes:
+        the loop re-raises recv-level failures (so the process watchdog
+        can restart a dead loop), and closing the socket under a live
+        ``recv_multipart`` could wake it with a non-cancel error that
+        would make an intentional stop look like a crash. Any exception
+        the dying task raises during an intentional stop is suppressed.
+        """
         self._running = False
+        if self._listen_task and not self._listen_task.done():
+            self._listen_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._listen_task
         await self._unsubscribe_inputs()
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._heartbeat_task
-        if self._listen_task and not self._listen_task.done():
-            self._listen_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._listen_task
         if self.publisher:
             self.publisher.setsockopt(zmq.LINGER, 0)
             await _close_resource_async(self.publisher)
@@ -706,24 +714,56 @@ class BaseStrategy(ABC):
                 topic_str, payload = await self.subscriber.recv_multipart()
                 payload_str = payload.decode()
                 self.last_data_timestamp = time.time()
-                self._check_gap_parsed(topic_str, payload_str)
-                if topic_str.startswith("system."):
-                    await self._handle_system_message(topic_str, payload_str)
-                    continue
-                if topic_str.startswith(_MARKET_TOPIC_PREFIX):
-                    parsed = parse_market_topic(topic_str)
-                    if parsed is None:
-                        logger.warning(f"Strategy {self.name}: Malformed market topic: {topic_str}")
-                        continue
-                    instrument = parsed.instrument
-                    signals = await self._dispatch_market_data(topic_str, instrument, payload_str)
-                    await self._emit_signal_group(signals)
+                await self._handle_bus_frame(topic_str, payload_str)
         except asyncio.CancelledError:
             logger.info(f"Strategy {self.name}: Listen loop cancelled")
             raise
         except Exception as e:
-            logger.exception(f"Strategy {self.name}: Error in listen loop: {e}")
+            logger.exception(f"Strategy {self.name}: Fatal listen-loop error: {e}")
             self._running = False
+            raise
+
+    async def _handle_bus_frame(self, topic_str: str, payload_str: str) -> None:
+        """Dispatch one bus frame, isolating per-frame failures.
+
+        A malformed or unparseable frame (bad payload schema, failing
+        callback) is logged and SKIPPED — one bad frame from any
+        publisher on the shared bus must never kill the strategy's
+        listen loop (P7 soak finding: a single invalid candle payload
+        previously ended the loop, leaving a zombie strategy that still
+        heartbeated as running while consuming nothing). SIGNAL EMISSION
+        stays OUTSIDE the isolation: an emit failure means the publisher
+        path is broken (the decision would be silently lost bar after
+        bar), so it propagates to :meth:`_listen_loop`, which re-raises
+        for the process watchdog to restart the strategy. Only
+        cancellation propagates from the isolated section.
+
+        Args:
+            topic_str: The decoded frame topic.
+            payload_str: The decoded frame payload JSON.
+        """
+        signals: list[StrategySignal] = []
+        try:
+            self._check_gap_parsed(topic_str, payload_str)
+            if topic_str.startswith("system."):
+                await self._handle_system_message(topic_str, payload_str)
+                return
+            if topic_str.startswith(_MARKET_TOPIC_PREFIX):
+                parsed = parse_market_topic(topic_str)
+                if parsed is None:
+                    logger.warning(f"Strategy {self.name}: Malformed market topic: {topic_str}")
+                    return
+                signals = await self._dispatch_market_data(
+                    topic_str, parsed.instrument, payload_str
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                f"Strategy {self.name}: frame on {topic_str} skipped after handler error: {e}"
+            )
+            return
+        await self._emit_signal_group(signals)
 
     async def _handle_candle_data(self, instrument: str, payload: str) -> list[StrategySignal]:
         """Handle incoming candle data.

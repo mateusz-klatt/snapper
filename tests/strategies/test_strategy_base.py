@@ -2101,11 +2101,13 @@ class TestListenLoop:
 
     @pytest.mark.asyncio
     async def test_listen_loop_handles_exception(self, strategy_config: StrategyConfig) -> None:
-        """Verify listen_loop handles exceptions gracefully.
+        """Verify a recv-level failure stops AND propagates (P7 fix).
 
         Given: Strategy with subscriber raising error,
         When: _listen_loop runs,
-        Then: Strategy stops running.
+        Then: Strategy stops running and the error re-raises so the
+            process watchdog can restart the strategy instead of
+            leaving a zombie.
         """
         strategy = SimpleTestStrategy(strategy_config)
         strategy._running = True
@@ -2113,7 +2115,8 @@ class TestListenLoop:
         mock_subscriber = MagicMock()
         mock_subscriber.recv_multipart = mock_recv
         strategy.subscriber = mock_subscriber
-        await strategy._listen_loop()
+        with pytest.raises(ValueError, match="Test error"):
+            await strategy._listen_loop()
         assert strategy._running is False
 
     @pytest.mark.asyncio

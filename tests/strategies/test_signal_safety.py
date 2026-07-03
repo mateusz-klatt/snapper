@@ -10,6 +10,7 @@ same-bar duplicate suppression, warm-up-floor suppression, RSI/MACD
 gating.
 """
 
+import asyncio
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -26,6 +27,7 @@ from snapper.strategies.base import StrategyConfig
 from snapper.strategies.base import StrategySignal
 from snapper.strategies.cointegration import CointegrationPairs
 from snapper.strategies.macd import MACDCrossover
+from snapper.strategies.process_wrapper import create_strategy_process
 from snapper.strategies.rsi import RSIReversion
 
 _OPEN_AT = datetime(2026, 7, 1, tzinfo=UTC)
@@ -603,3 +605,245 @@ class TestCoverageBranches:
         pair = helper._pair()
         helper._buffer_both(pair, 4)
         assert pair.should_reassert_targets(pair.instrument1, _candle(_OPEN_AT)) is False
+
+
+class TestBusFrameIsolation:
+    """P7 soak findings: bad frames must not kill or zombify a strategy."""
+
+    @pytest.mark.asyncio
+    async def test_malformed_payload_skipped_loop_survives(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify a malformed candle payload is skipped, not fatal.
+
+        Given: A frame whose payload fails CandleData validation, then a
+            valid bar,
+        When: Both frames dispatch through _handle_bus_frame,
+        Then: No exception propagates and the valid bar still reaches the
+            strategy (buffer grows) — one bad frame from any publisher on
+            the shared bus cannot kill the listen loop.
+        """
+        strategy = _ScriptStrategy(_config(), [None])
+        monkeypatch.setattr(strategy, "emit_signal", AsyncMock())
+        await strategy._handle_bus_frame(
+            "market.kraken.BTC-USD.candles.1h", '{"type": "not_a_candle"}'
+        )
+        await strategy._handle_bus_frame(
+            "market.kraken.BTC-USD.candles.1h", _candle(_OPEN_AT).model_dump_json()
+        )
+        assert len(strategy.candle_buffer.get("BTC-USD", [])) == 1
+
+    @pytest.mark.asyncio
+    async def test_system_frame_error_is_isolated(self) -> None:
+        """Verify a failing system-message handler cannot kill the loop.
+
+        Given: A system frame whose payload is invalid JSON,
+        When: _handle_bus_frame dispatches it,
+        Then: No exception propagates (frame logged and skipped).
+        """
+        strategy = _ScriptStrategy(_config(), [])
+        await strategy._handle_bus_frame("system.replay.start", "{not json")
+
+    @pytest.mark.asyncio
+    async def test_wrapper_raises_when_listen_loop_dies(self) -> None:
+        """Verify the process wrapper converts a dead listen loop to an error.
+
+        Given: A started strategy process whose listen task ends while the
+            stop event is unset,
+        When: The wrapper's wait guard observes the death,
+        Then: RuntimeError raises (so the launcher watchdog restarts the
+            process instead of leaving a running=True zombie).
+        """
+        wrapper_cls = create_strategy_process(
+            "p7_zombie_guard_test",
+            "_ScriptStrategy",
+            {
+                "name": "zombie_guard",
+                "inputs": ["market.kraken.BTC-USD.candles.1h"],
+                "outputs": ["BTC-USD"],
+                "exchange": "paper",
+                "params": {},
+            },
+        )
+        wrapper = wrapper_cls(
+            name="zombie_guard",
+            inputs=["market.kraken.BTC-USD.candles.1h"],
+            outputs=["BTC-USD"],
+        )
+        wrapper._stop_event = asyncio.Event()
+
+        class _FakeStrategy:
+            """Carrier for a pre-failed listen task."""
+
+        fake = _FakeStrategy()
+
+        async def _dead_loop() -> None:
+            raise ValueError("socket died")
+
+        fake._listen_task = asyncio.ensure_future(_dead_loop())
+        await asyncio.sleep(0)
+        wrapper.strategy = fake
+        with pytest.raises(RuntimeError, match="listen loop exited unexpectedly"):
+            await wrapper._wait_stop_or_listen_death()
+
+    @pytest.mark.asyncio
+    async def test_wrapper_returns_on_stop_event(self) -> None:
+        """Verify a normal stop returns without raising.
+
+        Given: A wrapper whose stop event fires while the listen loop
+            keeps running,
+        When: The wait guard runs,
+        Then: It returns normally (no false-positive zombie error).
+        """
+        wrapper_cls = create_strategy_process(
+            "p7_stop_guard_test",
+            "_ScriptStrategy",
+            {
+                "name": "stop_guard",
+                "inputs": ["market.kraken.BTC-USD.candles.1h"],
+                "outputs": ["BTC-USD"],
+                "exchange": "paper",
+                "params": {},
+            },
+        )
+        wrapper = wrapper_cls(
+            name="stop_guard",
+            inputs=["market.kraken.BTC-USD.candles.1h"],
+            outputs=["BTC-USD"],
+        )
+        wrapper._stop_event = asyncio.Event()
+
+        class _FakeStrategy:
+            """Carrier for a live listen task."""
+
+        fake = _FakeStrategy()
+
+        async def _live_loop() -> None:
+            await asyncio.Event().wait()
+
+        fake._listen_task = asyncio.ensure_future(_live_loop())
+        wrapper.strategy = fake
+        wrapper._stop_event.set()
+        await wrapper._wait_stop_or_listen_death()
+        fake._listen_task.cancel()
+
+
+class TestEmitFailureFatal:
+    """Emit failures must NOT be swallowed as skipped frames (round-2 fix)."""
+
+    @pytest.mark.asyncio
+    async def test_emit_failure_propagates_from_bus_frame(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify a broken publisher path fails the frame handler loudly.
+
+        Given: A valid bar whose callback yields a signal while
+            _emit_signal_group raises (publisher socket broken),
+        When: _handle_bus_frame dispatches it,
+        Then: The exception propagates (so the listen loop dies and the
+            watchdog restarts the strategy) instead of being logged as a
+            skipped frame while the decision is silently lost.
+        """
+        strategy = _ScriptStrategy(_config(), [_buy()])
+        monkeypatch.setattr(
+            strategy,
+            "_emit_signal_group",
+            AsyncMock(side_effect=RuntimeError("publisher down")),
+        )
+        with pytest.raises(RuntimeError, match="publisher down"):
+            await strategy._handle_bus_frame(
+                "market.kraken.BTC-USD.candles.1h", _candle(_OPEN_AT).model_dump_json()
+            )
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_listen_task_before_socket_close(self) -> None:
+        """Verify stop() cancels the listen task before closing the socket.
+
+        Given: A started-shaped strategy with a live listen task and a
+            recorded unsubscribe,
+        When: stop() runs,
+        Then: The listen task is already cancelled by the time the
+            subscriber closes (an intentional stop can never surface a
+            recv error as a crash).
+        """
+        strategy = _ScriptStrategy(_config(), [])
+        order: list[str] = []
+
+        async def _live_loop() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                order.append("listen_cancelled")
+                raise
+
+        strategy._listen_task = asyncio.ensure_future(_live_loop())
+        await asyncio.sleep(0)
+
+        async def _record_unsub() -> None:
+            order.append("subscriber_closed")
+
+        strategy._unsubscribe_inputs = _record_unsub
+        await strategy.stop()
+        assert order == ["listen_cancelled", "subscriber_closed"]
+
+
+class TestIsolationCoverageBranches:
+    """Remaining branch coverage for the P7 isolation fixes."""
+
+    @pytest.mark.asyncio
+    async def test_cancellation_propagates_through_frame_handler(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify CancelledError is never treated as a skippable frame error.
+
+        Given: A dispatch that raises CancelledError (shutdown during
+            handling),
+        When: _handle_bus_frame processes a market frame,
+        Then: The cancellation propagates (isolation must not eat it).
+        """
+        strategy = _ScriptStrategy(_config(), [])
+        monkeypatch.setattr(
+            strategy,
+            "_dispatch_market_data",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await strategy._handle_bus_frame(
+                "market.kraken.BTC-USD.candles.1h", _candle(_OPEN_AT).model_dump_json()
+            )
+
+    @pytest.mark.asyncio
+    async def test_wrapper_waits_stop_only_without_listen_task(self) -> None:
+        """Verify a strategy without a listen task waits on stop alone.
+
+        Given: A wrapper whose strategy exposes no _listen_task,
+        When: The wait guard runs with the stop event already set,
+        Then: It returns normally (direct-emit strategies keep the plain
+            stop-event contract).
+        """
+        from snapper.strategies.process_wrapper import create_strategy_process
+
+        wrapper_cls = create_strategy_process(
+            "p7_no_listen_guard_test",
+            "_ScriptStrategy",
+            {
+                "name": "no_listen_guard",
+                "inputs": ["market.kraken.BTC-USD.candles.1h"],
+                "outputs": ["BTC-USD"],
+                "exchange": "paper",
+                "params": {},
+            },
+        )
+        wrapper = wrapper_cls(
+            name="no_listen_guard",
+            inputs=["market.kraken.BTC-USD.candles.1h"],
+            outputs=["BTC-USD"],
+        )
+        wrapper._stop_event = asyncio.Event()
+
+        class _NoListenStrategy:
+            """Strategy stand-in without a _listen_task attribute."""
+
+        wrapper.strategy = _NoListenStrategy()
+        wrapper._stop_event.set()
+        await wrapper._wait_stop_or_listen_death()

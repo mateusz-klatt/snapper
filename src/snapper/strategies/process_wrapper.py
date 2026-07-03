@@ -98,7 +98,7 @@ def create_strategy_process(
                     f"(class: {self.config.strategy_class})"
                 )
                 try:
-                    await self._stop_event.wait()
+                    await self._wait_stop_or_listen_death()
                 except asyncio.CancelledError:
                     logger.info(f"Strategy process '{self.process_name}' start task cancelled")
                     raise
@@ -108,6 +108,41 @@ def create_strategy_process(
             finally:
                 self._stop_event = None
                 logger.debug(f"Strategy process '{self.process_name}' start coroutine exiting")
+
+        async def _wait_stop_or_listen_death(self) -> None:
+            """Block until stop is requested or the listen loop dies.
+
+            The strategy's listen loop is a fire-and-forget task; before
+            this guard its unexpected death produced a ZOMBIE (P7 soak
+            finding: heartbeats kept reporting running=True while the
+            strategy consumed nothing). Waiting on BOTH the stop event
+            and the listen task converts an unexpected loop exit into a
+            raised error, so the launcher's task-exception watchdog
+            restarts the whole strategy process.
+
+            Raises:
+                RuntimeError: The listen loop exited while the process
+                    was still supposed to run (chained to the loop's own
+                    exception when it raised one).
+            """
+            assert self._stop_event is not None
+            stop_wait = asyncio.ensure_future(self._stop_event.wait())
+            listen_task = getattr(self.strategy, "_listen_task", None)
+            if listen_task is None:
+                await stop_wait
+                return
+            try:
+                done, _ = await asyncio.wait(
+                    {stop_wait, listen_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                if not stop_wait.done():
+                    stop_wait.cancel()
+            if listen_task in done and not self._stop_event.is_set():
+                exc = listen_task.exception() if not listen_task.cancelled() else None
+                raise RuntimeError(
+                    f"Strategy '{self.config.name}' listen loop exited unexpectedly"
+                ) from exc
 
         async def stop(self) -> None:
             logger.info(f"Stopping strategy process: {self.process_name}")
