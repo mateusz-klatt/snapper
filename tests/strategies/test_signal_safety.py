@@ -821,8 +821,6 @@ class TestIsolationCoverageBranches:
         Then: It returns normally (direct-emit strategies keep the plain
             stop-event contract).
         """
-        from snapper.strategies.process_wrapper import create_strategy_process
-
         wrapper_cls = create_strategy_process(
             "p7_no_listen_guard_test",
             "_ScriptStrategy",
