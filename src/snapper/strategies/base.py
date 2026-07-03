@@ -38,6 +38,7 @@ from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataTypeEnum
 from snapper.core.types import PairedExecutionPolicy
+from snapper.core.types import TradeSideEnum
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import CandleRow
@@ -288,6 +289,7 @@ class BaseStrategy(ABC):
         self.candle_buffer: dict[str, list[CandleData]] = {}
         self._warmup_through_open_at: datetime | None = None
         self._warmup_high_water: dict[str, datetime] = {}
+        self._target: dict[str, StrategySignal] = {}
         self._listen_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self.last_data_timestamp: float = time.time()
@@ -756,7 +758,157 @@ class BaseStrategy(ABC):
                 f"below the warmup high-water {high_water.isoformat()}; buffered without callback"
             )
             return []
-        return self._normalize_signal_group(await self.on_candle(instrument, candle))
+        group = self._normalize_signal_group(await self.on_candle(instrument, candle))
+        try:
+            await self._emit_reassertions(candle, {sig.instrument for sig in group})
+        except Exception as exc:
+            logger.warning(
+                f"Strategy {self.name}: target re-assertion failed ({exc}); "
+                "the bar's fresh signals still emit"
+            )
+        return group
+
+    async def _emit_reassertions(self, candle: CandleData, signaled_this_bar: set[str]) -> None:
+        """Re-emit standing absolute targets for instruments idle this bar.
+
+        P6 signal-safety: signals are absolute position targets and the
+        coordinator delta engine no-ops an in-sync target, so re-asserting
+        the standing target on every decision bar self-heals an
+        at-most-once-dropped signal WITHIN a session. Runs ONLY after a
+        real callback (never on a warm-up-floor bar, which returns before
+        this point) and ONLY for opted-in strategies
+        (:meth:`reasserts_targets`).
+
+        Excludes any instrument that produced a fresh callback signal this
+        bar — that signal IS the bar's assertion, so re-asserting a prior
+        standing target for it would double-emit. Each eligible standing
+        target is repriced to current market (:meth:`_reprice_reassertion`)
+        and emitted as its OWN validated group via
+        :meth:`_emit_signal_group` (NOT concatenated with the callback
+        group), so an independent instrument's re-assertion is never
+        mis-stamped as a paired leg of the callback's signal. Re-assert
+        emits pass ``is_reassertion=True`` so they do NOT overwrite the
+        standing target (which stays the original decision — prevents
+        price/reason drift on the stored target).
+
+        A NON-flat group (an entry) is re-asserted as one paired group
+        (:meth:`_reassert_target_group` returns all legs) so the
+        paired-execution atomicity holds. An ALL-flat group (an exit) is
+        re-asserted as INDEPENDENT single-leg flats: flattening needs no
+        cross-leg coordination, and emitting a flat PAIRED group every bar
+        would churn out broken zero-leg groups (both legs delta-no-op
+        against an already-flat engine). This still self-heals a dropped
+        flat EXIT per leg while avoiding paired-group churn.
+
+        This is IN-SESSION loss repair only: ``_target`` starts empty on a
+        process restart and is repopulated from the first live decision,
+        so it does NOT recover a standing target after a restart (the
+        restart-orphan case — see the plan's P6 scope-out; the paper soak
+        starts flat and flattens after any restart).
+
+        Args:
+            candle: The triggering candle for this decision bar.
+            signaled_this_bar: Instruments that returned a fresh callback
+                signal on this bar (excluded from re-assertion).
+        """
+        if not self.reasserts_targets():
+            return
+        reasserted: set[str] = set()
+        for instrument, standing in list(self._target.items()):
+            if instrument in signaled_this_bar or instrument in reasserted:
+                continue
+            if not self.should_reassert_targets(instrument, candle):
+                continue
+            group = self._reassert_target_group(instrument, standing)
+            repriced = [self._reprice_reassertion(sig) for sig in group]
+            reasserted.update(sig.instrument for sig in repriced)
+            if all(sig.strength == 0.0 for sig in repriced):
+                for leg in repriced:
+                    await self._emit_signal_group([leg], is_reassertion=True)
+            else:
+                await self._emit_signal_group(repriced, is_reassertion=True)
+
+    def _reprice_reassertion(self, standing: StrategySignal) -> StrategySignal:
+        """Return a fresh re-assertion signal repriced to current market.
+
+        A re-assertion carries the standing ABSOLUTE target (``side`` +
+        ``strength`` + ``instrument``) but MUST be repriced to the leg's
+        current market — the trade runtime treats ``signal.price`` as the
+        current price for mark-to-market and opening-size caps, and reuses
+        ``signal.timestamp`` — so re-emitting the stale stored object would
+        risk-check/size a live order against a stale price/time. Reads the
+        leg's own latest buffered close (falls back to the stored price
+        when the buffer is unexpectedly empty) and stamps ``timestamp=None``
+        so the emit path re-stamps a fresh time.
+
+        Args:
+            standing: The stored standing-target signal.
+
+        Returns:
+            A new :class:`StrategySignal` with the same target but current
+            price and a cleared timestamp.
+        """
+        buffer = self.candle_buffer.get(standing.instrument)
+        price = buffer[-1].close if buffer else standing.price
+        return StrategySignal(
+            instrument=standing.instrument,
+            side=standing.side,
+            strength=standing.strength,
+            reason=f"{standing.reason} (re-assert)",
+            price=price,
+            timestamp=None,
+        )
+
+    def _reassert_target_group(
+        self, instrument: str, standing: StrategySignal
+    ) -> list[StrategySignal]:
+        """Return the re-assertion group for one standing target.
+
+        Single-leg strategies re-assert the one standing signal. Multi-leg
+        strategies override to re-assert all legs of the group together so
+        the paired-execution shape is preserved (never independent legs).
+
+        Args:
+            instrument: The standing-target instrument.
+            standing: Its last-emitted :class:`StrategySignal`.
+
+        Returns:
+            The signals to re-assert for this instrument.
+        """
+        return [standing]
+
+    def reasserts_targets(self) -> bool:
+        """Return whether this strategy re-asserts standing targets each bar.
+
+        Default ``False`` — the re-assert MECHANISM is opt-in per strategy
+        (the flat-exit convention itself is unconditional). Strategies
+        armed for the paper soak override to ``True`` so an
+        at-most-once-dropped signal self-heals on the next decision bar.
+
+        Returns:
+            True when the bar-driven re-assert layer is active.
+        """
+        return False
+
+    def should_reassert_targets(self, instrument: str, candle: CandleData) -> bool:
+        """Return whether ``instrument`` may re-assert its standing target now.
+
+        Base default: True whenever a standing target exists (the caller
+        already excluded instruments that signaled this bar). Strategies
+        with a decision-bar or signal-floor discipline (e.g. an aligned
+        cointegration spread) override to re-assert only on a valid
+        tradeable decision bar so warmed/stale/mid-window bars never
+        re-assert a tradeable target.
+
+        Args:
+            instrument: The standing-target instrument.
+            candle: The triggering candle for this bar.
+
+        Returns:
+            True when re-assertion is permitted for this instrument now.
+        """
+        del instrument, candle
+        return True
 
     def _buffer_candle(self, instrument: str, candle: CandleData) -> None:
         """Insert a candle into the per-instrument buffer, upserting by ``open_at``.
@@ -1153,7 +1305,47 @@ class BaseStrategy(ABC):
             )
         return policy
 
-    async def _emit_signal_group(self, signals: list[StrategySignal]) -> None:
+    def emit_flat(
+        self, instrument: str, reason: str, price: float, timestamp: datetime | None = None
+    ) -> StrategySignal:
+        """Build a flat (``strength=0.0``) target signal for an instrument.
+
+        P6 signal-safety: an EXIT is ALWAYS expressed as a flat absolute
+        target, NEVER as an opposite-side ``strength>0`` signal. The
+        coordinator maps ``strength=0.0`` to a target of flat (a
+        reduce-only close on both sides), so a dropped entry (engine flat)
+        followed by a flat exit is a delta no-op — no reversal. Opposite-
+        side ``strength>0`` would instead be an absolute REVERSED target
+        and open a naked reversed position from flat.
+
+        This is a signal BUILDER, not a publisher: callback strategies
+        RETURN it through ``on_candle`` so normalization, group
+        validation, and paired emission stay intact; a direct publisher
+        calls ``await emit_signal(emit_flat(...))``. ``side`` is fixed to
+        ``buy`` for a canonical envelope — it is irrelevant at
+        ``strength=0.0``.
+
+        Args:
+            instrument: The instrument to flatten.
+            reason: Human-readable reason for the flat target.
+            price: Current price stamped on the signal.
+            timestamp: Optional signal timestamp (defaults applied at emit).
+
+        Returns:
+            A :class:`StrategySignal` with ``strength=0.0``.
+        """
+        return StrategySignal(
+            instrument=instrument,
+            side=TradeSideEnum.BUY,
+            strength=0.0,
+            reason=reason,
+            price=price,
+            timestamp=timestamp,
+        )
+
+    async def _emit_signal_group(
+        self, signals: list[StrategySignal], *, is_reassertion: bool = False
+    ) -> None:
         """Emit a validated signal group, stamping the paired-group descriptor.
 
         A single-leg group is emitted unchanged (no paired-group descriptor).
@@ -1167,9 +1359,17 @@ class BaseStrategy(ABC):
         Args:
             signals: The validated signal group in strategy-declared order
                 (empty when the callback produced no signal).
+            is_reassertion: When True, this is a P6 re-assertion of an
+                existing standing target — the standing-target map is NOT
+                updated (the stored target stays the original decision, so
+                repeated re-asserts never drift its price or stack its
+                reason).
         """
         if not signals:
             return
+        if not is_reassertion:
+            for signal in signals:
+                self._target[signal.instrument] = signal
         if len(signals) == 1:
             await self.emit_signal(signals[0])
             return

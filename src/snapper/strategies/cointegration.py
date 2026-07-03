@@ -152,6 +152,77 @@ class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
         """
         return True
 
+    def reasserts_targets(self) -> bool:
+        """Return True: re-assert the standing aligned spread each decision bar.
+
+        The spread's exit is already flat-target compliant (``strength=0.0``);
+        opting into the P6 re-assert layer self-heals an at-most-once-dropped
+        leg on the next valid aligned bar. Idempotent on the trade side.
+
+        Returns:
+            Always True.
+        """
+        return True
+
+    def should_reassert_targets(self, instrument: str, candle: CandleData) -> bool:
+        """Gate re-assertion to the primary leg on a valid tradeable bar.
+
+        Re-asserts ONLY when the triggering candle is the primary leg
+        (single deterministic trigger for the pair), the candle completes
+        the latest common aligned day and is the latest seen (matching the
+        emit gate), and its ``open_at`` is strictly past the signal floor —
+        so warmed / stale / mid-window / partner-ahead bars never re-assert
+        a tradeable spread target. The paired legs are emitted together by
+        :meth:`_reassert_target_group`.
+
+        Args:
+            instrument: The standing-target instrument under consideration.
+            candle: The triggering candle for this bar.
+
+        Returns:
+            True only on a valid aligned primary-leg decision bar past the
+            floor.
+        """
+        if instrument != self.instrument1:
+            return False
+        closes1 = {b.open_at for b in self.candle_buffer.get(self.instrument1, [])}
+        closes2 = {b.open_at for b in self.candle_buffer.get(self.instrument2, [])}
+        common = closes1 & closes2
+        if not common:
+            return False
+        latest_common = max(common)
+        latest_seen = max(closes1 | closes2)
+        if candle.open_at != latest_common or candle.open_at != latest_seen:
+            return False
+        floor = self._signal_floor()
+        return floor is None or candle.open_at > floor
+
+    def _reassert_target_group(
+        self, instrument: str, standing: StrategySignal
+    ) -> list[StrategySignal]:
+        """Re-assert BOTH standing spread legs together as one paired group.
+
+        Preserves the paired-execution shape (never independent legs). The
+        canonical order is ``[instrument1, instrument2]`` regardless of
+        which leg triggered; returns empty when either standing leg is
+        absent (nothing to re-assert).
+
+        Args:
+            instrument: The triggering instrument (the primary, gated by
+                :meth:`should_reassert_targets`).
+            standing: The primary leg's standing signal (unused; both legs
+                are read from ``_target`` to preserve pairing).
+
+        Returns:
+            ``[primary_leg, hedge_leg]`` when both are present, else empty.
+        """
+        del instrument, standing
+        primary = self._target.get(self.instrument1)
+        hedge = self._target.get(self.instrument2)
+        if primary is None or hedge is None:
+            return []
+        return [primary, hedge]
+
     def _signal_floor(self) -> datetime | None:
         """Return the latest ``open_at`` no signal may fire on (it or earlier).
 

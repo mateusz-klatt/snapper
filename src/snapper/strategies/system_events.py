@@ -91,6 +91,7 @@ class SystemMessageRouter:
         replay_envelope = ReplayStartData.from_json(payload_str)
         logger.info(f"Strategy {self.strategy.name}: Replay started, resetting state")
         await self.strategy.reset()
+        self.strategy._target.clear()
         self.strategy._last_data_ts = (
             replay_envelope.started_at.timestamp() if replay_envelope.started_at else None
         )

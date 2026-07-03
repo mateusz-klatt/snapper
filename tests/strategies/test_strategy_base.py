@@ -5176,7 +5176,7 @@ async def test_macd_bearish_crossover(monkeypatch: pytest.MonkeyPatch) -> None:
         strategy_class="MACDCrossover",
         inputs=[INSTRUMENT_BTC],
         outputs=["BTC-USD"],
-        params={"fast": 12, "slow": 26, "signal_period": 9},
+        params={"fast": 12, "slow": 26, "signal_period": 9, "long_only": False},
     )
     strategy = MACDCrossover(config)
     closes: list[float] = [200.0 - i for i in range(40)]
@@ -5326,7 +5326,7 @@ def macd_strategy() -> MACDCrossover:
         strategy_class="MACDCrossover",
         inputs=[INSTRUMENT_BTC],
         outputs=["BTC-USD"],
-        params={"fast": 12, "slow": 26, "signal_period": 9},
+        params={"fast": 12, "slow": 26, "signal_period": 9, "long_only": False},
     )
     return MACDCrossover(config)
 
@@ -5794,7 +5794,7 @@ class TestRSIReversion:
             strategy_class="RSIReversion",
             inputs=["market.kraken.ETH-USD.candles.1h"],
             outputs=["ETH-USD"],
-            params={"period": 14, "upper": 70.0, "lower": 30.0, "cooldown": 0},
+            params={"period": 14, "upper": 70.0, "lower": 30.0, "cooldown": 0, "long_only": False},
         )
         return RSIReversion(config)
 
@@ -5806,7 +5806,7 @@ class TestRSIReversion:
             strategy_class="RSIReversion",
             inputs=["market.kraken.ETH-USD.candles.1h"],
             outputs=["ETH-USD"],
-            params={"period": 14, "upper": 70.0, "lower": 30.0, "cooldown": 0},
+            params={"period": 14, "upper": 70.0, "lower": 30.0, "cooldown": 0, "long_only": False},
         )
 
     @pytest.fixture

@@ -45,6 +45,10 @@ class RSIReversion(BaseStrategy):
         upper: Overbought threshold (sell signal).
         lower: Oversold threshold (buy signal).
         cooldown: Bars to wait between signals.
+        long_only: When True (default), an overbought trigger flattens
+            (``strength=0.0``) instead of opening a short — P6
+            signal-safety: a naked short from a missed entry is
+            impossible when the strategy never emits a negative target.
     """
 
     def __init__(self, config: StrategyConfig) -> None:
@@ -58,7 +62,19 @@ class RSIReversion(BaseStrategy):
         self.upper = self.params.get("upper", 70.0)
         self.lower = self.params.get("lower", 30.0)
         self.cooldown = self.params.get("cooldown", 0)
+        self.long_only = bool(self.params.get("long_only", True))
         self._cool: dict[str, int] = {}
+
+    def reasserts_targets(self) -> bool:
+        """Return True: re-assert the standing target each decision bar.
+
+        Opting into the P6 re-assert layer self-heals an at-most-once-
+        dropped signal on the next bar (idempotent on the trade side).
+
+        Returns:
+            Always True.
+        """
+        return True
 
     def required_candle_history(self) -> int:
         """Return the RSI lookback so warm-up makes the first live bar decisive.
@@ -109,12 +125,17 @@ class RSIReversion(BaseStrategy):
             )
         if r >= self.upper or (r_prev >= self.upper and c_last < c_prev):
             self._cool[instrument] = self.cooldown
+            reason = f"RSI {r:.2f} >= {self.upper} (period={self.period}, prev={r_prev:.2f})"
+            if self.long_only:
+                return self.emit_flat(
+                    instrument, f"{reason} — long_only flatten (P6)", current_price
+                )
             return StrategySignal(
                 instrument=instrument,
                 side=TradeSideEnum.SELL,
                 strength=1.0,
                 price=current_price,
-                reason=f"RSI {r:.2f} >= {self.upper} (period={self.period}, prev={r_prev:.2f})",
+                reason=reason,
             )
         return None
 

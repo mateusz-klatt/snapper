@@ -251,6 +251,46 @@ class StrategySignal:
     timestamp: datetime | None = None
 ```
 
+## Signal-safety convention (MANDATORY)
+
+A signal is an **absolute position target**, never an event. The trade
+coordinator maps `(side, strength)` to a signed target
+(`desired_units = +strength` for buy, `-strength` for sell) and executes
+`delta = desired_units - current_position`, so an in-sync target is a
+no-op (`abs(delta) < 1e-12`).
+
+Two rules keep strategies safe across the independent restart domains
+(the strategies container can restart while the trade runtime keeps
+running, and vice versa):
+
+1. **Express an EXIT as a flat target (`strength=0.0`), NEVER as an
+    opposite-side `strength>0` signal.** Use `BaseStrategy.emit_flat(...)`
+    (a signal builder — return it from `on_candle`). An opposite-side
+    `strength>0` "exit" is an absolute *reversed* target: after an
+    at-most-once-dropped entry (engine flat), it opens a naked reversed
+    position instead of closing nothing. A flat target against a flat
+    engine is a delta no-op — no reversal. A genuine long→short reversal
+    is a deliberate signed target, distinct from an exit.
+
+2. **Re-assert the standing target every decision bar** (opt in via
+    `reasserts_targets()` returning `True`). Because the same target is a
+    delta no-op, re-asserting is idempotent on the trade side and
+    self-heals a dropped signal *within a session*. This does NOT recover
+    a standing target after a process restart (the map starts empty and
+    is repopulated from the first live decision) — restart discipline
+    (start flat; flatten after any restart) covers that until venue-truth
+    position reconciliation lands.
+
+`RSIReversion` and `MACDCrossover` default to `long_only=True`, clamping a
+would-be short to `emit_flat` so they never emit a negative target.
+`CointegrationPairs` already exits with `strength=0.0` and re-asserts a
+standing ENTRY as one paired group (atomicity preserved); a flat EXIT is
+re-asserted as independent per-leg flats (flattening needs no cross-leg
+coordination, and a flat paired group every bar would churn broken
+zero-leg groups). Re-assertions are repriced to each leg's current close
+and never overwrite the standing decision. Direct `emit_signal` callers
+(e.g. an AI-consult heartbeat) bypass the bar-driven re-assert by design.
+
 ## Built-in Strategies
 
 ### RSIReversion

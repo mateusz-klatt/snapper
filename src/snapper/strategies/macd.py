@@ -43,6 +43,10 @@ class MACDCrossover(BaseStrategy):
         fast: Fast EMA period.
         slow: Slow EMA period.
         signal_period: Signal line EMA period.
+        long_only: When True (default), a bearish cross flattens
+            (``strength=0.0``) instead of opening a short — P6
+            signal-safety: a naked short from a missed entry is
+            impossible when the strategy never emits a negative target.
     """
 
     def __init__(self, config: StrategyConfig) -> None:
@@ -55,7 +59,19 @@ class MACDCrossover(BaseStrategy):
         self.fast = self.params.get("fast", 12)
         self.slow = self.params.get("slow", 26)
         self.signal_period = self.params.get("signal_period", 9)
+        self.long_only = bool(self.params.get("long_only", True))
         self._last_hist: dict[str, float] = {}
+
+    def reasserts_targets(self) -> bool:
+        """Return True: re-assert the standing target each decision bar.
+
+        Opting into the P6 re-assert layer self-heals an at-most-once-
+        dropped signal on the next bar (idempotent on the trade side).
+
+        Returns:
+            Always True.
+        """
+        return True
 
     def required_candle_history(self) -> int:
         """Return the MACD lookback so warm-up makes the first live bar decisive.
@@ -100,12 +116,20 @@ class MACDCrossover(BaseStrategy):
                 reason=f"MACD bull cross (hist={hist:.4f}, fast={self.fast}, slow={self.slow}, signal={self.signal_period})",
             )
         if last_hist >= 0 and hist < 0:
+            reason = (
+                f"MACD bear cross (hist={hist:.4f}, fast={self.fast}, "
+                f"slow={self.slow}, signal={self.signal_period})"
+            )
+            if self.long_only:
+                return self.emit_flat(
+                    instrument, f"{reason} — long_only flatten (P6)", current_price
+                )
             return StrategySignal(
                 instrument=instrument,
                 side=TradeSideEnum.SELL,
                 strength=min(abs(hist) * 10, 1.0),
                 price=current_price,
-                reason=f"MACD bear cross (hist={hist:.4f}, fast={self.fast}, slow={self.slow}, signal={self.signal_period})",
+                reason=reason,
             )
         return None
 
