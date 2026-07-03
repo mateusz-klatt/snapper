@@ -229,6 +229,45 @@ class TestCrossCoordinatorOwnership:
         assert row.coordinator == "coord-1"
 
     @pytest.mark.asyncio
+    async def test_configured_external_broker_is_managed_remotely(self) -> None:
+        """An externally-owned zmq_broker shows managed_remotely without a summary.
+
+        With ``zmq_broker_embedded=False`` the autostart profile no longer
+        selects the broker, and the dedicated broker container emits no
+        summary snapshots — the row must still be ``managed_remotely=True``
+        and not running locally so the UI hides Start/Stop (no duplicate
+        local broker can be spawned from the dashboard).
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="zmq_broker",
+                    enabled=True,
+                    mode="thread",
+                    class_path="snapper.messaging.infrastructure.broker.ZmqBrokerProcess",
+                    method="start",
+                    parameters={},
+                    tags=("zmq", "broker", "infrastructure"),
+                )
+            ]
+        )
+        mock_factory.started_processes = {}
+        mock_factory.active_runs = {}
+        mock_factory.instance_configs = {}
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(False, None))
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
+        )
+        row = result.payload[0]
+        assert row.name == "zmq_broker"
+        assert row.running is False
+        assert row.managed_remotely is True
+
+    @pytest.mark.asyncio
     async def test_configured_local_duplicate_stays_controllable(self) -> None:
         """A feed publisher running locally (the duplicate footgun) stays local.
 

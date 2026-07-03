@@ -232,6 +232,20 @@ class AppSettings:
         return self._bootstrap.zmq_broker_bind_xpub or self._bootstrap.zmq_broker_xpub
 
     @property
+    def zmq_broker_embedded(self) -> bool:
+        """Return whether this node's launcher owns the ``zmq_broker`` process.
+
+        True (default) keeps the broker embedded (single container /
+        dev). False means a dedicated broker container runs ``snapper
+        broker`` and the launcher must exclude the broker from autostart
+        and ownership so no duplicate can bind locally.
+
+        Returns:
+            The embedded-broker flag from bootstrap settings.
+        """
+        return self._bootstrap.zmq_broker_embedded
+
+    @property
     def coordinator_instance_id(self) -> int:
         """Return this coordinator's zero-based instance identifier.
 

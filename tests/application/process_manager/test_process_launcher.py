@@ -28,6 +28,7 @@ from snapper.application.process_manager.launcher import CoreProcessStartupError
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.launcher import _DesiredState
 from snapper.application.process_manager.launcher import is_market_data_publisher
+from snapper.application.process_manager.launcher import is_zmq_broker
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import ProcessRegistryEntry
@@ -1205,6 +1206,49 @@ class TestStartProcessByName:
         call_config = mock_start.call_args[0][0]
         assert call_config.enabled is False
         assert call_config.lifecycle == ProcessLifecycleEnum.ONE_SHOT
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.process_manager.launcher.ProcessLauncherService.start_process")
+    @patch("snapper.application.process_manager.launcher.get_repository")
+    async def test_start_process_by_name_refuses_external_broker(
+        self, mock_get_repo: MagicMock, mock_start: AsyncMock
+    ) -> None:
+        """Verify manual REST start cannot spawn a duplicate local broker.
+
+        Given: ``zmq_broker_embedded=False`` (a dedicated broker container
+            owns the bus) and a persisted broker config row,
+        When: start_process_by_name is called for ``zmq_broker``,
+        Then: The start is refused with the broker-container message and
+            no process is started — the external-owner invariant must not
+            be a UI-only guard.
+        """
+        mock_setting = MagicMock()
+        mock_setting.value = json.dumps(
+            {
+                "class": "snapper.messaging.infrastructure.broker.ZmqBrokerProcess",
+                "method": "start",
+                "mode": "thread",
+                "parameters": {},
+                "enabled": True,
+                "tags": ["zmq", "broker", "infrastructure"],
+            }
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_setting
+        mock_session = MagicMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value.__aenter__.return_value = mock_session
+        mock_repo.session.return_value.__aexit__.return_value = AsyncMock()
+        mock_get_repo.return_value = mock_repo
+        settings = MagicMock()
+        settings.db_url = "sqlite:///:memory:"
+        settings.zmq_broker_embedded = False
+        factory = ProcessLauncherService(settings)
+        result = await factory.start_process_by_name("zmq_broker")
+        assert result.status == "error"
+        assert "dedicated broker container" in result.message
+        mock_start.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.application.process_manager.launcher.ProcessLauncherService.start_process")
@@ -7414,9 +7458,11 @@ class TestLoadTemplateSetting:
         assert result == {}
 
 
-def _settings_with_profile(profile: str) -> AppSettings:
+def _settings_with_profile(profile: str, *, broker_embedded: bool = True) -> AppSettings:
     """Build AppSettings whose bootstrap carries the given autostart profile."""
-    bootstrap = BootstrapSettingsLoader(PROCESS_AUTOSTART_PROFILE=profile)
+    bootstrap = BootstrapSettingsLoader(
+        PROCESS_AUTOSTART_PROFILE=profile, ZMQ_BROKER_EMBEDDED=broker_embedded
+    )
     return AppSettings(bootstrap, _DummySettingsService())
 
 
@@ -7474,6 +7520,23 @@ class TestIsMarketDataPublisher:
         assert is_market_data_publisher(()) is False
 
 
+class TestIsZmqBroker:
+    """The tag predicate the external-broker opt-out excludes on."""
+
+    def test_true_for_broker_tags(self) -> None:
+        """The registered broker tag set (with extras) qualifies."""
+        assert is_zmq_broker(("zmq", "broker", "infrastructure")) is True
+
+    def test_false_for_partial_tags(self) -> None:
+        """Either tag alone is insufficient."""
+        assert is_zmq_broker(("zmq",)) is False
+        assert is_zmq_broker(("broker",)) is False
+
+    def test_false_for_publisher_tags(self) -> None:
+        """A market-data publisher is not the broker."""
+        assert is_zmq_broker(("market-data", "publisher")) is False
+
+
 class TestAutostartIncludes:
     """Profile-driven inclusion predicate on the launcher."""
 
@@ -7494,6 +7557,23 @@ class TestAutostartIncludes:
         factory = ProcessLauncherService(_settings_with_profile("feed"))
         assert factory.autostart_includes(_publisher_config()) is True
         assert factory.autostart_includes(_non_publisher_config()) is False
+
+    def test_external_broker_excluded_on_api_profile(self) -> None:
+        """``zmq_broker_embedded=False`` drops the broker from API autostart."""
+        factory = ProcessLauncherService(_settings_with_profile("api", broker_embedded=False))
+        assert factory.autostart_includes(_non_publisher_config()) is False
+        assert factory.autostart_includes(_publisher_config()) is False
+
+    def test_external_broker_excluded_on_all_profile(self) -> None:
+        """``zmq_broker_embedded=False`` drops the broker from ALL autostart."""
+        factory = ProcessLauncherService(_settings_with_profile("all", broker_embedded=False))
+        assert factory.autostart_includes(_non_publisher_config()) is False
+        assert factory.autostart_includes(_publisher_config()) is True
+
+    def test_embedded_broker_default_keeps_broker(self) -> None:
+        """The default embedded flag keeps the broker on API/ALL nodes."""
+        factory = ProcessLauncherService(_settings_with_profile("api"))
+        assert factory.autostart_includes(_non_publisher_config()) is True
 
     def test_mocked_settings_falls_through_to_all(self) -> None:
         """A non-enum profile attribute (mocked settings) defaults to ALL."""

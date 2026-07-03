@@ -227,6 +227,27 @@ Acceptable orchestrators for the non-systemd recipe are
 meta-test rejects bare `docker` because `docker run` alone does
 not provide the per-instance lifecycle the contract requires.
 
+## Compose restart matrix (broker split)
+
+With the dedicated `snapper-broker` service, restart domains are
+independent and each restart has explicit loss semantics on the
+at-most-once ZMQ bus:
+
+- `docker compose restart snapper` (backend only) — the bus stays up;
+  feed publishers and any strategies container keep publishing, BUT
+  signals consumed by the trade runtime during the backend window are
+  lost (the coordinator was down; signals have no replay). Feed frames
+  keep flowing to other subscribers.
+- `docker compose restart snapper-feed` — market-data gap for the
+  restart window (publishers reconnect and resume; candle corpus heals
+  per feed-resilience recovery below).
+- `docker compose restart snapper-broker` — a brief bus blip for EVERY
+  participant: PUB frames sent during the window drop, all sockets
+  auto-reconnect. Treat as a rare, deliberate operation.
+- `docker compose restart snapper-egress` — tunnel-routed public feeds
+  fail closed to quarantine semantics (see egress runbook) until the
+  sidecar is healthy again.
+
 ## Verified environments
 
 Verified on 2026-04-18 against docker-compose-v2.29.7

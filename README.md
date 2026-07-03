@@ -507,12 +507,18 @@ binary. Each service overrides `entrypoint` / `command` to launch the
 right process. The optional `postgres` service is gated behind the
 `dev` compose profile.
 
-- `snapper` — FastAPI backend, ZMQ broker, strategy/process control, and
+- `snapper-broker` — dedicated ZeroMQ XPUB/XSUB broker container
+  (`command: ["broker", "--xsub", "tcp://0.0.0.0:7500", "--xpub",
+  "tcp://0.0.0.0:7501"]`, `expose: 7500/7501` internally). Every other
+  service connects to it via `tcp://snapper-broker:7500/7501`, so
+  restarting the backend no longer bounces the bus.
+- `snapper` — FastAPI backend, strategy/process control, and
   non-publisher runtime processes. `PROCESS_AUTOSTART_PROFILE=api`,
-  `command: ["server"]`, `expose: 8000/7500/7501` internally.
+  `ZMQ_BROKER_EMBEDDED=false` (the dedicated broker container owns the
+  bus), `command: ["server"]`, `expose: 8000` internally.
 - `snapper-feed` — dedicated market-data publisher container.
   `PROCESS_AUTOSTART_PROFILE=feed`, `command: ["feed-engine"]`; it
-  connects to the backend broker via `tcp://snapper:7500/7501` and
+  connects to the broker via `tcp://snapper-broker:7500/7501` and
   uses reduced DB pool settings so publisher subprocesses do not
   overrun PostgreSQL connection limits.
 - `snapper-egress` — WireGuard + SOCKS5 sidecar for outbound publisher

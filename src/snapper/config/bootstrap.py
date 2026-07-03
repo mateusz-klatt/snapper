@@ -120,6 +120,13 @@ class BootstrapSettingsLoader(BaseSettings):
         zmq_broker_bind_xpub: Interface the broker BINDS its XPUB socket
             to. Empty (default) falls back to ``zmq_broker_xpub``. See
             ``zmq_broker_bind_xsub``.
+        zmq_broker_embedded: When True (default), this node's process
+            launcher owns the ``zmq_broker`` CORE process (single
+            container / dev). Set False when a dedicated broker
+            container runs ``snapper broker`` — the launcher then
+            excludes the broker from autostart and ownership so no
+            duplicate broker can start locally and the UI treats it as
+            remotely managed.
         telemetry_recording_enabled: When True, data-plane messages
             (ping/pong, heartbeat, GET reads) are persisted to the
             telemetry table. Default is False (counters still increment).
@@ -184,6 +191,7 @@ class BootstrapSettingsLoader(BaseSettings):
     zmq_broker_xpub: str = Field(default="tcp://127.0.0.1:7501", alias="ZMQ_BROKER_XPUB")
     zmq_broker_bind_xsub: str = Field(default="", alias="ZMQ_BROKER_BIND_XSUB")
     zmq_broker_bind_xpub: str = Field(default="", alias="ZMQ_BROKER_BIND_XPUB")
+    zmq_broker_embedded: bool = Field(default=True, alias="ZMQ_BROKER_EMBEDDED")
     telemetry_recording_enabled: bool = Field(default=False, alias="TELEMETRY_RECORDING_ENABLED")
     coordinator_instance_id: int = Field(default=0, alias="SNAPPER_COORDINATOR_INSTANCE_ID")
     coordinator_instance_count: int = Field(default=1, alias="SNAPPER_COORDINATOR_INSTANCE_COUNT")

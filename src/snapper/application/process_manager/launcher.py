@@ -99,6 +99,7 @@ _STRATEGIES_LIST_STREAM = "strategies.events.list"
 _BROADCAST_FAILURE_TEMPLATE = "Failed to broadcast {}: {}"
 _CORE_HEALTH_CACHE_TTL_S: Final[float] = 5.0
 _MARKET_DATA_PUBLISHER_TAGS: Final[frozenset[str]] = frozenset({"market-data", "publisher"})
+_ZMQ_BROKER_TAGS: Final[frozenset[str]] = frozenset({"zmq", "broker"})
 
 _RESTART_BASE_DELAY_S: Final[float] = 1.0
 _RESTART_FACTOR: Final[float] = 2.0
@@ -214,6 +215,25 @@ def is_market_data_publisher(tags: Iterable[str]) -> bool:
         ``publisher``, False otherwise.
     """
     return _MARKET_DATA_PUBLISHER_TAGS.issubset(set(tags))
+
+
+def is_zmq_broker(tags: Iterable[str]) -> bool:
+    """Return whether a process's tags mark it as the ZMQ broker.
+
+    The broker registration carries BOTH the ``zmq`` and ``broker``
+    tags (``messaging/infrastructure/broker.py``). This is the
+    predicate the ``zmq_broker_embedded=False`` opt-out excludes from
+    autostart so a dedicated broker container can own the bus without
+    the backend starting a duplicate.
+
+    Args:
+        tags: The registered tags of a process.
+
+    Returns:
+        True when the tag set is a superset of ``zmq`` + ``broker``,
+        False otherwise.
+    """
+    return _ZMQ_BROKER_TAGS.issubset(set(tags))
 
 
 def _copy_process_config_with_mode(
@@ -1094,6 +1114,14 @@ class ProcessLauncherService:
         settings object (whose attribute is not an enum member) falls
         through to the permissive ``ALL`` behaviour.
 
+        Independently of the profile, ``zmq_broker_embedded=False``
+        excludes the ``zmq_broker`` process (:func:`is_zmq_broker`) on
+        the API and ALL branches: a dedicated broker container then owns
+        the bus, this node must never bind a duplicate, and ownership
+        resolution treats the broker as remotely managed. The check uses
+        ``is False`` so mocked settings fall through to the embedded
+        (permissive) behaviour.
+
         Args:
             config: The process configuration under consideration.
 
@@ -1103,6 +1131,10 @@ class ProcessLauncherService:
         profile = self.settings.process_autostart_profile
         if profile is ProcessAutostartProfileEnum.FEED:
             return is_market_data_publisher(config.tags)
+        if getattr(self.settings, "zmq_broker_embedded", True) is False and is_zmq_broker(
+            config.tags
+        ):
+            return False
         if profile is ProcessAutostartProfileEnum.API:
             return not is_market_data_publisher(config.tags)
         return True
@@ -3026,6 +3058,18 @@ class ProcessLauncherService:
             config_dict = json.loads(setting.value)
             autostart_enabled = self._apply_overrides_to_config_dict(config_dict, mode, parameters)
             config = self._build_config_for_start_by_name(name, config_dict, autostart_enabled)
+        raw_tags = tuple(config_dict.get("tags") or ())
+        if getattr(self.settings, "zmq_broker_embedded", True) is False and (
+            is_zmq_broker(config.tags) or is_zmq_broker(raw_tags)
+        ):
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=(
+                    f"Process '{name}' is owned by the dedicated broker container "
+                    "(ZMQ_BROKER_EMBEDDED=false) — starting a local duplicate would "
+                    "bind a second bus; manage it via docker instead"
+                ),
+            )
         was_watchdog_managed = name in self._desired_state
         await self._cancel_pending_restart(name)
         try:

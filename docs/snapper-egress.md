@@ -33,11 +33,12 @@ This sidecar is part of the egress-multiplexer subsystem.
   `ZMQ_BROKER_XSUB` wires SettingsService change-broadcast support.
   `DB_URL` is supplied via `env_file: .env`. In the Compose split,
   `ZMQ_BROKER_XSUB` MUST be the routable broker host
-  `tcp://snapper:7500`, NOT the `.env` default `tcp://127.0.0.1:7500` —
-  the `docker-compose.yml` `snapper-egress` service overrides it for
-  exactly this reason. `snapper-egress` runs in a separate container, so
-  `localhost` would not reach the backend broker living in the `snapper`
-  container.
+  `tcp://snapper-broker:7500`, NOT the `.env` default
+  `tcp://127.0.0.1:7500` — the `docker-compose.yml` `snapper-egress`
+  service overrides it for exactly this reason (and depends on the
+  `snapper-broker` service being healthy). `snapper-egress` runs in a
+  separate container, so `localhost` would not reach the broker living
+  in the `snapper-broker` container.
 
 ## Architecture (short)
 

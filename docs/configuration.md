@@ -85,11 +85,15 @@ either value.
 | `ZMQ_BROKER_XPUB` | `tcp://127.0.0.1:7501` | XPUB endpoint (subscribers connect here) |
 | `ZMQ_BROKER_BIND_XSUB` | empty | Optional broker bind endpoint for XSUB. Empty means bind `ZMQ_BROKER_XSUB`; cross-container deployments set this to `tcp://0.0.0.0:7500`. |
 | `ZMQ_BROKER_BIND_XPUB` | empty | Optional broker bind endpoint for XPUB. Empty means bind `ZMQ_BROKER_XPUB`; cross-container deployments set this to `tcp://0.0.0.0:7501`. |
+| `ZMQ_BROKER_EMBEDDED` | `true` | When `false`, this node's launcher excludes the `zmq_broker` CORE process (a dedicated `snapper-broker` container owns the bus); the dashboard shows the broker as remotely managed. |
 
 Bind endpoints exist because ZMQ `bind()` requires a local interface
 while cross-container clients connect through the Docker service name.
-In the compose split, the backend broker binds `0.0.0.0` and both the
-backend and `snapper-feed` connect to `tcp://snapper:7500/7501`.
+In the compose split, the dedicated `snapper-broker` container binds
+`0.0.0.0` (via explicit CLI flags) and the backend, `snapper-feed`, and
+`snapper-egress` all connect to `tcp://snapper-broker:7500/7501`; the
+backend additionally sets `ZMQ_BROKER_EMBEDDED=false` so its launcher
+does not start a duplicate embedded broker.
 
 ### Database Engine Pool
 

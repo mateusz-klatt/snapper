@@ -1120,18 +1120,31 @@ under the `api` profile, and `get_core_health` honours the same filter so a
 publisher that intentionally runs in the feed container is not reported as a
 missing CORE process on the backend.
 
-The ZMQ broker stays in the backend (its tags are infrastructure, not
-publisher, so the `api` profile keeps it). Cross-container wiring uses two
-endpoint pairs because ZMQ `bind` rejects hostnames while `connect`
+The ZMQ broker runs in its own `snapper-broker` container in the compose
+split (`snapper broker --xsub tcp://0.0.0.0:7500 --xpub tcp://0.0.0.0:7501`),
+so restarting the backend no longer bounces the bus for the feed (and
+future strategies) containers. The backend opts out of its embedded
+broker via `ZMQ_BROKER_EMBEDDED=false`: the launcher excludes the
+`zmq_broker` CORE process from autostart and ownership resolution treats
+it as remotely managed (the dashboard hides Start/Stop, so no duplicate
+local broker can be spawned). The default (`true`) keeps the embedded
+broker for single-container and dev flows. Cross-container wiring uses
+two endpoint pairs because ZMQ `bind` rejects hostnames while `connect`
 resolves them:
 
-- `ZMQ_BROKER_BIND_XSUB` / `ZMQ_BROKER_BIND_XPUB` — the routable interface
-  the broker binds (`tcp://0.0.0.0:7500` / `:7501`). Empty (default) falls
-  back to the connect endpoints, so single-container behaviour is unchanged.
+- The broker container receives its bind interfaces as explicit CLI
+  flags (`tcp://0.0.0.0:7500` / `:7501`); the `ZMQ_BROKER_BIND_*` env
+  pair remains for embedded-broker deployments (empty default falls back
+  to the connect endpoints, so single-container behaviour is unchanged).
 - `ZMQ_BROKER_XSUB` / `ZMQ_BROKER_XPUB` — the connect endpoints every
-  process (backend's own components AND the feed container's publishers)
-  dials. Both containers set these to the backend service name
-  (`tcp://snapper:7500` / `:7501`).
+  process (backend components, feed publishers, and the egress sidecar)
+  dials. All compose services set these to the broker service name
+  (`tcp://snapper-broker:7500` / `:7501`).
+
+The broker container is a bare CLI without a ProcessLauncherService: it
+emits no `processes.events.summary.*` snapshots, so its only supervision
+is the docker healthcheck (TCP probes on both ports) + restart policy —
+port liveness IS the health of a single-thread proxy.
 
 `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` clamp each publisher subprocess's
 SQLAlchemy pool (PostgreSQL only). `get_repository` caches one engine per
@@ -1146,10 +1159,12 @@ Deploy notes (see `docker-compose.yml` `snapper-feed` service):
   `docker compose up snapper` with the `api` profile but no feed container
   stops all market-data ingest, so deploy both atomically.
 - The broker's bound endpoint is seeded into its DB process-config
-  `parameters` by registry sync on a fresh database. An existing
-  deployment whose broker config already carries `tcp://127.0.0.1:7500`
-  must have that row re-synced (or the `parameters` cleared) so the broker
-  picks up `tcp://0.0.0.0:*`; otherwise the feed container cannot reach it.
+  `parameters` by registry sync on a fresh database. With the dedicated
+  `snapper-broker` container that row is inert: the launcher never starts
+  the excluded process (`ZMQ_BROKER_EMBEDDED=false`) and the broker
+  container reads only its CLI flags — no row surgery is needed on
+  existing deployments. (Embedded-broker deployments keep the old rule:
+  a stale `tcp://127.0.0.1:7500` row must be re-synced or cleared.)
   In multi-instance deployments only coordinator instance `0` runs this
   replicated registry sync; non-zero instances skip it during FastAPI
   lifespan startup to avoid racing the same temporal `Setting` rows.

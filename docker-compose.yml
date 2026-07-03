@@ -1,4 +1,21 @@
 services:
+  snapper-broker:
+    image: klattm/snapper:latest
+    container_name: snapper-broker
+    env_file: .env
+    command: ["broker", "--xsub", "tcp://0.0.0.0:7500", "--xpub", "tcp://0.0.0.0:7501"]
+    expose:
+      - "7500"
+      - "7501"
+    networks:
+      - snapper-internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket;socket.create_connection(('127.0.0.1',7500),2).close();socket.create_connection(('127.0.0.1',7501),2).close()"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
   snapper:
     image: klattm/snapper:latest
     build:
@@ -9,14 +26,11 @@ services:
     environment:
       - PROCESS_AUTOSTART_PROFILE=api
       - SNAPPER_COORDINATOR_INSTANCE_ID=0
-      - ZMQ_BROKER_XSUB=tcp://snapper:7500
-      - ZMQ_BROKER_XPUB=tcp://snapper:7501
-      - ZMQ_BROKER_BIND_XSUB=tcp://0.0.0.0:7500
-      - ZMQ_BROKER_BIND_XPUB=tcp://0.0.0.0:7501
+      - ZMQ_BROKER_EMBEDDED=false
+      - ZMQ_BROKER_XSUB=tcp://snapper-broker:7500
+      - ZMQ_BROKER_XPUB=tcp://snapper-broker:7501
     expose:
       - "8000"
-      - "7500"
-      - "7501"
     volumes:
       - ./data:/app/data
       - ./reports:/app/reports
@@ -25,6 +39,8 @@ services:
       - snapper-internal
     restart: unless-stopped
     depends_on:
+      snapper-broker:
+        condition: service_healthy
       snapper-egress:
         condition: service_healthy
   snapper-feed:
@@ -33,8 +49,8 @@ services:
     env_file: .env
     environment:
       - PROCESS_AUTOSTART_PROFILE=feed
-      - ZMQ_BROKER_XSUB=tcp://snapper:7500
-      - ZMQ_BROKER_XPUB=tcp://snapper:7501
+      - ZMQ_BROKER_XSUB=tcp://snapper-broker:7500
+      - ZMQ_BROKER_XPUB=tcp://snapper-broker:7501
       - SNAPPER_COORDINATOR_INSTANCE_ID=1
       - DB_POOL_SIZE=2
       - DB_MAX_OVERFLOW=3
@@ -45,6 +61,8 @@ services:
       - snapper-internal
     restart: unless-stopped
     depends_on:
+      snapper-broker:
+        condition: service_healthy
       snapper:
         condition: service_healthy
       snapper-egress:
@@ -60,8 +78,11 @@ services:
     container_name: snapper-egress
     env_file: .env
     environment:
-      - ZMQ_BROKER_XSUB=tcp://snapper:7500
-      - ZMQ_BROKER_XPUB=tcp://snapper:7501
+      - ZMQ_BROKER_XSUB=tcp://snapper-broker:7500
+      - ZMQ_BROKER_XPUB=tcp://snapper-broker:7501
+    depends_on:
+      snapper-broker:
+        condition: service_healthy
     expose:
       - "8081"
     user: "0:0"
