@@ -138,6 +138,20 @@ class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
         """
         return self.lookback_window
 
+    def requires_aligned_warmup(self) -> bool:
+        """Return True: the pair spread demands date-aligned warm-up legs.
+
+        The z-score joins legs by ``open_at``; a partially-warmed or
+        misaligned leg set would compute a spread over mismatched dates
+        and emit false signals on a live money path, so warm-up stays
+        ALL-OR-NOTHING (base fail-closes multi-leg anyway; this override
+        documents the contract explicitly).
+
+        Returns:
+            Always True.
+        """
+        return True
+
     def _signal_floor(self) -> datetime | None:
         """Return the latest ``open_at`` no signal may fire on (it or earlier).
 

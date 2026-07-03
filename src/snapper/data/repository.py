@@ -1061,12 +1061,18 @@ class Repository(ABC):
         as_of: datetime,
         limit: int | None = None,
         order: str = "asc",
+        complete: bool | None = None,
     ) -> list[CandleRow]:
         """Retrieve candles for instrument.
 
         Two modes:
         - Range: start and end both provided.
         - Latest-as-of: start and end are None, limit provided.
+
+        ``complete=True`` restricts rows to final bars (excludes
+        provisional intermediate persists), so latest-N reads return
+        an exact count of complete bars; ``None`` applies no
+        completeness predicate (legacy behavior).
         """
         ...
 
@@ -5841,12 +5847,18 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         limit: int | None = None,
         order: str = "asc",
+        complete: bool | None = None,
     ) -> list[CandleRow]:
         """Retrieve active candles for instrument.
 
         Supports two modes:
         - Range mode: start and end both provided.
         - Latest-as-of mode: start/end are None, limit provided.
+
+        ``complete=True`` adds the final-bar predicate so latest-N
+        reads return an exact count of complete bars even when
+        intermediate persists left provisional rows; ``None`` keeps
+        the legacy unfiltered read.
         """
         async with self.session() as s:
             inst = await self._resolve_active_instrument(s, instrument, exchange, as_of)
@@ -5876,6 +5888,8 @@ class SQLAlchemyRepository(Repository):
             )
             if start is not None and end is not None:
                 q = q.where(Candle.open_at >= start, Candle.open_at <= end)
+            if complete is not None:
+                q = q.where(Candle.complete.is_(complete))
             order_col = Candle.open_at.desc() if order == "desc" else Candle.open_at.asc()
             q = q.order_by(order_col)
             if limit is not None:

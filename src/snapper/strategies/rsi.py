@@ -60,6 +60,19 @@ class RSIReversion(BaseStrategy):
         self.cooldown = self.params.get("cooldown", 0)
         self._cool: dict[str, int] = {}
 
+    def required_candle_history(self) -> int:
+        """Return the RSI lookback so warm-up makes the first live bar decisive.
+
+        The callback needs ``period`` closes plus the previous-RSI point for
+        its cross conditions, so ``period + 1`` warmed bars let the first
+        post-warm-up live bar evaluate immediately instead of idling
+        ``period`` live periods.
+
+        Returns:
+            ``period + 1``.
+        """
+        return int(self.period) + 1
+
     async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle and generate signal if conditions met.
 

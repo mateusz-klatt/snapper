@@ -5146,7 +5146,9 @@ async def test_macd_bullish_crossover_signal(monkeypatch: pytest.MonkeyPatch) ->
         macd_series = pd.Series([0.0] * len(series), index=index, dtype=float)
         signal_series = macd_series.copy()
         hist_value = 0.3 if call_state["count"] > 1 else -0.3
-        hist_series = pd.Series([hist_value] * len(series), index=index, dtype=float)
+        data = [-0.3] * len(series)
+        data[-1] = hist_value
+        hist_series = pd.Series(data, index=index, dtype=float)
         return macd_series, signal_series, hist_series
 
     monkeypatch.setattr("snapper.strategies.macd.macd", fake_macd)
@@ -5188,7 +5190,9 @@ async def test_macd_bearish_crossover(monkeypatch: pytest.MonkeyPatch) -> None:
         macd_series = pd.Series([0.0] * len(series), index=index, dtype=float)
         signal_series = macd_series.copy()
         hist_value = -0.3 if call_state["count"] > 1 else 0.3
-        hist_series = pd.Series([hist_value] * len(series), index=index, dtype=float)
+        data = [0.3] * len(series)
+        data[-1] = hist_value
+        hist_series = pd.Series(data, index=index, dtype=float)
         return macd_series, signal_series, hist_series
 
     monkeypatch.setattr("snapper.strategies.macd.macd", fake_macd)
@@ -5251,7 +5255,9 @@ async def test_macd_reason_contains_params(monkeypatch: pytest.MonkeyPatch) -> N
         macd_series = pd.Series([0.0] * len(series), index=index, dtype=float)
         signal_series = macd_series.copy()
         hist_value = 0.4 if call_state["count"] > 1 else -0.4
-        hist_series = pd.Series([hist_value] * len(series), index=index, dtype=float)
+        data = [-0.4] * len(series)
+        data[-1] = hist_value
+        hist_series = pd.Series(data, index=index, dtype=float)
         return macd_series, signal_series, hist_series
 
     monkeypatch.setattr("snapper.strategies.macd.macd", fake_macd)
@@ -5386,7 +5392,10 @@ def _stub_macd_sequence(
         macd_series = pd.Series([0.0] * len(series), index=index, dtype=float)
         signal_series = macd_series.copy()
         idx = min(call_state["index"], len(values) - 1)
-        hist_series = pd.Series([values[idx]] * len(series), index=index, dtype=float)
+        fill = values[max(idx - 1, 0)]
+        data = [fill] * len(series)
+        data[-1] = values[idx]
+        hist_series = pd.Series(data, index=index, dtype=float)
         call_state["index"] += 1
         return macd_series, signal_series, hist_series
 
@@ -6692,6 +6701,10 @@ class _WarmupStrategy(MockStrategy):
         """Return the configured warm-up bar count (0 when unset)."""
         return int(self.params.get("warmup_n", 0))
 
+    def requires_aligned_warmup(self) -> bool:
+        """Return the ``warmup_aligned`` param so single-leg tests can pick the mode."""
+        return bool(self.params.get("warmup_aligned", False))
+
 
 def _db_candle_row(close: float, *, day: date, volume: float = 10.0) -> dict[str, Any]:
     """Build a persisted 1d CandleRow dict (00:00 UTC open_at) for warmup DB tests."""
@@ -6736,10 +6749,13 @@ class _StubWarmupRepo:
         as_of: Any,
         limit: int | None = None,
         order: str = "asc",
+        complete: bool | None = None,
     ) -> list[dict[str, Any]]:
         rows = sorted(
             self._rows.get(instrument, []), key=lambda r: r["open_at"], reverse=order == "desc"
         )
+        if complete is not None:
+            rows = [r for r in rows if bool(r.get("complete")) is complete]
         return rows[:limit] if limit is not None else rows
 
 
@@ -6811,7 +6827,7 @@ class TestWarmupPrefill:
 
     def _warmup_config(self, **params: Any) -> StrategyConfig:
         """Build a crypto-opt-in warmup strategy config with the given params."""
-        base = {"warmup_n": 3, "warmup_market_type": "crypto"}
+        base = {"warmup_n": 3, "warmup_market_type": "crypto", "warmup_aligned": True}
         base.update(params)
         return _strategy_config(
             name="w",
@@ -7090,6 +7106,7 @@ class TestWarmupDbFirst:
             _db_candle_row(2.5, day=date(2024, 2, 16)),
             instrument="FET-USD",
             exchange="kraken",
+            timeframe="1d",
             sequence_id=0,
         )
         assert candle.open_at == datetime(2024, 2, 16, tzinfo=UTC)
@@ -7108,6 +7125,7 @@ class TestWarmupDbFirst:
             params={
                 "warmup_n": 3,
                 "warmup_market_type": "crypto",
+                "warmup_aligned": True,
                 "polygon_cache_root": str(cache_root),
             },
         )

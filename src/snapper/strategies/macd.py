@@ -57,6 +57,19 @@ class MACDCrossover(BaseStrategy):
         self.signal_period = self.params.get("signal_period", 9)
         self._last_hist: dict[str, float] = {}
 
+    def required_candle_history(self) -> int:
+        """Return the MACD lookback so warm-up makes the first live bar decisive.
+
+        The histogram needs the slow EMA plus the signal EMA to stabilise
+        and cross detection needs two consecutive histogram points, so
+        ``slow + signal_period`` warmed bars give the series at least two
+        valid points on the first post-warm-up live bar.
+
+        Returns:
+            ``slow + signal_period``.
+        """
+        return int(self.slow) + int(self.signal_period)
+
     async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle and generate signal on histogram crossover.
 
@@ -74,7 +87,7 @@ class MACDCrossover(BaseStrategy):
         current_price = float(closes.iloc[-1])
         _, _, hist_series = macd(closes, self.fast, self.slow, self.signal_period)
         hist = float(hist_series.iloc[-1])
-        last_hist = self._last_hist.get(instrument)
+        last_hist = self._previous_hist(instrument, hist_series)
         self._last_hist[instrument] = hist
         if last_hist is None:
             return None
@@ -94,6 +107,35 @@ class MACDCrossover(BaseStrategy):
                 price=current_price,
                 reason=f"MACD bear cross (hist={hist:.4f}, fast={self.fast}, slow={self.slow}, signal={self.signal_period})",
             )
+        return None
+
+    def _previous_hist(self, instrument: str, hist_series: pd.Series) -> float | None:
+        """Return the previous histogram point for cross detection.
+
+        CACHE-FIRST: live cross detection must compare against the value
+        the PRIOR callback actually observed — a rolling buffer prunes old
+        candles between callbacks, so a recomputed ``iloc[-2]`` can sit on
+        the other side of zero and silently miss (or double-fire) a valid
+        cross. The recomputed series bootstraps ONLY the first
+        post-warm-up decision, when no live callback has primed the cache
+        yet: a DB-warmed buffer then supplies the prior point so the very
+        first live bar can cross.
+
+        Args:
+            instrument: The instrument whose cache holds the live point.
+            hist_series: Recomputed MACD histogram series for the buffer.
+
+        Returns:
+            The previous histogram value, or ``None`` when neither source
+            has one yet.
+        """
+        cached = self._last_hist.get(instrument)
+        if cached is not None:
+            return cached
+        if len(hist_series) >= 2:
+            prior = hist_series.iloc[-2]
+            if not pd.isna(prior):
+                return float(prior)
         return None
 
     async def reset(self) -> None:
