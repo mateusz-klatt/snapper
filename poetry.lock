@@ -749,14 +749,14 @@ redis = ["redis (>=2.10.5)"]
 
 [[package]]
 name = "ccxt"
-version = "4.5.63"
+version = "4.5.64"
 description = "A cryptocurrency trading API with more than 100 exchanges in JavaScript / TypeScript / Python / C# / PHP / Go"
 optional = false
 python-versions = "*"
 groups = ["main"]
 files = [
-    {file = "ccxt-4.5.63-py2.py3-none-any.whl", hash = "sha256:e22229def9bc0ddc7ddfa00af8e61c045f92782ccd9d09162023a216f608e1ed"},
-    {file = "ccxt-4.5.63.tar.gz", hash = "sha256:2a71064893981a60b5599e5c478a00c42a8f980a3ebd3549db3bc6fe158ec996"},
+    {file = "ccxt-4.5.64-py2.py3-none-any.whl", hash = "sha256:1d38985ccd309806262f8b92925fb59b2fe276ce97a8025ebb72c208acb92ba5"},
+    {file = "ccxt-4.5.64.tar.gz", hash = "sha256:d7a53efddcec0469030eef444360a80bd76a6100f50a29c034298af36ec6c66f"},
 ]
 
 [package.dependencies]
@@ -5123,14 +5123,14 @@ six = ">=1.5"
 
 [[package]]
 name = "python-discovery"
-version = "1.4.2"
+version = "1.4.3"
 description = "Python interpreter discovery"
 optional = false
 python-versions = ">=3.8"
 groups = ["dev"]
 files = [
-    {file = "python_discovery-1.4.2-py3-none-any.whl", hash = "sha256:475803f53b7b2ed6e490e27373f9d8340f7d2eebf9acdaf645d7d714c97bb500"},
-    {file = "python_discovery-1.4.2.tar.gz", hash = "sha256:8f3746c4b4968d22afbb97d36e1a0e5b66e6c0f297290f2e95f05b9b8bf18690"},
+    {file = "python_discovery-1.4.3-py3-none-any.whl", hash = "sha256:b6e1e4a7d9e3f6948c39746ffe8218225162d738ba39d05ab1d2f6c1cac4878c"},
+    {file = "python_discovery-1.4.3.tar.gz", hash = "sha256:ad57d7045a862460d4a235986c33f13ed707d3aeb9153fa47eb7dfd0d4673289"},
 ]
 
 [package.dependencies]
@@ -7367,4 +7367,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "497636b0a971de3b41481e1d1cb9b7c3d50b08e144a375fd163b17d2c3f00d62"
+content-hash = "6b288319f4c939c05cb20d2734b9895feb2fd42448be0c7925c320c2c8162b19"
