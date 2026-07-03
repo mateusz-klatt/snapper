@@ -41,6 +41,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import hash_token
+from snapper.core.ids import is_uuid7
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User
 from snapper.data.models import UserActiveToken
@@ -700,6 +701,33 @@ class TestBlankOwnerGuard:
                 _csrf=None,
             )
         assert exc.value.status_code == 401
+
+
+class TestDelegateOperationalRow:
+    """Minting must create the ai_delegates liveness row atomically."""
+
+    @pytest.mark.asyncio
+    async def test_create_inserts_operational_row(self, repo: SQLAlchemyRepository) -> None:
+        """Verify a fresh mint carries its ai_delegates operational row.
+
+        Given: A seeded owner,
+        When: create_delegate succeeds,
+        Then: get_ai_delegate_by_user_public_id returns a row with a
+            UUID7 public_id, NULL last_seen_at, and a zeroed in-flight
+            counter — without it WS auth resolves delegate_public_id to
+            None and admission can never see the delegate live.
+        """
+        await _seed_owner(repo, public_id="owner-oprow", username="oprow")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        payload = await service.create_delegate(
+            owner=_make_owner_principal("owner-oprow"),
+            body=DelegateCreateBody(label="with-row", caps=DelegateCapsBody()),
+        )
+        row = await repo.get_ai_delegate_by_user_public_id(payload.delegate.public_id)
+        assert row is not None
+        assert is_uuid7(row["public_id"])
+        assert row["last_seen_at"] is None
+        assert row["active_reviews_count"] == 0
 
 
 class TestDelegateProliferationCap:

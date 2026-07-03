@@ -35,6 +35,7 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import hash_token
 from snapper.core.json_types import JsonObject
+from snapper.data.models import AiDelegate
 from snapper.data.models import User
 from snapper.data.models import UserActiveToken
 from snapper.data.models import UserOperatorMembership
@@ -294,6 +295,16 @@ class DelegateService:
                 sequence_id=self._tracker.next_sequence(_DELEGATES_TOPIC),
             )
             session.add(membership_row)
+            session.add(
+                AiDelegate(
+                    public_id=str(uuid.uuid7()),
+                    user_public_id=delegate_user.public_id,
+                    last_seen_at=None,
+                    active_reviews_count=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
             delegate_principal = AuthPrincipal(
                 username=delegate_user.username,
                 role=UserRole.AI_DELEGATE,
