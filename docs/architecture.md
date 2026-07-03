@@ -1454,7 +1454,9 @@ these instruments as observation-only.
   The public feed is delayed ~10 minutes per FCM policy. When
   `kraken_equities_realtime_ws_enabled=true`, the publisher first mints
   a Kraken Spot WebSockets token from the configured
-  `kraken_equities_realtime_wallet_public_id` override, or auto-selects
+  `kraken_equities_realtime_wallet_public_id` override (a wallet public id
+  or a `label:<wallet-label>` pin resolved to the single matching live
+  wallet), or auto-selects
   the first active Kraken Spot `api_key_secret` wallet credential when the
   setting is empty, and connects to `wss://ws-equities-auth.kraken.com/?f`;
   subscribe params receive the token in memory only. Mint, credential, or

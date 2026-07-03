@@ -487,12 +487,16 @@ class AppSettings:
 
         The authenticated Equities feed accepts tokens minted through Kraken
         Spot ``GetWebSocketsToken``. When non-empty, this setting pins the
-        wallet row in ``wallet_credentials`` whose ``exchange='kraken'`` API
-        key/secret is used for that mint. Empty string lets the Equities
-        client auto-select an active Kraken Spot ``api_key_secret`` wallet.
+        wallet whose ``exchange='kraken'`` API key/secret is used for that
+        mint — either directly by wallet public id, or as
+        ``label:<wallet-label>`` resolved at runtime to the single matching
+        live wallet (seed-file friendly: labels are stable while public ids
+        are minted per database). Empty string lets the Equities client
+        auto-select an active Kraken Spot ``api_key_secret`` wallet.
 
         Returns:
-            Wallet public id string, or empty string for auto-selection.
+            Wallet pin string (public id or ``label:`` form), or empty
+            string for auto-selection.
         """
         return self._get_db_setting("kraken_equities_realtime_wallet_public_id", "")
 

@@ -204,6 +204,15 @@ _WS_TOKEN_REFRESH_GRACE_S = 60.0
 """Seconds before Kraken's token TTL when Snapper proactively re-mints."""
 _WS_RECENT_TOKEN_LIMIT = 4
 """Maximum number of issued WS tokens retained only for log redaction."""
+_WALLET_LABEL_PIN_PREFIX = "label:"
+"""Realtime wallet pin prefix selecting resolution by live-wallet label.
+
+Wallet ``public_id`` values are minted at seed time (uuid7 per database),
+so a durable seed-file pin cannot carry a uuid. A pin of the form
+``label:<wallet-label>`` is resolved at runtime against the live
+(non-paper) wallet catalogue instead; any other non-empty pin is used
+verbatim as a wallet public id.
+"""
 _REDACTED_VALUE = "***REDACTED***"
 _SENSITIVE_LOG_KEYS = frozenset({"token", "api_key", "api_secret"})
 _TOKEN_SHAPED_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])")
@@ -428,6 +437,9 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 realtime Equities WS feed before falling back to public.
             realtime_wallet_public_id: Optional wallet override whose
                 Kraken Spot ``api_key_secret`` credential mints WS tokens.
+                Accepts a wallet public id verbatim, or
+                ``label:<wallet-label>`` resolved at runtime to the single
+                matching live wallet (fail closed on zero or multiple).
         """
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN_EQUITIES)
         self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker()
@@ -807,18 +819,29 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
     async def _resolve_realtime_wallet_public_id(self, repository: Repository | None) -> str:
         """Resolve the wallet used to mint Kraken Equities realtime WS tokens.
 
-        An explicitly configured wallet remains a hard override. When the
-        setting is empty, the first active Kraken Spot ``api_key_secret``
-        wallet credential is selected from the repository's deterministic
-        ordering and cached for later token refreshes.
+        An explicitly configured pin remains a hard override and has two
+        shapes: a ``label:<wallet-label>`` value is resolved at runtime to
+        the SINGLE live wallet carrying that label (fail closed to the
+        public delayed feed on zero or multiple matches — never a silent
+        pick), while any other non-empty value is used verbatim as a
+        wallet public id. When the pin is empty, the first active Kraken
+        Spot ``api_key_secret`` wallet credential is selected from the
+        repository's deterministic ordering. Label and autolookup
+        resolutions are cached for later token refreshes.
         """
-        if self._realtime_wallet_public_id:
-            return self._realtime_wallet_public_id
+        pin = self._realtime_wallet_public_id
+        if pin and not pin.startswith(_WALLET_LABEL_PIN_PREFIX):
+            return pin
         cached_wallet_public_id = self._resolved_realtime_wallet_public_id
         if cached_wallet_public_id is not None:
             return cached_wallet_public_id
         if repository is None:
             return ""
+        if pin:
+            return await self._resolve_realtime_wallet_label(
+                repository,
+                pin.removeprefix(_WALLET_LABEL_PIN_PREFIX),
+            )
         credentials = await repository.list_active_wallet_credentials(as_of=datetime.now(UTC))
         wallet_public_ids = [
             credential["wallet_public_id"]
@@ -838,6 +861,50 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 wallet_public_id,
             )
         return wallet_public_id
+
+    async def _resolve_realtime_wallet_label(self, repository: Repository, label: str) -> str:
+        """Resolve a ``label:`` wallet pin to the single matching live wallet.
+
+        Args:
+            repository: Repository exposing the active wallet catalogue.
+            label: Wallet label extracted from the configured pin. Matched
+                byte-for-byte against wallet labels — whitespace is only
+                used to reject blank pins, never to normalize the match.
+
+        Returns:
+            The matching wallet public id (cached for later refreshes), or
+            an empty string when the label is blank or zero/multiple live
+            wallets carry it — hard pin failures also clear any previously
+            minted token so an unexpired one cannot keep the auth feed
+            alive, and the caller stays on the public delayed feed instead
+            of silently picking a wallet. The cached resolution is
+            process-local and can go stale across wallet SCD2 changes
+            until a mint failure or restart re-resolves it.
+        """
+        if not label.strip():
+            logger.warning(
+                "Kraken Equities realtime WS wallet pin has a blank label; "
+                "refusing to mint (public delayed feed)"
+            )
+            self._clear_realtime_ws_auth()
+            return ""
+        wallets = await repository.list_active_wallets(datetime.now(UTC))
+        matches = [
+            wallet["public_id"]
+            for wallet in wallets
+            if wallet["label"] == label and not wallet["is_paper"]
+        ]
+        if len(matches) == 1:
+            self._resolved_realtime_wallet_public_id = matches[0]
+            return matches[0]
+        logger.warning(
+            "Kraken Equities realtime WS wallet label {!r} matched {} live wallets; "
+            "refusing ambiguous or missing pin (public delayed feed)",
+            label,
+            len(matches),
+        )
+        self._clear_realtime_ws_auth()
+        return ""
 
     async def _refresh_realtime_ws_token(self, *, clear_on_failure: bool = True) -> bool:
         """Refresh the in-memory realtime WS token.
@@ -898,7 +965,9 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 "Kraken Equities realtime WS token unavailable ({}); using public delayed feed",
                 type(exc).__name__,
             )
-            if not self._realtime_wallet_public_id:
+            if not self._realtime_wallet_public_id or self._realtime_wallet_public_id.startswith(
+                _WALLET_LABEL_PIN_PREFIX
+            ):
                 self._resolved_realtime_wallet_public_id = None
             if clear_on_failure:
                 self._clear_realtime_ws_auth()
@@ -944,7 +1013,11 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             refreshed = await self._refresh_realtime_ws_token(clear_on_failure=False)
             if not refreshed:
                 now = monotonic()
-                if previous_token is not None and now < previous_expires_at:
+                if (
+                    self._ws_auth_active
+                    and previous_token is not None
+                    and now < previous_expires_at
+                ):
                     decorated["token"] = previous_token
                     return decorated
                 raise _RealtimeWsAuthUnavailableError("Kraken Equities auth token expired")
@@ -968,7 +1041,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             return
         refreshed = await self._refresh_realtime_ws_token(clear_on_failure=False)
         if not refreshed:
-            if self._ws_client is not client or not self._ws_auth_active:
+            if self._ws_client is not client:
                 logger.info(
                     "Kraken Equities auth WS SDK reconnect demotion skipped; "
                     "client slot changed before token refresh failure handling"
@@ -1092,7 +1165,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         except _RealtimeWsAuthUnavailableError:
             if not allow_auth_demote:
                 raise
-        await self._demote_realtime_ws_to_public("auth token refresh failed")
+        await self._demote_realtime_ws_to_public("auth token refresh failed", force=True)
         await self._send_ws_subscribe_once(params)
 
     async def _send_ws_subscribe_once(self, params: dict[str, JsonValue]) -> None:

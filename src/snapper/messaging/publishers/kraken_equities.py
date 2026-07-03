@@ -174,11 +174,12 @@ class KrakenEquitiesMarketDataPublisher(
         return value if isinstance(value, bool) else False
 
     def _kraken_equities_realtime_wallet_public_id(self) -> str:
-        """Read the realtime token wallet id, defaulting empty pre-start.
+        """Read the realtime token wallet pin, defaulting empty pre-start.
 
         Returns:
-            Wallet public id string, or empty string when settings are not
-            DB-backed yet.
+            Wallet pin string — a wallet public id, or
+            ``label:<wallet-label>`` resolved by the exchange client at
+            runtime — or empty string when settings are not DB-backed yet.
         """
         try:
             value = self.settings.kraken_equities_realtime_wallet_public_id

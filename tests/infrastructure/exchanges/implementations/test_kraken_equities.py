@@ -18,6 +18,7 @@ from loguru import logger
 from snapper.config.credentials import CredentialNotFoundError
 from snapper.core.json_types import JsonValue
 from snapper.data.repository_types import WalletCredentialRow
+from snapper.data.repository_types import WalletRow
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
@@ -116,6 +117,19 @@ def _wallet_credential_row(
         "credential_type": credential_type,
         "encrypted_payload": "encrypted-payload",
         "label": None,
+        "timestamp": _dt(2026, 6, 30, tzinfo=_UTC),
+        "session_id": "session-1",
+        "sequence_id": 1,
+    }
+
+
+def _wallet_row(public_id: str, *, label: str, is_paper: bool = False) -> WalletRow:
+    """Build an active wallet catalogue row for repository doubles."""
+    return {
+        "public_id": public_id,
+        "label": label,
+        "description": None,
+        "is_paper": is_paper,
         "timestamp": _dt(2026, 6, 30, tzinfo=_UTC),
         "session_id": "session-1",
         "sequence_id": 1,
@@ -479,6 +493,306 @@ class TestRealtimeAuthWebSocket:
         assert c._ws_token_refresh_at == 10.0
         assert c._ws_token_expires_at == 20.0
         assert c._ws_auth_active is True
+
+    @pytest.mark.asyncio
+    async def test_realtime_label_pin_resolves_single_live_wallet(self) -> None:
+        """A ``label:`` pin resolves to the one live wallet and is cached.
+
+        Given: Two wallets share the pinned label but only one is live,
+        When: The realtime token is refreshed twice,
+        Then: The live wallet's credentials mint both tokens and the wallet
+            catalogue is queried only once (cached resolution).
+        """
+        repository = MagicMock()
+        repository.list_active_wallets = AsyncMock(
+            return_value=[
+                _wallet_row("wallet-paper", label="market-data", is_paper=True),
+                _wallet_row("wallet-live", label="market-data"),
+                _wallet_row("wallet-other", label="trading"),
+            ]
+        )
+        repository.list_active_wallet_credentials = AsyncMock(return_value=[])
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="label:market-data",
+        )
+        resolver = MagicMock()
+        resolver.get_credentials = AsyncMock(
+            return_value={"api_key": "api-key", "api_secret": "api-secret"}
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver",
+                return_value=resolver,
+            ),
+            patch.object(
+                c,
+                "_dispatch_blocking",
+                new_callable=AsyncMock,
+                return_value={"token": "token-1", "expires": 900},
+            ),
+        ):
+            assert await c._refresh_realtime_ws_token() is True
+            assert await c._refresh_realtime_ws_token() is True
+
+        repository.list_active_wallets.assert_awaited_once()
+        as_of = repository.list_active_wallets.await_args.args[0]
+        assert isinstance(as_of, _dt)
+        assert as_of.tzinfo is _UTC
+        repository.list_active_wallet_credentials.assert_not_awaited()
+        wallet_public_ids = [
+            call.kwargs["wallet_public_id"] for call in resolver.get_credentials.await_args_list
+        ]
+        assert wallet_public_ids == ["wallet-live", "wallet-live"]
+        assert c._resolved_realtime_wallet_public_id == "wallet-live"
+        assert c._ws_auth_active is True
+
+    @pytest.mark.asyncio
+    async def test_realtime_label_pin_ambiguous_fails_closed(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Two live wallets sharing the pinned label refuse to mint.
+
+        Given: The pinned label matches two live wallets,
+        When: The realtime token is refreshed,
+        Then: No credential lookup happens and the client stays on the
+            public delayed feed with an explicit ambiguity warning.
+        """
+        repository = MagicMock()
+        repository.list_active_wallets = AsyncMock(
+            return_value=[
+                _wallet_row("wallet-a", label="market-data"),
+                _wallet_row("wallet-b", label="market-data"),
+            ]
+        )
+        repository.list_active_wallet_credentials = AsyncMock(return_value=[])
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="label:market-data",
+        )
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            assert await c._refresh_realtime_ws_token() is False
+        finally:
+            logger.remove(sink_id)
+
+        assert "matched 2 live wallets" in caplog.text
+        assert c._ws_auth_active is False
+        assert c._resolved_realtime_wallet_public_id is None
+        repository.list_active_wallet_credentials.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_realtime_label_pin_missing_fails_closed(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A pinned label matching only paper wallets refuses to mint.
+
+        Given: The pinned label exists only on a paper wallet,
+        When: The realtime token is refreshed,
+        Then: The client stays on the public delayed feed and warns that
+            zero live wallets matched.
+        """
+        repository = MagicMock()
+        repository.list_active_wallets = AsyncMock(
+            return_value=[_wallet_row("wallet-paper", label="market-data", is_paper=True)]
+        )
+        repository.list_active_wallet_credentials = AsyncMock(return_value=[])
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="label:market-data",
+        )
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            assert await c._refresh_realtime_ws_token() is False
+        finally:
+            logger.remove(sink_id)
+
+        assert "matched 0 live wallets" in caplog.text
+        assert c._ws_auth_active is False
+        assert c._resolved_realtime_wallet_public_id is None
+
+    @pytest.mark.asyncio
+    async def test_realtime_label_pin_without_repository_fails_closed(self) -> None:
+        """A ``label:`` pin cannot resolve without a repository handle.
+
+        Given: The client has no repository,
+        When: The realtime token is refreshed with a label pin,
+        Then: The refresh fails closed onto the public delayed feed.
+        """
+        c = KrakenEquitiesExchangeClient(
+            repository=None,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="label:market-data",
+        )
+        assert await c._refresh_realtime_ws_token() is False
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_realtime_label_pin_mint_failure_clears_cached_resolution(self) -> None:
+        """A failed mint drops the cached label resolution for a re-lookup.
+
+        Given: A label pin resolved and cached a live wallet,
+        When: The token mint raises and a later refresh succeeds,
+        Then: The cached resolution is cleared on failure and the wallet
+            catalogue is queried again on the retry.
+        """
+        repository = MagicMock()
+        repository.list_active_wallets = AsyncMock(
+            return_value=[_wallet_row("wallet-live", label="market-data")]
+        )
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="label:market-data",
+        )
+        resolver = MagicMock()
+        resolver.get_credentials = AsyncMock(
+            return_value={"api_key": "api-key", "api_secret": "api-secret"}
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver",
+                return_value=resolver,
+            ),
+            patch.object(
+                c,
+                "_dispatch_blocking",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("mint down"),
+            ),
+        ):
+            assert await c._refresh_realtime_ws_token() is False
+
+        assert c._resolved_realtime_wallet_public_id is None
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities."
+                "CredentialResolver",
+                return_value=resolver,
+            ),
+            patch.object(
+                c,
+                "_dispatch_blocking",
+                new_callable=AsyncMock,
+                return_value={"token": "token-2", "expires": 900},
+            ),
+        ):
+            assert await c._refresh_realtime_ws_token() is True
+
+        assert repository.list_active_wallets.await_count == 2
+        assert c._resolved_realtime_wallet_public_id == "wallet-live"
+        assert c._ws_token == "token-2"
+
+    @pytest.mark.asyncio
+    async def test_realtime_label_pin_blank_label_fails_closed(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A blank ``label:`` pin refuses to mint even if a blank-label wallet exists.
+
+        Given: The pin is ``label:`` with only whitespace and a live wallet
+            with an empty label exists in the catalogue,
+        When: The realtime token is refreshed,
+        Then: The catalogue is never queried, auth state is cleared, and
+            the client stays on the public delayed feed.
+        """
+        repository = MagicMock()
+        repository.list_active_wallets = AsyncMock(
+            return_value=[_wallet_row("wallet-blank", label="")]
+        )
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="label:   ",
+        )
+        c._ws_token = "stale-token"
+        c._ws_auth_active = True
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            assert await c._refresh_realtime_ws_token() is False
+        finally:
+            logger.remove(sink_id)
+
+        assert "blank label" in caplog.text
+        repository.list_active_wallets.assert_not_awaited()
+        assert c._ws_token is None
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_realtime_label_pin_hard_failure_clears_unexpired_token(self) -> None:
+        """A hard label failure clears an unexpired token even on lazy refresh.
+
+        Given: An active auth session with an unexpired token and a pin
+            whose label now matches two live wallets,
+        When: A lazy refresh runs with ``clear_on_failure=False``,
+        Then: The stale token is cleared instead of being reused until TTL
+            (hard pin failures fail closed immediately, unlike transient
+            mint failures which preserve auth state).
+        """
+        repository = MagicMock()
+        repository.list_active_wallets = AsyncMock(
+            return_value=[
+                _wallet_row("wallet-a", label="market-data"),
+                _wallet_row("wallet-b", label="market-data"),
+            ]
+        )
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="label:market-data",
+        )
+        c._ws_token = "stale-token"
+        c._ws_token_refresh_at = 10.0
+        c._ws_token_expires_at = 10_000.0
+        c._ws_auth_active = True
+
+        assert await c._refresh_realtime_ws_token(clear_on_failure=False) is False
+
+        assert c._ws_token is None
+        assert c._ws_token_expires_at == 0.0
+        assert c._ws_auth_active is False
+
+    @pytest.mark.asyncio
+    async def test_realtime_label_hard_failure_blocks_previous_token_reuse(self) -> None:
+        """Subscribe decoration refuses the old token after a hard label failure.
+
+        Given: An active auth socket holds an unexpired token whose refresh
+            window has lapsed, and the pinned label now matches two live
+            wallets,
+        When: Subscribe params are decorated (lazy refresh path),
+        Then: The refresh hard-fails, the captured previous token is NOT
+            reused, and the auth-unavailable error is raised instead.
+        """
+        repository = MagicMock()
+        repository.list_active_wallets = AsyncMock(
+            return_value=[
+                _wallet_row("wallet-a", label="market-data"),
+                _wallet_row("wallet-b", label="market-data"),
+            ]
+        )
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="label:market-data",
+        )
+        c._ws_auth_active = True
+        c._ws_token = "stale-token"
+        c._ws_token_refresh_at = 0.0
+        c._ws_token_expires_at = ke.monotonic() + 1000.0
+
+        with pytest.raises(ke._RealtimeWsAuthUnavailableError):
+            await c._decorate_ws_subscribe_params({"channel": "trade"})
+
+        assert c._ws_token is None
+        assert c._ws_auth_active is False
 
     def test_token_mint_routes_through_equities_public_egress_pool(self) -> None:
         """Realtime token mint uses the same public Equities egress route as WS.
@@ -1005,6 +1319,54 @@ class TestRealtimeAuthWebSocket:
             await c._send_ws_subscribe({"channel": "ticker"}, allow_auth_demote=True)
 
     @pytest.mark.asyncio
+    async def test_send_ws_subscribe_hard_label_failure_demotes_and_retries_public(self) -> None:
+        """A hard label failure during subscribe force-demotes the auth socket.
+
+        Given: An auth client with an unexpired stale token, a lapsed
+            refresh window, and a pinned label matching two live wallets
+            (the resolver clears auth state during decoration),
+        When: A subscribe runs with auth demotion allowed,
+        Then: The auth client is force-closed despite the cleared auth
+            state, a public client is installed at the delayed URL, and the
+            retry goes out untokened on the public client.
+        """
+        repository = MagicMock()
+        repository.list_active_wallets = AsyncMock(
+            return_value=[
+                _wallet_row("wallet-a", label="market-data"),
+                _wallet_row("wallet-b", label="market-data"),
+            ]
+        )
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="label:market-data",
+        )
+        auth_client = AsyncMock()
+        c._ws_client = auth_client
+        c._ws_auth_active = True
+        c._ws_token = "stale-token"
+        c._ws_token_refresh_at = 0.0
+        c._ws_token_expires_at = ke.monotonic() + 1000.0
+        public_ws = AsyncMock()
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+            return_value=public_ws,
+        ) as ws_cls:
+            await c._send_ws_subscribe(
+                {"channel": "ticker", "symbol": ["CLM6.NYMEX"]},
+                allow_auth_demote=True,
+            )
+
+        public_ws.start.assert_awaited_once()
+        assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
+        assert c._ws_client is public_ws
+        assert c._ws_auth_active is False
+        public_ws.subscribe.assert_awaited_once()
+        sent_params = public_ws.subscribe.await_args.kwargs["params"]
+        assert "token" not in sent_params
+
+    @pytest.mark.asyncio
     async def test_send_ws_subscribe_propagates_auth_unavailable_when_demote_disallowed(
         self,
     ) -> None:
@@ -1028,7 +1390,8 @@ class TestRealtimeAuthWebSocket:
         c = KrakenEquitiesExchangeClient()
         c._ws_client = AsyncMock()
 
-        async def _demote(_: str) -> None:
+        async def _demote(_: str, *, force: bool = False) -> None:
+            assert force is True
             c._ws_client = None
 
         with (
@@ -1492,6 +1855,56 @@ class TestRealtimeAuthWebSocket:
         sdk_client.subscribe.assert_not_awaited()
         assert c._ws_public_demotion_task is None
         assert c._ws_client is replacement_ws
+
+    @pytest.mark.asyncio
+    async def test_sdk_reconnect_hard_label_failure_still_demotes_to_public(self) -> None:
+        """A hard label-pin failure during SDK reconnect still demotes the socket.
+
+        Given: An active auth client whose pinned label now matches two live
+            wallets (the resolver clears auth state during the refresh),
+        When: The patched SDK recover hook runs the real token refresh,
+        Then: Public demotion is still scheduled — the auth socket must not
+            stay installed with cleared auth state, or later subscribes
+            would send undecorated params on the auth endpoint.
+        """
+        repository = MagicMock()
+        repository.list_active_wallets = AsyncMock(
+            return_value=[
+                _wallet_row("wallet-a", label="market-data"),
+                _wallet_row("wallet-b", label="market-data"),
+            ]
+        )
+        c = KrakenEquitiesExchangeClient(
+            repository=repository,
+            realtime_ws_enabled=True,
+            realtime_wallet_public_id="label:market-data",
+        )
+        sdk_client = MagicMock()
+        connector = MagicMock()
+        sdk_client._pub_conn = connector
+        sdk_client.subscribe = AsyncMock()
+        sdk_client.close = AsyncMock()
+        c._ws_client = sdk_client
+        c._ws_auth_active = True
+        c._ws_token = "stale-token"
+        public_ws = AsyncMock()
+        assert c._disable_sdk_reconnect_replay_for_auth(sdk_client) is True
+        event = asyncio.Event()
+        event.set()
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient",
+            return_value=public_ws,
+        ) as ws_cls:
+            await connector._recover_subscriptions(event)
+            await _await_public_demotion(c)
+
+        sdk_client.subscribe.assert_not_awaited()
+        sdk_client.close.assert_awaited_once()
+        public_ws.start.assert_awaited_once()
+        assert ws_cls.call_args.kwargs["ws_url"] == ke._WS_URL
+        assert c._ws_client is public_ws
+        assert c._ws_auth_active is False
+        assert c._ws_token is None
 
     @pytest.mark.asyncio
     async def test_sdk_reconnect_replay_demotes_when_replay_fails(self) -> None:

@@ -342,10 +342,14 @@ execution subscriptions, or account channels in Snapper. To enable it:
     `credential_type='api_key_secret'`, and Kraken's WebSocket interface
     permission.
 2. Optionally set
-    `kraken_equities_realtime_wallet_public_id=<wallet_public_id>` to pin
-    a specific wallet. When this setting is empty, Snapper auto-selects the
-    first active Kraken Spot `api_key_secret` wallet credential in
-    deterministic repository order.
+    `kraken_equities_realtime_wallet_public_id` to pin a specific wallet —
+    either `<wallet_public_id>` used verbatim, or `label:<wallet-label>`
+    resolved at runtime to the single matching live wallet (fails closed
+    to the delayed feed on zero or multiple matches; label form is
+    seed-file friendly because public ids are minted per database). When
+    this setting is empty, Snapper auto-selects the first active Kraken
+    Spot `api_key_secret` wallet credential in deterministic repository
+    order.
 3. Set `kraken_equities_realtime_ws_enabled=true`.
 4. Restart `snapper-feed`; these settings are read when the
     `kraken_equities_feed_publisher` constructs its exchange client.
