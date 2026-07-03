@@ -268,6 +268,45 @@ class TestCrossCoordinatorOwnership:
         assert row.managed_remotely is True
 
     @pytest.mark.asyncio
+    async def test_configured_external_strategy_is_managed_remotely(self) -> None:
+        """An externally-owned strategy shows managed_remotely with a summary.
+
+        With ``strategies_embedded=False`` the profile no longer selects
+        role-STRATEGY configs; the strategies container's coord summary
+        unions in as running+managed_remotely so the dashboard hides
+        Start/Stop (no local duplicate).
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="strategy_heartbeat_consult_btc_1h",
+                    enabled=True,
+                    mode="thread",
+                    class_path="snapper.strategies.process_wrapper.X",
+                    method="start",
+                    parameters={},
+                    role=ProcessRoleEnum.STRATEGY,
+                    tags=("strategy", "HeartbeatConsult"),
+                )
+            ]
+        )
+        mock_factory.started_processes = {}
+        mock_factory.active_runs = {}
+        mock_factory.instance_configs = {}
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(True, "coord-2"))
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
+        )
+        row = result.payload[0]
+        assert row.running is True
+        assert row.managed_remotely is True
+        assert row.coordinator == "coord-2"
+
+    @pytest.mark.asyncio
     async def test_configured_local_duplicate_stays_controllable(self) -> None:
         """A feed publisher running locally (the duplicate footgun) stays local.
 
@@ -1416,6 +1455,7 @@ class TestCreateProcessConfiguration:
             tags=("strategy",),
             parameters_schema={"type": "object"},
             note="UI created",
+            template="strategy_macd_btc_1h",
         )
         assert result.payload.status == "created"
         assert result.payload.process.name == "strategy_macd_custom"

@@ -42,6 +42,7 @@ Example:
 """
 
 import asyncio
+import contextlib
 import json as json_mod
 import os
 import signal
@@ -67,6 +68,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+from snapper.application.ai_review.service import _BUS_AI_REVIEW_DECISION_TOPIC
+from snapper.application.ai_review.service import get_ai_review_service
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.config import BacktestExecutionMode
 from snapper.application.backtest.config import BacktestFillModel
@@ -80,6 +83,7 @@ from snapper.application.notify.apns_config import load_apns_config
 from snapper.application.notify.push_beta import PUSH_BETA_SETTING_KEY
 from snapper.application.notify.push_beta import parse_push_beta_config
 from snapper.application.notify.sidecar import NotifySidecar
+from snapper.application.process_manager.launcher import CoreProcessStartupError
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.services.candle_coverage import VERIFIABLE_TIMEFRAMES
@@ -674,6 +678,109 @@ def feed_engine() -> None:
             err=True,
         )
         raise typer.Exit(code=1)
+
+
+async def _run_strategies_engine() -> None:
+    """Run the dedicated strategies container until shutdown.
+
+    Mirrors :func:`_run_feed_engine` for role-STRATEGY processes:
+    initialises the DB-backed settings service, discovers the registry
+    (including ``STRATEGY_EXTRA_PACKAGES`` mounts), syncs it, then runs
+    :meth:`ProcessLauncherService.start_all_processes` under the
+    ``strategy`` autostart profile — strategies start THREAD-mode with
+    the full boot scope enforcement, watchdog, and parking semantics
+    they had inside the backend. A crashed strategy is watchdog-managed
+    (parked on budget exhaustion), never container-fatal: strategies are
+    role STRATEGY, so only a CORE startup failure exits non-zero.
+
+    Two engine-local services keep the container a first-class bus
+    citizen:
+
+    - A decision-only AI-review listener (``bus.ai_review_decision``)
+      so ``create_ai_review_and_await`` resumes on the fast path
+      instead of degrading to its DB poll; delegate-offline and
+      caps-violation handling deliberately stay on the FastAPI server.
+    - A periodic summary loop emitting the launcher's cross-coordinator
+      snapshot every 5s (THREAD-mode strategies have no native-process
+      monitor, and the API's RemoteSummaryCache treats snapshots stale
+      after 15s) — including the zero-strategies case.
+    """
+    settings = get_settings()
+    settings_service = await get_settings_service(settings.db_url, settings.zmq_broker_xsub)
+    app_settings = get_settings_with_service(settings_service)
+    discover_processes()
+    launcher = ProcessLauncherService(app_settings)
+    zmq_ctx: zmq.asyncio.Context | None = None
+    publisher: MessagePublisher | None = None
+    try:
+        publisher, zmq_ctx = build_audit_publisher(app_settings.zmq_broker_xsub)
+    except Exception as exc:
+        typer.echo(
+            f"Strategies engine: summary publisher unavailable ({exc}); "
+            "continuing without summary emission.",
+            err=True,
+        )
+        shutdown_audit_publisher(publisher, zmq_ctx)
+        zmq_ctx = None
+        publisher = None
+    launcher.set_msg_publisher(publisher)
+    ai_service = get_ai_review_service()
+    listener_started = False
+    summary_task: asyncio.Task[None] | None = None
+    try:
+        if app_settings.zmq_broker_xpub:
+            await ai_service.start_bus_listener(
+                app_settings.zmq_broker_xpub,
+                topics=(_BUS_AI_REVIEW_DECISION_TOPIC,),
+            )
+            listener_started = True
+        await launcher.sync_registry_to_database()
+        await launcher.start_all_processes()
+        summary_task = asyncio.ensure_future(_strategies_summary_loop(launcher))
+        typer.echo("Strategies engine running — role-STRATEGY processes started. Ctrl+C to stop.")
+        await _await_shutdown_signal()
+    finally:
+        if summary_task is not None:
+            summary_task.cancel()
+            await asyncio.gather(summary_task, return_exceptions=True)
+        await launcher.stop_all_processes()
+        if listener_started:
+            await ai_service.stop_bus_listener()
+        await settings_service.shutdown()
+        shutdown_audit_publisher(publisher, zmq_ctx)
+
+
+async def _strategies_summary_loop(launcher: ProcessLauncherService) -> None:
+    """Emit the launcher summary snapshot every 5s, best-effort.
+
+    Keeps the API-side RemoteSummaryCache (15s TTL) fresh for a
+    THREAD-only container; an individual emission failure logs at the
+    publisher layer and never stops the loop.
+    """
+    while True:
+        with contextlib.suppress(Exception):
+            await launcher.emit_summary_snapshot()
+        await asyncio.sleep(5.0)
+
+
+@app.command(name="strategies-engine")
+def strategies_engine() -> None:
+    """Run the dedicated strategies container: role-STRATEGY processes.
+
+    Strategies run THREAD-mode inside this container exactly as they ran
+    in the backend (boot wallet/grant scope enforcement, watchdog,
+    parking), while the backend sets ``STRATEGIES_EMBEDDED=false`` so it
+    stops owning them. Requires ``PROCESS_AUTOSTART_PROFILE=strategy``.
+
+    Exits non-zero only when a CORE process fails to start (strategy
+    crashes are watchdog-managed and, after the restart budget, parked —
+    visible via the coord summary frames, never container-fatal).
+    """
+    try:
+        asyncio.run(_run_strategies_engine())
+    except CoreProcessStartupError as exc:
+        typer.echo(f"Strategies engine startup failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command(name="zmq-logger")

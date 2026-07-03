@@ -1154,6 +1154,19 @@ class TestZmqBrokerBindProperties:
         assert settings.zmq_broker_bind_xsub == "tcp://0.0.0.0:7500"
         assert settings.zmq_broker_bind_xpub == "tcp://0.0.0.0:7501"
 
+    def test_container_split_flags_pass_through(self) -> None:
+        """The embedded/extra-package split flags pass through bootstrap."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            ZMQ_BROKER_EMBEDDED=False,
+            STRATEGIES_EMBEDDED=False,
+            STRATEGY_EXTRA_PACKAGES="strategies,extras",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.zmq_broker_embedded is False
+        assert settings.strategies_embedded is False
+        assert settings.strategy_extra_packages == "strategies,extras"
+
 
 def test_trade_command_dispatch_ttl_passthrough() -> None:
     """The dispatch TTL passes through from bootstrap untouched.

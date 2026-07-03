@@ -808,6 +808,7 @@ async def create_process_configuration(
             tags=entry.tags,
             parameters_schema=entry.parameters_schema,
             note=payload.note,
+            template=payload.template,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

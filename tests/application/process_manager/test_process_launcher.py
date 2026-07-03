@@ -284,7 +284,7 @@ class TestStartProcess:
             parameters={},
         )
         await factory.start_process(config)
-        mock_import.assert_called_once_with("test.Class", "disabled_process")
+        mock_import.assert_called_once_with("test.Class", "disabled_process", None)
         assert "disabled_process" in factory.started_processes
         task = factory.process_tasks["disabled_process"]
         task.cancel()
@@ -356,7 +356,7 @@ class TestStartProcess:
             parameters={"key": "value"},
         )
         await factory.start_process(config)
-        mock_import.assert_called_once_with("test.AsyncClass", "async_process")
+        mock_import.assert_called_once_with("test.AsyncClass", "async_process", None)
         mock_class.assert_called_once_with(key="value")
         assert "async_process" in factory.started_processes
         assert "async_process" in factory.process_tasks
@@ -657,7 +657,11 @@ class TestStartAllProcesses:
         mock_another_good_instance.run = long_running_task
         mock_another_good_class.return_value = mock_another_good_instance
 
-        def import_side_effect(class_path: str, process_name: str | None = None) -> MagicMock:
+        def import_side_effect(
+            class_path: str,
+            process_name: str | None = None,
+            template_name: str | None = None,
+        ) -> MagicMock:
             if "BadClass" in class_path:
                 raise ImportError("Failed to import bad class")
             elif "AnotherGoodClass" in class_path:
@@ -1248,6 +1252,51 @@ class TestStartProcessByName:
         result = await factory.start_process_by_name("zmq_broker")
         assert result.status == "error"
         assert "dedicated broker container" in result.message
+        mock_start.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.process_manager.launcher.ProcessLauncherService.start_process")
+    @patch("snapper.application.process_manager.launcher.get_repository")
+    async def test_start_process_by_name_refuses_external_strategy(
+        self, mock_get_repo: MagicMock, mock_start: AsyncMock
+    ) -> None:
+        """Verify manual REST start cannot run a strategy owned externally.
+
+        Given: ``strategies_embedded=False`` and a persisted role-STRATEGY
+            config row,
+        When: start_process_by_name is called,
+        Then: The start is refused with the strategies-container message
+            and no process starts — the same strategy must never run in
+            two containers.
+        """
+        mock_setting = MagicMock()
+        mock_setting.value = json.dumps(
+            {
+                "class": "snapper.strategies.process_wrapper.create_strategy_process.<locals>.X",
+                "method": "start",
+                "mode": "thread",
+                "parameters": {},
+                "enabled": True,
+                "role": "strategy",
+                "tags": ["strategy", "HeartbeatConsult"],
+            }
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_setting
+        mock_session = MagicMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value.__aenter__.return_value = mock_session
+        mock_repo.session.return_value.__aexit__.return_value = AsyncMock()
+        mock_get_repo.return_value = mock_repo
+        settings = MagicMock()
+        settings.db_url = "sqlite:///:memory:"
+        settings.zmq_broker_embedded = True
+        settings.strategies_embedded = False
+        factory = ProcessLauncherService(settings)
+        result = await factory.start_process_by_name("strategy_heartbeat_consult_btc_1h")
+        assert result.status == "error"
+        assert "strategies container" in result.message
         mock_start.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1989,6 +2038,7 @@ async def test_start_process_process_mode_filters_parameters() -> None:
         class_path="tests.application.process_manager.test_process_launcher.SyncProcess",
         method="start",
         parameters={"keep": "value"},
+        template_name=None,
     )
     assert factory.started_processes["os_process"].pid == 1234
     assert factory.process_tasks == {}
@@ -4233,6 +4283,65 @@ async def test_create_process_config_in_db_includes_tags_and_schema(
     added = repo.session_obj.added_items[0]
     assert json.loads(added.value)["tags"] == ["t"]
     assert json.loads(added.value)["parameters_schema"] == {"p": True}
+
+
+@pytest.mark.asyncio()
+async def test_create_process_config_persists_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the public create path persists the source template name.
+
+    Given: create_process_config called with a template,
+    When: The Setting row JSON is captured,
+    Then: It carries the "template" key for later class resolution.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+
+    class _CaptureSession(_RunsSession):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.added_items: list[Any] = []
+
+        async def __aenter__(self) -> _CaptureSession:
+            return self
+
+        def add(self, item: Any) -> None:
+            self.added_items.append(item)
+
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = None
+            return result
+
+    class _CaptureRepo:
+        def __init__(self) -> None:
+            self.session_obj = _CaptureSession()
+
+        def session(self) -> contextlib.AbstractAsyncContextManager[_CaptureSession]:
+            return self.session_obj
+
+    repo = _CaptureRepo()
+    monkeypatch.setattr(
+        "snapper.application.process_manager.registry_syncer.get_repository", lambda _url: repo
+    )
+    factory._emit_configured_snapshot = AsyncMock()
+    factory._emit_summary_snapshot = AsyncMock()
+    factory._emit_strategy_list_snapshot = AsyncMock()
+    await factory.create_process_config(
+        name="strategy_from_template",
+        class_path="snapper.strategies.process_wrapper.create_strategy_process.<locals>.X",
+        method="start",
+        enabled=False,
+        mode="thread",
+        parameters={},
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.STRATEGY,
+        tags=("strategy",),
+        template="strategy_heartbeat_consult_btc_1h",
+    )
+    added = repo.session_obj.added_items[0]
+    assert json.loads(added.value)["template"] == "strategy_heartbeat_consult_btc_1h"
 
 
 @pytest.mark.asyncio()
@@ -7458,12 +7567,31 @@ class TestLoadTemplateSetting:
         assert result == {}
 
 
-def _settings_with_profile(profile: str, *, broker_embedded: bool = True) -> AppSettings:
+def _settings_with_profile(
+    profile: str, *, broker_embedded: bool = True, strategies_embedded: bool = True
+) -> AppSettings:
     """Build AppSettings whose bootstrap carries the given autostart profile."""
     bootstrap = BootstrapSettingsLoader(
-        PROCESS_AUTOSTART_PROFILE=profile, ZMQ_BROKER_EMBEDDED=broker_embedded
+        PROCESS_AUTOSTART_PROFILE=profile,
+        ZMQ_BROKER_EMBEDDED=broker_embedded,
+        STRATEGIES_EMBEDDED=strategies_embedded,
     )
     return AppSettings(bootstrap, _DummySettingsService())
+
+
+def _strategy_config(name: str = "strategy_heartbeat") -> ProcessConfigModel:
+    """A role-STRATEGY config (thread-mode strategy wrapper)."""
+    return ProcessConfigModel(
+        name=name,
+        enabled=True,
+        mode="thread",
+        class_path="test.Strategy",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.STRATEGY,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        tags=("strategy", "HeartbeatConsult"),
+    )
 
 
 def _publisher_config(name: str = "kraken_equities_feed_publisher") -> ProcessConfigModel:
@@ -7574,6 +7702,30 @@ class TestAutostartIncludes:
         """The default embedded flag keeps the broker on API/ALL nodes."""
         factory = ProcessLauncherService(_settings_with_profile("api"))
         assert factory.autostart_includes(_non_publisher_config()) is True
+
+    def test_strategy_profile_selects_only_strategies(self) -> None:
+        """``STRATEGY`` selects role-STRATEGY configs and nothing else."""
+        factory = ProcessLauncherService(_settings_with_profile("strategy"))
+        assert factory.autostart_includes(_strategy_config()) is True
+        assert factory.autostart_includes(_publisher_config()) is False
+        assert factory.autostart_includes(_non_publisher_config()) is False
+
+    def test_external_strategies_excluded_on_api_profile(self) -> None:
+        """``strategies_embedded=False`` drops strategies from API autostart."""
+        factory = ProcessLauncherService(_settings_with_profile("api", strategies_embedded=False))
+        assert factory.autostart_includes(_strategy_config()) is False
+        assert factory.autostart_includes(_non_publisher_config()) is True
+
+    def test_external_strategies_excluded_on_all_profile(self) -> None:
+        """``strategies_embedded=False`` drops strategies from ALL autostart."""
+        factory = ProcessLauncherService(_settings_with_profile("all", strategies_embedded=False))
+        assert factory.autostart_includes(_strategy_config()) is False
+        assert factory.autostart_includes(_publisher_config()) is True
+
+    def test_embedded_strategies_default_keeps_strategies(self) -> None:
+        """The default embedded flag keeps strategies on API/ALL nodes."""
+        factory = ProcessLauncherService(_settings_with_profile("api"))
+        assert factory.autostart_includes(_strategy_config()) is True
 
     def test_mocked_settings_falls_through_to_all(self) -> None:
         """A non-enum profile attribute (mocked settings) defaults to ALL."""

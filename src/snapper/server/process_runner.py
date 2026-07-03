@@ -56,6 +56,8 @@ from loguru import logger
 
 from snapper.application.ai_review.service import _BUS_AI_REVIEW_DECISION_TOPIC
 from snapper.application.ai_review.service import get_ai_review_service
+from snapper.application.process_manager.registry import discover_processes
+from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.settings import get_settings
 from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
 from snapper.utils.logging import resolve_subprocess_logfile
@@ -73,6 +75,41 @@ async def _await_result[Result](awaitable: Awaitable[Result]) -> Result:
         Result of the awaited operation.
     """
     return await awaitable
+
+
+def _resolve_process_class(class_path: str, name: str, template_name: str | None) -> type:
+    """Resolve the process class: registry template first, then dynamic import.
+
+    Configs created FROM a registered template persist a function-local
+    wrapper class_path that can never be imported dynamically; the runner
+    resolves such classes by running process discovery and reading the
+    template's registry entry. A plain importable class_path keeps the
+    legacy dynamic import (no discovery cost).
+
+    Args:
+        class_path: Fully qualified class path from the runner config.
+        name: Process name (log context only).
+        template_name: Optional source-template registry name.
+
+    Returns:
+        The resolved process class.
+
+    Raises:
+        ImportError: When neither the registry nor the dynamic import
+            can produce the class.
+    """
+    if template_name:
+        discover_processes()
+        entry = get_registered_processes().get(template_name)
+        if entry is not None and isinstance(entry.class_ref, type):
+            logger.info(f"Process '{name}' resolved class via registry template '{template_name}'")
+            return entry.class_ref
+    module_path, class_name = class_path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    resolved = getattr(module, class_name)
+    if not isinstance(resolved, type):
+        raise ImportError(f"{class_path} is not a class")
+    return resolved
 
 
 def _use_asyncio_runner() -> bool:
@@ -195,12 +232,11 @@ def main() -> int:
     class_path = config["class_path"]
     method = config["method"]
     class_parameters = config.get("parameters", {})
+    template_name = config.get("template_name")
     set_log_context(f"proc:{name}")
     logger.info(f"Process '{name}' starting (PID: {os.getpid()})")
     try:
-        module_path, class_name = class_path.rsplit(".", 1)
-        module = importlib.import_module(module_path)
-        process_class = getattr(module, class_name)
+        process_class = _resolve_process_class(class_path, name, template_name)
         instance = process_class(**class_parameters)
         target_method = getattr(instance, method)
         logger.info(f"Process '{name}' calling {class_path}.{method}()")

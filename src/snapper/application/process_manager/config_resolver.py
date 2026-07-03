@@ -219,18 +219,25 @@ def build_process_config_from_dict(
         restart_policy=resolve_restart_policy(restart_policy_raw, process_name),
         tags=resolve_tags(tags_raw),
         parameters_schema=resolve_parameters_schema(config_dict, entry),
+        template=config_dict.get("template"),
     )
 
 
-def import_process_class(class_path: str, process_name: str | None = None) -> type:
+def import_process_class(
+    class_path: str, process_name: str | None = None, template_name: str | None = None
+) -> type:
     """Import a class by its fully qualified path.
 
-    First checks the process registry, then falls back to
-    dynamic import.
+    Resolution order: the process registry by ``process_name``, then the
+    registry by ``template_name`` (configs created FROM a registered
+    template store a function-local wrapper class_path that can never be
+    imported dynamically), then dynamic import of ``class_path``.
 
     Args:
         class_path: Fully qualified class path (e.g., "snapper.app.MyClass").
         process_name: Optional process name to check registry first.
+        template_name: Optional source-template registry name to check
+            when the process name itself is not registered.
 
     Returns:
         The imported class type.
@@ -239,10 +246,10 @@ def import_process_class(class_path: str, process_name: str | None = None) -> ty
         TypeError: If the imported object is not a class.
         ImportError: If the class cannot be imported.
     """
-    if process_name:
-        registry = get_registered_processes()
-        if process_name in registry:
-            cls = registry[process_name].class_ref
+    registry = get_registered_processes()
+    for key in (process_name, template_name):
+        if key and key in registry:
+            cls = registry[key].class_ref
             if not isinstance(cls, type):
                 raise TypeError(f"{class_path} is not a class")
             return cls

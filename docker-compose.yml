@@ -27,6 +27,7 @@ services:
       - PROCESS_AUTOSTART_PROFILE=api
       - SNAPPER_COORDINATOR_INSTANCE_ID=0
       - ZMQ_BROKER_EMBEDDED=false
+      - STRATEGIES_EMBEDDED=false
       - ZMQ_BROKER_XSUB=tcp://snapper-broker:7500
       - ZMQ_BROKER_XPUB=tcp://snapper-broker:7501
     expose:
@@ -73,6 +74,35 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 3
+  snapper-strategies:
+    image: klattm/snapper:latest
+    container_name: snapper-strategies
+    env_file: .env
+    environment:
+      - PROCESS_AUTOSTART_PROFILE=strategy
+      - SNAPPER_COORDINATOR_INSTANCE_ID=2
+      - ZMQ_BROKER_XSUB=tcp://snapper-broker:7500
+      - ZMQ_BROKER_XPUB=tcp://snapper-broker:7501
+      - DB_POOL_SIZE=2
+      - DB_MAX_OVERFLOW=3
+      - PYTHONPATH=/app/proprietary/src
+      - STRATEGY_EXTRA_PACKAGES=strategies
+    volumes:
+      - ./data:/app/data
+      - ./proprietary:/app/proprietary:ro
+    command: ["strategies-engine"]
+    healthcheck:
+      disable: true
+    networks:
+      - snapper-internal
+    restart: unless-stopped
+    depends_on:
+      snapper-broker:
+        condition: service_healthy
+      snapper:
+        condition: service_healthy
+      snapper-egress:
+        condition: service_healthy
   snapper-egress:
     image: klattm/snapper:latest
     container_name: snapper-egress

@@ -109,7 +109,7 @@ async def test_start_process_handles_run_record_failure(monkeypatch: pytest.Monk
     launcher._create_process_run_record = AsyncMock(side_effect=ValueError("fail"))
     launcher._update_process_run_record = AsyncMock()
     launcher._finalize_process_run = AsyncMock()
-    launcher.import_class = lambda path, name=None: DummyProcess
+    launcher.import_class = lambda path, name=None, template=None: DummyProcess
     launcher._register_task_completion = lambda name, task: None
     config = ProcessConfigModel(
         name="dummy",
@@ -151,7 +151,7 @@ async def test_start_process_rejects_invalid_mode(monkeypatch: pytest.MonkeyPatc
     launcher._update_process_run_record = AsyncMock()
     launcher._finalize_process_run = AsyncMock()
     launcher._register_task_completion = lambda name, task: None
-    launcher.import_class = lambda path, name=None: AsyncDummyProcess
+    launcher.import_class = lambda path, name=None, template=None: AsyncDummyProcess
     config = ProcessConfigModel(
         name="async_proc",
         enabled=True,
@@ -619,6 +619,7 @@ class TestStartProcess:
                 class_path="some.module.TestClass",
                 method="run",
                 parameters={},
+                template_name=None,
             )
             assert launcher.started_processes["test_subprocess"] is mock_process_info
 
@@ -2812,7 +2813,9 @@ class TestEmitSitesIntegration:
             STRATEGY).
         """
 
-        def _import_dummy_process(_path: str, name: str | None = None) -> type[DummyProcess]:
+        def _import_dummy_process(
+            _path: str, name: str | None = None, template: str | None = None
+        ) -> type[DummyProcess]:
             del name
             return DummyProcess
 

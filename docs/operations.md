@@ -244,6 +244,12 @@ at-most-once ZMQ bus:
 - `docker compose restart snapper-broker` — a brief bus blip for EVERY
   participant: PUB frames sent during the window drop, all sockets
   auto-reconnect. Treat as a rare, deliberate operation.
+- `docker compose restart snapper-strategies` — strategies-only restart:
+  in-memory strategy state is lost (candle buffers rebuild via DB
+  warmup; open-position beliefs and one-decision floors do NOT — the
+  P6 signal-safety gate governs arming anything beyond paper), the
+  backend and feed keep running, and consults in flight time out and
+  retry on the next window.
 - `docker compose restart snapper-egress` — tunnel-routed public feeds
   fail closed to quarantine semantics (see egress runbook) until the
   sidecar is healthy again.

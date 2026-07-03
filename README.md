@@ -521,6 +521,13 @@ right process. The optional `postgres` service is gated behind the
   connects to the broker via `tcp://snapper-broker:7500/7501` and
   uses reduced DB pool settings so publisher subprocesses do not
   overrun PostgreSQL connection limits.
+- `snapper-strategies` — dedicated strategies container
+  (`PROCESS_AUTOSTART_PROFILE=strategy`, `command: ["strategies-engine"]`).
+  Runs role-STRATEGY processes THREAD-mode with the same boot scope
+  enforcement and watchdog they had in the backend; mounts
+  `./proprietary` read-only and imports `STRATEGY_EXTRA_PACKAGES` so
+  out-of-tree strategies register. The backend sets
+  `STRATEGIES_EMBEDDED=false` so the same strategy can never run twice.
 - `snapper-egress` — WireGuard + SOCKS5 sidecar for outbound publisher
   traffic. `command: ["egress"]`, `cap_add: NET_ADMIN`, kernel module bind.
 - `snapper-web` — Caddy serving the React SPA from `/srv/dist` and

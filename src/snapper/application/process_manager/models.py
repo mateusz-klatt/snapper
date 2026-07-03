@@ -169,6 +169,10 @@ class ProcessConfigModel:
         restart_policy: Auto-restart policy for the launcher watchdog.
         tags: Tuple of string tags for filtering.
         parameters_schema: Optional JSON schema for parameters.
+        template: Registered process name this config was created from
+            (None for registry-native configs). Lets class resolution
+            fall back to the template's registry class when the stored
+            class_path is a function-local (unimportable) wrapper.
     """
 
     name: str
@@ -183,6 +187,7 @@ class ProcessConfigModel:
     restart_policy: ProcessRestartPolicyEnum = ProcessRestartPolicyEnum.ON_FAILURE
     tags: tuple[str, ...] = ()
     parameters_schema: JsonObject | None = None
+    template: str | None = None
 
 
 @dataclass

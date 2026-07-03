@@ -86,6 +86,8 @@ either value.
 | `ZMQ_BROKER_BIND_XSUB` | empty | Optional broker bind endpoint for XSUB. Empty means bind `ZMQ_BROKER_XSUB`; cross-container deployments set this to `tcp://0.0.0.0:7500`. |
 | `ZMQ_BROKER_BIND_XPUB` | empty | Optional broker bind endpoint for XPUB. Empty means bind `ZMQ_BROKER_XPUB`; cross-container deployments set this to `tcp://0.0.0.0:7501`. |
 | `ZMQ_BROKER_EMBEDDED` | `true` | When `false`, this node's launcher excludes the `zmq_broker` CORE process (a dedicated `snapper-broker` container owns the bus); the dashboard shows the broker as remotely managed. |
+| `STRATEGIES_EMBEDDED` | `true` | When `false`, this node's launcher excludes role-STRATEGY processes and refuses manual local starts (a dedicated `snapper-strategies` container owns them). |
+| `STRATEGY_EXTRA_PACKAGES` | empty | Comma-separated extra top-level packages process discovery imports (fail-soft) so out-of-tree strategies (e.g. a mounted proprietary tree on `PYTHONPATH`) register their processes. |
 
 Bind endpoints exist because ZMQ `bind()` requires a local interface
 while cross-container clients connect through the Docker service name.

@@ -246,6 +246,33 @@ class AppSettings:
         return self._bootstrap.zmq_broker_embedded
 
     @property
+    def strategies_embedded(self) -> bool:
+        """Return whether this node's launcher owns role-STRATEGY processes.
+
+        True (default) keeps strategies embedded (single container /
+        dev). False means a dedicated ``snapper strategies-engine``
+        container runs them and this node must exclude them from
+        autostart, ownership, and manual starts.
+
+        Returns:
+            The embedded-strategies flag from bootstrap settings.
+        """
+        return self._bootstrap.strategies_embedded
+
+    @property
+    def strategy_extra_packages(self) -> str:
+        """Return the comma-separated extra discovery packages.
+
+        Process discovery imports each listed top-level package
+        (fail-soft) so out-of-tree strategy modules can register their
+        processes.
+
+        Returns:
+            The raw comma-separated package list (may be empty).
+        """
+        return self._bootstrap.strategy_extra_packages
+
+    @property
     def coordinator_instance_id(self) -> int:
         """Return this coordinator's zero-based instance identifier.
 

@@ -24,6 +24,7 @@ from loguru import logger
 
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
+from snapper.application.process_manager.registry import get_registered_processes
 from snapper.core.json_types import JsonObject
 
 IS_WINDOWS = sys.platform == "win32"
@@ -49,6 +50,7 @@ def _build_process_command(
     class_path: str,
     method: str,
     parameters: dict[str, Any],
+    template_name: str | None = None,
 ) -> list[str]:
     """Build command line for subprocess execution.
 
@@ -59,6 +61,8 @@ def _build_process_command(
         class_path: Fully qualified class path.
         method: Method name to execute.
         parameters: Constructor parameters dict.
+        template_name: Optional source-template registry name the runner
+            resolves before attempting a dynamic class_path import.
 
     Returns:
         Command list for subprocess.Popen.
@@ -68,6 +72,7 @@ def _build_process_command(
         "class_path": class_path,
         "method": method,
         "parameters": parameters,
+        "template_name": template_name,
     }
     config_json = json.dumps(config)
     return [
@@ -104,18 +109,27 @@ class ProcessSpawnerService:
         self._startup_grace_period = 0.1
         self._capture_output = capture_output
 
-    def _validate_class_path(self, name: str, class_path: str) -> None:
+    def _validate_class_path(
+        self, name: str, class_path: str, template_name: str | None = None
+    ) -> None:
         """Validate that a class path is importable.
 
+        A registered template resolves FIRST: configs created from a
+        registry template store a function-local wrapper class_path that
+        can never be imported dynamically, but the runner resolves the
+        class through the registry, so validation must accept it too.
         Temporarily adds cwd to sys.path if needed for import resolution.
 
         Args:
             name: Process name for error messages.
             class_path: Fully qualified class path.
+            template_name: Optional source-template registry name.
 
         Raises:
             RuntimeError: If class cannot be imported.
         """
+        if template_name and template_name in get_registered_processes():
+            return
         validation_path_added = False
         cwd = os.getcwd()
         if cwd not in sys.path:
@@ -258,6 +272,7 @@ class ProcessSpawnerService:
         class_path: str,
         method: str,
         parameters: dict[str, Any],
+        template_name: str | None = None,
     ) -> ProcessInstanceInfo:
         """Spawn a new subprocess.
 
@@ -269,6 +284,8 @@ class ProcessSpawnerService:
             class_path: Fully qualified class path to instantiate.
             method: Method to call on the instantiated class.
             parameters: Constructor parameters dict.
+            template_name: Optional source-template registry name for
+                class resolution (function-local class_paths).
 
         Returns:
             ProcessInstanceInfo with subprocess details.
@@ -279,8 +296,8 @@ class ProcessSpawnerService:
         if name in self.processes:
             raise RuntimeError(f"Process '{name}' already exists")
         logger.info(f"Spawning process '{name}' (class: {class_path}, method: {method})")
-        self._validate_class_path(name, class_path)
-        cmd = _build_process_command(name, class_path, method, parameters)
+        self._validate_class_path(name, class_path, template_name)
+        cmd = _build_process_command(name, class_path, method, parameters, template_name)
         process = self._launch_subprocess(cmd)
         time.sleep(0.1)
         status = process.poll()

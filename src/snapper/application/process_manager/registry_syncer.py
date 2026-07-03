@@ -331,6 +331,7 @@ class ProcessRegistrySyncer:
         tags: Iterable[str],
         parameters_schema: JsonObject | None = None,
         note: str | None = None,
+        template: str | None = None,
     ) -> None:
         """Create a new process configuration in the database.
 
@@ -346,6 +347,9 @@ class ProcessRegistrySyncer:
             tags: Process tags for grouping.
             parameters_schema: Optional JSON schema for parameters.
             note: Optional description note.
+            template: Source-template registry name (persisted so class
+                resolution can use the registry when the stored
+                class_path is a function-local wrapper).
 
         Raises:
             ValueError: If process name already exists.
@@ -368,6 +372,8 @@ class ProcessRegistrySyncer:
             config_dict["parameters_schema"] = parameters_schema
         if note is not None:
             config_dict["note"] = note
+        if template is not None:
+            config_dict["template"] = template
         async with repository.session() as session:
             existing = await session.execute(
                 select(Setting).where(Setting.key == config_key, *where_active_now(Setting))

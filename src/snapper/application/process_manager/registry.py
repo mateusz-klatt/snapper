@@ -9,8 +9,11 @@ from collections.abc import Callable
 from collections.abc import Iterable
 from typing import Any
 
+from loguru import logger
+
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
+from snapper.config.settings import get_bootstrap_settings
 from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessMode
@@ -138,6 +141,20 @@ def get_registered_processes() -> dict[str, ProcessRegistryEntry]:
 def discover_processes() -> None:
     """Discover and register all processes in the snapper package.
 
-    Imports all modules under snapper to trigger @register_process decorators.
+    Imports all modules under snapper to trigger @register_process
+    decorators, then every extra top-level package listed in the
+    ``STRATEGY_EXTRA_PACKAGES`` bootstrap setting (comma-separated) —
+    fail-soft per package, so a missing or broken out-of-tree strategy
+    mount (e.g. proprietary code on PYTHONPATH) logs a warning instead
+    of aborting discovery for OSS deployments.
     """
     import_all_under("snapper")
+    extra = get_bootstrap_settings().strategy_extra_packages
+    for package in (part.strip() for part in extra.split(",")):
+        if not package:
+            continue
+        try:
+            imported = import_all_under(package)
+            logger.info(f"Discovered {imported} extra strategy modules under '{package}'")
+        except Exception as exc:
+            logger.warning(f"Extra strategy package '{package}' not imported: {exc}")

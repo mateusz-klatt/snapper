@@ -261,6 +261,7 @@ def _copy_process_config_with_mode(
         restart_policy=config.restart_policy,
         tags=config.tags,
         parameters_schema=config.parameters_schema,
+        template=config.template,
     )
 
 
@@ -289,6 +290,7 @@ def _copy_process_config_with_parameters(
         restart_policy=config.restart_policy,
         tags=config.tags,
         parameters_schema=config.parameters_schema,
+        template=config.template,
     )
 
 
@@ -488,6 +490,17 @@ class ProcessLauncherService:
                 )
             )
         return items
+
+    async def emit_summary_snapshot(self) -> None:
+        """Emit one cross-coordinator summary snapshot now (public wrapper).
+
+        Container entrypoints without PROCESS children (the strategies
+        engine runs THREAD-mode tasks) drive a periodic loop through
+        this wrapper so the API-side ``RemoteSummaryCache`` (15s TTL)
+        keeps seeing fresh coord snapshots; the native-process monitor
+        only emits when subprocesses exist.
+        """
+        await self._emit_summary_snapshot()
 
     async def _emit_summary_snapshot(self) -> None:
         """Publish ``processes.events.summary.{instance_id}`` snapshot.
@@ -777,17 +790,24 @@ class ProcessLauncherService:
                 }
         return configs
 
-    def import_class(self, class_path: str, process_name: str | None = None) -> type:
+    def import_class(
+        self,
+        class_path: str,
+        process_name: str | None = None,
+        template_name: str | None = None,
+    ) -> type:
         """Import a class by its fully qualified path.
 
         Args:
             class_path: Fully qualified class path.
             process_name: Optional process name to check registry first.
+            template_name: Optional source-template registry name checked
+                when the process name is not registered.
 
         Returns:
             The imported class type.
         """
-        return import_process_class(class_path, process_name)
+        return import_process_class(class_path, process_name, template_name)
 
     async def _start_as_async_task(self, config: ProcessConfigModel, method: Any) -> None:
         """Start an async method as an asyncio task.
@@ -869,6 +889,7 @@ class ProcessLauncherService:
             class_path=config.class_path,
             method=config.method,
             parameters=validated_params,
+            template_name=config.template,
         )
         logger.info(f"Process '{config.name}' started with PID {process_info.pid}")
         self.started_processes[config.name] = process_info
@@ -879,7 +900,7 @@ class ProcessLauncherService:
         Args:
             config: Process configuration.
         """
-        process_class = self.import_class(config.class_path, config.name)
+        process_class = self.import_class(config.class_path, config.name, config.template)
         validated_params = self._validate_parameters(config)
         process_instance = process_class(**validated_params)
         self._inject_market_persist_policy(process_instance, config.name)
@@ -1114,11 +1135,15 @@ class ProcessLauncherService:
         settings object (whose attribute is not an enum member) falls
         through to the permissive ``ALL`` behaviour.
 
+        ``STRATEGY`` selects ONLY role-STRATEGY processes — the
+        dedicated strategies container's profile.
+
         Independently of the profile, ``zmq_broker_embedded=False``
-        excludes the ``zmq_broker`` process (:func:`is_zmq_broker`) on
-        the API and ALL branches: a dedicated broker container then owns
-        the bus, this node must never bind a duplicate, and ownership
-        resolution treats the broker as remotely managed. The check uses
+        excludes the ``zmq_broker`` process (:func:`is_zmq_broker`) and
+        ``strategies_embedded=False`` excludes role-STRATEGY processes
+        on the API and ALL branches: a dedicated container then owns
+        them, this node must never start duplicates, and ownership
+        resolution treats them as remotely managed. Both checks use
         ``is False`` so mocked settings fall through to the embedded
         (permissive) behaviour.
 
@@ -1131,8 +1156,15 @@ class ProcessLauncherService:
         profile = self.settings.process_autostart_profile
         if profile is ProcessAutostartProfileEnum.FEED:
             return is_market_data_publisher(config.tags)
+        if profile is ProcessAutostartProfileEnum.STRATEGY:
+            return config.role is ProcessRoleEnum.STRATEGY
         if getattr(self.settings, "zmq_broker_embedded", True) is False and is_zmq_broker(
             config.tags
+        ):
+            return False
+        if (
+            getattr(self.settings, "strategies_embedded", True) is False
+            and config.role is ProcessRoleEnum.STRATEGY
         ):
             return False
         if profile is ProcessAutostartProfileEnum.API:
@@ -2746,6 +2778,7 @@ class ProcessLauncherService:
             restart_policy=resolve_restart_policy(restart_policy_raw, name),
             tags=tags_tuple,
             parameters_schema=parameters_schema,
+            template=config_dict.get("template"),
         )
 
     async def _handle_manual_start_stop_race(self, name: str) -> ProcessStartResult | None:
@@ -3070,6 +3103,18 @@ class ProcessLauncherService:
                     "bind a second bus; manage it via docker instead"
                 ),
             )
+        raw_role = str(config_dict.get("role") or "")
+        if getattr(self.settings, "strategies_embedded", True) is False and (
+            config.role is ProcessRoleEnum.STRATEGY or raw_role == ProcessRoleEnum.STRATEGY.value
+        ):
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=(
+                    f"Process '{name}' is owned by the strategies container "
+                    "(STRATEGIES_EMBEDDED=false) — starting a local duplicate would "
+                    "run the strategy twice; manage it via the strategies container"
+                ),
+            )
         was_watchdog_managed = name in self._desired_state
         await self._cancel_pending_restart(name)
         try:
@@ -3357,6 +3402,7 @@ class ProcessLauncherService:
         tags: Iterable[str],
         parameters_schema: JsonObject | None = None,
         note: str | None = None,
+        template: str | None = None,
     ) -> None:
         """Create a new process configuration in the database.
 
@@ -3377,6 +3423,7 @@ class ProcessLauncherService:
             tags: Process tags for categorization.
             parameters_schema: Optional JSON schema for parameters.
             note: Optional descriptive note.
+            template: Source-template registry name persisted on the row.
         """
         await self._registry_syncer.create_process_config(
             name=name,
@@ -3390,6 +3437,7 @@ class ProcessLauncherService:
             tags=tags,
             parameters_schema=parameters_schema,
             note=note,
+            template=template,
         )
         await self._emit_configured_snapshot()
         await self._emit_summary_snapshot()

@@ -26,6 +26,7 @@ from typer.testing import CliRunner
 
 import snapper.cli.app as app_module
 import snapper.messaging.infrastructure.publisher as publisher_module
+from snapper.application.process_manager.launcher import CoreProcessStartupError
 from snapper.application.services.continuous_contract_builder import BuildResult
 from snapper.application.services.continuous_contract_builder import RollPointInfo
 from snapper.application.updaters.historical.split_repair import SplitRepairCandidate
@@ -4714,6 +4715,327 @@ def test_feed_engine_starts_publishers_and_shuts_down(
     assert captured["connect_addr"] == "tcp://broker:7500"
     assert closed == {"sock": True, "ctx": True}
     assert (fake_zmq.LINGER, 0) in sockopts
+
+
+def test_strategies_engine_starts_and_shuts_down(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """strategies-engine boots, wires the decision listener, and tears down.
+
+    Given: mocked settings service, discovery, launcher, AI-review
+        service, and a no-op shutdown wait,
+    When: the strategies-engine command is invoked,
+    Then: the decision-only bus listener starts BEFORE strategies and the
+        finally path stops processes, the listener, the service, and the
+        publisher socket — in order.
+    """
+    calls: list[str] = []
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            calls.append("shutdown")
+
+    class DummyAiService:
+        async def start_bus_listener(self, xpub: str, *, topics: tuple[str, ...]) -> None:
+            calls.append(f"listener_start:{','.join(topics)}")
+
+        async def stop_bus_listener(self) -> None:
+            calls.append("listener_stop")
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            calls.append("init")
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            calls.append("set_publisher")
+
+        async def sync_registry_to_database(self) -> None:
+            calls.append("sync")
+
+        async def start_all_processes(self) -> None:
+            calls.append("start_all")
+
+        async def emit_summary_snapshot(self) -> None:
+            calls.append("summary")
+
+        async def stop_all_processes(self) -> None:
+            calls.append("stop")
+
+    class FakeSocket:
+        def setsockopt(self, option: int, value: int) -> None:
+            del option, value
+
+        def connect(self, addr: str) -> None:
+            del addr
+
+        def close(self) -> None:
+            calls.append("sock_close")
+
+    class FakeContext:
+        def socket(self, kind: object) -> FakeSocket:
+            del kind
+            return FakeSocket()
+
+        def term(self) -> None:
+            calls.append("ctx_term")
+
+    fake_zmq = SimpleNamespace(PUB="PUB", LINGER=17, asyncio=SimpleNamespace(Context=FakeContext))
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        calls.append("get_service")
+        return DummyService()
+
+    async def _no_wait() -> None:
+        calls.append("wait")
+
+    monkeypatch.setattr(publisher_module, "zmq", fake_zmq)
+    monkeypatch.setattr(publisher_module, "apply_hwm", lambda sock, **kwargs: None)
+    monkeypatch.setattr(publisher_module, "ValidatedPublisher", lambda sock: sock)
+    monkeypatch.setattr(publisher_module, "MessagePublisher", lambda validated, tracker: validated)
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(
+            zmq_broker_xsub="tcp://broker:7500", zmq_broker_xpub="tcp://broker:7501"
+        ),
+    )
+    monkeypatch.setattr(app_module, "discover_processes", lambda: calls.append("discover"))
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "get_ai_review_service", lambda: DummyAiService())
+    monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
+    result = cli_runner.invoke(app, ["strategies-engine"])
+    assert result.exit_code == 0
+    assert calls[:5] == [
+        "get_service",
+        "discover",
+        "init",
+        "set_publisher",
+        "listener_start:bus.ai_review_decision",
+    ]
+    assert calls[5:8] == ["sync", "start_all", "wait"]
+    assert calls[8:] == ["stop", "listener_stop", "shutdown", "sock_close", "ctx_term"]
+
+
+def test_strategies_engine_exits_nonzero_on_core_failure(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """A CORE startup failure exits the container non-zero.
+
+    Given: a launcher whose start_all_processes raises
+        CoreProcessStartupError,
+    When: the strategies-engine command is invoked,
+    Then: the exit code is 1 and teardown still ran.
+    """
+    calls: list[str] = []
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            calls.append("shutdown")
+
+    class DummyAiService:
+        async def start_bus_listener(self, xpub: str, *, topics: tuple[str, ...]) -> None:
+            calls.append("listener_start")
+
+        async def stop_bus_listener(self) -> None:
+            calls.append("listener_stop")
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            pass
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            pass
+
+        async def sync_registry_to_database(self) -> None:
+            pass
+
+        async def start_all_processes(self) -> None:
+            raise CoreProcessStartupError(["zmq_broker"])
+
+        async def stop_all_processes(self) -> None:
+            calls.append("stop")
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        return DummyService()
+
+    monkeypatch.setattr(
+        publisher_module, "build_audit_publisher", lambda xsub: (None, None), raising=False
+    )
+    monkeypatch.setattr(app_module, "build_audit_publisher", lambda xsub: (None, None))
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(
+            zmq_broker_xsub="tcp://broker:7500", zmq_broker_xpub="tcp://broker:7501"
+        ),
+    )
+    monkeypatch.setattr(app_module, "discover_processes", lambda: None)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "get_ai_review_service", lambda: DummyAiService())
+    result = cli_runner.invoke(app, ["strategies-engine"])
+    assert result.exit_code == 1
+    assert "stop" in calls
+    assert "listener_stop" in calls
+    assert "shutdown" in calls
+
+
+def test_strategies_engine_degrades_without_publisher(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """A broker hiccup during publisher build degrades to no summary emission.
+
+    Given: build_audit_publisher raising,
+    When: the strategies-engine command is invoked,
+    Then: the engine still boots and exits cleanly (publisher None).
+    """
+    captured: dict[str, object] = {}
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            pass
+
+    class DummyAiService:
+        async def start_bus_listener(self, xpub: str, *, topics: tuple[str, ...]) -> None:
+            pass
+
+        async def stop_bus_listener(self) -> None:
+            pass
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            pass
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            captured["publisher"] = publisher
+
+        async def sync_registry_to_database(self) -> None:
+            pass
+
+        async def start_all_processes(self) -> None:
+            pass
+
+        async def stop_all_processes(self) -> None:
+            pass
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        return DummyService()
+
+    async def _no_wait() -> None:
+        pass
+
+    def _boom(xsub: str) -> tuple[None, None]:
+        raise RuntimeError("broker away")
+
+    monkeypatch.setattr(app_module, "build_audit_publisher", _boom)
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(
+            zmq_broker_xsub="tcp://broker:7500", zmq_broker_xpub="tcp://broker:7501"
+        ),
+    )
+    monkeypatch.setattr(app_module, "discover_processes", lambda: None)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "get_ai_review_service", lambda: DummyAiService())
+    monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
+    result = cli_runner.invoke(app, ["strategies-engine"])
+    assert result.exit_code == 0
+    assert captured["publisher"] is None
+
+
+def test_strategies_engine_skips_listener_without_xpub(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """An empty XPUB endpoint skips the decision listener entirely.
+
+    Given: settings without a broker XPUB endpoint,
+    When: the strategies-engine command is invoked,
+    Then: no listener starts or stops and the engine exits cleanly.
+    """
+    listener_calls: list[str] = []
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            pass
+
+    class DummyAiService:
+        async def start_bus_listener(self, xpub: str, *, topics: tuple[str, ...]) -> None:
+            listener_calls.append("start")
+
+        async def stop_bus_listener(self) -> None:
+            listener_calls.append("stop")
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            pass
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            pass
+
+        async def sync_registry_to_database(self) -> None:
+            pass
+
+        async def start_all_processes(self) -> None:
+            pass
+
+        async def stop_all_processes(self) -> None:
+            pass
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        return DummyService()
+
+    async def _no_wait() -> None:
+        pass
+
+    monkeypatch.setattr(app_module, "build_audit_publisher", lambda xsub: (None, None))
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(zmq_broker_xsub="tcp://broker:7500", zmq_broker_xpub=""),
+    )
+    monkeypatch.setattr(app_module, "discover_processes", lambda: None)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "get_ai_review_service", lambda: DummyAiService())
+    monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
+    result = cli_runner.invoke(app, ["strategies-engine"])
+    assert result.exit_code == 0
+    assert listener_calls == []
+
+
+@pytest.mark.asyncio
+async def test_strategies_summary_loop_ticks_and_survives_errors() -> None:
+    """The summary loop emits every tick and swallows emission errors.
+
+    Given: a launcher whose snapshot raises once then succeeds,
+    When: the loop runs two ticks (patched sleep),
+    Then: both attempts happened and the error never escaped.
+    """
+    attempts: list[int] = []
+
+    class DummyLauncher:
+        async def emit_summary_snapshot(self) -> None:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("publisher blip")
+
+    sleeps: list[float] = []
+
+    async def _fast_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise asyncio.CancelledError
+
+    with (
+        patch.object(app_module.asyncio, "sleep", _fast_sleep),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await app_module._strategies_summary_loop(cast(Any, DummyLauncher()))
+    assert len(attempts) == 2
+    assert sleeps == [5.0, 5.0]
 
 
 def test_feed_engine_exits_nonzero_on_publisher_crash(

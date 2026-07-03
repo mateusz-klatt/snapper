@@ -149,11 +149,17 @@ class ProcessAutostartProfileEnum(StrEnum):
 
     A market-data publisher is any registered process whose tags carry
     both ``"market-data"`` and ``"publisher"``.
+
+    ``STRATEGY`` selects ONLY role-STRATEGY processes — the dedicated
+    strategies container (``snapper strategies-engine``) runs them as
+    THREAD-mode tasks off the backend loop; the backend then sets
+    ``STRATEGIES_EMBEDDED=false`` so it stops owning them.
     """
 
     ALL = "all"
     API = "api"
     FEED = "feed"
+    STRATEGY = "strategy"
 
 
 class ProcessLifecycleEnum(StrEnum):

@@ -1146,6 +1146,22 @@ emits no `processes.events.summary.*` snapshots, so its only supervision
 is the docker healthcheck (TCP probes on both ports) + restart policy —
 port liveness IS the health of a single-thread proxy.
 
+Strategies run in their own `snapper-strategies` container
+(`snapper strategies-engine`, `PROCESS_AUTOSTART_PROFILE=strategy`):
+role-STRATEGY processes start THREAD-mode through the SAME
+`start_all_processes` path they used in the backend — boot wallet/grant
+scope enforcement, watchdog restart budgets, and parking included. The
+backend sets `STRATEGIES_EMBEDDED=false`, which excludes strategies from
+its autostart, reports them as remotely managed, and hard-refuses manual
+local starts so one strategy can never run twice. The engine keeps the
+container a first-class bus citizen with a decision-only
+`bus.ai_review_decision` listener (the consult fast path; delegate-offline
+and caps fanout stay on the FastAPI server) and a 5s summary loop so the
+API's `RemoteSummaryCache` (15s TTL) always sees fresh `coord-2`
+snapshots even with zero strategies running. Out-of-tree strategies
+register via `STRATEGY_EXTRA_PACKAGES` + `PYTHONPATH` (compose mounts
+`./proprietary` read-only).
+
 `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` clamp each publisher subprocess's
 SQLAlchemy pool (PostgreSQL only). `get_repository` caches one engine per
 process, so splitting publishers across processes otherwise multiplies the

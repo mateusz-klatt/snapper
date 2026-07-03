@@ -127,6 +127,17 @@ class BootstrapSettingsLoader(BaseSettings):
             excludes the broker from autostart and ownership so no
             duplicate broker can start locally and the UI treats it as
             remotely managed.
+        strategies_embedded: When True (default), this node's launcher
+            owns role-STRATEGY processes (single container / dev). Set
+            False when a dedicated ``snapper strategies-engine``
+            container runs them — the launcher then excludes strategies
+            from autostart and ownership and refuses manual local
+            starts, so the same strategy can never run twice.
+        strategy_extra_packages: Comma-separated extra top-level
+            packages whose modules process discovery imports (fail-soft
+            per package) so out-of-tree strategies (e.g. a mounted
+            proprietary tree on PYTHONPATH) register their processes.
+            Empty default imports nothing extra.
         telemetry_recording_enabled: When True, data-plane messages
             (ping/pong, heartbeat, GET reads) are persisted to the
             telemetry table. Default is False (counters still increment).
@@ -192,6 +203,8 @@ class BootstrapSettingsLoader(BaseSettings):
     zmq_broker_bind_xsub: str = Field(default="", alias="ZMQ_BROKER_BIND_XSUB")
     zmq_broker_bind_xpub: str = Field(default="", alias="ZMQ_BROKER_BIND_XPUB")
     zmq_broker_embedded: bool = Field(default=True, alias="ZMQ_BROKER_EMBEDDED")
+    strategies_embedded: bool = Field(default=True, alias="STRATEGIES_EMBEDDED")
+    strategy_extra_packages: str = Field(default="", alias="STRATEGY_EXTRA_PACKAGES")
     telemetry_recording_enabled: bool = Field(default=False, alias="TELEMETRY_RECORDING_ENABLED")
     coordinator_instance_id: int = Field(default=0, alias="SNAPPER_COORDINATOR_INSTANCE_ID")
     coordinator_instance_count: int = Field(default=1, alias="SNAPPER_COORDINATOR_INSTANCE_COUNT")
