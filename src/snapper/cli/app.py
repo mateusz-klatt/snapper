@@ -725,6 +725,7 @@ async def _run_strategies_engine() -> None:
         publisher = None
     launcher.set_msg_publisher(publisher)
     ai_service = get_ai_review_service()
+    ai_service.set_msg_publisher(publisher)
     listener_started = False
     summary_task: asyncio.Task[None] | None = None
     try:

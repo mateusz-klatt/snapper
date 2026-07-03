@@ -4736,6 +4736,9 @@ def test_strategies_engine_starts_and_shuts_down(
             calls.append("shutdown")
 
     class DummyAiService:
+        def set_msg_publisher(self, publisher: object) -> None:
+            calls.append(f"ai_set_publisher:{publisher is not None}")
+
         async def start_bus_listener(self, xpub: str, *, topics: tuple[str, ...]) -> None:
             calls.append(f"listener_start:{','.join(topics)}")
 
@@ -4806,15 +4809,16 @@ def test_strategies_engine_starts_and_shuts_down(
     monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
     result = cli_runner.invoke(app, ["strategies-engine"])
     assert result.exit_code == 0
-    assert calls[:5] == [
+    assert calls[:6] == [
         "get_service",
         "discover",
         "init",
         "set_publisher",
+        "ai_set_publisher:True",
         "listener_start:bus.ai_review_decision",
     ]
-    assert calls[5:8] == ["sync", "start_all", "wait"]
-    assert calls[8:] == ["stop", "listener_stop", "shutdown", "sock_close", "ctx_term"]
+    assert calls[6:9] == ["sync", "start_all", "wait"]
+    assert calls[9:] == ["stop", "listener_stop", "shutdown", "sock_close", "ctx_term"]
 
 
 def test_strategies_engine_exits_nonzero_on_core_failure(
@@ -4834,6 +4838,9 @@ def test_strategies_engine_exits_nonzero_on_core_failure(
             calls.append("shutdown")
 
     class DummyAiService:
+        def set_msg_publisher(self, publisher: object) -> None:
+            calls.append(f"ai_set_publisher:{publisher is not None}")
+
         async def start_bus_listener(self, xpub: str, *, topics: tuple[str, ...]) -> None:
             calls.append("listener_start")
 
@@ -4897,6 +4904,9 @@ def test_strategies_engine_degrades_without_publisher(
             pass
 
     class DummyAiService:
+        def set_msg_publisher(self, publisher: object) -> None:
+            captured["ai_publisher_is_none"] = publisher is None
+
         async def start_bus_listener(self, xpub: str, *, topics: tuple[str, ...]) -> None:
             pass
 
@@ -4962,6 +4972,9 @@ def test_strategies_engine_skips_listener_without_xpub(
             pass
 
     class DummyAiService:
+        def set_msg_publisher(self, publisher: object) -> None:
+            listener_calls.append(f"ai_set_publisher:{publisher is not None}")
+
         async def start_bus_listener(self, xpub: str, *, topics: tuple[str, ...]) -> None:
             listener_calls.append("start")
 
@@ -5003,7 +5016,7 @@ def test_strategies_engine_skips_listener_without_xpub(
     monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
     result = cli_runner.invoke(app, ["strategies-engine"])
     assert result.exit_code == 0
-    assert listener_calls == []
+    assert listener_calls == ["ai_set_publisher:False"]
 
 
 @pytest.mark.asyncio
