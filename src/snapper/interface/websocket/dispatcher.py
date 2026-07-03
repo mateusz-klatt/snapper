@@ -352,7 +352,7 @@ async def dispatch_messages(
         db_url: Optional database URL for control recording.
     """
     client_gap_detector = WsClientGapDetector()
-    dispatch_table = _build_dispatch_table(websocket, manager, user)
+    dispatch_table = _build_dispatch_table(websocket, manager, user, ws_auth_manager)
     try:
         while True:
             raw_message = await websocket.receive_text()
@@ -394,6 +394,7 @@ def _build_dispatch_table(
     websocket: WebSocket,
     manager: WebSocketConnectionManager,
     user: AuthPrincipal,
+    ws_auth_manager: WebSocketAuthManager,
 ) -> dict[type, Callable[[Any], Awaitable[None]]]:
     """Build a message-type-to-handler dispatch table.
 
@@ -401,6 +402,9 @@ def _build_dispatch_table(
         websocket: The authenticated WebSocket connection.
         manager: WebSocket connection manager.
         user: Authenticated user profile.
+        ws_auth_manager: Auth manager whose ping hook refreshes AI-delegate
+            liveness (``ai_delegates.last_seen_at``) so admission control
+            keeps a connected delegate inside its heartbeat window.
 
     Returns:
         Dictionary mapping message types to async handler callables.
@@ -413,8 +417,33 @@ def _build_dispatch_table(
         WSGetSubscriptionsRequest: lambda msg: handle_get_subscriptions(
             websocket, manager, user.role
         ),
-        WSPingRequest: lambda msg: handle_ping(websocket, manager),
+        WSPingRequest: lambda msg: _handle_ping_with_liveness(
+            websocket, manager, user, ws_auth_manager
+        ),
     }
+
+
+async def _handle_ping_with_liveness(
+    websocket: WebSocket,
+    manager: WebSocketConnectionManager,
+    user: AuthPrincipal,
+    ws_auth_manager: WebSocketAuthManager,
+) -> None:
+    """Answer a client ping, then refresh delegate liveness.
+
+    Pong latency stays first-class: the liveness bump runs after the
+    pong is sent and is itself throttled + fail-soft inside
+    :meth:`WebSocketAuthManager.on_client_ping`, so a slow or failing
+    DB write can never delay or break the keep-alive exchange.
+
+    Args:
+        websocket: The authenticated WebSocket connection.
+        manager: WebSocket connection manager.
+        user: Authenticated principal for this connection.
+        ws_auth_manager: Auth manager owning the liveness hook.
+    """
+    await handle_ping(websocket, manager)
+    await ws_auth_manager.on_client_ping(user)
 
 
 async def _dispatch_single_message(

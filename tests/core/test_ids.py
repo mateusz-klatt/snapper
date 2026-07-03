@@ -41,3 +41,13 @@ class TestIsUuid7:
     def test_non_hex_rejected(self) -> None:
         """Characters outside 0-9a-f are rejected."""
         assert not is_uuid7("zzzzzzzz-zzzz-7zzz-8zzz-zzzzzzzzzzzz")
+
+    def test_trailing_newline_rejected(self) -> None:
+        """A trailing newline never sneaks past the anchor (fullmatch)."""
+        assert not is_uuid7(str(uuid7()) + "\n")
+
+    def test_surrounding_whitespace_rejected(self) -> None:
+        """Leading or trailing whitespace rejects the candidate."""
+        value = str(uuid7())
+        assert not is_uuid7(f" {value}")
+        assert not is_uuid7(f"{value} ")

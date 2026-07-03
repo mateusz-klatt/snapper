@@ -104,6 +104,15 @@ async def _authenticate_and_dispatch(
     Sets state[0] to True once the websocket is connected to the manager
     so the caller knows cleanup is needed even if an exception occurs later.
 
+    Delegate liveness lifecycle: after a successful authenticate the
+    :meth:`WebSocketAuthManager.on_authenticate` hook cancels any pending
+    offline publish and (fail-soft) bumps ``ai_delegates.last_seen_at``;
+    when the post-authenticate flow exits — auth-complete send or
+    dispatch loop, disconnect or error — the paired
+    :meth:`WebSocketAuthManager.on_disconnect` hook schedules the delayed
+    ``bus.delegate_offline`` publish. Non-delegate principals short-circuit
+    inside both hooks.
+
     Args:
         websocket: Accepted WebSocket connection.
         manager: WebSocket connection manager.
@@ -122,16 +131,20 @@ async def _authenticate_and_dispatch(
     user = auth_result.user
     state[0] = True
     await manager.connect(websocket, accept=False)
-    if auth_result.ws_payload is not None:
-        await send_auth_complete(
-            websocket,
-            manager,
-            user,
-            auth_result.ws_payload,
-            ws_auth_manager,
-            db_url,
-        )
-    await dispatch_messages(websocket, manager, user, ws_auth_manager, ws_token_service, db_url)
+    await ws_auth_manager.on_authenticate(websocket, user)
+    try:
+        if auth_result.ws_payload is not None:
+            await send_auth_complete(
+                websocket,
+                manager,
+                user,
+                auth_result.ws_payload,
+                ws_auth_manager,
+                db_url,
+            )
+        await dispatch_messages(websocket, manager, user, ws_auth_manager, ws_token_service, db_url)
+    finally:
+        await ws_auth_manager.on_disconnect(websocket, user)
 
 
 def create_authenticated_websocket_router(manager: WebSocketConnectionManager) -> APIRouter:

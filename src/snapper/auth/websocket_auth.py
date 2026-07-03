@@ -6,6 +6,7 @@ connections including session tracking and role-based access control.
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
@@ -68,6 +69,15 @@ DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS = 5
 A reconnect within this window cancels the pending publish so flapping
 WS connections never trigger a phantom-offline event for downstream
 subscribers (e.g. mid-traffic `ai_reviews` re-fanout).
+"""
+
+DELEGATE_LIVENESS_BUMP_MIN_INTERVAL_SECONDS = 5.0
+"""Per-delegate throttle for ping-driven ``last_seen_at`` refreshes.
+
+The AI-review admission window is 15s and the MCP watch client pings
+every ~7s, so bumping at most once per 5s keeps every well-behaved
+delegate live while capping the DB write rate of a misbehaving client
+that floods pings.
 """
 
 
@@ -162,6 +172,7 @@ class WebSocketAuthManager:
         self._pending_offline_tasks: dict[str, asyncio.Task[None]] = {}
         self._delegate_offline_grace_seconds: int = DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS
         self._delegate_locks: dict[str, asyncio.Lock] = {}
+        self._delegate_last_liveness_bump: dict[str, float] = {}
         self._deactivation_scan_task: asyncio.Task[None] | None = None
 
     def set_wiring(
@@ -485,6 +496,11 @@ class WebSocketAuthManager:
         serialised through :meth:`_delegate_lock` so concurrent hooks
         cannot orphan a pending offline task.
 
+        The ``last_seen_at`` bump itself is fail-soft: a transient DB
+        failure logs a warning and leaves the refresh to the ping path
+        (:meth:`on_client_ping`) instead of aborting the freshly
+        authenticated connection.
+
         Args:
             websocket: WebSocket connection that just authenticated
                 (passed through for symmetry with future hooks; the
@@ -509,8 +525,64 @@ class WebSocketAuthManager:
                     delegate_id,
                 )
                 return
+            try:
+                repo = self.repository_factory()
+                await repo.update_delegate_last_seen(delegate_id, datetime.now(UTC))
+            except Exception as exc:
+                logger.warning(
+                    "WebSocketAuthManager.on_authenticate: last_seen_at update failed "
+                    "for delegate_public_id={} — {} (ping-path refresh will retry)",
+                    delegate_id,
+                    exc,
+                )
+
+    async def on_client_ping(self, principal: AuthPrincipal) -> None:
+        """Refresh delegate liveness on a client ping, throttled + fail-soft.
+
+        ``on_authenticate`` bumps ``ai_delegates.last_seen_at`` only at
+        connect, but AI-review admission requires the timestamp inside
+        the 15s heartbeat window at consult time — without a periodic
+        refresh a delegate lapses out of eligibility seconds after
+        connecting. The MCP watch client heartbeats every ~7s, so each
+        ping re-bumps ``last_seen_at``, throttled per delegate to
+        :data:`DELEGATE_LIVENESS_BUMP_MIN_INTERVAL_SECONDS` to bound
+        the DB write rate. Fail-soft by design: a failed bump logs and
+        clears the throttle stamp (so the next ping retries) but never
+        disturbs the ping/pong exchange.
+
+        Args:
+            principal: Resolved principal for the pinging connection;
+                non-delegate principals short-circuit.
+        """
+        delegate_id = principal.delegate_public_id
+        if delegate_id is None:
+            return
+        now_monotonic = time.monotonic()
+        last_bump = self._delegate_last_liveness_bump.get(delegate_id)
+        if (
+            last_bump is not None
+            and now_monotonic - last_bump < DELEGATE_LIVENESS_BUMP_MIN_INTERVAL_SECONDS
+        ):
+            return
+        if self.repository_factory is None:
+            logger.warning(
+                "WebSocketAuthManager.on_client_ping: skipping last_seen_at "
+                "update for delegate_public_id={} — repository_factory not wired",
+                delegate_id,
+            )
+            return
+        self._delegate_last_liveness_bump[delegate_id] = now_monotonic
+        try:
             repo = self.repository_factory()
             await repo.update_delegate_last_seen(delegate_id, datetime.now(UTC))
+        except Exception as exc:
+            self._delegate_last_liveness_bump.pop(delegate_id, None)
+            logger.warning(
+                "WebSocketAuthManager.on_client_ping: last_seen_at update failed "
+                "for delegate_public_id={} — {}",
+                delegate_id,
+                exc,
+            )
 
     async def on_disconnect(self, websocket: WebSocket, principal: AuthPrincipal) -> None:
         """Schedule a delayed ``bus.delegate_offline`` publish for an AI delegate.

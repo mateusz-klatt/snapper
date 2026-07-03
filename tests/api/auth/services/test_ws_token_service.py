@@ -52,7 +52,8 @@ class DummyManager:
 class DummyWsAuthManager:
     """Placeholder WebSocket auth manager for tests."""
 
-    pass
+    async def on_client_ping(self, principal: Any) -> None:
+        """No-op liveness hook matching the real manager's ping interface."""
 
 
 class DummyTokenService:

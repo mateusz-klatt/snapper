@@ -30,7 +30,9 @@ def is_uuid7(value: str) -> bool:
     Enforces the RFC 4122 layout with version nibble = 7 and variant
     nibble in ``{8, 9, a, b}``. Length-only checks are insufficient —
     the topic validator needs format-level proof to reject malformed
-    segments.
+    segments. Uses ``fullmatch`` so a trailing newline (e.g. from a
+    config-sourced value) can never sneak past the ``$`` anchor into a
+    topic segment or DB row.
 
     Args:
         value: Candidate UUID7 string.
@@ -39,4 +41,4 @@ def is_uuid7(value: str) -> bool:
         ``True`` when the layout, version, and variant all match;
         ``False`` otherwise.
     """
-    return _UUID7_PATTERN.match(value) is not None
+    return _UUID7_PATTERN.fullmatch(value) is not None

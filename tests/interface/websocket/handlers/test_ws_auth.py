@@ -1197,7 +1197,7 @@ async def test_handshake_success_dispatches_and_sends_payload(
         headers={"origin": "http://localhost:8000"},
         cookies={"access_token": "token"},
     )
-    user = SimpleNamespace(username="alice")
+    user = SimpleNamespace(username="alice", delegate_public_id=None)
     auth_result = SimpleNamespace(success=True, user=user, ws_payload={"ok": True})
 
     async def fake_authenticate_websocket(*args: Any, **kwargs: Any) -> Any:
@@ -1262,7 +1262,7 @@ async def test_handshake_success_without_payload_dispatches(
         headers={"origin": "http://localhost:8000"},
         cookies={"access_token": "token"},
     )
-    user = SimpleNamespace(username="alice")
+    user = SimpleNamespace(username="alice", delegate_public_id=None)
     auth_result = SimpleNamespace(success=True, user=user, ws_payload=None)
 
     async def fake_authenticate(*args: Any, **kwargs: Any) -> Any:
@@ -1772,6 +1772,15 @@ class AuthManagerStub:
     def disconnect(self, websocket: Any) -> None:
         """Record WebSocket disconnection."""
         self.disconnect_calls.append(websocket)
+
+    async def on_authenticate(self, websocket: Any, principal: Any) -> None:
+        """No-op delegate-liveness hook matching the real manager."""
+
+    async def on_disconnect(self, websocket: Any, principal: Any) -> None:
+        """No-op delegate-liveness hook matching the real manager."""
+
+    async def on_client_ping(self, principal: Any) -> None:
+        """No-op ping-liveness hook matching the real manager."""
 
 
 class TokenServiceStub:

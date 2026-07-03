@@ -398,6 +398,49 @@ curl -X POST http://localhost:8000/api/mcp/ \
 
 ---
 
+## CONSULT wake path (runbook)
+
+A strategy issues a CONSULT round via the `create_ai_review_and_await`
+primitive; the service admits it only when an eligible delegate's
+`ai_delegates.last_seen_at` is inside the heartbeat window (default
+15s). Liveness is maintained by the delegate's WebSocket session: the
+connect handshake bumps `last_seen_at`, and every client ping re-bumps
+it (throttled server-side to at most one write per 5s per delegate).
+The bundled `HeartbeatConsult` strategy exercises the full loop with
+one consult per 1h candle and a target-flat (`strength=0.0`) paper
+signal on approval; its process config must supply UUID7
+`ai_review_user_public_id` and `ai_review_strategy_public_id` params
+plus a scoped wallet/operator pair whose grant covers the output
+instrument.
+
+Operator steps to arm the wake surface:
+
+1. Mint a delegate (`POST /api/ai-delegates`) and grant it scope on
+    the strategy's `(wallet, instrument)` pair.
+2. Run `snapper-mcp watch` with the delegate token. The default
+    subscription already includes the `ai_reviews.` family; each
+    `ai_review.request` frame appears as one JSONL line on stdout.
+3. Wire the watch stdout into the monitoring host (for example a
+    Claude Code monitor primitive) so a request frame wakes the
+    delegate's session. This host-side wiring lives outside this
+    repository by design — any host able to read a subprocess's
+    stdout can implement it.
+4. The woken delegate reads the frame's `review_public_id` and passes
+    it as the `review_id` argument of the `submit_ai_review_decision`
+    MCP tool before the review deadline (default 25s for
+    `HeartbeatConsult`); the strategy resumes with the outcome, and a
+    `decision_ack` frame follows on the same `ai_reviews.` family.
+
+After a watch reconnect, `GET /api/ai-reviews/pending` is the
+catch-up read for reviews whose fanout window (`fanout_after`,
+default creation + 30s) has already opened while the delegate was
+offline. Short-deadline rounds such as `HeartbeatConsult` (25s) time
+out before that window opens, so a missed heartbeat frame is simply
+lost and the next 1h round retries — the catch-up read matters for
+strategies configured with deadlines longer than the fanout window.
+
+---
+
 ## Safety caps
 
 Every delegate has its own `user_trading_caps` row. All fields are
