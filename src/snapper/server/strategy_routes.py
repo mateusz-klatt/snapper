@@ -26,6 +26,8 @@ from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import ProcessRoleEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.process_routes import _resolve_ownership
+from snapper.server.process_routes import get_remote_summary_cache
 from snapper.strategies.factory import StrategyFactory
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
@@ -65,7 +67,12 @@ async def list_strategies(
     """List configured strategy processes with lightweight status.
 
     Returns only strategy-role processes with minimal fields
-    (name, running, enabled, mode) for read-only views.
+    (name, running, enabled, mode) for read-only views. Running state
+    unions the local launcher with the cross-coordinator summary cache
+    (the ``_resolve_ownership`` contract shared with the processes
+    routes), so a strategy owned by the dedicated strategies container
+    reports ``running=True`` + ``managed_remotely=True`` with its
+    coordinator slug instead of a stale local ``Stopped``.
 
     Args:
         request: FastAPI request containing app state.
@@ -78,22 +85,33 @@ async def list_strategies(
     sid = tracker.session_id
     ts = dt.datetime.now(dt.UTC)
     factory: ProcessLauncherService = request.app.state.process_factory
+    cache = get_remote_summary_cache(request)
     configs = await factory.get_process_configs()
-    strategies = [
-        StrategyProcess(
-            name=config.name,
-            running=config.name in factory.started_processes,
-            enabled=config.enabled,
-            mode=config.mode,
-            strategy_class=_resolve_strategy_class(config.tags),
-            session_id=sid,
-            sequence_id=tracker.next_sequence(_REST_STREAM),
-            public_id=str(uuid7()),
-            timestamp=ts,
+    strategies: list[StrategyProcess] = []
+    for config in configs:
+        if config.role is not ProcessRoleEnum.STRATEGY:
+            continue
+        running, coordinator, managed_remotely = _resolve_ownership(
+            factory,
+            cache,
+            config,
+            local_running=config.name in factory.started_processes,
         )
-        for config in configs
-        if config.role is ProcessRoleEnum.STRATEGY
-    ]
+        strategies.append(
+            StrategyProcess(
+                name=config.name,
+                running=running,
+                enabled=config.enabled,
+                mode=config.mode,
+                strategy_class=_resolve_strategy_class(config.tags),
+                coordinator=coordinator,
+                managed_remotely=managed_remotely,
+                session_id=sid,
+                sequence_id=tracker.next_sequence(_REST_STREAM),
+                public_id=str(uuid7()),
+                timestamp=ts,
+            )
+        )
     return StrategyListResponse(
         payload=strategies,
         count=len(strategies),

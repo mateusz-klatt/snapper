@@ -599,6 +599,10 @@ class StrategyProcess(StrictDataSchema[Literal["strategy_process"]]):
         strategy_class: Registered StrategyFactory key this process runs
             (recovered from the process tags), or None if not resolvable.
             Lets the UI pre-fill the backtest create form's strategy dropdown.
+        coordinator: Owning coordinator slug from the summary cache, or
+            None when unknown.
+        managed_remotely: True when another coordinator owns the strategy
+            (Start/Stop hidden in the dashboard).
     """
 
     type: Literal["strategy_process"] = "strategy_process"
@@ -610,6 +614,16 @@ class StrategyProcess(StrictDataSchema[Literal["strategy_process"]]):
         default=None,
         description="Registered StrategyFactory key this process runs (from tags); "
         "None if not resolvable. Used to pre-fill the backtest create form.",
+    )
+    coordinator: str | None = Field(
+        default=None,
+        description="Coordinator slug that owns/runs this strategy (from the "
+        "cross-coordinator summary cache); None when unknown.",
+    )
+    managed_remotely: bool = Field(
+        default=False,
+        description="True when another coordinator (the strategies container) "
+        "owns this strategy — the dashboard hides Start/Stop.",
     )
 
 

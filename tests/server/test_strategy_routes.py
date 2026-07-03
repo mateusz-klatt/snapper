@@ -28,6 +28,8 @@ class TestListStrategies:
         mock_factory = MagicMock()
         mock_factory.get_process_configs = AsyncMock(return_value=[])
         mock_factory.started_processes = {}
+        mock_factory.autostart_includes = MagicMock(return_value=True)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
         mock_request.app.state.rest_tracker = SequenceTracker()
@@ -76,6 +78,8 @@ class TestListStrategies:
             ]
         )
         mock_factory.started_processes = {"strategy_macd": MagicMock()}
+        mock_factory.autostart_includes = MagicMock(return_value=True)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
         mock_request.app.state.rest_tracker = SequenceTracker()
@@ -87,6 +91,112 @@ class TestListStrategies:
         assert strategy.running is True
         assert strategy.enabled is True
         assert strategy.mode == "thread"
+
+    @pytest.mark.asyncio
+    async def test_remote_strategy_unions_cache_ownership(self) -> None:
+        """A strategy owned by the strategies container unions the cache.
+
+        Given: A strategy the profile does not select and a fresh coord-2
+            snapshot reporting it running,
+        When: list_strategies is called,
+        Then: running=True, coordinator="coord-2", managed_remotely=True.
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="strategy_heartbeat_consult_btc_1h",
+                    enabled=True,
+                    mode="thread",
+                    class_path="snapper.strategies.process_wrapper.X",
+                    method="start",
+                    parameters={},
+                    role=ProcessRoleEnum.STRATEGY,
+                )
+            ]
+        )
+        mock_factory.started_processes = {}
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(True, "coord-2"))
+        mock_request = MagicMock(spec=Request)
+        mock_request.app.state.process_factory = mock_factory
+        mock_request.app.state.rest_tracker = SequenceTracker()
+        mock_request.app.state.remote_summary_cache = cache
+        result = await list_strategies(request=mock_request, _user=MagicMock())
+        row = result.payload[0]
+        assert row.running is True
+        assert row.coordinator == "coord-2"
+        assert row.managed_remotely is True
+
+    @pytest.mark.asyncio
+    async def test_remote_strategy_without_snapshot_is_stopped_remote(self) -> None:
+        """An excluded strategy with no snapshot shows stopped + remote.
+
+        Given: autostart exclusion and no cached remote summary,
+        When: list_strategies is called,
+        Then: running=False and managed_remotely=True (Start hidden).
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="strategy_heartbeat_consult_btc_1h",
+                    enabled=True,
+                    mode="thread",
+                    class_path="snapper.strategies.process_wrapper.X",
+                    method="start",
+                    parameters={},
+                    role=ProcessRoleEnum.STRATEGY,
+                )
+            ]
+        )
+        mock_factory.started_processes = {}
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_request = MagicMock(spec=Request)
+        mock_request.app.state.process_factory = mock_factory
+        mock_request.app.state.rest_tracker = SequenceTracker()
+        del mock_request.app.state.remote_summary_cache
+        result = await list_strategies(request=mock_request, _user=MagicMock())
+        row = result.payload[0]
+        assert row.running is False
+        assert row.managed_remotely is True
+
+    @pytest.mark.asyncio
+    async def test_local_duplicate_strategy_stays_controllable(self) -> None:
+        """A locally-running duplicate keeps local ownership (footgun rule).
+
+        Given: The profile excludes the strategy but it IS running locally,
+        When: list_strategies is called,
+        Then: managed_remotely=False so the UI keeps Stop enabled.
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="strategy_heartbeat_consult_btc_1h",
+                    enabled=True,
+                    mode="thread",
+                    class_path="snapper.strategies.process_wrapper.X",
+                    method="start",
+                    parameters={},
+                    role=ProcessRoleEnum.STRATEGY,
+                )
+            ]
+        )
+        mock_factory.started_processes = {"strategy_heartbeat_consult_btc_1h": MagicMock()}
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_request = MagicMock(spec=Request)
+        mock_request.app.state.process_factory = mock_factory
+        mock_request.app.state.rest_tracker = SequenceTracker()
+        result = await list_strategies(request=mock_request, _user=MagicMock())
+        row = result.payload[0]
+        assert row.running is True
+        assert row.managed_remotely is False
+        assert row.coordinator == "coord-0"
 
     @pytest.mark.asyncio
     async def test_running_status_correctly_reported(self) -> None:
@@ -120,6 +230,8 @@ class TestListStrategies:
             ]
         )
         mock_factory.started_processes = {"strategy_running": MagicMock()}
+        mock_factory.autostart_includes = MagicMock(return_value=True)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
         mock_request.app.state.rest_tracker = SequenceTracker()
@@ -173,6 +285,8 @@ class TestListStrategies:
                 ]
             )
             mock_factory.started_processes = {}
+            mock_factory.autostart_includes = MagicMock(return_value=True)
+            mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
             mock_request = MagicMock(spec=Request)
             mock_request.app.state.process_factory = mock_factory
             mock_request.app.state.rest_tracker = SequenceTracker()
