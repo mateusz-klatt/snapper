@@ -25,6 +25,8 @@ from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import OrderReplaceData
 from snapper.messaging.schemas.data import OrderRequestData
+from snapper.messaging.schemas.data import ProcessCommandAckData
+from snapper.messaging.schemas.data import ProcessCommandData
 from snapper.messaging.schemas.data import ProcessConfiguredEventData
 from snapper.messaging.schemas.data import ProcessRunEventData
 from snapper.messaging.schemas.data import ProcessSummaryEventData
@@ -96,6 +98,8 @@ MESSAGE_TYPE_MAP: dict[str, type[StrictDataSchema[Any]]] = {
     "process_summary_event": ProcessSummaryEventData,
     "process_configured_event": ProcessConfiguredEventData,
     "process_run_event": ProcessRunEventData,
+    "process_command": ProcessCommandData,
+    "process_command_ack": ProcessCommandAckData,
     "strategy_list_event": StrategyListEventData,
 }
 """Mapping from message type string to Data class for deserialization."""

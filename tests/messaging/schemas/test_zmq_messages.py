@@ -21,6 +21,8 @@ from snapper.messaging.schemas.data import OrderCancelData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import OrderReplaceData
 from snapper.messaging.schemas.data import OrderRequestData
+from snapper.messaging.schemas.data import ProcessCommandAckData
+from snapper.messaging.schemas.data import ProcessCommandData
 from snapper.messaging.schemas.data import ProcessConfiguredEventData
 from snapper.messaging.schemas.data import ProcessRunEventData
 from snapper.messaging.schemas.data import ProcessSummaryEventData
@@ -1192,6 +1194,52 @@ class TestProcessAndStrategyEventSchemas:
         assert parsed.status == "running"
         assert parsed.completed_at is None
         assert parsed.exit_code is None
+
+    def test_process_command_roundtrip(self) -> None:
+        """``ProcessCommandData`` carries a signed control-plane nudge."""
+        command = ProcessCommandData(
+            session_id="s1",
+            sequence_id=1,
+            public_id="019dbb34-f439-77bd-afa8-ee5321d60314",
+            timestamp=datetime(2026, 7, 4, 12, tzinfo=UTC),
+            command_id="cmd-1",
+            coordinator="coord-2",
+            process_name="strategy_macd",
+            action="restart",
+            issued_by="api",
+            issued_at=datetime(2026, 7, 4, 12, tzinfo=UTC),
+            signature="deadbeef",
+        )
+
+        parsed = parse_message(command.to_json())
+
+        assert isinstance(parsed, ProcessCommandData)
+        assert parsed.command_id == "cmd-1"
+        assert parsed.coordinator == "coord-2"
+        assert parsed.action == "restart"
+        assert parsed.signature == "deadbeef"
+
+    def test_process_command_ack_roundtrip(self) -> None:
+        """``ProcessCommandAckData`` carries a signed ack with an optional detail."""
+        ack = ProcessCommandAckData(
+            session_id="s1",
+            sequence_id=2,
+            public_id="019dbb34-f439-77bd-afa8-ee5321d60315",
+            timestamp=datetime(2026, 7, 4, 12, tzinfo=UTC),
+            command_id="cmd-1",
+            coordinator="coord-2",
+            process_name="strategy_macd",
+            status="applied",
+            signature="cafef00d",
+        )
+
+        parsed = parse_message(ack.to_json())
+
+        assert isinstance(parsed, ProcessCommandAckData)
+        assert parsed.command_id == "cmd-1"
+        assert parsed.status == "applied"
+        assert parsed.detail is None
+        assert parsed.signature == "cafef00d"
 
     def test_strategy_list_event_roundtrip(self) -> None:
         """``StrategyListEventData`` carries the strategy class path roster."""

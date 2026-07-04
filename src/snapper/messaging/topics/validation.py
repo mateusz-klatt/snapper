@@ -122,6 +122,8 @@ def _get_topic_prefix_validators() -> list[tuple[str, Callable[[str], tuple[bool
         ("processes.events.summary.", _validate_processes_summary_topic),
         ("processes.events.configured.", _validate_processes_configured_topic),
         ("processes.events.runs.", _validate_processes_runs_topic),
+        ("processes.events.command_ack.", _validate_processes_command_ack_topic),
+        ("processes.commands.", _validate_processes_commands_topic),
         ("strategies.events.list.", _validate_strategies_list_topic),
     ]
 
@@ -576,8 +578,7 @@ def _validate_strategy_heartbeat(segments: list[str]) -> tuple[bool, str]:
         return True, ""
     return (
         False,
-        "system.heartbeats.strategy requires exactly 4 segments: "
-        "system.heartbeats.strategy.{name}",
+        "system.heartbeats.strategy requires exactly 4 segments: system.heartbeats.strategy.{name}",
     )
 
 
@@ -826,8 +827,7 @@ def _validate_alerts_topic(topic: str) -> tuple[bool, str]:
     if alert_type not in _ALERT_TYPES:
         return (
             False,
-            f"Invalid alert_type '{alert_type}'. Must be one of: "
-            f"{', '.join(sorted(_ALERT_TYPES))}",
+            f"Invalid alert_type '{alert_type}'. Must be one of: {', '.join(sorted(_ALERT_TYPES))}",
         )
     return True, ""
 
@@ -994,6 +994,57 @@ def _validate_processes_runs_topic(topic: str) -> tuple[bool, str]:
     )
 
 
+def _validate_processes_commands_topic(topic: str) -> tuple[bool, str]:
+    """Validate a ``processes.commands.{coordinator}`` control-plane nudge topic.
+
+    Published by the API coordinator after a desired-state PATCH so the owning
+    coordinator reconciles now instead of waiting for its periodic tick. Three
+    segments; the trailing coordinator slug must match
+    :data:`_PROCESSES_TOPIC_NAME_PATTERN`. This topic is deliberately NOT
+    exposed through WS RBAC — the payload HMAC signature, not a topic ACL, is
+    the trust boundary (the receiver also enforces slug and freshness).
+
+    Args:
+        topic: Topic string starting with ``processes.commands.``.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 3:
+        return False, (
+            f"processes.commands.* requires 3 segments (processes.commands.<coordinator>),"
+            f" got '{topic}'"
+        )
+    if segments[0] != "processes" or segments[1] != "commands":
+        return False, (f"Expected 'processes.commands' prefix, got '{segments[0]}.{segments[1]}'")
+    tail = segments[2]
+    if not _PROCESSES_TOPIC_NAME_PATTERN.fullmatch(tail):
+        return False, (
+            f"processes.commands.* coordinator must match [A-Za-z][A-Za-z0-9_-]*, got '{tail}'"
+        )
+    return True, ""
+
+
+def _validate_processes_command_ack_topic(topic: str) -> tuple[bool, str]:
+    """Validate a ``processes.events.command_ack.{coordinator}`` ack topic.
+
+    Published by the owning coordinator after handling a command nudge; the
+    API's blocking PATCH matches the ack (verifying its signature first) to
+    resolve the pending request. Four segments; the trailing coordinator slug
+    must match :data:`_PROCESSES_TOPIC_NAME_PATTERN`.
+
+    Args:
+        topic: Topic string starting with ``processes.events.command_ack.``.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    return _validate_processes_snapshot_topic(
+        topic, prefix="processes.events.command_ack.", suffix_label="coordinator"
+    )
+
+
 def _validate_strategies_list_topic(topic: str) -> tuple[bool, str]:
     """Validate ``strategies.events.list.{instance_id}`` topics.
 
@@ -1014,8 +1065,7 @@ def _validate_strategies_list_topic(topic: str) -> tuple[bool, str]:
     tail = segments[3]
     if not _PROCESSES_TOPIC_NAME_PATTERN.fullmatch(tail):
         return False, (
-            f"strategies.events.list.* instance_id must match "
-            f"[A-Za-z][A-Za-z0-9_-]*, got '{tail}'"
+            f"strategies.events.list.* instance_id must match [A-Za-z][A-Za-z0-9_-]*, got '{tail}'"
         )
     return True, ""
 

@@ -39,6 +39,7 @@ from snapper.messaging.topics.validation import _validate_orders_commands_topic
 from snapper.messaging.topics.validation import _validate_orders_events_topic
 from snapper.messaging.topics.validation import _validate_plans_decisions_topic
 from snapper.messaging.topics.validation import _validate_prefix_pattern
+from snapper.messaging.topics.validation import _validate_processes_commands_topic
 from snapper.messaging.topics.validation import _validate_processes_snapshot_topic
 from snapper.messaging.topics.validation import _validate_replay_source
 from snapper.messaging.topics.validation import _validate_signal_topic
@@ -4434,6 +4435,57 @@ class TestProcessesAndStrategiesValidation:
         """Tail starting with a digit fails the regex constraint."""
         valid, err = validate_topic("strategies.events.list.0bad")
         assert not valid
+
+    def test_processes_commands_topic_accepted(self) -> None:
+        """``processes.commands.{coordinator}`` validates."""
+        valid, err = validate_topic("processes.commands.coord-2")
+        assert valid, err
+
+    def test_processes_commands_topic_empty_tail_rejected(self) -> None:
+        """Trailing-dot ``processes.commands.`` is NOT a topic."""
+        valid, err = validate_topic("processes.commands.")
+        assert not valid
+        assert "requires 3 segments" in err
+
+    def test_processes_commands_topic_extra_segment_rejected(self) -> None:
+        """A 4-segment ``processes.commands.a.b`` fails the 3-segment rule."""
+        valid, err = validate_topic("processes.commands.a.b")
+        assert not valid
+        assert "requires 3 segments" in err
+
+    def test_processes_commands_topic_invalid_tail_rejected(self) -> None:
+        """A coordinator slug starting with a digit fails the regex constraint."""
+        valid, err = validate_topic("processes.commands.0bad")
+        assert not valid
+        assert "[A-Za-z]" in err
+
+    def test_processes_commands_validator_rejects_mismatched_prefix(self) -> None:
+        """Called directly with a non-matching 3-segment topic, the validator rejects it.
+
+        This defensive branch is unreachable through ``validate_topic`` (the
+        prefix dispatch guarantees the first two segments), so it is exercised
+        by a direct call.
+        """
+        valid, err = _validate_processes_commands_topic("foo.bar.baz")
+        assert not valid
+        assert "processes.commands" in err
+
+    def test_processes_command_ack_topic_accepted(self) -> None:
+        """``processes.events.command_ack.{coordinator}`` validates."""
+        valid, err = validate_topic("processes.events.command_ack.coord-2")
+        assert valid, err
+
+    def test_processes_command_ack_topic_empty_tail_rejected(self) -> None:
+        """Trailing-dot ``processes.events.command_ack.`` is NOT a topic."""
+        valid, err = validate_topic("processes.events.command_ack.")
+        assert not valid
+        assert "requires 4 segments" in err
+
+    def test_processes_command_ack_topic_invalid_tail_rejected(self) -> None:
+        """A coordinator slug starting with a digit fails the regex constraint."""
+        valid, err = validate_topic("processes.events.command_ack.0bad")
+        assert not valid
+        assert "[A-Za-z]" in err
 
     def test_processes_summary_prefix_accepted(self) -> None:
         """``processes.events.summary.`` is a valid subscription prefix."""

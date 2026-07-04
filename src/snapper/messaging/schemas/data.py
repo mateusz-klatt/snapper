@@ -1959,6 +1959,73 @@ class ProcessRunEventData(StrictDataSchema[Literal["process_run_event"]]):
     exit_code: int | None = None
 
 
+class ProcessCommandData(StrictDataSchema[Literal["process_command"]]):
+    """A signed control-plane nudge asking a coordinator to reconcile now.
+
+    Published by the API coordinator on ``processes.commands.{coordinator}``
+    after a desired-state PATCH so the owning coordinator reconciles within
+    milliseconds instead of waiting for its periodic tick. The nudge is NEVER
+    the source of truth (the DB desired-state is): a dropped or duplicated
+    nudge is harmless because the periodic reconcile converges regardless. The
+    ``signature`` is an HMAC over the canonical signature-excluded payload
+    proving possession of the master-key-derived control-plane key; the
+    receiver additionally enforces ``coordinator == its own slug``, freshness
+    on ``issued_at``, and dedup on ``command_id``.
+
+    Attributes:
+        type: Payload discriminator (always ``process_command``).
+        command_id: Unique id for receiver-side dedup.
+        coordinator: Target coordinator slug (the receiver rejects a command
+            whose coordinator is not its own slug).
+        process_name: The owned process to reconcile.
+        action: The desired-state action that motivated the nudge
+            (``enable`` / ``disable`` / ``restart``); advisory only — the
+            receiver reconciles from the DB, not from this field.
+        issued_by: Issuer label (e.g. ``api``) for audit.
+        issued_at: Issue time; the receiver rejects a command outside its
+            freshness window.
+        signature: Hex HMAC-SHA256 over the canonical signature-excluded payload.
+    """
+
+    type: Literal["process_command"] = "process_command"
+    command_id: str
+    coordinator: str
+    process_name: str
+    action: str
+    issued_by: str
+    issued_at: datetime
+    signature: str
+
+
+class ProcessCommandAckData(StrictDataSchema[Literal["process_command_ack"]]):
+    """A signed acknowledgement that a coordinator handled a command nudge.
+
+    Published by the owning coordinator on
+    ``processes.events.command_ack.{coordinator}`` after it reconciles in
+    response to a :class:`ProcessCommandData`. The ack is SIGNED too so the
+    API's blocking PATCH cannot be resolved by a spoofed success frame; the API
+    matches ``command_id`` to the pending request's future and verifies the
+    signature before resolving it.
+
+    Attributes:
+        type: Payload discriminator (always ``process_command_ack``).
+        command_id: Echoes the command's id so the API can resolve the future.
+        coordinator: The acking coordinator's slug.
+        process_name: The process the command targeted.
+        status: Outcome — ``applied`` / ``rejected`` / ``noop``.
+        detail: Optional human-readable detail (e.g. a rejection reason).
+        signature: Hex HMAC-SHA256 over the canonical signature-excluded payload.
+    """
+
+    type: Literal["process_command_ack"] = "process_command_ack"
+    command_id: str
+    coordinator: str
+    process_name: str
+    status: str
+    detail: str | None = None
+    signature: str
+
+
 class StrategyListEventData(StrictDataSchema[Literal["strategy_list_event"]]):
     """Snapshot of canonical class paths for every STRATEGY-role process.
 
