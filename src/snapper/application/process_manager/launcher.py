@@ -3043,6 +3043,16 @@ class ProcessLauncherService:
         (``executor_<exchange>``) are rejected as ERROR — templates
         are config-only and never directly runnable.
 
+        Externally-owned processes are refused so a REST start cannot
+        spawn a container-crossing duplicate: the broker when
+        ``zmq_broker_embedded=False``, role-STRATEGY processes when
+        ``strategies_embedded=False``, and market-data publishers under
+        the ``API`` autostart profile (they belong to the feed
+        container). Each check inspects both resolved and raw tags/role
+        because the config builder can drop tags when no parameter
+        schema is present. This is a backend invariant, not a UI-only
+        guard.
+
         This manual lock-taker owns the first-start-leak cleanup for the
         markers it caused: if the name was NOT already watchdog-managed
         when the start began and :meth:`start_process` then raises, it
@@ -3113,6 +3123,20 @@ class ProcessLauncherService:
                     f"Process '{name}' is owned by the strategies container "
                     "(STRATEGIES_EMBEDDED=false) — starting a local duplicate would "
                     "run the strategy twice; manage it via the strategies container"
+                ),
+            )
+        if getattr(
+            self.settings, "process_autostart_profile", ProcessAutostartProfileEnum.ALL
+        ) is ProcessAutostartProfileEnum.API and (
+            is_market_data_publisher(config.tags) or is_market_data_publisher(raw_tags)
+        ):
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=(
+                    f"Process '{name}' is a market-data publisher owned by the feed "
+                    "container (API autostart profile) — starting a local duplicate "
+                    "would open a second exchange connection; manage it via the feed "
+                    "container"
                 ),
             )
         was_watchdog_managed = name in self._desired_state

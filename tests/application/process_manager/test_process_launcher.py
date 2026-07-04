@@ -48,6 +48,7 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
 from snapper.core.types import HealthStatusEnum
+from snapper.core.types import ProcessAutostartProfileEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRestartPolicyEnum
@@ -1297,6 +1298,51 @@ class TestStartProcessByName:
         result = await factory.start_process_by_name("strategy_heartbeat_consult_btc_1h")
         assert result.status == "error"
         assert "strategies container" in result.message
+        mock_start.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.process_manager.launcher.ProcessLauncherService.start_process")
+    @patch("snapper.application.process_manager.launcher.get_repository")
+    async def test_start_process_by_name_refuses_external_feed_publisher(
+        self, mock_get_repo: MagicMock, mock_start: AsyncMock
+    ) -> None:
+        """Verify manual REST start cannot spawn a duplicate feed publisher.
+
+        Given: the ``API`` autostart profile (the feed container owns the
+            publishers) and a persisted market-data publisher config row,
+        When: start_process_by_name is called for the publisher,
+        Then: The start is refused with the feed-container message and no
+            process starts — starting a duplicate on the API node would
+            open a second exchange connection. The refusal reads the raw
+            tags, so it holds even when the builder drops resolved tags
+            for a schema-less config.
+        """
+        mock_setting = MagicMock()
+        mock_setting.value = json.dumps(
+            {
+                "class": "snapper.infrastructure.market_data.publisher.MarketDataPublisher",
+                "method": "start",
+                "mode": "process",
+                "parameters": {},
+                "enabled": True,
+                "tags": ["market-data", "publisher", "kraken_equities"],
+            }
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_setting
+        mock_session = MagicMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value.__aenter__.return_value = mock_session
+        mock_repo.session.return_value.__aexit__.return_value = AsyncMock()
+        mock_get_repo.return_value = mock_repo
+        settings = MagicMock()
+        settings.db_url = "sqlite:///:memory:"
+        settings.process_autostart_profile = ProcessAutostartProfileEnum.API
+        factory = ProcessLauncherService(settings)
+        result = await factory.start_process_by_name("kraken_equities_feed_publisher")
+        assert result.status == "error"
+        assert "feed container" in result.message
         mock_start.assert_not_awaited()
 
     @pytest.mark.asyncio
