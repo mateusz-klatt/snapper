@@ -6348,67 +6348,67 @@ docs = ["ipykernel", "jupyter_client", "matplotlib", "nbconvert", "nbformat", "n
 
 [[package]]
 name = "ta-lib"
-version = "0.6.8"
+version = "0.7.0"
 description = "Python wrapper for TA-Lib"
 optional = false
 python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "ta_lib-0.6.8-cp310-cp310-macosx_13_0_x86_64.whl", hash = "sha256:71506116eac0d3e3598d6325b4b818c3a0f6acb3222b24d30ad726e8c4bf7ea8"},
-    {file = "ta_lib-0.6.8-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:b3b017d9103e7a7372a146773be32b184ff7330bd708d40b1f56f06a686756ed"},
-    {file = "ta_lib-0.6.8-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6c1fd18e45c39d5a4be4b0d6a20c141e43fe46daeb1b2e2f304ebae7015ab6e6"},
-    {file = "ta_lib-0.6.8-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6c6a1e8f98de92e817491b50aa4d01d69a1b41a4ed3173747e8f16f0d4cf81cc"},
-    {file = "ta_lib-0.6.8-cp310-cp310-musllinux_1_2_aarch64.whl", hash = "sha256:3d7333e907bff3e3997e54f89733ffa8d619842a3e1cd962bca34bdc11944c28"},
-    {file = "ta_lib-0.6.8-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:87c1cc1057d903b78a8257a7c5f497db6fd5284f5080392bd57b66031d7389a3"},
-    {file = "ta_lib-0.6.8-cp310-cp310-win32.whl", hash = "sha256:7a5cc6bf60791d8274edfdfe2dd7cec3f00f656dcc92e2b0a9af06c8b18ce6a6"},
-    {file = "ta_lib-0.6.8-cp310-cp310-win_amd64.whl", hash = "sha256:cce8de9d48289927ed18aaa420740efd52b2cd9289da32e3799afbb3a02822e8"},
-    {file = "ta_lib-0.6.8-cp310-cp310-win_arm64.whl", hash = "sha256:4aa0fe08383f3e5fc7d2f8cf9b42ac778f4d53fd75bcd2799a858225954eab89"},
-    {file = "ta_lib-0.6.8-cp311-cp311-macosx_13_0_x86_64.whl", hash = "sha256:f823d0f6b04a6797fbe253bcf91666e71a6b63c290683819650c68b2468ebe64"},
-    {file = "ta_lib-0.6.8-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:30de46b55873b51be945a09edf486afcc190dc47eff9fb5d2b12c9f7e3d743da"},
-    {file = "ta_lib-0.6.8-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:490e19a45cd3cdd6dfe6b46019f7ffe1103500750b41b51996a870e7c1c5f066"},
-    {file = "ta_lib-0.6.8-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a395524b0fafa10446d11e11acb4742e919523de58aac03b791f26d7a783bcf0"},
-    {file = "ta_lib-0.6.8-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:11a373c9308eae3bac2d56d37017f9ab63968cc074a8b95be879aae3d13133aa"},
-    {file = "ta_lib-0.6.8-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:282e49c766b5952dd8796f77d7ed3ae412cdd88e31f845b1fbbb86ac6cb7bebf"},
-    {file = "ta_lib-0.6.8-cp311-cp311-win32.whl", hash = "sha256:0a08a29690a922ba92a6cf42902a8a93c6fbda4cfed62c3c5b0471560ef60135"},
-    {file = "ta_lib-0.6.8-cp311-cp311-win_amd64.whl", hash = "sha256:c01809fb602e2fefc8cbfb3b603bb59d2a2eaee8708410896d48a835ba00e7c5"},
-    {file = "ta_lib-0.6.8-cp311-cp311-win_arm64.whl", hash = "sha256:a89734a7bcb2ea3b6fd600a74d6fbcdb8d3fa3f7917dbd978e039710b5509c9c"},
-    {file = "ta_lib-0.6.8-cp312-cp312-macosx_13_0_x86_64.whl", hash = "sha256:128ec92e6a0e9ff7a38edef80e3b74f15bb2ed1c531d5d3252c8dca22677651b"},
-    {file = "ta_lib-0.6.8-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:66a8e1c1e899d15a2f7510e43527fba22d895e7f6058d027db3e3837d88a69de"},
-    {file = "ta_lib-0.6.8-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:5929c83bd8cb7572d1c17ffdbf0eac235bf3c4d53cde1950cf89d944eaf97525"},
-    {file = "ta_lib-0.6.8-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:094677b279a59c3f01c3aca8a889fda3523fd641a3805f69a2d642121b72e55e"},
-    {file = "ta_lib-0.6.8-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:e920c272cd9e70a6b10eae9203cc96845da142e1dd4482de9343dda3738a9862"},
-    {file = "ta_lib-0.6.8-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:d556d1c256b3700b60b6b061664a667b2e49d599c2772d46a9f2348f2dc4ab5c"},
-    {file = "ta_lib-0.6.8-cp312-cp312-win32.whl", hash = "sha256:2b369cabb48485fbf444beb3f5a878075367b99c2c86db2f796afeabebc749e0"},
-    {file = "ta_lib-0.6.8-cp312-cp312-win_amd64.whl", hash = "sha256:e781eeb65b2007af553389c8a7fb7bc53cb856118b0fcffb2c26b0f49561c686"},
-    {file = "ta_lib-0.6.8-cp312-cp312-win_arm64.whl", hash = "sha256:fa7e9f2e80a9535f9692e113d02b4268b5f88675a730d1b0ef0abeb74c9a4e80"},
-    {file = "ta_lib-0.6.8-cp313-cp313-macosx_13_0_x86_64.whl", hash = "sha256:6cf029b886cfb28a2701503b7c602b811f2daa45276bd6459b0c71e051deb497"},
-    {file = "ta_lib-0.6.8-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:ddf7453acd03b966624ebefdb38169b5bbbeea1a1a58c90b095667247f9de327"},
-    {file = "ta_lib-0.6.8-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:3c32fc0f546ceecc47dd45f33d72ab4a1e341b80d9081c2d77b100add5d49104"},
-    {file = "ta_lib-0.6.8-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2bf714333788bf5175f2512b86d2ed129e89ae6f6c2923e8a297a1e3395e13b5"},
-    {file = "ta_lib-0.6.8-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:b3845e4c2fa32963fb7f384ebbaa2761b0e6b96145239bf80e956d4aff4b071c"},
-    {file = "ta_lib-0.6.8-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:4795e93d130c9b7fb661f0cead49752ae6a980437df74b99d5918026c212443e"},
-    {file = "ta_lib-0.6.8-cp313-cp313-win32.whl", hash = "sha256:691a62926ba09f2653ec0908554b3635497efb7751c5d46b916cd1ebbb1d3c25"},
-    {file = "ta_lib-0.6.8-cp313-cp313-win_amd64.whl", hash = "sha256:34e3b12407ddf99f6627435aa8a165f094339bb7dc33de92e1d7472e9f237304"},
-    {file = "ta_lib-0.6.8-cp313-cp313-win_arm64.whl", hash = "sha256:0ccd478ff5735831bf2a61d653466bfda8afadc26ad58ca6b1edb9e7521cc674"},
-    {file = "ta_lib-0.6.8-cp314-cp314-macosx_13_0_x86_64.whl", hash = "sha256:36b2a516fce57309840f5ef3fa2fd0c4449293fc72536a0400d2e1e26b414da8"},
-    {file = "ta_lib-0.6.8-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:7993164e8e9f78ec31d38c47850ca6ba5451788b5b49a8a2dbb3322b36b5693b"},
-    {file = "ta_lib-0.6.8-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:613cf06313331f49dd7b85a5a24fbddb1156c9723b6921a231906241726e5aee"},
-    {file = "ta_lib-0.6.8-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ce2bc1ea01200b6d8130ab917296d05d77a1a571ec6c1ee25cfca6d55cd5db4a"},
-    {file = "ta_lib-0.6.8-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:a63a52221f8c73f82f4e00493351d987f594931198589287aee96f8da673cfd5"},
-    {file = "ta_lib-0.6.8-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:559326d8f3d904cd4aa61f6a392d5626f35eec6a9f6cc83bcddb0abf88c40516"},
-    {file = "ta_lib-0.6.8-cp314-cp314-win32.whl", hash = "sha256:f5b6174bf4bf9152e368561dff410203c6921e4dd2afbcda3283a95957158112"},
-    {file = "ta_lib-0.6.8-cp314-cp314-win_amd64.whl", hash = "sha256:1fb4028437201e19014e4e374272b739867c8a3eb655da46675ef4c2ff14b616"},
-    {file = "ta_lib-0.6.8-cp314-cp314-win_arm64.whl", hash = "sha256:bfad1202fb1f9140e3810cc607058395f59032d9128cc0d716900c78bea5f337"},
-    {file = "ta_lib-0.6.8-cp39-cp39-macosx_13_0_x86_64.whl", hash = "sha256:5bfd21b6acb32e20d4e279c34405a34e63da345be4b2b6eabd683e1a88857406"},
-    {file = "ta_lib-0.6.8-cp39-cp39-macosx_14_0_arm64.whl", hash = "sha256:d4601e2a8b46ffbf540601a4926fd6cc5aae8a13b36fdd467f1040f01f9edaed"},
-    {file = "ta_lib-0.6.8-cp39-cp39-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a5100a4be91b7d4b7c8fe16a3600bd0951e10205eb1066b6873afd3996b51ee4"},
-    {file = "ta_lib-0.6.8-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0e371d14b49e70caa973a234c8823341dd446f5c5d7acc826868bb42b272bdc0"},
-    {file = "ta_lib-0.6.8-cp39-cp39-musllinux_1_2_aarch64.whl", hash = "sha256:98376c75bd6c103c74396953084a5e0798ffe476aecbfcc51ec6d100a685ac38"},
-    {file = "ta_lib-0.6.8-cp39-cp39-musllinux_1_2_x86_64.whl", hash = "sha256:f69bd42fd2515060af69b120668213121264bb7976b113954b6f9db327727c65"},
-    {file = "ta_lib-0.6.8-cp39-cp39-win32.whl", hash = "sha256:02388054c059945e5f02625f5075bac20a1803573cb43e7d096091027511961f"},
-    {file = "ta_lib-0.6.8-cp39-cp39-win_amd64.whl", hash = "sha256:b165f5e6de1ccc964e863bd2035807a4d3bad3e0481f9db2dc52034d6ad4f9de"},
-    {file = "ta_lib-0.6.8-cp39-cp39-win_arm64.whl", hash = "sha256:b6c6e4858d8c3f88e19b7aa94b6a7619108f0bee51da9fa67b0785a8b59955f9"},
-    {file = "ta_lib-0.6.8.tar.gz", hash = "sha256:3a9195299df9d7d2a6e9d16bebd6b706b0ea99e4b871864c4b034c2577e21a77"},
+    {file = "ta_lib-0.7.0-cp310-cp310-macosx_13_0_x86_64.whl", hash = "sha256:c4dfff9be5cd84da2eeb2c85a6fadff67df5d616598e6efa72f5242d7ac4503f"},
+    {file = "ta_lib-0.7.0-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:5f7a7415a197ed393f3052b40dd774c2a7289eeec4014870915bf95917c76a3b"},
+    {file = "ta_lib-0.7.0-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:96b451499ab96b1e74d214522dd2a9735c1199048ffc2942b0f4f535eb376fc1"},
+    {file = "ta_lib-0.7.0-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1dfda5b34772142880cbb48807b5a4cb9cb89550b23d635cea7077fcea8a5819"},
+    {file = "ta_lib-0.7.0-cp310-cp310-musllinux_1_2_aarch64.whl", hash = "sha256:f82e6d663cd078fb88c0c547fb2e5e8550bda40e4f901b9b831857fe38274967"},
+    {file = "ta_lib-0.7.0-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:aa3b57515bbddc6bf3117b0f345b330cc7eb8e9a230c55f4a359dbbdb1bd88e9"},
+    {file = "ta_lib-0.7.0-cp310-cp310-win32.whl", hash = "sha256:3fb7efab01cd20b27752f6c566536ac730c1acdaec5651ed76221c6f37e89bea"},
+    {file = "ta_lib-0.7.0-cp310-cp310-win_amd64.whl", hash = "sha256:89b78a85f10ee24aecf9e7c709b79c1906fc80485e7cbb083373d11d5bc18967"},
+    {file = "ta_lib-0.7.0-cp310-cp310-win_arm64.whl", hash = "sha256:765ed36bf07e4d77b5b3bb8eebc4509f9db16234a61705507d4158cd998ccf44"},
+    {file = "ta_lib-0.7.0-cp311-cp311-macosx_13_0_x86_64.whl", hash = "sha256:337af7a411e79eedd4cc72b95c3306feb53be6832fd0df5a641d94072e51f14f"},
+    {file = "ta_lib-0.7.0-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:bbe7be486e2ae837f81a94e8d48643a184dfd3911bc8d22325ab80147a11a1a2"},
+    {file = "ta_lib-0.7.0-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d46a442a79420f841ea6d8d1ec91ec136ece881558c2eb65bee7abcf116a6c02"},
+    {file = "ta_lib-0.7.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:94471b8e6cb88c20643e22172e982fb50d814aededddad32b082226fdb8dccd4"},
+    {file = "ta_lib-0.7.0-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:ee4a9942e72d8f43ed7e8bdd923e6088b0967e14015c622c28020a8959faab64"},
+    {file = "ta_lib-0.7.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:129f60035f22fd5178785433de641221f6c6cbb2d1280c3f746a1d617f21159f"},
+    {file = "ta_lib-0.7.0-cp311-cp311-win32.whl", hash = "sha256:8e880f8727302a0116a0c04efbc3378d7960d4e40ca3ba6d7cf8cab36e8ac3db"},
+    {file = "ta_lib-0.7.0-cp311-cp311-win_amd64.whl", hash = "sha256:a9e7343ba48a7318bc4433b529888a37715a8af94a2e7c544b30dc6f20c3d923"},
+    {file = "ta_lib-0.7.0-cp311-cp311-win_arm64.whl", hash = "sha256:9bd4b8149295fcef0513f7e302fd1178a4a3381d372a389bbdd68854094ba6e3"},
+    {file = "ta_lib-0.7.0-cp312-cp312-macosx_13_0_x86_64.whl", hash = "sha256:8b1221fcdf2b5a61b807bfe95ebed609928494f23bc446f4bd7af92cd9d7e88f"},
+    {file = "ta_lib-0.7.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:c723b66e842c2ae8f519bbaf03dfd1be0dbab1240fe3a40780d20ef0498e238d"},
+    {file = "ta_lib-0.7.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d7f97a8ce6e11c0833eceecce445b06ac23248b69a2960edd247e311a77d6513"},
+    {file = "ta_lib-0.7.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:26de33f5eaa0386239681cc4d4c85a7761745fac2bad4ee17d227a8779200663"},
+    {file = "ta_lib-0.7.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:1d32a500689b6e498831ac629ef03c2792585ec889b6079205b492ad95660db0"},
+    {file = "ta_lib-0.7.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:b34d4e36a14cee0d6e86e3c52c3f1b4d84745cc9d31067d59d657b66ccda16f3"},
+    {file = "ta_lib-0.7.0-cp312-cp312-win32.whl", hash = "sha256:755d3aa68f3da344cca3e8a610ad829b6dfd063c4cbafb58b3e1eadc30ddc5ab"},
+    {file = "ta_lib-0.7.0-cp312-cp312-win_amd64.whl", hash = "sha256:6883ce7a7e66243fbe059adca468773ce95f2c6d866b3dadedcc83c9ac5c4373"},
+    {file = "ta_lib-0.7.0-cp312-cp312-win_arm64.whl", hash = "sha256:be8dab7f1852f08c66cc692a3b0b961c8f49d81655cf2e4a2470e7449cff6133"},
+    {file = "ta_lib-0.7.0-cp313-cp313-macosx_13_0_x86_64.whl", hash = "sha256:2cb527090d5471f43b45291489b3a769e9a3f78804ed0d82ff87446ac560ec10"},
+    {file = "ta_lib-0.7.0-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:119556cee19b49496d6b2a4a3d636546c86f274e554561c09413d2709c20e939"},
+    {file = "ta_lib-0.7.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:2ab5571fe2b304b6a9331715419c5bb68852cd17effd8104bbe03314ffbc5ae8"},
+    {file = "ta_lib-0.7.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:968c35ae56a8daaef58e58873f3c51dce4427d38a91bd3cdbb213e1007c7a6e8"},
+    {file = "ta_lib-0.7.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:0155d01b42032721763af6a527f4cfa42eb8d2644add13cdd2f97011471ddab3"},
+    {file = "ta_lib-0.7.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:1419501fc311182139d57e9a2610351fc8a6f1ec91c062252b35356800f1015b"},
+    {file = "ta_lib-0.7.0-cp313-cp313-win32.whl", hash = "sha256:f54f8c0679259bfc4963a3877db14ee122aef9a8b3403f6f9188f617b284820e"},
+    {file = "ta_lib-0.7.0-cp313-cp313-win_amd64.whl", hash = "sha256:b6377a09e6b23f4d1f7bf79b5d1b89ea7ea11dbca342aa52636b2775563a5e44"},
+    {file = "ta_lib-0.7.0-cp313-cp313-win_arm64.whl", hash = "sha256:2951f064ae49b56f4f997b8ecbe318d63a4e4a53fa329fad3bae382351e01689"},
+    {file = "ta_lib-0.7.0-cp314-cp314-macosx_13_0_x86_64.whl", hash = "sha256:cd45e63cdfbc655f85947bf0033c2a830093b776d724a5416cc9696498c518c2"},
+    {file = "ta_lib-0.7.0-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:d003809268eccfeabb8f2f5f4d41add1731955b13f9e684e9c856c50c76c6610"},
+    {file = "ta_lib-0.7.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:5cae68789c9af90782c99057161deded6a5a3d1f0d999031656fcb5b630abc67"},
+    {file = "ta_lib-0.7.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9fa45905cc4976084a8ab60f37949e47ca8dd6e55161269e3ad831794fd05d5c"},
+    {file = "ta_lib-0.7.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:169feaec6de3755376a1425704b973d2eda2c91603f73e7653899e7b93aee1ff"},
+    {file = "ta_lib-0.7.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:14907e49c316e1ff6ad421a612795668235a30e35a59e7b1792b33aeaf8cb1c2"},
+    {file = "ta_lib-0.7.0-cp314-cp314-win32.whl", hash = "sha256:8c3c1a5fc126ed29054ba4e7575f35108937362b44a4d5828c0551caa93c3bb1"},
+    {file = "ta_lib-0.7.0-cp314-cp314-win_amd64.whl", hash = "sha256:2bd01fd50670b564d515ae776045b5aaf532082922a096f9405d885c52333d80"},
+    {file = "ta_lib-0.7.0-cp314-cp314-win_arm64.whl", hash = "sha256:5968446bfca7f0e9e38ea92ae8efdd6095cb0258b6b5fdd846e3f4c9f40590cb"},
+    {file = "ta_lib-0.7.0-cp39-cp39-macosx_13_0_x86_64.whl", hash = "sha256:59fe468d218d09ba27b2cd389d5197f42c0b931ea45667c50609b842e4cfb622"},
+    {file = "ta_lib-0.7.0-cp39-cp39-macosx_14_0_arm64.whl", hash = "sha256:abed82b8f12396fb183ad241ea909362c0dc8bb86fee566c18bb5fbf664af201"},
+    {file = "ta_lib-0.7.0-cp39-cp39-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:5cea31f569fd478886ce3414daff635c3364ee1477c6e5f3fe14e7db2498102f"},
+    {file = "ta_lib-0.7.0-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:de07314e0900cadbb8009182d1645eee8a8eb4e21fee62c26ac4457866c71f48"},
+    {file = "ta_lib-0.7.0-cp39-cp39-musllinux_1_2_aarch64.whl", hash = "sha256:1f66de7b582b904856af77fb6aff7bef73194f0f880a3620d05391a40002cbfc"},
+    {file = "ta_lib-0.7.0-cp39-cp39-musllinux_1_2_x86_64.whl", hash = "sha256:0a967c4c5e6e80af380bd55a749024b5b9b046154f49d949f2ee87f85aab4d0c"},
+    {file = "ta_lib-0.7.0-cp39-cp39-win32.whl", hash = "sha256:0c7318c7b93e4d5e5be3e41712c67792d695fe6ea2f4e00f99f2a240aa3120d3"},
+    {file = "ta_lib-0.7.0-cp39-cp39-win_amd64.whl", hash = "sha256:04ca074bb687e1566e7899a4aadb1789177112e90777b6cf53b98cdff7c75a55"},
+    {file = "ta_lib-0.7.0-cp39-cp39-win_arm64.whl", hash = "sha256:cfe8ddfd71c3fb1513464adbda7e80ca7ca1bf4173131cae08ef81492694ade0"},
+    {file = "ta_lib-0.7.0.tar.gz", hash = "sha256:e0c2d2156b3702eb850bfb7a14c115870e087fa106d07ad51936078768581423"},
 ]
 
 [package.dependencies]
@@ -6672,14 +6672,14 @@ zstd = ["backports-zstd (>=1.0.0) ; python_version < \"3.14\""]
 
 [[package]]
 name = "uvicorn"
-version = "0.49.0"
+version = "0.50.0"
 description = "The lightning-fast ASGI server."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "uvicorn-0.49.0-py3-none-any.whl", hash = "sha256:ba3d14c3ee7e41c6c654c46c9eb489d33213cdd30aa1696eab1374337c13f68f"},
-    {file = "uvicorn-0.49.0.tar.gz", hash = "sha256:ebf4271aa580d9de97f93192d4595176df6e91f9aae919ca73e4fc07df1e66a3"},
+    {file = "uvicorn-0.50.0-py3-none-any.whl", hash = "sha256:05f0eb19edf38208f79f43df8a63081b48df31b0cd1e5997be957a4dc97d1b19"},
+    {file = "uvicorn-0.50.0.tar.gz", hash = "sha256:0c92e1bc2259cb7faa4fcef774a5966588f2e88542744550b66799fba10b76f1"},
 ]
 
 [package.dependencies]
@@ -6691,10 +6691,10 @@ python-dotenv = {version = ">=0.13", optional = true, markers = "extra == \"stan
 pyyaml = {version = ">=5.1", optional = true, markers = "extra == \"standard\""}
 uvloop = {version = ">=0.15.1", optional = true, markers = "sys_platform != \"win32\" and sys_platform != \"cygwin\" and platform_python_implementation != \"PyPy\" and extra == \"standard\""}
 watchfiles = {version = ">=0.20", optional = true, markers = "extra == \"standard\""}
-websockets = {version = ">=10.4", optional = true, markers = "extra == \"standard\""}
+websockets = {version = ">=11.0", optional = true, markers = "extra == \"standard\""}
 
 [package.extras]
-standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.8.0)", "python-dotenv (>=0.13)", "pyyaml (>=5.1)", "uvloop (>=0.15.1) ; sys_platform != \"win32\" and sys_platform != \"cygwin\" and platform_python_implementation != \"PyPy\"", "watchfiles (>=0.20)", "websockets (>=10.4)"]
+standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.8.0)", "python-dotenv (>=0.13)", "pyyaml (>=5.1)", "uvloop (>=0.15.1) ; sys_platform != \"win32\" and sys_platform != \"cygwin\" and platform_python_implementation != \"PyPy\"", "watchfiles (>=0.20)", "websockets (>=11.0)"]
 
 [[package]]
 name = "uvloop"
@@ -7367,4 +7367,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "6b288319f4c939c05cb20d2734b9895feb2fd42448be0c7925c320c2c8162b19"
+content-hash = "e1e18f673b7a1ee42d784fe9547a9b0d922a4d003c432cc6039ebdc044e90ac5"
