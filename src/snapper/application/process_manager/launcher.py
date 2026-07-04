@@ -407,6 +407,8 @@ class ProcessLauncherService:
         self._parked_processes: set[str] = set()
         self._park_heartbeat_tasks: dict[str, asyncio.Task[None]] = {}
         self._core_health_cache: tuple[float, HealthStatus] | None = None
+        self._reconcile_lock = asyncio.Lock()
+        self._last_applied_restart_nonce: dict[str, str] = {}
 
     def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
         """Inject the bus publisher used for processes/strategies fanout.
@@ -1251,6 +1253,7 @@ class ProcessLauncherService:
                 process_config = await self._resolve_autostart_strategy_scope(config)
                 self._arm_desired_running(process_config.name)
                 await self.start_process(process_config)
+                self._record_applied_nonce(process_config)
                 started_count += 1
             except (StrategyScopeError, WalletAmbiguousError, WalletUnresolvedError):
                 logger.warning(
@@ -1319,6 +1322,7 @@ class ProcessLauncherService:
             try:
                 self._arm_desired_running(process_config.name)
                 await self.start_process(process_config)
+                self._record_applied_nonce(process_config)
                 started_count += 1
             except Exception as e:
                 logger.error(f"Failed to start publisher '{config.name}': {e}")
@@ -1334,6 +1338,192 @@ class ProcessLauncherService:
         self._start_native_process_monitoring()
         if failed_core_names:
             raise CoreProcessStartupError(failed_core_names)
+
+    def is_parked(self, name: str) -> bool:
+        """Return whether ``name`` is parked (watchdog gave up after budget).
+
+        Args:
+            name: Process name.
+
+        Returns:
+            True when the watchdog has parked the process.
+        """
+        return name in self._parked_processes
+
+    def _has_pending_restart(self, name: str) -> bool:
+        """Return whether a live delayed-restart task is pending for ``name``.
+
+        Args:
+            name: Process name.
+
+        Returns:
+            True when the watchdog has a not-yet-done restart task queued —
+            the process is mid-backoff and the watchdog owns its recovery.
+        """
+        task = self._restart_tasks.get(name)
+        return task is not None and not task.done()
+
+    async def _prepare_owned_config_for_start(
+        self, config: ProcessConfigModel
+    ) -> ProcessConfigModel:
+        """Apply the boot-equivalent scope + mode transforms before a start.
+
+        Mirrors the boot start paths so a reconcile start is identical to
+        autostart: strategy configs go through
+        :meth:`_resolve_autostart_strategy_scope` (operator/wallet/grant,
+        fail-closed), and market-data publishers are forced to ``PROCESS``
+        mode (they default to thread) exactly as
+        :meth:`start_feed_publishers` does. Any other config is unchanged.
+
+        Args:
+            config: The owned config about to be started.
+
+        Returns:
+            The scope- and mode-resolved config to spawn.
+        """
+        prepared = await self._resolve_autostart_strategy_scope(config)
+        if is_market_data_publisher(prepared.tags):
+            prepared = _copy_process_config_with_mode(prepared, ProcessModeEnum.PROCESS)
+        return prepared
+
+    def _record_applied_nonce(self, config: ProcessConfigModel) -> None:
+        """Record the restart nonce a just-started process was launched with.
+
+        Called after every successful (re)start — boot autostart, a reconcile
+        start, and a reconcile bounce — so the reconcile loop bounces a
+        process only when the DB nonce ADVANCES beyond the one the running
+        instance carries. Seeding at boot (rather than lazily on first
+        reconcile) is what lets a first-ever operator restart of a parked or
+        boot-started process be recognised as a change and recovered, instead
+        of being swallowed as an adopted baseline. A None nonce is not
+        recorded (there is nothing to compare against).
+
+        Args:
+            config: The config whose process was just started.
+        """
+        if config.restart_nonce is not None:
+            self._last_applied_restart_nonce[config.name] = config.restart_nonce
+
+    async def _reconcile_start_owned(self, config: ProcessConfigModel) -> bool:
+        """Start an owned config under its per-name lock (scope + mode applied).
+
+        Applies scope + mode via :meth:`_prepare_owned_config_for_start`,
+        arms desired-RUNNING, then spawns — the boot start sequence, but
+        serialized against the watchdog on ``_restart_lock_for(name)`` with
+        an in-lock re-check so a watchdog respawn between the reconcile
+        decision and this call cannot double-spawn. Calls
+        :meth:`start_process` (which does NOT take the per-name lock) rather
+        than :meth:`start_process_by_name` — the latter would re-acquire the
+        same non-reentrant lock and deadlock, and lacks the scope/mode
+        transforms. Under the lock it also re-cancels any restart task that
+        was re-armed during the pre-lock window (matching
+        :meth:`stop_process_by_name`) so no orphaned delayed-restart survives
+        the start. After a successful spawn it re-arms native-process
+        monitoring so a reconcile-started PROCESS publisher is supervised
+        exactly like a boot-started one, and records the applied nonce.
+        ``start_process`` unparks only on success, so a failed start of a
+        parked process keeps its parked marker.
+
+        Args:
+            config: The owned config to start.
+
+        Returns:
+            True when the process was actually spawned; False when an in-lock
+            re-check found it already running (so a caller does NOT mark a
+            restart nonce applied on a no-op).
+        """
+        name = config.name
+        async with self._restart_lock_for(name):
+            if name in self.started_processes:
+                return False
+            await self._cancel_restart_tasks_locked(name)
+            prepared = await self._prepare_owned_config_for_start(config)
+            self._arm_desired_running(prepared.name)
+            await self.start_process(prepared)
+        self._start_native_process_monitoring()
+        self._record_applied_nonce(config)
+        return True
+
+    async def _reconcile_restart(self, config: ProcessConfigModel) -> None:
+        """Bounce a process for an operator restart (its ``restart_nonce`` moved).
+
+        Resets the restart budget and cancels any pending delayed-restart,
+        stops the process if running (which also unparks and clears the
+        watchdog state), then starts it fresh via the scope+mode path. The
+        parked marker is kept until the start succeeds (``start_process``
+        unparks only on success), so a failed explicit restart of a parked
+        process preserves the parked signal. The new nonce is marked applied
+        ONLY when the start actually spawns (inside
+        :meth:`_reconcile_start_owned`): if the stop fails and leaves the
+        process running, the start no-ops and the nonce stays unapplied, so
+        the operator restart is retried on the next tick rather than silently
+        swallowed.
+
+        Args:
+            config: The owned config to bounce.
+        """
+        name = config.name
+        self._restart_attempts.pop(name, None)
+        self._total_failed_restarts.pop(name, None)
+        await self._cancel_pending_restart(name)
+        if name in self.started_processes:
+            await self.stop_process_by_name(name)
+        await self._reconcile_start_owned(config)
+
+    async def _reconcile_one(self, config: ProcessConfigModel) -> None:
+        """Converge a single owned process to its DB desired state (§3 matrix).
+
+        The restart-nonce baseline is seeded at boot (:meth:`_record_applied_nonce`
+        after the boot start), so any ``restart_nonce`` here that differs from
+        the recorded one — including a first-ever operator restart of a parked
+        or running process — is a genuine restart request and bounces.
+
+        Args:
+            config: An owned process config (caller has already checked
+                :meth:`autostart_includes`).
+        """
+        name = config.name
+        running = name in self.started_processes
+        if not config.enabled:
+            if (
+                running
+                or self._has_pending_restart(name)
+                or self.is_parked(name)
+                or self._desired_state.get(name) is _DesiredState.RUNNING
+            ):
+                await self.stop_process_by_name(name)
+            return
+        nonce = config.restart_nonce
+        if nonce is not None and self._last_applied_restart_nonce.get(name) != nonce:
+            await self._reconcile_restart(config)
+            return
+        if running or self.is_parked(name) or self._has_pending_restart(name):
+            return
+        await self._reconcile_start_owned(config)
+
+    async def reconcile_desired_state(self) -> None:
+        """Converge owned processes to the DB desired-state (enabled / nonce).
+
+        The periodic reconcile a remote coordinator runs (~every 10s): reads
+        live desired-state from :meth:`get_process_configs` and, for each
+        config THIS node owns (:meth:`autostart_includes`), applies the §3
+        state matrix — start an enabled-but-stopped process (unless it is
+        parked or mid-backoff, which the watchdog owns), stop a
+        disabled-but-running/pending/parked one, and bounce a process whose
+        ``restart_nonce`` advanced. Each process is fail-soft (a bad config
+        never stalls the others). Serialized by ``_reconcile_lock`` so it
+        never overlaps itself; the nudge-driven fast path and its
+        coalescing land in P2.
+        """
+        async with self._reconcile_lock:
+            configs = await self.get_process_configs()
+            for config in configs:
+                if not self.autostart_includes(config):
+                    continue
+                try:
+                    await self._reconcile_one(config)
+                except Exception as exc:
+                    logger.error("Reconcile of '{}' failed (skipped): {}", config.name, exc)
 
     async def wait_for_feed_publisher_failure(self) -> str:
         """Block until the watchdog escalates a feed publisher, then name it.

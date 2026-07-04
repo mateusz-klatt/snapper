@@ -19,6 +19,7 @@ import pytest
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.launcher import ProcessLauncherService
+from snapper.application.process_manager.launcher import _DesiredState
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import ProcessRegistryEntry
@@ -28,6 +29,7 @@ from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
@@ -3169,3 +3171,323 @@ class TestEmitSitesIntegration:
         await launcher.stop_all_processes()
         assert launcher.active_runs == {}
         assert launcher.active_run_started_at == {}
+
+
+class TestReconcileDesiredState:
+    """Tests for the desired-state reconcile loop (control plane P0.3)."""
+
+    @staticmethod
+    def _cfg(
+        name: str,
+        *,
+        enabled: bool,
+        role: ProcessRoleEnum = ProcessRoleEnum.CORE,
+        tags: tuple[str, ...] = (),
+        restart_nonce: str | None = None,
+    ) -> ProcessConfigModel:
+        """Build a minimal owned config for reconcile tests.
+
+        Args:
+            name: Process name.
+            enabled: Desired-state enabled flag.
+            role: Process role (STRATEGY drives the scope path).
+            tags: Tags (market-data+publisher drives the PROCESS-mode path).
+            restart_nonce: Persisted operator restart nonce.
+
+        Returns:
+            A populated ProcessConfigModel.
+        """
+        return ProcessConfigModel(
+            name=name,
+            enabled=enabled,
+            mode="thread",
+            class_path="x.Y",
+            method="start",
+            parameters={},
+            role=role,
+            tags=tags,
+            restart_nonce=restart_nonce,
+        )
+
+    @staticmethod
+    def _instrument(launcher: ProcessLauncherService) -> None:
+        """Replace the spawn/stop/scope primitives so decisions are observable.
+
+        The stop mock also removes the name from ``started_processes`` (as the
+        real stop would) so a restart's subsequent start is not short-circuited
+        by the in-lock already-running re-check.
+
+        Args:
+            launcher: The launcher under test.
+        """
+
+        async def _stop(name: str) -> None:
+            launcher.started_processes.pop(name, None)
+
+        launcher.start_process = AsyncMock()
+        launcher.stop_process_by_name = AsyncMock(side_effect=_stop)
+        launcher._resolve_autostart_strategy_scope = AsyncMock(side_effect=lambda config: config)
+        launcher._cancel_pending_restart = AsyncMock()
+        launcher._cancel_restart_tasks_locked = AsyncMock()
+        launcher._start_native_process_monitoring = MagicMock()
+
+    @staticmethod
+    def _pending_task() -> MagicMock:
+        """Return a mock delayed-restart task that is not done.
+
+        Returns:
+            A MagicMock whose ``done()`` returns False.
+        """
+        task = MagicMock()
+        task.done.return_value = False
+        return task
+
+    def test_is_parked_reflects_parked_set(self, launcher: ProcessLauncherService) -> None:
+        """is_parked mirrors the parked set."""
+        launcher._parked_processes.add("p")
+        assert launcher.is_parked("p") is True
+        assert launcher.is_parked("q") is False
+
+    def test_has_pending_restart(self, launcher: ProcessLauncherService) -> None:
+        """_has_pending_restart is True only for a live restart task."""
+        assert launcher._has_pending_restart("p") is False
+        launcher._restart_tasks["p"] = self._pending_task()
+        assert launcher._has_pending_restart("p") is True
+        done = MagicMock()
+        done.done.return_value = True
+        launcher._restart_tasks["q"] = done
+        assert launcher._has_pending_restart("q") is False
+
+    @pytest.mark.asyncio
+    async def test_prepare_publisher_forces_process_mode(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A market-data publisher is forced to PROCESS mode before start."""
+        self._instrument(launcher)
+        cfg = self._cfg("kraken_feed_publisher", enabled=True, tags=("market-data", "publisher"))
+        prepared = await launcher._prepare_owned_config_for_start(cfg)
+        assert prepared.mode == ProcessModeEnum.PROCESS
+
+    @pytest.mark.asyncio
+    async def test_prepare_strategy_scope_resolved_mode_unchanged(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A strategy goes through scope resolution and keeps its (thread) mode."""
+        self._instrument(launcher)
+        cfg = self._cfg("strategy_x", enabled=True, role=ProcessRoleEnum.STRATEGY)
+        prepared = await launcher._prepare_owned_config_for_start(cfg)
+        launcher._resolve_autostart_strategy_scope.assert_awaited_once()
+        assert prepared.mode == "thread"
+
+    @pytest.mark.asyncio
+    async def test_start_owned_spawns_when_stopped(self, launcher: ProcessLauncherService) -> None:
+        """_reconcile_start_owned spawns, re-arms the monitor, re-cancels stale restarts."""
+        self._instrument(launcher)
+        cfg = self._cfg("p", enabled=True, restart_nonce="n1")
+        started = await launcher._reconcile_start_owned(cfg)
+        assert started is True
+        launcher.start_process.assert_awaited_once()
+        launcher._start_native_process_monitoring.assert_called_once()
+        launcher._cancel_restart_tasks_locked.assert_awaited_once_with("p")
+        assert launcher._last_applied_restart_nonce["p"] == "n1"
+
+    @pytest.mark.asyncio
+    async def test_start_owned_noop_when_already_running(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """_reconcile_start_owned returns False and no-ops if already running."""
+        self._instrument(launcher)
+        launcher.started_processes["p"] = MagicMock()
+        started = await launcher._reconcile_start_owned(self._cfg("p", enabled=True))
+        assert started is False
+        launcher.start_process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_restart_running_stops_then_starts_and_records_nonce(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A running restart resets budget, stops, starts, and records the nonce."""
+        self._instrument(launcher)
+        launcher.started_processes["p"] = MagicMock()
+        launcher._restart_attempts["p"] = 3
+        launcher._total_failed_restarts["p"] = 9
+        await launcher._reconcile_restart(self._cfg("p", enabled=True, restart_nonce="n2"))
+        launcher._cancel_pending_restart.assert_awaited_once_with("p")
+        launcher.stop_process_by_name.assert_awaited_once_with("p")
+        launcher.start_process.assert_awaited_once()
+        assert "p" not in launcher._restart_attempts
+        assert "p" not in launcher._total_failed_restarts
+        assert launcher._last_applied_restart_nonce["p"] == "n2"
+
+    @pytest.mark.asyncio
+    async def test_restart_not_recorded_when_stop_leaves_process_running(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A failed stop (process still running) leaves the nonce unapplied for retry.
+
+        Regression (review): stop_process_by_name returns an ERROR result
+        rather than raising, so if the stop fails the process stays running,
+        the subsequent start no-ops, and the nonce must NOT be marked applied
+        — otherwise the operator restart would be permanently swallowed.
+        """
+        self._instrument(launcher)
+        launcher.started_processes["p"] = MagicMock()
+        launcher.stop_process_by_name = AsyncMock()
+        await launcher._reconcile_restart(self._cfg("p", enabled=True, restart_nonce="n2"))
+        launcher.start_process.assert_not_awaited()
+        assert "p" not in launcher._last_applied_restart_nonce
+
+    @pytest.mark.asyncio
+    async def test_restart_parked_does_not_stop_before_start(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A parked (not-running) restart skips the stop so the marker survives a failed start."""
+        self._instrument(launcher)
+        launcher._parked_processes.add("p")
+        await launcher._reconcile_restart(self._cfg("p", enabled=True, restart_nonce="n2"))
+        launcher.stop_process_by_name.assert_not_awaited()
+        launcher.start_process.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_enabled_running_unchanged_nonce_noop(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """An enabled, running process with an unchanged nonce is a no-op."""
+        self._instrument(launcher)
+        launcher.started_processes["p"] = MagicMock()
+        launcher._last_applied_restart_nonce["p"] = "n1"
+        await launcher._reconcile_one(self._cfg("p", enabled=True, restart_nonce="n1"))
+        launcher.start_process.assert_not_awaited()
+        launcher.stop_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_enabled_stopped_parked_does_not_auto_unpark(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """An enabled but parked process is left parked (watchdog gave up)."""
+        self._instrument(launcher)
+        launcher._parked_processes.add("p")
+        await launcher._reconcile_one(self._cfg("p", enabled=True))
+        launcher.start_process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_enabled_stopped_pending_restart_noop(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """An enabled process mid-backoff is left to the watchdog."""
+        self._instrument(launcher)
+        launcher._restart_tasks["p"] = self._pending_task()
+        await launcher._reconcile_one(self._cfg("p", enabled=True))
+        launcher.start_process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_enabled_stopped_clean_starts(self, launcher: ProcessLauncherService) -> None:
+        """An enabled, stopped, unparked, no-pending process is started."""
+        self._instrument(launcher)
+        await launcher._reconcile_one(self._cfg("p", enabled=True))
+        launcher.start_process.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_enabled_nonce_advanced_bounces(self, launcher: ProcessLauncherService) -> None:
+        """An advanced restart nonce bounces the process."""
+        self._instrument(launcher)
+        launcher.started_processes["p"] = MagicMock()
+        launcher._last_applied_restart_nonce["p"] = "n1"
+        await launcher._reconcile_one(self._cfg("p", enabled=True, restart_nonce="n2"))
+        launcher.stop_process_by_name.assert_awaited_once_with("p")
+        launcher.start_process.assert_awaited_once()
+        assert launcher._last_applied_restart_nonce["p"] == "n2"
+
+    @pytest.mark.asyncio
+    async def test_enabled_seeded_nonce_unchanged_noop(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A running process whose nonce equals the boot-seeded baseline is a no-op."""
+        self._instrument(launcher)
+        launcher.started_processes["p"] = MagicMock()
+        launcher._last_applied_restart_nonce["p"] = "n1"
+        await launcher._reconcile_one(self._cfg("p", enabled=True, restart_nonce="n1"))
+        launcher.stop_process_by_name.assert_not_awaited()
+        launcher.start_process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_parked_first_operator_nonce_recovers(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A parked process with an unapplied restart nonce is recovered (bounced).
+
+        Regression (review): the first operator restart of a parked process
+        must NOT be swallowed as an adopted baseline — it is the recovery
+        signal. With the baseline seeded at boot, an unrecorded nonce here is a
+        genuine restart request.
+        """
+        self._instrument(launcher)
+        launcher._parked_processes.add("p")
+        await launcher._reconcile_one(self._cfg("p", enabled=True, restart_nonce="n1"))
+        launcher.start_process.assert_awaited_once()
+        assert launcher._last_applied_restart_nonce["p"] == "n1"
+
+    @pytest.mark.asyncio
+    async def test_disabled_running_stops(self, launcher: ProcessLauncherService) -> None:
+        """A disabled, running process is stopped."""
+        self._instrument(launcher)
+        launcher.started_processes["p"] = MagicMock()
+        await launcher._reconcile_one(self._cfg("p", enabled=False))
+        launcher.stop_process_by_name.assert_awaited_once_with("p")
+
+    @pytest.mark.asyncio
+    async def test_disabled_parked_stops(self, launcher: ProcessLauncherService) -> None:
+        """A disabled, parked process is stopped (clears the parked marker)."""
+        self._instrument(launcher)
+        launcher._parked_processes.add("p")
+        await launcher._reconcile_one(self._cfg("p", enabled=False))
+        launcher.stop_process_by_name.assert_awaited_once_with("p")
+
+    @pytest.mark.asyncio
+    async def test_disabled_pending_restart_stops(self, launcher: ProcessLauncherService) -> None:
+        """A disabled process mid-backoff is stopped (cancels the pending restart)."""
+        self._instrument(launcher)
+        launcher._restart_tasks["p"] = self._pending_task()
+        await launcher._reconcile_one(self._cfg("p", enabled=False))
+        launcher.stop_process_by_name.assert_awaited_once_with("p")
+
+    @pytest.mark.asyncio
+    async def test_disabled_desired_running_stops(self, launcher: ProcessLauncherService) -> None:
+        """A disabled process still marked desired-RUNNING is stopped."""
+        self._instrument(launcher)
+        launcher._desired_state["p"] = _DesiredState.RUNNING
+        await launcher._reconcile_one(self._cfg("p", enabled=False))
+        launcher.stop_process_by_name.assert_awaited_once_with("p")
+
+    @pytest.mark.asyncio
+    async def test_disabled_stopped_clean_noop(self, launcher: ProcessLauncherService) -> None:
+        """A disabled, stopped, clean process is a no-op."""
+        self._instrument(launcher)
+        await launcher._reconcile_one(self._cfg("p", enabled=False))
+        launcher.stop_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reconcile_skips_non_owned_and_is_fail_soft(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """reconcile_desired_state skips non-owned configs and survives a per-config failure."""
+        self._instrument(launcher)
+        owned = self._cfg("owned", enabled=True)
+        not_owned = self._cfg("not_owned", enabled=True)
+        boom = self._cfg("boom", enabled=True)
+        launcher.get_process_configs = AsyncMock(return_value=[owned, not_owned, boom])
+        launcher.autostart_includes = MagicMock(
+            side_effect=lambda config: config.name != "not_owned"
+        )
+        original_start = launcher.start_process
+
+        async def _start(config: ProcessConfigModel) -> None:
+            if config.name == "boom":
+                raise RuntimeError("spawn failed")
+            await original_start(config)
+
+        launcher.start_process = AsyncMock(side_effect=_start)
+        await launcher.reconcile_desired_state()
+        started = {call.args[0].name for call in launcher.start_process.await_args_list}
+        assert "owned" in started
+        assert "not_owned" not in started

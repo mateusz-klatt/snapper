@@ -126,6 +126,7 @@ from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import ProcessAutostartProfileEnum
 from snapper.data.archive_symbols import safe_path
 from snapper.data.archiver import EVENT_TABLES
 from snapper.data.archiver import STATE_TABLES
@@ -643,14 +644,29 @@ async def _run_feed_engine() -> str | None:
         zmq_ctx = None
         publisher = None
     launcher.set_msg_publisher(publisher)
+    reconcile_task: asyncio.Task[None] | None = None
     try:
         await launcher.sync_registry_to_database()
         await launcher.start_feed_publishers()
+        if (
+            getattr(app_settings, "process_autostart_profile", None)
+            is ProcessAutostartProfileEnum.FEED
+        ):
+            reconcile_task = asyncio.ensure_future(_reconcile_loop(launcher))
+        else:
+            typer.echo(
+                "Feed engine: reconcile loop disabled (PROCESS_AUTOSTART_PROFILE is not 'feed'); "
+                "the loop is only safe when this node owns exactly the publishers.",
+                err=True,
+            )
         typer.echo(
             "Feed engine running — publishers spawned as separate processes. Ctrl+C to stop."
         )
         return await _await_feed_shutdown_or_failure(launcher)
     finally:
+        if reconcile_task is not None:
+            reconcile_task.cancel()
+            await asyncio.gather(reconcile_task, return_exceptions=True)
         await launcher.stop_all_processes()
         await settings_service.shutdown()
         shutdown_audit_publisher(publisher, zmq_ctx)
@@ -728,6 +744,7 @@ async def _run_strategies_engine() -> None:
     ai_service.set_msg_publisher(publisher)
     listener_started = False
     summary_task: asyncio.Task[None] | None = None
+    reconcile_task: asyncio.Task[None] | None = None
     try:
         if app_settings.zmq_broker_xpub:
             await ai_service.start_bus_listener(
@@ -738,12 +755,26 @@ async def _run_strategies_engine() -> None:
         await launcher.sync_registry_to_database()
         await launcher.start_all_processes()
         summary_task = asyncio.ensure_future(_strategies_summary_loop(launcher))
+        if (
+            getattr(app_settings, "process_autostart_profile", None)
+            is ProcessAutostartProfileEnum.STRATEGY
+        ):
+            reconcile_task = asyncio.ensure_future(_reconcile_loop(launcher))
+        else:
+            typer.echo(
+                "Strategies engine: reconcile loop disabled (PROCESS_AUTOSTART_PROFILE is not "
+                "'strategy'); the loop is only safe when this node owns exactly the strategies.",
+                err=True,
+            )
         typer.echo("Strategies engine running — role-STRATEGY processes started. Ctrl+C to stop.")
         await _await_shutdown_signal()
     finally:
         if summary_task is not None:
             summary_task.cancel()
             await asyncio.gather(summary_task, return_exceptions=True)
+        if reconcile_task is not None:
+            reconcile_task.cancel()
+            await asyncio.gather(reconcile_task, return_exceptions=True)
         await launcher.stop_all_processes()
         if listener_started:
             await ai_service.stop_bus_listener()
@@ -762,6 +793,28 @@ async def _strategies_summary_loop(launcher: ProcessLauncherService) -> None:
         with contextlib.suppress(Exception):
             await launcher.emit_summary_snapshot()
         await asyncio.sleep(5.0)
+
+
+_RECONCILE_INTERVAL_SECONDS = 10.0
+"""How often a coordinator converges running processes to the DB desired-state."""
+
+
+async def _reconcile_loop(launcher: ProcessLauncherService) -> None:
+    """Converge running processes to the DB desired-state every ~10s, best-effort.
+
+    The coordinator-side driver of the control plane: an operator
+    enable/disable/restart (a ``PATCH /desired-state`` write) takes effect
+    within one tick without a manual restart. A whole-pass failure is
+    suppressed so a single bad cycle never stops the loop; per-process
+    failures are already fail-soft inside ``reconcile_desired_state``.
+
+    Args:
+        launcher: The coordinator's process launcher service.
+    """
+    while True:
+        with contextlib.suppress(Exception):
+            await launcher.reconcile_desired_state()
+        await asyncio.sleep(_RECONCILE_INTERVAL_SECONDS)
 
 
 @app.command(name="strategies-engine")

@@ -49,6 +49,7 @@ from snapper.cli.app import server
 from snapper.cli.app import settings_rotate_encryption
 from snapper.cli.app import validate_api_keys
 from snapper.cli.app import zmq_logger
+from snapper.core.types import ProcessAutostartProfileEnum
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonSplitEvent
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 
@@ -5049,6 +5050,168 @@ async def test_strategies_summary_loop_ticks_and_survives_errors() -> None:
         await app_module._strategies_summary_loop(cast(Any, DummyLauncher()))
     assert len(attempts) == 2
     assert sleeps == [5.0, 5.0]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_loop_ticks_and_survives_errors() -> None:
+    """The reconcile loop converges every tick and swallows a pass error.
+
+    Given: a launcher whose reconcile raises once then succeeds,
+    When: the loop runs two ticks (patched sleep),
+    Then: both attempts happened, the error never escaped, and it sleeps the
+        reconcile interval between ticks.
+    """
+    attempts: list[int] = []
+
+    class DummyLauncher:
+        async def reconcile_desired_state(self) -> None:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("reconcile blip")
+
+    sleeps: list[float] = []
+
+    async def _fast_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise asyncio.CancelledError
+
+    with (
+        patch.object(app_module.asyncio, "sleep", _fast_sleep),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await app_module._reconcile_loop(cast(Any, DummyLauncher()))
+    assert len(attempts) == 2
+    assert sleeps == [10.0, 10.0]
+
+
+def test_feed_engine_spawns_reconcile_loop_when_profile_feed(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """With PROCESS_AUTOSTART_PROFILE=feed the reconcile loop is spawned and torn down.
+
+    Given: a feed profile and a launcher that boots and shuts down cleanly,
+    When: the feed-engine command runs,
+    Then: the reconcile loop is spawned (not the profile-mismatch disable
+        path) and the finally cancels it, exiting cleanly.
+    """
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            return None
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            return None
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            return None
+
+        async def sync_registry_to_database(self) -> None:
+            return None
+
+        async def start_feed_publishers(self) -> None:
+            return None
+
+        async def stop_all_processes(self) -> None:
+            return None
+
+        async def reconcile_desired_state(self) -> None:
+            return None
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        return DummyService()
+
+    async def _clean_shutdown(launcher: Any) -> str | None:
+        return None
+
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(
+            zmq_broker_xsub="tcp://broker:7500",
+            process_autostart_profile=ProcessAutostartProfileEnum.FEED,
+        ),
+    )
+    monkeypatch.setattr(app_module, "discover_processes", lambda: None)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _clean_shutdown)
+    result = cli_runner.invoke(app, ["feed-engine"])
+    assert result.exit_code == 0
+    assert "reconcile loop disabled" not in result.output
+
+
+def test_strategies_engine_spawns_reconcile_loop_when_profile_strategy(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """With PROCESS_AUTOSTART_PROFILE=strategy the reconcile loop is spawned and torn down.
+
+    Given: a strategy profile and a launcher that boots and shuts down cleanly,
+    When: the strategies-engine command runs,
+    Then: the reconcile loop is spawned (not the profile-mismatch disable
+        path) and the finally cancels it, exiting cleanly.
+    """
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            return None
+
+    class DummyAiService:
+        def set_msg_publisher(self, publisher: object) -> None:
+            return None
+
+        async def start_bus_listener(self, xpub: str, *, topics: tuple[str, ...]) -> None:
+            return None
+
+        async def stop_bus_listener(self) -> None:
+            return None
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            return None
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            return None
+
+        async def sync_registry_to_database(self) -> None:
+            return None
+
+        async def start_all_processes(self) -> None:
+            return None
+
+        async def emit_summary_snapshot(self) -> None:
+            return None
+
+        async def reconcile_desired_state(self) -> None:
+            return None
+
+        async def stop_all_processes(self) -> None:
+            return None
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        return DummyService()
+
+    async def _no_wait() -> None:
+        return None
+
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(
+            zmq_broker_xsub="tcp://broker:7500",
+            zmq_broker_xpub="",
+            process_autostart_profile=ProcessAutostartProfileEnum.STRATEGY,
+        ),
+    )
+    monkeypatch.setattr(app_module, "discover_processes", lambda: None)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "get_ai_review_service", lambda: DummyAiService())
+    monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
+    result = cli_runner.invoke(app, ["strategies-engine"])
+    assert result.exit_code == 0
+    assert "reconcile loop disabled" not in result.output
 
 
 def test_feed_engine_exits_nonzero_on_publisher_crash(
