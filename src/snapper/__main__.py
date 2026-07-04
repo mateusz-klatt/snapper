@@ -15,12 +15,14 @@ Note:
     Log output is written per container so services sharing the
     ``./data`` bind mount never write to the same file: ``feed-engine``
     (the ``snapper-feed`` container) logs to ``data/snapper-feed.log``,
-    the ``egress`` sidecar (running as ``root`` for ``CAP_NET_ADMIN``)
-    logs to ``data/snapper-egress.log``, and every other command (the
-    ``snapper-api`` container) logs to ``data/snapper.log`` at INFO
-    level. Subprocesses inherit their container's file via the
-    ``SNAPPER_LOG_FILE`` environment variable. JSON logging is disabled
-    for human-readable console output.
+    ``strategies-engine`` (``snapper-strategies``) to
+    ``data/snapper-strategies.log``, ``broker`` (``snapper-broker``) to
+    ``data/snapper-broker.log``, the ``egress`` sidecar (running as
+    ``root`` for ``CAP_NET_ADMIN``) to ``data/snapper-egress.log``, and
+    every other command (the ``snapper-api`` container) to
+    ``data/snapper.log`` at INFO level. Subprocesses inherit their
+    container's file via the ``SNAPPER_LOG_FILE`` environment variable.
+    JSON logging is disabled for human-readable console output.
 """
 
 import os
@@ -35,6 +37,8 @@ from snapper.utils.logging import setup_logging
 _COMMAND_LOGFILES: dict[str, str] = {
     "egress": "data/snapper-egress.log",
     "feed-engine": "data/snapper-feed.log",
+    "strategies-engine": "data/snapper-strategies.log",
+    "broker": "data/snapper-broker.log",
 }
 
 
@@ -48,6 +52,10 @@ def _resolve_logfile(argv: list[str]) -> str:
 
     - ``feed-engine`` (the ``snapper-feed`` container) ->
       ``data/snapper-feed.log``.
+    - ``strategies-engine`` (the ``snapper-strategies`` container) ->
+      ``data/snapper-strategies.log``.
+    - ``broker`` (the ``snapper-broker`` container) ->
+      ``data/snapper-broker.log``.
     - ``egress`` (the ``snapper-egress`` sidecar, running as ``root``
       for ``CAP_NET_ADMIN``) -> ``data/snapper-egress.log``.
     - every other command (the ``snapper-api`` container) ->
@@ -77,6 +85,8 @@ def main() -> int:
         - JSON format: disabled (human-readable)
         - Log file: per container via :func:`_resolve_logfile`
           (``data/snapper-feed.log`` for ``feed-engine``,
+          ``data/snapper-strategies.log`` for ``strategies-engine``,
+          ``data/snapper-broker.log`` for ``broker``,
           ``data/snapper-egress.log`` for ``egress``,
           :data:`DEFAULT_LOGFILE` otherwise).
 

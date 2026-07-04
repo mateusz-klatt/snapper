@@ -150,9 +150,10 @@ def test_main_non_egress_subcommand_uses_default_logfile(
         container),
     When main() is called,
     Then setup_logging receives ``logfile="data/snapper.log"`` —
-        ``feed-engine`` and ``egress`` map to dedicated files while
-        ``server``, ``broker`` etc. share the API container's log
-        because they run under the same ``snapper:snapper`` uid.
+        ``feed-engine``, ``strategies-engine``, ``broker`` and
+        ``egress`` map to dedicated files while ``server`` (and any
+        other unmapped command) keeps the ``snapper-api`` container's
+        shared ``data/snapper.log``.
     """
     setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
@@ -193,6 +194,62 @@ def test_main_feed_engine_subcommand_uses_feed_logfile(
     main()
     _, kwargs = setup_calls[0]
     assert kwargs["logfile"] == "data/snapper-feed.log"
+
+
+def test_main_strategies_engine_subcommand_uses_strategies_logfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — ``snapper strategies-engine`` logs to ``data/snapper-strategies.log``.
+
+    Given argv whose first positional arg is ``"strategies-engine"`` (the
+        docker-compose CMD for the ``snapper-strategies`` container),
+    When main() is called,
+    Then setup_logging receives ``logfile="data/snapper-strategies.log"``
+        so the strategies container does not interleave its lines with the
+        API container's ``data/snapper.log`` on the shared ``./data`` bind
+        mount (both ran under the default before this dispatch existed).
+    """
+    setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
+        setup_calls.append((args, kwargs))
+
+    monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
+    monkeypatch.setattr("snapper.__main__.app", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["snapper", "strategies-engine"])
+    main()
+    _, kwargs = setup_calls[0]
+    assert kwargs["logfile"] == "data/snapper-strategies.log"
+
+
+def test_main_broker_subcommand_uses_broker_logfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — ``snapper broker`` logs to ``data/snapper-broker.log``.
+
+    Given argv whose first positional arg is ``"broker"`` (the
+        docker-compose CMD for the ``snapper-broker`` container),
+    When main() is called,
+    Then setup_logging receives ``logfile="data/snapper-broker.log"``.
+        The ``snapper-broker`` service mounts ``./data`` so this dedicated
+        file is host-visible; without the mapping the broker fell through
+        to ``data/snapper.log`` and, running as an unprivileged uid over
+        the image's ``/app/data`` with no bind mount, could only emit a
+        swallowed PermissionError instead of logging.
+    """
+    setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
+        setup_calls.append((args, kwargs))
+
+    monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
+    monkeypatch.setattr("snapper.__main__.app", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["snapper", "broker"])
+    main()
+    _, kwargs = setup_calls[0]
+    assert kwargs["logfile"] == "data/snapper-broker.log"
 
 
 def test_main_exports_resolved_logfile_to_environment(
