@@ -56,19 +56,29 @@ class _CoordinatorSnapshot:
     Attributes:
         received_at: Monotonic clock reading when the snapshot arrived.
         processes: Per-process rows keyed by process name.
+        coordinator_label: The emitting node's human-readable label, or None.
     """
 
-    __slots__ = ("processes", "received_at")
+    __slots__ = ("coordinator_label", "processes", "received_at")
 
-    def __init__(self, received_at: float, processes: dict[str, ProcessSummaryItem]) -> None:
-        """Store the snapshot rows and their receipt timestamp.
+    def __init__(
+        self,
+        received_at: float,
+        processes: dict[str, ProcessSummaryItem],
+        coordinator_label: str | None,
+    ) -> None:
+        """Store the snapshot rows, receipt timestamp, and emitting label.
 
         Args:
             received_at: Monotonic clock reading at receipt.
             processes: Per-process rows keyed by process name.
+            coordinator_label: The emitting node's human-readable label
+                (``API`` / ``Feed`` / ``Strategies``), or None for the ``ALL``
+                profile / older producers.
         """
         self.received_at = received_at
         self.processes = processes
+        self.coordinator_label = coordinator_label
 
 
 class RemoteSummaryCache:
@@ -246,6 +256,7 @@ class RemoteSummaryCache:
         self._snapshots[coordinator] = _CoordinatorSnapshot(
             received_at=self._clock(),
             processes=rows,
+            coordinator_label=event.coordinator_label,
         )
 
     def _is_fresh(self, snapshot: _CoordinatorSnapshot) -> bool:
@@ -314,6 +325,25 @@ class RemoteSummaryCache:
             process, or ``None`` when no fresh coordinator tracks it.
         """
         return self.lookup(name)[1]
+
+    def label_for(self, coordinator: str) -> str | None:
+        """Return the human-readable label of a fresh coordinator's snapshot.
+
+        Used to render a managed-remotely process's owner as its friendly
+        container name (``Feed`` / ``Strategies``) instead of the raw
+        ``coord-<id>`` slug.
+
+        Args:
+            coordinator: The coordinator slug to resolve.
+
+        Returns:
+            The coordinator's emitted label, or ``None`` when it has no fresh
+            snapshot or emitted none (older producer / the ``ALL`` profile).
+        """
+        snapshot = self._snapshots.get(coordinator)
+        if snapshot is None or not self._is_fresh(snapshot):
+            return None
+        return snapshot.coordinator_label
 
     def has_fresh_snapshot(self) -> bool:
         """Return whether any remote coordinator snapshot is currently fresh.

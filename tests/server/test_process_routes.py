@@ -236,8 +236,10 @@ class TestCrossCoordinatorOwnership:
         mock_factory.instance_configs = {}
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         cache = MagicMock()
         cache.lookup = MagicMock(return_value=(True, "coord-1"))
+        cache.label_for = MagicMock(return_value="Feed")
         result = await list_configured_processes(
             request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
         )
@@ -276,6 +278,7 @@ class TestCrossCoordinatorOwnership:
         mock_factory.instance_configs = {}
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         cache = MagicMock()
         cache.lookup = MagicMock(return_value=(False, None))
         cache.has_fresh_snapshot = MagicMock(return_value=False)
@@ -318,6 +321,7 @@ class TestCrossCoordinatorOwnership:
         mock_factory.instance_configs = {}
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         cache = MagicMock()
         cache.lookup = MagicMock(return_value=(False, "coord-2"))
         cache.has_fresh_snapshot = MagicMock(return_value=True)
@@ -359,8 +363,10 @@ class TestCrossCoordinatorOwnership:
         mock_factory.instance_configs = {}
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         cache = MagicMock()
         cache.lookup = MagicMock(return_value=(True, "coord-2"))
+        cache.label_for = MagicMock(return_value="Strategies")
         result = await list_configured_processes(
             request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
         )
@@ -396,8 +402,10 @@ class TestCrossCoordinatorOwnership:
         mock_factory.instance_configs = {}
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         cache = MagicMock()
         cache.lookup = MagicMock(return_value=(True, "coord-1"))
+        cache.label_for = MagicMock(return_value="Feed")
         result = await list_configured_processes(
             request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
         )
@@ -433,6 +441,7 @@ class TestCrossCoordinatorOwnership:
         mock_factory.instance_configs = {}
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         result = await list_configured_processes(
             request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
@@ -472,6 +481,7 @@ class TestCrossCoordinatorOwnership:
         )
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         cache = MagicMock()
         cache.lookup = MagicMock(return_value=(True, "coord-1"))
         result = await get_process_summary(
@@ -561,6 +571,7 @@ class TestListConfiguredProcesses:
         """
         mock_factory = MagicMock()
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         mock_factory.autostart_includes = MagicMock(return_value=True)
         mock_factory.get_process_configs = AsyncMock(
             return_value=[
@@ -628,6 +639,7 @@ class TestListConfiguredProcesses:
         """
         mock_factory = MagicMock()
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         mock_factory.autostart_includes = MagicMock(return_value=True)
         mock_factory.get_process_configs = AsyncMock(
             return_value=[
@@ -667,6 +679,7 @@ class TestListConfiguredProcesses:
         wallet = "00000000-0000-7000-8000-0000000000a1"
         mock_factory = MagicMock()
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         mock_factory.autostart_includes = MagicMock(return_value=True)
         mock_factory.get_process_configs = AsyncMock(return_value=[])
         instance = ProcessConfigModel(
@@ -733,6 +746,7 @@ class TestListConfiguredProcesses:
         wallet = "00000000-0000-7000-8000-0000000000a1"
         mock_factory = MagicMock()
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         mock_factory.autostart_includes = MagicMock(return_value=True)
         mock_factory.get_process_configs = AsyncMock(
             return_value=[
@@ -786,6 +800,7 @@ class TestGetProcessSummary:
         mock_factory.instance_configs = {}
         mock_factory.build_process_summary_items = AsyncMock(return_value=[])
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
@@ -883,6 +898,7 @@ class TestGetProcessSummary:
         }
         mock_factory.build_process_summary_items = AsyncMock(return_value=[])
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
@@ -923,6 +939,7 @@ class TestGetProcessSummary:
         mock_factory.instance_configs = {}
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         mock_factory.build_process_summary_items = AsyncMock(
             return_value=[
                 ProcessSummaryItem(
@@ -971,6 +988,7 @@ class TestGetProcessSummary:
         mock_factory.instance_configs = {}
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         mock_factory.build_process_summary_items = AsyncMock(
             return_value=[
                 ProcessSummaryItem(
@@ -1014,6 +1032,7 @@ class TestGetProcessSummary:
         mock_factory.instance_configs = {"zmq_broker": spurious}
         mock_factory.build_process_summary_items = AsyncMock(return_value=[])
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
@@ -1041,6 +1060,7 @@ class TestGetProcessSummary:
         mock_factory.instance_configs = {}
         mock_factory.build_process_summary_items = AsyncMock(return_value=[])
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
@@ -1087,6 +1107,7 @@ class TestGetProcessSummary:
         mock_factory.instance_configs = {}
         mock_factory.build_process_summary_items = AsyncMock(return_value=[sampled, thread_mode])
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-3")
+        mock_factory.coordinator_label = MagicMock(return_value="Strategies")
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )

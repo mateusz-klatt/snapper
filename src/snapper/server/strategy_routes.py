@@ -26,6 +26,7 @@ from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import ProcessRoleEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.process_routes import _coordinator_label
 from snapper.server.process_routes import _resolve_ownership
 from snapper.server.process_routes import get_remote_summary_cache
 from snapper.strategies.factory import StrategyFactory
@@ -105,6 +106,9 @@ async def list_strategies(
                 mode=config.mode,
                 strategy_class=_resolve_strategy_class(config.tags),
                 coordinator=coordinator,
+                coordinator_label=_coordinator_label(
+                    factory, cache, coordinator, managed_remotely=managed_remotely
+                ),
                 managed_remotely=managed_remotely,
                 session_id=sid,
                 sequence_id=tracker.next_sequence(_REST_STREAM),

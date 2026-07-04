@@ -1892,6 +1892,11 @@ class ProcessSummaryEventData(StrictDataSchema[Literal["process_summary_event"]]
             the bus. Defaults to ``coord-0`` so that during a rolling
             deploy a consumer can still decode an older payload that
             predates this field; live producers always set it explicitly.
+        coordinator_label: Human-readable container label derived from the
+            emitting node's autostart profile (``API`` / ``Feed`` /
+            ``Strategies``), or ``None`` for the single-container ``ALL``
+            profile. Lets consumers render the friendly container name instead
+            of the raw ``coord-<id>`` slug.
         processes: Unordered snapshot of per-process status rows. The
             launcher emits persisted configs first (in repository row
             order) followed by runtime per-wallet instances in
@@ -1902,6 +1907,7 @@ class ProcessSummaryEventData(StrictDataSchema[Literal["process_summary_event"]]
 
     type: Literal["process_summary_event"] = "process_summary_event"
     coordinator: str = "coord-0"
+    coordinator_label: str | None = None
     processes: list[ProcessSummaryItem]
     snapshot_at: datetime
 

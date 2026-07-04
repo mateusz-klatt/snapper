@@ -30,6 +30,7 @@ class TestListStrategies:
         mock_factory.started_processes = {}
         mock_factory.autostart_includes = MagicMock(return_value=True)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
         mock_request.app.state.rest_tracker = SequenceTracker()
@@ -80,6 +81,7 @@ class TestListStrategies:
         mock_factory.started_processes = {"strategy_macd": MagicMock()}
         mock_factory.autostart_includes = MagicMock(return_value=True)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
         mock_request.app.state.rest_tracker = SequenceTracker()
@@ -118,8 +120,10 @@ class TestListStrategies:
         mock_factory.started_processes = {}
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         cache = MagicMock()
         cache.lookup = MagicMock(return_value=(True, "coord-2"))
+        cache.label_for = MagicMock(return_value="Strategies")
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
         mock_request.app.state.rest_tracker = SequenceTracker()
@@ -155,6 +159,7 @@ class TestListStrategies:
         mock_factory.started_processes = {}
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
         mock_request.app.state.rest_tracker = SequenceTracker()
@@ -189,6 +194,7 @@ class TestListStrategies:
         mock_factory.started_processes = {"strategy_heartbeat_consult_btc_1h": MagicMock()}
         mock_factory.autostart_includes = MagicMock(return_value=False)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
         mock_request.app.state.rest_tracker = SequenceTracker()
@@ -232,6 +238,7 @@ class TestListStrategies:
         mock_factory.started_processes = {"strategy_running": MagicMock()}
         mock_factory.autostart_includes = MagicMock(return_value=True)
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.coordinator_label = MagicMock(return_value="API")
         mock_request = MagicMock(spec=Request)
         mock_request.app.state.process_factory = mock_factory
         mock_request.app.state.rest_tracker = SequenceTracker()
@@ -287,6 +294,7 @@ class TestListStrategies:
             mock_factory.started_processes = {}
             mock_factory.autostart_includes = MagicMock(return_value=True)
             mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+            mock_factory.coordinator_label = MagicMock(return_value="API")
             mock_request = MagicMock(spec=Request)
             mock_request.app.state.process_factory = mock_factory
             mock_request.app.state.rest_tracker = SequenceTracker()

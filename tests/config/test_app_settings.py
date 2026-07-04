@@ -1125,6 +1125,41 @@ class TestProcessAutostartProfileProperty:
         assert settings.process_autostart_profile is ProcessAutostartProfileEnum.FEED
 
 
+class TestCoordinatorLabelProperty:
+    """``coordinator_label`` maps the autostart profile to a display name."""
+
+    def test_all_profile_has_no_label(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The single-container ``ALL`` profile has no distinct label."""
+        monkeypatch.delenv("PROCESS_AUTOSTART_PROFILE", raising=False)
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_label is None
+
+    def test_api_profile_labelled_api(self) -> None:
+        """The ``API`` profile labels the container "API"."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:", PROCESS_AUTOSTART_PROFILE="api"
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_label == "API"
+
+    def test_feed_profile_labelled_feed(self) -> None:
+        """The ``FEED`` profile labels the container "Feed"."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:", PROCESS_AUTOSTART_PROFILE="feed"
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_label == "Feed"
+
+    def test_strategy_profile_labelled_strategies(self) -> None:
+        """The ``STRATEGY`` profile labels the container "Strategies"."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:", PROCESS_AUTOSTART_PROFILE="strategy"
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_label == "Strategies"
+
+
 class TestZmqBrokerBindProperties:
     """Broker bind endpoints fall back to connect endpoints when unset."""
 

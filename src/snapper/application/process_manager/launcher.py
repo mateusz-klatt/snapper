@@ -482,6 +482,20 @@ class ProcessLauncherService:
         """
         return f"coord-{self.settings.coordinator_instance_id}"
 
+    def coordinator_label(self) -> str | None:
+        """Return this node's human-readable container label, or ``None``.
+
+        Derived from the autostart profile (``API`` -> "API", ``FEED`` ->
+        "Feed", ``STRATEGY`` -> "Strategies"); ``None`` for the single-container
+        ``ALL`` profile. Emitted alongside :meth:`coordinator_topic_slug` on the
+        summary snapshot so cross-container consumers can render the friendly
+        container name instead of the raw ``coord-<id>`` slug.
+
+        Returns:
+            The container label, or ``None`` for the ``ALL`` profile.
+        """
+        return self.settings.coordinator_label
+
     async def build_process_summary_items(self) -> list[ProcessSummaryItem]:
         """Compose a snapshot of every tracked process row.
 
@@ -569,6 +583,7 @@ class ProcessLauncherService:
                 public_id=str(uuid7()),
                 timestamp=datetime.now(UTC),
                 coordinator=slug,
+                coordinator_label=self.coordinator_label(),
                 processes=items,
                 snapshot_at=datetime.now(UTC),
             )

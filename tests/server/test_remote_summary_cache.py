@@ -441,3 +441,49 @@ class TestStartStop:
         cache = RemoteSummaryCache(own_coordinator="coord-0", clock=_FakeClock(0.0))
         await cache.stop()
         assert cache._listen_task is None
+
+
+def _labelled_payload(coordinator: str, label: str | None) -> bytes:
+    """Build a summary payload carrying a coordinator label.
+
+    Args:
+        coordinator: Topic-field coordinator (ignored by the cache).
+        label: The ``coordinator_label`` to stamp on the event.
+
+    Returns:
+        UTF-8 JSON payload bytes.
+    """
+    event = ProcessSummaryEventData(
+        session_id="sess-1",
+        sequence_id=1,
+        public_id="pub-1",
+        timestamp=_FIXED_TS,
+        coordinator=coordinator,
+        coordinator_label=label,
+        processes=[_make_item("kfp", running=True)],
+        snapshot_at=_FIXED_TS,
+    )
+    return event.to_json().encode("utf-8")
+
+
+class TestLabelFor:
+    """Remote coordinator label resolution for the managed-remotely UI rows."""
+
+    def test_label_for_returns_fresh_coordinator_label(self) -> None:
+        """A fresh coordinator's emitted label is returned for its slug."""
+        cache = RemoteSummaryCache(own_coordinator="coord-0", clock=_FakeClock(100.0))
+        cache._ingest(_topic("coord-1"), _labelled_payload("coord-1", "Feed"))
+        assert cache.label_for("coord-1") == "Feed"
+
+    def test_label_for_unknown_coordinator_is_none(self) -> None:
+        """A coordinator with no snapshot has no label."""
+        cache = RemoteSummaryCache(own_coordinator="coord-0", clock=_FakeClock(100.0))
+        assert cache.label_for("coord-9") is None
+
+    def test_label_for_stale_snapshot_is_none(self) -> None:
+        """A coordinator whose snapshot has aged past the TTL yields no label."""
+        clock = _FakeClock(100.0)
+        cache = RemoteSummaryCache(own_coordinator="coord-0", ttl_seconds=15.0, clock=clock)
+        cache._ingest(_topic("coord-1"), _labelled_payload("coord-1", "Feed"))
+        clock.value = 200.0
+        assert cache.label_for("coord-1") is None

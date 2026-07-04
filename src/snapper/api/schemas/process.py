@@ -483,6 +483,9 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
             (e.g. ``coord-0`` for the API, ``coord-1`` for the feed
             container); ``None`` when a remote owner is unknown because
             its summary has not been observed.
+        coordinator_label: Human-readable label for the owning node
+            (``API`` / ``Feed`` / ``Strategies``); ``None`` for the
+            single-container ``ALL`` profile or an unknown owner.
         managed_remotely: True when this node does not run the process
             under its autostart profile (a dedicated feed container owns
             it). The UI disables Start/Stop/Restart for such rows so it
@@ -517,6 +520,11 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
         None,
         description="Slug of the node owning this process; None when a remote owner is unknown",
     )
+    coordinator_label: str | None = Field(
+        None,
+        description="Human-readable label for the owning node (API/Feed/Strategies); "
+        "None for the single-container ALL profile or an unknown owner",
+    )
     managed_remotely: bool = Field(
         default=False,
         description="True when a remote node (e.g. the feed container) owns this process",
@@ -549,6 +557,9 @@ class ProcessSummaryData(StrictDataSchema[Literal["process_summary"]]):
             ``coord-0`` so a strict consumer can still decode older
             payloads emitted before this field existed; the API always
             sets it explicitly when building a response.
+        coordinator_label: Human-readable label for the emitting node
+            (``API`` / ``Feed`` / ``Strategies``); ``None`` for the
+            single-container ``ALL`` profile.
         feeds: Count of feed publisher processes.
         strategies: Count of strategy processes.
         executors: Count of executor processes.
@@ -563,6 +574,11 @@ class ProcessSummaryData(StrictDataSchema[Literal["process_summary"]]):
     type: Literal["process_summary"] = "process_summary"
     coordinator: str = Field(
         default="coord-0", description="Topic-safe slug of the emitting API node"
+    )
+    coordinator_label: str | None = Field(
+        default=None,
+        description="Human-readable label for the emitting node (API/Feed/Strategies); "
+        "None for the single-container ALL profile",
     )
     feeds: ProcessCategoryCount = Field(description="Feed publisher process counts")
     strategies: ProcessCategoryCount = Field(description="Strategy process counts")
@@ -601,6 +617,9 @@ class StrategyProcess(StrictDataSchema[Literal["strategy_process"]]):
             Lets the UI pre-fill the backtest create form's strategy dropdown.
         coordinator: Owning coordinator slug from the summary cache, or
             None when unknown.
+        coordinator_label: Human-readable label for the owning coordinator
+            (``API`` / ``Feed`` / ``Strategies``); None for the ALL profile
+            or an unknown owner.
         managed_remotely: True when another coordinator owns the strategy
             (Start/Stop hidden in the dashboard).
     """
@@ -619,6 +638,11 @@ class StrategyProcess(StrictDataSchema[Literal["strategy_process"]]):
         default=None,
         description="Coordinator slug that owns/runs this strategy (from the "
         "cross-coordinator summary cache); None when unknown.",
+    )
+    coordinator_label: str | None = Field(
+        default=None,
+        description="Human-readable label for the owning coordinator "
+        "(API/Feed/Strategies); None for the ALL profile or unknown.",
     )
     managed_remotely: bool = Field(
         default=False,

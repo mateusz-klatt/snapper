@@ -368,6 +368,36 @@ def _resolve_configured_ownership(
     return running, coordinator, managed_remotely
 
 
+def _coordinator_label(
+    factory: ProcessLauncherService,
+    cache: RemoteSummaryCache | None,
+    coordinator: str | None,
+    *,
+    managed_remotely: bool,
+) -> str | None:
+    """Resolve the human-readable label for a row's owning coordinator.
+
+    A locally-owned row uses THIS node's own profile label; a managed-remotely
+    row uses the remote coordinator's label, carried on its summary snapshot and
+    surfaced by the cache. Lets the UI render "Feed" / "Strategies" instead of
+    the raw ``coord-<id>`` slug.
+
+    Args:
+        factory: The local process launcher (supplies this node's own label).
+        cache: Cross-coordinator summary cache, or ``None`` when absent.
+        coordinator: The resolved owning slug, or ``None``.
+        managed_remotely: Whether another container owns the row.
+
+    Returns:
+        The owner's label, or ``None`` when unknown / the ``ALL`` profile.
+    """
+    if coordinator is None:
+        return None
+    if not managed_remotely:
+        return factory.coordinator_label()
+    return cache.label_for(coordinator) if cache is not None else None
+
+
 @dataclass(slots=True)
 class _ProcessSummaryCounters:
     """Mutable counters used while building ``/processes/summary``."""
@@ -837,6 +867,9 @@ async def list_configured_processes(
                 wallet_public_id=None,
                 parent_template=None,
                 coordinator=coordinator,
+                coordinator_label=_coordinator_label(
+                    factory, cache, coordinator, managed_remotely=managed_remotely
+                ),
                 managed_remotely=managed_remotely,
             )
         )
@@ -873,6 +906,9 @@ async def list_configured_processes(
                 wallet_public_id=wallet_id,
                 parent_template=parent_template_for_instance(instance_name),
                 coordinator=coordinator,
+                coordinator_label=_coordinator_label(
+                    factory, cache, coordinator, managed_remotely=managed_remotely
+                ),
                 managed_remotely=managed_remotely,
             )
         )
@@ -926,6 +962,7 @@ async def get_process_summary(
         public_id=str(uuid7()),
         timestamp=ts,
         coordinator=factory.coordinator_topic_slug(),
+        coordinator_label=factory.coordinator_label(),
         processes=items,
         feeds=counters.feeds(),
         strategies=counters.strategies(),

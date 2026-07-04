@@ -2485,6 +2485,29 @@ class TestEmitHelpersWithPublisher:
         valid, err = validate_topic(f"strategies.events.list.{slug}")
         assert valid, err
 
+    def test_coordinator_label_surfaces_settings_label(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """``coordinator_label()`` returns the settings-derived container label.
+
+        Given: A launcher whose ``settings.coordinator_label`` is ``"Feed"``,
+        When: ``coordinator_label()`` is called,
+        Then: It returns ``"Feed"`` (emitted alongside the slug on the snapshot).
+        """
+        launcher.settings = SimpleNamespace(coordinator_label="Feed")
+        assert launcher.coordinator_label() == "Feed"
+
+    def test_coordinator_label_none_for_all_profile(self, launcher: ProcessLauncherService) -> None:
+        """``coordinator_label()`` is ``None`` when the settings label is ``None``.
+
+        Given: A launcher whose ``settings.coordinator_label`` is ``None`` (the
+            single-container ``ALL`` profile),
+        When: ``coordinator_label()`` is called,
+        Then: It returns ``None`` so consumers fall back to the raw slug.
+        """
+        launcher.settings = SimpleNamespace(coordinator_label=None)
+        assert launcher.coordinator_label() is None
+
     @pytest.mark.asyncio
     async def test_summary_emit_publishes_snapshot(
         self, launcher: ProcessLauncherService, monkeypatch: pytest.MonkeyPatch

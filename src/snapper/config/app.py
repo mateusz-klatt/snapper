@@ -168,6 +168,30 @@ class AppSettings:
         return self._bootstrap.process_autostart_profile
 
     @property
+    def coordinator_label(self) -> str | None:
+        """Human-readable container label for this coordinator, from its profile.
+
+        Maps the autostart profile to the operator-facing container name shown
+        wherever the raw ``coord-<id>`` slug appears in the UI (process cards'
+        "managed by" notice, the overview coordinator groups): ``API`` -> "API",
+        ``FEED`` -> "Feed", ``STRATEGY`` -> "Strategies". ``ALL`` (single-container
+        / dev) has no distinct role, so it returns ``None`` and the UI falls back
+        to the slug.
+
+        Returns:
+            The container label, or ``None`` for the ``ALL`` profile.
+        """
+        match self.process_autostart_profile:
+            case ProcessAutostartProfileEnum.API:
+                return "API"
+            case ProcessAutostartProfileEnum.FEED:
+                return "Feed"
+            case ProcessAutostartProfileEnum.STRATEGY:
+                return "Strategies"
+            case _:
+                return None
+
+    @property
     def server_proxy_headers(self) -> bool:
         """Return whether uvicorn should parse proxy headers.
 
