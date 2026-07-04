@@ -51,6 +51,20 @@ class TestBuildProcessConfigRestartPolicy:
         config = build_process_config_from_dict("proc", {"class": "a.B"}, None)
         assert config.restart_policy == ProcessRestartPolicyEnum.ON_FAILURE
 
+    def test_restart_nonce_from_config_dict(self) -> None:
+        """A restart_nonce present in the config dict is carried onto the model."""
+        config = build_process_config_from_dict(
+            "proc",
+            {"class": "a.B", "restart_nonce": "op-restart-1"},
+            None,
+        )
+        assert config.restart_nonce == "op-restart-1"
+
+    def test_restart_nonce_defaults_to_none(self) -> None:
+        """A config without restart_nonce yields None (never restarted via the control plane)."""
+        config = build_process_config_from_dict("proc", {"class": "a.B"}, None)
+        assert config.restart_nonce is None
+
     def test_restart_policy_inherited_from_entry(self) -> None:
         """When the config omits restart_policy, it is inherited from the registry entry."""
         entry = ProcessRegistryEntry(

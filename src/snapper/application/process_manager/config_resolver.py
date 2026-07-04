@@ -220,6 +220,7 @@ def build_process_config_from_dict(
         tags=resolve_tags(tags_raw),
         parameters_schema=resolve_parameters_schema(config_dict, entry),
         template=config_dict.get("template"),
+        restart_nonce=config_dict.get("restart_nonce"),
     )
 
 

@@ -2425,6 +2425,49 @@ async def test_start_process_by_name_keeps_tags_when_present(
 
 
 @pytest.mark.asyncio()
+async def test_start_process_by_name_preserves_restart_nonce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a persisted restart_nonce survives the start-by-name config build.
+
+    Given: A config carrying restart_nonce in its Setting JSON,
+    When: start_process_by_name rebuilds the ProcessConfigModel,
+    Then: restart_nonce reaches the model passed to start_process (and thus
+        the watchdog's ``_restart_configs``), so the reconcile loop's
+        last-applied nonce tracking is not silently reset — the P4-class
+        drop-bug guard on the manual-start path.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    mock_start = mock.AsyncMock()
+    cast(Any, factory).start_process = mock_start
+    config_dict = {
+        "enabled": True,
+        "mode": "thread",
+        "class": "tests.application.process_manager.test_process_launcher.SyncProcess",
+        "parameters": {},
+        "restart_nonce": "op-restart-777",
+    }
+    setting = Setting(
+        key="process_noncey",
+        value=json.dumps(config_dict),
+        session_id="test-session",
+        sequence_id=1,
+    )
+    repo = _DummyRepository(setting)
+    monkeypatch.setattr(
+        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
+    )
+    monkeypatch.setattr(
+        "snapper.application.process_manager.launcher.get_registered_processes", lambda: {}
+    )
+    result = await factory.start_process_by_name("noncey")
+    assert result.status == "success"
+    call_config = mock_start.call_args[0][0]
+    assert call_config.restart_nonce == "op-restart-777"
+
+
+@pytest.mark.asyncio()
 async def test_stop_process_by_name_not_running() -> None:
     """Verify not_running status for process not in started_processes.
 

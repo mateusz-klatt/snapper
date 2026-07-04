@@ -173,6 +173,12 @@ class ProcessConfigModel:
             (None for registry-native configs). Lets class resolution
             fall back to the template's registry class when the stored
             class_path is a function-local (unimportable) wrapper.
+        restart_nonce: Operator restart generation token (a client-minted
+            uuid) persisted in the config JSON. The desired-state reconcile
+            loop bounces (stop+start) a process when this differs from the
+            nonce it last applied, so an operator restart survives retries
+            and coordinator restarts idempotently. None for a config that
+            has never been restarted through the control plane.
     """
 
     name: str
@@ -188,6 +194,7 @@ class ProcessConfigModel:
     tags: tuple[str, ...] = ()
     parameters_schema: JsonObject | None = None
     template: str | None = None
+    restart_nonce: str | None = None
 
 
 @dataclass

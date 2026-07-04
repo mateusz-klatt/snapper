@@ -26,6 +26,7 @@ from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
@@ -1760,6 +1761,132 @@ class TestCreateProcessConfig:
             mock_session.commit.assert_called_once()
 
 
+class TestUpdateProcessConfig:
+    """Tests for update_process_config (desired-state PATCH DAL)."""
+
+    @staticmethod
+    def _mock_repo_with_existing(existing: object) -> tuple[MagicMock, MagicMock]:
+        """Build a mocked repository whose active-row query returns ``existing``.
+
+        Args:
+            existing: The Setting the active-now query resolves to (or None).
+
+        Returns:
+            A ``(mock_get_repo_value, mock_session)`` pair.
+        """
+        mock_repo = MagicMock()
+        mock_session = MagicMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = existing
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock()
+        mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_repo.session.return_value.__aexit__ = AsyncMock(return_value=False)
+        return mock_repo, mock_session
+
+    @staticmethod
+    def _existing_setting(value: JsonObject) -> MagicMock:
+        """Return a mock Setting whose JSON value is ``value``.
+
+        Args:
+            value: The config dict serialised into the Setting value.
+
+        Returns:
+            A mock Setting with category/description/is_encrypted set.
+        """
+        existing = MagicMock()
+        existing.value = json.dumps(value)
+        existing.category = "process"
+        existing.description = None
+        existing.is_encrypted = False
+        return existing
+
+    @pytest.mark.asyncio
+    async def test_update_flips_enabled_preserving_other_keys(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Flipping enabled rewrites only that key; other JSON keys round-trip.
+
+        Given: an active config with enabled=True and extra parameters,
+        When: update_process_config(enabled=False) is called,
+        Then: close_and_insert persists enabled=False with parameters intact,
+            no restart_nonce added, and the operator principal stamped.
+        """
+        existing = self._existing_setting(
+            {"class": "a.B", "enabled": True, "mode": "thread", "parameters": {"k": "v"}}
+        )
+        mock_repo, mock_session = self._mock_repo_with_existing(existing)
+        with (
+            patch(
+                "snapper.application.process_manager.registry_syncer.get_repository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "snapper.application.process_manager.registry_syncer.close_and_insert",
+                new_callable=AsyncMock,
+            ) as mock_cai,
+        ):
+            await launcher._registry_syncer.update_process_config(
+                name="p", enabled=False, updated_by="alice"
+            )
+        await_args = mock_cai.await_args
+        assert await_args is not None
+        written = json.loads(await_args.kwargs["new_values"]["value"])
+        assert written["enabled"] is False
+        assert written["parameters"] == {"k": "v"}
+        assert "restart_nonce" not in written
+        assert await_args.kwargs["new_values"]["updated_by"] == "alice"
+        mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_update_sets_restart_nonce_leaving_enabled_untouched(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Setting only the restart nonce leaves enabled at its stored value.
+
+        Given: an active config with enabled=True,
+        When: update_process_config(restart_nonce='n1') is called (enabled=None),
+        Then: restart_nonce is written and enabled stays True (unchanged).
+        """
+        existing = self._existing_setting({"class": "a.B", "enabled": True, "parameters": {}})
+        mock_repo, _ = self._mock_repo_with_existing(existing)
+        with (
+            patch(
+                "snapper.application.process_manager.registry_syncer.get_repository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "snapper.application.process_manager.registry_syncer.close_and_insert",
+                new_callable=AsyncMock,
+            ) as mock_cai,
+        ):
+            await launcher._registry_syncer.update_process_config(
+                name="p", restart_nonce="n1", updated_by="bob"
+            )
+        await_args = mock_cai.await_args
+        assert await_args is not None
+        written = json.loads(await_args.kwargs["new_values"]["value"])
+        assert written["restart_nonce"] == "n1"
+        assert written["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_update_raises_keyerror_when_config_absent(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A missing active config raises KeyError (the REST layer maps to 404)."""
+        mock_repo, _ = self._mock_repo_with_existing(None)
+        with (
+            patch(
+                "snapper.application.process_manager.registry_syncer.get_repository",
+                return_value=mock_repo,
+            ),
+            pytest.raises(KeyError),
+        ):
+            await launcher._registry_syncer.update_process_config(
+                name="ghost", enabled=True, updated_by="alice"
+            )
+
+
 class TestHandleProcessCompletion:
     """Tests for _handle_process_completion method."""
 
@@ -2974,6 +3101,46 @@ class TestEmitSitesIntegration:
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
             tags=(),
+        )
+        topics = [topic for topic, _ in publisher.sent]
+        assert any(t.startswith("processes.events.configured.") for t in topics)
+        assert any(t.startswith("processes.events.summary.") for t in topics)
+        assert not any(t.startswith("strategies.events.list.") for t in topics)
+
+    @pytest.mark.asyncio
+    async def test_update_process_config_emits_configured_summary_and_strategy(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """`update_process_config(is_strategy=True)` emits configured + summary + strategy-list.
+
+        The desired-state PATCH must refresh the same snapshots as create so
+        the UI reflects an enable/disable/restart without polling.
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher._registry_syncer.update_process_config = AsyncMock()
+        launcher.get_process_configs = AsyncMock(return_value=[])
+
+        await launcher.update_process_config(
+            name="momentum", enabled=False, updated_by="op", is_strategy=True
+        )
+        topics = [topic for topic, _ in publisher.sent]
+        assert any(t.startswith("processes.events.configured.") for t in topics)
+        assert any(t.startswith("processes.events.summary.") for t in topics)
+        assert any(t.startswith("strategies.events.list.") for t in topics)
+
+    @pytest.mark.asyncio
+    async def test_update_process_config_non_strategy_skips_strategy_emit(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A non-strategy update emits configured + summary but not the strategy list."""
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher._registry_syncer.update_process_config = AsyncMock()
+        launcher.get_process_configs = AsyncMock(return_value=[])
+
+        await launcher.update_process_config(
+            name="kraken_feed_publisher", restart_nonce="n1", updated_by="op"
         )
         topics = [topic for topic, _ in publisher.sent]
         assert any(t.startswith("processes.events.configured.") for t in topics)

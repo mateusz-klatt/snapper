@@ -390,3 +390,68 @@ class ProcessRegistrySyncer:
             )
             session.add(setting)
             await session.commit()
+
+    async def update_process_config(
+        self,
+        *,
+        name: str,
+        enabled: bool | None = None,
+        restart_nonce: str | None = None,
+        updated_by: str,
+    ) -> None:
+        """Mutate the desired-state fields of an existing process config.
+
+        Loads the active ``process_<name>`` Setting and persists a new
+        bitemporal version via close-and-insert (the SCD-2 UPDATE path —
+        NOT the INSERT-only :meth:`create_process_config`, which 409s on an
+        existing key). Only ``enabled`` and/or ``restart_nonce`` are
+        mutated; the rest of the config JSON round-trips untouched, so
+        registry-synced fields and any unknown keys survive. Writing the
+        same value again is a harmless identical version (idempotency is
+        enforced downstream by the reconcile loop, which no-ops when the
+        nonce equals the one it last applied).
+
+        Args:
+            name: Process name whose desired state to mutate.
+            enabled: New enabled flag, or None to leave it unchanged.
+            restart_nonce: New restart generation token (a client-minted
+                uuid), or None to leave it unchanged. A changed nonce makes
+                the reconcile loop bounce the process.
+            updated_by: Principal recorded in the temporal audit trail so
+                operator edits are distinguishable from ``sync_registry``.
+
+        Raises:
+            KeyError: If no active config exists for ``name`` (the REST
+                layer maps this to 404).
+        """
+        repository = get_repository(self.settings.db_url)
+        config_key = f"process_{name}"
+        async with repository.session() as session:
+            result = await session.execute(
+                select(Setting).where(Setting.key == config_key, *where_active_now(Setting))
+            )
+            existing = result.scalar_one_or_none()
+            if existing is None:
+                raise KeyError(f"Process '{name}' is not configured")
+            config_dict = json.loads(existing.value)
+            if enabled is not None:
+                config_dict["enabled"] = enabled
+            if restart_nonce is not None:
+                config_dict["restart_nonce"] = restart_nonce
+            await close_and_insert(
+                session=session,
+                model=Setting,
+                match_filters=[Setting.key == config_key],
+                new_values={
+                    "key": config_key,
+                    "value": json.dumps(config_dict, indent=4),
+                    "category": existing.category,
+                    "description": existing.description,
+                    "is_encrypted": existing.is_encrypted,
+                    "updated_by": updated_by,
+                    "session_id": self._tracker.session_id,
+                    "sequence_id": self._tracker.next_sequence(_SETTINGS_TOPIC),
+                },
+                bus_time=datetime.now(UTC),
+            )
+            await session.commit()

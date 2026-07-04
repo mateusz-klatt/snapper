@@ -262,6 +262,7 @@ def _copy_process_config_with_mode(
         tags=config.tags,
         parameters_schema=config.parameters_schema,
         template=config.template,
+        restart_nonce=config.restart_nonce,
     )
 
 
@@ -291,6 +292,7 @@ def _copy_process_config_with_parameters(
         tags=config.tags,
         parameters_schema=config.parameters_schema,
         template=config.template,
+        restart_nonce=config.restart_nonce,
     )
 
 
@@ -1458,6 +1460,12 @@ class ProcessLauncherService:
            ``enabled = True`` (templates are config-only, never runnable),
            ``parameters["wallet_public_id"] = wallet_public_id`` (any
            template-side leak of the same key is stripped first).
+
+        ``restart_nonce`` is INTENTIONALLY not carried onto per-wallet
+        instances: they have no ``process_<name>`` Setting row and are
+        never desired-state reconcile targets (the control-plane PATCH
+        rejects them), so a synthesized instance is always ``None`` — it
+        has never been restarted through the control plane.
 
         Args:
             exchange: Exchange identifier (e.g. ``kraken``, ``paper``).
@@ -2779,6 +2787,7 @@ class ProcessLauncherService:
             tags=tags_tuple,
             parameters_schema=parameters_schema,
             template=config_dict.get("template"),
+            restart_nonce=config_dict.get("restart_nonce"),
         )
 
     async def _handle_manual_start_stop_race(self, name: str) -> ProcessStartResult | None:
@@ -3466,4 +3475,48 @@ class ProcessLauncherService:
         await self._emit_configured_snapshot()
         await self._emit_summary_snapshot()
         if role is ProcessRoleEnum.STRATEGY:
+            await self._emit_strategy_list_snapshot()
+
+    async def update_process_config(
+        self,
+        *,
+        name: str,
+        enabled: bool | None = None,
+        restart_nonce: str | None = None,
+        updated_by: str,
+        is_strategy: bool = False,
+    ) -> None:
+        """Mutate a process's DB desired-state (enabled / restart nonce).
+
+        Delegates to the registry syncer's bitemporal update, then emits a
+        ``processes.events.configured`` snapshot (and a
+        ``strategies.events.list`` snapshot when ``is_strategy``) so
+        subscribers refresh without polling. This persists DESIRED state
+        only; the owning coordinator's reconcile loop converges the
+        actually-running process — this method never starts or stops
+        anything locally, so it is safe to call on the API node for a
+        remotely-owned process.
+
+        Args:
+            name: Process name whose desired state to mutate.
+            enabled: New enabled flag, or None to leave it unchanged.
+            restart_nonce: New restart generation token, or None to leave
+                it unchanged.
+            updated_by: Principal recorded in the temporal audit trail.
+            is_strategy: Whether the target carries the STRATEGY role, so
+                the strategy-list snapshot is refreshed too.
+
+        Raises:
+            KeyError: If no active config exists for ``name`` (mapped to
+                404 by the REST layer).
+        """
+        await self._registry_syncer.update_process_config(
+            name=name,
+            enabled=enabled,
+            restart_nonce=restart_nonce,
+            updated_by=updated_by,
+        )
+        await self._emit_configured_snapshot()
+        await self._emit_summary_snapshot()
+        if is_strategy:
             await self._emit_strategy_list_snapshot()

@@ -149,6 +149,47 @@ class TestCopyHelpersPreserveTemplate:
         copied = _copy_process_config_with_mode(config, ProcessModeEnum.PROCESS)
         assert copied.template == "strategy_heartbeat_consult_btc_1h"
 
+    def test_parameter_copy_preserves_restart_nonce(self) -> None:
+        """Verify the wallet-scope parameter copy keeps the restart nonce.
+
+        Given: A config carrying an operator restart nonce,
+        When: The parameters-replacing copy runs,
+        Then: restart_nonce survives — else a reconcile-driven restart of a
+            per-wallet-scoped process would be silently dropped.
+        """
+        config = ProcessConfigModel(
+            name="strategy_heartbeat_e2e",
+            enabled=True,
+            mode="thread",
+            class_path=_LOCALS_PATH,
+            method="start",
+            parameters={},
+            restart_nonce="op-restart-abc",
+        )
+        copied = _copy_process_config_with_parameters(config, {"wallet_public_id": "w"})
+        assert copied.restart_nonce == "op-restart-abc"
+
+    def test_mode_copy_preserves_restart_nonce(self) -> None:
+        """Verify the PROCESS-mode force copy keeps the restart nonce.
+
+        Given: A publisher config forced to PROCESS mode with a restart nonce,
+        When: The mode-replacing copy runs,
+        Then: restart_nonce survives — the feed reconcile forces PROCESS mode
+            via this copy, so a dropped nonce would lose an operator restart
+            of a publisher.
+        """
+        config = ProcessConfigModel(
+            name="kraken_feed_publisher",
+            enabled=True,
+            mode="thread",
+            class_path=_LOCALS_PATH,
+            method="start",
+            parameters={},
+            restart_nonce="op-restart-xyz",
+        )
+        copied = _copy_process_config_with_mode(config, ProcessModeEnum.PROCESS)
+        assert copied.restart_nonce == "op-restart-xyz"
+
 
 class TestSpawnerTemplateSupport:
     """Spawner validation and command building carry the template."""
