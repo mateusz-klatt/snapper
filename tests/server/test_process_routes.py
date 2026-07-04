@@ -277,6 +277,7 @@ class TestCrossCoordinatorOwnership:
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         cache = MagicMock()
         cache.lookup = MagicMock(return_value=(False, None))
+        cache.has_fresh_snapshot = MagicMock(return_value=False)
         result = await list_configured_processes(
             request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
         )
@@ -284,6 +285,49 @@ class TestCrossCoordinatorOwnership:
         assert row.name == "zmq_broker"
         assert row.running is False
         assert row.managed_remotely is True
+        assert row.coordinator is None
+
+    @pytest.mark.asyncio
+    async def test_configured_broker_running_via_transitive_liveness(self) -> None:
+        """A live bus flips the configured broker row to running with no phantom owner.
+
+        The dedicated broker publishes no summary frame, so plain ownership
+        resolution reports it stopped and misattributes it to whichever
+        coordinator last listed it. When any coordinator's snapshot is fresh the
+        bus is demonstrably forwarding, so the #processes row must read running
+        (matching #overview) and carry coordinator=None rather than an incidental
+        coordinator slug.
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="zmq_broker",
+                    enabled=True,
+                    mode="thread",
+                    class_path="snapper.messaging.infrastructure.broker.ZmqBrokerProcess",
+                    method="start",
+                    parameters={},
+                    tags=("zmq", "broker", "infrastructure"),
+                )
+            ]
+        )
+        mock_factory.started_processes = {}
+        mock_factory.active_runs = {}
+        mock_factory.instance_configs = {}
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(False, "coord-2"))
+        cache.has_fresh_snapshot = MagicMock(return_value=True)
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
+        )
+        row = result.payload[0]
+        assert row.name == "zmq_broker"
+        assert row.running is True
+        assert row.managed_remotely is True
+        assert row.coordinator is None
 
     @pytest.mark.asyncio
     async def test_configured_external_strategy_is_managed_remotely(self) -> None:

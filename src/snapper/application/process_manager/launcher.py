@@ -1268,7 +1268,7 @@ class ProcessLauncherService:
                 await self.start_process(process_config)
                 self._record_applied_nonce(process_config)
                 started_count += 1
-            except (StrategyScopeError, WalletAmbiguousError, WalletUnresolvedError):
+            except StrategyScopeError, WalletAmbiguousError, WalletUnresolvedError:
                 logger.warning(
                     "strategy {} not started: wallet unresolved/ambiguous; set wallet_public_id",
                     config.name,
@@ -2098,7 +2098,7 @@ class ProcessLauncherService:
                     self._psutil_handles[name] = handle
                 cpu = handle.cpu_percent(interval=None)
                 rss = handle.memory_info().rss
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+            except psutil.NoSuchProcess, psutil.AccessDenied:
                 self._process_metrics[name] = (None, None)
                 self._psutil_handles.pop(name, None)
                 continue
@@ -2496,8 +2496,7 @@ class ProcessLauncherService:
         """
         if config.role is ProcessRoleEnum.CORE and is_market_data_publisher(config.tags):
             logger.error(
-                f"Publisher '{name}' exhausted its restart budget; "
-                f"escalating to container restart"
+                f"Publisher '{name}' exhausted its restart budget; escalating to container restart"
             )
             self._feed_failed_publisher = name
             self._feed_failure_event.set()
@@ -2993,6 +2992,120 @@ class ProcessLauncherService:
             restart_nonce=config_dict.get("restart_nonce"),
         )
 
+    async def _load_config_for_start_by_name(
+        self,
+        name: str,
+        mode: ProcessMode | None,
+        parameters: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], ProcessConfigModel] | ProcessStartResult:
+        """Load and resolve the persisted config used by ``start_process_by_name``."""
+        repository = get_repository(self.settings.db_url)
+        config_key = f"process_{name}"
+        async with repository.session() as session:
+            result = await session.execute(
+                select(Setting).where(Setting.key == config_key, *where_active_now(Setting))
+            )
+            setting = result.scalar_one_or_none()
+            if not setting:
+                return ProcessStartResult(
+                    status=StartProcessStatusEnum.ERROR,
+                    message=f"Process '{name}' not found in configuration",
+                )
+            config_dict = cast(dict[str, Any], json.loads(setting.value))
+            autostart_enabled = self._apply_overrides_to_config_dict(config_dict, mode, parameters)
+            config = self._build_config_for_start_by_name(name, config_dict, autostart_enabled)
+        return config_dict, config
+
+    def _reject_external_process_start(
+        self,
+        name: str,
+        config: ProcessConfigModel,
+        config_dict: dict[str, Any],
+    ) -> ProcessStartResult | None:
+        """Reject local starts for processes owned by another container."""
+        raw_tags = tuple(config_dict.get("tags") or ())
+        if getattr(self.settings, "zmq_broker_embedded", True) is False and (
+            is_zmq_broker(config.tags) or is_zmq_broker(raw_tags)
+        ):
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=(
+                    f"Process '{name}' is owned by the dedicated broker container "
+                    "(ZMQ_BROKER_EMBEDDED=false) — starting a local duplicate would "
+                    "bind a second bus; manage it via docker instead"
+                ),
+            )
+        raw_role = str(config_dict.get("role") or "")
+        if getattr(self.settings, "strategies_embedded", True) is False and (
+            config.role is ProcessRoleEnum.STRATEGY or raw_role == ProcessRoleEnum.STRATEGY.value
+        ):
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=(
+                    f"Process '{name}' is owned by the strategies container "
+                    "(STRATEGIES_EMBEDDED=false) — starting a local duplicate would "
+                    "run the strategy twice; manage it via the strategies container"
+                ),
+            )
+        if getattr(
+            self.settings, "process_autostart_profile", ProcessAutostartProfileEnum.ALL
+        ) is ProcessAutostartProfileEnum.API and (
+            is_market_data_publisher(config.tags) or is_market_data_publisher(raw_tags)
+        ):
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=(
+                    f"Process '{name}' is a market-data publisher owned by the feed "
+                    "container (API autostart profile) — starting a local duplicate "
+                    "would open a second exchange connection; manage it via the feed "
+                    "container"
+                ),
+            )
+        return None
+
+    async def _start_loaded_process_by_name(
+        self,
+        name: str,
+        config: ProcessConfigModel,
+    ) -> ProcessStartResult:
+        """Start a resolved process config under the per-process restart lock."""
+        was_watchdog_managed = name in self._desired_state
+        await self._cancel_pending_restart(name)
+        try:
+            async with self._restart_lock_for(name):
+                running_result = self._already_running_start_result(name)
+                if running_result is not None:
+                    return running_result
+                self._arm_desired_running(name)
+                await self.start_process(config)
+                stopped_result = await self._handle_manual_start_stop_race(name)
+                if stopped_result is not None:
+                    return stopped_result
+        except Exception as exc:
+            if was_watchdog_managed:
+                self._rearm_recovery_after_manual_start_failure(name)
+            else:
+                self._clear_watchdog_state(name)
+            logger.error(f"Failed to start process '{name}': {exc}")
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=f"Failed to start process '{name}': {exc}",
+            )
+        self._start_native_process_monitoring()
+        public_id = self.active_runs.get(name)
+        if config.lifecycle is ProcessLifecycleEnum.ONE_SHOT:
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.SUCCESS,
+                message=f"Process '{name}' executed successfully",
+                public_id=public_id,
+            )
+        logger.info(f"Process '{name}' started successfully")
+        return ProcessStartResult(
+            status=StartProcessStatusEnum.SUCCESS,
+            message=f"Process '{name}' started successfully",
+            public_id=public_id,
+        )
+
     async def _handle_manual_start_stop_race(self, name: str) -> ProcessStartResult | None:
         """Tear down a just-started process when a stop won the race.
 
@@ -3291,105 +3404,17 @@ class ProcessLauncherService:
                     f"'{name}_w<wallet_short>' for a specific wallet"
                 ),
             )
-        if name in self.started_processes:
-            logger.warning(f"Process '{name}' is already running")
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.ALREADY_RUNNING,
-                message=f"Process '{name}' is already running",
-            )
-        repository = get_repository(self.settings.db_url)
-        config_key = f"process_{name}"
-        config_dict: dict[str, Any] = {}
-        async with repository.session() as session:
-            result = await session.execute(
-                select(Setting).where(Setting.key == config_key, *where_active_now(Setting))
-            )
-            setting = result.scalar_one_or_none()
-            if not setting:
-                return ProcessStartResult(
-                    status=StartProcessStatusEnum.ERROR,
-                    message=f"Process '{name}' not found in configuration",
-                )
-            config_dict = json.loads(setting.value)
-            autostart_enabled = self._apply_overrides_to_config_dict(config_dict, mode, parameters)
-            config = self._build_config_for_start_by_name(name, config_dict, autostart_enabled)
-        raw_tags = tuple(config_dict.get("tags") or ())
-        if getattr(self.settings, "zmq_broker_embedded", True) is False and (
-            is_zmq_broker(config.tags) or is_zmq_broker(raw_tags)
-        ):
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.ERROR,
-                message=(
-                    f"Process '{name}' is owned by the dedicated broker container "
-                    "(ZMQ_BROKER_EMBEDDED=false) — starting a local duplicate would "
-                    "bind a second bus; manage it via docker instead"
-                ),
-            )
-        raw_role = str(config_dict.get("role") or "")
-        if getattr(self.settings, "strategies_embedded", True) is False and (
-            config.role is ProcessRoleEnum.STRATEGY or raw_role == ProcessRoleEnum.STRATEGY.value
-        ):
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.ERROR,
-                message=(
-                    f"Process '{name}' is owned by the strategies container "
-                    "(STRATEGIES_EMBEDDED=false) — starting a local duplicate would "
-                    "run the strategy twice; manage it via the strategies container"
-                ),
-            )
-        if getattr(
-            self.settings, "process_autostart_profile", ProcessAutostartProfileEnum.ALL
-        ) is ProcessAutostartProfileEnum.API and (
-            is_market_data_publisher(config.tags) or is_market_data_publisher(raw_tags)
-        ):
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.ERROR,
-                message=(
-                    f"Process '{name}' is a market-data publisher owned by the feed "
-                    "container (API autostart profile) — starting a local duplicate "
-                    "would open a second exchange connection; manage it via the feed "
-                    "container"
-                ),
-            )
-        was_watchdog_managed = name in self._desired_state
-        await self._cancel_pending_restart(name)
-        try:
-            async with self._restart_lock_for(name):
-                if name in self.started_processes:
-                    logger.warning(f"Process '{name}' is already running")
-                    return ProcessStartResult(
-                        status=StartProcessStatusEnum.ALREADY_RUNNING,
-                        message=f"Process '{name}' is already running",
-                    )
-                self._arm_desired_running(name)
-                await self.start_process(config)
-                stopped_result = await self._handle_manual_start_stop_race(name)
-                if stopped_result is not None:
-                    return stopped_result
-        except Exception as e:
-            if was_watchdog_managed:
-                self._rearm_recovery_after_manual_start_failure(name)
-            else:
-                self._clear_watchdog_state(name)
-            logger.error(f"Failed to start process '{name}': {e}")
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.ERROR,
-                message=f"Failed to start process '{name}': {str(e)}",
-            )
-        self._start_native_process_monitoring()
-        public_id = self.active_runs.get(name)
-        if config.lifecycle is ProcessLifecycleEnum.ONE_SHOT:
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.SUCCESS,
-                message=f"Process '{name}' executed successfully",
-                public_id=public_id,
-            )
-        logger.info(f"Process '{name}' started successfully")
-        return ProcessStartResult(
-            status=StartProcessStatusEnum.SUCCESS,
-            message=f"Process '{name}' started successfully",
-            public_id=public_id,
-        )
+        running_result = self._already_running_start_result(name)
+        if running_result is not None:
+            return running_result
+        loaded = await self._load_config_for_start_by_name(name, mode, parameters)
+        if isinstance(loaded, ProcessStartResult):
+            return loaded
+        config_dict, config = loaded
+        external_result = self._reject_external_process_start(name, config, config_dict)
+        if external_result is not None:
+            return external_result
+        return await self._start_loaded_process_by_name(name, config)
 
     async def _cancel_pending_restart(self, name: str) -> None:
         """Cancel and join every pending delayed-restart task for ``name``.

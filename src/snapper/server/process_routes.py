@@ -29,6 +29,9 @@ Example:
 """
 
 import json
+from collections.abc import Container
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from typing import Annotated
@@ -124,6 +127,13 @@ _PROCESS_START_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"description": "Invalid process request"},
     403: {"description": "Process scope denied"},
     422: {"description": "Bare executor template — start a per-wallet instance instead"},
+}
+_PROCESS_DESIRED_STATE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"description": "Invalid process request"},
+    403: {"description": "Process scope denied"},
+    404: {"description": "Process desired-state target not found"},
+    409: {"description": "Process state conflict"},
+    422: {"description": "Invalid desired-state action request"},
 }
 _resolve_role_for_class_path = resolve_role_for_class_path
 _enforce_wallet_grant_exists = enforce_wallet_grant_exists
@@ -320,6 +330,154 @@ def _broker_running(local_running: bool, cache: RemoteSummaryCache | None) -> bo
     if local_running:
         return True
     return cache is not None and cache.has_fresh_snapshot()
+
+
+def _resolve_configured_ownership(
+    factory: ProcessLauncherService,
+    cache: RemoteSummaryCache | None,
+    config: ProcessConfigModel,
+    *,
+    local_running: bool,
+) -> tuple[bool, str | None, bool]:
+    """Resolve ``(running, coordinator, managed_remotely)`` for a configured row.
+
+    Identical to :func:`_resolve_ownership` for ordinary processes, but the
+    dedicated broker is infrastructure: it runs in the standalone
+    ``snapper-broker`` container under no coordinator, so plain ownership
+    resolution reports it ``stopped`` (no coordinator publishes a summary frame
+    claiming it) AND misattributes it to whichever coordinator most recently
+    listed it in a snapshot — the incidental ``coord-2`` the operator saw. This
+    override gives the broker the transitive-liveness running-state used by
+    ``/processes/summary`` and clears the phantom owner (``coordinator=None``)
+    so the UI never frames it as controllable by an arbitrary coordinator.
+
+    Args:
+        factory: The local process launcher service.
+        cache: Cross-coordinator summary cache, or ``None`` when absent.
+        config: The process configuration under consideration.
+        local_running: Whether this node's launcher tracks the process.
+
+    Returns:
+        Tuple ``(running, coordinator, managed_remotely)``.
+    """
+    running, coordinator, managed_remotely = _resolve_ownership(
+        factory, cache, config, local_running=local_running
+    )
+    if config.name == "zmq_broker":
+        return _broker_running(local_running, cache), None, managed_remotely
+    return running, coordinator, managed_remotely
+
+
+@dataclass(slots=True)
+class _ProcessSummaryCounters:
+    """Mutable counters used while building ``/processes/summary``."""
+
+    feeds_total: int = 0
+    feeds_running: int = 0
+    strategies_total: int = 0
+    strategies_running: int = 0
+    executors_total: int = 0
+    executors_running: int = 0
+    brokers_total: int = 0
+    brokers_running: int = 0
+
+    def feeds(self) -> ProcessCategoryCount:
+        """Return the feed category response count."""
+        return ProcessCategoryCount(running=self.feeds_running, total=self.feeds_total)
+
+    def strategies(self) -> ProcessCategoryCount:
+        """Return the strategy category response count."""
+        return ProcessCategoryCount(
+            running=self.strategies_running,
+            total=self.strategies_total,
+        )
+
+    def executors(self) -> ProcessCategoryCount:
+        """Return the executor category response count."""
+        return ProcessCategoryCount(running=self.executors_running, total=self.executors_total)
+
+    def brokers(self) -> ProcessCategoryCount:
+        """Return the broker category response count."""
+        return ProcessCategoryCount(running=self.brokers_running, total=self.brokers_total)
+
+
+def _count_configured_process(
+    counters: _ProcessSummaryCounters,
+    factory: ProcessLauncherService,
+    cache: RemoteSummaryCache | None,
+    config: ProcessConfigModel,
+    running_names: Container[str],
+) -> None:
+    """Fold one configured process into the category counters."""
+    is_running, _coordinator, _managed_remotely = _resolve_ownership(
+        factory, cache, config, local_running=config.name in running_names
+    )
+    if "feed_publisher" in config.name:
+        counters.feeds_total += 1
+        counters.feeds_running += int(is_running)
+    elif config.role is ProcessRoleEnum.STRATEGY:
+        counters.strategies_total += 1
+        counters.strategies_running += int(is_running)
+    elif is_executor_template(config.name):
+        return
+    elif config.name == "zmq_broker":
+        counters.brokers_total += 1
+        counters.brokers_running += int(_broker_running(config.name in running_names, cache))
+
+
+def _build_process_summary_counts(
+    factory: ProcessLauncherService,
+    cache: RemoteSummaryCache | None,
+    configs: Sequence[ProcessConfigModel],
+    running_names: Container[str],
+) -> _ProcessSummaryCounters:
+    """Count process categories for the lightweight summary payload."""
+    counters = _ProcessSummaryCounters()
+    for config in configs:
+        _count_configured_process(counters, factory, cache, config, running_names)
+    for instance_name in factory.instance_configs:
+        if is_executor_instance(instance_name):
+            counters.executors_total += 1
+            counters.executors_running += int(instance_name in running_names)
+    return counters
+
+
+def _summary_config_by_name(
+    configs: Sequence[ProcessConfigModel],
+    instance_configs: dict[str, ProcessConfigModel],
+) -> dict[str, ProcessConfigModel]:
+    """Index configured and synthesized instance configs by process name."""
+    config_by_name: dict[str, ProcessConfigModel] = {config.name: config for config in configs}
+    for instance_name, instance_config in instance_configs.items():
+        config_by_name.setdefault(instance_name, instance_config)
+    return config_by_name
+
+
+def _union_process_summary_items(
+    factory: ProcessLauncherService,
+    cache: RemoteSummaryCache | None,
+    configs: Sequence[ProcessConfigModel],
+    local_items: Sequence[ProcessSummaryItem],
+) -> list[ProcessSummaryItem]:
+    """Union local per-process rows with remote running-state."""
+    config_by_name = _summary_config_by_name(configs, factory.instance_configs)
+    items: list[ProcessSummaryItem] = []
+    for item in local_items:
+        row_config = config_by_name.get(item.name)
+        if row_config is None:
+            items.append(item)
+            continue
+        unioned_running, _coordinator, _managed_remotely = _resolve_ownership(
+            factory, cache, row_config, local_running=item.running
+        )
+        if item.name == "zmq_broker":
+            unioned_running = _broker_running(item.running, cache)
+        items.append(
+            item
+            if unioned_running == item.running
+            else item.model_copy(update={"running": unioned_running})
+        )
+    return items
 
 
 def get_repository_for_processes() -> Repository:
@@ -651,7 +809,7 @@ async def list_configured_processes(
         is_template_row = is_executor_template(config.name)
         kind: Literal["template", "instance"] = "template" if is_template_row else "instance"
         local_running = False if is_template_row else config.name in factory.started_processes
-        running, coordinator, managed_remotely = _resolve_ownership(
+        running, coordinator, managed_remotely = _resolve_configured_ownership(
             factory, cache, config, local_running=local_running
         )
         active_public_id = None if is_template_row else factory.active_runs.get(config.name)
@@ -758,56 +916,9 @@ async def get_process_summary(
     configs = await factory.get_process_configs()
     running = factory.started_processes
 
-    feeds_total = 0
-    feeds_running = 0
-    strategies_total = 0
-    strategies_running = 0
-    executors_total = 0
-    executors_running = 0
-    brokers_total = 0
-    brokers_running = 0
-
-    for config in configs:
-        is_running, _coordinator, _managed_remotely = _resolve_ownership(
-            factory, cache, config, local_running=config.name in running
-        )
-        if "feed_publisher" in config.name:
-            feeds_total += 1
-            feeds_running += int(is_running)
-        elif config.role is ProcessRoleEnum.STRATEGY:
-            strategies_total += 1
-            strategies_running += int(is_running)
-        elif is_executor_template(config.name):
-            continue
-        elif config.name == "zmq_broker":
-            brokers_total += 1
-            brokers_running += int(_broker_running(config.name in running, cache))
-    for instance_name in factory.instance_configs:
-        if not is_executor_instance(instance_name):
-            continue
-        executors_total += 1
-        executors_running += int(instance_name in running)
-
+    counters = _build_process_summary_counts(factory, cache, configs, running)
     local_items = await factory.build_process_summary_items()
-    config_by_name: dict[str, ProcessConfigModel] = {config.name: config for config in configs}
-    for instance_name, instance_config in factory.instance_configs.items():
-        config_by_name.setdefault(instance_name, instance_config)
-    items: list[ProcessSummaryItem] = []
-    for item in local_items:
-        row_config = config_by_name.get(item.name)
-        if row_config is None:
-            items.append(item)
-            continue
-        unioned_running, _coordinator, _managed_remotely = _resolve_ownership(
-            factory, cache, row_config, local_running=item.running
-        )
-        if item.name == "zmq_broker":
-            unioned_running = _broker_running(item.running, cache)
-        items.append(
-            item
-            if unioned_running == item.running
-            else item.model_copy(update={"running": unioned_running})
-        )
+    items = _union_process_summary_items(factory, cache, configs, local_items)
     sid, seq, pid, ts = _mint_provenance(request)
     data = ProcessSummaryData(
         session_id=sid,
@@ -816,22 +927,10 @@ async def get_process_summary(
         timestamp=ts,
         coordinator=factory.coordinator_topic_slug(),
         processes=items,
-        feeds=ProcessCategoryCount(
-            running=feeds_running,
-            total=feeds_total,
-        ),
-        strategies=ProcessCategoryCount(
-            running=strategies_running,
-            total=strategies_total,
-        ),
-        executors=ProcessCategoryCount(
-            running=executors_running,
-            total=executors_total,
-        ),
-        brokers=ProcessCategoryCount(
-            running=brokers_running,
-            total=brokers_total,
-        ),
+        feeds=counters.feeds(),
+        strategies=counters.strategies(),
+        executors=counters.executors(),
+        brokers=counters.brokers(),
     )
     return ProcessSummaryResponse(
         session_id=sid,
@@ -1087,6 +1186,7 @@ async def stop_process(
 @router.patch(
     "/{name}/desired-state",
     openapi_extra=openapi_schema(ProcessDesiredStateRequest),
+    responses=_PROCESS_DESIRED_STATE_RESPONSES,
 )
 async def set_process_desired_state(
     http_request: Request,

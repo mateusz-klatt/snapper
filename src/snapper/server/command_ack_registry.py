@@ -130,7 +130,8 @@ class ProcessCommandAckRegistry:
                 publisher, command_id, coordinator, process_name, action, issued_by
             )
 
-            return await asyncio.wait_for(future, timeout)
+            async with asyncio.timeout(timeout):
+                return await future
         except TimeoutError:
             return None
         except Exception as exc:

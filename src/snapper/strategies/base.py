@@ -11,6 +11,7 @@ existing imports.
 import asyncio
 import contextlib
 import logging
+import math
 import time
 from abc import ABC
 from abc import abstractmethod
@@ -854,7 +855,7 @@ class BaseStrategy(ABC):
         if not self.reasserts_targets():
             return
         reasserted: set[str] = set()
-        for instrument, standing in list(self._target.items()):
+        for instrument, standing in self._target.copy().items():
             if instrument in signaled_this_bar or instrument in reasserted:
                 continue
             if not self.should_reassert_targets(instrument, candle):
@@ -862,7 +863,7 @@ class BaseStrategy(ABC):
             group = self._reassert_target_group(instrument, standing)
             repriced = [self._reprice_reassertion(sig) for sig in group]
             reasserted.update(sig.instrument for sig in repriced)
-            if all(sig.strength == 0.0 for sig in repriced):
+            if all(math.isclose(sig.strength, 0.0, abs_tol=1e-12) for sig in repriced):
                 for leg in repriced:
                     await self._emit_signal_group([leg], is_reassertion=True)
             else:
