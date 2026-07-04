@@ -14,6 +14,7 @@ from unittest.mock import patch as _patch
 import pytest
 from fastapi import HTTPException
 from fastapi import Request
+from pydantic import ValidationError
 
 from snapper.api.schemas.process import ProcessCategoryCount
 from snapper.api.schemas.process import ProcessCreateBody
@@ -2231,9 +2232,10 @@ class TestGetRepositoryForProcesses:
 
     def test_returns_repository(self) -> None:
         """Dependency wraps get_settings + get_repository."""
-        with patch("snapper.server.process_routes.get_settings") as mock_get_settings, patch(
-            "snapper.server.process_routes.get_repository"
-        ) as mock_get_repo:
+        with (
+            patch("snapper.server.process_routes.get_settings") as mock_get_settings,
+            patch("snapper.server.process_routes.get_repository") as mock_get_repo,
+        ):
             mock_get_settings.return_value = MagicMock(db_url="sqlite:///:memory:")
             mock_get_repo.return_value = MagicMock(name="repo")
             result = get_repository_for_processes()
@@ -2447,17 +2449,20 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.StratClass",
-                    "parameters": persisted_params,
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": persisted_params,
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=ProcessRoleEnum.STRATEGY,
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=ProcessRoleEnum.STRATEGY,
+            ),
         ):
             result = await start_process(
                 http_request=_make_rest_request(),
@@ -2502,20 +2507,22 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.StratClass",
-                    "parameters": persisted_params,
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": persisted_params,
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=ProcessRoleEnum.STRATEGY,
-        ), pytest.raises(
-            HTTPException
-        ) as exc_info:
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=ProcessRoleEnum.STRATEGY,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="strategy",
@@ -2551,20 +2558,22 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.StratClass",
-                    "parameters": persisted_params,
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": persisted_params,
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=ProcessRoleEnum.STRATEGY,
-        ), pytest.raises(
-            HTTPException
-        ) as exc_info:
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=ProcessRoleEnum.STRATEGY,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="strategy",
@@ -2604,21 +2613,23 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.ImportableButUnregistered",
-                    "parameters": persisted_params,
-                    "role": "strategy",
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.ImportableButUnregistered",
+                        "parameters": persisted_params,
+                        "role": "strategy",
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=None,
-        ), pytest.raises(
-            HTTPException
-        ) as exc_info:
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=None,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="strategy",
@@ -2658,21 +2669,23 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.StratClass",
-                    "parameters": persisted_params,
-                    "role": "core",
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": persisted_params,
+                        "role": "core",
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=ProcessRoleEnum.STRATEGY,
-        ), pytest.raises(
-            HTTPException
-        ) as exc_info:
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=ProcessRoleEnum.STRATEGY,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="strategy",
@@ -2706,17 +2719,20 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.BackfillClass",
-                    "parameters": {"exchange": "kraken"},
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.BackfillClass",
+                        "parameters": {"exchange": "kraken"},
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=None,
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=None,
+            ),
         ):
             await start_process(
                 http_request=_make_rest_request(),
@@ -2749,18 +2765,21 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.CoreClass",
-                    "parameters": "not-a-dict",
-                    "role": "core",
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.CoreClass",
+                        "parameters": "not-a-dict",
+                        "role": "core",
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=None,
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=None,
+            ),
         ):
             await start_process(
                 http_request=_make_rest_request(),
@@ -2796,16 +2815,19 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.StratClass",
-                    "parameters": persisted_params,
-                    "role": "bogus",
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": persisted_params,
+                        "role": "bogus",
+                    }
+                ),
             ),
-        ), pytest.raises(HTTPException) as exc_info:
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="strategy",
@@ -2840,20 +2862,22 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.ImportableButUnregistered",
-                    "parameters": persisted_params,
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.ImportableButUnregistered",
+                        "parameters": persisted_params,
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=None,
-        ), pytest.raises(
-            HTTPException
-        ) as exc_info:
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=None,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="strategy",
@@ -2891,21 +2915,23 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.ImportableButUnregistered",
-                    "parameters": persisted_params,
-                    "role": "core",
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.ImportableButUnregistered",
+                        "parameters": persisted_params,
+                        "role": "core",
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=None,
-        ), pytest.raises(
-            HTTPException
-        ) as exc_info:
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=None,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="strategy",
@@ -2944,20 +2970,22 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.StratClass",
-                    "parameters": persisted_params,
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": persisted_params,
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=ProcessRoleEnum.STRATEGY,
-        ), pytest.raises(
-            HTTPException
-        ) as exc_info:
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=ProcessRoleEnum.STRATEGY,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="strategy",
@@ -3000,18 +3028,21 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.StratClass",
-                    "parameters": persisted_params,
-                    "role": ProcessRoleEnum.STRATEGY,
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": persisted_params,
+                        "role": ProcessRoleEnum.STRATEGY,
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=None,
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=None,
+            ),
         ):
             await start_process(
                 http_request=_make_rest_request(),
@@ -3052,20 +3083,22 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.StratClass",
-                    "parameters": persisted_params,
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": persisted_params,
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=ProcessRoleEnum.STRATEGY,
-        ), pytest.raises(
-            HTTPException
-        ) as exc_info:
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=ProcessRoleEnum.STRATEGY,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="strategy",
@@ -3104,17 +3137,20 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.StratClass",
-                    "parameters": persisted_params,
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": persisted_params,
+                    }
+                ),
             ),
-        ), _patch(
-            "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
-            return_value=ProcessRoleEnum.STRATEGY,
+            _patch(
+                "snapper.application.process_manager.strategy_scope.resolve_role_for_class_path",
+                return_value=ProcessRoleEnum.STRATEGY,
+            ),
         ):
             await start_process(
                 http_request=_make_rest_request(),
@@ -3156,16 +3192,19 @@ class TestStartProcessScopeRecheck:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(mode=None, parameters=None),
         )
-        with _patch(
-            "snapper.server.process_routes._read_persisted_strategy_parameters",
-            new=AsyncMock(
-                return_value={
-                    "class_path": "snapper.fake.StratClass",
-                    "parameters": persisted_params,
-                    "role": "strategy",
-                }
+        with (
+            _patch(
+                "snapper.server.process_routes._read_persisted_strategy_parameters",
+                new=AsyncMock(
+                    return_value={
+                        "class_path": "snapper.fake.StratClass",
+                        "parameters": persisted_params,
+                        "role": "strategy",
+                    }
+                ),
             ),
-        ), pytest.raises(HTTPException) as exc_info:
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="strategy",
@@ -3518,10 +3557,13 @@ class TestResolveRoleForClassPathHit:
         mock_factory.start_process_by_name = AsyncMock(
             return_value=ProcessStartResult(status="success", message="ok")
         )
-        with _patch(
-            "snapper.application.process_manager.strategy_scope.get_registered_processes",
-            return_value=registry,
-        ), pytest.raises(HTTPException) as exc_info:
+        with (
+            _patch(
+                "snapper.application.process_manager.strategy_scope.get_registered_processes",
+                return_value=registry,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="listparams",
@@ -3620,10 +3662,13 @@ class TestResolveRoleForClassPathHit:
                 mode="thread",
             )
         }
-        with _patch(
-            "snapper.application.process_manager.strategy_scope.get_registered_processes",
-            return_value=registry,
-        ), pytest.raises(HTTPException) as exc_info:
+        with (
+            _patch(
+                "snapper.application.process_manager.strategy_scope.get_registered_processes",
+                return_value=registry,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
             await start_process(
                 http_request=_make_rest_request(),
                 name="strat-no-override",
@@ -3863,10 +3908,12 @@ class TestSetProcessDesiredState:
         """Restarting an enabled process persists the client restart_nonce, not enabled."""
         config = self._config("p", enabled=True)
         factory = self._factory(config, autostart_includes=True)
-        result = await self._patch("p", factory, self._body("restart", restart_nonce="n1"))
+        result = await self._patch(
+            "p", factory, self._body("restart", restart_nonce="nonce-restart-01")
+        )
         assert result.payload.action == "restart"
         kwargs = factory.update_process_config.await_args.kwargs
-        assert kwargs["restart_nonce"] == "n1"
+        assert kwargs["restart_nonce"] == "nonce-restart-01"
         assert kwargs["enabled"] is None
 
     @pytest.mark.asyncio
@@ -3875,7 +3922,7 @@ class TestSetProcessDesiredState:
         config = self._config("p", enabled=False)
         factory = self._factory(config)
         with pytest.raises(HTTPException) as exc:
-            await self._patch("p", factory, self._body("restart", restart_nonce="n1"))
+            await self._patch("p", factory, self._body("restart", restart_nonce="nonce-restart-01"))
         assert exc.value.status_code == 409
         factory.update_process_config.assert_not_awaited()
 
@@ -3912,3 +3959,31 @@ class TestSetProcessDesiredState:
         with pytest.raises(HTTPException) as exc:
             await self._patch("ghost", factory, self._body("enable"))
         assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_config_deleted_between_check_and_write_is_404(self) -> None:
+        """The TOCTOU window maps to 404, not a 500.
+
+        The existence pre-check and the desired-state write are two
+        separate awaits; a Setting closed in between makes the DAL raise
+        KeyError, which must surface as the same 404 the pre-check gives.
+        """
+        config = self._config("p", enabled=True)
+        factory = self._factory(config)
+        factory.update_process_config = AsyncMock(side_effect=KeyError("gone"))
+        with pytest.raises(HTTPException) as exc:
+            await self._patch("p", factory, self._body("disable"))
+        assert exc.value.status_code == 404
+
+    def test_restart_nonce_rejects_oversized_and_unsafe_values(self) -> None:
+        """The nonce is UUID-shaped and bounded — it lands verbatim in the Setting JSON."""
+        with pytest.raises(ValidationError):
+            ProcessDesiredStateBody(action="restart", restart_nonce="x" * 65)
+        with pytest.raises(ValidationError):
+            ProcessDesiredStateBody(action="restart", restart_nonce="short")
+        with pytest.raises(ValidationError):
+            ProcessDesiredStateBody(action="restart", restart_nonce="nonce with spaces!")
+        body = ProcessDesiredStateBody(
+            action="restart", restart_nonce="01960a7e-2c1a-7c00-8000-000000000000"
+        )
+        assert body.restart_nonce is not None

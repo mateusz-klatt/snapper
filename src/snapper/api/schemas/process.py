@@ -852,6 +852,11 @@ class ProcessDesiredStateBody(StrictBody):
             ``restart`` action and ignored otherwise. Re-sending the same
             nonce (a retried request) does not bounce the process twice —
             the reconcile loop no-ops when it equals the nonce last applied.
+            Constrained to a UUID-shaped safe charset and bounded length:
+            the value is persisted verbatim into the bitemporal process
+            Setting JSON and compared by the reconcile loop, so an
+            unbounded free-form string would let any MANAGE_PROCESSES
+            caller bloat the config row.
     """
 
     action: ProcessDesiredStateAction = Field(
@@ -860,6 +865,9 @@ class ProcessDesiredStateBody(StrictBody):
     )
     restart_nonce: str | None = Field(
         None,
+        min_length=8,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
         description="Client-minted idempotency token; required for the restart action",
         examples=["01960a7e-2c1a-7c00-8000-000000000000"],
     )

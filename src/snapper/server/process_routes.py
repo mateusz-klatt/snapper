@@ -1268,13 +1268,16 @@ async def set_process_desired_state(
                 detail="A restart action requires a client-minted restart_nonce",
             )
         restart_nonce = body.payload.restart_nonce
-    await factory.update_process_config(
-        name=name,
-        enabled=enabled,
-        restart_nonce=restart_nonce,
-        updated_by=principal.username,
-        is_strategy=is_strategy,
-    )
+    try:
+        await factory.update_process_config(
+            name=name,
+            enabled=enabled,
+            restart_nonce=restart_nonce,
+            updated_by=principal.username,
+            is_strategy=is_strategy,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Process '{name}' is not configured") from exc
     _, coordinator, managed_remotely = _resolve_ownership(
         factory, cache, config, local_running=name in factory.started_processes
     )
