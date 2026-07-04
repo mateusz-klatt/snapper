@@ -838,3 +838,79 @@ class ProcessStopResponse(PayloadResponse[Literal["process_stop_response"], Proc
     """
 
     type: Literal["process_stop_response"] = "process_stop_response"
+
+
+ProcessDesiredStateAction = Literal["enable", "disable", "restart"]
+
+
+class ProcessDesiredStateBody(StrictBody):
+    """Body for the desired-state PATCH: enable / disable / restart a process.
+
+    Attributes:
+        action: The desired-state transition to apply.
+        restart_nonce: A client-minted idempotency token, REQUIRED for the
+            ``restart`` action and ignored otherwise. Re-sending the same
+            nonce (a retried request) does not bounce the process twice —
+            the reconcile loop no-ops when it equals the nonce last applied.
+    """
+
+    action: ProcessDesiredStateAction = Field(
+        description="Desired-state transition: enable, disable, or restart",
+        examples=["enable", "disable", "restart"],
+    )
+    restart_nonce: str | None = Field(
+        None,
+        description="Client-minted idempotency token; required for the restart action",
+        examples=["01960a7e-2c1a-7c00-8000-000000000000"],
+    )
+
+
+class ProcessDesiredStateRequest(
+    PayloadRequest[Literal["process_desired_state_request"], ProcessDesiredStateBody]
+):
+    """Desired-state PATCH request envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["process_desired_state_request"] = "process_desired_state_request"
+
+
+class ProcessDesiredStateData(StrictDataSchema[Literal["process_desired_state"]]):
+    """Result of a desired-state PATCH.
+
+    Attributes:
+        type: Payload item type discriminator.
+        status: Always ``success`` (failures surface as HTTP errors).
+        name: Process name.
+        action: The transition that was applied.
+        coordinator: Owning coordinator slug, or None when no remote owner
+            has been observed yet.
+        managed_remotely: True when a remote coordinator owns the process,
+            so its reconcile loop (not this API node) converges the running
+            state to the persisted desired state.
+        message: Human-readable outcome note.
+    """
+
+    type: Literal["process_desired_state"] = "process_desired_state"
+    status: Literal["success"] = "success"
+    name: str = Field(description=_PROCESS_NAME_DESC)
+    action: ProcessDesiredStateAction = Field(description="Applied desired-state transition")
+    coordinator: str | None = Field(None, description="Owning coordinator slug")
+    managed_remotely: bool = Field(
+        description="Whether a remote coordinator owns and reconciles the process"
+    )
+    message: str | None = Field(None, description="Human-readable outcome note")
+
+
+class ProcessDesiredStateResponse(
+    PayloadResponse[Literal["process_desired_state_response"], ProcessDesiredStateData]
+):
+    """Desired-state PATCH response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["process_desired_state_response"] = "process_desired_state_response"

@@ -18,6 +18,9 @@ from fastapi import Request
 from snapper.api.schemas.process import ProcessCategoryCount
 from snapper.api.schemas.process import ProcessCreateBody
 from snapper.api.schemas.process import ProcessCreateRequest
+from snapper.api.schemas.process import ProcessDesiredStateBody
+from snapper.api.schemas.process import ProcessDesiredStateRequest
+from snapper.api.schemas.process import ProcessDesiredStateResponse
 from snapper.api.schemas.process import ProcessStartBody
 from snapper.api.schemas.process import ProcessStartRequest
 from snapper.api.schemas.process import ProcessSummaryData
@@ -50,6 +53,7 @@ from snapper.server.process_routes import get_repository_for_processes
 from snapper.server.process_routes import list_available_processes
 from snapper.server.process_routes import list_configured_processes
 from snapper.server.process_routes import list_process_runs
+from snapper.server.process_routes import set_process_desired_state
 from snapper.server.process_routes import start_process
 from snapper.server.process_routes import stop_process
 
@@ -3572,3 +3576,222 @@ class TestResolveRoleForClassPathHit:
                 _csrf=None,
             )
         assert exc_info.value.status_code == 400
+
+
+class TestSetProcessDesiredState:
+    """Tests for the PATCH /{name}/desired-state control endpoint."""
+
+    @staticmethod
+    def _config(
+        name: str, *, enabled: bool, role: ProcessRoleEnum = ProcessRoleEnum.CORE
+    ) -> ProcessConfigModel:
+        """Build a minimal process config for the desired-state handler.
+
+        Args:
+            name: Process name.
+            enabled: Current persisted enabled flag.
+            role: Process role (STRATEGY triggers the scope check).
+
+        Returns:
+            A populated ProcessConfigModel.
+        """
+        return ProcessConfigModel(
+            name=name,
+            enabled=enabled,
+            mode="thread",
+            class_path="x.Y",
+            method="start",
+            parameters={},
+            role=role,
+        )
+
+    @staticmethod
+    def _factory(
+        config: ProcessConfigModel | None,
+        *,
+        started: dict[str, object] | None = None,
+        autostart_includes: bool = False,
+        slug: str = "coord-0",
+    ) -> MagicMock:
+        """Build a mock launcher exposing the surfaces the handler reads.
+
+        Args:
+            config: The single config get_process_configs returns (or None).
+            started: The started_processes mapping (local-running set).
+            autostart_includes: Whether this node owns the config.
+            slug: This node's coordinator slug.
+
+        Returns:
+            A configured MagicMock factory.
+        """
+        factory = MagicMock()
+        factory.get_process_configs = AsyncMock(return_value=[config] if config else [])
+        factory.update_process_config = AsyncMock()
+        factory.started_processes = started or {}
+        factory.autostart_includes = MagicMock(return_value=autostart_includes)
+        factory.coordinator_topic_slug = MagicMock(return_value=slug)
+        return factory
+
+    @staticmethod
+    def _body(action: str, restart_nonce: str | None = None) -> ProcessDesiredStateRequest:
+        """Build a desired-state request envelope.
+
+        Args:
+            action: enable / disable / restart.
+            restart_nonce: Client idempotency token for restart.
+
+        Returns:
+            A populated ProcessDesiredStateRequest.
+        """
+        return ProcessDesiredStateRequest(
+            session_id="s",
+            sequence_id=1,
+            public_id="p",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessDesiredStateBody(action=action, restart_nonce=restart_nonce),
+        )
+
+    @staticmethod
+    async def _patch(
+        name: str,
+        factory: MagicMock,
+        body: ProcessDesiredStateRequest,
+        *,
+        cache: MagicMock | None = None,
+        repo: MagicMock | None = None,
+    ) -> ProcessDesiredStateResponse:
+        """Invoke the handler directly with mocked dependencies.
+
+        Args:
+            name: Target process name.
+            factory: Mock launcher.
+            body: Request envelope.
+            cache: Cross-coordinator cache (None degrades to local view).
+            repo: Repository for the scope check.
+
+        Returns:
+            The handler response.
+        """
+        return await set_process_desired_state(
+            http_request=_make_rest_request(),
+            name=name,
+            factory=factory,
+            cache=cache,
+            repo=repo or MagicMock(),
+            principal=MagicMock(username="alice", operator_public_ids=[]),
+            _csrf=None,
+            body=body,
+        )
+
+    @pytest.mark.asyncio
+    async def test_disable_persists_and_reports_remote_coordinator(self) -> None:
+        """Disabling a remote-owned process persists enabled=False + names the coordinator."""
+        config = self._config("kraken_feed_publisher", enabled=True)
+        factory = self._factory(config, autostart_includes=False)
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(False, "coord-1"))
+        result = await self._patch(
+            "kraken_feed_publisher", factory, self._body("disable"), cache=cache
+        )
+        assert result.payload.action == "disable"
+        assert result.payload.managed_remotely is True
+        assert result.payload.coordinator == "coord-1"
+        assert "reconcile" in (result.payload.message or "")
+        kwargs = factory.update_process_config.await_args.kwargs
+        assert kwargs["enabled"] is False
+        assert kwargs["restart_nonce"] is None
+        assert kwargs["is_strategy"] is False
+        assert kwargs["updated_by"] == "alice"
+
+    @pytest.mark.asyncio
+    async def test_enable_non_strategy_local_owner(self) -> None:
+        """Enabling a locally-owned non-strategy persists enabled=True, not managed_remotely."""
+        config = self._config("some_core_proc", enabled=False)
+        factory = self._factory(config, autostart_includes=True)
+        result = await self._patch("some_core_proc", factory, self._body("enable"))
+        assert result.payload.managed_remotely is False
+        assert result.payload.message == "Desired state persisted"
+        assert factory.update_process_config.await_args.kwargs["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_enable_strategy_runs_scope_check(self) -> None:
+        """Enabling a strategy runs the scope check and marks is_strategy."""
+        config = self._config("strategy_x", enabled=False, role=ProcessRoleEnum.STRATEGY)
+        factory = self._factory(config, autostart_includes=True)
+        with patch(
+            "snapper.server.process_routes._enforce_strategy_scope", new_callable=AsyncMock
+        ) as mock_scope:
+            await self._patch("strategy_x", factory, self._body("enable"))
+        mock_scope.assert_awaited_once()
+        kwargs = factory.update_process_config.await_args.kwargs
+        assert kwargs["enabled"] is True
+        assert kwargs["is_strategy"] is True
+
+    @pytest.mark.asyncio
+    async def test_enable_strategy_scope_failure_propagates(self) -> None:
+        """A failed strategy scope check aborts the write (fail-closed)."""
+        config = self._config("strategy_x", enabled=False, role=ProcessRoleEnum.STRATEGY)
+        factory = self._factory(config)
+        with patch(
+            "snapper.server.process_routes._enforce_strategy_scope", new_callable=AsyncMock
+        ) as mock_scope:
+            mock_scope.side_effect = HTTPException(status_code=403, detail="no grant")
+            with pytest.raises(HTTPException) as exc:
+                await self._patch("strategy_x", factory, self._body("enable"))
+        assert exc.value.status_code == 403
+        factory.update_process_config.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_restart_enabled_process_with_nonce(self) -> None:
+        """Restarting an enabled process persists the client restart_nonce, not enabled."""
+        config = self._config("p", enabled=True)
+        factory = self._factory(config, autostart_includes=True)
+        result = await self._patch("p", factory, self._body("restart", restart_nonce="n1"))
+        assert result.payload.action == "restart"
+        kwargs = factory.update_process_config.await_args.kwargs
+        assert kwargs["restart_nonce"] == "n1"
+        assert kwargs["enabled"] is None
+
+    @pytest.mark.asyncio
+    async def test_restart_disabled_process_conflicts(self) -> None:
+        """Restarting a disabled process is 409 and writes nothing."""
+        config = self._config("p", enabled=False)
+        factory = self._factory(config)
+        with pytest.raises(HTTPException) as exc:
+            await self._patch("p", factory, self._body("restart", restart_nonce="n1"))
+        assert exc.value.status_code == 409
+        factory.update_process_config.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_restart_without_nonce_unprocessable(self) -> None:
+        """A restart with no client nonce is 422 (retry-idempotency requires it)."""
+        config = self._config("p", enabled=True)
+        factory = self._factory(config)
+        with pytest.raises(HTTPException) as exc:
+            await self._patch("p", factory, self._body("restart"))
+        assert exc.value.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_executor_instance_rejected_not_found(self) -> None:
+        """A per-wallet executor instance has no desired-state config → 404, no config read."""
+        factory = self._factory(None)
+        with pytest.raises(HTTPException) as exc:
+            await self._patch("executor_kraken_w000000000001", factory, self._body("enable"))
+        assert exc.value.status_code == 404
+        factory.get_process_configs.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_executor_template_rejected_unprocessable(self) -> None:
+        """A bare executor template is config-only → 422."""
+        factory = self._factory(None)
+        with pytest.raises(HTTPException) as exc:
+            await self._patch("executor_kraken", factory, self._body("enable"))
+        assert exc.value.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_unknown_process_not_found(self) -> None:
+        """A name with no active config row is 404."""
+        factory = self._factory(None)
+        with pytest.raises(HTTPException) as exc:
+            await self._patch("ghost", factory, self._body("enable"))
+        assert exc.value.status_code == 404

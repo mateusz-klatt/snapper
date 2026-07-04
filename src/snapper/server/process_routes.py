@@ -52,6 +52,9 @@ from snapper.api.schemas.process import ProcessCreateData
 from snapper.api.schemas.process import ProcessCreatedInfo
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.api.schemas.process import ProcessCreateResponse
+from snapper.api.schemas.process import ProcessDesiredStateData
+from snapper.api.schemas.process import ProcessDesiredStateRequest
+from snapper.api.schemas.process import ProcessDesiredStateResponse
 from snapper.api.schemas.process import ProcessRun
 from snapper.api.schemas.process import ProcessRunsResponse
 from snapper.api.schemas.process import ProcessSchemaData
@@ -1006,6 +1009,123 @@ async def stop_process(
         message=result.message,
     )
     return ProcessStopResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=data,
+    )
+
+
+@router.patch(
+    "/{name}/desired-state",
+    openapi_extra=openapi_schema(ProcessDesiredStateRequest),
+)
+async def set_process_desired_state(
+    http_request: Request,
+    name: str,
+    factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
+    cache: Annotated[RemoteSummaryCache | None, Depends(get_remote_summary_cache)],
+    repo: Annotated[Repository, Depends(get_repository_for_processes)],
+    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    body: Annotated[ProcessDesiredStateRequest, Depends(json_body(ProcessDesiredStateRequest))],
+) -> ProcessDesiredStateResponse:
+    """Set a process's persistent desired state: enable, disable, or restart.
+
+    This mutates the DB desired-state (``enabled`` / a ``restart_nonce``) of
+    the ``process_<name>`` config — the source of truth — and NEVER starts or
+    stops anything locally, so it is safe for a process owned by a different
+    container. The owning coordinator's reconcile loop converges the actual
+    running state to what is written here. Gated by MANAGE_PROCESSES + CSRF.
+
+    Targets that have no controllable desired-state row are rejected: a
+    per-wallet executor instance has no ``process_<name>`` Setting (404), and
+    a bare executor template is config-only and never runnable (422). A
+    ``restart`` requires the process to be enabled (409) and a client-minted
+    ``restart_nonce`` (422) so a retried request cannot double-bounce.
+    Enabling a strategy re-runs the operator/wallet/grant scope check
+    (fail-closed) before the write.
+
+    Args:
+        http_request: FastAPI request (provenance).
+        name: Process name to control.
+        factory: Process launcher service (desired-state write + ownership).
+        cache: Cross-coordinator summary cache (owning-coordinator lookup).
+        repo: Repository for the strategy scope check.
+        principal: Authenticated caller (recorded as the editor).
+        _csrf: CSRF guard (Bearer callers bypass).
+        body: The desired-state action.
+
+    Returns:
+        The applied action with the owning coordinator and whether it is
+        managed remotely.
+
+    Raises:
+        HTTPException: 404 (instance / unknown), 422 (template / missing
+            nonce), 409 (restart of a disabled process), 403/400 (strategy
+            scope).
+    """
+    action = body.payload.action
+    if is_executor_instance(name):
+        raise HTTPException(
+            status_code=404,
+            detail=f"'{name}' is a per-wallet executor instance with no desired-state config",
+        )
+    _reject_executor_template_start(name)
+    configs = await factory.get_process_configs()
+    config = next((candidate for candidate in configs if candidate.name == name), None)
+    if config is None:
+        raise HTTPException(status_code=404, detail=f"Process '{name}' is not configured")
+    is_strategy = config.role is ProcessRoleEnum.STRATEGY
+    enabled: bool | None = None
+    restart_nonce: str | None = None
+    if action == "enable":
+        if is_strategy:
+            await _enforce_strategy_scope(dict(config.parameters), config.role, principal, repo)
+        enabled = True
+    elif action == "disable":
+        enabled = False
+    else:
+        if not config.enabled:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Process '{name}' is disabled; enable it before requesting a restart",
+            )
+        if not body.payload.restart_nonce:
+            raise HTTPException(
+                status_code=422,
+                detail="A restart action requires a client-minted restart_nonce",
+            )
+        restart_nonce = body.payload.restart_nonce
+    await factory.update_process_config(
+        name=name,
+        enabled=enabled,
+        restart_nonce=restart_nonce,
+        updated_by=principal.username,
+        is_strategy=is_strategy,
+    )
+    _, coordinator, managed_remotely = _resolve_ownership(
+        factory, cache, config, local_running=name in factory.started_processes
+    )
+    message = (
+        f"Desired state persisted; {coordinator} will reconcile"
+        if managed_remotely and coordinator is not None
+        else "Desired state persisted"
+    )
+    sid, seq, pid, ts = _mint_provenance(http_request)
+    data = ProcessDesiredStateData(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=str(uuid7()),
+        timestamp=ts,
+        name=name,
+        action=action,
+        coordinator=coordinator,
+        managed_remotely=managed_remotely,
+        message=message,
+    )
+    return ProcessDesiredStateResponse(
         session_id=sid,
         sequence_id=seq,
         public_id=pid,
