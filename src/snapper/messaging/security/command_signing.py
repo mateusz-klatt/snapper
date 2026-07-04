@@ -27,6 +27,7 @@ from snapper.core.json_types import JsonObject
 _COMMAND_SIGNING_INFO = b"snapper-process-command-signing-v1"
 _KDF_ITERATIONS = 100000
 _SIGNATURE_FIELD = "signature"
+_UNSIGNED_FIELDS = frozenset({_SIGNATURE_FIELD, "topic"})
 
 
 def command_signing_key(master_password: str) -> bytes:
@@ -62,18 +63,22 @@ def command_signing_key(master_password: str) -> bytes:
 
 
 def _canonical_unsigned_bytes(payload: JsonObject) -> bytes:
-    """Return the canonical JSON bytes of ``payload`` excluding the signature.
+    """Return the canonical JSON bytes of ``payload`` excluding transport fields.
 
     Deterministic (sorted keys, compact separators) so the signer and the
-    verifier agree byte-for-byte regardless of dict insertion order.
+    verifier agree byte-for-byte regardless of dict insertion order. Excludes
+    both the in-band ``signature`` AND the ``topic`` field: the ZMQ publisher
+    stamps the routing ``topic`` onto the payload AFTER it is signed, so a
+    verifier over the on-wire payload would otherwise recompute the HMAC over a
+    ``topic`` the signer never saw and reject a legitimate message.
 
     Args:
-        payload: The full payload dict (it may already carry a signature key).
+        payload: The full payload dict (it may carry ``signature`` / ``topic``).
 
     Returns:
-        Canonical UTF-8 JSON bytes with the ``signature`` field removed.
+        Canonical UTF-8 JSON bytes with the signature and topic fields removed.
     """
-    unsigned = {key: value for key, value in payload.items() if key != _SIGNATURE_FIELD}
+    unsigned = {key: value for key, value in payload.items() if key not in _UNSIGNED_FIELDS}
 
     return json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
 

@@ -83,6 +83,7 @@ from snapper.application.notify.apns_config import load_apns_config
 from snapper.application.notify.push_beta import PUSH_BETA_SETTING_KEY
 from snapper.application.notify.push_beta import parse_push_beta_config
 from snapper.application.notify.sidecar import NotifySidecar
+from snapper.application.process_manager.command_listener import ProcessCommandListener
 from snapper.application.process_manager.launcher import CoreProcessStartupError
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
@@ -645,6 +646,7 @@ async def _run_feed_engine() -> str | None:
         publisher = None
     launcher.set_msg_publisher(publisher)
     reconcile_task: asyncio.Task[None] | None = None
+    command_listener: ProcessCommandListener | None = None
     try:
         await launcher.sync_registry_to_database()
         await launcher.start_feed_publishers()
@@ -653,6 +655,8 @@ async def _run_feed_engine() -> str | None:
             is ProcessAutostartProfileEnum.FEED
         ):
             reconcile_task = asyncio.ensure_future(_reconcile_loop(launcher))
+            command_listener = ProcessCommandListener(launcher)
+            await command_listener.start(getattr(app_settings, "zmq_broker_xpub", ""))
         else:
             typer.echo(
                 "Feed engine: reconcile loop disabled (PROCESS_AUTOSTART_PROFILE is not 'feed'); "
@@ -667,6 +671,8 @@ async def _run_feed_engine() -> str | None:
         if reconcile_task is not None:
             reconcile_task.cancel()
             await asyncio.gather(reconcile_task, return_exceptions=True)
+        if command_listener is not None:
+            await command_listener.stop()
         await launcher.stop_all_processes()
         await settings_service.shutdown()
         shutdown_audit_publisher(publisher, zmq_ctx)
@@ -745,6 +751,7 @@ async def _run_strategies_engine() -> None:
     listener_started = False
     summary_task: asyncio.Task[None] | None = None
     reconcile_task: asyncio.Task[None] | None = None
+    command_listener: ProcessCommandListener | None = None
     try:
         if app_settings.zmq_broker_xpub:
             await ai_service.start_bus_listener(
@@ -760,6 +767,8 @@ async def _run_strategies_engine() -> None:
             is ProcessAutostartProfileEnum.STRATEGY
         ):
             reconcile_task = asyncio.ensure_future(_reconcile_loop(launcher))
+            command_listener = ProcessCommandListener(launcher)
+            await command_listener.start(getattr(app_settings, "zmq_broker_xpub", ""))
         else:
             typer.echo(
                 "Strategies engine: reconcile loop disabled (PROCESS_AUTOSTART_PROFILE is not "
@@ -775,6 +784,8 @@ async def _run_strategies_engine() -> None:
         if reconcile_task is not None:
             reconcile_task.cancel()
             await asyncio.gather(reconcile_task, return_exceptions=True)
+        if command_listener is not None:
+            await command_listener.stop()
         await launcher.stop_all_processes()
         if listener_started:
             await ai_service.stop_bus_listener()

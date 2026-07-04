@@ -2449,8 +2449,10 @@ class TestEmitHelpersWithPublisher:
         publisher = _RecordingPublisher()
         launcher.set_msg_publisher(publisher)
         assert launcher._msg_publisher is publisher
+        assert launcher.message_publisher is publisher
         launcher.set_msg_publisher(None)
         assert launcher._msg_publisher is None
+        assert launcher.message_publisher is None
 
     def test_coordinator_topic_slug_default(self, launcher: ProcessLauncherService) -> None:
         """Default ``coordinator_instance_id`` of ``0`` slugifies to ``coord-0``.

@@ -4695,6 +4695,11 @@ def test_feed_engine_starts_publishers_and_shuts_down(
     )
     monkeypatch.setattr(app_module, "discover_processes", lambda: calls.append("discover"))
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(
+        app_module,
+        "ProcessCommandListener",
+        lambda launcher: SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
+    )
     monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _no_wait)
     result = cli_runner.invoke(app, ["feed-engine"])
     assert result.exit_code == 0
@@ -4806,6 +4811,11 @@ def test_strategies_engine_starts_and_shuts_down(
     )
     monkeypatch.setattr(app_module, "discover_processes", lambda: calls.append("discover"))
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(
+        app_module,
+        "ProcessCommandListener",
+        lambda launcher: SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
+    )
     monkeypatch.setattr(app_module, "get_ai_review_service", lambda: DummyAiService())
     monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
     result = cli_runner.invoke(app, ["strategies-engine"])
@@ -4881,6 +4891,11 @@ def test_strategies_engine_exits_nonzero_on_core_failure(
     )
     monkeypatch.setattr(app_module, "discover_processes", lambda: None)
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(
+        app_module,
+        "ProcessCommandListener",
+        lambda launcher: SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
+    )
     monkeypatch.setattr(app_module, "get_ai_review_service", lambda: DummyAiService())
     result = cli_runner.invoke(app, ["strategies-engine"])
     assert result.exit_code == 1
@@ -4950,6 +4965,11 @@ def test_strategies_engine_degrades_without_publisher(
     )
     monkeypatch.setattr(app_module, "discover_processes", lambda: None)
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(
+        app_module,
+        "ProcessCommandListener",
+        lambda launcher: SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
+    )
     monkeypatch.setattr(app_module, "get_ai_review_service", lambda: DummyAiService())
     monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
     result = cli_runner.invoke(app, ["strategies-engine"])
@@ -5013,6 +5033,11 @@ def test_strategies_engine_skips_listener_without_xpub(
     )
     monkeypatch.setattr(app_module, "discover_processes", lambda: None)
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(
+        app_module,
+        "ProcessCommandListener",
+        lambda launcher: SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
+    )
     monkeypatch.setattr(app_module, "get_ai_review_service", lambda: DummyAiService())
     monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
     result = cli_runner.invoke(app, ["strategies-engine"])
@@ -5136,6 +5161,11 @@ def test_feed_engine_spawns_reconcile_loop_when_profile_feed(
     )
     monkeypatch.setattr(app_module, "discover_processes", lambda: None)
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(
+        app_module,
+        "ProcessCommandListener",
+        lambda launcher: SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
+    )
     monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _clean_shutdown)
     result = cli_runner.invoke(app, ["feed-engine"])
     assert result.exit_code == 0
@@ -5207,6 +5237,11 @@ def test_strategies_engine_spawns_reconcile_loop_when_profile_strategy(
     )
     monkeypatch.setattr(app_module, "discover_processes", lambda: None)
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(
+        app_module,
+        "ProcessCommandListener",
+        lambda launcher: SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
+    )
     monkeypatch.setattr(app_module, "get_ai_review_service", lambda: DummyAiService())
     monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
     result = cli_runner.invoke(app, ["strategies-engine"])
@@ -5260,6 +5295,11 @@ def test_feed_engine_exits_nonzero_on_publisher_crash(
     )
     monkeypatch.setattr(app_module, "discover_processes", lambda: None)
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(
+        app_module,
+        "ProcessCommandListener",
+        lambda launcher: SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
+    )
     monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _crash)
     result = cli_runner.invoke(app, ["feed-engine"])
     assert result.exit_code == 1
@@ -5344,6 +5384,11 @@ def test_feed_engine_degrades_when_publisher_build_fails(
     )
     monkeypatch.setattr(app_module, "discover_processes", lambda: None)
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(
+        app_module,
+        "ProcessCommandListener",
+        lambda launcher: SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
+    )
     monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _no_wait)
     result = cli_runner.invoke(app, ["feed-engine"])
     assert result.exit_code == 0
@@ -5410,6 +5455,11 @@ def test_feed_engine_degrades_when_context_creation_fails(
     )
     monkeypatch.setattr(app_module, "discover_processes", lambda: None)
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(
+        app_module,
+        "ProcessCommandListener",
+        lambda launcher: SimpleNamespace(start=AsyncMock(), stop=AsyncMock()),
+    )
     monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _no_wait)
     result = cli_runner.invoke(app, ["feed-engine"])
     assert result.exit_code == 0

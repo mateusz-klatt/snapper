@@ -425,6 +425,19 @@ class ProcessLauncherService:
         """
         self._msg_publisher = publisher
 
+    @property
+    def message_publisher(self) -> MessagePublisher | None:
+        """Return the wired bus publisher (``None`` until :meth:`set_msg_publisher`).
+
+        Read at emit time by the control-plane command listener
+        (:class:`ProcessCommandListener`) so it can publish a signed ack on the
+        same shared socket the launcher uses for its snapshot fanout.
+
+        Returns:
+            The injected publisher, or ``None`` when none is wired.
+        """
+        return self._msg_publisher
+
     def coordinator_topic_slug(self) -> str:
         """Return a topic-safe slug for ``coordinator_instance_id``.
 

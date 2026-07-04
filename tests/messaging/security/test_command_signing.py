@@ -139,6 +139,22 @@ class TestSignVerify:
         """
         assert verify_command_payload(_payload(), command_signing_key("master")) is False
 
+    def test_signature_excludes_the_transport_topic_field(self) -> None:
+        """A publisher-stamped ``topic`` field does not break verification.
+
+        Given: a payload signed before any topic is stamped,
+        When: the transport ``topic`` field is added (as the ZMQ publisher does)
+            and it is verified,
+        Then: verification still passes because ``topic`` is excluded from the
+            signed canonical bytes.
+        """
+        key = command_signing_key("master")
+        payload = _payload()
+        payload["signature"] = sign_command_payload(payload, key)
+        payload["topic"] = "processes.events.command_ack.coord-0"
+
+        assert verify_command_payload(payload, key) is True
+
     def test_verify_rejects_non_string_signature(self) -> None:
         """A non-string signature field fails verification.
 
