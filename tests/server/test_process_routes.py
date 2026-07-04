@@ -45,6 +45,7 @@ from snapper.server.process_routes import _read_persisted_strategy_parameters
 from snapper.server.process_routes import _resolve_role_for_class_path
 from snapper.server.process_routes import _resolve_strategy_start_launch_parameters
 from snapper.server.process_routes import create_process_configuration
+from snapper.server.process_routes import get_command_ack_registry
 from snapper.server.process_routes import get_process_factory
 from snapper.server.process_routes import get_process_schema
 from snapper.server.process_routes import get_process_summary
@@ -193,6 +194,19 @@ class TestCrossCoordinatorOwnership:
         mock_request = MagicMock(spec=Request)
         del mock_request.app.state.remote_summary_cache
         assert get_remote_summary_cache(mock_request) is None
+
+    def test_get_command_ack_registry_returns_attached(self) -> None:
+        """The ack registry is returned when wired into app state."""
+        mock_request = MagicMock(spec=Request)
+        sentinel = MagicMock()
+        mock_request.app.state.command_ack_registry = sentinel
+        assert get_command_ack_registry(mock_request) is sentinel
+
+    def test_get_command_ack_registry_returns_none_when_absent(self) -> None:
+        """``None`` is returned when the registry never started."""
+        mock_request = MagicMock(spec=Request)
+        del mock_request.app.state.command_ack_registry
+        assert get_command_ack_registry(mock_request) is None
 
     @pytest.mark.asyncio
     async def test_configured_feed_publisher_tagged_running_via_cache(self) -> None:
@@ -3659,6 +3673,7 @@ class TestSetProcessDesiredState:
         *,
         cache: MagicMock | None = None,
         repo: MagicMock | None = None,
+        registry: MagicMock | None = None,
     ) -> ProcessDesiredStateResponse:
         """Invoke the handler directly with mocked dependencies.
 
@@ -3668,6 +3683,7 @@ class TestSetProcessDesiredState:
             body: Request envelope.
             cache: Cross-coordinator cache (None degrades to local view).
             repo: Repository for the scope check.
+            registry: Command-ack registry (None skips the nudge).
 
         Returns:
             The handler response.
@@ -3677,6 +3693,7 @@ class TestSetProcessDesiredState:
             name=name,
             factory=factory,
             cache=cache,
+            registry=registry,
             repo=repo or MagicMock(),
             principal=MagicMock(username="alice", operator_public_ids=[]),
             _csrf=None,
@@ -3702,6 +3719,62 @@ class TestSetProcessDesiredState:
         assert kwargs["restart_nonce"] is None
         assert kwargs["is_strategy"] is False
         assert kwargs["updated_by"] == "alice"
+
+    @pytest.mark.asyncio
+    async def test_remote_nudge_ack_applied_surfaces_outcome(self) -> None:
+        """A wired registry that acks 'applied' surfaces the coordinator's outcome now."""
+        config = self._config("kraken_feed_publisher", enabled=True)
+        factory = self._factory(config, autostart_includes=False)
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(False, "coord-1"))
+        registry = MagicMock()
+        registry.nudge = AsyncMock(return_value=MagicMock(status="applied", detail=None))
+        result = await self._patch(
+            "kraken_feed_publisher",
+            factory,
+            self._body("disable"),
+            cache=cache,
+            registry=registry,
+        )
+        registry.nudge.assert_awaited_once()
+        assert "coord-1 applied the disable" in (result.payload.message or "")
+
+    @pytest.mark.asyncio
+    async def test_remote_nudge_ack_detail_included(self) -> None:
+        """An ack carrying a detail (e.g. a rejection reason) includes it in the message."""
+        config = self._config("kraken_feed_publisher", enabled=True)
+        factory = self._factory(config, autostart_includes=False)
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(False, "coord-1"))
+        registry = MagicMock()
+        registry.nudge = AsyncMock(return_value=MagicMock(status="rejected", detail="parked"))
+        result = await self._patch(
+            "kraken_feed_publisher",
+            factory,
+            self._body("disable"),
+            cache=cache,
+            registry=registry,
+        )
+        assert "rejected" in (result.payload.message or "")
+        assert "parked" in (result.payload.message or "")
+
+    @pytest.mark.asyncio
+    async def test_remote_nudge_timeout_falls_back_to_reconcile_pending(self) -> None:
+        """No ack in time falls back to the reconcile-pending message."""
+        config = self._config("kraken_feed_publisher", enabled=True)
+        factory = self._factory(config, autostart_includes=False)
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(False, "coord-1"))
+        registry = MagicMock()
+        registry.nudge = AsyncMock(return_value=None)
+        result = await self._patch(
+            "kraken_feed_publisher",
+            factory,
+            self._body("disable"),
+            cache=cache,
+            registry=registry,
+        )
+        assert "reconcile" in (result.payload.message or "")
 
     @pytest.mark.asyncio
     async def test_enable_non_strategy_local_owner(self) -> None:

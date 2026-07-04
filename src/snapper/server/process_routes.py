@@ -108,6 +108,7 @@ from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ProcessSummaryItem
+from snapper.server.command_ack_registry import ProcessCommandAckRegistry
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
 from snapper.server.remote_summary_cache import RemoteSummaryCache
@@ -184,6 +185,72 @@ def get_remote_summary_cache(request: Request) -> RemoteSummaryCache | None:
     """
     cache: RemoteSummaryCache | None = getattr(request.app.state, "remote_summary_cache", None)
     return cache
+
+
+def get_command_ack_registry(request: Request) -> ProcessCommandAckRegistry | None:
+    """FastAPI dependency to get the process-command ack registry.
+
+    Returns ``None`` when the registry failed to start (or was never wired, as
+    in some tests), in which case the desired-state PATCH skips the nudge and
+    falls back to reconcile-pending.
+
+    Args:
+        request: FastAPI request containing app state.
+
+    Returns:
+        The :class:`ProcessCommandAckRegistry` if attached, else ``None``.
+    """
+    registry: ProcessCommandAckRegistry | None = getattr(
+        request.app.state, "command_ack_registry", None
+    )
+    return registry
+
+
+async def _nudge_owner_and_describe(
+    registry: ProcessCommandAckRegistry | None,
+    factory: ProcessLauncherService,
+    *,
+    coordinator: str | None,
+    managed_remotely: bool,
+    name: str,
+    action: str,
+    issued_by: str,
+) -> str:
+    """Nudge the owning coordinator (if remote) and describe the outcome.
+
+    A locally-owned process has nothing to nudge. For a remote one, this
+    publishes a signed nudge and blocks briefly on the owning coordinator's
+    signed ack: on ack the message reflects the coordinator's outcome; on
+    timeout / no registry / no publisher it falls back to reconcile-pending
+    (the periodic reconcile converges regardless).
+
+    Args:
+        registry: The ack registry, or ``None`` when unwired.
+        factory: The process launcher (supplies the wired publisher).
+        coordinator: The owning coordinator's slug, or ``None``.
+        managed_remotely: Whether another container owns the process.
+        name: The process name.
+        action: The desired-state action.
+        issued_by: The authenticated caller (audit).
+
+    Returns:
+        A human-readable outcome message for the PATCH response.
+    """
+    if not managed_remotely or coordinator is None:
+        return "Desired state persisted"
+    if registry is None:
+        return f"Desired state persisted; {coordinator} will reconcile"
+    ack = await registry.nudge(
+        factory.message_publisher,
+        coordinator=coordinator,
+        process_name=name,
+        action=action,
+        issued_by=issued_by,
+    )
+    if ack is None:
+        return f"Desired state persisted; {coordinator} will reconcile"
+    detail = f": {ack.detail}" if ack.detail else ""
+    return f"Desired state persisted; {coordinator} {ack.status} the {action}{detail}"
 
 
 def _resolve_ownership(
@@ -1026,6 +1093,7 @@ async def set_process_desired_state(
     name: str,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     cache: Annotated[RemoteSummaryCache | None, Depends(get_remote_summary_cache)],
+    registry: Annotated[ProcessCommandAckRegistry | None, Depends(get_command_ack_registry)],
     repo: Annotated[Repository, Depends(get_repository_for_processes)],
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
@@ -1052,6 +1120,8 @@ async def set_process_desired_state(
         name: Process name to control.
         factory: Process launcher service (desired-state write + ownership).
         cache: Cross-coordinator summary cache (owning-coordinator lookup).
+        registry: Command-ack registry for the sub-second nudge/await (``None``
+            when unwired — the PATCH then falls back to reconcile-pending).
         repo: Repository for the strategy scope check.
         principal: Authenticated caller (recorded as the editor).
         _csrf: CSRF guard (Bearer callers bypass).
@@ -1108,10 +1178,14 @@ async def set_process_desired_state(
     _, coordinator, managed_remotely = _resolve_ownership(
         factory, cache, config, local_running=name in factory.started_processes
     )
-    message = (
-        f"Desired state persisted; {coordinator} will reconcile"
-        if managed_remotely and coordinator is not None
-        else "Desired state persisted"
+    message = await _nudge_owner_and_describe(
+        registry,
+        factory,
+        coordinator=coordinator,
+        managed_remotely=managed_remotely,
+        name=name,
+        action=action,
+        issued_by=principal.username,
     )
     sid, seq, pid, ts = _mint_provenance(http_request)
     data = ProcessDesiredStateData(

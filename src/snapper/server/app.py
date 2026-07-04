@@ -212,6 +212,7 @@ from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import UnderlyingAssetData
 from snapper.messaging.schemas.data import UnderlyingInstrumentData
 from snapper.messaging.schemas.data import VenueFeeScheduleData
+from snapper.messaging.security.command_signing import command_signing_key
 from snapper.server._locale_utils import resolve_caller_default_language
 from snapper.server.ai_delegate_routes import AiIntegrationDisabledError
 from snapper.server.ai_delegate_routes import ai_integration_disabled_handler
@@ -221,6 +222,7 @@ from snapper.server.alert_default_routes import router as alert_default_router
 from snapper.server.alerts_routes import router as alerts_router
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.backtest_routes import router as backtest_router
+from snapper.server.command_ack_registry import ProcessCommandAckRegistry
 from snapper.server.credential_routes import router as credential_router
 from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
@@ -609,6 +611,55 @@ async def _stop_remote_summary_cache(app: FastAPI) -> None:
     await cache.stop()
 
 
+async def _start_command_ack_registry(
+    app: FastAPI, *, master_password: str, zmq_broker_xpub: str
+) -> None:
+    """Build + start the :class:`ProcessCommandAckRegistry`.
+
+    Subscribes to ``processes.events.command_ack.*`` so the desired-state PATCH
+    can publish a signed nudge and block on the owning coordinator's signed ack
+    (dropping latency from the ~10s reconcile tick to sub-second). The attribute
+    is assigned to ``app.state`` ONLY after a successful start; on any failure
+    the PATCH degrades to reconcile-pending (the periodic reconcile converges
+    regardless). Failure does NOT block the rest of lifespan startup.
+
+    Args:
+        app: FastAPI application whose ``state`` holds the registry.
+        master_password: The master secret; the control-plane HMAC key used to
+            sign nudges and verify acks is derived from it.
+        zmq_broker_xpub: Broker XPUB endpoint to subscribe on.
+    """
+    app.state.command_ack_registry = None
+    try:
+        registry = ProcessCommandAckRegistry(command_signing_key(master_password))
+        await registry.start(zmq_broker_xpub)
+    except Exception:
+        logger.exception(
+            "ProcessCommandAckRegistry startup failed — desired-state PATCH "
+            "falls back to reconcile-pending"
+        )
+        return
+    app.state.command_ack_registry = registry
+    logger.info("ProcessCommandAckRegistry started")
+
+
+async def _stop_command_ack_registry(app: FastAPI) -> None:
+    """Stop the :class:`ProcessCommandAckRegistry` if attached and clear the slot.
+
+    Tolerates partial-init state where startup failed before the attribute was
+    assigned. Clears ``app.state.command_ack_registry`` afterwards so a reused
+    application object never leaves a stopped stale registry in the slot.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    registry: ProcessCommandAckRegistry | None = getattr(app.state, "command_ack_registry", None)
+    if registry is None:
+        return
+    await registry.stop()
+    app.state.command_ack_registry = None
+
+
 def _egress_snapshot_interval_seconds(heartbeat_interval_ms: int) -> float:
     """Return the egress snapshot publish cadence in seconds.
 
@@ -874,6 +925,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.market_cache = None
     app.state.market_stats_worker = None
     app.state.remote_summary_cache = None
+    app.state.command_ack_registry = None
     app.state.egress_snapshot_cache = None
     app.state.egress_snapshot_publisher = None
     app.state.egress_container = None
@@ -983,6 +1035,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             own_coordinator=process_factory.coordinator_topic_slug(),
             zmq_broker_xpub=settings.zmq_broker_xpub,
         )
+        await _start_command_ack_registry(
+            app,
+            master_password=settings.master_password,
+            zmq_broker_xpub=settings.zmq_broker_xpub,
+        )
         egress_container = resolve_egress_container_id(
             f"api:{process_factory.coordinator_topic_slug()}"
         )
@@ -1021,6 +1078,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _stop_egress_snapshot_publisher(app)
         await _stop_egress_snapshot_cache(app)
         await _stop_remote_summary_cache(app)
+        await _stop_command_ack_registry(app)
         await _stop_db_stats_snapshotter(app)
         await _stop_retention_scheduler(app)
         await _stop_market_data_watchdog(app)
