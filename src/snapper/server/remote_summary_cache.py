@@ -314,3 +314,21 @@ class RemoteSummaryCache:
             process, or ``None`` when no fresh coordinator tracks it.
         """
         return self.lookup(name)[1]
+
+    def has_fresh_snapshot(self) -> bool:
+        """Return whether any remote coordinator snapshot is currently fresh.
+
+        A fresh snapshot from ANY coordinator proves the broker is
+        forwarding: every ``processes.events.summary`` frame physically
+        transits the broker's XSUB/XPUB proxy. The dedicated broker
+        container publishes no summary of its own, so this transitive
+        signal is the API's only liveness evidence for it short of the
+        docker TCP healthcheck, which the API cannot observe. The
+        false-negative window is narrow: only when EVERY remote
+        coordinator is simultaneously silent (itself an outage) while the
+        broker stays up.
+
+        Returns:
+            True when at least one non-stale coordinator snapshot exists.
+        """
+        return any(self._is_fresh(snapshot) for snapshot in self._snapshots.values())

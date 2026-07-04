@@ -249,6 +249,33 @@ class TestFreshnessAndLookup:
         clock.value = 200.0
         assert cache.coordinator_for("feed") is None
 
+    def test_has_fresh_snapshot_false_when_empty(self) -> None:
+        """An empty cache has no fresh snapshot (broker liveness unknown)."""
+        cache = RemoteSummaryCache(own_coordinator="coord-0", clock=_FakeClock(100.0))
+        assert cache.has_fresh_snapshot() is False
+
+    def test_has_fresh_snapshot_true_with_fresh_coordinator(self) -> None:
+        """Any within-TTL snapshot proves the broker is forwarding.
+
+        The snapshot's process is deliberately ``running=False``: a fresh
+        frame from any coordinator transits the broker regardless of what
+        it reports, so its mere freshness is the broker-liveness signal.
+        """
+        clock = _FakeClock(100.0)
+        cache = RemoteSummaryCache(own_coordinator="coord-0", ttl_seconds=15.0, clock=clock)
+        cache._ingest(_topic("coord-1"), _payload("coord-1", [_make_item("feed", running=False)]))
+        clock.value = 110.0
+        assert cache.has_fresh_snapshot() is True
+
+    def test_has_fresh_snapshot_false_when_all_stale(self) -> None:
+        """Every coordinator stale past the TTL yields no fresh snapshot."""
+        clock = _FakeClock(100.0)
+        cache = RemoteSummaryCache(own_coordinator="coord-0", ttl_seconds=15.0, clock=clock)
+        cache._ingest(_topic("coord-1"), _payload("coord-1", [_make_item("feed", running=True)]))
+        cache._ingest(_topic("coord-2"), _payload("coord-2", [_make_item("strat", running=True)]))
+        clock.value = 200.0
+        assert cache.has_fresh_snapshot() is False
+
 
 class TestListenLoop:
     """Listener loop against a fake subscriber."""

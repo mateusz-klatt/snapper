@@ -833,6 +833,103 @@ class TestGetProcessSummary:
         assert result.payload.brokers.total == 1
 
     @pytest.mark.asyncio
+    async def test_summary_broker_running_via_transitive_liveness(self) -> None:
+        """A remotely-owned broker counts as running when the bus is live.
+
+        The dedicated ``snapper-broker`` container publishes no summary of
+        its own, so ``_resolve_ownership`` resolves it to stopped on the
+        API node (``cache.lookup`` returns ``running=False``). A fresh
+        snapshot from any coordinator proves the broker is forwarding, so
+        both the brokers count and the broker process row report running —
+        this is what stops #overview showing a healthy broker as "Stopped".
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="zmq_broker",
+                    enabled=True,
+                    mode="thread",
+                    class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
+                    method="run",
+                    parameters={},
+                )
+            ]
+        )
+        mock_factory.started_processes = {}
+        mock_factory.instance_configs = {}
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.build_process_summary_items = AsyncMock(
+            return_value=[
+                ProcessSummaryItem(
+                    name="zmq_broker",
+                    running=False,
+                    enabled=True,
+                    role="core",
+                    lifecycle="long_running",
+                )
+            ]
+        )
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(False, "coord-1"))
+        cache.has_fresh_snapshot = MagicMock(return_value=True)
+        result = await get_process_summary(
+            request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
+        )
+        assert result.payload.brokers.total == 1
+        assert result.payload.brokers.running == 1
+        assert result.payload.processes[0].name == "zmq_broker"
+        assert result.payload.processes[0].running is True
+
+    @pytest.mark.asyncio
+    async def test_summary_broker_stopped_when_bus_silent(self) -> None:
+        """A remotely-owned broker stays stopped when no coordinator is fresh.
+
+        With every coordinator snapshot stale (or absent),
+        ``has_fresh_snapshot`` is False, so the transitive-liveness signal
+        gives no evidence the broker is up and both the count and the row
+        report stopped — a genuinely dead bus is not masked as healthy.
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="zmq_broker",
+                    enabled=True,
+                    mode="thread",
+                    class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
+                    method="run",
+                    parameters={},
+                )
+            ]
+        )
+        mock_factory.started_processes = {}
+        mock_factory.instance_configs = {}
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.build_process_summary_items = AsyncMock(
+            return_value=[
+                ProcessSummaryItem(
+                    name="zmq_broker",
+                    running=False,
+                    enabled=True,
+                    role="core",
+                    lifecycle="long_running",
+                )
+            ]
+        )
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(False, None))
+        cache.has_fresh_snapshot = MagicMock(return_value=False)
+        result = await get_process_summary(
+            request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
+        )
+        assert result.payload.brokers.total == 1
+        assert result.payload.brokers.running == 0
+        assert result.payload.processes[0].running is False
+
+    @pytest.mark.asyncio
     async def test_summary_skips_non_executor_in_instance_configs(self) -> None:
         """Summary defensive guard: non-executor entry in ``instance_configs`` skipped.
 

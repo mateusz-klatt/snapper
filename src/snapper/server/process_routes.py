@@ -226,6 +226,32 @@ def _resolve_ownership(
     return remote_running, remote_coordinator, True
 
 
+def _broker_running(local_running: bool, cache: RemoteSummaryCache | None) -> bool:
+    """Return the dedicated broker's effective running state.
+
+    The ``snapper-broker`` container is a pure XSUB/XPUB proxy: it runs
+    no launcher and publishes no ``processes.events.summary`` frame, so
+    no coordinator ever reports it ``running`` and :func:`_resolve_ownership`
+    resolves it to stopped on the API node. Its only direct liveness is a
+    docker TCP healthcheck the API cannot observe, which is why #overview
+    rendered it "Stopped" despite a healthy container. A fresh snapshot
+    from any remote coordinator proves the broker is forwarding (every
+    summary frame transits its proxy), so transitive liveness stands in
+    for a direct signal. When the broker runs embedded in this node
+    (single-container / dev) the authoritative local view wins.
+
+    Args:
+        local_running: Whether this node's launcher tracks the broker.
+        cache: Cross-coordinator summary cache, or ``None`` when absent.
+
+    Returns:
+        True when the broker runs locally or the bus is demonstrably live.
+    """
+    if local_running:
+        return True
+    return cache is not None and cache.has_fresh_snapshot()
+
+
 def get_repository_for_processes() -> Repository:
     """FastAPI dependency for repository access in strategy permission checks.
 
@@ -685,7 +711,7 @@ async def get_process_summary(
             continue
         elif config.name == "zmq_broker":
             brokers_total += 1
-            brokers_running += int(is_running)
+            brokers_running += int(_broker_running(config.name in running, cache))
     for instance_name in factory.instance_configs:
         if not is_executor_instance(instance_name):
             continue
@@ -705,6 +731,8 @@ async def get_process_summary(
         unioned_running, _coordinator, _managed_remotely = _resolve_ownership(
             factory, cache, row_config, local_running=item.running
         )
+        if item.name == "zmq_broker":
+            unioned_running = _broker_running(item.running, cache)
         items.append(
             item
             if unioned_running == item.running
