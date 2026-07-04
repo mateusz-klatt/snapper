@@ -21,12 +21,20 @@ from snapper.server.command_ack_registry import ProcessCommandAckRegistry
 _KEY = command_signing_key("master")
 
 
-def _signed_ack(*, command_id: str = "cmd-1", status: str = "applied") -> str:
+def _signed_ack(
+    *,
+    command_id: str = "cmd-1",
+    status: str = "applied",
+    coordinator: str = "coord-2",
+    process_name: str = "strategy_x",
+) -> str:
     """Build a signed ProcessCommandAckData JSON payload.
 
     Args:
         command_id: The acked command id.
         status: The ack status.
+        coordinator: The acking coordinator slug.
+        process_name: The acked process name.
 
     Returns:
         The signed ack serialized as JSON.
@@ -37,8 +45,8 @@ def _signed_ack(*, command_id: str = "cmd-1", status: str = "applied") -> str:
         public_id=str(uuid7()),
         timestamp=datetime.now(UTC),
         command_id=command_id,
-        coordinator="coord-2",
-        process_name="strategy_x",
+        coordinator=coordinator,
+        process_name=process_name,
         status=status,
         signature="",
     )
@@ -56,7 +64,7 @@ class TestRegistry:
     async def test_register_returns_a_future(self) -> None:
         """Register returns an awaitable future for the command id."""
         registry = ProcessCommandAckRegistry(_KEY)
-        future = registry.register("cmd-1")
+        future = registry.register("cmd-1", coordinator="coord-2", process_name="strategy_x")
         assert isinstance(future, asyncio.Future)
         assert not future.done()
 
@@ -65,14 +73,15 @@ class TestRegistry:
         """Register returns None once the pending bound is reached."""
         registry = ProcessCommandAckRegistry(_KEY)
         for index in range(mod._MAX_PENDING):
-            registry.register(f"cmd-{index}")
-        assert registry.register("overflow") is None
+            registry.register(f"cmd-{index}", coordinator="coord-2", process_name="strategy_x")
+        overflow = registry.register("overflow", coordinator="coord-2", process_name="strategy_x")
+        assert overflow is None
 
     @pytest.mark.asyncio
     async def test_unregister_drops_the_future(self) -> None:
         """Unregister removes the pending future so a late ack cannot resolve it."""
         registry = ProcessCommandAckRegistry(_KEY)
-        registry.register("cmd-1")
+        registry.register("cmd-1", coordinator="coord-2", process_name="strategy_x")
         registry.unregister("cmd-1")
         registry._resolve_ack(_signed_ack(command_id="cmd-1"))
 
@@ -84,7 +93,7 @@ class TestResolveAck:
     async def test_valid_ack_resolves_the_matching_future(self) -> None:
         """A signed ack for a registered command resolves its future with the ack."""
         registry = ProcessCommandAckRegistry(_KEY)
-        future = registry.register("cmd-1")
+        future = registry.register("cmd-1", coordinator="coord-2", process_name="strategy_x")
         assert future is not None
 
         registry._resolve_ack(_signed_ack(command_id="cmd-1", status="applied"))
@@ -105,7 +114,7 @@ class TestResolveAck:
     async def test_second_ack_does_not_re_resolve(self) -> None:
         """A second ack for an already-resolved future is ignored."""
         registry = ProcessCommandAckRegistry(_KEY)
-        future = registry.register("cmd-1")
+        future = registry.register("cmd-1", coordinator="coord-2", process_name="strategy_x")
         assert future is not None
         registry._resolve_ack(_signed_ack(command_id="cmd-1"))
         await future
@@ -118,7 +127,7 @@ class TestResolveAck:
     async def test_malformed_json_ack_dropped(self) -> None:
         """A non-JSON ack does not resolve anything."""
         registry = ProcessCommandAckRegistry(_KEY)
-        future = registry.register("cmd-1")
+        future = registry.register("cmd-1", coordinator="coord-2", process_name="strategy_x")
         assert future is not None
 
         registry._resolve_ack("not json{")
@@ -129,7 +138,7 @@ class TestResolveAck:
     async def test_non_object_ack_dropped(self) -> None:
         """A JSON-array ack does not resolve anything."""
         registry = ProcessCommandAckRegistry(_KEY)
-        future = registry.register("cmd-1")
+        future = registry.register("cmd-1", coordinator="coord-2", process_name="strategy_x")
         assert future is not None
 
         registry._resolve_ack("[1, 2, 3]")
@@ -140,7 +149,7 @@ class TestResolveAck:
     async def test_bad_signature_ack_dropped(self) -> None:
         """An ack signed with the wrong key does not resolve the future."""
         registry = ProcessCommandAckRegistry(_KEY)
-        future = registry.register("cmd-1")
+        future = registry.register("cmd-1", coordinator="coord-2", process_name="strategy_x")
         assert future is not None
         wrong = ProcessCommandAckData(
             session_id="s",
@@ -169,7 +178,7 @@ class TestResolveAck:
     async def test_schema_invalid_ack_dropped(self) -> None:
         """A signed but schema-invalid ack does not resolve the future."""
         registry = ProcessCommandAckRegistry(_KEY)
-        future = registry.register("cmd-1")
+        future = registry.register("cmd-1", coordinator="coord-2", process_name="strategy_x")
         assert future is not None
         raw = {"type": "process_command_ack", "command_id": "cmd-1", "signature": ""}
         raw["signature"] = sign_command_payload(raw, _KEY)
@@ -193,6 +202,50 @@ def _publisher() -> MagicMock:
     publisher.send = AsyncMock()
 
     return publisher
+
+
+class TestResolveAckIdentity:
+    """A signed ack resolves ONLY the nudge whose identity it matches."""
+
+    @pytest.mark.asyncio
+    async def test_ack_with_wrong_coordinator_is_dropped(self) -> None:
+        """An ack whose coordinator differs from the pinned one never resolves.
+
+        The registry subscribes to every coordinator's ack topic, so a
+        bare command_id match would let any first-party key holder
+        resolve any pending PATCH; the identity pin closes that.
+        """
+        registry = ProcessCommandAckRegistry(_KEY)
+        future = registry.register("cmd-1", coordinator="coord-2", process_name="strategy_x")
+        assert future is not None
+
+        registry._resolve_ack(_signed_ack(command_id="cmd-1", coordinator="coord-9"))
+
+        assert not future.done()
+
+    @pytest.mark.asyncio
+    async def test_ack_with_wrong_process_name_is_dropped(self) -> None:
+        """An ack for a different process than the nudge targeted never resolves."""
+        registry = ProcessCommandAckRegistry(_KEY)
+        future = registry.register("cmd-1", coordinator="coord-2", process_name="strategy_x")
+        assert future is not None
+
+        registry._resolve_ack(_signed_ack(command_id="cmd-1", process_name="strategy_other"))
+
+        assert not future.done()
+
+    @pytest.mark.asyncio
+    async def test_matching_identity_still_resolves(self) -> None:
+        """The exact pinned coordinator+process pair resolves the future."""
+        registry = ProcessCommandAckRegistry(_KEY)
+        future = registry.register("cmd-1", coordinator="coord-2", process_name="strategy_x")
+        assert future is not None
+
+        registry._resolve_ack(
+            _signed_ack(command_id="cmd-1", coordinator="coord-2", process_name="strategy_x")
+        )
+
+        assert (await future).command_id == "cmd-1"
 
 
 class TestNudge:
@@ -276,7 +329,7 @@ class TestNudge:
         """A saturated registry yields None without publishing."""
         registry = ProcessCommandAckRegistry(_KEY)
         for index in range(mod._MAX_PENDING):
-            registry.register(f"cmd-{index}")
+            registry.register(f"cmd-{index}", coordinator="coord-2", process_name="strategy_x")
         publisher = _publisher()
 
         result = await registry.nudge(

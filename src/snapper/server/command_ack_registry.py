@@ -50,18 +50,29 @@ class ProcessCommandAckRegistry:
                 resolving its future.
         """
         self._key = signing_key
-        self._pending: dict[str, asyncio.Future[ProcessCommandAckData]] = {}
+        self._pending: dict[str, tuple[asyncio.Future[ProcessCommandAckData], str, str]] = {}
         self._zmq_context: zmq.asyncio.Context | None = None
         self._subscriber: ValidatedSubscriber | None = None
         self._listen_task: asyncio.Task[None] | None = None
         self._running = False
         self._lock = asyncio.Lock()
 
-    def register(self, command_id: str) -> asyncio.Future[ProcessCommandAckData] | None:
+    def register(
+        self, command_id: str, *, coordinator: str, process_name: str
+    ) -> asyncio.Future[ProcessCommandAckData] | None:
         """Register a future to be resolved by ``command_id``'s ack.
+
+        The expected coordinator and process name are pinned alongside the
+        future so :meth:`_resolve_ack` can reject an ack whose identity
+        fields do not match the nudge that minted the id — the registry
+        subscribes to EVERY coordinator's ack topic, and a bare
+        ``command_id`` match would let any signed ack frame resolve any
+        pending PATCH.
 
         Args:
             command_id: The id of the command about to be published.
+            coordinator: The slug of the coordinator the nudge targets.
+            process_name: The process the nudge controls.
 
         Returns:
             A future the caller awaits, or ``None`` when the registry is
@@ -75,7 +86,7 @@ class ProcessCommandAckRegistry:
 
             return None
         future: asyncio.Future[ProcessCommandAckData] = asyncio.get_running_loop().create_future()
-        self._pending[command_id] = future
+        self._pending[command_id] = (future, coordinator, process_name)
 
         return future
 
@@ -122,7 +133,7 @@ class ProcessCommandAckRegistry:
         if publisher is None:
             return None
         command_id = str(uuid7())
-        future = self.register(command_id)
+        future = self.register(command_id, coordinator=coordinator, process_name=process_name)
         if future is None:
             return None
         try:
@@ -273,7 +284,10 @@ class ProcessCommandAckRegistry:
 
         A malformed / non-object / bad-signature / schema-invalid ack is
         dropped (the PATCH times out to reconcile-pending). An ack for an
-        unknown or already-resolved command id is ignored.
+        unknown or already-resolved command id is ignored. An ack whose
+        ``coordinator`` / ``process_name`` do not match the values pinned
+        at :meth:`register` time is dropped with a warning — a signed ack
+        can only resolve the exact nudge that minted its command id.
 
         Args:
             payload: The decoded ack JSON payload.
@@ -292,6 +306,21 @@ class ProcessCommandAckRegistry:
             ack = ProcessCommandAckData.model_validate_json(payload)
         except Exception:
             return
-        future = self._pending.get(ack.command_id)
-        if future is not None and not future.done():
+        entry = self._pending.get(ack.command_id)
+        if entry is None:
+            return
+        future, coordinator, process_name = entry
+        if ack.coordinator != coordinator or ack.process_name != process_name:
+            logger.warning(
+                "ProcessCommandAckRegistry: ack '{}' identity mismatch "
+                "({}/{} != expected {}/{}), dropped",
+                ack.command_id,
+                ack.coordinator,
+                ack.process_name,
+                coordinator,
+                process_name,
+            )
+
+            return
+        if not future.done():
             future.set_result(ack)

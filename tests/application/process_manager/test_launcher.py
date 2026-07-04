@@ -17,6 +17,7 @@ from uuid import uuid4
 import pytest
 
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.application.process_manager import launcher as launcher_module
 from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.launcher import _DesiredState
@@ -3493,3 +3494,272 @@ class TestReconcileDesiredState:
         started = {call.args[0].name for call in launcher.start_process.await_args_list}
         assert "owned" in started
         assert "not_owned" not in started
+
+
+class TestReconcileHardening:
+    """Failure damping, pass timeout, and §8 concurrency guarantees."""
+
+    @staticmethod
+    def _cfg(
+        name: str,
+        *,
+        enabled: bool = True,
+        role: ProcessRoleEnum = ProcessRoleEnum.CORE,
+        restart_nonce: str | None = None,
+    ) -> ProcessConfigModel:
+        """Build a minimal owned config (delegates to the P0.3 helper).
+
+        Args:
+            name: Process name.
+            enabled: Desired-state enabled flag.
+            role: Process role.
+            restart_nonce: Persisted operator restart nonce.
+
+        Returns:
+            A populated ProcessConfigModel.
+        """
+        return TestReconcileDesiredState._cfg(
+            name, enabled=enabled, role=role, restart_nonce=restart_nonce
+        )
+
+    @staticmethod
+    def _instrument(launcher: ProcessLauncherService) -> None:
+        """Replace spawn/stop/scope primitives (delegates to the P0.3 helper).
+
+        Args:
+            launcher: The launcher under test.
+        """
+        TestReconcileDesiredState._instrument(launcher)
+
+    @pytest.mark.asyncio
+    async def test_parks_after_consecutive_start_failures(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A permanently failing enabled config parks after the budget.
+
+        Without damping every ~10s tick would fail-start forever
+        (run-record churn); after the budget the parked no-op row takes
+        over and no further spawn is attempted.
+        """
+        self._instrument(launcher)
+        launcher.start_process = AsyncMock(side_effect=RuntimeError("boom"))
+        cfg = self._cfg("p")
+        budget = launcher_module._RECONCILE_START_FAILURE_BUDGET
+        for _ in range(budget):
+            with pytest.raises(RuntimeError):
+                await launcher._reconcile_one(cfg)
+        assert launcher.is_parked("p") is True
+        assert "p" not in launcher._desired_state
+        assert "p" not in launcher._restart_configs
+        await launcher._reconcile_one(cfg)
+        assert launcher.start_process.await_count == budget
+
+    @pytest.mark.asyncio
+    async def test_wedged_start_counts_toward_budget_and_parks(
+        self, launcher: ProcessLauncherService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A start that HANGS (timeout-cancelled) burns budget like a raise.
+
+        wait_for injects CancelledError, which _reconcile_one's except
+        Exception never sees — without counting in the TimeoutError
+        branch a perpetually hanging start would be cancelled and
+        retried every tick forever, orphaning executor work each time.
+        """
+        self._instrument(launcher)
+        monkeypatch.setattr(launcher_module, "_RECONCILE_ONE_TIMEOUT_S", 0.02)
+
+        async def _hang(config: ProcessConfigModel) -> None:
+            await asyncio.sleep(5)
+
+        launcher.start_process = AsyncMock(side_effect=_hang)
+        cfg = self._cfg("p")
+        launcher.get_process_configs = AsyncMock(return_value=[cfg])
+        launcher.autostart_includes = MagicMock(return_value=True)
+        budget = launcher_module._RECONCILE_START_FAILURE_BUDGET
+        for _ in range(budget):
+            await launcher.reconcile_desired_state()
+        assert launcher.is_parked("p") is True
+        assert "p" not in launcher._desired_state
+        await launcher.reconcile_desired_state()
+        assert launcher.start_process.await_count == budget
+
+    @pytest.mark.asyncio
+    async def test_failure_counter_resets_on_success(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A successful start wipes the consecutive-failure counter."""
+        self._instrument(launcher)
+        launcher.start_process = AsyncMock(side_effect=RuntimeError("boom"))
+        cfg = self._cfg("p")
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                await launcher._reconcile_one(cfg)
+        assert launcher._reconcile_start_failures["p"] == 2
+        launcher.start_process = AsyncMock()
+        await launcher._reconcile_one(cfg)
+        assert "p" not in launcher._reconcile_start_failures
+
+    @pytest.mark.asyncio
+    async def test_failed_restart_stays_parked_and_abandons_nonce_after_budget(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A failing operator restart of a parked process ends in a bounded park.
+
+        The parked marker survives every failed attempt (§8: parked stays
+        parked on a FAILED explicit restart), and after the budget the
+        nonce is recorded as applied so the bounce loop ends; a further
+        tick is a parked no-op.
+        """
+        self._instrument(launcher)
+        launcher.start_process = AsyncMock(side_effect=RuntimeError("boom"))
+        launcher._park("p")
+        cfg = self._cfg("p", restart_nonce="n1")
+        budget = launcher_module._RECONCILE_START_FAILURE_BUDGET
+        for _ in range(budget):
+            with pytest.raises(RuntimeError):
+                await launcher._reconcile_one(cfg)
+            assert launcher.is_parked("p") is True
+        assert launcher._last_applied_restart_nonce["p"] == "n1"
+        await launcher._reconcile_one(cfg)
+        assert launcher.start_process.await_count == budget
+
+    @pytest.mark.asyncio
+    async def test_new_nonce_rearms_the_failure_budget(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A changed restart nonce resets the consecutive-failure counter."""
+        self._instrument(launcher)
+        launcher.start_process = AsyncMock(side_effect=RuntimeError("boom"))
+        budget = launcher_module._RECONCILE_START_FAILURE_BUDGET
+        cfg_n1 = self._cfg("p", restart_nonce="n1")
+        for _ in range(budget - 1):
+            with pytest.raises(RuntimeError):
+                await launcher._reconcile_one(cfg_n1)
+        assert launcher._reconcile_start_failures["p"] == budget - 1
+        cfg_n2 = self._cfg("p", restart_nonce="n2")
+        with pytest.raises(RuntimeError):
+            await launcher._reconcile_one(cfg_n2)
+        assert launcher._reconcile_start_failures["p"] == 1
+        assert launcher.is_parked("p") is False
+
+    @pytest.mark.asyncio
+    async def test_disable_clears_the_failure_counter(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Disabling a failing config wipes its counter for a fresh re-enable."""
+        self._instrument(launcher)
+        launcher._reconcile_start_failures["p"] = 3
+        await launcher._reconcile_one(self._cfg("p", enabled=False))
+        assert "p" not in launcher._reconcile_start_failures
+
+    @pytest.mark.asyncio
+    async def test_strategy_scope_failure_fails_closed_without_spawn(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """§8: a scope failure at reconcile-start never spawns the strategy."""
+        self._instrument(launcher)
+        launcher._resolve_autostart_strategy_scope = AsyncMock(
+            side_effect=RuntimeError("grant revoked")
+        )
+        cfg = self._cfg("strategy_x", role=ProcessRoleEnum.STRATEGY)
+        with pytest.raises(RuntimeError):
+            await launcher._reconcile_one(cfg)
+        launcher.start_process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_wedged_convergence_times_out_and_pass_continues(
+        self, launcher: ProcessLauncherService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hung stop is cancelled by the per-process ceiling; the pass moves on.
+
+        Without the ceiling a wedged ``instance.stop()`` would hold
+        ``_reconcile_lock`` forever, stalling every future tick and nudge.
+        """
+        self._instrument(launcher)
+        monkeypatch.setattr(launcher_module, "_RECONCILE_ONE_TIMEOUT_S", 0.05)
+
+        async def _hang(name: str) -> None:
+            await asyncio.sleep(5)
+
+        launcher.stop_process_by_name = AsyncMock(side_effect=_hang)
+        launcher.started_processes["wedged"] = MagicMock()
+        wedged = self._cfg("wedged", enabled=False)
+        healthy = self._cfg("healthy")
+        launcher.get_process_configs = AsyncMock(return_value=[wedged, healthy])
+        launcher.autostart_includes = MagicMock(return_value=True)
+        await launcher.reconcile_desired_state()
+        started = {call.args[0].name for call in launcher.start_process.await_args_list}
+        assert "healthy" in started
+
+    @pytest.mark.asyncio
+    async def test_concurrent_passes_spawn_exactly_once(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """§8 tick-vs-nudge: two concurrent passes produce a single spawn.
+
+        The passes serialize on ``_reconcile_lock``; the second pass sees
+        the name running (the first pass's spawn registered it) and no-ops.
+        """
+        self._instrument(launcher)
+        cfg = self._cfg("p")
+
+        async def _spawn(config: ProcessConfigModel) -> None:
+            await asyncio.sleep(0.02)
+            launcher.started_processes[config.name] = MagicMock()
+
+        launcher.start_process = AsyncMock(side_effect=_spawn)
+        launcher.get_process_configs = AsyncMock(return_value=[cfg])
+        launcher.autostart_includes = MagicMock(return_value=True)
+        await asyncio.gather(launcher.reconcile_desired_state(), launcher.reconcile_desired_state())
+        assert launcher.start_process.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_same_nonce_bounces_exactly_once(self, launcher: ProcessLauncherService) -> None:
+        """§8 retry idempotency: re-seeing an applied nonce never re-bounces."""
+        self._instrument(launcher)
+        cfg = self._cfg("p", restart_nonce="n1")
+
+        async def _spawn(config: ProcessConfigModel) -> None:
+            launcher.started_processes[config.name] = MagicMock()
+
+        launcher.start_process = AsyncMock(side_effect=_spawn)
+        launcher.started_processes["p"] = MagicMock()
+        await launcher._reconcile_one(cfg)
+        await launcher._reconcile_one(cfg)
+        assert launcher.start_process.await_count == 1
+        assert launcher.stop_process_by_name.await_count == 1
+
+    def test_clear_watchdog_state_drops_reconcile_counters(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Terminal cleanup forgets the damping counter and attempted nonce."""
+        launcher._reconcile_start_failures["p"] = 4
+        launcher._reconcile_attempted_nonce["p"] = "n1"
+        launcher._clear_watchdog_state("p")
+        assert "p" not in launcher._reconcile_start_failures
+        assert "p" not in launcher._reconcile_attempted_nonce
+
+    @pytest.mark.asyncio
+    async def test_park_cancels_a_pending_watchdog_restart_task(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Crossing the budget cancels a delayed-restart scheduled in the race window.
+
+        A watchdog _maybe_schedule_restart can slip in between a failed
+        (or cancelled) start and the park — the helper runs outside the
+        per-name lock's original hold. _clear_watchdog_state pops
+        _restart_tasks WITHOUT cancelling, so without the explicit
+        locked cancel the sleeper would survive untracked and later
+        respawn the parked name.
+        """
+        cfg = self._cfg("p")
+        launcher._reconcile_start_failures["p"] = (
+            launcher_module._RECONCILE_START_FAILURE_BUDGET - 1
+        )
+        sleeper = asyncio.get_running_loop().create_task(asyncio.sleep(30))
+        launcher._restart_tasks["p"] = sleeper
+        await launcher._register_reconcile_start_failure(cfg)
+        await asyncio.sleep(0)
+        assert sleeper.cancelled()
+        assert "p" not in launcher._restart_tasks
+        assert launcher.is_parked("p") is True

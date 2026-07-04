@@ -120,6 +120,31 @@ survives sidecar restarts) while the rule's dedup caps pages at about
 one per hour; an accepted parking stops the loop via the per-frame gate
 and the unpark cancellation."""
 
+_RECONCILE_START_FAILURE_BUDGET: Final[int] = 5
+"""Consecutive failed reconcile-driven starts before a config is parked.
+
+Damps the ~10s convergence churn of a permanently failing enabled
+config: without a ceiling every reconcile tick spawns, fails, INSERTs
+and finalizes a FAILED ``process_runs`` row and error-logs — forever
+(``_handle_start_failure`` neither parks nor counts toward the watchdog
+restart budget, because a reconcile start never reaches the watchdog's
+completion path). Five attempts ≈ 50 s of retries, enough to ride out a
+transient (DB blip, slow dependency) while bounding the damage of a
+genuinely broken config to a handful of rows before the level-triggered
+parked signal takes over."""
+
+_RECONCILE_ONE_TIMEOUT_S: Final[float] = 120.0
+"""Ceiling for converging ONE process inside a reconcile pass.
+
+``reconcile_desired_state`` holds ``_reconcile_lock`` across the whole
+pass, and the P2 nudge listener awaits the same lock — so a single
+wedged ``instance.stop()`` (which has no timeout of its own) would
+otherwise stall every future periodic tick AND every nudge on this
+coordinator, silently disabling the control plane. ``asyncio.wait_for``
+cancels the stuck convergence and the pass moves on; 120 s is far above
+any healthy stop/start so a cancellation here always indicates a wedged
+process, which the log line then surfaces."""
+
 _PARK_HEARTBEAT_SPACING_S: Final[float] = 2.0
 """Spacing between synthetic park-heartbeat frames.
 
@@ -409,6 +434,8 @@ class ProcessLauncherService:
         self._core_health_cache: tuple[float, HealthStatus] | None = None
         self._reconcile_lock = asyncio.Lock()
         self._last_applied_restart_nonce: dict[str, str] = {}
+        self._reconcile_start_failures: dict[str, int] = {}
+        self._reconcile_attempted_nonce: dict[str, str] = {}
 
     def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
         """Inject the bus publisher used for processes/strategies fanout.
@@ -1483,6 +1510,67 @@ class ProcessLauncherService:
             await self.stop_process_by_name(name)
         await self._reconcile_start_owned(config)
 
+    async def _register_reconcile_start_failure(self, config: ProcessConfigModel) -> None:
+        """Count one failed reconcile-driven start; park after the budget.
+
+        After ``_RECONCILE_START_FAILURE_BUDGET`` consecutive failures the
+        name is parked — the same level-triggered operator signal the
+        watchdog give-up uses — which the §3 matrix then treats as a no-op,
+        ending the churn. Parking also runs :meth:`_clear_watchdog_state`,
+        exactly like the watchdog's own give-up in
+        :meth:`_maybe_schedule_restart`: a failed start can leave armed
+        desired-RUNNING / respawn-config residue behind (and a partially
+        started run's completion callback may still fire later), and
+        without the clear the watchdog would happily respawn a name the
+        budget just parked. The clear also drops this helper's own
+        counters, ending the episode.
+
+        The whole decision runs under ``_restart_lock_for(name)``, and the
+        park additionally cancels any pending delayed-restart via
+        :meth:`_cancel_restart_tasks_locked`: every caller sits OUTSIDE
+        the per-name lock (an exception or ``wait_for`` cancellation has
+        already released :meth:`_reconcile_start_owned`'s hold), so a
+        concurrent watchdog :meth:`_maybe_schedule_restart` could
+        otherwise slip in between the failure and the clear, schedule a
+        delayed restart from the stale desired-RUNNING/config residue,
+        and — because :meth:`_clear_watchdog_state` pops
+        ``_restart_tasks`` WITHOUT cancelling — leave an untracked
+        sleeper that later respawns a name the budget just parked (or
+        double-spawns after an operator recovery). Under the lock the
+        watchdog either ran first (its task is cancelled here) or runs
+        after (and finds no config residue, so it no-ops).
+
+        When the failing convergence was an operator restart, the nonce
+        is ALSO recorded as applied: this deliberately relaxes the
+        applied-only-on-success rule after the budget, because an
+        unapplied nonce takes priority over the parked marker in
+        :meth:`_reconcile_one` and would bounce the parked process on
+        every tick forever. Recovery is the standard parked flow: fix the
+        config and request a restart — a FRESH nonce re-arms a full
+        budget (see the nonce-change reset in :meth:`_reconcile_one`).
+
+        Args:
+            config: The owned config whose reconcile convergence just
+                failed (a raised start OR a timed-out, cancelled attempt).
+        """
+        name = config.name
+        async with self._restart_lock_for(name):
+            failures = self._reconcile_start_failures.get(name, 0) + 1
+            self._reconcile_start_failures[name] = failures
+            if failures < _RECONCILE_START_FAILURE_BUDGET:
+                return
+            await self._cancel_restart_tasks_locked(name)
+            self._park(name)
+            if config.restart_nonce is not None:
+                self._last_applied_restart_nonce[name] = config.restart_nonce
+            self._clear_watchdog_state(name)
+        logger.warning(
+            "reconcile: '{}' parked after {} consecutive failed convergence attempts; "
+            "fix the config and request a restart to recover",
+            name,
+            failures,
+        )
+
     async def _reconcile_one(self, config: ProcessConfigModel) -> None:
         """Converge a single owned process to its DB desired state (§3 matrix).
 
@@ -1490,6 +1578,15 @@ class ProcessLauncherService:
         after the boot start), so any ``restart_nonce`` here that differs from
         the recorded one — including a first-ever operator restart of a parked
         or running process — is a genuine restart request and bounces.
+
+        Every non-noop decision is logged with its reason (start / stop /
+        bounce) so an operator can attribute a lifecycle action to the
+        reconcile loop rather than the watchdog or a manual call.
+        Consecutive start failures are counted per name and park it after
+        ``_RECONCILE_START_FAILURE_BUDGET`` attempts
+        (:meth:`_register_reconcile_start_failure`); a CHANGED restart
+        nonce re-arms a full budget so an operator retry is never starved
+        by an earlier config's failures.
 
         Args:
             config: An owned process config (caller has already checked
@@ -1504,15 +1601,32 @@ class ProcessLauncherService:
                 or self.is_parked(name)
                 or self._desired_state.get(name) is _DesiredState.RUNNING
             ):
+                logger.info("reconcile: stopping '{}' (disabled in desired-state)", name)
                 await self.stop_process_by_name(name)
+            self._reconcile_start_failures.pop(name, None)
             return
         nonce = config.restart_nonce
         if nonce is not None and self._last_applied_restart_nonce.get(name) != nonce:
-            await self._reconcile_restart(config)
+            if self._reconcile_attempted_nonce.get(name) != nonce:
+                self._reconcile_attempted_nonce[name] = nonce
+                self._reconcile_start_failures.pop(name, None)
+            logger.info("reconcile: bouncing '{}' (restart nonce advanced)", name)
+            try:
+                await self._reconcile_restart(config)
+            except Exception:
+                await self._register_reconcile_start_failure(config)
+                raise
+            self._reconcile_start_failures.pop(name, None)
             return
         if running or self.is_parked(name) or self._has_pending_restart(name):
             return
-        await self._reconcile_start_owned(config)
+        logger.info("reconcile: starting '{}' (enabled and stopped)", name)
+        try:
+            await self._reconcile_start_owned(config)
+        except Exception:
+            await self._register_reconcile_start_failure(config)
+            raise
+        self._reconcile_start_failures.pop(name, None)
 
     async def reconcile_desired_state(self) -> None:
         """Converge owned processes to the DB desired-state (enabled / nonce).
@@ -1524,9 +1638,19 @@ class ProcessLauncherService:
         parked or mid-backoff, which the watchdog owns), stop a
         disabled-but-running/pending/parked one, and bounce a process whose
         ``restart_nonce`` advanced. Each process is fail-soft (a bad config
-        never stalls the others). Serialized by ``_reconcile_lock`` so it
-        never overlaps itself; the nudge-driven fast path and its
-        coalescing land in P2.
+        never stalls the others) AND time-bounded: one convergence is
+        cancelled after ``_RECONCILE_ONE_TIMEOUT_S`` so a wedged
+        ``instance.stop()`` cannot hold ``_reconcile_lock`` forever and
+        silently disable both the periodic loop and the nudge listener,
+        which awaits the same lock. A timed-out convergence counts toward
+        the SAME failure budget as a raised one
+        (:meth:`_register_reconcile_start_failure`) — cancellation cannot
+        stop work already handed to an executor thread, so a perpetually
+        hanging start could otherwise orphan a copy per tick forever; the
+        budget bounds that to a handful before the parked signal ends the
+        loop. Serialized by ``_reconcile_lock`` so it never overlaps
+        itself; the P2 nudge fast path simply queues on the lock and runs
+        a fresh full pass right after the current one.
         """
         async with self._reconcile_lock:
             configs = await self.get_process_configs()
@@ -1534,7 +1658,14 @@ class ProcessLauncherService:
                 if not self.autostart_includes(config):
                     continue
                 try:
-                    await self._reconcile_one(config)
+                    await asyncio.wait_for(self._reconcile_one(config), _RECONCILE_ONE_TIMEOUT_S)
+                except TimeoutError:
+                    await self._register_reconcile_start_failure(config)
+                    logger.error(
+                        "Reconcile of '{}' timed out after {}s (cancelled, skipped)",
+                        config.name,
+                        _RECONCILE_ONE_TIMEOUT_S,
+                    )
                 except Exception as exc:
                     logger.error("Reconcile of '{}' failed (skipped): {}", config.name, exc)
 
@@ -2246,6 +2377,8 @@ class ProcessLauncherService:
         self._total_failed_restarts.pop(name, None)
         self._process_metrics.pop(name, None)
         self._psutil_handles.pop(name, None)
+        self._reconcile_start_failures.pop(name, None)
+        self._reconcile_attempted_nonce.pop(name, None)
 
     def _arm_desired_running(self, name: str) -> None:
         """Declare ``name`` desired-RUNNING (the lock-owned transition).
