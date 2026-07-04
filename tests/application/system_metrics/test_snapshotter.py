@@ -498,13 +498,45 @@ class TestSnapshotter:
         """Covered by test body."""
         monkeypatch.setattr(snapshotter, "_live_aiosqlite_connections", {object(): object()})
 
-        metrics = SystemMetricsSnapshotter._sample_db_internal_metrics()
+        metrics = SystemMetricsSnapshotter()._sample_db_internal_metrics()
 
         assert metrics == {
             "aiosqlite_live_connections": 1,
             "pool_size": None,
             "pool_checked_out": None,
         }
+
+    def test_sample_db_internal_reports_queue_pool_utilization(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Covered by test body."""
+        fake_pool = MagicMock()
+        fake_pool.size = MagicMock(return_value=5)
+        fake_pool.checkedout = MagicMock(return_value=2)
+        fake_engine = MagicMock()
+        fake_engine.sync_engine.pool = fake_pool
+        monkeypatch.setattr(snapshotter, "_live_aiosqlite_connections", {})
+
+        metrics = SystemMetricsSnapshotter(engine=fake_engine)._sample_db_internal_metrics()
+
+        assert metrics == {
+            "aiosqlite_live_connections": 0,
+            "pool_size": 5,
+            "pool_checked_out": 2,
+        }
+
+    def test_sample_db_internal_ignores_pool_without_counters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Covered by test body."""
+        fake_engine = MagicMock()
+        fake_engine.sync_engine.pool = object()
+        monkeypatch.setattr(snapshotter, "_live_aiosqlite_connections", {})
+
+        metrics = SystemMetricsSnapshotter(engine=fake_engine)._sample_db_internal_metrics()
+
+        assert metrics["pool_size"] is None
+        assert metrics["pool_checked_out"] is None
 
     def test_sample_disk_metrics_reports_healthy_state(
         self, monkeypatch: pytest.MonkeyPatch

@@ -42,6 +42,7 @@ from typing import Protocol
 from uuid import uuid7
 
 import psutil
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from snapper.application.system_metrics.cgroup import CgroupReading
 from snapper.application.system_metrics.cgroup import read_cgroup
@@ -214,6 +215,7 @@ class SystemMetricsSnapshotter:
         tracemalloc_controller: TracemallocController | None = None,
         history_buffer: MetricsRingBuffer | None = None,
         msg_publisher: _HeartbeatPublisher | None = None,
+        engine: AsyncEngine | None = None,
     ) -> None:
         """Wire dependencies.
 
@@ -244,6 +246,10 @@ class SystemMetricsSnapshotter:
             msg_publisher: Optional ZMQ publisher for host disk heartbeat
                 frames. ``None`` disables bus publication while keeping
                 local metrics and logs intact.
+            engine: The app's primary async DB engine, injected so the
+                DB-pool tile reports THAT pool's utilization authoritatively
+                rather than guessing from the set of all live engines.
+                ``None`` (tests / metrics-only) leaves pool metrics ``None``.
         """
         if interval_seconds is None:
             interval_seconds = _resolve_interval(os.environ.get(_INTERVAL_ENV_VAR))
@@ -271,6 +277,7 @@ class SystemMetricsSnapshotter:
         self._tracemalloc = tracemalloc_controller or TracemallocController()
         self._history = history_buffer or MetricsRingBuffer(maxlen=history_cap)
         self._msg_publisher = msg_publisher
+        self._engine = engine
         self._disk_heartbeat_sequence = 0
         self._sampler_task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
@@ -619,19 +626,44 @@ class SystemMetricsSnapshotter:
             fds_pct=fds_pct,
         )
 
-    @staticmethod
-    def _sample_db_internal_metrics() -> DbInternalMetrics:
+    def _sample_pool_metrics(self) -> tuple[int | None, int | None]:
+        """Read ``(pool_size, checked_out)`` from the injected primary pool.
+
+        Reads the INJECTED primary engine's pool authoritatively — no guessing
+        among the set of all live engines, so a secondary/replica engine can
+        never shadow the primary in the operator tile. A ``QueuePool``
+        (asyncpg/Postgres and file-backed SQLite) exposes ``size()`` /
+        ``checkedout()``; an in-memory ``StaticPool`` / ``NullPool`` — and the
+        no-engine case (tests / metrics-only startup) — does not, so those
+        collapse to ``(None, None)``. This is why the prod (Postgres) "DB Pool"
+        tile was blank: the previous sampler hardcoded both to ``None``.
+
+        Returns:
+            ``(pool_size, checked_out)``, or ``(None, None)`` when no engine is
+            injected or its pool exposes no queue-pool counters.
+        """
+        if self._engine is None:
+            return None, None
+        pool = self._engine.sync_engine.pool
+        size = getattr(pool, "size", None)
+        checked_out = getattr(pool, "checkedout", None)
+        if callable(size) and callable(checked_out):
+            return size(), checked_out()
+        return None, None
+
+    def _sample_db_internal_metrics(self) -> DbInternalMetrics:
         """SQLAlchemy + aiosqlite pool counters.
 
         ``aiosqlite_live_connections`` is read via atomic ``len(...)``
         — DICT iteration would race with SQLAlchemy connect / close
-        hooks. ``pool_size`` / ``pool_checked_out`` are reserved for
-        queue-pool instrumentation and currently return ``None`` from
-        this sampler.
+        hooks; it is a SQLite-only tracker that stays ``0`` on Postgres.
+        ``pool_size`` / ``pool_checked_out`` come from the injected
+        primary engine's queue pool (asyncpg/Postgres and file-backed
+        SQLite); an in-memory ``StaticPool`` / ``NullPool`` leaves them
+        ``None``.
         """
         live = len(_live_aiosqlite_connections)
-        pool_size: int | None = None
-        pool_checked_out: int | None = None
+        pool_size, pool_checked_out = self._sample_pool_metrics()
         return DbInternalMetrics(
             aiosqlite_live_connections=live,
             pool_size=pool_size,

@@ -106,9 +106,12 @@ class DbInternalMetrics(TypedDict):
     ``len(_live_aiosqlite_connections)`` at sample time — atomic read,
     no iteration. Each live aiosqlite Connection corresponds to one OS
     thread under NullPool semantics; this metric is the diagnostic for
-    aiosqlite thread leaks.
-    ``pool_size`` and ``pool_checked_out`` are reserved for queue-pool
-    instrumentation and are ``None`` in the current sampler output.
+    aiosqlite thread leaks. It is a SQLite-only tracker and stays ``0``
+    on Postgres.
+    ``pool_size`` and ``pool_checked_out`` report the live async engine's
+    queue-pool utilization (asyncpg/Postgres and file-backed SQLite); an
+    in-memory ``StaticPool`` / ``NullPool`` exposes no such counters, so
+    both are ``None`` there.
     """
 
     aiosqlite_live_connections: int

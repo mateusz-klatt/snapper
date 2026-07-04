@@ -205,9 +205,9 @@ the leading indicator of a thread leak or fd leak.
 
 | Field                       | Type        | Description |
 |-----------------------------|-------------|-------------|
-| `aiosqlite_live_connections`| int         | `len(_live_aiosqlite_connections)` — atomic read; each live aiosqlite connection runs its own worker OS thread. |
-| `pool_size`                 | int \| null | Reserved for future pool instrumentation. Currently always `null`; the sampler does not yet reflect the SQLAlchemy queue pool. |
-| `pool_checked_out`          | int \| null | Reserved for future pool instrumentation. Currently always `null`. |
+| `aiosqlite_live_connections`| int         | `len(_live_aiosqlite_connections)` — atomic read; each live aiosqlite connection runs its own worker OS thread. SQLite-only tracker; stays `0` on Postgres. |
+| `pool_size`                 | int \| null | The primary async engine's queue-pool base size (`QueuePool.size()`), for asyncpg/Postgres and file-backed SQLite. `null` for an in-memory `StaticPool`/`NullPool` or when no engine is injected. |
+| `pool_checked_out`          | int \| null | Connections currently checked out of that pool (`QueuePool.checkedout()`, includes overflow). `null` under the same conditions as `pool_size`. |
 
 ### `disk`
 

@@ -465,6 +465,7 @@ async def _warn_on_tradfi_near_expiry(settings: AppSettings) -> None:
 async def _start_system_metrics_snapshotter(
     app: FastAPI,
     *,
+    db_url: str | None = None,
     msg_publisher: MessagePublisher | None = None,
 ) -> None:
     """Build + start the :class:`SystemMetricsSnapshotter` singleton.
@@ -480,14 +481,18 @@ async def _start_system_metrics_snapshotter(
     Args:
         app: FastAPI application instance whose ``state`` will hold the
             singleton on successful start.
+        db_url: Primary database URL; its cached engine is injected so the
+            DB-pool tile reports the primary pool's utilization. ``None``
+            (tests) leaves pool metrics ``None``.
         msg_publisher: Optional shared ZMQ publisher used for host disk
             heartbeats. ``None`` preserves metrics-only startup.
     """
     try:
+        engine = get_repository(db_url).engine if db_url is not None else None
         if msg_publisher is None:
-            snapshotter = SystemMetricsSnapshotter()
+            snapshotter = SystemMetricsSnapshotter(engine=engine)
         else:
-            snapshotter = SystemMetricsSnapshotter(msg_publisher=msg_publisher)
+            snapshotter = SystemMetricsSnapshotter(engine=engine, msg_publisher=msg_publisher)
         await snapshotter.start()
     except Exception:
         logger.exception(
@@ -1026,7 +1031,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         app.state.plan_executor = plan_executor
         manager_ref: WebSocketConnectionManager = app.state.manager
         app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
-        await _start_system_metrics_snapshotter(app, msg_publisher=user_publisher)
+        await _start_system_metrics_snapshotter(
+            app, db_url=settings.db_url, msg_publisher=user_publisher
+        )
         await _start_market_data_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_retention_scheduler(app, db_url=settings.db_url)
         await _start_db_stats_snapshotter(app, db_url=settings.db_url)

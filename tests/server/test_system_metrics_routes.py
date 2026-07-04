@@ -621,6 +621,9 @@ class TestStartSystemMetricsSnapshotterHelper:
         class FailingSnapshotter:
             """Stand-in that fails its eager-sample call."""
 
+            def __init__(self, **_kwargs: object) -> None:
+                """Accept and ignore constructor kwargs (engine / publisher)."""
+
             async def start(self) -> None:
                 """Raise to simulate cgroup / psutil setup failure."""
                 raise RuntimeError("synthetic startup failure")
@@ -642,6 +645,9 @@ class TestStartSystemMetricsSnapshotterHelper:
 
         class SucceedingSnapshotter:
             """Stand-in with a bookkept ``start()`` to assert call ordering."""
+
+            def __init__(self, **_kwargs: object) -> None:
+                """Accept and ignore constructor kwargs (engine / publisher)."""
 
             async def start(self) -> None:
                 """Record the call without doing real I/O."""
@@ -669,7 +675,9 @@ class TestStartSystemMetricsSnapshotterHelper:
         class SucceedingSnapshotter:
             """Stand-in that records constructor publisher injection."""
 
-            def __init__(self, *, msg_publisher: object | None = None) -> None:
+            def __init__(
+                self, *, engine: object | None = None, msg_publisher: object | None = None
+            ) -> None:
                 """Capture the publisher passed by the startup helper."""
                 constructed_publishers.append(msg_publisher)
 
@@ -686,6 +694,40 @@ class TestStartSystemMetricsSnapshotterHelper:
 
         assert constructed_publishers == [publisher]
         assert isinstance(app.state.system_metrics_snapshotter, SucceedingSnapshotter)
+
+    @pytest.mark.asyncio
+    async def test_start_injects_primary_engine_from_db_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A db_url resolves the cached primary engine and injects it into the snapshotter."""
+        primary_engine = object()
+        constructed_engines: list[object | None] = []
+
+        class SucceedingSnapshotter:
+            """Stand-in that records the engine passed by the startup helper."""
+
+            def __init__(
+                self, *, engine: object | None = None, msg_publisher: object | None = None
+            ) -> None:
+                """Capture the engine the helper resolved from the db_url."""
+                constructed_engines.append(engine)
+
+            async def start(self) -> None:
+                """Complete startup without doing real I/O."""
+
+        monkeypatch.setattr(
+            "snapper.server.app.SystemMetricsSnapshotter",
+            SucceedingSnapshotter,
+        )
+        monkeypatch.setattr(
+            "snapper.server.app.get_repository",
+            lambda _db_url: SimpleNamespace(engine=primary_engine),
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        await _start_system_metrics_snapshotter(app, db_url="sqlite+aiosqlite:///./x.db")
+
+        assert constructed_engines == [primary_engine]
 
 
 class TestStopSystemMetricsSnapshotterHelper:
