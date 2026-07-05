@@ -107,8 +107,8 @@ Edit `.env` file:
 # Database (SQLite dev, PostgreSQL prod)
 DB_URL=sqlite+aiosqlite:///./data/snapper.db
 
-# Deployment environment — production/prod/staging refuse placeholder
-# secrets (MASTER_PASSWORD, auth_secret_key, csrf_secret_key)
+# Deployment environment — production/prod/staging refuse the placeholder
+# MASTER_PASSWORD (the only secret; all internal keys derive from it)
 SNAPPER_ENV=development
 
 # Settings encryption in database

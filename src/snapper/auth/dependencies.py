@@ -256,7 +256,7 @@ class CSRFManager:
         """
         message = f"{nonce}:{timestamp}"
         return hmac.new(
-            self.settings.auth_secret_key.encode(), message.encode(), hashlib.sha256
+            self.settings.csrf_secret_key.encode(), message.encode(), hashlib.sha256
         ).hexdigest()
 
     def _verify_hmac_signature(self, nonce: str, timestamp: str, signature: str) -> bool:
@@ -295,7 +295,7 @@ class CSRFManager:
             current_time = int(datetime.now(UTC).timestamp())
             max_age_seconds = int(self.settings.csrf_token_expire_minutes) * 60
             return (current_time - token_time) <= max_age_seconds
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return False
 
     def generate_token(self) -> str:
@@ -328,7 +328,7 @@ class CSRFManager:
             if not self._is_timestamp_valid(timestamp):
                 return False
             return self._verify_hmac_signature(nonce, timestamp, signature)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return False
 
     def invalidate_token(self, token: str) -> None:

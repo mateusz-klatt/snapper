@@ -30,10 +30,15 @@ DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
 | `SNAPPER_ENV` | `development` | Deployment environment: `development`, `dev`, `test`, `testing`, and `ci` allow local placeholders; `production`, `prod`, and `staging` refuse placeholder secrets at startup/runtime. Any other value fails startup; matching is case-insensitive |
 | `MASTER_PASSWORD` | `snapper_default_master_password_v1` | Password for encrypting settings in database (salt derived automatically) |
 
-**Important**: Set `SNAPPER_ENV=production` and change default secret
-values in production. Production-like modes fail fast when
-`MASTER_PASSWORD`, `auth_secret_key`, or `csrf_secret_key` still use
-development placeholders.
+**Important**: Set `SNAPPER_ENV=production` and change the default
+`MASTER_PASSWORD` in production. It is the ONLY secret you provision:
+every internal key (settings encryption, JWT auth signing, CSRF token
+signing, control-plane command signing) is derived from it with a
+distinct purpose tag (`src/snapper/infrastructure/security/kdf.py`), so
+production-like modes fail fast only when `MASTER_PASSWORD` still uses
+the development placeholder. Changing `MASTER_PASSWORD` rotates every
+derived key at the next restart — see the rotation runbook in
+`docs/operations.md`.
 
 ### HTTP Server
 
@@ -377,10 +382,14 @@ restart to take effect.
 
 ### Authentication
 
+The JWT signing key and the CSRF signing key are NOT settings: both
+are derived from `MASTER_PASSWORD` (purpose tags
+`snapper-auth-token-signing-v1` / `snapper-csrf-token-signing-v1`).
+Legacy `auth_secret_key` / `csrf_secret_key` rows in the settings table
+are ignored and may be deleted.
+
 | Key | Default | Description |
 | --- | ------- | ----------- |
-| `auth_secret_key` | `change-me-in-production-use-openssl-rand-hex-32` | JWT signing secret |
-| `csrf_secret_key` | `change-me-in-production-csrf-key` | CSRF token signing secret |
 | `auth_algorithm` | `HS256` | JWT signing algorithm |
 | `auth_access_token_expire_minutes` | `15` | Access token lifetime |
 | `auth_refresh_token_expire_days` | `7` | Refresh token lifetime |

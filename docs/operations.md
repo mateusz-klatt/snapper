@@ -62,12 +62,26 @@ placeholder-secret gate: every process loading this env file —
 coordinators included — refuses to start while `MASTER_PASSWORD` is
 unset or still the development placeholder
 (`snapper_default_master_password_v1`); `BootstrapSettingsLoader`
-raises `ValueError` naming the variable before anything binds. The
-API server additionally refuses the placeholder `auth_secret_key` /
-`csrf_secret_key` DB settings with a `RuntimeError` naming the key.
-Remediation: set a real `MASTER_PASSWORD` in the env file (and real
-secret rows in the settings table) before flipping `SNAPPER_ENV` to a
-production-like value — see `docs/configuration.md`.
+raises `ValueError` naming the variable before anything binds. That is
+the whole gate: the JWT, CSRF, and control-plane signing keys are all
+DERIVED from the master password (one-root-secret model,
+`src/snapper/infrastructure/security/kdf.py`), so no separate secret
+rows exist to validate. Remediation: set a real `MASTER_PASSWORD` in
+the env file before flipping `SNAPPER_ENV` to a production-like value.
+
+Rotating `MASTER_PASSWORD` (change the `.env` value, rebuild/restart):
+
+- Derived keys (JWT, CSRF, command signing) rotate automatically and
+  atomically across the whole compose — no distribution step.
+- Every session/JWT is invalidated: all users re-log-in, and MCP
+  delegate long-lived tokens MUST be re-minted (they are signed with
+  the derived auth key).
+- CSRF cookies refresh transparently on the next page load.
+- Fernet-ENCRYPTED rows do NOT re-encrypt themselves: run
+  `snapper settings-rotate-encryption` for settings rows FIRST, and
+  recreate wallet credentials separately (they share the Fernet key
+  but are not rewritten by that command) — see `.env.example` for the
+  step-by-step order.
 
 `SNAPPER_COORDINATOR_INSTANCE_COUNT >= 2` requires a PostgreSQL
 `DB_URL`. On a SQLite backend the coordinator refuses to start with a

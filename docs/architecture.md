@@ -66,10 +66,11 @@ Two-layer configuration:
     - Authentication configuration
 
     Production-like `SNAPPER_ENV` values (`production`, `prod`,
-    `staging`) fail fast on placeholder secrets: bootstrap refuses the
-    default `MASTER_PASSWORD` at load time, and `AppSettings` raises on
-    the placeholder `auth_secret_key` / `csrf_secret_key` DB defaults
-    instead of silently signing tokens with development values.
+    `staging`) fail fast on a placeholder secret: bootstrap refuses the
+    default `MASTER_PASSWORD` at load time. It is the only provisioned
+    secret — the JWT and CSRF signing keys are derived from it via the
+    single derivation site (`infrastructure/security/kdf.py`), so a
+    placeholder master can never silently sign production tokens.
 
 ### Data (`src/snapper/data/`)
 

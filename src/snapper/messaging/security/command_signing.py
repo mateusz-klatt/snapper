@@ -19,13 +19,10 @@ import hashlib
 import hmac
 import json
 
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
 from snapper.core.json_types import JsonObject
+from snapper.infrastructure.security.kdf import derive_key
 
 _COMMAND_SIGNING_INFO = b"snapper-process-command-signing-v1"
-_KDF_ITERATIONS = 100000
 _SIGNATURE_FIELD = "signature"
 _UNSIGNED_FIELDS = frozenset({_SIGNATURE_FIELD, "topic"})
 
@@ -33,16 +30,14 @@ _UNSIGNED_FIELDS = frozenset({_SIGNATURE_FIELD, "topic"})
 def command_signing_key(master_password: str) -> bytes:
     """Derive the control-plane HMAC key from the master password.
 
-    Uses PBKDF2-HMAC-SHA256 with the SAME 100,000-iteration work factor as the
-    Fernet settings-encryption derivation
-    (:mod:`snapper.infrastructure.security.encryption`), so a leaked signature
-    is not a cheaper offline oracle for brute-forcing the master password than
-    the encrypted settings already are. A domain-tagged salt
-    (``sha256(master_password + info)``) makes this key independent of the
-    Fernet key derived from the same password. Deterministic: every container
-    configured with the same master password derives the same key, which is
-    what lets a coordinator verify a nudge the API signed (and vice versa for
-    acks).
+    Delegates to the single derivation site
+    (:func:`snapper.infrastructure.security.kdf.derive_key`) with this
+    module's purpose tag — the output is byte-identical to the recipe this
+    function originally inlined (locked by golden-vector tests), so the
+    consolidation rotates nothing. Deterministic: every container
+    configured with the same master password derives the same key, which
+    is what lets a coordinator verify a nudge the API signed (and vice
+    versa for acks).
 
     Args:
         master_password: The single master secret (the only environment secret).
@@ -50,16 +45,7 @@ def command_signing_key(master_password: str) -> bytes:
     Returns:
         A 32-byte HMAC key.
     """
-    secret = master_password.encode()
-    salt = hashlib.sha256(secret + _COMMAND_SIGNING_INFO).digest()
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=_KDF_ITERATIONS,
-    )
-
-    return kdf.derive(secret)
+    return derive_key(master_password, _COMMAND_SIGNING_INFO)
 
 
 def _canonical_unsigned_bytes(payload: JsonObject) -> bytes:

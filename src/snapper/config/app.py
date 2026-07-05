@@ -42,12 +42,11 @@ from snapper.application.services.settings import SettingsService
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ProcessAutostartProfileEnum
+from snapper.infrastructure.security.kdf import AUTH_TOKEN_SIGNING_PURPOSE
+from snapper.infrastructure.security.kdf import CSRF_TOKEN_SIGNING_PURPOSE
+from snapper.infrastructure.security.kdf import derive_key
 
 __all__ = ["AppSettings"]
-
-
-DEFAULT_AUTH_SECRET_KEY = "change-me-in-production-use-openssl-rand-hex-32"
-DEFAULT_CSRF_SECRET_KEY = "change-me-in-production-csrf-key"
 
 
 class AppSettings:
@@ -85,24 +84,6 @@ class AppSettings:
             Database connection URL string.
         """
         return self._bootstrap.db_url
-
-    @property
-    def snapper_env(self) -> str:
-        """Return normalized deployment environment from bootstrap settings.
-
-        Returns:
-            Deployment environment string.
-        """
-        return self._bootstrap.snapper_env
-
-    @property
-    def requires_explicit_secrets(self) -> bool:
-        """Return whether placeholder secrets are refused.
-
-        Returns:
-            True for production-like environments.
-        """
-        return self._bootstrap.requires_explicit_secrets
 
     @property
     def master_password(self) -> str:
@@ -348,8 +329,7 @@ class AppSettings:
             value = int(raw)
         except ValueError as exc:
             raise ValueError(
-                f"coordinator_outbox_max_scan_rows must be positive int or "
-                f"'unbounded', got {raw!r}"
+                f"coordinator_outbox_max_scan_rows must be positive int or 'unbounded', got {raw!r}"
             ) from exc
         if value <= 0:
             raise ValueError(
@@ -415,16 +395,6 @@ class AppSettings:
         result = self._settings_service.get_setting(key, default)
         return result if result is not None else default
 
-    def _get_required_secret_setting(self, key: str, default: str) -> str:
-        """Retrieve a DB-backed secret while refusing placeholders in production."""
-        value = self._get_db_setting(key, default)
-        if self.requires_explicit_secrets and value == default:
-            raise RuntimeError(
-                f"{key} must be configured in the settings table when SNAPPER_ENV is "
-                f"{self.snapper_env!r}; refusing the development placeholder"
-            )
-        return value
-
     @property
     def polygon_api_key(self) -> str:
         """Return Polygon.io API key from database settings.
@@ -441,21 +411,36 @@ class AppSettings:
 
     @property
     def auth_secret_key(self) -> str:
-        """Return JWT authentication secret key from database settings.
+        """Return the JWT auth signing key derived from the master password.
+
+        One-root-secret model: the key is derived on the fly via the
+        single derivation site (:mod:`snapper.infrastructure.security.kdf`)
+        instead of being a separately provisioned Setting — rotating
+        ``MASTER_PASSWORD`` in ``.env`` rotates this key at the next
+        restart (all sessions and MCP delegate tokens are invalidated;
+        see the rotation runbook in ``docs/operations.md``). Legacy
+        ``auth_secret_key`` rows in the settings table are ignored. The
+        development-placeholder guard lives on the master password itself
+        (bootstrap refuses the default in production).
 
         Returns:
-            JWT secret key string for token signing.
+            Deterministic 64-char hex JWT signing key.
         """
-        return self._get_required_secret_setting("auth_secret_key", DEFAULT_AUTH_SECRET_KEY)
+        return derive_key(self.master_password, AUTH_TOKEN_SIGNING_PURPOSE).hex()
 
     @property
     def csrf_secret_key(self) -> str:
-        """Return CSRF protection secret key from database settings.
+        """Return the CSRF token signing key derived from the master password.
+
+        Same one-root-secret model as :attr:`auth_secret_key`, under its
+        own purpose tag so the two keys stay cryptographically
+        independent. Legacy ``csrf_secret_key`` rows in the settings table
+        are ignored.
 
         Returns:
-            CSRF secret key string for token generation.
+            Deterministic 64-char hex CSRF signing key.
         """
-        return self._get_required_secret_setting("csrf_secret_key", DEFAULT_CSRF_SECRET_KEY)
+        return derive_key(self.master_password, CSRF_TOKEN_SIGNING_PURPOSE).hex()
 
     @property
     def ws_token_ttl_seconds(self) -> int:

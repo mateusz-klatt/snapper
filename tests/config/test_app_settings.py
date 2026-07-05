@@ -38,15 +38,15 @@ def test_db_setting_returns_default_when_none_from_service() -> None:
     """Verify default is returned when service returns None.
 
     Given AppSettings with service returning None,
-    When accessing auth_secret_key,
+    When accessing polygon_api_key,
     Then default value is returned.
     """
     bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
     service = _DummyService(return_value=None)
     settings = AppSettings(bootstrap, settings_service=service)
-    value = settings.auth_secret_key
-    assert value == "change-me-in-production-use-openssl-rand-hex-32"
-    assert service.calls == [("auth_secret_key", "change-me-in-production-use-openssl-rand-hex-32")]
+    value = settings.polygon_api_key
+    assert value == ""
+    assert service.calls == [("polygon_api_key", "")]
 
 
 def test_bootstrap_accessors_return_values() -> None:
@@ -216,67 +216,83 @@ class TestAppSettingsKrakenEquitiesRealtimeWs:
 class TestAppSettingsAuthProperties:
     """Tests for AppSettings authentication property accessors."""
 
-    def test_auth_secret_key_returns_value(self) -> None:
-        """Verify auth_secret_key returns configured value.
+    def test_auth_secret_key_is_derived_from_master(self) -> None:
+        """The JWT key derives from the master password, not a Setting.
 
-        Given service with auth_secret_key set,
-        When accessing settings.auth_secret_key,
-        Then configured value is returned.
+        One-root-secret model: a legacy ``auth_secret_key`` row in the
+        settings table is IGNORED — the key is a deterministic function
+        of the master password alone.
         """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({"auth_secret_key": "custom-secret"})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.auth_secret_key == "custom-secret"
-
-    def test_auth_secret_key_production_rejects_missing_value(self) -> None:
-        """Production mode refuses the development JWT placeholder."""
         bootstrap = BootstrapSettingsLoader(
-            DB_URL="sqlite:///:memory:",
-            SNAPPER_ENV="production",
-            MASTER_PASSWORD="custom-master-password",
+            DB_URL="sqlite:///:memory:", MASTER_PASSWORD="test-master"
         )
-        service = MockSettingsService({})
+        service = MockSettingsService({"auth_secret_key": "legacy-row-ignored"})
         settings = AppSettings(bootstrap, settings_service=service)
-        with pytest.raises(RuntimeError, match="auth_secret_key"):
-            _ = settings.auth_secret_key
+        assert (
+            settings.auth_secret_key
+            == "a7bb8d51537b0cb09357c6b0271e6f2f12eb9dc139bff55e6bbc4afdfb892761"
+        )
 
-    def test_auth_secret_key_production_rejects_placeholder_value(self) -> None:
-        """Production mode refuses an explicitly stored JWT placeholder."""
+    def test_auth_secret_key_needs_no_settings_service(self) -> None:
+        """The derived key is available before DB settings exist (boot paths)."""
         bootstrap = BootstrapSettingsLoader(
-            DB_URL="sqlite:///:memory:",
-            SNAPPER_ENV="production",
-            MASTER_PASSWORD="custom-master-password",
+            DB_URL="sqlite:///:memory:", MASTER_PASSWORD="test-master"
         )
-        service = MockSettingsService(
-            {"auth_secret_key": "change-me-in-production-use-openssl-rand-hex-32"}
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert len(settings.auth_secret_key) == 64
+
+    def test_auth_secret_key_rotates_with_master(self) -> None:
+        """Changing MASTER_PASSWORD rotates the JWT key deterministically."""
+        first = AppSettings(
+            BootstrapSettingsLoader(DB_URL="sqlite:///:memory:", MASTER_PASSWORD="master-a"),
+            settings_service=None,
+        ).auth_secret_key
+        second = AppSettings(
+            BootstrapSettingsLoader(DB_URL="sqlite:///:memory:", MASTER_PASSWORD="master-b"),
+            settings_service=None,
+        ).auth_secret_key
+        assert first != second
+
+    def test_csrf_secret_key_is_derived_and_independent(self) -> None:
+        """The CSRF key derives from the master under its own purpose tag."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:", MASTER_PASSWORD="test-master"
         )
+        service = MockSettingsService({"csrf_secret_key": "legacy-row-ignored"})
         settings = AppSettings(bootstrap, settings_service=service)
-        with pytest.raises(RuntimeError, match="auth_secret_key"):
-            _ = settings.auth_secret_key
+        assert (
+            settings.csrf_secret_key
+            == "716233da50bcca98d6c430a0c330098475ec84f9a1007c3dc1867a68db6cbb2a"
+        )
+        assert settings.csrf_secret_key != settings.auth_secret_key
 
-    def test_csrf_secret_key_returns_value(self) -> None:
-        """Verify csrf_secret_key returns configured value.
+    def test_csrf_manager_signs_with_the_csrf_purpose_key(self) -> None:
+        """CSRF tokens are HMAC-signed with the CSRF key, not the JWT key.
 
-        Given service with csrf_secret_key set,
-        When accessing settings.csrf_secret_key,
-        Then configured value is returned.
+        Purpose separation must be real: before this test the manager
+        signed with auth_secret_key, so bumping the CSRF purpose tag
+        would have rotated nothing.
         """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({"csrf_secret_key": "csrf-secret"})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.csrf_secret_key == "csrf-secret"
+        import hashlib
+        import hmac as hmac_mod
 
-    def test_csrf_secret_key_production_rejects_missing_value(self) -> None:
-        """Production mode refuses the development CSRF placeholder."""
+        from snapper.auth.dependencies import CSRFManager
+
         bootstrap = BootstrapSettingsLoader(
-            DB_URL="sqlite:///:memory:",
-            SNAPPER_ENV="production",
-            MASTER_PASSWORD="custom-master-password",
+            DB_URL="sqlite:///:memory:", MASTER_PASSWORD="test-master"
         )
-        service = MockSettingsService({})
-        settings = AppSettings(bootstrap, settings_service=service)
-        with pytest.raises(RuntimeError, match="csrf_secret_key"):
-            _ = settings.csrf_secret_key
+        settings = AppSettings(bootstrap, settings_service=None)
+        manager = CSRFManager()
+        manager._settings = settings
+        signature = manager._create_hmac_signature("nonce", "123")
+        expected = hmac_mod.new(
+            settings.csrf_secret_key.encode(), b"nonce:123", hashlib.sha256
+        ).hexdigest()
+        assert signature == expected
+        not_auth = hmac_mod.new(
+            settings.auth_secret_key.encode(), b"nonce:123", hashlib.sha256
+        ).hexdigest()
+        assert signature != not_auth
 
     def test_master_password_returns_bootstrap_value(self) -> None:
         """The facade exposes the validated bootstrap master password."""
