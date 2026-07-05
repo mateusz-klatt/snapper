@@ -15,6 +15,7 @@ Run record persistence is delegated to run_recorder module.
 import asyncio
 import contextlib
 import functools
+import hashlib
 import inspect
 import json
 import re
@@ -436,6 +437,7 @@ class ProcessLauncherService:
         self._last_applied_restart_nonce: dict[str, str] = {}
         self._reconcile_start_failures: dict[str, int] = {}
         self._reconcile_attempted_nonce: dict[str, str] = {}
+        self._terminal_no_restart_generation: dict[str, str] = {}
 
     def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
         """Inject the bus publisher used for processes/strategies fanout.
@@ -1459,6 +1461,7 @@ class ProcessLauncherService:
         Args:
             config: The config whose process was just started.
         """
+        self._terminal_no_restart_generation.pop(config.name, None)
         if config.restart_nonce is not None:
             self._last_applied_restart_nonce[config.name] = config.restart_nonce
 
@@ -1493,6 +1496,8 @@ class ProcessLauncherService:
         name = config.name
         async with self._restart_lock_for(name):
             if name in self.started_processes:
+                return False
+            if self._terminal_no_restart_generation.get(name) == self._config_generation(config):
                 return False
             await self._cancel_restart_tasks_locked(name)
             prepared = await self._prepare_owned_config_for_start(config)
@@ -1622,6 +1627,7 @@ class ProcessLauncherService:
                 logger.info("reconcile: stopping '{}' (disabled in desired-state)", name)
                 await self.stop_process_by_name(name)
             self._reconcile_start_failures.pop(name, None)
+            self._terminal_no_restart_generation.pop(name, None)
             return
         nonce = config.restart_nonce
         if nonce is not None and self._last_applied_restart_nonce.get(name) != nonce:
@@ -1629,6 +1635,7 @@ class ProcessLauncherService:
                 self._reconcile_attempted_nonce[name] = nonce
                 self._reconcile_start_failures.pop(name, None)
             logger.info("reconcile: bouncing '{}' (restart nonce advanced)", name)
+            self._terminal_no_restart_generation.pop(name, None)
             try:
                 await self._reconcile_restart(config)
             except Exception:
@@ -1636,7 +1643,12 @@ class ProcessLauncherService:
                 raise
             self._reconcile_start_failures.pop(name, None)
             return
-        if running or self.is_parked(name) or self._has_pending_restart(name):
+        if (
+            running
+            or self.is_parked(name)
+            or self._has_pending_restart(name)
+            or self._terminal_no_restart_generation.get(name) == self._config_generation(config)
+        ):
             return
         logger.info("reconcile: starting '{}' (enabled and stopped)", name)
         try:
@@ -2150,6 +2162,7 @@ class ProcessLauncherService:
         self._restart_configs.clear()
         self._restart_tasks.clear()
         self._restart_locks.clear()
+        self._terminal_no_restart_generation.clear()
         self._process_metrics.clear()
         self._psutil_handles.clear()
 
@@ -2462,6 +2475,69 @@ class ProcessLauncherService:
         existing = self._restart_tasks.get(name)
         return existing is not None and not existing.done()
 
+    def _config_generation(self, config: ProcessConfigModel) -> str:
+        """Stable fingerprint of the DESIRED-STATE config fields warranting a fresh run.
+
+        The terminal no-restart marker (:attr:`_terminal_no_restart_generation`)
+        is keyed by this so that a later config edit — parameters, policy,
+        class/method, enabled, lifecycle, role, tags, template, or an operator
+        restart nonce — flips the fingerprint and re-arms the reconcile start,
+        while an *unchanged* config keeps a benignly-exited process at rest
+        instead of being restarted every reconcile tick.
+
+        ``mode`` is included EXCEPT for market-data publishers. A publisher is
+        forced to ``PROCESS`` at start (:meth:`_prepare_owned_config_for_start`)
+        but persists as ``THREAD`` in the DB, so the config the marker is
+        recorded from (the prepared, mode-forced one in ``_restart_configs``)
+        and the config the reconcile loop compares against (the raw DB config)
+        would differ only in ``mode`` — including it there would make the
+        recorded generation never match and defeat the suppression. For a
+        non-publisher ``mode`` is NOT forced, so it is a genuine desired-state
+        field: a ``thread``↔``process`` edit must re-arm the start. Volatile run
+        bookkeeping (``public_id`` / ``active_public_id``) is excluded for the
+        do-not-perturb reason.
+
+        Args:
+            config: The process config the run was (or would be) started from.
+
+        Returns:
+            A hex digest fingerprint of the behaviourally-relevant fields.
+        """
+        payload = json.dumps(
+            {
+                "enabled": config.enabled,
+                "class_path": config.class_path,
+                "method": config.method,
+                "parameters": config.parameters,
+                "restart_policy": str(config.restart_policy),
+                "restart_nonce": config.restart_nonce,
+                "lifecycle": str(config.lifecycle),
+                "role": str(config.role),
+                "tags": sorted(config.tags),
+                "template": config.template,
+                "mode": None if is_market_data_publisher(config.tags) else str(config.mode),
+            },
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def _record_terminal_no_restart(self, config: ProcessConfigModel) -> None:
+        """Tombstone a process the watchdog terminally declined to restart.
+
+        Recorded at each terminal no-restart decision (ONE_SHOT completion,
+        NEVER, ON_FAILURE clean exit) so the desired-state reconcile loop does
+        not re-start a process that already reached a benign terminal state
+        under the CURRENT config generation. Deliberately NOT placed inside
+        :meth:`_clear_watchdog_state` — that helper is also called on paths
+        that must not tombstone (deliberate stop, escalation), and it would
+        outlive the marker's intended lifetime.
+
+        Args:
+            config: The config the terminal run was started from.
+        """
+        self._terminal_no_restart_generation[config.name] = self._config_generation(config)
+
     def _restart_config_for_status(
         self,
         name: str,
@@ -2476,10 +2552,12 @@ class ProcessLauncherService:
         if config is None:
             return None
         if config.lifecycle is ProcessLifecycleEnum.ONE_SHOT:
+            self._record_terminal_no_restart(config)
             self._clear_watchdog_state(name)
             return None
         if config.restart_policy is ProcessRestartPolicyEnum.NEVER:
             logger.info(f"Process '{name}' died; restart_policy=NEVER, not restarting")
+            self._record_terminal_no_restart(config)
             self._clear_watchdog_state(name)
             return None
         if (
@@ -2487,6 +2565,7 @@ class ProcessLauncherService:
             and run_status is not ProcessRunStatusEnum.FAILED
         ):
             logger.info(f"Process '{name}' exited cleanly under ON_FAILURE; not restarting")
+            self._record_terminal_no_restart(config)
             self._clear_watchdog_state(name)
             return None
         return config
@@ -3545,6 +3624,7 @@ class ProcessLauncherService:
         Returns:
             Typed result with operation status, message, and optional public_id.
         """
+        self._terminal_no_restart_generation.pop(name, None)
         if is_executor_instance(name):
             return await self.start_per_wallet_instance_by_name(name, mode=mode)
         if is_executor_template(name):

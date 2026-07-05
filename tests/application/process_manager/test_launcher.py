@@ -3236,6 +3236,50 @@ class TestReconcileDesiredState:
         )
 
     @staticmethod
+    def _policy_cfg(
+        name: str,
+        *,
+        enabled: bool = True,
+        restart_policy: ProcessRestartPolicyEnum = ProcessRestartPolicyEnum.ON_FAILURE,
+        lifecycle: ProcessLifecycleEnum = ProcessLifecycleEnum.LONG_RUNNING,
+        parameters: dict[str, Any] | None = None,
+        restart_nonce: str | None = None,
+        mode: ProcessModeEnum = ProcessModeEnum.THREAD,
+        tags: tuple[str, ...] = (),
+    ) -> ProcessConfigModel:
+        """Build a config with an explicit restart policy / lifecycle / params / mode.
+
+        Used by the terminal-no-restart marker tests to drive each policy
+        branch, vary the config generation via ``parameters``, and exercise the
+        prepared-vs-DB mode mismatch via ``mode``.
+
+        Args:
+            name: Process name.
+            enabled: Desired-state enabled flag.
+            restart_policy: Watchdog restart policy.
+            lifecycle: LONG_RUNNING or ONE_SHOT.
+            parameters: Constructor parameters (part of the config generation).
+            restart_nonce: Persisted operator restart nonce.
+            mode: Execution mode (thread persisted; process forced at start).
+            tags: Config tags.
+
+        Returns:
+            A populated ProcessConfigModel.
+        """
+        return ProcessConfigModel(
+            name=name,
+            enabled=enabled,
+            mode=mode,
+            class_path="x.Y",
+            method="start",
+            parameters=parameters or {},
+            restart_policy=restart_policy,
+            lifecycle=lifecycle,
+            tags=tags,
+            restart_nonce=restart_nonce,
+        )
+
+    @staticmethod
     def _instrument(launcher: ProcessLauncherService) -> None:
         """Replace the spawn/stop/scope primitives so decisions are observable.
 
@@ -3412,6 +3456,172 @@ class TestReconcileDesiredState:
         self._instrument(launcher)
         await launcher._reconcile_one(self._cfg("p", enabled=True))
         launcher.start_process.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_on_failure_clean_exit_tombstones_and_reconcile_skips(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A clean exit under ON_FAILURE tombstones so reconcile stops re-starting it.
+
+        This is the churn bug: without the marker, an enabled process that
+        idle-exits cleanly under ON_FAILURE is restarted every reconcile tick.
+        """
+        self._instrument(launcher)
+        cfg = self._policy_cfg("p")
+        launcher._restart_configs["p"] = cfg
+        launcher._desired_state["p"] = _DesiredState.RUNNING
+        result = launcher._restart_config_for_status("p", ProcessRunStatusEnum.SUCCEEDED)
+        assert result is None
+        assert launcher._terminal_no_restart_generation["p"] == launcher._config_generation(cfg)
+        await launcher._reconcile_one(cfg)
+        launcher.start_process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mode_forced_publisher_tombstone_survives_prepared_vs_db_mismatch(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A publisher tombstoned from the PROCESS-forced config is still skipped by the THREAD reconcile.
+
+        Regression (Codex review): the marker is recorded from ``_restart_configs``
+        (mode=PROCESS — a market-data publisher is forced to PROCESS at start),
+        while the reconcile loop compares the raw DB config (mode=THREAD).
+        Excluding ``mode`` from the generation keeps the two equal so the paper /
+        equities feed churn stays suppressed instead of restarting every tick.
+        """
+        self._instrument(launcher)
+        prepared = self._policy_cfg(
+            "kf", mode=ProcessModeEnum.PROCESS, tags=("market-data", "publisher")
+        )
+        launcher._restart_configs["kf"] = prepared
+        launcher._desired_state["kf"] = _DesiredState.RUNNING
+        launcher._restart_config_for_status("kf", ProcessRunStatusEnum.SUCCEEDED)
+        db_cfg = self._policy_cfg(
+            "kf", mode=ProcessModeEnum.THREAD, tags=("market-data", "publisher")
+        )
+        await launcher._reconcile_one(db_cfg)
+        launcher.start_process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_publisher_mode_edit_rearms_start(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A non-publisher thread->process mode edit re-arms the reconcile start.
+
+        Regression (Codex review): ``mode`` is excluded from the generation ONLY
+        for market-data publishers (force-PROCESSed at start). For a normal
+        process a mode edit is a genuine desired-state change and must re-run it,
+        so the tombstone recorded under the old mode must not suppress it.
+        """
+        self._instrument(launcher)
+        old = self._policy_cfg("p", mode=ProcessModeEnum.THREAD)
+        launcher._terminal_no_restart_generation["p"] = launcher._config_generation(old)
+        new = self._policy_cfg("p", mode=ProcessModeEnum.PROCESS)
+        await launcher._reconcile_one(new)
+        launcher.start_process.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_never_policy_death_tombstones(self, launcher: ProcessLauncherService) -> None:
+        """A NEVER-policy death (even FAILED) tombstones so reconcile does not restart it."""
+        self._instrument(launcher)
+        cfg = self._policy_cfg("p", restart_policy=ProcessRestartPolicyEnum.NEVER)
+        launcher._restart_configs["p"] = cfg
+        launcher._desired_state["p"] = _DesiredState.RUNNING
+        assert launcher._restart_config_for_status("p", ProcessRunStatusEnum.FAILED) is None
+        assert "p" in launcher._terminal_no_restart_generation
+        await launcher._reconcile_one(cfg)
+        launcher.start_process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_one_shot_completion_tombstones(self, launcher: ProcessLauncherService) -> None:
+        """A completed one-shot tombstones so reconcile does not re-run it."""
+        self._instrument(launcher)
+        cfg = self._policy_cfg("p", lifecycle=ProcessLifecycleEnum.ONE_SHOT)
+        launcher._restart_configs["p"] = cfg
+        launcher._desired_state["p"] = _DesiredState.RUNNING
+        assert launcher._restart_config_for_status("p", ProcessRunStatusEnum.SUCCEEDED) is None
+        assert "p" in launcher._terminal_no_restart_generation
+
+    @pytest.mark.asyncio
+    async def test_always_clean_exit_does_not_tombstone_and_restarts(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A clean exit under ALWAYS returns the restart config and never tombstones."""
+        self._instrument(launcher)
+        cfg = self._policy_cfg("p", restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        launcher._restart_configs["p"] = cfg
+        launcher._desired_state["p"] = _DesiredState.RUNNING
+        assert launcher._restart_config_for_status("p", ProcessRunStatusEnum.SUCCEEDED) is cfg
+        assert "p" not in launcher._terminal_no_restart_generation
+        await launcher._reconcile_one(cfg)
+        launcher.start_process.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_config_generation_change_rearms_start(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A tombstone from an earlier generation does not suppress a start after a config edit."""
+        self._instrument(launcher)
+        old = self._policy_cfg("p", parameters={"a": 1})
+        launcher._terminal_no_restart_generation["p"] = launcher._config_generation(old)
+        new = self._policy_cfg("p", parameters={"a": 2})
+        await launcher._reconcile_one(new)
+        launcher.start_process.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_disable_rearms_tombstone_even_without_a_stop(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Disabling a tombstoned, already-stopped process clears the marker for a later re-enable."""
+        self._instrument(launcher)
+        cfg = self._policy_cfg("p")
+        launcher._terminal_no_restart_generation["p"] = launcher._config_generation(cfg)
+        await launcher._reconcile_one(self._policy_cfg("p", enabled=False))
+        assert "p" not in launcher._terminal_no_restart_generation
+        launcher.stop_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_nonce_advance_clears_tombstone_and_bounces(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """An advanced nonce clears the tombstone and bounces despite it."""
+        self._instrument(launcher)
+        launcher.started_processes["p"] = MagicMock()
+        launcher._last_applied_restart_nonce["p"] = "n1"
+        launcher._terminal_no_restart_generation["p"] = "stale-generation"
+        await launcher._reconcile_one(self._cfg("p", enabled=True, restart_nonce="n2"))
+        assert "p" not in launcher._terminal_no_restart_generation
+        launcher.start_process.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reconcile_start_owned_toctou_rechecks_tombstone(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A tombstone landing between the outer guard and the spawn lock no-ops the spawn."""
+        self._instrument(launcher)
+        cfg = self._policy_cfg("p")
+        launcher._terminal_no_restart_generation["p"] = launcher._config_generation(cfg)
+        started = await launcher._reconcile_start_owned(cfg)
+        assert started is False
+        launcher.start_process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_successful_reconcile_start_rearms_tombstone(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A successful start clears any stale tombstone via _record_applied_nonce."""
+        self._instrument(launcher)
+        launcher._terminal_no_restart_generation["p"] = "stale-generation"
+        await launcher._reconcile_start_owned(self._cfg("p", enabled=True, restart_nonce="n1"))
+        assert "p" not in launcher._terminal_no_restart_generation
+
+    @pytest.mark.asyncio
+    async def test_manual_start_rearms_tombstone(self, launcher: ProcessLauncherService) -> None:
+        """A deliberate start_process_by_name clears the tombstone (operator intent wins)."""
+        self._instrument(launcher)
+        launcher._terminal_no_restart_generation["p"] = "stale-generation"
+        launcher._already_running_start_result = MagicMock(return_value=MagicMock())
+        await launcher.start_process_by_name("p")
+        assert "p" not in launcher._terminal_no_restart_generation
 
     @pytest.mark.asyncio
     async def test_enabled_nonce_advanced_bounces(self, launcher: ProcessLauncherService) -> None:
