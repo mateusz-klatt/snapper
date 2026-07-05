@@ -260,9 +260,11 @@ class TestKrakenEquitiesMarketDataPublisher:
             (datetime(2026, 5, 23, 12, 0, tzinfo=UTC), True),
             (datetime(2026, 5, 24, 21, 59, tzinfo=UTC), True),
             (datetime(2026, 5, 24, 22, 1, tzinfo=UTC), False),
-            (datetime(2026, 5, 25, 20, 59, tzinfo=UTC), False),
-            (datetime(2026, 5, 25, 21, 1, tzinfo=UTC), True),
-            (datetime(2026, 5, 25, 21, 59, tzinfo=UTC), True),
+            (datetime(2026, 5, 18, 20, 59, tzinfo=UTC), False),
+            (datetime(2026, 5, 18, 21, 1, tzinfo=UTC), True),
+            (datetime(2026, 5, 18, 21, 59, tzinfo=UTC), True),
+            (datetime(2026, 5, 18, 22, 1, tzinfo=UTC), False),
+            (datetime(2026, 5, 25, 18, 0, tzinfo=UTC), True),
             (datetime(2026, 5, 25, 22, 1, tzinfo=UTC), False),
             (datetime(2026, 5, 22, 20, 59, tzinfo=UTC), False),
             (datetime(2026, 5, 22, 21, 59, tzinfo=UTC), True),
@@ -276,7 +278,10 @@ class TestKrakenEquitiesMarketDataPublisher:
     ) -> None:
         """CME schedule helper matches weekend and daily-break boundaries.
 
-        Given: Representative UTC datetimes around the CME closure windows,
+        Given: Representative UTC datetimes around the CME closure
+            windows on a plain Monday (2026-05-18), the weekend, and
+            Memorial Day (2026-05-25 — the shared calendar's holiday
+            table halts it at 12:00 CT and reopens 17:00 CT same day),
         When: _is_cme_closed is evaluated,
         Then: It reports closed only inside the approved windows — the
             shared calendar treats Friday 21:00-22:00 UTC as closed (the
