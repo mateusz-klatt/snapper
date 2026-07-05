@@ -125,7 +125,12 @@ def test_is_throttled_per_topic_throttles_only_the_repeated_topic() -> None:
 
 
 def test_is_throttled_per_subscription_uses_single_last_sent() -> None:
-    """A non-per-topic subscription throttles on the single shared last_sent."""
+    """A non-per-topic subscription throttles on the single shared last_sent.
+
+    Given: A market subscription (throttle_per_topic False, 100ms) that just sent,
+    When: Two frames are checked inside and after the window,
+    Then: The first is throttled and the later one passes.
+    """
     bridge = ZmqWebSocketBridgeService(connection_manager=None)
     ws: Any = DummyWebSocket()
     sub = TopicSubscriptionModel(websocket=ws, throttle_ms=100, throttle_per_topic=False)
@@ -136,7 +141,13 @@ def test_is_throttled_per_subscription_uses_single_last_sent() -> None:
 
 @pytest.mark.asyncio
 async def test_try_send_message_records_per_topic_timestamp() -> None:
-    """A throttle_per_topic send stamps last_sent_by_topic, not the shared last_sent."""
+    """A throttle_per_topic send stamps last_sent_by_topic, not the shared last_sent.
+
+    Given: A heartbeat root subscription (throttle_per_topic True),
+    When: A component frame is sent,
+    Then: last_sent_by_topic records that component and the shared last_sent
+        stays untouched.
+    """
     bridge = ZmqWebSocketBridgeService(connection_manager=None)
     ws: Any = DummyWebSocket()
     sub = TopicSubscriptionModel(websocket=ws, throttle_ms=1000, throttle_per_topic=True)
