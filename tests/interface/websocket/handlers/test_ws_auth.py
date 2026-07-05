@@ -3914,6 +3914,82 @@ def test_refresh_token_concurrent_replay_reserves_winner_pair(
     assert body["payload"]["user"]["active_wallet_public_id"] == "winner-wallet"
 
 
+def test_refresh_grace_replay_with_unverifiable_winner_keeps_loser_principal(
+    auth_app: AuthAppFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grace replay whose winner pair fails local verification still succeeds.
+
+    Given: ``rotate_tokens`` re-serves a winner pair whose access token
+        does NOT decode (``verify_token`` returns None — e.g. clock skew
+        or a corrupted cache entry),
+    When: Calling the refresh endpoint,
+    Then: 200 with the winner's cookies anyway; the response principal
+        simply keeps the loser's wallet state instead of adopting the
+        winner's claims (best-effort reconciliation, never a failure).
+    """
+
+    class _UnverifiableWinnerTokenManager(StubTokenManager):
+        """Stub whose replayed winner pair cannot be decoded locally."""
+
+        winner_pair = TokenPair(
+            access_token="undecodable-winner-access",
+            refresh_token="undecodable-winner-refresh",
+            expires_in=999,
+        )
+
+        async def rotate_tokens(
+            self,
+            pair: TokenPair,
+            user_public_id: str,
+            old_refresh_jti: str,
+            repository: object,
+        ) -> TokenPair | None:
+            self.rotated_old_jtis.append(old_refresh_jti)
+            return self.winner_pair
+
+        def verify_token(self, token: str) -> TokenClaims | None:
+            if token == "undecodable-winner-access":
+                return None
+            return super().verify_token(token)
+
+    client, user_service, _token_manager, csrf_manager = auth_app
+    grace_manager = _UnverifiableWinnerTokenManager()
+    grace_manager.verify_response = TokenClaims(
+        sub="123",
+        username="bob",
+        role=UserRole.OPERATOR,
+        permissions=["read"],
+        exp=999999999,
+        iat=123456,
+        jti="refresh_unverifiable-winner",
+        sid="session-123",
+    )
+    monkeypatch.setattr(routes, "get_token_manager", lambda: grace_manager)
+    user = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="bob",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+    user_service.user_by_id = user
+    grace_manager.create_tokens_response = TokenPair(
+        access_token="loser-access",
+        refresh_token="loser-refresh",
+        expires_in=999,
+    )
+    csrf_manager.token = "csrf-unverifiable"
+    client.cookies.set("refresh_token", "raced-refresh-2")
+    response = client.post("/auth/refresh")
+    assert response.status_code == 200
+    assert response.cookies.get("access_token") == "undecodable-winner-access"
+    assert response.cookies.get("refresh_token") == "undecodable-winner-refresh"
+    assert grace_manager.blacklisted == []
+
+
 def test_refresh_rejects_access_token_as_refresh_grant(
     auth_app: AuthAppFixture,
 ) -> None:
