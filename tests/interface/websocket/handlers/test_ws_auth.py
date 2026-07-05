@@ -3299,11 +3299,11 @@ class StubTokenManager:
         user_public_id: str,
         old_refresh_jti: str,
         repository: object,
-    ) -> bool:
-        """Record the rotation call; returns True so the refresh route completes."""
+    ) -> TokenPair | None:
+        """Record the rotation call; echoes the pair so the refresh route completes."""
         self.persisted_pairs.append((pair, user_public_id))
         self.rotated_old_jtis.append(old_refresh_jti)
-        return True
+        return pair
 
     def verify_token(self, token: str) -> TokenClaims | None:
         """Verify token and return claims (sync JWT+blacklist layer)."""
@@ -3586,7 +3586,7 @@ def test_refresh_token_success(
         permissions=["read"],
         exp=999999999,
         iat=123456,
-        jti="refresh-jti",
+        jti="refresh_jti",
         sid="session-123",
         active_wallet_public_id="wallet-from-old-token",
     )
@@ -3610,7 +3610,7 @@ def test_refresh_token_success(
     response = client.post("/auth/refresh")
     assert response.status_code == 200
     assert token_manager.last_verified_token == "existing-refresh"
-    assert token_manager.blacklisted == ["refresh-jti"]
+    assert token_manager.blacklisted == ["refresh_jti"]
     assert response.cookies.get("access_token") == "rotated-access"
     assert response.cookies.get("refresh_token") == "rotated-refresh"
     assert response.cookies.get("csrf_token") == "csrf-rot"
@@ -3623,7 +3623,7 @@ def test_refresh_token_success(
     assert payload["user"]["role"] == "operator"
     assert token_manager.last_created_user is not None
     assert token_manager.last_created_user.active_wallet_public_id == "wallet-from-old-token"
-    assert token_manager.rotated_old_jtis == ["refresh-jti"]
+    assert token_manager.rotated_old_jtis == ["refresh_jti"]
     assert len(token_manager.persisted_pairs) == 1
     rotated_pair, rotated_user_id = token_manager.persisted_pairs[0]
     assert rotated_pair.access_token == "rotated-access"
@@ -3741,7 +3741,7 @@ def test_refresh_token_user_missing_returns_401(
         permissions=["read"],
         exp=999999999,
         iat=123456,
-        jti="missing-jti",
+        jti="refresh_missing-jti",
         sid="session-missing",
     )
     user_service.user_by_id = None
@@ -3767,7 +3767,7 @@ def test_refresh_token_replay_returns_401_no_mint(
     """
 
     class _ReplayTokenManager(StubTokenManager):
-        """Stub where ``rotate_tokens`` always returns False (replay)."""
+        """Stub where ``rotate_tokens`` reports a stale replay (None)."""
 
         async def rotate_tokens(
             self,
@@ -3775,9 +3775,9 @@ def test_refresh_token_replay_returns_401_no_mint(
             user_public_id: str,
             old_refresh_jti: str,
             repository: object,
-        ) -> bool:
+        ) -> TokenPair | None:
             self.rotated_old_jtis.append(old_refresh_jti)
-            return False
+            return None
 
     client, user_service, _token_manager, _csrf_manager = auth_app
     replay_manager = _ReplayTokenManager()
@@ -3788,7 +3788,7 @@ def test_refresh_token_replay_returns_401_no_mint(
         permissions=["read"],
         exp=999999999,
         iat=123456,
-        jti="replayed-jti",
+        jti="refresh_replayed-jti",
         sid="session-123",
     )
     monkeypatch.setattr(routes, "get_token_manager", lambda: replay_manager)
@@ -3811,11 +3811,139 @@ def test_refresh_token_replay_returns_401_no_mint(
     response = client.post("/auth/refresh")
     assert response.status_code == 401
     assert response.json()["detail"] == "Refresh token already redeemed"
-    assert replay_manager.rotated_old_jtis == ["replayed-jti"]
+    assert replay_manager.rotated_old_jtis == ["refresh_replayed-jti"]
     assert replay_manager.blacklisted == []
     assert replay_manager.persisted_pairs == []
     assert response.cookies.get("access_token") is None
     assert response.cookies.get("refresh_token") is None
+
+
+def test_refresh_token_concurrent_replay_reserves_winner_pair(
+    auth_app: AuthAppFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CAS-losing refresh inside the grace window re-serves the winner's pair.
+
+    Given: ``rotate_tokens`` reports the JTI was concurrently redeemed and
+        returns the WINNER'S successor pair (not the pair this request
+        minted),
+    When: Calling the refresh endpoint,
+    Then: 200 with cookies carrying the winner's tokens, the loser's
+        freshly-minted pair does not leak, and the old JTI is NOT
+        re-blacklisted (only a fresh rotation arms the blacklist grace).
+    """
+
+    class _GraceReplayTokenManager(StubTokenManager):
+        """Stub replaying a concurrent redeem: echoes a fixed winner pair.
+
+        ``verify_token`` reports a DIFFERENT active wallet for the
+        winner's access token so the test can prove the route rebuilds
+        the response principal from the WINNER'S claims (the loser may
+        have applied its own wallet hint before losing the race).
+        """
+
+        winner_pair = TokenPair(
+            access_token="winner-access",
+            refresh_token="winner-refresh",
+            expires_in=999,
+        )
+
+        async def rotate_tokens(
+            self,
+            pair: TokenPair,
+            user_public_id: str,
+            old_refresh_jti: str,
+            repository: object,
+        ) -> TokenPair | None:
+            self.rotated_old_jtis.append(old_refresh_jti)
+            return self.winner_pair
+
+        def verify_token(self, token: str) -> TokenClaims | None:
+            if token == "winner-access":
+                return TokenClaims(
+                    sub="123",
+                    username="bob",
+                    role=UserRole.OPERATOR,
+                    permissions=["read"],
+                    exp=999999999,
+                    iat=123456,
+                    jti="access-winner",
+                    sid="session-123",
+                    active_wallet_public_id="winner-wallet",
+                )
+            return super().verify_token(token)
+
+    client, user_service, _token_manager, csrf_manager = auth_app
+    grace_manager = _GraceReplayTokenManager()
+    grace_manager.verify_response = TokenClaims(
+        sub="123",
+        username="bob",
+        role=UserRole.OPERATOR,
+        permissions=["read"],
+        exp=999999999,
+        iat=123456,
+        jti="refresh_raced-jti",
+        sid="session-123",
+    )
+    monkeypatch.setattr(routes, "get_token_manager", lambda: grace_manager)
+    user = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="bob",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+    user_service.user_by_id = user
+    grace_manager.create_tokens_response = TokenPair(
+        access_token="loser-access-must-not-leak",
+        refresh_token="loser-refresh-must-not-leak",
+        expires_in=999,
+    )
+    csrf_manager.token = "csrf-grace"
+    client.cookies.set("refresh_token", "raced-refresh")
+    response = client.post("/auth/refresh")
+    assert response.status_code == 200
+    assert response.cookies.get("access_token") == "winner-access"
+    assert response.cookies.get("refresh_token") == "winner-refresh"
+    assert grace_manager.rotated_old_jtis == ["refresh_raced-jti"]
+    assert grace_manager.blacklisted == []
+    body = response.json()
+    assert body["payload"]["ws_token"]
+    assert body["payload"]["user"]["active_wallet_public_id"] == "winner-wallet"
+
+
+def test_refresh_rejects_access_token_as_refresh_grant(
+    auth_app: AuthAppFixture,
+) -> None:
+    """A verified token whose JTI is not ``refresh_``-prefixed cannot rotate.
+
+    Given: A valid ACCESS token presented on the refresh endpoint (its
+        JTI lacks the ``refresh_`` prefix that ``create_tokens`` stamps
+        on refresh JWTs),
+    When: Calling the refresh endpoint,
+    Then: 401 BEFORE any rotation attempt — an access token must never
+        be exchangeable for a fresh access+refresh pair, which would
+        defeat the short access-token lifetime.
+    """
+    client, user_service, token_manager, _csrf_manager = auth_app
+    token_manager.verify_response = TokenClaims(
+        sub="123",
+        username="bob",
+        role=UserRole.OPERATOR,
+        permissions=["read"],
+        exp=999999999,
+        iat=123456,
+        jti="access-jti",
+        sid="session-123",
+    )
+    client.cookies.set("refresh_token", "smuggled-access-token")
+    response = client.post("/auth/refresh")
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid refresh token"
+    assert token_manager.rotated_old_jtis == []
+    assert token_manager.persisted_pairs == []
 
 
 def test_logout_invalidates_tokens(

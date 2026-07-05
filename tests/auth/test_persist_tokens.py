@@ -12,9 +12,11 @@ The tests run against an in-memory aiosqlite DB so the join on
 ``users.is_active`` exercises real SQL.
 """
 
+import asyncio
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from typing import cast
 
 import pytest
 from sqlalchemy import select
@@ -22,6 +24,9 @@ from sqlalchemy.exc import IntegrityError
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.schemas.tokens import TokenPair
+from snapper.auth.tokens import ROTATION_GRACE_MAX_ENTRIES
+from snapper.auth.tokens import ROTATION_GRACE_TTL_SECONDS
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import hash_token
 from snapper.data.models import KNOWN_TO_MAX
@@ -650,7 +655,7 @@ class TestRotateTokens:
         return manager
 
     @pytest.mark.asyncio
-    async def test_rotate_success_flips_old_persists_new_returns_true(
+    async def test_rotate_success_flips_old_persists_new_returns_pair(
         self, repo: SQLAlchemyRepository
     ) -> None:
         """Happy path: rotation commits both old revoke and new rows."""
@@ -671,7 +676,7 @@ class TestRotateTokens:
             original_refresh_jti,
             repo,
         )
-        assert ok is True
+        assert ok is successor
         active = sorted(await repo.list_active_user_token_jtis("user-rot-ok"))
         new_access = manager._decode_fresh_token(successor.access_token).jti
         new_refresh = manager._decode_fresh_token(successor.refresh_token).jti
@@ -682,8 +687,8 @@ class TestRotateTokens:
         assert original_access in active
 
     @pytest.mark.asyncio
-    async def test_rotate_replay_returns_false_no_insert(self, repo: SQLAlchemyRepository) -> None:
-        """Replayed rotation returns False and does NOT persist new rows."""
+    async def test_rotate_replay_returns_none_no_insert(self, repo: SQLAlchemyRepository) -> None:
+        """A stale replay (no grace entry) returns None and persists nothing."""
         await _seed_user(repo, public_id="user-rot-replay", username="rot-replay")
         manager = self._fresh_manager()
         principal = AuthPrincipal(
@@ -703,6 +708,158 @@ class TestRotateTokens:
             original_refresh_jti,
             repo,
         )
-        assert ok is False
+        assert ok is None
         active = await repo.list_active_user_token_jtis("user-rot-replay")
         assert new_access_jti not in active
+
+
+class TestRotationGrace:
+    """Concurrent-redeem grace: the CAS loser re-collects the winner's pair."""
+
+    def _fresh_manager(self) -> TokenManager:
+        """Return a cleanly-initialized singleton (clears grace + blacklist)."""
+        TokenManager._initialized = False
+        manager = TokenManager()
+        manager._blacklisted_tokens.clear()
+        manager._blacklist_cleanup_heap.clear()
+        manager._next_blacklist_cleanup_ts = float("inf")
+        manager._rotation_grace.clear()
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_concurrent_redeem_within_grace_returns_winner_pair(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """The second rotation of the same JTI re-serves the FIRST successor.
+
+        Models rapid F5: the winner rotates, the loser presents the same
+        now-revoked JTI milliseconds later. The loser must receive the
+        winner's pair (idempotent replay) and its own freshly-minted pair
+        must never be persisted.
+        """
+        await _seed_user(repo, public_id="user-rot-grace", username="rot-grace")
+        manager = self._fresh_manager()
+        principal = AuthPrincipal(
+            username="rot-grace",
+            role=UserRole.VIEWER,
+            user_public_id="user-rot-grace",
+        )
+        original = manager.create_tokens(principal)
+        await manager.persist_tokens(original, principal.user_public_id, repo)
+        original_refresh_jti = manager._decode_fresh_token(original.refresh_token).jti
+        winner = manager.create_tokens(principal)
+        loser = manager.create_tokens(principal)
+        first = await manager.rotate_tokens(
+            winner, principal.user_public_id, original_refresh_jti, repo
+        )
+        assert first is winner
+        second = await manager.rotate_tokens(
+            loser, principal.user_public_id, original_refresh_jti, repo
+        )
+        assert second is winner
+        active = await repo.list_active_user_token_jtis("user-rot-grace")
+        loser_access_jti = manager._decode_fresh_token(loser.access_token).jti
+        loser_refresh_jti = manager._decode_fresh_token(loser.refresh_token).jti
+        assert loser_access_jti not in active
+        assert loser_refresh_jti not in active
+
+    @pytest.mark.asyncio
+    async def test_expired_grace_entry_returns_none_and_evicts(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Past the TTL the replay is stale: None, and the entry is dropped."""
+        await _seed_user(repo, public_id="user-rot-stale", username="rot-stale")
+        manager = self._fresh_manager()
+        principal = AuthPrincipal(
+            username="rot-stale",
+            role=UserRole.VIEWER,
+            user_public_id="user-rot-stale",
+        )
+        original = manager.create_tokens(principal)
+        await manager.persist_tokens(original, principal.user_public_id, repo)
+        original_refresh_jti = manager._decode_fresh_token(original.refresh_token).jti
+        winner = manager.create_tokens(principal)
+        rotated = await manager.rotate_tokens(
+            winner, principal.user_public_id, original_refresh_jti, repo
+        )
+        assert rotated is winner
+        pair, redeemed_at = manager._rotation_grace[original_refresh_jti]
+        manager._rotation_grace[original_refresh_jti] = (
+            pair,
+            redeemed_at - ROTATION_GRACE_TTL_SECONDS - 1.0,
+        )
+        loser = manager.create_tokens(principal)
+        second = await manager.rotate_tokens(
+            loser, principal.user_public_id, original_refresh_jti, repo
+        )
+        assert second is None
+        assert original_refresh_jti not in manager._rotation_grace
+
+    def test_remember_rotation_prunes_expired_and_bounds_size(self) -> None:
+        """Inserting prunes expired entries and evicts the oldest at the cap."""
+        manager = self._fresh_manager()
+        pair = TokenPair(access_token="a", refresh_token="r", expires_in=1)
+        now = datetime.now(UTC).timestamp()
+        manager._rotation_grace["expired-jti"] = (
+            pair,
+            now - ROTATION_GRACE_TTL_SECONDS - 1.0,
+        )
+        for index in range(ROTATION_GRACE_MAX_ENTRIES):
+            manager._rotation_grace[f"jti-{index}"] = (pair, now - 1.0 + index * 1e-6)
+        manager._remember_rotation("fresh-jti", pair)
+        assert "expired-jti" not in manager._rotation_grace
+        assert "fresh-jti" in manager._rotation_grace
+        assert "jti-0" not in manager._rotation_grace
+        assert len(manager._rotation_grace) == ROTATION_GRACE_MAX_ENTRIES
+
+    def test_remembered_rotation_unknown_jti_returns_none(self) -> None:
+        """A JTI never rotated by this process has no grace entry."""
+        manager = self._fresh_manager()
+        assert manager._remembered_rotation("never-seen") is None
+
+    @pytest.mark.asyncio
+    async def test_scheduler_race_loser_still_receives_winner_pair(self) -> None:
+        """The rotation lock closes the CAS-commit-vs-remember scheduling gap.
+
+        Without ``_rotation_lock`` the event loop may resume the CAS
+        loser BEFORE the winner's continuation records its pair, and the
+        loser would 401 despite the grace window. The stub repository
+        yields control several times after the winning CAS commits,
+        maximizing the chance of that interleaving; the lock must make
+        the outcome deterministic: both concurrent calls return the
+        winner's pair.
+        """
+        manager = self._fresh_manager()
+        principal = AuthPrincipal(
+            username="race",
+            role=UserRole.VIEWER,
+            user_public_id="user-race",
+        )
+        winner = manager.create_tokens(principal)
+        loser = manager.create_tokens(principal)
+
+        class _RaceRepo:
+            """First rotation wins after yielding control; the rest lose."""
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def rotate_user_active_token(
+                self,
+                old_refresh_jti: str,
+                rows: object,
+                revoked_at: object,
+            ) -> bool:
+                self.calls += 1
+                won = self.calls == 1
+                for _ in range(3):
+                    await asyncio.sleep(0)
+                return won
+
+        repo_stub = cast(SQLAlchemyRepository, _RaceRepo())
+        results = await asyncio.gather(
+            manager.rotate_tokens(winner, "user-race", "refresh_shared-jti", repo_stub),
+            manager.rotate_tokens(loser, "user-race", "refresh_shared-jti", repo_stub),
+        )
+        assert results[0] is winner
+        assert results[1] is winner

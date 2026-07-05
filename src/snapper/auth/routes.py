@@ -383,6 +383,11 @@ async def refresh_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token",
         )
+    if not token_data.jti.startswith("refresh_"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+        )
     user_service = get_user_service()
     user = await user_service.get_user_by_id(token_data.sub)
     if not user:
@@ -400,18 +405,25 @@ async def refresh_token(
         principal,
         session_id=token_data.sid,
     )
-    rotated = await token_manager.rotate_tokens(
+    rotated_pair = await token_manager.rotate_tokens(
         new_token_pair,
         principal.user_public_id,
         token_data.jti,
         repo,
     )
-    if not rotated:
+    if rotated_pair is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token already redeemed",
         )
-    token_manager.blacklist_token(token_data.jti)
+    if rotated_pair is new_token_pair:
+        token_manager.blacklist_token(token_data.jti)
+    else:
+        winner_claims = token_manager.verify_token(rotated_pair.access_token)
+        if winner_claims is not None:
+            principal = principal.model_copy(
+                update={"active_wallet_public_id": winner_claims.active_wallet_public_id}
+            )
     csrf_manager = get_csrf_manager()
     csrf_token = csrf_manager.generate_token()
     cookie_secure = settings.session_secure
@@ -420,7 +432,7 @@ async def refresh_token(
     )
     response.set_cookie(
         key="refresh_token",
-        value=new_token_pair.refresh_token,
+        value=rotated_pair.refresh_token,
         httponly=True,
         secure=cookie_secure,
         samesite=cookie_samesite,
@@ -429,7 +441,7 @@ async def refresh_token(
     )
     response.set_cookie(
         key="access_token",
-        value=new_token_pair.access_token,
+        value=rotated_pair.access_token,
         httponly=True,
         secure=cookie_secure,
         samesite=cookie_samesite,
@@ -458,8 +470,8 @@ async def refresh_token(
         ws_token_exp=ws_token_result.expires_at,
         csrf_token=csrf_token,
         user=user,
-        access_token=new_token_pair.access_token if return_tokens else None,
-        refresh_token=new_token_pair.refresh_token if return_tokens else None,
+        access_token=rotated_pair.access_token if return_tokens else None,
+        refresh_token=rotated_pair.refresh_token if return_tokens else None,
     )
     return RefreshResponse(
         payload=refresh_data,

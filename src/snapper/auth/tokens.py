@@ -58,6 +58,28 @@ VERIFY_CACHE_TTL_SECONDS: Final[float] = 30.0
 VERIFY_CACHE_MAX_ENTRIES: Final[int] = 10000
 """Upper bound on the verify-cache size before an opportunistic prune runs."""
 
+ROTATION_GRACE_TTL_SECONDS: Final[float] = BLACKLIST_GRACE_PERIOD_SECONDS
+"""Seconds a just-redeemed refresh JTI may idempotently re-collect its successor.
+
+Concurrent refreshes with the same single-use token are a NORMAL client
+pattern (rapid F5 aborts an in-flight refresh whose Set-Cookie the browser
+never processed; parallel 401 handlers race each other). The CAS loser
+re-presents a JTI the winner already redeemed; within this window the
+route returns the SAME successor pair instead of 401, per the OAuth2
+Security BCP allowance for a short replay grace.
+
+Deliberately EQUAL to ``BLACKLIST_GRACE_PERIOD_SECONDS``: past the
+blacklist grace, verification rejects the old JWT before rotation is
+even reached, so a longer memory would only widen the window in which a
+STOLEN already-redeemed token (replayed by an in-flight request that
+verified before the blacklist armed) could collect the successor pair —
+an accepted single-user-deployment risk that this alignment keeps as
+narrow as the existing verify layer already allows.
+"""
+
+ROTATION_GRACE_MAX_ENTRIES: Final[int] = 1024
+"""Upper bound on remembered successor pairs before the oldest are pruned."""
+
 BLACKLIST_MAX_ENTRIES: Final[int] = 50000
 """Hard cap on in-memory JTI blacklist entries.
 
@@ -219,6 +241,8 @@ class TokenManager:
         self._next_blacklist_cleanup_ts = float("inf")
         self._blacklist_grace_period = BLACKLIST_GRACE_PERIOD_SECONDS
         self._verify_cache: dict[str, _VerifyCacheEntry] = {}
+        self._rotation_grace: dict[str, tuple[TokenPair, float]] = {}
+        self._rotation_lock = asyncio.Lock()
         self._user_cache_generations: dict[str, int] = {}
         self._admin_listener_lock = asyncio.Lock()
         self._admin_listen_task: asyncio.Task[None] | None = None
@@ -537,23 +561,41 @@ class TokenManager:
         user_public_id: str,
         old_refresh_jti: str,
         repository: Repository,
-    ) -> bool:
+    ) -> TokenPair | None:
         """Atomic refresh-rotation: revoke ``old_refresh_jti`` + persist ``pair``.
 
         The refresh route must treat "revoke old JTI" and "persist
         new pair" as a single transaction so that:
 
             1. A replayed refresh token (old row already revoked or
-               absent) cannot mint another successor pair inside the
-               in-memory blacklist grace window. Returns ``False``
-               and NOTHING is inserted — caller returns 401.
+               absent) cannot mint ANOTHER successor pair — the CAS
+               loses, NOTHING is inserted, and the caller either
+               re-serves the winner's pair (grace window below) or
+               returns 401.
             2. A transient DB error during new-row insert rolls
                back the old-row revoke so the user retries with the
                original refresh JWT instead of getting stranded.
 
+        Concurrent-refresh grace: rapid F5 and parallel 401 handlers
+        legitimately race the same single-use refresh token, and an
+        aborted page load can lose the winner's ``Set-Cookie``
+        forever. When the CAS loses but this manager rotated the
+        same JTI within ``ROTATION_GRACE_TTL_SECONDS``, the WINNER'S
+        pair is returned so the route can respond idempotently
+        (both racers end up with the same, valid cookie set). The
+        cache is per-process — matching the in-memory blacklist and
+        verify-cache, which already assume single-instance
+        deployment. The whole CAS-plus-remember (and the loser's
+        CAS-plus-lookup) runs under ``_rotation_lock``: without it,
+        the event loop may resume the CAS loser BEFORE the winner's
+        continuation records its pair, and the loser would 401
+        despite the grace window — the exact symptom this exists to
+        remove.
+
         The in-memory blacklist is NOT seeded here — that is the
-        caller's responsibility AFTER this method returns
-        ``True``, so the blacklist grace period starts post-commit.
+        caller's responsibility after a FRESH rotation (identity
+        ``result is pair``), so the blacklist grace period starts
+        post-commit and a grace replay does not re-arm it.
 
         Args:
             pair: The freshly-minted :class:`TokenPair` (successor
@@ -564,22 +606,34 @@ class TokenManager:
             repository: Active :class:`Repository`.
 
         Returns:
-            ``True`` when the rotation committed (rowcount == 1);
-            ``False`` when the old row was already revoked or
-            absent, in which case the caller MUST NOT return the
-            new pair to the client.
+            ``pair`` when the rotation committed (rowcount == 1);
+            the REMEMBERED successor pair when this exact JTI was
+            already rotated within the grace window (idempotent
+            replay); ``None`` when the JTI is unknown or the grace
+            expired, in which case the caller MUST return 401.
         """
         rows = self._build_inventory_rows(pair, user_public_id)
-        rotated = await repository.rotate_user_active_token(
-            old_refresh_jti, rows, datetime.now(UTC)
-        )
-        if not rotated:
-            logger.warning(
-                "rotate_tokens: refresh JTI replay/missing — user={} old_jti={}",
-                user_public_id,
-                old_refresh_jti,
+        async with self._rotation_lock:
+            rotated = await repository.rotate_user_active_token(
+                old_refresh_jti, rows, datetime.now(UTC)
             )
-            return False
+            if not rotated:
+                remembered = self._remembered_rotation(old_refresh_jti)
+                if remembered is not None:
+                    logger.info(
+                        "rotate_tokens: concurrent redeem of jti={} within grace"
+                        " — re-serving the winner's successor pair (user={})",
+                        old_refresh_jti,
+                        user_public_id,
+                    )
+                    return remembered
+                logger.warning(
+                    "rotate_tokens: refresh JTI replay/missing — user={} old_jti={}",
+                    user_public_id,
+                    old_refresh_jti,
+                )
+                return None
+            self._remember_rotation(old_refresh_jti, pair)
         logger.debug(
             "rotate_tokens: user={} old_jti={} new_access_jti={} new_refresh_jti={}",
             user_public_id,
@@ -587,7 +641,50 @@ class TokenManager:
             rows[0]["jti"],
             rows[1]["jti"],
         )
-        return True
+        return pair
+
+    def _remember_rotation(self, old_refresh_jti: str, pair: TokenPair) -> None:
+        """Record ``old_refresh_jti`` -> successor ``pair`` for the grace window.
+
+        Prunes expired entries on every insert and, if the cache still
+        exceeds ``ROTATION_GRACE_MAX_ENTRIES``, evicts the oldest — the
+        cache stays bounded regardless of refresh volume.
+
+        Args:
+            old_refresh_jti: JTI of the refresh JWT that was just redeemed.
+            pair: The successor pair persisted by the winning rotation.
+        """
+        now = datetime.now(UTC).timestamp()
+        expired = [
+            jti
+            for jti, (_, redeemed_at) in self._rotation_grace.items()
+            if now - redeemed_at >= ROTATION_GRACE_TTL_SECONDS
+        ]
+        for jti in expired:
+            del self._rotation_grace[jti]
+        self._rotation_grace[old_refresh_jti] = (pair, now)
+        while len(self._rotation_grace) > ROTATION_GRACE_MAX_ENTRIES:
+            oldest = min(self._rotation_grace, key=lambda k: self._rotation_grace[k][1])
+            del self._rotation_grace[oldest]
+
+    def _remembered_rotation(self, old_refresh_jti: str) -> TokenPair | None:
+        """Return the successor pair for a JTI redeemed within the grace window.
+
+        Args:
+            old_refresh_jti: JTI presented by the CAS-losing refresh call.
+
+        Returns:
+            The winner's :class:`TokenPair` while the grace window is
+            open; ``None`` when the JTI was never remembered or expired.
+        """
+        entry = self._rotation_grace.get(old_refresh_jti)
+        if entry is None:
+            return None
+        pair, redeemed_at = entry
+        if datetime.now(UTC).timestamp() - redeemed_at >= ROTATION_GRACE_TTL_SECONDS:
+            del self._rotation_grace[old_refresh_jti]
+            return None
+        return pair
 
     def _is_token_blacklisted(self, jti: str) -> bool:
         """Check if token is blacklisted (past grace period).
