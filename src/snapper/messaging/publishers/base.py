@@ -3856,17 +3856,27 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     def _compute_max_lag_ms(self) -> int:
         """Compute the worst per-symbol data lag in milliseconds.
 
-        Symbols that have never delivered data count as zero lag (their
-        last-data timestamp defaults to the current time).
+        A symbol that has never delivered data is counted as stale for the
+        feed-level dark interval — the time since the last message from ANY
+        symbol (``_last_message_at``, seeded at start) — NOT as zero lag. This
+        stops a publisher with no subscribed symbols or one receiving nothing
+        (e.g. a closed FX venue) from reporting a misleading ``0ms`` that reads
+        as fresh real-time data; it instead surfaces the true staleness. The
+        per-symbol path is unchanged for symbols that HAVE delivered, so a busy
+        feed with a single quiet symbol still reflects that symbol's real lag.
 
         Returns:
-            Maximum lag across all subscribed symbols, in milliseconds.
+            Maximum lag across all subscribed symbols, in milliseconds; the
+            feed-level dark interval when none are subscribed.
         """
+        feed_lag_ms = int((monotonic() - self._last_message_at) * 1000)
+        if not self.symbols:
+            return feed_lag_ms
         current_time = datetime.now(UTC).timestamp() * 1000
         max_lag_ms = 0
         for symbol in self.symbols:
-            last_data_time = self._last_data_timestamps.get(symbol, current_time)
-            lag_ms = int(current_time - last_data_time)
+            last_data_time = self._last_data_timestamps.get(symbol)
+            lag_ms = feed_lag_ms if last_data_time is None else int(current_time - last_data_time)
             max_lag_ms = max(max_lag_ms, lag_ms)
         return max_lag_ms
 

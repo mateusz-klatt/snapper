@@ -340,6 +340,64 @@ def test_require_repository_raises_when_uninitialized() -> None:
         pub._require_repository()
 
 
+def test_compute_max_lag_no_symbols_reports_feed_dark_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A publisher with no subscribed symbols reports the feed-level dark interval, not 0ms.
+
+    Given: An idle publisher (empty symbol set) whose last message arrived 60s ago.
+    When: _compute_max_lag_ms runs.
+    Then: it returns the 60_000ms dark interval, so the heartbeat cannot read as
+        fresh real-time data.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub = DummyPublisher(symbols=[])
+    pub._last_message_at = 940.0
+    assert pub._compute_max_lag_ms() == 60_000
+
+
+def test_compute_max_lag_never_delivered_symbol_counts_as_dark_not_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A symbol that has never delivered data counts as the dark interval, not zero lag.
+
+    Given: A subscribed symbol with no recorded data timestamp and a feed dark for 60s.
+    When: _compute_max_lag_ms runs.
+    Then: it returns 60_000ms rather than the old misleading 0.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._last_message_at = 940.0
+    assert "BTC-USD" not in pub._last_data_timestamps
+    assert pub._compute_max_lag_ms() == 60_000
+
+
+def test_compute_max_lag_delivered_symbol_uses_real_per_symbol_lag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A symbol that HAS delivered reports its real wall-clock lag over a fresh feed clock.
+
+    Given: A symbol whose last data was 4s ago while the feed clock is fresh.
+    When: _compute_max_lag_ms runs.
+    Then: it returns ~4000ms (the symbol's real lag), not the tiny feed-clock delta.
+
+    Returns:
+        None.
+    """
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._last_message_at = 999.9
+    pub._last_data_timestamps["BTC-USD"] = datetime.now(UTC).timestamp() * 1000 - 4000
+    lag = pub._compute_max_lag_ms()
+    assert 3500 <= lag <= 4500
+
+
 @pytest.mark.asyncio
 async def test_extra_background_task_hook_defaults_empty() -> None:
     """The base extra task hook is a no-op.
