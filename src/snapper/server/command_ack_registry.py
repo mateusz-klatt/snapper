@@ -41,15 +41,18 @@ _ACK_TIMEOUT_S = 4.0
 class ProcessCommandAckRegistry:
     """Listens for signed command acks and resolves the matching pending future."""
 
-    def __init__(self, signing_key: bytes) -> None:
+    def __init__(self, signing_key: bytes, *, ack_timeout_s: float = _ACK_TIMEOUT_S) -> None:
         """Initialize an empty registry.
 
         Args:
             signing_key: The control-plane HMAC key (from
                 :func:`command_signing_key`), used to verify each ack before
                 resolving its future.
+            ack_timeout_s: Seconds to wait for a coordinator ack before the
+                caller falls back to reconcile-pending.
         """
         self._key = signing_key
+        self._ack_timeout_s = ack_timeout_s
         self._pending: dict[str, tuple[asyncio.Future[ProcessCommandAckData], str, str]] = {}
         self._zmq_context: zmq.asyncio.Context | None = None
         self._subscriber: ValidatedSubscriber | None = None
@@ -106,17 +109,17 @@ class ProcessCommandAckRegistry:
         process_name: str,
         action: str,
         issued_by: str,
-        timeout: float = _ACK_TIMEOUT_S,
     ) -> ProcessCommandAckData | None:
         """Publish a signed nudge to a coordinator and await its ack to a timeout.
 
         Registers a future, publishes a signed :class:`ProcessCommandData` on
         ``processes.commands.{coordinator}``, and blocks on the coordinator's
-        signed ack up to ``timeout``. Returns the ack, or ``None`` when there is
-        no publisher, the registry is saturated, the publish fails, or the ack
-        does not arrive in time — in EVERY ``None`` case the caller falls back
-        to reconcile-pending (the periodic reconcile converges regardless, so
-        the nudge is a latency optimizer, never a correctness dependency).
+        signed ack up to the configured ack timeout. Returns the ack, or
+        ``None`` when there is no publisher, the registry is saturated, the
+        publish fails, or the ack does not arrive in time — in EVERY ``None``
+        case the caller falls back to reconcile-pending (the periodic reconcile
+        converges regardless, so the nudge is a latency optimizer, never a
+        correctness dependency).
 
         Args:
             publisher: The wired bus publisher, or ``None``.
@@ -125,7 +128,6 @@ class ProcessCommandAckRegistry:
             action: The desired-state action (advisory; the coordinator
                 reconciles from the DB, not from this field).
             issued_by: Issuer label for audit.
-            timeout: Seconds to wait for the ack.
 
         Returns:
             The coordinator's ack, or ``None`` on any failure / timeout.
@@ -141,7 +143,7 @@ class ProcessCommandAckRegistry:
                 publisher, command_id, coordinator, process_name, action, issued_by
             )
 
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout(self._ack_timeout_s):
                 return await future
         except TimeoutError:
             return None

@@ -69,7 +69,7 @@ async def test_full_nudge_reconcile_ack_roundtrip_resolves_the_patch_future() ->
     reconcile = AsyncMock()
     launcher = _coordinator_launcher(reconcile)
     listener = ProcessCommandListener(launcher)
-    registry = ProcessCommandAckRegistry(command_signing_key(_MASTER))
+    registry = ProcessCommandAckRegistry(command_signing_key(_MASTER), ack_timeout_s=0.05)
 
     async def _coordinator_publishes_ack(topic: str, ack: object) -> None:
         assert topic == "processes.events.command_ack.coord-2"
@@ -134,7 +134,6 @@ async def test_nudge_for_the_wrong_coordinator_is_rejected_and_times_out() -> No
         process_name="strategy_macd",
         action="restart",
         issued_by="alice",
-        timeout=0.05,
     )
 
     assert ack is None
@@ -154,7 +153,9 @@ async def test_nudge_signed_with_a_different_master_is_rejected() -> None:
     reconcile = AsyncMock()
     launcher = _coordinator_launcher(reconcile)
     listener = ProcessCommandListener(launcher)
-    registry = ProcessCommandAckRegistry(command_signing_key("a-different-master"))
+    registry = ProcessCommandAckRegistry(
+        command_signing_key("a-different-master"), ack_timeout_s=0.05
+    )
     launcher.message_publisher.send = AsyncMock()
 
     async def _api_publishes_command(_topic: str, command: object) -> None:
@@ -173,7 +174,6 @@ async def test_nudge_signed_with_a_different_master_is_rejected() -> None:
         process_name="strategy_macd",
         action="restart",
         issued_by="alice",
-        timeout=0.05,
     )
 
     assert ack is None

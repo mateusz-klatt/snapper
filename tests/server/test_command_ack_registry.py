@@ -298,7 +298,7 @@ class TestNudge:
     @pytest.mark.asyncio
     async def test_nudge_times_out_to_none(self) -> None:
         """A nudge with no ack in time returns None."""
-        registry = ProcessCommandAckRegistry(_KEY)
+        registry = ProcessCommandAckRegistry(_KEY, ack_timeout_s=0.01)
 
         result = await registry.nudge(
             _publisher(),
@@ -306,7 +306,6 @@ class TestNudge:
             process_name="p",
             action="restart",
             issued_by="api",
-            timeout=0.01,
         )
 
         assert result is None

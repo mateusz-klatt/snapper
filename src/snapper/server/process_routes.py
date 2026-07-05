@@ -117,20 +117,22 @@ from snapper.server.json_body import openapi_schema
 from snapper.server.remote_summary_cache import RemoteSummaryCache
 
 _REST_STREAM = "rest.control"
+_PROCESS_INVALID_REQUEST_DESCRIPTION = "Invalid process request"
+_PROCESS_SCOPE_DENIED_DESCRIPTION = "Process scope denied"
 _PROCESS_BAD_REQUEST_RESPONSE: dict[int | str, dict[str, Any]] = {
-    400: {"description": "Invalid process request"}
+    400: {"description": _PROCESS_INVALID_REQUEST_DESCRIPTION}
 }
 _PROCESS_FORBIDDEN_RESPONSE: dict[int | str, dict[str, Any]] = {
-    403: {"description": "Process scope denied"}
+    403: {"description": _PROCESS_SCOPE_DENIED_DESCRIPTION}
 }
 _PROCESS_START_RESPONSES: dict[int | str, dict[str, Any]] = {
-    400: {"description": "Invalid process request"},
-    403: {"description": "Process scope denied"},
+    400: {"description": _PROCESS_INVALID_REQUEST_DESCRIPTION},
+    403: {"description": _PROCESS_SCOPE_DENIED_DESCRIPTION},
     422: {"description": "Bare executor template — start a per-wallet instance instead"},
 }
 _PROCESS_DESIRED_STATE_RESPONSES: dict[int | str, dict[str, Any]] = {
-    400: {"description": "Invalid process request"},
-    403: {"description": "Process scope denied"},
+    400: {"description": _PROCESS_INVALID_REQUEST_DESCRIPTION},
+    403: {"description": _PROCESS_SCOPE_DENIED_DESCRIPTION},
     404: {"description": "Process desired-state target not found"},
     409: {"description": "Process state conflict"},
     422: {"description": "Invalid desired-state action request"},
@@ -982,8 +984,8 @@ async def get_process_summary(
     "",
     status_code=201,
     responses={
-        400: {"description": "Invalid process request"},
-        403: {"description": "Process scope denied"},
+        400: {"description": _PROCESS_INVALID_REQUEST_DESCRIPTION},
+        403: {"description": _PROCESS_SCOPE_DENIED_DESCRIPTION},
         404: {"description": "Template not found"},
         409: {"description": "Process name already exists"},
     },
