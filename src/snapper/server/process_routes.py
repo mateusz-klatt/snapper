@@ -400,6 +400,44 @@ def _coordinator_label(
     return cache.label_for(coordinator) if cache is not None else None
 
 
+_BROKER_CONTAINER_LABEL = "snapper-broker"
+"""Display label for the dedicated broker's standalone container.
+
+The broker runs in its own ``snapper-broker`` container under no coordinator, so
+it has no profile label; naming its container is friendlier than the generic
+"managed by another container" fallback an empty label would render.
+"""
+
+
+def _configured_coordinator_label(
+    factory: ProcessLauncherService,
+    cache: RemoteSummaryCache | None,
+    config: ProcessConfigModel,
+    coordinator: str | None,
+    *,
+    managed_remotely: bool,
+) -> str | None:
+    """Resolve a configured row's owner label, naming the broker's container.
+
+    Wraps :func:`_coordinator_label` but labels the dedicated broker with its
+    standalone container name — it belongs to no coordinator, so the plain
+    resolver returns ``None`` and the card would show only a generic notice.
+
+    Args:
+        factory: The local process launcher.
+        cache: Cross-coordinator summary cache, or ``None``.
+        config: The row's process configuration.
+        coordinator: The resolved owning slug, or ``None``.
+        managed_remotely: Whether another container owns the row.
+
+    Returns:
+        The owner label, ``snapper-broker`` for the broker, or ``None``.
+    """
+    if config.name == "zmq_broker":
+        return _BROKER_CONTAINER_LABEL
+    return _coordinator_label(factory, cache, coordinator, managed_remotely=managed_remotely)
+
+
 @dataclass(slots=True)
 class _ProcessSummaryCounters:
     """Mutable counters used while building ``/processes/summary``."""
@@ -869,8 +907,8 @@ async def list_configured_processes(
                 wallet_public_id=None,
                 parent_template=None,
                 coordinator=coordinator,
-                coordinator_label=_coordinator_label(
-                    factory, cache, coordinator, managed_remotely=managed_remotely
+                coordinator_label=_configured_coordinator_label(
+                    factory, cache, config, coordinator, managed_remotely=managed_remotely
                 ),
                 managed_remotely=managed_remotely,
             )

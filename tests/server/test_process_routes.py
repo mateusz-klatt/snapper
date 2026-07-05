@@ -290,6 +290,7 @@ class TestCrossCoordinatorOwnership:
         assert row.running is False
         assert row.managed_remotely is True
         assert row.coordinator is None
+        assert row.coordinator_label == "snapper-broker"
 
     @pytest.mark.asyncio
     async def test_configured_broker_running_via_transitive_liveness(self) -> None:
