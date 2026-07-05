@@ -530,6 +530,13 @@ right process. The optional `postgres` service is gated behind the
   `STRATEGIES_EMBEDDED=false` so the same strategy can never run twice.
 - `snapper-egress` — WireGuard + SOCKS5 sidecar for outbound publisher
   traffic. `command: ["egress"]`, `cap_add: NET_ADMIN`, kernel module bind.
+- `snapper-notify` — alert-rule evaluator + iOS Push Foundation sidecar
+  (`command: ["notify"]`). Subscribes to the rule registry's ZMQ
+  prefixes (heartbeats, order events), evaluates the alert rules,
+  records `alert_events`, republishes `alerts.{user}.{type}` for the
+  WebSocket bridge, and fans deliveries out to APNs using the
+  `apns_*` settings. Without this container the ENTIRE alert chain is
+  dark — no alert rows, no UI alerts, no push.
 - `snapper-web` — Caddy serving the React SPA from `/srv/dist` and
   reverse-proxying `/api/*`, `/api/ws`, `/api/mcp`, `/docs`, `/redoc`,
   `/openapi.json` to `snapper:8000`. `entrypoint: ["/usr/bin/caddy"]`,

@@ -267,6 +267,10 @@ at-most-once ZMQ bus:
 - `docker compose restart snapper-egress` — tunnel-routed public feeds
   fail closed to quarantine semantics (see egress runbook) until the
   sidecar is healthy again.
+- `docker compose restart snapper-notify` — alert evaluation and APNs
+  delivery pause for the restart window; the outbox drain on the next
+  start recovers queued deliveries, and rule dedup windows persist in
+  the database, so a brief restart neither drops nor duplicates pages.
 
 ### Flat-restart discipline (MANDATORY until venue-truth reconciliation lands)
 

@@ -135,6 +135,28 @@ services:
       timeout: 3s
       start_period: 15s
       retries: 5
+  snapper-notify:
+    image: klattm/snapper:latest
+    container_name: snapper-notify
+    env_file: .env
+    environment:
+      - ZMQ_BROKER_XSUB=tcp://snapper-broker:7500
+      - ZMQ_BROKER_XPUB=tcp://snapper-broker:7501
+      - DB_POOL_SIZE=2
+      - DB_MAX_OVERFLOW=3
+    volumes:
+      - ./data:/app/data
+    command: ["notify"]
+    healthcheck:
+      disable: true
+    networks:
+      - snapper-internal
+    restart: unless-stopped
+    depends_on:
+      snapper-broker:
+        condition: service_healthy
+      snapper:
+        condition: service_healthy
   snapper-web:
     image: klattm/snapper:latest
     container_name: snapper-web
