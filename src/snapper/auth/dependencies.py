@@ -386,6 +386,34 @@ def get_csrf_token(request: Request) -> str | None:
     return request.cookies.get("csrf_token")
 
 
+def _request_settings(request: Request) -> AppSettings:
+    """Return DB-backed settings for the request, falling back to bootstrap.
+
+    ``get_settings()`` yields a bootstrap-only :class:`AppSettings` whose
+    database-backed properties (``ui_origin``, ``session_domain``) raise
+    ``RuntimeError`` — :func:`build_allowed_origins` swallows those, so
+    origin validation would silently collapse to the localhost defaults
+    and reject every same-site browser mutation from the configured
+    ``ui_origin`` (e.g. the deployment domain). The lifespan publishes the
+    initialized ``SettingsService`` on ``app.state``; binding it here lets
+    ``ui_origin`` resolve. Falls back to the bootstrap instance only when
+    the service is absent (e.g. early startup), preserving the previous
+    behaviour instead of erroring.
+
+    Args:
+        request: The incoming request whose ``app.state`` may carry the
+            initialized settings service.
+
+    Returns:
+        A service-bound :class:`AppSettings` when available, else the
+        bootstrap-only instance.
+    """
+    settings_service = getattr(request.app.state, "settings_service", None)
+    if settings_service is None:
+        return get_settings()
+    return get_settings_with_service(settings_service)
+
+
 def validate_csrf_token(
     request: Request,
     csrf_token: Annotated[str | None, Depends(get_csrf_token)] = None,
@@ -415,7 +443,7 @@ def validate_csrf_token(
         return
     origin = request.headers.get("origin") or ""
     referer = request.headers.get("referer") or ""
-    settings = get_settings()
+    settings = _request_settings(request)
     allowed_origins = build_allowed_origins(settings, settings.server_port)
     origin_valid = origin in allowed_origins or any(
         referer == allowed_origin or referer.startswith(allowed_origin + "/")

@@ -16,6 +16,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi import Request
 
+from snapper.application.services.settings import SettingsService
 from snapper.auth.dependencies import CSRFManager
 from snapper.auth.dependencies import get_csrf_manager
 from snapper.auth.dependencies import get_csrf_token
@@ -2229,6 +2230,63 @@ class TestCSRFDependencies:
                 validate_csrf_token(request, "nonce.1234567890.invalid_signature")
             assert exc_info.value.status_code == 403
             assert "Invalid or tampered CSRF token signature" in exc_info.value.detail
+
+    @pytest.mark.real_settings
+    async def test_validate_csrf_token_accepts_db_configured_ui_origin(self) -> None:
+        """A same-site mutation from the DB-configured ui_origin is accepted.
+
+        Regression: ``validate_csrf_token`` read origins via the unbound
+        ``get_settings()``, whose DB-backed ``ui_origin`` raises
+        RuntimeError, so ``build_allowed_origins`` silently collapsed to
+        localhost defaults and rejected EVERY browser mutation from the
+        deployment domain with 403 "Invalid origin". Binding the
+        request's ``app.state.settings_service`` makes ``ui_origin``
+        resolve. Uses real settings so the autouse mock (which forces
+        ``ui_origin=""``) does not mask the bug.
+        """
+        service = Mock(spec=SettingsService)
+        service.get_setting = lambda key, default: (
+            "https://snapper.ch" if key == "ui_origin" else default
+        )
+        csrf_manager = CSRFManager()
+        csrf_manager.set_settings_service(service)
+        valid_token = csrf_manager.generate_token()
+        request = Mock(spec=Request)
+        request.method = "POST"
+        request.app.state.settings_service = service
+        request.headers = {
+            "origin": "https://snapper.ch",
+            "referer": "https://snapper.ch/processes",
+            "X-CSRF-Token": valid_token,
+        }
+        request.cookies = {"csrf_token": valid_token}
+        validate_csrf_token(request, valid_token)
+
+    @pytest.mark.real_settings
+    async def test_validate_csrf_token_rejects_ui_origin_without_bound_service(
+        self,
+    ) -> None:
+        """Without the bound service the deployment origin is NOT trusted.
+
+        The negative half of the regression: when ``app.state`` carries
+        no settings service the resolver falls back to bootstrap-only
+        settings (localhost defaults), so the very same deployment-domain
+        request is rejected — proving it is the service binding, not some
+        other change, that fixes the 403.
+        """
+        request = Mock(spec=Request)
+        request.method = "POST"
+        request.app.state.settings_service = None
+        request.headers = {
+            "origin": "https://snapper.ch",
+            "referer": "https://snapper.ch/processes",
+            "X-CSRF-Token": "any-token",
+        }
+        request.cookies = {"csrf_token": "any-token"}
+        with pytest.raises(HTTPException) as exc_info:
+            validate_csrf_token(request, "any-token")
+        assert exc_info.value.status_code == 403
+        assert "Invalid origin" in exc_info.value.detail
 
     async def test_validate_csrf_token_invalid_origin(self) -> None:
         """Verify validate_csrf_token raises 403 for invalid origin.
