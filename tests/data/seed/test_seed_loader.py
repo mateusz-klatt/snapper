@@ -17,6 +17,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Setting
 from snapper.data.seed.loader import SeedProfile
 from snapper.data.seed.loader import SeedSetting
 from snapper.data.seed.loader import SeedUser
@@ -1139,3 +1140,38 @@ def _create_multi_tenant_tables(conn: Connection) -> None:
             " sequence_id INTEGER NOT NULL DEFAULT 0)"
         )
     )
+
+
+class TestSeedProfilesFitColumnLimits:
+    """Every resolvable seed profile must fit the Setting column widths.
+
+    Regression guard for the 2026-07-05 prod incident: db-seed died with
+    StringDataRightTruncation because ONE setting description exceeded
+    settings.description varchar(1024). Postgres validates the bind cast
+    in the INSERT..SELECT..WHERE NOT EXISTS statement even for rows the
+    NOT EXISTS clause will skip, so a single over-limit field breaks the
+    otherwise idempotent seed pass for the whole profile. Limits are
+    introspected from the ORM model so a future column resize keeps this
+    test honest without edits.
+    """
+
+    @pytest.mark.parametrize("profile", ["dev", "prod"])
+    def test_settings_fit_column_widths(self, profile: str) -> None:
+        """All settings in each resolvable profile fit the model columns."""
+        try:
+            seed = load_seed_profile(profile)
+        except FileNotFoundError:
+            pytest.skip(f"profile {profile!r} not present in this checkout")
+        limits = {
+            "key": Setting.__table__.c.key.type.length,
+            "category": Setting.__table__.c.category.type.length,
+            "description": Setting.__table__.c.description.type.length,
+        }
+        for setting in seed.settings:
+            for field, limit in limits.items():
+                assert limit is not None
+                value = getattr(setting, field, None) or ""
+                assert len(value) <= limit, (
+                    f"{profile}: setting {setting.key!r} field {field!r}"
+                    f" is {len(value)} chars > varchar({limit})"
+                )
