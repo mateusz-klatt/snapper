@@ -23,18 +23,33 @@ class TopicSchema:
         pattern: ZMQ subscription prefix (e.g. ``"market."``).
         category: RBAC category for permission filtering.
         throttle_ms: Bridge-side throttle interval in milliseconds.
+        throttle_per_topic: When True, the bridge throttle is applied PER
+            received topic rather than per subscription. Set for
+            per-entity status families (heartbeats) so that a single
+            root subscription does not let one component's frames throttle
+            another's — a root subscription to ``system.heartbeats.`` at a
+            1s throttle would otherwise pass only ~1 of N components' beats
+            per second, leaving most cards stale. Left False for
+            high-cardinality streams (``market.``) where the per-subscription
+            throttle is an intentional aggregate rate cap.
     """
 
     pattern: str
     category: str
     throttle_ms: int = 100
+    throttle_per_topic: bool = False
 
 
 TOPIC_REGISTRY: tuple[TopicSchema, ...] = (
     TopicSchema(pattern="market.", category="market", throttle_ms=100),
     TopicSchema(pattern="signals.", category="signals", throttle_ms=500),
     TopicSchema(pattern="system.egress.", category="system", throttle_ms=1000),
-    TopicSchema(pattern="system.heartbeats.", category="system", throttle_ms=1000),
+    TopicSchema(
+        pattern="system.heartbeats.",
+        category="system",
+        throttle_ms=1000,
+        throttle_per_topic=True,
+    ),
     TopicSchema(pattern="admin.", category="admin", throttle_ms=1000),
     TopicSchema(pattern="orders.commands.", category="trade", throttle_ms=0),
     TopicSchema(pattern="orders.events.", category="trade_events", throttle_ms=0),

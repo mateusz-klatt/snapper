@@ -172,6 +172,7 @@ class ZmqWebSocketBridgeService:
                 endpoint=endpoint,
                 pattern=topic_schema.pattern,
                 throttle_ms=topic_schema.throttle_ms,
+                throttle_per_topic=topic_schema.throttle_per_topic,
             )
         return config
 
@@ -222,12 +223,31 @@ class ZmqWebSocketBridgeService:
             return fallback
         return topic_config.throttle_ms
 
+    def _topic_throttle_per_topic(self, topic: str) -> bool:
+        """Return whether ``topic``'s throttle applies per received topic.
+
+        True only for schema families that opt in (heartbeats); an exact
+        subscription not registered as a pattern falls back to False (a single
+        topic has nothing to throttle per-topic against).
+
+        Args:
+            topic: The subscription topic (client key).
+
+        Returns:
+            The matching schema's ``throttle_per_topic``, or False.
+        """
+        topic_config = self.available_topics.get(topic)
+        if topic_config is None:
+            return False
+        return topic_config.throttle_per_topic
+
     def _register_topic_subscription(
         self,
         websocket: WebSocket,
         topic: str,
         throttle_ms: int,
         client_id: str = "",
+        throttle_per_topic: bool = False,
     ) -> bool:
         """Track subscription state and return whether it is the first subscriber."""
         client_topics = self._ensure_client_topics(websocket)
@@ -238,6 +258,7 @@ class ZmqWebSocketBridgeService:
             websocket=websocket,
             throttle_ms=throttle_ms,
             client_id=client_id,
+            throttle_per_topic=throttle_per_topic,
         )
         metrics.active_subscribers = len(subscriptions)
         return len(subscriptions) == 1
@@ -313,6 +334,7 @@ class ZmqWebSocketBridgeService:
                 topic=topic,
                 throttle_ms=self._default_topic_throttle_ms(topic),
                 client_id=client_id,
+                throttle_per_topic=self._topic_throttle_per_topic(topic),
             )
             if should_start:
                 await self._start_zmq_subscription(topic)
@@ -555,19 +577,35 @@ class ZmqWebSocketBridgeService:
         return MAX_PENDING_MESSAGES_MARKET
 
     def _is_throttled(
-        self, subscription: TopicSubscriptionModel, current_time: float, topic: str
+        self,
+        subscription: TopicSubscriptionModel,
+        current_time: float,
+        topic: str,
+        received_topic: str,
     ) -> bool:
         """Check if a subscription should be throttled.
+
+        For a ``throttle_per_topic`` subscription (heartbeats) the throttle
+        window is tracked per received topic, so one component's frames never
+        throttle another's under a shared root subscription; otherwise the
+        single per-subscription ``last_sent`` is used.
 
         Args:
             subscription: The subscription to check.
             current_time: Current timestamp.
-            topic: Topic name for metrics tracking.
+            topic: Subscription topic (client key) for metrics tracking.
+            received_topic: The actual topic from the ZMQ frame, keying the
+                per-topic throttle window.
 
         Returns:
             True if the message should be throttled.
         """
-        if current_time - subscription.last_sent < (subscription.throttle_ms / 1000.0):
+        last_sent = (
+            subscription.last_sent_by_topic.get(received_topic, 0.0)
+            if subscription.throttle_per_topic
+            else subscription.last_sent
+        )
+        if current_time - last_sent < (subscription.throttle_ms / 1000.0):
             if topic in self.topic_metrics:
                 self.topic_metrics[topic].throttled_count += 1
             return True
@@ -617,6 +655,7 @@ class ZmqWebSocketBridgeService:
         topic: str,
         message_str: str,
         current_time: float,
+        received_topic: str,
     ) -> None:
         """Attempt to send a message to a single subscriber.
 
@@ -625,6 +664,8 @@ class ZmqWebSocketBridgeService:
             topic: Topic name for metrics.
             message_str: Message payload to send.
             current_time: Current timestamp for last_sent update.
+            received_topic: The actual topic from the ZMQ frame, keying the
+                per-topic throttle window for ``throttle_per_topic`` subs.
         """
         subscription.pending_count += 1
         try:
@@ -641,7 +682,10 @@ class ZmqWebSocketBridgeService:
             with contextlib.suppress(Exception):
                 await self.disconnect_client(subscription.websocket)
             return
-        subscription.last_sent = current_time
+        if subscription.throttle_per_topic:
+            subscription.last_sent_by_topic[received_topic] = current_time
+        else:
+            subscription.last_sent = current_time
         subscription.pending_count = max(0, subscription.pending_count - 1)
         if topic in self.topic_metrics:
             self.topic_metrics[topic].forwarded_count += 1
@@ -726,6 +770,7 @@ class ZmqWebSocketBridgeService:
             await self._dispatch_to_subscription(
                 subscription=subscription,
                 topic=topic,
+                received_topic=received_topic,
                 message_str=message_str,
                 current_time=current_time,
                 max_pending=max_pending,
@@ -791,6 +836,7 @@ class ZmqWebSocketBridgeService:
         *,
         subscription: TopicSubscriptionModel,
         topic: str,
+        received_topic: str,
         message_str: str,
         current_time: float,
         max_pending: int,
@@ -808,7 +854,7 @@ class ZmqWebSocketBridgeService:
         so a misbehaving socket cannot wedge the fan-out loop.
         """
         try:
-            if self._is_throttled(subscription, current_time, topic):
+            if self._is_throttled(subscription, current_time, topic, received_topic):
                 return
             if ai_review_payload is not None and not await self._enforce_ai_review_scope(
                 subscription=subscription,
@@ -832,7 +878,9 @@ class ZmqWebSocketBridgeService:
                 return
             if await self._handle_backpressure(subscription, topic, max_pending, is_trade):
                 return
-            await self._try_send_message(subscription, topic, message_str, current_time)
+            await self._try_send_message(
+                subscription, topic, message_str, current_time, received_topic
+            )
         except Exception as e:
             logger.warning(f"Failed to send message to client {subscription.client_id}: {e}")
             with contextlib.suppress(Exception):
@@ -1095,7 +1143,9 @@ class ZmqWebSocketBridgeService:
         if self._websocket_has_topic_subscription(websocket, topic):
             logger.debug(f"WebSocket already subscribed to topic: {topic}")
             return True
-        self._register_topic_subscription(websocket, topic, throttle_ms)
+        self._register_topic_subscription(
+            websocket, topic, throttle_ms, throttle_per_topic=self._topic_throttle_per_topic(topic)
+        )
         await self.start_zmq_subscriber(topic)
         logger.info(f"WebSocket subscribed to topic: {topic} (throttle: {throttle_ms}ms)")
         return True

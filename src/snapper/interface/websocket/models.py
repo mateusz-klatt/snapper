@@ -6,6 +6,7 @@ and metrics collection.
 """
 
 from dataclasses import dataclass
+from dataclasses import field
 
 from fastapi import WebSocket
 
@@ -72,7 +73,14 @@ class TopicSubscriptionModel:
     Attributes:
         websocket: The WebSocket connection.
         throttle_ms: Minimum time between messages in milliseconds.
-        last_sent: Timestamp of last sent message.
+        last_sent: Timestamp of last sent message (per-subscription throttle).
+        throttle_per_topic: When True, throttle each received topic
+            independently via ``last_sent_by_topic`` instead of the single
+            ``last_sent``; set for heartbeat root subscriptions so one
+            component's frames never throttle another's.
+        last_sent_by_topic: Per-received-topic last-sent timestamps, used only
+            when ``throttle_per_topic`` is True. Bounded by the number of
+            distinct topics matched under the subscription.
         client_id: Client identifier for logging.
         pending_count: Number of messages pending acknowledgment.
     """
@@ -80,6 +88,8 @@ class TopicSubscriptionModel:
     websocket: WebSocket
     throttle_ms: int = 100
     last_sent: float = 0.0
+    throttle_per_topic: bool = False
+    last_sent_by_topic: dict[str, float] = field(default_factory=dict)
     client_id: str = ""
     pending_count: int = 0
 
@@ -94,11 +104,14 @@ class TopicConfigurationModel:
         endpoint: ZMQ endpoint address.
         pattern: Topic pattern for ZMQ subscription.
         throttle_ms: Default throttle interval in milliseconds.
+        throttle_per_topic: Whether the throttle is applied per received
+            topic rather than per subscription (heartbeat families).
     """
 
     endpoint: str
     pattern: str
     throttle_ms: int = 100
+    throttle_per_topic: bool = False
 
 
 @dataclass

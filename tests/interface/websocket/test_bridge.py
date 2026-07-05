@@ -90,6 +90,64 @@ async def test_forward_to_clients_raw_passthrough() -> None:
     ws.send_text.assert_awaited_once_with(raw_json)
 
 
+def test_topic_throttle_per_topic_from_schema() -> None:
+    """``_topic_throttle_per_topic`` reads the matching schema flag, else False.
+
+    Given: The registry (heartbeats opt in, market does not),
+    When: The per-topic flag is resolved for a pattern and an exact topic,
+    Then: Only the heartbeat root pattern returns True.
+    """
+    bridge = ZmqWebSocketBridgeService(connection_manager=None)
+    assert bridge._topic_throttle_per_topic("system.heartbeats.") is True
+    assert bridge._topic_throttle_per_topic("market.") is False
+    assert bridge._topic_throttle_per_topic("system.heartbeats.strategy.abc") is False
+
+
+def test_is_throttled_per_topic_throttles_only_the_repeated_topic() -> None:
+    """A throttle_per_topic subscription throttles each received topic independently.
+
+    Given: A heartbeat root subscription (throttle_per_topic, 1s) that recently
+        sent for one component,
+    When: A repeat of that component and a fresh component are checked,
+    Then: Only the repeat is throttled — components never suppress each other.
+    """
+    bridge = ZmqWebSocketBridgeService(connection_manager=None)
+    ws: Any = DummyWebSocket()
+    sub = TopicSubscriptionModel(websocket=ws, throttle_ms=1000, throttle_per_topic=True)
+    sub.last_sent_by_topic["system.heartbeats.executor.a"] = 100.0
+    assert (
+        bridge._is_throttled(sub, 100.5, "system.heartbeats.", "system.heartbeats.executor.a")
+        is True
+    )
+    assert (
+        bridge._is_throttled(sub, 100.5, "system.heartbeats.", "system.heartbeats.feed.b") is False
+    )
+
+
+def test_is_throttled_per_subscription_uses_single_last_sent() -> None:
+    """A non-per-topic subscription throttles on the single shared last_sent."""
+    bridge = ZmqWebSocketBridgeService(connection_manager=None)
+    ws: Any = DummyWebSocket()
+    sub = TopicSubscriptionModel(websocket=ws, throttle_ms=100, throttle_per_topic=False)
+    sub.last_sent = 100.0
+    assert bridge._is_throttled(sub, 100.05, "market.", "market.kraken.BTC") is True
+    assert bridge._is_throttled(sub, 100.2, "market.", "market.kraken.BTC") is False
+
+
+@pytest.mark.asyncio
+async def test_try_send_message_records_per_topic_timestamp() -> None:
+    """A throttle_per_topic send stamps last_sent_by_topic, not the shared last_sent."""
+    bridge = ZmqWebSocketBridgeService(connection_manager=None)
+    ws: Any = DummyWebSocket()
+    sub = TopicSubscriptionModel(websocket=ws, throttle_ms=1000, throttle_per_topic=True)
+    await bridge._try_send_message(
+        sub, "system.heartbeats.", '{"x":1}', 100.0, "system.heartbeats.executor.a"
+    )
+    ws.send_text.assert_awaited_once()
+    assert sub.last_sent_by_topic["system.heartbeats.executor.a"] == 100.0
+    assert sub.last_sent == 0.0
+
+
 @pytest.mark.asyncio
 async def test_forward_to_clients_backpressure_trade_disconnects_client() -> None:
     """Forward to clients disconnects on trade topic backpressure.
