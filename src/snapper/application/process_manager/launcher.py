@@ -3822,6 +3822,19 @@ class ProcessLauncherService:
         running, or "error" when any are missing. Disabled CORE processes
         and completed one-shot CORE processes are ignored.
 
+        An ``ON_FAILURE`` CORE process that reached a benign TERMINAL-CLEAN
+        state under its current config generation is also accepted, NOT reported
+        as ERROR: the reconcile loop deliberately keeps it at rest (see
+        :attr:`_terminal_no_restart_generation`), so an enabled-but-resting feed
+        like ``paper_feed_publisher`` no longer turns the container unhealthy.
+        Acceptance is restricted to ``ON_FAILURE`` because only there does a
+        terminal marker GUARANTEE a clean exit — an ``ON_FAILURE`` process that
+        FAILS is restarted (never tombstoned), so a marker implies a clean exit.
+        A ``NEVER`` process is tombstoned on ANY exit including a crash, so a
+        missing ``NEVER`` CORE still flags ERROR. A crash, a mid-restart
+        backoff, a not-yet-started process, or a parked process (which returns
+        ERROR before this loop) likewise still flags ERROR.
+
         Bare executor templates (``executor_<exchange>``) are skipped:
         they are config-only entries expanded into per-wallet instances
         by :meth:`spawn_per_wallet_executors`. Instance-level CORE
@@ -3864,12 +3877,18 @@ class ProcessLauncherService:
         for config in configs:
             if is_executor_template(config.name):
                 continue
+            terminal_clean_accepted = (
+                config.restart_policy is ProcessRestartPolicyEnum.ON_FAILURE
+                and self._terminal_no_restart_generation.get(config.name)
+                == self._config_generation(config)
+            )
             if (
                 config.enabled
                 and self.autostart_includes(config)
                 and config.role is ProcessRoleEnum.CORE
                 and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
                 and config.name not in self.started_processes
+                and not terminal_clean_accepted
             ):
                 status = HealthStatusEnum.ERROR
                 break

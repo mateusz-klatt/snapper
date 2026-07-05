@@ -5813,6 +5813,125 @@ async def test_get_core_health_core_missing(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio()
+async def test_get_core_health_terminal_clean_core_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a terminal-clean-tombstoned enabled CORE reads as healthy, not error.
+
+    Given: An enabled long-running CORE process not in started_processes but
+        tombstoned at its CURRENT config generation (a benign idle-exit the
+        reconcile loop deliberately keeps at rest),
+    When: get_core_health is called,
+    Then: Returns "healthy" — a resting feed like paper_feed_publisher no longer
+        turns the container unhealthy.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="paper_feed_publisher",
+        enabled=True,
+        mode="thread",
+        class_path="test.Paper",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+    )
+    factory._terminal_no_restart_generation[config.name] = factory._config_generation(config)
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    assert await factory.get_core_health() == "healthy"
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_stale_generation_tombstone_still_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a tombstone from a STALE generation does not mask a missing CORE.
+
+    Given: An enabled long-running CORE process not in started_processes whose
+        terminal marker is keyed to an OLD config generation (the config has
+        since changed, so the process should be running again),
+    When: get_core_health is called,
+    Then: Returns "error" — terminal acceptance is generation-specific, so a
+        crash or a stale marker still surfaces the missing CORE.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="paper_feed_publisher",
+        enabled=True,
+        mode="thread",
+        class_path="test.Paper",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+    )
+    factory._terminal_no_restart_generation[config.name] = "stale-generation"
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    assert await factory.get_core_health() == "error"
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_never_policy_tombstone_still_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a NEVER-policy tombstone (which can follow a crash) does not mask a missing CORE.
+
+    Given: An enabled long-running CORE with restart_policy=NEVER, missing from
+        started_processes, with a matching terminal marker — NEVER tombstones on
+        ANY exit including a crash, so the marker does not prove a clean exit,
+    When: get_core_health is called,
+    Then: Returns "error" — terminal acceptance is restricted to ON_FAILURE.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="zmq_broker",
+        enabled=True,
+        mode="thread",
+        class_path="test.Broker",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        restart_policy=ProcessRestartPolicyEnum.NEVER,
+    )
+    factory._terminal_no_restart_generation[config.name] = factory._config_generation(config)
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    assert await factory.get_core_health() == "error"
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_parked_beats_terminal_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a parked process reports error even with an accepting terminal marker.
+
+    Given: An ON_FAILURE CORE with a matching terminal marker, but the launcher
+        has a parked process (watchdog gave up),
+    When: get_core_health is called,
+    Then: Returns "error" — parking wins over the terminal-clean acceptance.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="paper_feed_publisher",
+        enabled=True,
+        mode="thread",
+        class_path="test.Paper",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+    )
+    factory._terminal_no_restart_generation[config.name] = factory._config_generation(config)
+    factory._parked_processes.add(config.name)
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    assert await factory.get_core_health() == "error"
+
+
+@pytest.mark.asyncio()
 async def test_get_core_health_disabled_core_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify disabled CORE does not cause error.
 
