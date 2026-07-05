@@ -1,9 +1,12 @@
 """Unit tests for AppSettings configuration facade."""
 
+import hashlib
+import hmac as hmac_mod
 from typing import Any
 
 import pytest
 
+from snapper.auth.dependencies import CSRFManager
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.types import ProcessAutostartProfileEnum
@@ -273,11 +276,6 @@ class TestAppSettingsAuthProperties:
         signed with auth_secret_key, so bumping the CSRF purpose tag
         would have rotated nothing.
         """
-        import hashlib
-        import hmac as hmac_mod
-
-        from snapper.auth.dependencies import CSRFManager
-
         bootstrap = BootstrapSettingsLoader(
             DB_URL="sqlite:///:memory:", MASTER_PASSWORD="test-master"
         )
