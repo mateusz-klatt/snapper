@@ -1861,6 +1861,12 @@ class ProcessSummaryItem(StrictBody):
             100). ``None`` under the same conditions as ``rss_bytes``; the
             first sample after a (re)start reads ``0.0`` because psutil
             needs two readings to compute a delta.
+        owned: True when the emitting node's autostart profile runs this
+            process (or it is locally running). Lets the cross-coordinator
+            cache attribute a NOT-running process to the container that owns
+            it by profile (the strategies container for a stopped strategy)
+            rather than to whichever node most recently listed it. Defaults
+            ``False`` so older producers decode during a rolling deploy.
     """
 
     name: str
@@ -1871,6 +1877,7 @@ class ProcessSummaryItem(StrictBody):
     active_public_id: str | None = None
     rss_bytes: int | None = None
     cpu_percent: float | None = None
+    owned: bool = False
 
 
 class ProcessSummaryEventData(StrictDataSchema[Literal["process_summary_event"]]):

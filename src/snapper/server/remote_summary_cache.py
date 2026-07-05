@@ -274,10 +274,15 @@ class RemoteSummaryCache:
         """Return ``(running, coordinator)`` for ``name`` from one fresh snapshot.
 
         Resolving both facts in a single scan keeps them consistent when
-        several coordinators happen to list the same process: a fresh
-        snapshot reporting it running wins; otherwise the most recently
-        received fresh coordinator that merely lists it is returned as the
-        owner (deterministic regardless of dict iteration order).
+        several coordinators list the same process. Owner precedence, in a
+        single deterministic scan: (1) a fresh snapshot reporting it RUNNING
+        wins; else (2) the most-recently-received fresh coordinator that OWNS
+        it by profile (``item.owned`` — e.g. the strategies container for a
+        stopped strategy); else (3) the most-recently-received fresh
+        coordinator that merely lists it. Every container emits a row for
+        every config (most not-running), so without the ``owned`` tier a
+        stopped strategy would be mis-attributed to whichever node's snapshot
+        arrived last (the feed container) instead of its owning container.
 
         Args:
             name: Process name to look up.
@@ -287,8 +292,10 @@ class RemoteSummaryCache:
             remote snapshot reports the process running, and ``coordinator``
             is the owning slug (``None`` when no fresh snapshot lists it).
         """
-        owner: str | None = None
-        owner_received_at = float("-inf")
+        listing_owner: str | None = None
+        listing_received_at = float("-inf")
+        profile_owner: str | None = None
+        profile_received_at = float("-inf")
         for coordinator, snapshot in self._snapshots.items():
             if not self._is_fresh(snapshot):
                 continue
@@ -297,10 +304,13 @@ class RemoteSummaryCache:
                 continue
             if item.running:
                 return True, coordinator
-            if snapshot.received_at > owner_received_at:
-                owner = coordinator
-                owner_received_at = snapshot.received_at
-        return False, owner
+            if item.owned and snapshot.received_at > profile_received_at:
+                profile_owner = coordinator
+                profile_received_at = snapshot.received_at
+            if snapshot.received_at > listing_received_at:
+                listing_owner = coordinator
+                listing_received_at = snapshot.received_at
+        return False, profile_owner if profile_owner is not None else listing_owner
 
     def is_running(self, name: str) -> bool:
         """Return whether a fresh remote snapshot reports ``name`` running.

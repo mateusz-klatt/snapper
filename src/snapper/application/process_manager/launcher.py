@@ -528,6 +528,7 @@ class ProcessLauncherService:
                     active_public_id=self.active_runs.get(name),
                     rss_bytes=rss,
                     cpu_percent=cpu,
+                    owned=self.autostart_includes(config) or name in self.started_processes,
                 )
             )
             seen.add(name)
@@ -545,6 +546,8 @@ class ProcessLauncherService:
                     active_public_id=self.active_runs.get(name),
                     rss_bytes=rss,
                     cpu_percent=cpu,
+                    owned=self.autostart_includes(instance_config)
+                    or name in self.started_processes,
                 )
             )
         return items

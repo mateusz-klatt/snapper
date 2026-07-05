@@ -55,12 +55,13 @@ def _topic(coordinator: str) -> str:
     return f"processes.events.summary.{coordinator}"
 
 
-def _make_item(name: str, *, running: bool) -> ProcessSummaryItem:
+def _make_item(name: str, *, running: bool, owned: bool = False) -> ProcessSummaryItem:
     """Build a minimal per-process summary row.
 
     Args:
         name: Process name.
         running: Whether the row reports the process as running.
+        owned: Whether the emitting node owns the process by profile.
 
     Returns:
         A populated :class:`ProcessSummaryItem`.
@@ -71,6 +72,7 @@ def _make_item(name: str, *, running: bool) -> ProcessSummaryItem:
         enabled=True,
         role="core",
         lifecycle="long_running",
+        owned=owned,
     )
 
 
@@ -220,6 +222,28 @@ class TestFreshnessAndLookup:
         cache._ingest(_topic("coord-2"), _payload("coord-2", [_make_item("feed", running=False)]))
         clock.value = 110.0
         assert cache.lookup("feed") == (False, "coord-1")
+
+    def test_lookup_prefers_profile_owner_over_recent_lister(self) -> None:
+        """A stopped process is attributed to its profile-owner, not the last lister.
+
+        Every container emits a row for every config, so a stopped strategy is
+        also listed (not-running) by the feed container. Without the ``owned``
+        tier the most-recently-received lister (feed) would win. The strategies
+        container marks the strategy ``owned``, so it wins regardless of which
+        snapshot arrived last.
+        """
+        clock = _FakeClock(100.0)
+        cache = RemoteSummaryCache(own_coordinator="coord-0", ttl_seconds=15.0, clock=clock)
+        cache._ingest(
+            _topic("coord-2"),
+            _payload("coord-2", [_make_item("strat_x", running=False, owned=True)]),
+        )
+        clock.value = 101.0
+        cache._ingest(
+            _topic("coord-1"),
+            _payload("coord-1", [_make_item("strat_x", running=False, owned=False)]),
+        )
+        assert cache.lookup("strat_x") == (False, "coord-2")
 
     def test_is_running_false_for_stale_snapshot(self) -> None:
         """A snapshot older than the TTL is treated as stopped."""
