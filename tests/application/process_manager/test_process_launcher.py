@@ -57,6 +57,7 @@ from snapper.core.types import ProcessRunStatusEnum
 from snapper.data.models import ProcessRun
 from snapper.data.models import Setting
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import WalletCredentialRow
 from snapper.data.repository_types import WalletRow
 
 
@@ -6181,6 +6182,30 @@ def test_validate_parameters_with_model(monkeypatch: pytest.MonkeyPatch) -> None
     assert result == {"endpoint": "tcp://localhost:5555"}
 
 
+def _credential_row(public_id: str, wallet_public_id: str, exchange: str) -> WalletCredentialRow:
+    """Build a minimal active wallet-credential row for spawner tests.
+
+    Args:
+        public_id: Credential public id.
+        wallet_public_id: Owning wallet public id.
+        exchange: Exchange slug for the credential.
+
+    Returns:
+        Row dict matching ``WalletCredentialRow``.
+    """
+    return {
+        "public_id": public_id,
+        "wallet_public_id": wallet_public_id,
+        "exchange": exchange,
+        "credential_type": "api_key_secret",
+        "encrypted_payload": "enc",
+        "label": None,
+        "timestamp": datetime.now(UTC),
+        "session_id": "s",
+        "sequence_id": 1,
+    }
+
+
 class TestSpawnPerWalletExecutors:
     """Dynamic per-wallet executor spawner coverage.
 
@@ -6188,14 +6213,17 @@ class TestSpawnPerWalletExecutors:
     ``ProcessConfigModel`` per ``(exchange, wallet)`` pair via
     :meth:`ProcessLauncherService.start_process`. The tests cover the
     happy path, the empty-credentials short-circuit, the missing
-    template skip, the duplicate-instance skip, and the per-instance
-    failure isolation. ``list_active_wallet_credentials`` and
+    template skip, the duplicate-instance skip, the per-instance
+    failure isolation, and the pinned-mint-wallet exclusion (the wallet
+    minting equities realtime tokens must never run order executors —
+    nonce isolation). ``list_active_wallet_credentials`` and
     ``start_process`` are mocked so the tests stay pure unit tests.
     """
 
-    def _make_factory(self) -> ProcessLauncherService:
+    def _make_factory(self, mint_pin: str = "") -> ProcessLauncherService:
         settings = MagicMock()
         settings.db_url = "sqlite+aiosqlite:///:memory:"
+        settings.kraken_equities_realtime_wallet_public_id = mint_pin
         return ProcessLauncherService(settings)
 
     def _make_entry(self, class_path: str = "test.PaperExecutor") -> ProcessRegistryEntry:
@@ -6334,6 +6362,376 @@ class TestSpawnPerWalletExecutors:
             {"wallet_public_id": wallet_a},
             {"wallet_public_id": wallet_b},
         ]
+
+    @pytest.mark.asyncio
+    async def test_spawn_skips_pinned_mint_wallet_by_public_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A verbatim public-id mint pin excludes every executor for that wallet.
+
+        Given: Two kraken credentials and a mint pin equal to the first
+            wallet's public id,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: Only the non-mint wallet gets an executor — running order
+            executors on the token-mint wallet would recreate the
+            mint-vs-exec nonce contention the pin eliminates.
+        """
+        mint_wallet = "00000000-0000-7000-8000-0000000000d1"
+        trading_wallet = "00000000-0000-7000-8000-0000000000d2"
+        factory = self._make_factory(mint_pin=mint_wallet)
+        repo = MagicMock()
+        repo.get_orders_total_count = AsyncMock(return_value=0)
+        repo.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                _credential_row("cred-mint", mint_wallet, "kraken"),
+                _credential_row("cred-trade", trading_wallet, "kraken"),
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry("snapper.executors.KrakenExecutor")},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 1
+        names = [call.args[0].name for call in start_mock.await_args_list]
+        assert names == ["executor_kraken_w0000000000d2"]
+
+    @pytest.mark.asyncio
+    async def test_spawn_skips_pinned_mint_wallet_by_label(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A label: mint pin resolves to the single live wallet and skips it.
+
+        Given: A ``label:market-data`` pin, a wallet catalogue with
+            exactly one live wallet carrying the label, and credentials
+            for that wallet plus a trading wallet,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: The labelled wallet's executor is skipped, mirroring the
+            equities publisher's pin resolution.
+        """
+        mint_wallet = "00000000-0000-7000-8000-0000000000e1"
+        trading_wallet = "00000000-0000-7000-8000-0000000000e2"
+        factory = self._make_factory(mint_pin="label:market-data")
+        repo = MagicMock()
+        repo.get_orders_total_count = AsyncMock(return_value=0)
+        repo.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                _credential_row("cred-mint", mint_wallet, "kraken"),
+                _credential_row("cred-trade", trading_wallet, "kraken"),
+            ]
+        )
+        repo.list_active_wallets = AsyncMock(
+            return_value=[
+                {"public_id": mint_wallet, "label": "market-data", "is_paper": False},
+                {"public_id": trading_wallet, "label": "main", "is_paper": False},
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry("snapper.executors.KrakenExecutor")},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 1
+        names = [call.args[0].name for call in start_mock.await_args_list]
+        assert names == ["executor_kraken_w0000000000e2"]
+
+    @pytest.mark.asyncio
+    async def test_spawn_fails_open_on_ambiguous_or_blank_mint_label(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ambiguous label pins exclude nothing — every executor spawns.
+
+        Given: A ``label:market-data`` pin matching TWO live wallets,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: Both executors spawn — silently dropping a trading
+            executor is the worse failure, so the exclusion fails OPEN
+            (unlike the mint itself, which fails closed).
+        """
+        wallet_a = "00000000-0000-7000-8000-0000000000f1"
+        wallet_b = "00000000-0000-7000-8000-0000000000f2"
+        factory = self._make_factory(mint_pin="label:market-data")
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                _credential_row("cred-a", wallet_a, "kraken"),
+                _credential_row("cred-b", wallet_b, "kraken"),
+            ]
+        )
+        repo.list_active_wallets = AsyncMock(
+            return_value=[
+                {"public_id": wallet_a, "label": "market-data", "is_paper": False},
+                {"public_id": wallet_b, "label": "market-data", "is_paper": False},
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry("snapper.executors.KrakenExecutor")},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 2
+
+    @pytest.mark.asyncio
+    async def test_spawn_fails_open_when_wallet_catalogue_lookup_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wallet-catalogue error during label resolution excludes nothing.
+
+        Given: A ``label:market-data`` pin and a wallet catalogue query
+            that raises,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: Every executor spawns (fail-open) instead of the error
+            silently dropping a trading executor.
+        """
+        wallet_a = "00000000-0000-7000-8000-0000000000a9"
+        factory = self._make_factory(mint_pin="label:market-data")
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[_credential_row("cred-a", wallet_a, "kraken")]
+        )
+        repo.list_active_wallets = AsyncMock(side_effect=RuntimeError("catalogue down"))
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry("snapper.executors.KrakenExecutor")},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_spawn_non_string_pin_payload_excludes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A JSON-parsed non-string setting payload is ignored (fail-open).
+
+        Given: The settings service returning ``True`` (a REST-written
+            "true" string reloads as a JSON boolean) for the mint pin,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: Every executor spawns — the resolver mirrors the equities
+            publisher's isinstance guard instead of crashing on
+            ``startswith``.
+        """
+        wallet_a = "00000000-0000-7000-8000-0000000000c9"
+        factory = self._make_factory()
+        factory.settings.kraken_equities_realtime_wallet_public_id = True
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[_credential_row("cred-a", wallet_a, "kraken")]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry("snapper.executors.KrakenExecutor")},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_spawn_refuses_exclusion_when_pinned_wallet_has_order_history(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mis-pin at a wallet that ever traded excludes nothing.
+
+        Given: The mint pin pointing at wallet A while wallet B also
+            holds a kraken credential, and wallet A having ORDER
+            HISTORY (deterministic evidence it is the trading wallet —
+            a read-only mint key can never produce an order row),
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: BOTH executors spawn with a warning — the trading
+            executor must never be silently dropped even though
+            another wallet could satisfy the per-exchange belt.
+        """
+        trading_wallet = "00000000-0000-7000-8000-0000000000e9"
+        mint_wallet = "00000000-0000-7000-8000-0000000000ea"
+        factory = self._make_factory(mint_pin=trading_wallet)
+        repo = MagicMock()
+        repo.get_orders_total_count = AsyncMock(return_value=42)
+        repo.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                _credential_row("cred-trade", trading_wallet, "kraken"),
+                _credential_row("cred-mint", mint_wallet, "kraken"),
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry("snapper.executors.KrakenExecutor")},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 2
+        repo.get_orders_total_count.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_spawn_refuses_exclusion_when_pinned_wallet_has_scope_grants(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mis-pin at a fresh trading wallet is caught by its scope grants.
+
+        Given: The mint pin pointing at wallet A with ZERO orders so
+            far but ACTIVE SCOPE GRANTS (strategy authorization exists
+            before the first order), while wallet B also holds a
+            kraken credential,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: BOTH executors spawn — closing the bootstrap hole where a
+            skipped fresh trading wallet could never produce the order
+            row that would flip the order-history probe.
+        """
+        fresh_trading_wallet = "00000000-0000-7000-8000-0000000000aa"
+        mint_wallet = "00000000-0000-7000-8000-0000000000ab"
+        factory = self._make_factory(mint_pin=fresh_trading_wallet)
+        repo = MagicMock()
+        repo.get_orders_total_count = AsyncMock(return_value=0)
+        repo.list_active_scope_grants_for_wallet = AsyncMock(
+            return_value=[{"public_id": "grant-1"}]
+        )
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                _credential_row("cred-trade", fresh_trading_wallet, "kraken"),
+                _credential_row("cred-mint", mint_wallet, "kraken"),
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry("snapper.executors.KrakenExecutor")},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 2
+
+    @pytest.mark.asyncio
+    async def test_spawn_fails_open_when_order_history_probe_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An order-catalogue error during the probe excludes nothing."""
+        wallet_a = "00000000-0000-7000-8000-0000000000f9"
+        factory = self._make_factory(mint_pin=wallet_a)
+        repo = MagicMock()
+        repo.get_orders_total_count = AsyncMock(side_effect=RuntimeError("orders down"))
+        repo.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[_credential_row("cred-a", wallet_a, "kraken")]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry("snapper.executors.KrakenExecutor")},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_spawn_never_skips_the_only_wallet_of_an_exchange(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mis-pin at the sole wallet of an exchange refuses to skip it.
+
+        Given: The mint pin pointing at the ONLY kraken wallet (e.g. an
+            operator accidentally pinned the trading wallet),
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: The executor spawns anyway with a warning — the exclusion
+            must never leave an exchange without any order executor.
+        """
+        only_wallet = "00000000-0000-7000-8000-0000000000d9"
+        factory = self._make_factory(mint_pin=only_wallet)
+        repo = MagicMock()
+        repo.get_orders_total_count = AsyncMock(return_value=0)
+        repo.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[_credential_row("cred-only", only_wallet, "kraken")]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry("snapper.executors.KrakenExecutor")},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 1
+        names = [call.args[0].name for call in start_mock.await_args_list]
+        assert names == ["executor_kraken_w0000000000d9"]
+
+    @pytest.mark.asyncio
+    async def test_spawn_blank_label_pin_excludes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``label:`` pin with a blank label is ignored (fail-open)."""
+        wallet_a = "00000000-0000-7000-8000-0000000000b9"
+        factory = self._make_factory(mint_pin="label:   ")
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[_credential_row("cred-a", wallet_a, "kraken")]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry("snapper.executors.KrakenExecutor")},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 1
 
     @pytest.mark.asyncio
     async def test_spawn_skips_credentials_without_template(

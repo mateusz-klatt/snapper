@@ -81,6 +81,7 @@ from snapper.core.wallet_resolution import WalletAmbiguousError
 from snapper.core.wallet_resolution import WalletUnresolvedError
 from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.models import Setting
+from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
 from snapper.data.repository_types import WalletCredentialRow
@@ -145,6 +146,15 @@ coordinator, silently disabling the control plane. ``asyncio.wait_for``
 cancels the stuck convergence and the pass moves on; 120 s is far above
 any healthy stop/start so a cancellation here always indicates a wedged
 process, which the log line then surfaces."""
+
+_WALLET_LABEL_PIN_PREFIX: Final = "label:"
+"""Prefix marking a wallet pin as a label lookup.
+
+Same convention as ``kraken_equities_realtime_wallet_public_id`` in the
+equities realtime client — the spawner resolves the pinned token-mint
+wallet with identical semantics so both sides always agree on which
+wallet is the mint identity.
+"""
 
 _PARK_HEARTBEAT_SPACING_S: Final[float] = 2.0
 """Spacing between synthetic park-heartbeat frames.
@@ -1893,6 +1903,126 @@ class ProcessLauncherService:
             parameters_schema=parameters_schema,
         )
 
+    async def _resolve_mint_wallet_public_id(self, repository: Repository) -> str:
+        """Resolve the equities token-mint wallet the spawner must exclude.
+
+        The wallet pinned by ``kraken_equities_realtime_wallet_public_id``
+        exists solely to mint Kraken Equities realtime WS tokens on its
+        own exchange nonce counter; running order executors against its
+        credentials would recreate the mint-vs-exec nonce contention the
+        pin was introduced to eliminate, so the boot spawner skips EVERY
+        executor for that wallet. Pin semantics mirror the publisher's
+        resolver: an empty pin excludes nothing (autolookup mode shares a
+        wallet with trading by definition), a ``label:<wallet-label>``
+        pin resolves to the SINGLE live wallet carrying the label, and
+        any other value is used verbatim as a wallet public id. Unlike
+        the mint (which fails CLOSED to the delayed feed), this lookup
+        fails OPEN — on a non-string setting payload (the settings
+        service JSON-parses stored values), a blank/ambiguous label, or
+        a wallet-catalogue error every executor spawns, because silently
+        dropping a trading executor is the worse failure. One more belt
+        lives in the caller: a wallet that is the ONLY credential holder
+        for an exchange is never skipped, so a mis-pin pointing at the
+        trading wallet cannot leave the exchange executor-less. The
+        operator manual path
+        (:meth:`start_per_wallet_instance_by_name`) is deliberately not
+        gated — an explicit start is an operator override.
+
+        Contract note: the pin is an EXPLICIT operator declaration of
+        the mint identity, so an admin manual order targeted at the
+        declared wallet is intentionally left without an executor (the
+        wallet-scoped executors of other wallets drop foreign
+        commands) — executing orders through the mint identity is
+        precisely what this exclusion exists to prevent. The
+        evidence probes above only override declarations contradicted
+        by the system's own records.
+
+        Args:
+            repository: Repository exposing the active wallet catalogue.
+
+        Returns:
+            The wallet public id to skip, or ``""`` when nothing should
+            be skipped.
+        """
+        raw_pin = self.settings.kraken_equities_realtime_wallet_public_id
+        pin = raw_pin.strip() if isinstance(raw_pin, str) else ""
+        if not pin:
+            return ""
+        if not pin.startswith(_WALLET_LABEL_PIN_PREFIX):
+            return await self._reject_mint_wallet_with_trading_evidence(repository, pin)
+        label = pin.removeprefix(_WALLET_LABEL_PIN_PREFIX)
+        if not label.strip():
+            return ""
+        try:
+            wallets = await repository.list_active_wallets(datetime.now(UTC))
+        except Exception as exc:
+            logger.warning(
+                f"Per-wallet spawner: wallet catalogue lookup for mint-pin label failed "
+                f"({exc}); spawning executors for every wallet"
+            )
+            return ""
+        matches = [
+            wallet["public_id"]
+            for wallet in wallets
+            if wallet["label"] == label and not wallet["is_paper"]
+        ]
+        if len(matches) == 1:
+            return await self._reject_mint_wallet_with_trading_evidence(repository, matches[0])
+        logger.warning(
+            f"Per-wallet spawner: mint-pin label {label!r} matched {len(matches)} live "
+            "wallets; spawning executors for every wallet"
+        )
+        return ""
+
+    async def _reject_mint_wallet_with_trading_evidence(
+        self, repository: Repository, wallet_public_id: str
+    ) -> str:
+        """Refuse the mint-wallet exclusion when the wallet looks like a trader.
+
+        A genuine token-mint wallet holds a read-only exchange key: it
+        can never have produced an ORDER row, and nothing ever grants
+        it strategy SCOPE (grants exist to authorize trading). Either
+        signal is deterministic evidence the pin points at a TRADING
+        wallet — the one wallet whose executor must never be silently
+        dropped. The scope-grant probe also closes the fresh-wallet
+        bootstrap hole: a mis-pinned trading wallet with zero orders so
+        far still carries its strategy grants, so it is refused BEFORE
+        the missing executor could prevent its first order forever.
+        Both probes fail OPEN like every other guard in this path: on a
+        query error nothing is excluded.
+
+        Args:
+            repository: Repository exposing the order and scope-grant
+                catalogues.
+            wallet_public_id: Candidate mint wallet to vet.
+
+        Returns:
+            ``wallet_public_id`` when the wallet has neither order
+            history nor scope grants, else ``""`` (no exclusion) with a
+            warning.
+        """
+        now = datetime.now(UTC)
+        try:
+            order_count = await repository.get_orders_total_count(
+                now, wallet_public_ids=[wallet_public_id]
+            )
+            grants = await repository.list_active_scope_grants_for_wallet(wallet_public_id, now)
+        except Exception as exc:
+            logger.warning(
+                f"Per-wallet spawner: trading-evidence probe for mint-pin wallet failed "
+                f"({exc}); spawning executors for every wallet"
+            )
+            return ""
+        if order_count or grants:
+            logger.warning(
+                f"Per-wallet spawner: mint-pin wallet={wallet_public_id} has "
+                f"{order_count} order(s) and {len(grants)} scope grant(s) — that is a "
+                "TRADING wallet, refusing the executor exclusion; check "
+                "kraken_equities_realtime_wallet_public_id"
+            )
+            return ""
+        return wallet_public_id
+
     async def _spawn_one_per_wallet_instance(
         self,
         credential: WalletCredentialRow,
@@ -2013,10 +2143,32 @@ class ProcessLauncherService:
         if not credentials:
             logger.info("Per-wallet spawner: no wallet credentials, skipping")
             return 0
+        mint_wallet_public_id = await self._resolve_mint_wallet_public_id(repository)
+        exchanges_with_other_wallets = {
+            credential["exchange"]
+            for credential in credentials
+            if credential["wallet_public_id"] != mint_wallet_public_id
+        }
         template_configs: dict[str, dict[str, Any]] = {}
         spawned = 0
         failed_core_names: list[str] = []
         for credential in credentials:
+            if mint_wallet_public_id and credential["wallet_public_id"] == mint_wallet_public_id:
+                if credential["exchange"] not in exchanges_with_other_wallets:
+                    logger.warning(
+                        f"Per-wallet spawner: mint-pin wallet={credential['wallet_public_id']} "
+                        f"is the ONLY {credential['exchange']} wallet — spawning its executor "
+                        "anyway (refusing to leave the exchange without any executor; check "
+                        "kraken_equities_realtime_wallet_public_id, it may point at the "
+                        "trading wallet)"
+                    )
+                else:
+                    logger.info(
+                        f"Per-wallet spawner: skipping wallet={credential['wallet_public_id']} "
+                        f"exchange={credential['exchange']} — pinned equities token-mint wallet "
+                        "(nonce isolation: the mint identity never runs order executors)"
+                    )
+                    continue
             outcome = await self._spawn_one_per_wallet_instance(credential, template_configs)
             if outcome is None:
                 continue
