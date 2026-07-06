@@ -379,6 +379,20 @@ class WalletConflictError(Exception):
         self.reason = reason
 
 
+class OperatorConflictError(Exception):
+    """Raised when an operator insert collides with an existing active row.
+
+    Maps to HTTP 409 at the API layer. The active-unique index on ``label``
+    enforces that two operators cannot share a label at the same bus time.
+    """
+
+    def __init__(self, label: str, reason: str) -> None:
+        """Capture the conflicting label for the caller."""
+        super().__init__(f"Operator insert failed for label={label!r}: {reason}")
+        self.label = label
+        self.reason = reason
+
+
 @dataclass(frozen=True, slots=True)
 class _DeviceAlertPrefValues:
     """Merged values for a new active ``DeviceAlertPref`` version."""
@@ -3241,6 +3255,36 @@ class Repository(ABC):
 
         Returns:
             Active operator rows ordered by ``label`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def create_operator(
+        self,
+        label: str,
+        description: str | None,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> OperatorRow:
+        """Create a new active operator row.
+
+        Enforces the active-unique index on ``operators.label``: two concurrent
+        active rows sharing a label cannot exist at the same bus time.
+
+        Args:
+            label: Human-readable operator name (1-128 chars).
+            description: Optional free-form description.
+            session_id: Provenance session id.
+            sequence_id: Provenance sequence id.
+            timestamp: Bus time for the insert.
+
+        Returns:
+            The newly-inserted operator row.
+
+        Raises:
+            OperatorConflictError: When an active operator with the same label
+                already exists.
         """
         ...
 
@@ -13966,6 +14010,45 @@ class SQLAlchemyRepository(Repository):
                 )
                 for row in result.scalars().all()
             ]
+
+    async def create_operator(
+        self,
+        label: str,
+        description: str | None,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> OperatorRow:
+        """Insert a new active operator row."""
+        async with self.session() as s:
+            operator = Operator(
+                label=label,
+                description=description,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=timestamp,
+                known_to=KNOWN_TO_MAX,
+            )
+            s.add(operator)
+            try:
+                await s.commit()
+            except IntegrityError as exc:
+                err_msg = str(exc.orig).lower() if exc.orig else ""
+                if "unique" not in err_msg and "duplicate" not in err_msg:
+                    raise
+                raise OperatorConflictError(
+                    label=label,
+                    reason="active operator with the same label already exists",
+                ) from exc
+            await s.refresh(operator)
+            return OperatorRow(
+                public_id=operator.public_id,
+                label=operator.label,
+                description=operator.description,
+                timestamp=operator.timestamp,
+                session_id=operator.session_id,
+                sequence_id=operator.sequence_id,
+            )
 
     @staticmethod
     def _wallet_row_from(wallet: Wallet) -> WalletRow:

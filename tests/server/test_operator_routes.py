@@ -11,13 +11,41 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 from fastapi import Request
+from fastapi import status
 
+from snapper.api.schemas.multi_tenant import CreateOperatorBody
+from snapper.api.schemas.multi_tenant import CreateOperatorCommand
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.data.repository import OperatorConflictError
 from snapper.data.repository_types import OperatorRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.operator_routes import create_operator
 from snapper.server.operator_routes import list_operators
+
+
+def _admin_principal() -> AuthPrincipal:
+    """Return an ADMIN principal."""
+    return AuthPrincipal(
+        username="admin",
+        role=UserRole.ADMIN,
+        user_public_id="00000000-0000-7000-8000-000000000099",
+    )
+
+
+def _make_create_operator_command(
+    *, label: str = "firm-desk", description: str | None = "created by test"
+) -> CreateOperatorCommand:
+    """Return a minimal valid create-operator command envelope."""
+    return CreateOperatorCommand(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="00000000-0000-7000-8000-000000000701",
+        timestamp=datetime.now(UTC),
+        payload=CreateOperatorBody(label=label, description=description),
+    )
 
 
 def _operator_row(public_id: str, label: str) -> OperatorRow:
@@ -113,3 +141,62 @@ class TestListOperators:
 
         assert result.count == 0
         assert result.payload == []
+
+
+class TestCreateOperator:
+    """Behaviour of the ``create_operator`` POST handler."""
+
+    @pytest.mark.asyncio
+    async def test_successful_create_returns_projected_row(self) -> None:
+        """Happy path: repository row projected into an ``OperatorInfo`` response.
+
+        Given: An ADMIN principal and a valid command,
+        When: ``create_operator`` is called,
+        Then: The repository method is awaited with the command fields and the
+            response wraps the returned row.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.create_operator = AsyncMock(return_value=_operator_row("op-new", "firm-desk"))
+
+        result = await create_operator(
+            request=_make_request(),
+            _principal=_admin_principal(),
+            _csrf=None,
+            command=_make_create_operator_command(label="firm-desk"),
+            repo=mock_repo,
+        )
+
+        assert result.payload.label == "firm-desk"
+        assert result.payload.public_id == "op-new"
+        mock_repo.create_operator.assert_awaited_once()
+        call_kwargs = mock_repo.create_operator.await_args.kwargs
+        assert call_kwargs["label"] == "firm-desk"
+        assert call_kwargs["description"] == "created by test"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_label_maps_to_409(self) -> None:
+        """Repository ``OperatorConflictError`` maps to HTTP 409.
+
+        Given: The repository raises ``OperatorConflictError`` for a duplicate
+            active label,
+        When: ``create_operator`` is called,
+        Then: HTTPException 409 is raised.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.create_operator = AsyncMock(
+            side_effect=OperatorConflictError(
+                label="firm-desk",
+                reason="active operator with the same label already exists",
+            )
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_operator(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                command=_make_create_operator_command(label="firm-desk"),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_409_CONFLICT

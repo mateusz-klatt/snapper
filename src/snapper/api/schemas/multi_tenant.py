@@ -99,6 +99,32 @@ class OperatorListResponse(PayloadListResponse[Literal["operator_list_response"]
     type: Literal["operator_list_response"] = "operator_list_response"
 
 
+class OperatorResponse(PayloadResponse[Literal["operator_response"], OperatorInfo]):
+    """Singleton wrapper returned by ``POST /api/operators``."""
+
+    type: Literal["operator_response"] = "operator_response"
+
+
+class CreateOperatorBody(StrictBody):
+    """Request body for ``POST /api/operators``.
+
+    Attributes:
+        label: Human-readable operator name (1-128 chars). The active-unique
+            index on ``label`` enforces that two operators cannot share a label
+            at the same bus time.
+        description: Optional free-form description.
+    """
+
+    label: str = Field(min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+
+
+class CreateOperatorCommand(PayloadRequest[Literal["create_operator_command"], CreateOperatorBody]):
+    """Request envelope for ``POST /api/operators``."""
+
+    type: Literal["create_operator_command"] = "create_operator_command"
+
+
 class ScopeGrantInfo(StrictDataSchema[Literal["scope_grant_info"]]):
     """Read projection of a single ``wallet_operator_scope_grants`` SCD2 row.
 

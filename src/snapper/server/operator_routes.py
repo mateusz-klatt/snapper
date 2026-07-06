@@ -21,16 +21,26 @@ from uuid import uuid7
 
 from fastapi import APIRouter
 from fastapi import Depends
+from fastapi import HTTPException
 from fastapi import Request
+from fastapi import status
 
+from snapper.api.schemas.multi_tenant import CreateOperatorCommand
 from snapper.api.schemas.multi_tenant import OperatorInfo
 from snapper.api.schemas.multi_tenant import OperatorListResponse
+from snapper.api.schemas.multi_tenant import OperatorResponse
 from snapper.auth.dependencies import require_authentication
+from snapper.auth.dependencies import require_permission
+from snapper.auth.dependencies import validate_csrf_token
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.data.repository import OperatorConflictError
 from snapper.data.repository import Repository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
+from snapper.server.json_body import json_body
+from snapper.server.json_body import openapi_schema
 
 router = APIRouter(prefix="/operators", tags=["operators"])
 
@@ -89,4 +99,70 @@ async def list_operators(
         timestamp=ts,
         payload=items,
         count=len(items),
+    )
+
+
+@router.post("", openapi_extra=openapi_schema(CreateOperatorCommand))
+async def create_operator(
+    request: Request,
+    _principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.MANAGE_SCOPE_GRANTS)),
+    ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    command: Annotated[CreateOperatorCommand, Depends(json_body(CreateOperatorCommand))],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+) -> OperatorResponse:
+    """Create a new active operator.
+
+    Guarded by ``MANAGE_SCOPE_GRANTS`` (currently ADMIN-only): operators are the
+    principals that scope grants target and that AI delegates bind to, so the
+    permission that manages grants also mints the operators they reference.
+    Creating a distinct operator is the prerequisite for scoping an AI delegate
+    independently of the seed ``default`` operator. The active-unique index on
+    ``label`` is enforced at the DB layer and bubbles up as HTTP 409 via
+    ``OperatorConflictError``.
+
+    Args:
+        request: FastAPI request (provides REST tracker for provenance).
+        _principal: Authenticated caller holding MANAGE_SCOPE_GRANTS.
+        _csrf: CSRF guard dependency.
+        command: Create command envelope.
+        repo: Repository dependency.
+
+    Returns:
+        ``OperatorResponse`` wrapping the newly-inserted operator row.
+
+    Raises:
+        HTTPException: 409 when an active operator with the same label exists.
+    """
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = dt.datetime.now(dt.UTC)
+    pid = str(uuid7())
+    body = command.payload
+    try:
+        row = await repo.create_operator(
+            label=body.label,
+            description=body.description,
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+        )
+    except OperatorConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return OperatorResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=OperatorInfo(
+            session_id=row["session_id"],
+            sequence_id=row["sequence_id"],
+            public_id=row["public_id"],
+            timestamp=row["timestamp"],
+            label=row["label"],
+            description=row["description"],
+        ),
     )

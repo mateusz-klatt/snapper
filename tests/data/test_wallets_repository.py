@@ -27,6 +27,7 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Operator
 from snapper.data.models import Wallet
 from snapper.data.models import WalletOperatorScopeGrant
+from snapper.data.repository import OperatorConflictError
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import WalletConflictError
 
@@ -374,5 +375,90 @@ class TestCreateWallet:
                 is_paper=False,
                 session_id="test-session",
                 sequence_id=99,
+                timestamp=datetime.now(UTC),
+            )
+
+
+class TestCreateOperator:
+    """Behaviour of ``SQLAlchemyRepository.create_operator``."""
+
+    @pytest.mark.asyncio
+    async def test_insert_new_operator_returns_row(self, repo: SQLAlchemyRepository) -> None:
+        """A first operator insert returns a populated ``OperatorRow``.
+
+        Given: An empty operators table,
+        When: ``create_operator`` is called,
+        Then: The returned row carries the inserted label / description and a
+            freshly-generated ``public_id``.
+        """
+        row = await repo.create_operator(
+            label="firm-desk",
+            description="scoped operator",
+            session_id="test-session",
+            sequence_id=1,
+            timestamp=datetime.now(UTC),
+        )
+
+        assert row["label"] == "firm-desk"
+        assert row["description"] == "scoped operator"
+        assert row["public_id"]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_label_raises_conflict(self, repo: SQLAlchemyRepository) -> None:
+        """A second active operator with the same label fails.
+
+        Given: An existing ``firm-desk`` operator,
+        When: A second insert reuses the label,
+        Then: ``OperatorConflictError`` is raised.
+        """
+        base_ts = datetime.now(UTC)
+        await repo.create_operator(
+            label="firm-desk",
+            description=None,
+            session_id="test-session",
+            sequence_id=1,
+            timestamp=base_ts,
+        )
+
+        with pytest.raises(OperatorConflictError) as excinfo:
+            await repo.create_operator(
+                label="firm-desk",
+                description=None,
+                session_id="test-session",
+                sequence_id=2,
+                timestamp=base_ts + timedelta(seconds=1),
+            )
+
+        assert excinfo.value.label == "firm-desk"
+
+    @pytest.mark.asyncio
+    async def test_non_unique_integrity_error_reraises_unhandled(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """An IntegrityError whose message does not mention 'unique' re-raises.
+
+        Given: A mocked session whose ``commit`` raises an ``IntegrityError``
+            with a non-unique cause (e.g. NOT NULL violation),
+        When: ``create_operator`` is called,
+        Then: The error propagates as-is (not wrapped in ``OperatorConflictError``).
+        """
+        mock_session = AsyncMock()
+        mock_session.add = MagicMock()
+        orig = Exception("NOT NULL constraint failed: operators.label")
+        mock_session.commit = AsyncMock(
+            side_effect=IntegrityError(statement="INSERT", params={}, orig=orig)
+        )
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch.object(repo, "session", return_value=mock_ctx),
+            pytest.raises(IntegrityError),
+        ):
+            await repo.create_operator(
+                label="",
+                description=None,
+                session_id="test-session",
+                sequence_id=1,
                 timestamp=datetime.now(UTC),
             )
