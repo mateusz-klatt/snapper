@@ -41,8 +41,8 @@ def _make_run_row(
         operator_public_id=None,
         strategy_name=strategy_name,
         strategy_params={"fast": 10},
-        instrument_public_id="BTC-USD",
-        instrument=None,
+        instrument_public_id="019eda8d-9d34-73de-b365-920301e26549",
+        instrument="BTC-USD",
         exchange="kraken",
         mode="paper",
         timeframe="1h",
@@ -101,6 +101,30 @@ class TestRunToConfigDict:
         row["target_execution_exchange"] = ExchangeEnum.KRAKEN
         result = run_to_config_dict(row)
         assert result["target_execution_exchange"] == ExchangeEnum.KRAKEN
+
+    def test_archived_instrument_uuid_without_symbol_raises(self) -> None:
+        """A UUID row whose Symbol join yields nothing (archived) raises.
+
+        The candle read path keys off the native symbol, so an archived
+        instrument public_id that no longer resolves cannot be re-executed.
+        """
+        row = _make_run_row()
+        row["instrument"] = None
+        with pytest.raises(ValueError, match="no resolvable instrument symbol"):
+            run_to_config_dict(row)
+
+    def test_legacy_symbol_row_uses_stored_value(self) -> None:
+        """A legacy row (native symbol stored, no joined ticker) falls back to it.
+
+        Rows created before instrument public_ids were persisted held the native
+        symbol directly in ``instrument_public_id``; the config keys candles off
+        that symbol rather than raising.
+        """
+        row = _make_run_row()
+        row["instrument"] = None
+        row["instrument_public_id"] = "BTC-USD"
+        result = run_to_config_dict(row)
+        assert result["instruments"] == {"kraken": ["BTC-USD"]}
 
 
 class TestBacktestRunnerProcess:

@@ -3976,6 +3976,9 @@ class TestBacktestRerun:
             mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
             mock_repo = MagicMock()
             mock_repo.session_factory = MagicMock()
+            mock_repo.get_instrument_public_id_by_symbol = AsyncMock(
+                return_value="instrument-uuid-1"
+            )
             mock_get_repo.return_value = mock_repo
 
             result = cli_runner.invoke(app, ["backtest-rerun", "run-1"])
@@ -4033,6 +4036,9 @@ class TestBacktestRerunPreservesPhase2Fields:
             mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
             mock_repo = MagicMock()
             mock_repo.session_factory = MagicMock()
+            mock_repo.get_instrument_public_id_by_symbol = AsyncMock(
+                return_value="instrument-uuid-1"
+            )
             mock_get_repo.return_value = mock_repo
             result = cli_runner.invoke(app, ["backtest-rerun", "run-1"])
             assert result.exit_code == 0
@@ -4091,6 +4097,9 @@ class TestBacktestRun:
             mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
             mock_repo = MagicMock()
             mock_repo.session_factory = MagicMock()
+            mock_repo.get_instrument_public_id_by_symbol = AsyncMock(
+                return_value="instrument-uuid-1"
+            )
             mock_get_repo.return_value = mock_repo
 
             result = cli_runner.invoke(
@@ -4136,6 +4145,9 @@ class TestBacktestRun:
             mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
             mock_repo = MagicMock()
             mock_repo.session_factory = MagicMock()
+            mock_repo.get_instrument_public_id_by_symbol = AsyncMock(
+                return_value="instrument-uuid-1"
+            )
             mock_get_repo.return_value = mock_repo
 
             result = cli_runner.invoke(
@@ -4156,6 +4168,45 @@ class TestBacktestRun:
             )
             assert result.exit_code == 1
             assert "failed" in result.output.lower()
+
+    @patch.dict(
+        "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", {"sma_cross": MagicMock()}
+    )
+    def test_run_unknown_instrument_exits_1(self, cli_runner: CliRunner) -> None:
+        """An unresolvable instrument symbol exits 1 before touching the engine."""
+        mock_bt_repo = AsyncMock()
+        mock_bt_repo.create_run = AsyncMock(return_value=(1, "run-new"))
+
+        with (
+            patch("snapper.cli.app.BootstrapSettingsLoader") as mock_boot,
+            patch("snapper.cli.app.get_repository") as mock_get_repo,
+            patch("snapper.cli.app.BacktestRepository", return_value=mock_bt_repo),
+        ):
+            mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
+            mock_repo = MagicMock()
+            mock_repo.session_factory = MagicMock()
+            mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+            mock_get_repo.return_value = mock_repo
+
+            result = cli_runner.invoke(
+                app,
+                [
+                    "backtest-run",
+                    "--strategy",
+                    "sma_cross",
+                    "--instrument",
+                    "NOPE-USD",
+                    "--exchange",
+                    "kraken",
+                    "--start",
+                    "2026-01-01",
+                    "--end",
+                    "2026-06-01",
+                ],
+            )
+            assert result.exit_code == 1
+            assert "no active instrument resolves" in result.output.lower()
+            mock_bt_repo.create_run.assert_not_called()
 
 
 class TestNotifyCommand:

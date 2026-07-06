@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Annotated
 from typing import Any
 from typing import cast
+from uuid import UUID
 from uuid import uuid7
 
 from fastapi import APIRouter
@@ -294,6 +295,82 @@ def _get_process_factory(request: Request) -> ProcessLauncherService:
     return cast(ProcessLauncherService, request.app.state.process_factory)
 
 
+async def _resolve_backtest_instrument(
+    repo: Repository,
+    instrument_ref: str,
+    exchange: str,
+    as_of: datetime,
+) -> str:
+    """Resolve a backtest request's instrument reference to an instrument public_id.
+
+    The create form sends a native symbol (for example ``EUR-USD``) in the
+    ``instrument_public_id`` field, mirroring order entry. Resolve it to the
+    instrument's public_id so the value lands in the ``UUID``-typed
+    ``backtest_runs.instrument_public_id`` column (Postgres rejects a raw symbol
+    there with a ``DataError`` that surfaces as 500) AND so the join in
+    ``get_run`` resolves the native ticker the runner needs for candle lookup.
+
+    A reference that is already a well-formed UUID (the rerun path may replay a
+    stored public_id) is accepted only after confirming it resolves to an active
+    instrument. ``get_symbol_for_instrument`` is called only for UUID-shaped input
+    because comparing the UUID column to a non-UUID string would itself raise a
+    ``DataError`` on Postgres.
+
+    Args:
+        repo: Database repository.
+        instrument_ref: Native symbol or instrument public_id from the request.
+        exchange: Feed-source exchange the instrument belongs to.
+        as_of: Point-in-time for the temporal instrument lookup.
+
+    Returns:
+        The resolved instrument public_id.
+
+    Raises:
+        HTTPException: 422 when the reference resolves to no active instrument.
+    """
+    resolved = await repo.get_instrument_public_id_by_symbol(
+        native_symbol=instrument_ref,
+        exchange=exchange,
+        as_of=as_of,
+    )
+    if resolved is not None:
+        return resolved
+    try:
+        normalized = str(UUID(str(instrument_ref)))
+    except (ValueError, AttributeError, TypeError):
+        raise _unknown_instrument(instrument_ref, exchange) from None
+    symbol = await repo.get_symbol_for_instrument(
+        instrument_public_id=normalized,
+        as_of=as_of,
+    )
+    if symbol is None:
+        raise _unknown_instrument(instrument_ref, exchange)
+    on_exchange = await repo.get_instrument_public_id_by_symbol(
+        native_symbol=symbol,
+        exchange=exchange,
+        as_of=as_of,
+    )
+    if on_exchange != normalized:
+        raise _unknown_instrument(instrument_ref, exchange)
+    return normalized
+
+
+def _unknown_instrument(instrument_ref: str, exchange: str) -> HTTPException:
+    """Build the 422 raised when a backtest instrument reference does not resolve."""
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail={
+            "error_code": "unknown_instrument",
+            "symbol": instrument_ref,
+            "exchange": exchange,
+            "reason": (
+                "no active instrument resolves for this (symbol, exchange) pair; "
+                "enter a valid instrument symbol for the selected exchange"
+            ),
+        },
+    )
+
+
 @router.post(
     "",
     openapi_extra=openapi_schema(BacktestCreateCommand),
@@ -335,10 +412,13 @@ async def create_backtest(
         )
 
     body = command.payload
+    instrument_public_id = await _resolve_backtest_instrument(
+        repo, body.instrument_public_id, body.exchange, now
+    )
     try:
         pairing_config = BacktestConfig(
             strategy_class=body.strategy_class,
-            instruments={body.exchange: [body.instrument_public_id]},
+            instruments={body.exchange: [instrument_public_id]},
             start_date=body.start_date,
             end_date=body.end_date,
             wallet_public_id=wallet_id,
@@ -362,7 +442,7 @@ async def create_backtest(
             "operator_public_id": principal.primary_operator_public_id or None,
             "strategy_name": body.strategy_class,
             "strategy_params": dict(body.strategy_params),
-            "instrument_public_id": body.instrument_public_id,
+            "instrument_public_id": instrument_public_id,
             "exchange": body.exchange,
             "timeframe": body.timeframe,
             "start_date": body.start_date,
@@ -1030,7 +1110,7 @@ async def rerun_backtest(
 
     rerun_body = BacktestCreateBody(
         strategy_class=original["strategy_name"],
-        instrument_public_id=original["instrument_public_id"],
+        instrument_public_id=original.get("instrument") or original["instrument_public_id"],
         exchange=original["exchange"],
         timeframe=original["timeframe"],
         start_date=original["start_date"],

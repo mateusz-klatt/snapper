@@ -162,6 +162,8 @@ def _create_client(
     role: UserRole = UserRole.ADMIN,
     wallet: str | None = "wallet-1",
     launch_error: Exception | None = None,
+    resolved_map: dict[str, str] | None = None,
+    resolved_symbol: str | None = "BTC-USD",
 ) -> TestClient:
     """Create test client with mocked BacktestRepository and auth bypassed."""
     app = create_app()
@@ -178,8 +180,15 @@ def _create_client(
         mock_factory.start_process = AsyncMock()
     app.state.process_factory = mock_factory
 
+    symbol_to_uuid = {"BTC-USD": "instrument-uuid-1"} if resolved_map is None else resolved_map
+
+    def _resolve_by_symbol(*, native_symbol: str, exchange: str, as_of: Any) -> str | None:
+        return symbol_to_uuid.get(native_symbol)
+
     mock_repo = MagicMock()
     mock_repo.session_factory = MagicMock()
+    mock_repo.get_instrument_public_id_by_symbol = AsyncMock(side_effect=_resolve_by_symbol)
+    mock_repo.get_symbol_for_instrument = AsyncMock(return_value=resolved_symbol)
 
     def skip_csrf() -> None:
         return None
@@ -760,6 +769,101 @@ class TestCreateBacktest:
             response = client.post("/api/backtests", json=_create_body())
             assert response.status_code == 200
             assert response.json()["payload"]["public_id"] == "run-new"
+            client.close()
+
+    def test_create_resolves_symbol_to_instrument_public_id(self) -> None:
+        """The submitted native symbol is resolved to a UUID before the INSERT.
+
+        Guards the Postgres regression where a raw symbol reached the
+        ``UUID``-typed ``instrument_public_id`` column and raised a DataError.
+        """
+        bt = AsyncMock()
+        bt.create_run = AsyncMock(return_value=(1, "run-new"))
+        bt.get_run = AsyncMock(return_value=_make_run_row(public_id="run-new"))
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet="wallet-1")
+            response = client.post("/api/backtests", json=_create_body())
+            assert response.status_code == 200
+            inserted = bt.create_run.await_args.kwargs["row"]
+            assert inserted["instrument_public_id"] == "instrument-uuid-1"
+            assert inserted["instrument_public_id"] != "BTC-USD"
+            client.close()
+
+    def test_create_unknown_instrument_returns_422(self) -> None:
+        """A symbol that resolves to no instrument returns 422, not a 500/DataError."""
+        bt = AsyncMock()
+        bt.create_run = AsyncMock(return_value=(1, "run-new"))
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet="wallet-1", resolved_map={})
+            response = client.post("/api/backtests", json=_create_body())
+            assert response.status_code == 422
+            assert response.json()["detail"]["error_code"] == "unknown_instrument"
+            bt.create_run.assert_not_called()
+            client.close()
+
+    def test_create_accepts_existing_instrument_uuid(self) -> None:
+        """A UUID reference (e.g. rerun replay) is accepted and stored normalized.
+
+        The submitted UUID is upper-case; the resolver canonicalises it before the
+        exchange round-trip and the INSERT, so the stored value is the normalized
+        lower-case form (not the raw input).
+        """
+        bt = AsyncMock()
+        bt.create_run = AsyncMock(return_value=(1, "run-new"))
+        bt.get_run = AsyncMock(return_value=_make_run_row(public_id="run-new"))
+        body = _create_body()
+        body["payload"]["instrument_public_id"] = "019EDA8D-9D34-73DE-B365-920301E26549"
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(
+                bt,
+                wallet="wallet-1",
+                resolved_map={"BTC-USD": "019eda8d-9d34-73de-b365-920301e26549"},
+                resolved_symbol="BTC-USD",
+            )
+            response = client.post("/api/backtests", json=body)
+            assert response.status_code == 200
+            inserted = bt.create_run.await_args.kwargs["row"]
+            assert inserted["instrument_public_id"] == "019eda8d-9d34-73de-b365-920301e26549"
+            client.close()
+
+    def test_create_rejects_nonexistent_instrument_uuid(self) -> None:
+        """A UUID that resolves to no active instrument returns 422."""
+        bt = AsyncMock()
+        bt.create_run = AsyncMock(return_value=(1, "run-new"))
+        body = _create_body()
+        body["payload"]["instrument_public_id"] = "019eda8d-9d34-73de-b365-920301e26549"
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(
+                bt,
+                wallet="wallet-1",
+                resolved_map={},
+                resolved_symbol=None,
+            )
+            response = client.post("/api/backtests", json=body)
+            assert response.status_code == 422
+            bt.create_run.assert_not_called()
+            client.close()
+
+    def test_create_rejects_instrument_uuid_on_wrong_exchange(self) -> None:
+        """A UUID whose instrument is not on the submitted exchange returns 422.
+
+        The UUID resolves to a symbol, but that symbol on the requested exchange
+        maps to a different instrument public_id, so the reference is rejected.
+        """
+        bt = AsyncMock()
+        bt.create_run = AsyncMock(return_value=(1, "run-new"))
+        body = _create_body()
+        body["payload"]["instrument_public_id"] = "019eda8d-9d34-73de-b365-920301e26549"
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(
+                bt,
+                wallet="wallet-1",
+                resolved_map={"BTC-USD": "different-instrument-uuid"},
+                resolved_symbol="BTC-USD",
+            )
+            response = client.post("/api/backtests", json=body)
+            assert response.status_code == 422
+            bt.create_run.assert_not_called()
             client.close()
 
     def test_create_launch_failure_500(self) -> None:

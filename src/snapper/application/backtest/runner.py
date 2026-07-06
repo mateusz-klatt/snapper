@@ -15,6 +15,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Any
 from typing import cast
+from uuid import UUID
 
 import zmq
 import zmq.asyncio
@@ -107,12 +108,36 @@ def run_to_config_dict(run: BacktestRunRow) -> dict[str, Any]:
     Args:
         run: BacktestRunRow from the repository.
 
+    The candle read path keys off the native symbol, so the config uses the
+    joined ``instrument`` ticker. For legacy rows created before instrument
+    public_ids were persisted (``instrument_public_id`` held the native symbol
+    directly and the Symbol join yields nothing) the stored value is used as the
+    symbol. A row whose join fails yet whose stored value is a UUID is an
+    archived instrument that can no longer be re-executed and raises.
+
     Returns:
         Dict that can be passed to ``BacktestConfig.model_validate()``.
+
+    Raises:
+        ValueError: When ``instrument`` is unresolved and the stored
+            ``instrument_public_id`` is a UUID (an archived instrument whose
+            Symbol join no longer resolves).
     """
+    instrument = run.get("instrument")
+    if instrument is None:
+        stored = run["instrument_public_id"]
+        try:
+            UUID(str(stored))
+        except (ValueError, AttributeError, TypeError):
+            instrument = stored
+        else:
+            raise ValueError(
+                f"backtest run {run['public_id']} has no resolvable instrument symbol "
+                f"for instrument_public_id {stored}"
+            )
     return {
         "strategy_class": run["strategy_name"],
-        "instruments": {run["exchange"]: [run["instrument_public_id"]]},
+        "instruments": {run["exchange"]: [instrument]},
         "start_date": run["start_date"],
         "end_date": run["end_date"],
         "wallet_public_id": run["wallet_public_id"],

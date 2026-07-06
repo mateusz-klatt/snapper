@@ -2443,7 +2443,8 @@ def backtest_run(
 
     Args:
         strategy: Registered strategy class name.
-        instrument: Target instrument public ID.
+        instrument: Native instrument symbol (resolved to its public ID for
+            persistence; the engine config keys candles off the native symbol).
         exchange: Exchange name for candle data.
         start: Backtest start date in ISO format.
         end: Backtest end date in ISO format.
@@ -2466,6 +2467,19 @@ def backtest_run(
         bt_repo = BacktestRepository(cast(Any, repo).session_factory)
         tracker = SequenceTracker()
         now = datetime.now(UTC)
+
+        resolved_instrument_public_id = await repo.get_instrument_public_id_by_symbol(
+            native_symbol=instrument,
+            exchange=exchange,
+            as_of=now,
+        )
+        if resolved_instrument_public_id is None:
+            typer.echo(
+                f"Error: no active instrument resolves for symbol '{instrument}' "
+                f"on exchange '{exchange}'",
+                err=True,
+            )
+            raise typer.Exit(1)
 
         config = BacktestConfig(
             strategy_class=strategy,
@@ -2491,7 +2505,7 @@ def backtest_run(
                 "wallet_public_id": wallet,
                 "strategy_name": strategy,
                 "strategy_params": strategy_params,
-                "instrument_public_id": instrument,
+                "instrument_public_id": resolved_instrument_public_id,
                 "exchange": exchange,
                 "timeframe": timeframe,
                 "start_date": start_dt,
@@ -2730,16 +2744,17 @@ def backtest_rerun(
         typer.echo(f"Run not found: {run_id}", err=True)
         raise typer.Exit(code=1)
 
+    original_instrument = original.get("instrument") or original["instrument_public_id"]
     typer.echo(
         f"Re-running {original['strategy_name']} on "
-        f"{original['instrument_public_id']} "
+        f"{original_instrument} "
         f"({original['start_date'].strftime('%Y-%m-%d')} → "
         f"{original['end_date'].strftime('%Y-%m-%d')})"
     )
 
     backtest_run(
         strategy=original["strategy_name"],
-        instrument=original["instrument_public_id"],
+        instrument=original_instrument,
         exchange=original["exchange"],
         start=original["start_date"].isoformat(),
         end=original["end_date"].isoformat(),

@@ -231,6 +231,10 @@ class TestCliConfigHashFallback:
             ),
             patch("snapper.cli.app.DirectDbEngine") as engine_cls,
             patch("snapper.cli.app.compute_metrics") as compute_metrics_mock,
+            patch(
+                "snapper.data.repository.SQLAlchemyRepository.get_instrument_public_id_by_symbol",
+                AsyncMock(return_value="BTC-USD"),
+            ),
         ):
             engine = AsyncMock()
             engine.run = AsyncMock()
@@ -599,6 +603,7 @@ class TestCreateBacktestConfigHashFallback:
         )
         repo = MagicMock()
         repo.session_factory = MagicMock()
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="instrument-uuid-1")
 
         with (
             patch(
