@@ -2023,6 +2023,60 @@ class ProcessLauncherService:
             return ""
         return wallet_public_id
 
+    def _should_skip_mint_wallet_executor(
+        self,
+        credential: WalletCredentialRow,
+        mint_wallet_public_id: str,
+        exchanges_with_other_wallets: set[str],
+    ) -> bool:
+        """Return whether the per-wallet spawner should skip this credential.
+
+        The mint wallet is skipped only when a resolved mint pin matches the
+        credential and at least one other wallet keeps the same exchange
+        covered. If skipping would leave the exchange without any executor,
+        the caller still spawns the instance and the operator gets the same
+        warning as before.
+        """
+        if not mint_wallet_public_id:
+            return False
+        if credential["wallet_public_id"] != mint_wallet_public_id:
+            return False
+        if credential["exchange"] not in exchanges_with_other_wallets:
+            logger.warning(
+                f"Per-wallet spawner: mint-pin wallet={credential['wallet_public_id']} "
+                f"is the ONLY {credential['exchange']} wallet — spawning its executor "
+                "anyway (refusing to leave the exchange without any executor; check "
+                "kraken_equities_realtime_wallet_public_id, it may point at the "
+                "trading wallet)"
+            )
+            return False
+        logger.info(
+            f"Per-wallet spawner: skipping wallet={credential['wallet_public_id']} "
+            f"exchange={credential['exchange']} — pinned equities token-mint wallet "
+            "(nonce isolation: the mint identity never runs order executors)"
+        )
+        return True
+
+    def _record_per_wallet_spawn_outcome(
+        self,
+        credential: WalletCredentialRow,
+        outcome: _PerWalletSpawnOutcome,
+        failed_core_names: list[str],
+    ) -> int:
+        """Record one spawn outcome and return its successful-spawn count."""
+        if outcome.error is None:
+            return 1
+        logger.error(
+            f"Per-wallet spawner: failed to start '{outcome.instance_name}' "
+            f"for wallet={credential['wallet_public_id']}: {outcome.error}"
+        )
+        if (
+            outcome.entry.role is ProcessRoleEnum.CORE
+            and outcome.entry.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+        ):
+            failed_core_names.append(outcome.instance_name)
+        return 0
+
     async def _spawn_one_per_wallet_instance(
         self,
         credential: WalletCredentialRow,
@@ -2153,37 +2207,14 @@ class ProcessLauncherService:
         spawned = 0
         failed_core_names: list[str] = []
         for credential in credentials:
-            if mint_wallet_public_id and credential["wallet_public_id"] == mint_wallet_public_id:
-                if credential["exchange"] not in exchanges_with_other_wallets:
-                    logger.warning(
-                        f"Per-wallet spawner: mint-pin wallet={credential['wallet_public_id']} "
-                        f"is the ONLY {credential['exchange']} wallet — spawning its executor "
-                        "anyway (refusing to leave the exchange without any executor; check "
-                        "kraken_equities_realtime_wallet_public_id, it may point at the "
-                        "trading wallet)"
-                    )
-                else:
-                    logger.info(
-                        f"Per-wallet spawner: skipping wallet={credential['wallet_public_id']} "
-                        f"exchange={credential['exchange']} — pinned equities token-mint wallet "
-                        "(nonce isolation: the mint identity never runs order executors)"
-                    )
-                    continue
+            if self._should_skip_mint_wallet_executor(
+                credential, mint_wallet_public_id, exchanges_with_other_wallets
+            ):
+                continue
             outcome = await self._spawn_one_per_wallet_instance(credential, template_configs)
             if outcome is None:
                 continue
-            if outcome.error is None:
-                spawned += 1
-                continue
-            logger.error(
-                f"Per-wallet spawner: failed to start '{outcome.instance_name}' "
-                f"for wallet={credential['wallet_public_id']}: {outcome.error}"
-            )
-            if (
-                outcome.entry.role is ProcessRoleEnum.CORE
-                and outcome.entry.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
-            ):
-                failed_core_names.append(outcome.instance_name)
+            spawned += self._record_per_wallet_spawn_outcome(credential, outcome, failed_core_names)
         logger.info(f"Per-wallet spawner: started {spawned} per-wallet executor(s)")
         if spawned > 0:
             await self._emit_configured_snapshot()
