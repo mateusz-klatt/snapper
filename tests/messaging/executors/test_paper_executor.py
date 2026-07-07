@@ -212,11 +212,12 @@ class TestPaperOrderClientCoverage:
 
     @pytest.mark.asyncio
     async def test_get_order(self) -> None:
-        """Test retrieving an order by ID.
+        """Test retrieving an unknown order by ID.
 
-        Given: A connected paper exchange client,
-        When: get_order is called with order ID,
-        Then: Order details are returned with correct ID and symbol.
+        Given: A connected paper exchange client with no such order in memory,
+        When: get_order is called with an unknown (post-restart) order ID,
+        Then: A CANCELED terminal snapshot carrying the ID and symbol is
+            returned, so recovery does not resurrect it as a zombie pending.
         """
         mock_repo = _make_repo_mock()
         client = PaperExchangeClient(repository=mock_repo)
@@ -225,7 +226,7 @@ class TestPaperOrderClientCoverage:
         result = await client.get_order("paper_order_123", symbol="BTC-USD")
         assert result.id == "paper_order_123"
         assert result.symbol == "BTC-USD"
-        assert result.status == ExchangeOrderStatusEnum.OPEN
+        assert result.status == ExchangeOrderStatusEnum.CANCELED
         await client.disconnect()
 
     @pytest.mark.asyncio

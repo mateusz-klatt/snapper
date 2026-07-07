@@ -754,11 +754,13 @@ async def test_create_order_logs_and_executes_with_db_updates() -> None:
 
 @pytest.mark.asyncio
 async def test_get_order_known_and_unknown() -> None:
-    """Verify get_order returns correct order or placeholder.
+    """Verify get_order returns the live order or a CANCELED placeholder.
 
     Given: A connected client with one created order,
     When: get_order() is called with known and unknown IDs,
-    Then: Known order is returned, unknown gets placeholder.
+    Then: The known order is returned, and an unknown (post-restart) id gets a
+        CANCELED terminal placeholder so recovery never resurrects it as a
+        zombie pending.
     """
     client = PaperExchangeClient()
     await client.connect()
@@ -773,7 +775,7 @@ async def test_get_order_known_and_unknown() -> None:
     )
     assert (await client.get_order(order.id)).id == order.id
     placeholder = await client.get_order("missing", symbol="ETH/USD")
-    assert placeholder.status == ExchangeOrderStatusEnum.OPEN
+    assert placeholder.status == ExchangeOrderStatusEnum.CANCELED
     assert placeholder.symbol == "ETH/USD"
 
 

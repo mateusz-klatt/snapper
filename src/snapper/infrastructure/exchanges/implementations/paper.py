@@ -277,12 +277,21 @@ class PaperExchangeClient(ExchangeClientBase):
     async def get_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
         """Get details of a simulated order.
 
+        A known order returns its live in-memory snapshot. An UNKNOWN order
+        returns a CANCELED terminal snapshot rather than a fabricated OPEN one.
+        Paper state is in-memory only, so a restart drops every prior order; an
+        OPEN placeholder would make executor recovery classify the order as
+        still live (:meth:`_resolve_recovery_snapshot`) and restore it as a
+        pending that never fills — a zombie. CANCELED routes it down the same
+        terminal path a real venue uses for an order that went away during
+        downtime (fills stay durable and are healed independently).
+
         Args:
             order_id: Order ID to fetch.
             symbol: Trading pair (optional).
 
         Returns:
-            Order snapshot.
+            Order snapshot; CANCELED for an unknown (post-restart) order.
 
         Raises:
             RuntimeError: If client not connected.
@@ -299,7 +308,7 @@ class PaperExchangeClient(ExchangeClientBase):
             type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.0,
             price=None,
-            status=ExchangeOrderStatusEnum.OPEN,
+            status=ExchangeOrderStatusEnum.CANCELED,
             filled=0.0,
             remaining=0.0,
             timestamp=time.time(),
