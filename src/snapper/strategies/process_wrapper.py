@@ -5,6 +5,7 @@ that can be controlled via the process manager.
 """
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 from loguru import logger
@@ -27,6 +28,8 @@ def create_strategy_process(
     process_name: str,
     strategy_class: str,
     default_config: dict[str, Any],
+    reference_identity_params: Mapping[str, str] | None = None,
+    seeded_identity_params: tuple[str, ...] = (),
 ) -> type:
     """Create a process class wrapper for a strategy.
 
@@ -37,6 +40,10 @@ def create_strategy_process(
         process_name: Name for the process.
         strategy_class: Name of the strategy class.
         default_config: Default configuration for the strategy.
+        reference_identity_params: Scoped-strategy nested identity references
+            (name -> kind) read from the strategy class, empty otherwise.
+        seeded_identity_params: Scoped-strategy nested seeded-identity keys
+            read from the strategy class, empty otherwise.
 
     Returns:
         The dynamically created process class.
@@ -51,6 +58,8 @@ def create_strategy_process(
         parameters_model=StrategyProcessParameters,
         enabled=False,
         mode=ProcessModeEnum.THREAD,
+        reference_identity_params=reference_identity_params,
+        seeded_identity_params=seeded_identity_params,
     )
     class StrategyProcess(RegisterableProcess):
         @staticmethod

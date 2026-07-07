@@ -10,7 +10,9 @@ import pytest
 import snapper.strategies.macd as macd_module
 import snapper.strategies.rsi as rsi_module
 from snapper.application.process_manager.registry import get_registered_processes
+from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import StrategyConfig
+from snapper.strategies.heartbeat_consult import HeartbeatConsult
 from snapper.strategies.process_wrapper import create_strategy_process
 
 assert macd_module
@@ -421,3 +423,43 @@ async def test_predefined_rsi_strategy() -> None:
     assert metadata.mode == "thread"
     assert metadata.role == "strategy"
     assert "strategy" in metadata.tags
+
+
+def test_scoped_strategy_declares_identity_metadata() -> None:
+    """A scoped strategy's identity metadata reaches its process entry.
+
+    Given the heartbeat strategy that declares REFERENCE_IDENTITY_PARAMS
+        and SEEDED_IDENTITY_PARAMS,
+    When fetching its registered process metadata,
+    Then the declared identity params are plumbed onto the registry entry
+        (via the decorator's class reference, not a class_path lookup).
+    """
+    assert HeartbeatConsult.SEEDED_IDENTITY_PARAMS == ("ai_review_strategy_public_id",)
+    metadata = get_registered_processes().get("strategy_heartbeat_consult_btc_1h")
+    assert metadata is not None
+    assert metadata.reference_identity_params == {"ai_review_user_public_id": "user"}
+    assert metadata.seeded_identity_params == ("ai_review_strategy_public_id",)
+
+
+def test_non_scoped_strategy_has_empty_identity_metadata() -> None:
+    """A non-scoped strategy inherits the empty identity-metadata defaults.
+
+    Given the MACD strategy that declares no identity params,
+    When fetching its registered process metadata,
+    Then both identity-metadata fields are empty.
+    """
+    metadata = get_registered_processes().get("strategy_macd_btc_1h")
+    assert metadata is not None
+    assert metadata.reference_identity_params == {}
+    assert metadata.seeded_identity_params == ()
+
+
+def test_base_strategy_identity_metadata_defaults_empty() -> None:
+    """BaseStrategy exposes empty identity-metadata class defaults.
+
+    Given the abstract strategy base,
+    When reading its identity-metadata class attributes,
+    Then both are empty so non-scoped subclasses opt out by default.
+    """
+    assert BaseStrategy.REFERENCE_IDENTITY_PARAMS == {}
+    assert BaseStrategy.SEEDED_IDENTITY_PARAMS == ()

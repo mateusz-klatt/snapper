@@ -7,6 +7,7 @@ and can be discovered and launched by the ProcessLauncherService.
 
 from collections.abc import Callable
 from collections.abc import Iterable
+from collections.abc import Mapping
 from typing import Any
 
 from loguru import logger
@@ -57,6 +58,8 @@ def register_process[T: type[RegisterableProcess]](
     enabled: bool = False,
     mode: ProcessMode = ProcessModeEnum.THREAD,
     restart_policy: ProcessRestartPolicyEnum | str = ProcessRestartPolicyEnum.ON_FAILURE,
+    reference_identity_params: Mapping[str, str] | None = None,
+    seeded_identity_params: tuple[str, ...] = (),
 ) -> Callable[[T], T]:
     """Decorator to register a process class in the global registry.
 
@@ -76,6 +79,10 @@ def register_process[T: type[RegisterableProcess]](
         enabled: Default enabled state. Defaults to False.
         mode: Execution mode ("thread" or "process"). Defaults to "thread".
         restart_policy: Watchdog auto-restart policy. Defaults to on_failure.
+        reference_identity_params: Scoped-strategy nested identity references
+            (name -> kind) forwarded from the strategy class, empty otherwise.
+        seeded_identity_params: Scoped-strategy nested seeded-identity keys
+            forwarded from the strategy class, empty otherwise.
 
     Returns:
         Decorator function that registers and returns the class unchanged.
@@ -123,6 +130,8 @@ def register_process[T: type[RegisterableProcess]](
             enabled=enabled,
             mode=mode,
             restart_policy=restart_policy_value,
+            reference_identity_params=dict(reference_identity_params or {}),
+            seeded_identity_params=tuple(seeded_identity_params),
         )
         return cls
 

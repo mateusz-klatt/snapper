@@ -63,6 +63,8 @@ def create_strategy_process[T: type[BaseStrategy]](
             process_name=process_name,
             strategy_class=strategy_class_name,
             default_config=default_config,
+            reference_identity_params=cls.REFERENCE_IDENTITY_PARAMS,
+            seeded_identity_params=cls.SEEDED_IDENTITY_PARAMS,
         )
         return cls
 

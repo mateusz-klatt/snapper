@@ -15,12 +15,14 @@ import math
 import time
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from typing import ClassVar
 from typing import cast
 from uuid import NAMESPACE_DNS
 from uuid import uuid5
@@ -260,6 +262,27 @@ class BaseStrategy(ABC):
     together; ``"sequential_handoff"`` arms leg N+1 only after leg N is
     terminal). Single-leg strategies leave this ``None``; emitting a multi-leg
     group with no declared policy is a fail-closed error.
+    """
+
+    REFERENCE_IDENTITY_PARAMS: ClassVar[Mapping[str, str]] = {}
+    """Nested ``params`` keys that are identity REFERENCES to resolve.
+
+    Maps a nested parameter name to its reference kind
+    (``"wallet"``/``"operator"``/``"user"``). A scoped strategy declares the
+    identity params it carries under ``config.params`` so the shared scope
+    resolver can rewrite a ``label:`` reference to a canonical public id at
+    launch, exactly as the top-level ``wallet_public_id``/``operator_public_id``
+    fields are resolved. Non-scoped strategies leave this empty.
+    """
+
+    SEEDED_IDENTITY_PARAMS: ClassVar[tuple[str, ...]] = ()
+    """Nested ``params`` keys that are SEEDED-ONCE identity tokens.
+
+    Names the nested parameters that carry a generate-once correlation token
+    (a fresh UUID7 with no backing row) rather than a reference to an existing
+    entity. The persistence layer mints these fill-if-empty so the operator
+    never hand-authors a UUID7; they are never label-resolved and never
+    rotated once populated. Non-scoped strategies leave this empty.
     """
 
     def __init__(self, config: StrategyConfig) -> None:

@@ -15,6 +15,7 @@ import asyncio
 import subprocess
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
@@ -267,6 +268,11 @@ class ProcessRegistryEntry:
         enabled: Default enabled state.
         mode: Default execution mode.
         restart_policy: Default auto-restart policy for the launcher watchdog.
+        reference_identity_params: Scoped-strategy nested ``params`` keys that
+            are identity references (name -> ``wallet``/``operator``/``user``),
+            resolved from ``label:`` at launch. Empty for non-scoped processes.
+        seeded_identity_params: Scoped-strategy nested ``params`` keys minted
+            once as fresh UUID7s at persistence. Empty for non-scoped processes.
     """
 
     class_ref: type[RegisterableProcess]
@@ -282,6 +288,8 @@ class ProcessRegistryEntry:
     enabled: bool
     mode: ProcessMode
     restart_policy: ProcessRestartPolicyEnum = ProcessRestartPolicyEnum.ON_FAILURE
+    reference_identity_params: Mapping[str, str] = field(default_factory=dict)
+    seeded_identity_params: tuple[str, ...] = ()
 
 
 @dataclass

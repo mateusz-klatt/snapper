@@ -16,8 +16,10 @@ create pending rows whose wake frames are silently dropped. Both params
 are therefore validated fail-fast at construction.
 """
 
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
+from typing import ClassVar
 
 from loguru import logger
 
@@ -98,6 +100,9 @@ class HeartbeatConsult(BaseStrategy):
             seeded once by the operator in the process config.
         consult_deadline_seconds: Per-round decision deadline.
     """
+
+    REFERENCE_IDENTITY_PARAMS: ClassVar[Mapping[str, str]] = {"ai_review_user_public_id": "user"}
+    SEEDED_IDENTITY_PARAMS: ClassVar[tuple[str, ...]] = ("ai_review_strategy_public_id",)
 
     def __init__(self, config: StrategyConfig) -> None:
         """Validate consult identity params fail-fast and initialize state.
