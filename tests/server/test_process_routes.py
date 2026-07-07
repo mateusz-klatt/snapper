@@ -1194,6 +1194,46 @@ class TestGetProcessSchema:
         assert result.payload.default_enabled is True
         assert result.payload.default_mode == "thread"
         assert result.payload.default_parameters == {"endpoint": "tcp://0.0.0.0:5555"}
+        assert result.payload.reference_identity_params == {}
+        assert result.payload.seeded_identity_params == []
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.process_routes.get_registered_processes")
+    async def test_get_process_schema_exposes_identity_metadata(
+        self, mock_get_registry: MagicMock
+    ) -> None:
+        """A scoped strategy's identity metadata reaches the schema payload.
+
+        Given: a registered process declaring reference + seeded identity params,
+        When: get_process_schema is called,
+        Then: the payload surfaces both so a launch UI can render catalogue
+            pickers and hide the auto-minted seeded field.
+        """
+        mock_class = MagicMock()
+        mock_class.get_default_parameters = MagicMock(return_value={})
+        mock_get_registry.return_value = {
+            "scoped": ProcessRegistryEntry(
+                class_ref=mock_class,
+                class_path="snapper.fake.Wrapper",
+                method="start",
+                description="scoped",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.STRATEGY,
+                tags=(),
+                parameters_model=None,
+                parameters_schema=None,
+                enabled=False,
+                mode="thread",
+                reference_identity_params={"ai_review_user_public_id": "user"},
+                seeded_identity_params=("ai_review_strategy_public_id",),
+            )
+        }
+        result = await get_process_schema(
+            request=_make_rest_request(), name="scoped", settings=MagicMock(), _user=MagicMock()
+        )
+        assert result.payload.reference_identity_params == {"ai_review_user_public_id": "user"}
+        assert result.payload.seeded_identity_params == ["ai_review_strategy_public_id"]
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")

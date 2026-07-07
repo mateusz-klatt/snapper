@@ -1167,6 +1167,8 @@ async def get_process_schema(
         default_enabled=entry.enabled,
         default_mode=resolve_mode(entry.mode, name),
         default_parameters=default_parameters,
+        reference_identity_params=dict(entry.reference_identity_params),
+        seeded_identity_params=list(entry.seeded_identity_params),
         lifecycle=entry.lifecycle,
     )
     return ProcessSchemaResponse(

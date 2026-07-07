@@ -701,6 +701,14 @@ class ProcessSchemaData(StrictDataSchema[Literal["process_schema"]]):
         default_enabled: Default autostart setting.
         default_mode: Default execution mode.
         default_parameters: Default constructor parameters.
+        reference_identity_params: Nested ``params`` keys that are identity
+            label references, mapped to their kind
+            (``wallet``/``operator``/``user``). A scoped-strategy launch UI
+            renders a catalogue picker per entry (a ``user`` picker writes
+            ``label:<username>`` so the backend membership scope-check runs).
+        seeded_identity_params: Nested ``params`` keys auto-minted at
+            persistence (correlation tokens). Never operator-authored, so a
+            launch UI must not render them.
         lifecycle: Process lifecycle type.
     """
 
@@ -712,6 +720,14 @@ class ProcessSchemaData(StrictDataSchema[Literal["process_schema"]]):
     default_enabled: bool = Field(description="Default autostart setting")
     default_mode: ProcessMode = Field(description="Default execution mode")
     default_parameters: JsonObject = Field(default={}, description="Default parameters")
+    reference_identity_params: dict[str, str] = Field(
+        default={},
+        description="Nested identity label references (param name -> kind)",
+    )
+    seeded_identity_params: list[str] = Field(
+        default=[],
+        description="Nested auto-minted identity params (never operator-authored)",
+    )
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
 
 
