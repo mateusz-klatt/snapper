@@ -39,6 +39,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import WalletRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ProcessSummaryItem
+from snapper.server.process_routes import _classify_persisted_process_for_start
 from snapper.server.process_routes import _enforce_strategy_outputs_covered
 from snapper.server.process_routes import _enforce_strategy_scope
 from snapper.server.process_routes import _enforce_wallet_grant_exists
@@ -3303,6 +3304,47 @@ class TestResolveRoleForClassPath:
         repo = _settings_repo(_process_setting("process_arr", "[1, 2, 3]"))
         result = await _read_persisted_strategy_parameters(repo, "arr")
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_classify_resolves_reference_metadata_by_template(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A UI-created instance resolves nested metadata by its template.
+
+        Given: a persisted config whose name is not a registry key but whose
+            'template' names a registered scoped strategy declaring a user ref,
+        When: the start endpoint classifies it,
+        Then: the classification carries the template's reference params, so a
+            renamed instance still gets its nested user label resolved.
+        """
+        entry = MagicMock(reference_identity_params={"ai_review_user_public_id": "user"})
+        monkeypatch.setattr(
+            "snapper.application.process_manager.strategy_scope.get_registered_processes",
+            lambda: {"strategy_heartbeat_consult_btc_1h": entry},
+        )
+        repo = _settings_repo(
+            _process_setting(
+                "process_my-heartbeat",
+                _json.dumps(
+                    {
+                        "class": "snapper.fake.StratClass",
+                        "role": "strategy",
+                        "template": "strategy_heartbeat_consult_btc_1h",
+                        "parameters": {
+                            "name": "hb",
+                            "inputs": ["candles.X"],
+                            "outputs": ["orders.X"],
+                            "operator_public_id": "op",
+                            "wallet_public_id": "w",
+                            "params": {"ai_review_user_public_id": "label:alice"},
+                        },
+                    }
+                ),
+            )
+        )
+        classification, _raw = await _classify_persisted_process_for_start(repo, "my-heartbeat")
+        assert classification is not None
+        assert classification.reference_identity_params == {"ai_review_user_public_id": "user"}
 
     @pytest.mark.asyncio
     async def test_start_process_runs_persisted_recheck_when_strategy(self, tmp_path: Path) -> None:

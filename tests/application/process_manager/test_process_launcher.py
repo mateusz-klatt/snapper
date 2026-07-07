@@ -49,6 +49,9 @@ from snapper.application.process_manager.strategy_scope import StrategyLabelUnre
 from snapper.application.process_manager.strategy_scope import StrategyProcessClassification
 from snapper.application.process_manager.strategy_scope import StrategyScopeError
 from snapper.application.process_manager.strategy_scope import classify_strategy_process
+from snapper.application.process_manager.strategy_scope import (
+    reference_identity_params_for_registry_name,
+)
 from snapper.application.process_manager.strategy_scope import resolve_classified_strategy_scope
 from snapper.application.process_manager.strategy_scope import resolve_strategy_process_scope
 from snapper.config.app import AppSettings
@@ -67,6 +70,7 @@ from snapper.data.models import ProcessRun
 from snapper.data.models import Setting
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import OperatorRow
+from snapper.data.repository_types import UserOperatorMembershipRow
 from snapper.data.repository_types import WalletCredentialRow
 from snapper.data.repository_types import WalletRow
 
@@ -1678,11 +1682,15 @@ class _WalletLookupRepository:
         active_wallets: list[WalletRow] | None = None,
         operator_wallets: list[WalletRow] | None = None,
         active_operators: list[OperatorRow] | None = None,
+        active_users: dict[str, str] | None = None,
+        memberships: dict[str, list[str]] | None = None,
     ) -> None:
-        """Store wallet lookup fixtures."""
+        """Store wallet, operator, and user lookup fixtures."""
         self.active_wallets = active_wallets or []
         self.operator_wallets = operator_wallets or []
         self.active_operators = active_operators or []
+        self.active_users = active_users or {}
+        self.memberships = memberships or {}
         self.active_lookup_count = 0
         self.operator_lookup_count = 0
         self.operator_catalogue_lookup_count = 0
@@ -1707,6 +1715,29 @@ class _WalletLookupRepository:
         """Return active operator fixtures."""
         self.operator_catalogue_lookup_count += 1
         return list(self.active_operators)
+
+    async def get_active_user_public_id_by_username(
+        self, username: str, as_of: datetime
+    ) -> str | None:
+        """Return the fixture user public id for a username, or None."""
+        return self.active_users.get(username)
+
+    async def get_user_operator_memberships(
+        self, user_public_id: str, as_of: datetime
+    ) -> list[UserOperatorMembershipRow]:
+        """Return fixture operator memberships for a user."""
+        return [
+            UserOperatorMembershipRow(
+                public_id=f"membership-{operator_public_id}",
+                user_public_id=user_public_id,
+                operator_public_id=operator_public_id,
+                is_primary=False,
+                timestamp=as_of,
+                session_id="test-session",
+                sequence_id=1,
+            )
+            for operator_public_id in self.memberships.get(user_public_id, [])
+        ]
 
 
 def _strategy_autostart_config(
@@ -2228,6 +2259,499 @@ async def test_resolve_classified_strategy_scope_non_label_values_pass_through()
     assert scope.wallet_public_id == "wallet-explicit"
     assert repository.operator_catalogue_lookup_count == 0
     assert repository.active_lookup_count == 0
+
+
+def test_reference_identity_params_for_registry_name_reads_registered_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registered scoped strategy exposes its nested reference metadata.
+
+    Given: a registered process declaring a user reference param,
+    When: looking its reference-identity params up by registry name,
+    Then: the declared ``{param: kind}`` mapping is returned.
+    """
+    entry = MagicMock(reference_identity_params={"ai_review_user_public_id": "user"})
+    monkeypatch.setattr(
+        "snapper.application.process_manager.strategy_scope.get_registered_processes",
+        lambda: {"scoped_strat": entry},
+    )
+    assert reference_identity_params_for_registry_name("scoped_strat") == {
+        "ai_review_user_public_id": "user"
+    }
+
+
+def test_reference_identity_params_for_registry_name_empty_for_unknown_or_none() -> None:
+    """Unknown, empty, and None registry names all resolve to no metadata.
+
+    Given: a name absent from the registry, the empty string, and None,
+    When: looking their reference-identity params up,
+    Then: each returns an empty mapping (fail-safe passthrough).
+    """
+    assert reference_identity_params_for_registry_name("no_such_process") == {}
+    assert reference_identity_params_for_registry_name("") == {}
+    assert reference_identity_params_for_registry_name(None) == {}
+
+
+def test_classify_strategy_process_attaches_reference_identity_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry name attaches the strategy's declared nested references.
+
+    Given: strategy-shaped params classified with a registry name whose
+        process declares a user reference param,
+    When: the classifier runs,
+    Then: the classification carries the declared reference-identity params.
+    """
+    entry = MagicMock(reference_identity_params={"ai_review_user_public_id": "user"})
+    monkeypatch.setattr(
+        "snapper.application.process_manager.strategy_scope.get_registered_processes",
+        lambda: {"scoped_strat": entry},
+    )
+    classification = classify_strategy_process(
+        raw_role="strategy",
+        class_path="snapper.fake.StrategyProcess",
+        raw_parameters={"inputs": ["candles.BTC-USD"], "outputs": ["orders.BTC-USD"]},
+        registry_name="scoped_strat",
+    )
+    assert classification.reference_identity_params == {"ai_review_user_public_id": "user"}
+
+
+def test_classify_strategy_process_without_registry_name_has_empty_reference_params() -> None:
+    """Omitting the registry name leaves the nested references empty.
+
+    Given: strategy-shaped params classified without a registry name,
+    When: the classifier runs,
+    Then: the classification carries no reference-identity params.
+    """
+    classification = classify_strategy_process(
+        raw_role="strategy",
+        class_path="snapper.fake.StrategyProcess",
+        raw_parameters={"inputs": ["candles.BTC-USD"], "outputs": ["orders.BTC-USD"]},
+    )
+    assert classification.reference_identity_params == {}
+
+
+def _nested_ref_classification(
+    *,
+    operator_public_id: str,
+    params: JsonObject,
+    reference_identity_params: dict[str, str],
+    wallet_public_id: str = "wallet-explicit",
+    exchange: str = "paper",
+) -> StrategyProcessClassification:
+    """Build a strategy classification carrying nested reference params."""
+    parameters = dict(
+        _strategy_autostart_config(
+            operator_public_id=operator_public_id,
+            wallet_public_id=wallet_public_id,
+            exchange=exchange,
+        ).parameters
+    )
+    parameters["params"] = params
+    return StrategyProcessClassification(
+        treat_as_strategy=True,
+        parameters=parameters,
+        row_role=ProcessRoleEnum.STRATEGY,
+        registry_role=None,
+        reference_identity_params=reference_identity_params,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_resolves_nested_user_label() -> None:
+    """A nested user label resolves to the member user's public id.
+
+    Given: a strategy pinning ``ai_review_user_public_id`` by username whose
+        user holds a membership on the resolved operator,
+    When: the resolver runs,
+    Then: the nested param is rewritten to the resolved user public id and
+        the original classification's params are left untouched.
+    """
+    repository = _WalletLookupRepository(
+        active_users={"alice": "user-alice"},
+        memberships={"user-alice": ["op-uuid"]},
+    )
+    classification = _nested_ref_classification(
+        operator_public_id="op-uuid",
+        params={"ai_review_user_public_id": "label:alice"},
+        reference_identity_params={"ai_review_user_public_id": "user"},
+    )
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=classification,
+        principal_operator_public_ids=["op-uuid"],
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.parameters is not None
+    resolved_params = scope.parameters["params"]
+    assert isinstance(resolved_params, dict)
+    assert resolved_params["ai_review_user_public_id"] == "user-alice"
+    assert classification.parameters is not None
+    original_params = classification.parameters["params"]
+    assert isinstance(original_params, dict)
+    assert original_params["ai_review_user_public_id"] == "label:alice"
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_nested_user_label_unknown_fails_closed() -> None:
+    """An unknown nested username fails closed.
+
+    Given: a nested user label whose username is absent from the catalogue,
+    When: the resolver runs,
+    Then: it raises rather than launching with an unresolved reference.
+    """
+    repository = _WalletLookupRepository(active_users={}, memberships={})
+    classification = _nested_ref_classification(
+        operator_public_id="op-uuid",
+        params={"ai_review_user_public_id": "label:ghost"},
+        reference_identity_params={"ai_review_user_public_id": "user"},
+    )
+    with pytest.raises(StrategyLabelUnresolvedError):
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=["op-uuid"],
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_nested_user_label_non_member_fails_closed() -> (
+    None
+):
+    """A nested user outside the resolved operator's members fails closed.
+
+    Given: a resolvable username whose only membership is on another operator,
+    When: the resolver runs against the strategy's operator,
+    Then: it raises so a strategy can never bind an out-of-operator user.
+    """
+    repository = _WalletLookupRepository(
+        active_users={"alice": "user-alice"},
+        memberships={"user-alice": ["op-other"]},
+    )
+    classification = _nested_ref_classification(
+        operator_public_id="op-uuid",
+        params={"ai_review_user_public_id": "label:alice"},
+        reference_identity_params={"ai_review_user_public_id": "user"},
+    )
+    with pytest.raises(StrategyLabelUnresolvedError):
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=["op-uuid"],
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_nested_user_label_without_operator_fails_closed() -> (
+    None
+):
+    """A nested user label with no resolved operator fails closed.
+
+    Given: a paper strategy with no operator resolving its wallet via the
+        admin catalogue and a nested user label,
+    When: the resolver reaches the nested step with an empty operator,
+    Then: it refuses to resolve the user without an operator to scope it.
+    """
+    repository = _WalletLookupRepository(
+        active_wallets=[_wallet_row("wallet-paper", is_paper=True)],
+        active_users={"alice": "user-alice"},
+        memberships={"user-alice": ["op-uuid"]},
+    )
+    classification = _nested_ref_classification(
+        operator_public_id="",
+        wallet_public_id="",
+        params={"ai_review_user_public_id": "label:alice"},
+        reference_identity_params={"ai_review_user_public_id": "user"},
+    )
+    with pytest.raises(StrategyLabelUnresolvedError) as exc_info:
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=None,
+            allow_admin_lookup_without_operator=True,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=True,
+        )
+    assert "without a resolved operator" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_nested_user_label_blank_rejected() -> None:
+    """A blank nested user label is rejected before any lookup.
+
+    Given: a nested user reference that is empty after the label prefix,
+    When: the resolver runs,
+    Then: it raises the invalid-label error without querying the catalogue.
+    """
+    repository = _WalletLookupRepository(active_users={"alice": "user-alice"})
+    classification = _nested_ref_classification(
+        operator_public_id="op-uuid",
+        params={"ai_review_user_public_id": "label:   "},
+        reference_identity_params={"ai_review_user_public_id": "user"},
+    )
+    with pytest.raises(StrategyLabelInvalidError):
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=["op-uuid"],
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_nested_non_label_value_passes_through() -> None:
+    """A nested non-label identity value is left untouched.
+
+    Given: a nested user param already holding a canonical id (no prefix),
+    When: the resolver runs,
+    Then: the value passes through and no user lookup happens.
+    """
+    repository = _WalletLookupRepository(active_users={"alice": "user-alice"})
+    classification = _nested_ref_classification(
+        operator_public_id="op-uuid",
+        params={"ai_review_user_public_id": "user-explicit"},
+        reference_identity_params={"ai_review_user_public_id": "user"},
+    )
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=classification,
+        principal_operator_public_ids=["op-uuid"],
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.parameters is not None
+    resolved_params = scope.parameters["params"]
+    assert isinstance(resolved_params, dict)
+    assert resolved_params["ai_review_user_public_id"] == "user-explicit"
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_nested_params_missing_is_noop() -> None:
+    """A declared reference with no nested ``params`` dict is a safe no-op.
+
+    Given: a classification declaring a user reference but carrying no
+        nested ``params`` mapping,
+    When: the resolver runs,
+    Then: it returns the resolved scope without raising or mutating params.
+    """
+    repository = _WalletLookupRepository(active_users={"alice": "user-alice"})
+    parameters = dict(
+        _strategy_autostart_config(
+            operator_public_id="op-uuid",
+            wallet_public_id="wallet-explicit",
+            exchange="paper",
+        ).parameters
+    )
+    classification = StrategyProcessClassification(
+        treat_as_strategy=True,
+        parameters=parameters,
+        row_role=ProcessRoleEnum.STRATEGY,
+        registry_role=None,
+        reference_identity_params={"ai_review_user_public_id": "user"},
+    )
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=classification,
+        principal_operator_public_ids=["op-uuid"],
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.operator_public_id == "op-uuid"
+    assert scope.parameters is not None
+    assert "params" not in scope.parameters
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_nested_unknown_kind_rejected() -> None:
+    """A declared reference of an unknown kind fails closed.
+
+    Given: a nested reference whose declared kind is neither user, operator,
+        nor wallet,
+    When: the resolver reaches the nested step with a label value,
+    Then: it raises the invalid-label error rather than skipping the ref.
+    """
+    repository = _WalletLookupRepository()
+    classification = _nested_ref_classification(
+        operator_public_id="op-uuid",
+        params={"mystery_public_id": "label:whatever"},
+        reference_identity_params={"mystery_public_id": "bogus"},
+    )
+    with pytest.raises(StrategyLabelInvalidError):
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=["op-uuid"],
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_nested_operator_kind_reuses_operator_resolver() -> (
+    None
+):
+    """A nested operator-kind reference reuses the operator-label resolver.
+
+    Given: a nested reference declared as an operator kind pinned by label,
+    When: the resolver runs against a matching operator catalogue,
+    Then: the nested value resolves to the operator public id.
+    """
+    repository = _WalletLookupRepository(active_operators=[_operator_row("op-desk", label="desk")])
+    classification = _nested_ref_classification(
+        operator_public_id="op-uuid",
+        params={"delegate_operator_public_id": "label:desk"},
+        reference_identity_params={"delegate_operator_public_id": "operator"},
+    )
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=classification,
+        principal_operator_public_ids=None,
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.parameters is not None
+    resolved_params = scope.parameters["params"]
+    assert isinstance(resolved_params, dict)
+    assert resolved_params["delegate_operator_public_id"] == "op-desk"
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_nested_wallet_kind_reuses_wallet_resolver() -> (
+    None
+):
+    """A nested wallet-kind reference reuses the wallet-label resolver.
+
+    Given: a nested reference declared as a wallet kind pinned by label,
+    When: the resolver runs against the resolved operator's wallet catalogue,
+    Then: the nested value resolves to the mode-matched wallet public id.
+    """
+    repository = _WalletLookupRepository(
+        operator_wallets=[_wallet_row("wallet-mm", is_paper=True, label="mm")]
+    )
+    classification = _nested_ref_classification(
+        operator_public_id="op-uuid",
+        params={"maker_wallet_public_id": "label:mm"},
+        reference_identity_params={"maker_wallet_public_id": "wallet"},
+    )
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=classification,
+        principal_operator_public_ids=["op-uuid"],
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.parameters is not None
+    resolved_params = scope.parameters["params"]
+    assert isinstance(resolved_params, dict)
+    assert resolved_params["maker_wallet_public_id"] == "wallet-mm"
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_unscoped_paper_user_ref_fails_closed() -> None:
+    """A nested user label on the unscoped-paper early return fails closed.
+
+    Given: a paper strategy with no operator and no wallet taking the
+        unscoped-paper early return, plus a nested user label,
+    When: the resolver runs,
+    Then: the nested step still runs before returning and refuses the
+        user reference for want of a resolved operator, rather than
+        deferring an unresolved label to the strategy constructor.
+    """
+    repository = _WalletLookupRepository(
+        active_users={"alice": "user-alice"},
+        memberships={"user-alice": ["op-uuid"]},
+    )
+    classification = _nested_ref_classification(
+        operator_public_id="",
+        wallet_public_id="",
+        params={"ai_review_user_public_id": "label:alice"},
+        reference_identity_params={"ai_review_user_public_id": "user"},
+    )
+    with pytest.raises(StrategyLabelUnresolvedError) as exc_info:
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=None,
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=True,
+            require_operator_for_explicit_wallet=False,
+        )
+    assert "without a resolved operator" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_unscoped_paper_no_refs_returns_scope() -> None:
+    """The unscoped-paper early return still returns when no refs are declared.
+
+    Given: a paper strategy with no operator, no wallet, and no declared
+        nested references,
+    When: the resolver takes the unscoped-paper early return,
+    Then: the no-op nested step passes and the empty-operator scope returns.
+    """
+    repository = _WalletLookupRepository()
+    classification = _nested_ref_classification(
+        operator_public_id="",
+        wallet_public_id="",
+        params={"ai_review_user_public_id": ""},
+        reference_identity_params={},
+    )
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=classification,
+        principal_operator_public_ids=None,
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=True,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.treat_as_strategy is True
+    assert scope.operator_public_id == ""
+    assert scope.wallet_public_id == ""
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_unscoped_paper_wallet_ref_fails_closed() -> None:
+    """A nested wallet/operator label also fails closed with no operator.
+
+    Given: an unscoped-paper strategy declaring a nested WALLET reference by
+        label but no resolved operator,
+    When: the resolver takes the unscoped-paper early return,
+    Then: it refuses to resolve the wallet reference unscoped rather than
+        binding an arbitrary active paper wallet through params.
+    """
+    repository = _WalletLookupRepository(
+        active_wallets=[_wallet_row("wallet-any", is_paper=True, label="mm")]
+    )
+    classification = _nested_ref_classification(
+        operator_public_id="",
+        wallet_public_id="",
+        params={"maker_wallet_public_id": "label:mm"},
+        reference_identity_params={"maker_wallet_public_id": "wallet"},
+    )
+    with pytest.raises(StrategyLabelUnresolvedError) as exc_info:
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=None,
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=True,
+            require_operator_for_explicit_wallet=False,
+        )
+    assert "without a resolved operator" in exc_info.value.detail
 
 
 @pytest.mark.asyncio

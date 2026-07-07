@@ -1746,6 +1746,13 @@ class DummyRepository(Repository):
         del user_public_ids
         return []
 
+    async def get_active_user_public_id_by_username(
+        self, username: str, as_of: datetime
+    ) -> str | None:
+        """Return no user for dummy repository tests."""
+        del username, as_of
+        return None
+
     async def ensure_instrument(
         self,
         symbol_public_id: str,
@@ -2905,6 +2912,12 @@ class _MinimalRepository(Repository):
     async def list_inactive_user_public_ids(self, user_public_ids: list[str]) -> list[str]:
         del user_public_ids
         return []
+
+    async def get_active_user_public_id_by_username(
+        self, username: str, as_of: datetime
+    ) -> str | None:
+        del username, as_of
+        return None
 
     async def get_latest_candle_ids(
         self, as_of: datetime

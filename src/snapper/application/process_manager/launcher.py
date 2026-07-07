@@ -1270,6 +1270,7 @@ class ProcessLauncherService:
             raw_role=config.role,
             class_path=config.class_path,
             raw_parameters=config.parameters,
+            registry_name=config.template or config.name,
         )
         if not classification.treat_as_strategy:
             return config

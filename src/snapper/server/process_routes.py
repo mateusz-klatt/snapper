@@ -568,11 +568,14 @@ async def _read_persisted_strategy_parameters(
 ) -> dict[str, object] | None:
     """Read the persisted process configuration for ``name``.
 
-    Returns a dict with ``class_path``, ``parameters``, and ``role`` keys
-    when the persisted ``process_<name>`` settings row exists, otherwise
-    None. Mirrors the launcher's ``start_process_by_name`` DB read so the
-    start endpoint can re-validate the same effective parameters the
-    launcher will hand to the process constructor.
+    Returns a dict with ``class_path``, ``parameters``, ``role``, and
+    ``template`` keys when the persisted ``process_<name>`` settings row
+    exists, otherwise None. Mirrors the launcher's ``start_process_by_name``
+    DB read so the start endpoint can re-validate the same effective
+    parameters the launcher will hand to the process constructor. The
+    ``template`` (source registry name a UI-created instance was cloned
+    from) lets scope resolution look declared identity metadata up by
+    registry name even when the instance name is not itself registered.
     """
     if not isinstance(repo, SQLAlchemyRepository):
         return None
@@ -594,7 +597,13 @@ async def _read_persisted_strategy_parameters(
     parameters = config_dict.get("parameters") or {}
     class_path = config_dict.get("class") or config_dict.get("class_path") or ""
     role = config_dict.get("role")
-    return {"class_path": class_path, "parameters": parameters, "role": role}
+    template = config_dict.get("template")
+    return {
+        "class_path": class_path,
+        "parameters": parameters,
+        "role": role,
+        "template": template,
+    }
 
 
 def _reject_executor_template_start(name: str) -> None:
@@ -620,11 +629,16 @@ async def _classify_persisted_process_for_start(
     raw_role = persisted.get("role")
     raw_params = persisted.get("parameters")
     class_path = persisted.get("class_path")
+    persisted_template = persisted.get("template")
+    registry_name = (
+        persisted_template if isinstance(persisted_template, str) and persisted_template else name
+    )
     try:
         classification = classify_strategy_process(
             raw_role=raw_role,
             class_path=class_path,
             raw_parameters=raw_params,
+            registry_name=registry_name,
         )
     except StrategyScopeError as exc:
         raise HTTPException(

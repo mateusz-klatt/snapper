@@ -1,6 +1,8 @@
 """Shared strategy scope classification and wallet resolution."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from typing import Protocol
@@ -16,6 +18,7 @@ from snapper.core.wallet_resolution import WalletResolutionRepository
 from snapper.core.wallet_resolution import resolve_wallet_or_default
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import OperatorRow
+from snapper.data.repository_types import UserOperatorMembershipRow
 
 _STRATEGY_PARAMETER_KEYS = frozenset(("inputs", "outputs"))
 _STRATEGY_OPERATOR_REQUIRED_DETAIL = (
@@ -58,11 +61,13 @@ class StrategyLabelAmbiguousError(StrategyScopeError):
 
 
 class StrategyScopeRepository(WalletResolutionRepository, Protocol):
-    """Wallet-resolution repository extended with the operator catalogue.
+    """Wallet-resolution repository extended with the identity catalogues.
 
     The strategy scope chokepoint resolves ``label:`` operator references
-    against the active operator catalogue in addition to the wallet
-    lookups already required for wallet autolookup.
+    against the active operator catalogue, and nested ``label:<username>``
+    user references against the active user catalogue (scope-checked via
+    operator membership), in addition to the wallet lookups already
+    required for wallet autolookup.
     """
 
     async def list_active_operators(self, as_of: datetime) -> list[OperatorRow]:
@@ -76,15 +81,56 @@ class StrategyScopeRepository(WalletResolutionRepository, Protocol):
         """
         ...
 
+    async def get_active_user_public_id_by_username(
+        self, username: str, as_of: datetime
+    ) -> str | None:
+        """Return the active user's public id for a username, or None.
+
+        Excludes soft-deactivated (``is_active`` False) users so a disabled
+        account never resolves a live scope reference.
+
+        Args:
+            username: Exact active username to resolve.
+            as_of: Temporal anchor for the active-user catalogue.
+
+        Returns:
+            The active, non-deactivated user's public id, or None when no
+            such user matches the username.
+        """
+        ...
+
+    async def get_user_operator_memberships(
+        self, user_public_id: str, as_of: datetime
+    ) -> list[UserOperatorMembershipRow]:
+        """Return active operator memberships for a user at ``as_of``.
+
+        Args:
+            user_public_id: User whose memberships to read.
+            as_of: Temporal anchor for the active-membership query.
+
+        Returns:
+            Active membership rows for the user.
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class StrategyProcessClassification:
-    """Strategy classification result for persisted process parameters."""
+    """Strategy classification result for persisted process parameters.
+
+    ``reference_identity_params`` carries the strategy's declared nested
+    identity references (param name -> kind) resolved by REGISTRY NAME at
+    classification time, so the chokepoint can rewrite nested
+    ``label:<x>`` references without a class_path lookup (class_path
+    points at the shared wrapper, not the strategy class). Empty for
+    non-scoped or unresolved processes.
+    """
 
     treat_as_strategy: bool
     parameters: dict[str, object] | None
     row_role: ProcessRoleEnum | None
     registry_role: ProcessRoleEnum | None
+    reference_identity_params: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -145,6 +191,27 @@ def resolve_role_for_class_path(class_path: str) -> ProcessRoleEnum | None:
     return None
 
 
+def reference_identity_params_for_registry_name(registry_name: str | None) -> Mapping[str, str]:
+    """Return a process's declared nested reference-identity params.
+
+    Resolved by REGISTRY NAME (the ``template or name`` a launch caller
+    knows), NOT by class_path: registered strategies share a function-local
+    wrapper class_path, so a class_path lookup is ambiguous. Returns an
+    empty mapping for an unregistered name or one that declares no
+    reference-identity params.
+
+    Args:
+        registry_name: Registered process name, or None.
+
+    Returns:
+        The declared ``{param_name: kind}`` mapping, or an empty mapping.
+    """
+    if not registry_name:
+        return {}
+    entry = get_registered_processes().get(registry_name)
+    return dict(entry.reference_identity_params) if entry is not None else {}
+
+
 def _copy_string_keyed_parameters(raw_parameters: object) -> dict[str, object] | None:
     """Return a string-keyed parameter copy when ``raw_parameters`` is a dict."""
     if not isinstance(raw_parameters, dict):
@@ -162,6 +229,7 @@ def classify_strategy_process(
     raw_role: object,
     class_path: object,
     raw_parameters: object,
+    registry_name: str | None = None,
 ) -> StrategyProcessClassification:
     """Classify persisted process parameters for strategy scope enforcement.
 
@@ -174,6 +242,11 @@ def classify_strategy_process(
         raw_role: Persisted row role value.
         class_path: Persisted class path value.
         raw_parameters: Persisted constructor parameters.
+        registry_name: Registered process name (``template or name`` from
+            the launch caller) used to attach the strategy's declared
+            nested reference-identity params to the classification. None
+            leaves them empty, so nested ``label:`` refs pass through
+            unresolved and fail closed at the strategy constructor.
 
     Returns:
         Strategy classification with copied parameters when enforcement applies.
@@ -205,6 +278,9 @@ def classify_strategy_process(
         parameters=parameters if treat_as_strategy else None,
         row_role=row_role,
         registry_role=registry_role,
+        reference_identity_params=(
+            reference_identity_params_for_registry_name(registry_name) if treat_as_strategy else {}
+        ),
     )
 
 
@@ -480,6 +556,126 @@ async def _resolve_scope_reference_labels(
         )
 
 
+async def _resolve_user_label(
+    repository: StrategyScopeRepository,
+    value: str,
+    operator_public_id: str,
+    as_of: datetime,
+) -> str:
+    """Resolve a ``label:<username>`` user reference to a canonical public ID.
+
+    The username must match exactly one active user (``users.username`` is
+    active-unique) AND that user must hold an active membership on the
+    RESOLVED operator, so a nested user reference can never bind a strategy
+    to a user outside the operator that owns it. Fail-closed: an unknown
+    username or a user with no membership on the operator raises. The caller
+    (:func:`_resolve_nested_reference_labels`) guarantees a non-empty
+    ``operator_public_id`` before dispatch.
+
+    Args:
+        repository: Repository exposing the user catalogue and memberships.
+        value: Parameter value carrying the label prefix.
+        operator_public_id: The resolved operator the user must belong to.
+        as_of: Temporal anchor for the active-user and membership reads.
+
+    Returns:
+        The resolved user public ID.
+
+    Raises:
+        StrategyLabelInvalidError: The reference is blank after the prefix.
+        StrategyLabelUnresolvedError: No active user matched the username, or
+            the user has no active membership on the resolved operator.
+    """
+    label = _label_from_reference(value)
+    public_id = await repository.get_active_user_public_id_by_username(label, as_of)
+    if public_id is None:
+        raise StrategyLabelUnresolvedError(f"no active user matches label {label!r}")
+    memberships = await repository.get_user_operator_memberships(public_id, as_of)
+    if not any(row["operator_public_id"] == operator_public_id for row in memberships):
+        raise StrategyLabelUnresolvedError(
+            f"user label {label!r} has no active membership on operator {operator_public_id!r}"
+        )
+    return public_id
+
+
+async def _resolve_nested_reference_labels(
+    repository: StrategyScopeRepository,
+    parameters: dict[str, object],
+    reference_identity_params: Mapping[str, str],
+    operator_public_id: str,
+    wallet_resolution_mode: ExecutionModeEnum,
+    principal_operator_public_ids: list[str] | None,
+    as_of: datetime,
+) -> None:
+    """Rewrite declared ``label:`` references in nested ``params`` in place.
+
+    For each declared ``{param_name: kind}`` reference, a
+    ``label:``-prefixed value under ``parameters["params"]`` is resolved to
+    a canonical public ID; every other value (empty, a UUID7, or an
+    explicit id) passes through unchanged. Runs AFTER the top-level
+    operator/wallet resolution so a ``user`` reference resolves against the
+    final operator. A nested label reference of ANY kind requires a resolved
+    operator to scope it: when the launch has no operator (the unscoped-paper
+    early return) any nested ``label:`` fails closed rather than resolving an
+    operator/wallet/user reference unscoped. The nested ``params`` sub-dict
+    is copied before any rewrite so the caller's (frozen) classification is
+    never mutated. Resolution is fail-closed per kind, and an unknown
+    declared kind raises.
+
+    Args:
+        repository: Repository exposing the identity catalogues.
+        parameters: Mutable resolved strategy parameters; nested ``params``
+            is replaced with a rewritten copy when a reference resolves.
+        reference_identity_params: Declared ``{param_name: kind}`` map.
+        operator_public_id: The resolved operator scope (empty means no
+            nested label may be resolved).
+        wallet_resolution_mode: Paper or live wallet selection mode.
+        principal_operator_public_ids: Caller operator memberships, or None.
+        as_of: Temporal anchor for the catalogue reads.
+
+    Raises:
+        StrategyLabelInvalidError: A reference is blank after the prefix, or
+            declares an unknown kind.
+        StrategyLabelUnresolvedError: A reference matched no in-scope row, or
+            a nested label is present with no resolved operator to scope it.
+        StrategyLabelAmbiguousError: A reference matched multiple rows.
+    """
+    if not reference_identity_params:
+        return
+    nested_raw = parameters.get("params")
+    if not isinstance(nested_raw, dict):
+        return
+    nested = dict(nested_raw)
+    changed = False
+    for param_name, kind in reference_identity_params.items():
+        raw_value = nested.get(param_name)
+        if not isinstance(raw_value, str) or not raw_value.startswith(_LABEL_REFERENCE_PREFIX):
+            continue
+        if not operator_public_id:
+            raise StrategyLabelUnresolvedError(
+                f"cannot scope nested {kind} label {raw_value!r} for {param_name!r} "
+                f"without a resolved operator"
+            )
+        if kind == "user":
+            resolved = await _resolve_user_label(repository, raw_value, operator_public_id, as_of)
+        elif kind == "operator":
+            resolved = await _resolve_operator_label(
+                repository, raw_value, principal_operator_public_ids, as_of
+            )
+        elif kind == "wallet":
+            resolved = await _resolve_wallet_label(
+                repository, raw_value, operator_public_id, wallet_resolution_mode, as_of
+            )
+        else:
+            raise StrategyLabelInvalidError(
+                f"unknown reference kind {kind!r} for nested param {param_name!r}"
+            )
+        nested[param_name] = resolved
+        changed = True
+    if changed:
+        parameters["params"] = nested
+
+
 async def resolve_classified_strategy_scope(
     repository: StrategyScopeRepository,
     *,
@@ -535,6 +731,15 @@ async def resolve_classified_strategy_scope(
             require_operator_for_explicit_wallet=require_operator_for_explicit_wallet,
         )
         if scope is not None:
+            await _resolve_nested_reference_labels(
+                repository,
+                parameters,
+                classification.reference_identity_params,
+                operator_public_id,
+                wallet_resolution_mode,
+                principal_operator_public_ids,
+                datetime.now(UTC),
+            )
             return scope
     _enforce_operator_membership(operator_public_id, principal_operator_public_ids)
     if not wallet_public_id:
@@ -544,6 +749,15 @@ async def resolve_classified_strategy_scope(
             operator_public_id,
             wallet_resolution_mode,
         )
+    await _resolve_nested_reference_labels(
+        repository,
+        parameters,
+        classification.reference_identity_params,
+        operator_public_id,
+        wallet_resolution_mode,
+        principal_operator_public_ids,
+        datetime.now(UTC),
+    )
     return StrategyWalletScope(
         True,
         parameters,

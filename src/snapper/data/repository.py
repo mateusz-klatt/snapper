@@ -3259,6 +3259,28 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_active_user_public_id_by_username(
+        self, username: str, as_of: datetime
+    ) -> str | None:
+        """Return the active user's public id for a username, or None.
+
+        Backs the scoped-strategy ``label:<username>`` reference resolver.
+        ``users.username`` is active-unique, so an exact match yields at
+        most one public id; None is returned when no active user carries
+        the username (including a soft-deactivated ``is_active`` False user)
+        so the resolver can fail closed on an unknown or disabled reference.
+
+        Args:
+            username: Exact active username to resolve.
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            The active, non-deactivated user's public id, or None when no
+            such user matches the username at ``as_of``.
+        """
+        ...
+
+    @abstractmethod
     async def create_operator(
         self,
         label: str,
@@ -14010,6 +14032,25 @@ class SQLAlchemyRepository(Repository):
                 )
                 for row in result.scalars().all()
             ]
+
+    async def get_active_user_public_id_by_username(
+        self, username: str, as_of: datetime
+    ) -> str | None:
+        """Return the active user's public id for a username, or None.
+
+        Excludes soft-deactivated users (``is_active`` False on an
+        otherwise-active SCD2 row) so a deactivated account can never
+        resolve a live scope reference.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(User.public_id).where(
+                    User.username == username,
+                    User.is_active.is_(True),
+                    *where_active(User, as_of),
+                )
+            )
+            return result.scalars().first()
 
     async def create_operator(
         self,
