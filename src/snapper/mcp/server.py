@@ -292,6 +292,58 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             TOKEN_CLAIMS_CTX.reset(ctx_token)
 
 
+class StandaloneSseGetRejectionMiddleware(BaseHTTPMiddleware):
+    """Answer the client's standalone SSE ``GET`` stream with 405.
+
+    After ``initialize`` the MCP Streamable-HTTP client opens a
+    long-lived ``GET`` stream to receive server-initiated messages.
+    This deployment is ``stateless_http=True`` and advertises
+    ``tools.listChanged=false`` — it never pushes server-initiated
+    messages — so that stream carries nothing. Left open, the held
+    ``GET`` connection starves subsequent ``POST`` responses behind the
+    buffering reverse proxy that fronts production (Cloudflare),
+    surfacing as a 60-second ``tools/list`` timeout: the ``GET`` is
+    accepted (HTTP 200) but its headers stall for ~15 s and the
+    concurrent ``tools/list`` ``POST`` never receives its reply until
+    the client's request timeout fires. A single ``POST`` with no
+    standalone stream open returns in well under a second, so the
+    stream is the sole trigger.
+
+    The MCP spec permits a server that does not offer the standalone
+    SSE stream to answer ``GET`` with 405. Doing so makes the SDK
+    client treat the stream as unsupported and skip it, relying solely
+    on per-request ``POST`` replies — which are unaffected by the proxy.
+    The rejection is the outermost gate so an unused ``GET`` never pays
+    for a DB-backed token verification. ``POST`` (JSON-RPC requests)
+    and ``DELETE`` (session termination) pass through untouched.
+    """
+
+    async def dispatch(self, request: Request, call_next: Any) -> Any:
+        """Return 405 for ``GET``; forward every other method.
+
+        Args:
+            request: Incoming Starlette request.
+            call_next: Downstream ASGI app callable.
+
+        Returns:
+            A 405 :class:`JSONResponse` carrying an ``Allow`` header for
+            ``GET``, or the downstream response for any other method.
+        """
+        if request.method == "GET":
+            return JSONResponse(
+                status_code=405,
+                headers={"Allow": "POST, DELETE"},
+                content={
+                    "error_code": "method_not_allowed",
+                    "detail": (
+                        "The MCP endpoint does not offer a standalone SSE "
+                        "stream. Send JSON-RPC requests via POST."
+                    ),
+                },
+            )
+        return await call_next(request)
+
+
 def build_mcp_app(
     settings_service_getter: Callable[[], SettingsService | None],
     repository_getter: Callable[[], Repository | None] | None = None,
@@ -370,6 +422,7 @@ def build_mcp_app(
         FeatureFlagMiddleware,
         settings_service_getter=settings_service_getter,
     )
+    downstream.add_middleware(StandaloneSseGetRejectionMiddleware)
     logger.info(
         "MCP sub-app built ({}, v{}) — mount path: /api/mcp",
         _MCP_SERVER_NAME,

@@ -332,6 +332,47 @@ class TestBearerAuthMiddleware:
         assert response.json()["seen"] == "ai-delegate-1"
 
 
+class TestStandaloneSseGetRejection:
+    """The unused standalone SSE ``GET`` stream is rejected with 405."""
+
+    def test_get_returns_405_before_auth(self) -> None:
+        """A ``GET`` is answered 405 ahead of the bearer check.
+
+        Given: the composed MCP sub-app,
+        When: a ``GET`` — the client's standalone SSE stream request —
+            arrives with no Authorization header,
+        Then: HTTP 405 with ``error_code="method_not_allowed"`` and an
+            ``Allow: POST, DELETE`` header is returned. The outermost
+            method gate rejects it before the DB-backed bearer check
+            (proven by the absence of an Authorization header), so the
+            SDK client skips the stream instead of holding it open and
+            starving ``POST`` responses behind the production proxy.
+        """
+        svc = _make_settings_service(enabled=True)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
+        client = TestClient(app)
+        response = client.get("/")
+        assert response.status_code == 405
+        assert response.headers["allow"] == "POST, DELETE"
+        assert response.json()["error_code"] == "method_not_allowed"
+
+    def test_post_still_passes_through_to_auth(self) -> None:
+        """A ``POST`` is forwarded past the method gate to auth.
+
+        Given: the composed MCP sub-app,
+        When: a ``POST`` with no Authorization header arrives,
+        Then: the method gate forwards it and the bearer middleware
+            returns 401 ``missing_bearer_token`` — confirming the GET
+            rejection does not intercept the JSON-RPC request path.
+        """
+        svc = _make_settings_service(enabled=True)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
+        client = TestClient(app)
+        response = client.post("/", json={})
+        assert response.status_code == 401
+        assert response.json()["error_code"] == "missing_bearer_token"
+
+
 class TestMCPContext:
     """Context access used by FastMCP tool handlers."""
 
