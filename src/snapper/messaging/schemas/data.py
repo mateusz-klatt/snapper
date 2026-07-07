@@ -559,6 +559,13 @@ class HeartbeatData(StrictDataSchema[Literal["heartbeat"]]):
         sequence: Domain-level heartbeat generation count (not transport sequence_id).
         status: Current health status.
         lag_ms: Processing lag in milliseconds.
+        market_closed: Whether the component's venue is in a scheduled
+            market closure, so a large ``lag_ms`` is expected silence
+            rather than a fault. Always-open or unmodeled venues report
+            ``False``.
+        next_open: When the venue next reopens, if it is currently in a
+            scheduled closure and the reopen instant is known; ``None``
+            when open, always-open, or unmodeled.
         meta: Optional metadata dictionary for extensions.
     """
 
@@ -567,6 +574,8 @@ class HeartbeatData(StrictDataSchema[Literal["heartbeat"]]):
     sequence: int
     status: HealthStatus
     lag_ms: int
+    market_closed: bool = False
+    next_open: datetime | None = None
     meta: JsonObject = Field(default={})
 
 

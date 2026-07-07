@@ -25,6 +25,7 @@ from snapper.application.process_manager.process_parameters import PublisherSymb
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.market_hours import is_cme_closed
+from snapper.core.market_hours import next_cme_open
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import ProcessModeEnum
@@ -310,6 +311,21 @@ class KrakenEquitiesMarketDataPublisher(
         if _is_cme_closed(datetime.now(UTC)):
             return 0
         return _LIVENESS_RECOVERY_THRESHOLD_S
+
+    def _market_schedule_state(self, now_utc: datetime) -> tuple[bool, datetime | None]:
+        """Report CME closures and the next reopen for the Equities feed.
+
+        Args:
+            now_utc: Reference instant; a naive value is assumed UTC.
+
+        Returns:
+            ``(True, next_cme_open(now_utc))`` inside a scheduled CME
+            closure window so the heartbeat surfaces a market-closed state
+            and the reopen instant; ``(False, None)`` when the venue is open.
+        """
+        if _is_cme_closed(now_utc):
+            return (True, next_cme_open(now_utc))
+        return (False, None)
 
     async def _attempt_liveness_recovery(self, reason: str) -> None:
         """Recover stale market data by rebuilding the public WS client."""

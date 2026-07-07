@@ -207,3 +207,31 @@ def last_cme_reopen(now_utc: datetime) -> datetime:
     while _is_closed_ct(candidate):
         candidate -= timedelta(days=1)
     return candidate.astimezone(UTC)
+
+
+def next_cme_open(now_utc: datetime) -> datetime:
+    """Return the next closed-to-open CME transition at or after ``now_utc``.
+
+    The forward dual of :func:`last_cme_reopen`. Every reopen happens at
+    17:00 CT, so the candidate is seeded at that boundary and stepped
+    forward a day at a time until it lands on an instant the venue is
+    actually OPEN: the daily break resolves to today 17:00 CT, the weekend
+    closure to Sunday 17:00 CT, and a holiday closure to the 17:00 CT
+    evening that begins the next open session.
+
+    A market-closed badge reads this to show when the feed will resume.
+
+    Args:
+        now_utc: Reference instant; a naive value is assumed UTC.
+
+    Returns:
+        Aware UTC datetime of the next reopen boundary at or after
+        ``now_utc``.
+    """
+    ct = _as_ct(now_utc)
+    candidate = ct.replace(hour=CME_DAILY_BREAK_END_CT.hour, minute=0, second=0, microsecond=0)
+    if candidate < ct:
+        candidate += timedelta(days=1)
+    while _is_closed_ct(candidate):
+        candidate += timedelta(days=1)
+    return candidate.astimezone(UTC)

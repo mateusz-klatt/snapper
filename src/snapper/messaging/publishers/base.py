@@ -3812,6 +3812,25 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
 
+    def _market_schedule_state(self, now_utc: datetime) -> tuple[bool, datetime | None]:
+        """Return the venue's ``(market_closed, next_open)`` for the heartbeat.
+
+        The base publisher has no market calendar: its venue trades
+        continuously (crypto) or its schedule is unmodeled, so it always
+        reports open. A publisher whose venue has scheduled closures
+        (e.g. CME futures) overrides this to consult its calendar, so the
+        heartbeat can carry a market-closed state plus the reopen instant
+        instead of a misleading multi-hour data lag while the market is shut.
+
+        Args:
+            now_utc: Reference instant; a naive value is assumed UTC.
+
+        Returns:
+            A ``(market_closed, next_open)`` pair; ``(False, None)`` when
+            the venue is open or has no market calendar.
+        """
+        return (False, None)
+
     async def _heartbeat_tick(self, component_name: str) -> None:
         """Compute and publish one heartbeat with honest status.
 
@@ -3831,10 +3850,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self.heartbeat_seq += 1
         max_lag_ms = self._compute_max_lag_ms()
         self._check_feed_liveness()
+        now = datetime.now(UTC)
+        market_closed, next_open = self._market_schedule_state(now)
         hb_topic = heartbeat_topic_from_component(component_name)
         hb_msg = HeartbeatData(
             public_id=str(uuid7()),
-            timestamp=datetime.now(UTC),
+            timestamp=now,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence(hb_topic),
             component=component_name,
@@ -3845,6 +3866,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 else HealthStatusEnum.HEALTHY
             ),
             lag_ms=max_lag_ms,
+            market_closed=market_closed,
+            next_open=next_open,
             meta={
                 "symbols": list(self.symbols),
                 "symbol_count": len(self.symbols),

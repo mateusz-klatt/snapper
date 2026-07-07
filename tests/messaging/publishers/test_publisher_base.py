@@ -2243,6 +2243,18 @@ async def test_publish_heartbeat_when_running() -> None:
     pub.msg_publisher.send.assert_awaited()
 
 
+def test_market_schedule_state_defaults_to_open() -> None:
+    """The base publisher reports its venue always-open by default.
+
+    Given: A base feed publisher with no market calendar,
+    When: The heartbeat market-schedule hook is read,
+    Then: It reports ``(False, None)`` so crypto and other unmodeled
+        venues never surface a spurious market-closed heartbeat state.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    assert pub._market_schedule_state(datetime(2024, 1, 1, tzinfo=UTC)) == (False, None)
+
+
 @pytest.mark.asyncio
 async def test_symbol_aliases_loop_invokes_invalidation(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test symbol aliases loop invalidates cache.

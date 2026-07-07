@@ -20,6 +20,7 @@ import pytest
 
 from snapper.core.market_hours import is_cme_closed
 from snapper.core.market_hours import last_cme_reopen
+from snapper.core.market_hours import next_cme_open
 
 
 class TestIsCmeClosed:
@@ -190,4 +191,68 @@ class TestLastCmeReopen:
         """
         result = last_cme_reopen(datetime(2026, 7, 6, 8, 0))
         assert result == datetime(2026, 7, 5, 22, 0, tzinfo=UTC)
+        assert result.tzinfo is not None
+
+
+class TestNextCmeOpen:
+    """Next closed-to-open transition at or after the instant."""
+
+    @pytest.mark.parametrize(
+        ("now_utc", "expected"),
+        [
+            (datetime(2026, 7, 1, 12, 0, tzinfo=UTC), datetime(2026, 7, 1, 22, 0, tzinfo=UTC)),
+            (datetime(2026, 7, 1, 21, 30, tzinfo=UTC), datetime(2026, 7, 1, 22, 0, tzinfo=UTC)),
+            (datetime(2026, 7, 1, 22, 0, tzinfo=UTC), datetime(2026, 7, 1, 22, 0, tzinfo=UTC)),
+            (datetime(2026, 7, 1, 22, 30, tzinfo=UTC), datetime(2026, 7, 2, 22, 0, tzinfo=UTC)),
+            (datetime(2026, 7, 4, 12, 0, tzinfo=UTC), datetime(2026, 7, 5, 22, 0, tzinfo=UTC)),
+            (datetime(2026, 7, 5, 21, 0, tzinfo=UTC), datetime(2026, 7, 5, 22, 0, tzinfo=UTC)),
+            (datetime(2026, 7, 3, 18, 0, tzinfo=UTC), datetime(2026, 7, 5, 22, 0, tzinfo=UTC)),
+        ],
+    )
+    def test_next_open_boundaries(self, now_utc: datetime, expected: datetime) -> None:
+        """Next-open resolution steps forward over closed 22:00 boundaries.
+
+        Given: Instants mid-session, inside the daily break, exactly at a
+            reopen, just after a reopen (rolling to the next trading
+            evening), during the Saturday full closure, on the Sunday
+            before the reopen, and inside the Friday July 3 observance,
+        When: ``next_cme_open`` is evaluated,
+        Then: It returns the next true closed-to-open 22:00 UTC boundary —
+            skipping Friday and Saturday 22:00 forward to the Sunday
+            reopen, and treating an in-break instant as opening at the end
+            of the same break.
+        """
+        assert next_cme_open(now_utc) == expected
+
+    @pytest.mark.parametrize(
+        ("now_utc", "expected"),
+        [
+            (datetime(2026, 1, 14, 22, 30, tzinfo=UTC), datetime(2026, 1, 14, 23, 0, tzinfo=UTC)),
+            (datetime(2026, 1, 19, 19, 0, tzinfo=UTC), datetime(2026, 1, 19, 23, 0, tzinfo=UTC)),
+            (datetime(2026, 12, 25, 12, 0, tzinfo=UTC), datetime(2026, 12, 27, 23, 0, tzinfo=UTC)),
+        ],
+    )
+    def test_next_open_tracks_dst_and_holidays(self, now_utc: datetime, expected: datetime) -> None:
+        """Next-open lands on 17:00 CT boundaries that actually open.
+
+        Given: A winter daily-break instant (reopen 23:00 UTC = 17:00
+            CST), the MLK Monday halt whose same-day 23:00 UTC boundary IS
+            the reopen, and Christmas Day inside the multi-day cluster
+            whose next open is the Sunday 23:00 UTC reopen,
+        When: ``next_cme_open`` is evaluated,
+        Then: It returns the venue's true next reopen — 23:00 UTC in
+            winter — stepping past every 17:00 CT boundary swallowed by a
+            holiday interval or the weekend.
+        """
+        assert next_cme_open(now_utc) == expected
+
+    def test_naive_datetime_is_assumed_utc(self) -> None:
+        """A naive instant resolves the same next-open as its UTC twin.
+
+        Given: A naive Wednesday 21:30 (inside the summer daily break),
+        When: ``next_cme_open`` is evaluated,
+        Then: Wednesday 22:00 UTC is returned as an aware datetime.
+        """
+        result = next_cme_open(datetime(2026, 7, 1, 21, 30))
+        assert result == datetime(2026, 7, 1, 22, 0, tzinfo=UTC)
         assert result.tzinfo is not None

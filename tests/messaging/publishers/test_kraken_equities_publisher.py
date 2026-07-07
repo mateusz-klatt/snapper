@@ -254,6 +254,36 @@ class TestKrakenEquitiesMarketDataPublisher:
         with patch.object(equities_module, "_is_cme_closed", return_value=False):
             assert publisher._get_liveness_recovery_threshold_s() == 120
 
+    def test_market_schedule_state_reports_closure_and_reopen(self) -> None:
+        """During a CME closure the heartbeat carries closed + next reopen.
+
+        Given: A Saturday instant inside the weekend closure
+            (2026-05-23 12:00 UTC),
+        When: The heartbeat market-schedule hook is read,
+        Then: It reports market-closed with the Sunday 22:00 UTC reopen so
+            the heartbeat surfaces expected silence instead of a fault.
+        """
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        assert publisher._market_schedule_state(datetime(2026, 5, 23, 12, 0, tzinfo=UTC)) == (
+            True,
+            datetime(2026, 5, 24, 22, 0, tzinfo=UTC),
+        )
+
+    def test_market_schedule_state_open_reports_no_closure(self) -> None:
+        """While the venue is open the hook reports no closure and no reopen.
+
+        Given: A Friday afternoon instant before the 16:00 CT break
+            (2026-05-22 20:59 UTC),
+        When: The heartbeat market-schedule hook is read,
+        Then: It reports ``(False, None)`` so the heartbeat behaves as a
+            normal live feed.
+        """
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        assert publisher._market_schedule_state(datetime(2026, 5, 22, 20, 59, tzinfo=UTC)) == (
+            False,
+            None,
+        )
+
     @pytest.mark.parametrize(
         ("now_utc", "expected"),
         [
