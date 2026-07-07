@@ -12,6 +12,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 from typing import cast
+from uuid import uuid7
 
 from loguru import logger
 from sqlalchemy import select
@@ -32,6 +33,56 @@ from snapper.data.repository import where_active_now
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _SETTINGS_TOPIC = "settings"
+
+
+def _seeded_identity_params_for_registry_name(registry_name: str) -> tuple[str, ...]:
+    """Return the seeded-identity param names registered under a process name.
+
+    Class paths cannot be used to resolve this: every dynamic strategy
+    wrapper shares one function-local class path, so a class-path lookup is
+    ambiguous across strategies. The registry is keyed by process name, so
+    the caller passes the process's source-template name (for template
+    instances) or its own name.
+
+    Args:
+        registry_name: Registry key of the process.
+
+    Returns:
+        The registered process's seeded-identity params, or empty when no
+        entry matches (a non-scoped or unregistered process).
+    """
+    entry = get_registered_processes().get(registry_name)
+    return entry.seeded_identity_params if entry is not None else ()
+
+
+def _mint_missing_seeded_identities(
+    parameters: object, seeded_identity_params: tuple[str, ...]
+) -> bool:
+    """Fill empty seeded-identity params under ``params`` with fresh UUID7s.
+
+    Fill-if-empty per key: an already-populated value is never rotated
+    because it correlates committed review rows; only an empty or missing
+    value is minted. Mutates ``parameters['params']`` in place.
+
+    Args:
+        parameters: Process ``parameters`` mapping, mutated in place.
+        seeded_identity_params: Nested ``params`` keys to mint.
+
+    Returns:
+        True if at least one key was minted.
+    """
+    if not seeded_identity_params or not isinstance(parameters, dict):
+        return False
+    nested = parameters.get("params")
+    if not isinstance(nested, dict):
+        return False
+    minted = False
+    for key in seeded_identity_params:
+        current = nested.get(key)
+        if not (isinstance(current, str) and current):
+            nested[key] = str(uuid7())
+            minted = True
+    return minted
 
 
 class ProcessRegistrySyncer:
@@ -216,6 +267,10 @@ class ProcessRegistrySyncer:
         if "parameters_schema" not in config_dict and entry.parameters_schema is not None:
             config_dict["parameters_schema"] = entry.parameters_schema
             updated = True
+        if _mint_missing_seeded_identities(
+            config_dict.get("parameters"), entry.seeded_identity_params
+        ):
+            updated = True
         return updated
 
     async def _sync_new_process(self, name: str, entry: ProcessRegistryEntry) -> None:
@@ -232,6 +287,7 @@ class ProcessRegistrySyncer:
         except Exception as e:
             logger.warning(f"Failed to get default parameters for '{name}': {e}, using empty dict")
             defaults["parameters"] = {}
+        _mint_missing_seeded_identities(defaults.get("parameters"), entry.seeded_identity_params)
         await self._create_process_config_in_db(
             name=name,
             class_path=entry.class_path,
@@ -356,6 +412,9 @@ class ProcessRegistrySyncer:
         """
         repository = get_repository(self.settings.db_url)
         config_key = f"process_{name}"
+        _mint_missing_seeded_identities(
+            parameters, _seeded_identity_params_for_registry_name(template or name)
+        )
         config_dict: dict[str, Any] = {
             "enabled": enabled,
             "mode": mode,
@@ -406,7 +465,10 @@ class ProcessRegistrySyncer:
         NOT the INSERT-only :meth:`create_process_config`, which 409s on an
         existing key). Only ``enabled`` and/or ``restart_nonce`` are
         mutated; the rest of the config JSON round-trips untouched, so
-        registry-synced fields and any unknown keys survive. Writing the
+        registry-synced fields and any unknown keys survive. A missing
+        scoped-strategy seeded-identity token is additionally back-filled
+        fill-if-empty here, so a desired-state edit migrates a legacy
+        empty token without ever rotating a populated one. Writing the
         same value again is a harmless identical version (idempotency is
         enforced downstream by the reconcile loop, which no-ops when the
         nonce equals the one it last applied).
@@ -438,6 +500,10 @@ class ProcessRegistrySyncer:
                 config_dict["enabled"] = enabled
             if restart_nonce is not None:
                 config_dict["restart_nonce"] = restart_nonce
+            _mint_missing_seeded_identities(
+                config_dict.get("parameters"),
+                _seeded_identity_params_for_registry_name(str(config_dict.get("template") or name)),
+            )
             await close_and_insert(
                 session=session,
                 model=Setting,

@@ -37,6 +37,11 @@ from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.process_manager.registry import get_registered_processes
+from snapper.application.process_manager.registry_syncer import ProcessRegistrySyncer
+from snapper.application.process_manager.registry_syncer import _mint_missing_seeded_identities
+from snapper.application.process_manager.registry_syncer import (
+    _seeded_identity_params_for_registry_name,
+)
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.application.process_manager.strategy_scope import StrategyLabelAmbiguousError
 from snapper.application.process_manager.strategy_scope import StrategyLabelInvalidError
@@ -49,6 +54,7 @@ from snapper.application.process_manager.strategy_scope import resolve_strategy_
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
+from snapper.core.ids import is_uuid7
 from snapper.core.json_types import JsonObject
 from snapper.core.types import HealthStatusEnum
 from snapper.core.types import ProcessAutostartProfileEnum
@@ -4156,6 +4162,169 @@ async def test_sync_registry_creates_missing_configs(monkeypatch: pytest.MonkeyP
     assert defaults_arg["parameters"] == {"default": True}
     assert defaults_arg["parameters_schema"] == {"schema": True}
     create_mock.assert_awaited_once()
+
+
+class _SeededRegistryClass:
+    """Scoped-strategy test class whose defaults carry an empty seeded id."""
+
+    @classmethod
+    def get_default_parameters(cls, _settings: Any) -> dict[str, Any]:
+        """Return defaults with an empty seeded-identity param."""
+        return {"params": {"ai_review_strategy_public_id": ""}}
+
+
+def _seeded_entry() -> ProcessRegistryEntry:
+    """Build a scoped-strategy registry entry declaring a seeded param."""
+    return ProcessRegistryEntry(
+        class_ref=_SeededRegistryClass,
+        class_path="module.Seeded",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.STRATEGY,
+        tags=("strategy",),
+        parameters_model=None,
+        parameters_schema=None,
+        enabled=False,
+        mode="thread",
+        seeded_identity_params=("ai_review_strategy_public_id",),
+    )
+
+
+def test_mint_missing_seeded_identities_fills_empty() -> None:
+    """An empty seeded param is minted to a canonical UUID7.
+
+    Given: A nested params dict whose seeded key is empty,
+    When: The normalizer runs for that seeded key,
+    Then: The key is filled with a canonical UUID7 and a mint is reported.
+    """
+    parameters: dict[str, Any] = {"params": {"ai_review_strategy_public_id": ""}}
+    assert _mint_missing_seeded_identities(parameters, ("ai_review_strategy_public_id",)) is True
+    assert is_uuid7(parameters["params"]["ai_review_strategy_public_id"])
+
+
+def test_mint_missing_seeded_identities_skips_populated() -> None:
+    """A populated seeded param is never rotated.
+
+    Given: A nested params dict whose seeded key already holds a value,
+    When: The normalizer runs for that seeded key,
+    Then: The value is left unchanged and no mint is reported.
+    """
+    existing = "01890000-0000-7000-8000-000000000000"
+    parameters: dict[str, Any] = {"params": {"ai_review_strategy_public_id": existing}}
+    assert _mint_missing_seeded_identities(parameters, ("ai_review_strategy_public_id",)) is False
+    assert parameters["params"]["ai_review_strategy_public_id"] == existing
+
+
+def test_mint_missing_seeded_identities_mints_only_empty_of_several() -> None:
+    """Only the empty key of several declared seeded params is minted.
+
+    Given: Two seeded keys where one is populated and one is empty,
+    When: The normalizer runs for both keys,
+    Then: The empty key is minted and the populated key is left unchanged.
+    """
+    existing = "01890000-0000-7000-8000-000000000000"
+    parameters: dict[str, Any] = {"params": {"seeded_a": existing, "seeded_b": ""}}
+    assert _mint_missing_seeded_identities(parameters, ("seeded_a", "seeded_b")) is True
+    assert parameters["params"]["seeded_a"] == existing
+    assert is_uuid7(parameters["params"]["seeded_b"])
+
+
+def test_mint_missing_seeded_identities_no_declared_params() -> None:
+    """No declared seeded params is a no-op.
+
+    Given: An empty seeded-param declaration,
+    When: The normalizer runs,
+    Then: Nothing is minted and no change is reported.
+    """
+    parameters: dict[str, Any] = {"params": {"ai_review_strategy_public_id": ""}}
+    assert _mint_missing_seeded_identities(parameters, ()) is False
+    assert parameters["params"]["ai_review_strategy_public_id"] == ""
+
+
+def test_mint_missing_seeded_identities_non_dict_parameters() -> None:
+    """A non-dict parameters value is a no-op.
+
+    Given: A parameters value that is not a dict,
+    When: The normalizer runs,
+    Then: It fails closed to a no-op without raising.
+    """
+    assert _mint_missing_seeded_identities(None, ("ai_review_strategy_public_id",)) is False
+
+
+def test_mint_missing_seeded_identities_non_dict_nested_params() -> None:
+    """Parameters without a nested params dict is a no-op.
+
+    Given: A parameters dict whose ``params`` value is not a dict,
+    When: The normalizer runs,
+    Then: It fails closed to a no-op without raising.
+    """
+    parameters: dict[str, Any] = {"params": "not-a-dict"}
+    assert _mint_missing_seeded_identities(parameters, ("ai_review_strategy_public_id",)) is False
+
+
+def test_seeded_identity_params_for_registry_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The registry-name lookup returns the registered entry's seeded params.
+
+    Given: A registry with one scoped-strategy entry declaring a seeded param,
+    When: The lookup runs for the matching and a non-matching registry name,
+    Then: It returns the seeded params for the match and empty otherwise
+        (a class-path lookup would be ambiguous across shared wrapper paths).
+    """
+    monkeypatch.setattr(
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
+        lambda: {"seeded": _seeded_entry()},
+    )
+    assert _seeded_identity_params_for_registry_name("seeded") == ("ai_review_strategy_public_id",)
+    assert _seeded_identity_params_for_registry_name("unknown") == ()
+
+
+@pytest.mark.asyncio()
+async def test_sync_registry_mints_seeded_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sync mints an empty scoped-strategy seeded id at config creation.
+
+    Given: A scoped-strategy registry entry whose defaults carry an empty
+        seeded-identity param,
+    When: sync_registry_to_database creates its config,
+    Then: the persisted defaults carry a minted canonical UUID7.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    create_mock = mock.AsyncMock()
+    monkeypatch.setattr(factory._registry_syncer, "_create_process_config_in_db", create_mock)
+    monkeypatch.setattr(
+        "snapper.application.process_manager.registry_syncer.get_registered_processes",
+        lambda: {"seeded_proc": _seeded_entry()},
+    )
+    monkeypatch.setattr(
+        "snapper.application.process_manager.registry_syncer.get_repository",
+        lambda _url: _DummyRepository(None),
+    )
+    await factory.sync_registry_to_database()
+    defaults_arg = create_mock.call_args.kwargs["defaults"]
+    assert is_uuid7(defaults_arg["parameters"]["params"]["ai_review_strategy_public_id"])
+
+
+def test_apply_entry_updates_backfills_seeded_identity() -> None:
+    """A missing seeded id is back-filled even when parameters are non-empty.
+
+    Given: An existing config whose parameters are already populated (so the
+        parameter-sync path early-returns) but whose seeded token is empty,
+    When: _apply_entry_updates runs for the scoped-strategy entry,
+    Then: it mints the token and reports the config changed, proving the
+        back-fill is independent of the non-empty-parameters early return.
+    """
+    syncer = ProcessRegistrySyncer(_create_settings())
+    config_dict: dict[str, Any] = {
+        "parameters": {"name": "x", "params": {"ai_review_strategy_public_id": ""}},
+        "lifecycle": ProcessLifecycleEnum.LONG_RUNNING.value,
+        "role": ProcessRoleEnum.STRATEGY.value,
+        "tags": ["strategy"],
+    }
+    changed = syncer._apply_entry_updates("seeded_proc", config_dict, _seeded_entry())
+    assert changed is True
+    assert is_uuid7(config_dict["parameters"]["params"]["ai_review_strategy_public_id"])
 
 
 class _RegistryClassFailingKwargs:

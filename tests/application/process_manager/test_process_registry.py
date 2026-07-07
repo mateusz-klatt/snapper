@@ -463,3 +463,20 @@ def test_base_strategy_identity_metadata_defaults_empty() -> None:
     """
     assert BaseStrategy.REFERENCE_IDENTITY_PARAMS == {}
     assert BaseStrategy.SEEDED_IDENTITY_PARAMS == ()
+
+
+def test_scoped_strategy_default_parameters_are_independent_copies() -> None:
+    """get_default_parameters never returns the shared config template.
+
+    Given the heartbeat strategy process,
+    When get_default_parameters is called twice and the first result mutated,
+    Then the second call is unaffected, so a persistence-layer mint into one
+        config can never leak a seeded token into a later instance built from
+        the same strategy template.
+    """
+    metadata = get_registered_processes().get("strategy_heartbeat_consult_btc_1h")
+    assert metadata is not None
+    first = metadata.class_ref.get_default_parameters(MagicMock())
+    second = metadata.class_ref.get_default_parameters(MagicMock())
+    first["params"]["ai_review_strategy_public_id"] = "mutated"
+    assert second["params"]["ai_review_strategy_public_id"] == ""

@@ -5,6 +5,7 @@ that can be controlled via the process manager.
 """
 
 import asyncio
+import copy
 from collections.abc import Mapping
 from typing import Any
 
@@ -64,7 +65,15 @@ def create_strategy_process(
     class StrategyProcess(RegisterableProcess):
         @staticmethod
         def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
-            return default_config
+            """Return a fresh copy of the strategy's default config.
+
+            A copy — never the shared ``default_config`` template captured in
+            this closure — so a caller that mutates the result (for example
+            the persistence layer minting a seeded-identity token in place)
+            can never pollute the template and leak that value into a later
+            instance created from the same strategy.
+            """
+            return copy.deepcopy(default_config)
 
         def __init__(
             self,
