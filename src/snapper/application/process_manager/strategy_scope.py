@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
+from typing import Protocol
 
 from pydantic import ValidationError
 
@@ -14,11 +15,13 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.core.wallet_resolution import WalletResolutionRepository
 from snapper.core.wallet_resolution import resolve_wallet_or_default
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import OperatorRow
 
 _STRATEGY_PARAMETER_KEYS = frozenset(("inputs", "outputs"))
 _STRATEGY_OPERATOR_REQUIRED_DETAIL = (
     "operator_public_id required for live strategy wallet resolution"
 )
+_LABEL_REFERENCE_PREFIX = "label:"
 
 
 class StrategyScopeError(ValueError):
@@ -40,6 +43,38 @@ class StrategyGrantScopeError(StrategyScopeError):
 
 class StrategyOutputCoverageError(StrategyScopeError):
     """Raised when strategy outputs are not fully grant-covered."""
+
+
+class StrategyLabelInvalidError(StrategyScopeError):
+    """Raised when a ``label:`` scope reference is blank after the prefix."""
+
+
+class StrategyLabelUnresolvedError(StrategyScopeError):
+    """Raised when a ``label:`` scope reference matches no active row."""
+
+
+class StrategyLabelAmbiguousError(StrategyScopeError):
+    """Raised when a ``label:`` scope reference matches multiple active rows."""
+
+
+class StrategyScopeRepository(WalletResolutionRepository, Protocol):
+    """Wallet-resolution repository extended with the operator catalogue.
+
+    The strategy scope chokepoint resolves ``label:`` operator references
+    against the active operator catalogue in addition to the wallet
+    lookups already required for wallet autolookup.
+    """
+
+    async def list_active_operators(self, as_of: datetime) -> list[OperatorRow]:
+        """Return active operator rows at ``as_of``.
+
+        Args:
+            as_of: Temporal anchor for the active-operator catalogue.
+
+        Returns:
+            Active operator rows in repository-defined deterministic order.
+        """
+        ...
 
 
 @dataclass(frozen=True)
@@ -278,8 +313,175 @@ async def _resolve_missing_strategy_wallet(
     return wallet_public_id
 
 
+def _label_from_reference(value: str) -> str:
+    """Return the trimmed label from a ``label:`` reference value.
+
+    Args:
+        value: Parameter value already known to carry the label prefix.
+
+    Returns:
+        The non-empty label following the prefix.
+
+    Raises:
+        StrategyLabelInvalidError: The reference is blank after the prefix.
+    """
+    label = value.removeprefix(_LABEL_REFERENCE_PREFIX).strip()
+    if not label:
+        raise StrategyLabelInvalidError(f"blank label reference: {value!r}")
+    return label
+
+
+def _single_label_match(matches: list[str], *, kind: str, label: str) -> str:
+    """Return the sole match or fail closed on zero or many.
+
+    Args:
+        matches: Candidate public IDs sharing the resolved label.
+        kind: Reference kind for diagnostics (``operator`` or ``wallet``).
+        label: The label being resolved, for diagnostics.
+
+    Returns:
+        The single matching public ID.
+
+    Raises:
+        StrategyLabelUnresolvedError: No active row matched the label.
+        StrategyLabelAmbiguousError: More than one active row matched.
+    """
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise StrategyLabelUnresolvedError(f"no active {kind} matches label {label!r}")
+    raise StrategyLabelAmbiguousError(f"label {label!r} matches {len(matches)} active {kind}s")
+
+
+async def _resolve_operator_label(
+    repository: StrategyScopeRepository,
+    value: str,
+    principal_operator_public_ids: list[str] | None,
+    as_of: datetime,
+) -> str:
+    """Resolve a ``label:`` operator reference to a canonical public ID.
+
+    The label must match exactly one active operator, scope-qualified to
+    the caller's operator memberships when supplied so a reference can
+    never resolve outside the caller's authority.
+
+    Args:
+        repository: Repository exposing the active operator catalogue.
+        value: Parameter value carrying the label prefix.
+        principal_operator_public_ids: Caller operator memberships, or
+            None for the trusted boot or admin path.
+        as_of: Temporal anchor for the active-operator catalogue.
+
+    Returns:
+        The resolved operator public ID.
+
+    Raises:
+        StrategyLabelInvalidError: The reference is blank after the prefix.
+        StrategyLabelUnresolvedError: No in-scope operator matched.
+        StrategyLabelAmbiguousError: More than one in-scope operator matched.
+    """
+    label = _label_from_reference(value)
+    operators = await repository.list_active_operators(as_of)
+    matches = [
+        operator["public_id"]
+        for operator in operators
+        if operator["label"] == label
+        and (
+            principal_operator_public_ids is None
+            or operator["public_id"] in principal_operator_public_ids
+        )
+    ]
+    return _single_label_match(matches, kind="operator", label=label)
+
+
+async def _resolve_wallet_label(
+    repository: StrategyScopeRepository,
+    value: str,
+    operator_public_id: str,
+    wallet_resolution_mode: ExecutionModeEnum,
+    as_of: datetime,
+) -> str:
+    """Resolve a ``label:`` wallet reference to a canonical public ID.
+
+    The label must match exactly one active wallet of the resolution mode
+    (paper vs live), scoped to the resolved operator's accessible set when
+    an operator is pinned or the admin catalogue otherwise. The mode
+    filter prevents a live strategy from binding a paper wallet, or the
+    reverse, when a label collides across modes.
+
+    Args:
+        repository: Repository exposing the wallet catalogues.
+        value: Parameter value carrying the label prefix.
+        operator_public_id: Resolved operator scope, or empty for admin.
+        wallet_resolution_mode: Paper or live wallet selection mode.
+        as_of: Temporal anchor for the wallet catalogue.
+
+    Returns:
+        The resolved wallet public ID.
+
+    Raises:
+        StrategyLabelInvalidError: The reference is blank after the prefix.
+        StrategyLabelUnresolvedError: No in-scope wallet of the mode matched.
+        StrategyLabelAmbiguousError: More than one in-scope wallet matched.
+    """
+    label = _label_from_reference(value)
+    if operator_public_id:
+        wallets = await repository.list_accessible_wallets_for_operators(
+            [operator_public_id], as_of
+        )
+    else:
+        wallets = await repository.list_active_wallets(as_of)
+    want_paper = wallet_resolution_mode == ExecutionModeEnum.PAPER
+    matches = [
+        wallet["public_id"]
+        for wallet in wallets
+        if wallet["label"] == label and wallet["is_paper"] == want_paper
+    ]
+    return _single_label_match(matches, kind="wallet", label=label)
+
+
+async def _resolve_scope_reference_labels(
+    repository: StrategyScopeRepository,
+    parameters: dict[str, object],
+    wallet_resolution_mode: ExecutionModeEnum,
+    principal_operator_public_ids: list[str] | None,
+) -> None:
+    """Rewrite ``label:`` operator and wallet references in place.
+
+    Only ``label:``-prefixed values are touched: empty strings and any
+    other value (a canonical public ID or a legacy explicit ID) pass
+    through unchanged, preserving the empty-wallet autolookup and
+    explicit-ID paths. Resolution is fail-closed — zero or multiple active
+    matches raise rather than silently mis-scoping the launch. The
+    operator reference resolves first so a wallet reference can then match
+    within the resolved operator's accessible set.
+
+    Args:
+        repository: Repository exposing operator and wallet catalogues.
+        parameters: Mutable strategy parameters rewritten in place.
+        wallet_resolution_mode: Paper or live wallet selection mode.
+        principal_operator_public_ids: Caller operator memberships, or
+            None for the trusted boot or admin path.
+    """
+    as_of = datetime.now(UTC)
+    operator_value = _string_parameter(parameters, "operator_public_id")
+    if operator_value.startswith(_LABEL_REFERENCE_PREFIX):
+        parameters["operator_public_id"] = await _resolve_operator_label(
+            repository, operator_value, principal_operator_public_ids, as_of
+        )
+    wallet_value = _string_parameter(parameters, "wallet_public_id")
+    if wallet_value.startswith(_LABEL_REFERENCE_PREFIX):
+        parameters["wallet_public_id"] = await _resolve_wallet_label(
+            repository,
+            wallet_value,
+            _string_parameter(parameters, "operator_public_id"),
+            wallet_resolution_mode,
+            as_of,
+        )
+
+
 async def resolve_classified_strategy_scope(
-    repository: WalletResolutionRepository,
+    repository: StrategyScopeRepository,
     *,
     classification: StrategyProcessClassification,
     principal_operator_public_ids: list[str] | None,
@@ -315,6 +517,14 @@ async def resolve_classified_strategy_scope(
     operator_public_id = _string_parameter(parameters, "operator_public_id")
     wallet_public_id = _string_parameter(parameters, "wallet_public_id")
     wallet_resolution_mode = strategy_wallet_resolution_mode(parameters)
+    if operator_public_id.startswith(_LABEL_REFERENCE_PREFIX) or wallet_public_id.startswith(
+        _LABEL_REFERENCE_PREFIX
+    ):
+        await _resolve_scope_reference_labels(
+            repository, parameters, wallet_resolution_mode, principal_operator_public_ids
+        )
+        operator_public_id = _string_parameter(parameters, "operator_public_id")
+        wallet_public_id = _string_parameter(parameters, "wallet_public_id")
     if not operator_public_id:
         scope = _resolve_no_operator_strategy_scope(
             parameters,
@@ -447,7 +657,7 @@ async def find_uncovered_outputs(
 
 
 async def enforce_classified_strategy_scope_complete(
-    repository: WalletResolutionRepository,
+    repository: StrategyScopeRepository,
     *,
     classification: StrategyProcessClassification,
     principal_operator_public_ids: list[str] | None,
@@ -514,7 +724,7 @@ async def enforce_classified_strategy_scope_complete(
 
 
 async def resolve_strategy_process_scope(
-    repository: WalletResolutionRepository,
+    repository: StrategyScopeRepository,
     *,
     raw_role: object,
     class_path: object,
@@ -564,7 +774,7 @@ async def resolve_strategy_process_scope(
 
 
 async def enforce_strategy_process_scope_complete(
-    repository: WalletResolutionRepository,
+    repository: StrategyScopeRepository,
     *,
     raw_role: object,
     class_path: object,

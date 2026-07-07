@@ -38,6 +38,9 @@ from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.application.process_manager.spawner import ProcessSpawnerService
+from snapper.application.process_manager.strategy_scope import StrategyLabelAmbiguousError
+from snapper.application.process_manager.strategy_scope import StrategyLabelInvalidError
+from snapper.application.process_manager.strategy_scope import StrategyLabelUnresolvedError
 from snapper.application.process_manager.strategy_scope import StrategyProcessClassification
 from snapper.application.process_manager.strategy_scope import StrategyScopeError
 from snapper.application.process_manager.strategy_scope import classify_strategy_process
@@ -57,6 +60,7 @@ from snapper.core.types import ProcessRunStatusEnum
 from snapper.data.models import ProcessRun
 from snapper.data.models import Setting
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import OperatorRow
 from snapper.data.repository_types import WalletCredentialRow
 from snapper.data.repository_types import WalletRow
 
@@ -1634,13 +1638,25 @@ def _create_settings() -> AppSettings:
     return AppSettings(bootstrap, _DummySettingsService())
 
 
-def _wallet_row(public_id: str, *, is_paper: bool = False) -> WalletRow:
+def _wallet_row(public_id: str, *, is_paper: bool = False, label: str | None = None) -> WalletRow:
     """Build a wallet row for autostart wallet-resolution tests."""
     return WalletRow(
         public_id=public_id,
-        label=public_id,
+        label=label if label is not None else public_id,
         description=None,
         is_paper=is_paper,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        session_id="test-session",
+        sequence_id=1,
+    )
+
+
+def _operator_row(public_id: str, *, label: str | None = None) -> OperatorRow:
+    """Build an operator row for label-resolution tests."""
+    return OperatorRow(
+        public_id=public_id,
+        label=label if label is not None else public_id,
+        description=None,
         timestamp=datetime(2026, 1, 1, tzinfo=UTC),
         session_id="test-session",
         sequence_id=1,
@@ -1655,12 +1671,15 @@ class _WalletLookupRepository:
         *,
         active_wallets: list[WalletRow] | None = None,
         operator_wallets: list[WalletRow] | None = None,
+        active_operators: list[OperatorRow] | None = None,
     ) -> None:
         """Store wallet lookup fixtures."""
         self.active_wallets = active_wallets or []
         self.operator_wallets = operator_wallets or []
+        self.active_operators = active_operators or []
         self.active_lookup_count = 0
         self.operator_lookup_count = 0
+        self.operator_catalogue_lookup_count = 0
         self.operator_public_ids: list[str] = []
 
     async def list_active_wallets(self, as_of: datetime) -> list[WalletRow]:
@@ -1677,6 +1696,11 @@ class _WalletLookupRepository:
         self.operator_lookup_count += 1
         self.operator_public_ids = list(operator_public_ids)
         return list(self.operator_wallets)
+
+    async def list_active_operators(self, as_of: datetime) -> list[OperatorRow]:
+        """Return active operator fixtures."""
+        self.operator_catalogue_lookup_count += 1
+        return list(self.active_operators)
 
 
 def _strategy_autostart_config(
@@ -1899,6 +1923,305 @@ async def test_resolve_classified_strategy_scope_allows_paper_explicit_wallet_wi
     assert scope.wallet_public_id == "wallet-paper"
     assert repository.active_lookup_count == 0
     assert repository.operator_lookup_count == 0
+
+
+def _label_classification(
+    *,
+    operator_public_id: str,
+    wallet_public_id: str = "wallet-explicit",
+    exchange: str = "paper",
+) -> StrategyProcessClassification:
+    """Build a strategy classification for label-resolution tests."""
+    return StrategyProcessClassification(
+        treat_as_strategy=True,
+        parameters=dict(
+            _strategy_autostart_config(
+                operator_public_id=operator_public_id,
+                wallet_public_id=wallet_public_id,
+                exchange=exchange,
+            ).parameters
+        ),
+        row_role=ProcessRoleEnum.STRATEGY,
+        registry_role=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_resolves_operator_and_wallet_labels() -> None:
+    """A label: operator and wallet both resolve to canonical public IDs.
+
+    Given: Paper strategy params pinning both scope fields by label with
+        decoy rows carrying other labels,
+    When: The resolver runs against a matching active catalogue,
+    Then: Each reference resolves to its single active public ID and the
+        wallet lookup is scoped to the resolved operator, not the label.
+    """
+    repository = _WalletLookupRepository(
+        operator_wallets=[
+            _wallet_row("wallet-uuid", is_paper=True, label="paper"),
+            _wallet_row("wallet-decoy", is_paper=True, label="other"),
+        ],
+        active_operators=[
+            _operator_row("op-uuid", label="desk"),
+            _operator_row("op-other", label="other"),
+        ],
+    )
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=_label_classification(
+            operator_public_id="label:desk",
+            wallet_public_id="label:paper",
+        ),
+        principal_operator_public_ids=["op-uuid"],
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.operator_public_id == "op-uuid"
+    assert scope.wallet_public_id == "wallet-uuid"
+    assert repository.operator_public_ids == ["op-uuid"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_operator_label_with_explicit_wallet() -> None:
+    """An operator label resolves while a non-label wallet passes through.
+
+    Given: An operator pinned by label alongside an explicit wallet ID,
+    When: The resolver runs,
+    Then: The operator resolves and the explicit wallet is used unchanged.
+    """
+    repository = _WalletLookupRepository(active_operators=[_operator_row("op-uuid", label="desk")])
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=_label_classification(
+            operator_public_id="label:desk",
+            wallet_public_id="wallet-explicit",
+        ),
+        principal_operator_public_ids=["op-uuid"],
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.operator_public_id == "op-uuid"
+    assert scope.wallet_public_id == "wallet-explicit"
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_operator_label_unresolved() -> None:
+    """An operator label with no active match fails closed.
+
+    Given: An operator label absent from the active catalogue,
+    When: The resolver runs,
+    Then: It raises rather than launching unscoped.
+    """
+    repository = _WalletLookupRepository(active_operators=[_operator_row("op-uuid", label="desk")])
+    with pytest.raises(StrategyLabelUnresolvedError):
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=_label_classification(operator_public_id="label:missing"),
+            principal_operator_public_ids=None,
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_operator_label_ambiguous() -> None:
+    """An operator label matching multiple active rows fails closed.
+
+    Given: Two active operators sharing a label,
+    When: The resolver runs on that label,
+    Then: It raises rather than picking one arbitrarily.
+    """
+    repository = _WalletLookupRepository(
+        active_operators=[
+            _operator_row("op-a", label="desk"),
+            _operator_row("op-b", label="desk"),
+        ]
+    )
+    with pytest.raises(StrategyLabelAmbiguousError):
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=_label_classification(operator_public_id="label:desk"),
+            principal_operator_public_ids=None,
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_operator_label_blank_rejected() -> None:
+    """A blank operator label reference is rejected before any lookup.
+
+    Given: An operator reference that is empty after the prefix,
+    When: The resolver runs,
+    Then: It raises the invalid-label error without touching the catalogue.
+    """
+    repository = _WalletLookupRepository()
+    with pytest.raises(StrategyLabelInvalidError):
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=_label_classification(operator_public_id="label:   "),
+            principal_operator_public_ids=None,
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+    assert repository.operator_catalogue_lookup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_operator_label_out_of_principal_scope() -> None:
+    """An operator label outside caller scope resolves to nothing.
+
+    Given: An operator whose label matches but whose ID is outside the
+        caller's operator memberships,
+    When: The resolver runs with a principal scope,
+    Then: It fails closed rather than resolving across scope.
+    """
+    repository = _WalletLookupRepository(active_operators=[_operator_row("op-uuid", label="desk")])
+    with pytest.raises(StrategyLabelUnresolvedError):
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=_label_classification(operator_public_id="label:desk"),
+            principal_operator_public_ids=["other-op"],
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_wallet_label_mode_filtered() -> None:
+    """A wallet label matching only a wrong-mode wallet fails closed.
+
+    Given: A paper strategy whose wallet label matches only a live wallet,
+    When: The resolver applies the paper/live mode filter,
+    Then: It fails closed rather than binding the wrong-mode wallet.
+    """
+    repository = _WalletLookupRepository(
+        operator_wallets=[_wallet_row("wallet-live", is_paper=False, label="shared")],
+        active_operators=[_operator_row("op-uuid", label="desk")],
+    )
+    with pytest.raises(StrategyLabelUnresolvedError):
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=_label_classification(
+                operator_public_id="label:desk",
+                wallet_public_id="label:shared",
+            ),
+            principal_operator_public_ids=["op-uuid"],
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_wallet_label_admin_catalogue() -> None:
+    """A wallet label with no operator resolves via the admin catalogue.
+
+    Given: A paper strategy with no operator pinning a wallet by label,
+    When: The resolver runs,
+    Then: It resolves the label against the active wallet catalogue.
+    """
+    repository = _WalletLookupRepository(
+        active_wallets=[_wallet_row("wallet-uuid", is_paper=True, label="paper")]
+    )
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=_label_classification(
+            operator_public_id="",
+            wallet_public_id="label:paper",
+        ),
+        principal_operator_public_ids=[],
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.wallet_public_id == "wallet-uuid"
+    assert repository.active_lookup_count == 1
+    assert repository.operator_lookup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_wallet_label_ambiguous() -> None:
+    """A wallet label matching multiple active wallets fails closed.
+
+    Given: Two active paper wallets sharing a label,
+    When: The resolver runs on that label,
+    Then: It raises rather than picking one arbitrarily.
+    """
+    repository = _WalletLookupRepository(
+        active_wallets=[
+            _wallet_row("wallet-a", is_paper=True, label="paper"),
+            _wallet_row("wallet-b", is_paper=True, label="paper"),
+        ]
+    )
+    with pytest.raises(StrategyLabelAmbiguousError):
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=_label_classification(
+                operator_public_id="",
+                wallet_public_id="label:paper",
+            ),
+            principal_operator_public_ids=[],
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_wallet_label_blank_rejected() -> None:
+    """A blank wallet label reference is rejected before any lookup.
+
+    Given: A wallet reference that is empty after the prefix,
+    When: The resolver runs,
+    Then: It raises the invalid-label error without touching the catalogue.
+    """
+    repository = _WalletLookupRepository()
+    with pytest.raises(StrategyLabelInvalidError):
+        await resolve_classified_strategy_scope(
+            repository,
+            classification=_label_classification(
+                operator_public_id="",
+                wallet_public_id="label:",
+            ),
+            principal_operator_public_ids=[],
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=False,
+            require_operator_for_explicit_wallet=False,
+        )
+    assert repository.active_lookup_count == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_classified_strategy_scope_non_label_values_pass_through() -> None:
+    """Non-label scope values bypass resolution entirely.
+
+    Given: Explicit non-label operator and wallet IDs,
+    When: The resolver runs,
+    Then: Both pass through unchanged and no catalogue lookup happens.
+    """
+    repository = _WalletLookupRepository()
+    scope = await resolve_classified_strategy_scope(
+        repository,
+        classification=_label_classification(
+            operator_public_id="op-uuid",
+            wallet_public_id="wallet-explicit",
+        ),
+        principal_operator_public_ids=["op-uuid"],
+        allow_admin_lookup_without_operator=False,
+        allow_unscoped_paper=False,
+        require_operator_for_explicit_wallet=False,
+    )
+    assert scope.operator_public_id == "op-uuid"
+    assert scope.wallet_public_id == "wallet-explicit"
+    assert repository.operator_catalogue_lookup_count == 0
+    assert repository.active_lookup_count == 0
 
 
 @pytest.mark.asyncio
