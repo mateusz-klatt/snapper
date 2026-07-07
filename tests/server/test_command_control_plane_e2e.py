@@ -20,16 +20,38 @@ The in-process wiring mirrors production faithfully: the API is one container
 via env, exactly as modelled here.
 """
 
+from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
 
 from snapper.application.process_manager.command_listener import ProcessCommandListener
+from snapper.application.process_manager.launcher import ProcessLauncherService
+from snapper.application.process_manager.models import ProcessConfigModel
+from snapper.config.app import AppSettings
+from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.core.types import ProcessRoleEnum
 from snapper.messaging.security.command_signing import command_signing_key
 from snapper.server.command_ack_registry import ProcessCommandAckRegistry
 
 _MASTER = "shared-master-secret"
+
+
+class _DummySettingsService:
+    """Stub settings service that returns defaults for any key."""
+
+    def get_setting(self, key: str, default: Any) -> Any:
+        """Return the provided default for any key.
+
+        Args:
+            key: Setting key (ignored).
+            default: Value to return.
+
+        Returns:
+            The provided default.
+        """
+        return default
 
 
 def _coordinator_launcher(reconcile: AsyncMock) -> MagicMock:
@@ -178,3 +200,50 @@ async def test_nudge_signed_with_a_different_master_is_rejected() -> None:
 
     assert ack is None
     reconcile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dropped_nudge_is_converged_by_a_reconcile_pass() -> None:
+    """§8 dropped-nudge: a nudge that times out to None is still applied by a reconcile pass.
+
+    Given: an API nudge whose publisher delivers nowhere, so no ack ever arrives,
+    When: the short-timeout nudge returns None and a reconcile pass then runs on
+        a REAL launcher holding an enabled-but-not-started config,
+    Then: the nudge is dropped (None) yet the reconcile pass starts the process,
+        so the dropped nudge still converges via the periodic safety net.
+    """
+    registry = ProcessCommandAckRegistry(command_signing_key(_MASTER), ack_timeout_s=0.01)
+    api_publisher = MagicMock()
+    api_tracker = MagicMock()
+    api_tracker.session_id = "api-session"
+    api_tracker.next_sequence.return_value = 1
+    api_publisher.tracker = api_tracker
+    api_publisher.send = AsyncMock()
+    dropped = await registry.nudge(
+        api_publisher,
+        coordinator="coord-2",
+        process_name="p",
+        action="restart",
+        issued_by="api",
+    )
+    assert dropped is None
+
+    launcher = ProcessLauncherService(
+        AppSettings(BootstrapSettingsLoader(), _DummySettingsService())
+    )
+    launcher.start_process = AsyncMock()
+    launcher._start_native_process_monitoring = MagicMock()
+    launcher.autostart_includes = MagicMock(return_value=True)
+    cfg = ProcessConfigModel(
+        name="p",
+        enabled=True,
+        mode="thread",
+        class_path="x.Y",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        tags=(),
+    )
+    launcher.get_process_configs = AsyncMock(return_value=[cfg])
+    await launcher.reconcile_desired_state()
+    launcher.start_process.assert_awaited_once()

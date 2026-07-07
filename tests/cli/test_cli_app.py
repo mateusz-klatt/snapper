@@ -5300,6 +5300,152 @@ def test_strategies_engine_spawns_reconcile_loop_when_profile_strategy(
     assert "reconcile loop disabled" not in result.output
 
 
+def test_feed_engine_disables_reconcile_loop_when_profile_not_feed(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """§8 driver-not-on-API: a non-FEED profile installs NO reconcile driver.
+
+    Given: a non-feed (API) autostart profile on the feed-engine node,
+    When: the feed-engine command runs,
+    Then: the else branch echoes 'reconcile loop disabled' and constructs NO
+        ProcessCommandListener, so no stray reconcile driver runs where the node
+        does not own reconcile.
+    """
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            return None
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            return None
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            return None
+
+        async def sync_registry_to_database(self) -> None:
+            return None
+
+        async def start_feed_publishers(self) -> None:
+            return None
+
+        async def stop_all_processes(self) -> None:
+            return None
+
+        async def reconcile_desired_state(self) -> None:
+            return None
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        return DummyService()
+
+    async def _clean_shutdown(launcher: Any) -> str | None:
+        return None
+
+    constructed: list[Any] = []
+
+    def _spy_listener(launcher: Any) -> SimpleNamespace:
+        constructed.append(launcher)
+        return SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(
+            zmq_broker_xsub="tcp://broker:7500",
+            process_autostart_profile=ProcessAutostartProfileEnum.API,
+        ),
+    )
+    monkeypatch.setattr(app_module, "discover_processes", lambda: None)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "ProcessCommandListener", _spy_listener)
+    monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _clean_shutdown)
+    result = cli_runner.invoke(app, ["feed-engine"])
+    assert result.exit_code == 0
+    assert "reconcile loop disabled" in result.output
+    assert constructed == []
+
+
+def test_strategies_engine_disables_reconcile_loop_when_profile_not_strategy(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """§8 driver-not-on-API: a non-STRATEGY profile installs NO reconcile driver.
+
+    Given: a non-strategy (API) autostart profile on the strategies-engine node,
+    When: the strategies-engine command runs,
+    Then: the else branch echoes 'reconcile loop disabled' and constructs NO
+        ProcessCommandListener.
+    """
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            return None
+
+    class DummyAiService:
+        def set_msg_publisher(self, publisher: object) -> None:
+            return None
+
+        async def start_bus_listener(self, xpub: str, *, topics: tuple[str, ...]) -> None:
+            return None
+
+        async def stop_bus_listener(self) -> None:
+            return None
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            return None
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            return None
+
+        async def sync_registry_to_database(self) -> None:
+            return None
+
+        async def start_all_processes(self) -> None:
+            return None
+
+        async def emit_summary_snapshot(self) -> None:
+            return None
+
+        async def reconcile_desired_state(self) -> None:
+            return None
+
+        async def stop_all_processes(self) -> None:
+            return None
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        return DummyService()
+
+    async def _no_wait() -> None:
+        return None
+
+    constructed: list[Any] = []
+
+    def _spy_listener(launcher: Any) -> SimpleNamespace:
+        constructed.append(launcher)
+        return SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(
+            zmq_broker_xsub="tcp://broker:7500",
+            zmq_broker_xpub="",
+            process_autostart_profile=ProcessAutostartProfileEnum.API,
+        ),
+    )
+    monkeypatch.setattr(app_module, "discover_processes", lambda: None)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "ProcessCommandListener", _spy_listener)
+    monkeypatch.setattr(app_module, "get_ai_review_service", lambda: DummyAiService())
+    monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
+    result = cli_runner.invoke(app, ["strategies-engine"])
+    assert result.exit_code == 0
+    assert "reconcile loop disabled" in result.output
+    assert constructed == []
+
+
 def test_feed_engine_exits_nonzero_on_publisher_crash(
     monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
 ) -> None:

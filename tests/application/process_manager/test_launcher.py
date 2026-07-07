@@ -3199,6 +3199,74 @@ class TestEmitSitesIntegration:
         assert launcher.active_run_started_at == {}
 
 
+class FakeManagedProcess(RegisterableProcess):
+    """Real managed process with a genuine awaitable stop for reconcile tests.
+
+    Unlike an ``AsyncMock`` stop, driving this through the real
+    :meth:`ProcessLauncherService.stop_process_by_name` exercises the
+    per-name lock acquired around ``await instance.stop()``: a ``hang``
+    stop blocks until ``release`` is set, so a cancelled/timed-out
+    convergence proves the per-name lock is RELEASED on unwind — the
+    lock-structural regression an AsyncMock stop can never surface.
+    """
+
+    def __init__(self, *, hang: bool = False, lock: asyncio.Lock | None = None) -> None:
+        """Build a fake process; ``hang`` blocks ``stop`` until ``release`` is set.
+
+        Args:
+            hang: When True, ``stop`` awaits ``release`` before completing.
+            lock: When given, ``stop`` records whether that lock was held while
+                the stop ran, so a test can prove the reconcile stop path holds
+                the per-name lock around ``await instance.stop()`` (not just that
+                it is released afterwards).
+        """
+        self.started = False
+        self.stop_entered = False
+        self.stop_completed = False
+        self.lock_held_during_stop: bool | None = None
+        self._hang = hang
+        self._lock = lock
+        self.release = asyncio.Event()
+
+    async def start(self) -> None:
+        """Mark the process started (no real work)."""
+        self.started = True
+
+    async def stop(self) -> None:
+        """Stop, optionally blocking on ``release`` to simulate a wedged stop."""
+        self.stop_entered = True
+        if self._lock is not None:
+            self.lock_held_during_stop = self._lock.locked()
+        if self._hang:
+            await self.release.wait()
+        self.stop_completed = True
+
+
+@pytest.mark.asyncio
+async def test_fake_managed_process_contract() -> None:
+    """The reconcile real-stop harness starts, stops, and can hang until released.
+
+    Given: a FakeManagedProcess plus a hang-mode variant,
+    When: start and stop are awaited and the hung stop's release is set,
+    Then: the lifecycle flags track start/stop and the hung stop completes only
+        after release, matching what the reconcile stop path relies on.
+    """
+    proc = FakeManagedProcess()
+    await proc.start()
+    assert proc.started is True
+    await proc.stop()
+    assert proc.stop_entered is True
+    assert proc.stop_completed is True
+    hung = FakeManagedProcess(hang=True)
+    task = asyncio.create_task(hung.stop())
+    await asyncio.sleep(0)
+    assert hung.stop_entered is True
+    assert hung.stop_completed is False
+    hung.release.set()
+    await task
+    assert hung.stop_completed is True
+
+
 class TestReconcileDesiredState:
     """Tests for the desired-state reconcile loop (control plane P0.3)."""
 
@@ -3360,6 +3428,36 @@ class TestReconcileDesiredState:
         launcher._start_native_process_monitoring.assert_called_once()
         launcher._cancel_restart_tasks_locked.assert_awaited_once_with("p")
         assert launcher._last_applied_restart_nonce["p"] == "n1"
+
+    @pytest.mark.asyncio
+    async def test_start_owned_spawns_publisher_in_process_mode(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A reconcile start of a market-data publisher spawns it in PROCESS mode.
+
+        Guards the wiring between _reconcile_start_owned and
+        _prepare_owned_config_for_start end-to-end: the config actually handed
+        to start_process must be force-PROCESSed, not the Setting's persisted
+        THREAD default. A regression that spawned the raw DB config would leave
+        a market-data publisher running in-thread.
+        """
+        self._instrument(launcher)
+        cfg = self._cfg("kraken_feed_publisher", enabled=True, tags=("market-data", "publisher"))
+        started = await launcher._reconcile_start_owned(cfg)
+        assert started is True
+        launcher.start_process.assert_awaited_once()
+        assert launcher.start_process.await_args.args[0].mode == ProcessModeEnum.PROCESS
+
+    @pytest.mark.asyncio
+    async def test_reconcile_one_starts_publisher_in_process_mode(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """The full _reconcile_one start path also force-PROCESSes a publisher."""
+        self._instrument(launcher)
+        cfg = self._cfg("kraken_feed_publisher", enabled=True, tags=("market-data", "publisher"))
+        await launcher._reconcile_one(cfg)
+        launcher.start_process.assert_awaited_once()
+        assert launcher.start_process.await_args.args[0].mode == ProcessModeEnum.PROCESS
 
     @pytest.mark.asyncio
     async def test_start_owned_noop_when_already_running(
@@ -3962,6 +4060,84 @@ class TestReconcileHardening:
         assert launcher.start_process.await_count == 1
         assert launcher.stop_process_by_name.await_count == 1
 
+    @pytest.mark.asyncio
+    async def test_start_owned_no_self_deadlock_with_real_in_lock_cancel(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """§8 deadlock-guard: _reconcile_start_owned runs the REAL in-lock cancel without deadlock.
+
+        Entering through the reconcile entrypoint with the REAL
+        _cancel_restart_tasks_locked (not the _instrument AsyncMock) proves the
+        helper does not re-acquire the same non-reentrant lock the entrypoint
+        already holds. A re-entrant acquisition would hang, which the 2s ceiling
+        converts into a failure.
+        """
+        cfg = self._cfg("p")
+        launcher.start_process = AsyncMock()
+        launcher._start_native_process_monitoring = MagicMock()
+        sleeper = asyncio.get_running_loop().create_task(asyncio.sleep(30))
+        launcher._restart_tasks["p"] = sleeper
+        started = await asyncio.wait_for(launcher._reconcile_start_owned(cfg), timeout=2.0)
+        await asyncio.sleep(0)
+        assert started is True
+        assert sleeper.cancelled()
+        assert launcher._restart_lock_for("p").locked() is False
+
+    @pytest.mark.asyncio
+    async def test_reconcile_restart_real_stop_then_start_no_deadlock(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """§8 deadlock-guard: a real stop releases the per-name lock so the real start re-acquires it.
+
+        _reconcile_restart runs the REAL stop_process_by_name (which holds the
+        per-name lock around ``await instance.stop()``) and then the REAL
+        _reconcile_start_owned (which re-acquires that same lock). A regression
+        where the stop failed to release, or the start nested inside a held
+        lock, would deadlock — bounded here by the 2s ceiling.
+        """
+        fake = FakeManagedProcess()
+        launcher.started_processes["p"] = fake
+        launcher.start_process = AsyncMock()
+        launcher._start_native_process_monitoring = MagicMock()
+        await asyncio.wait_for(
+            launcher._reconcile_restart(self._cfg("p", restart_nonce="n1")), timeout=2.0
+        )
+        assert fake.stop_completed is True
+        launcher.start_process.assert_awaited_once()
+        assert launcher._restart_lock_for("p").locked() is False
+
+    @pytest.mark.asyncio
+    async def test_concurrent_nonce_bump_applies_later_nonce_not_lost(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """§8 tick-vs-nudge (no lost nudge): a nonce advancing between two overlapping passes is applied.
+
+        The complement of the same-nonce no-double-bounce case: two concurrent
+        passes read n1 then n2 (a nudge-carried bump landing while a tick is
+        mid-pass); serialized on _reconcile_lock, the later pass must still see
+        and apply n2 through a REAL stop rather than swallow it.
+        """
+        launcher._start_native_process_monitoring = MagicMock()
+        launcher.autostart_includes = MagicMock(return_value=True)
+        launcher.started_processes["p"] = FakeManagedProcess()
+
+        async def _spawn(config: ProcessConfigModel) -> None:
+            await asyncio.sleep(0.02)
+            launcher.started_processes[config.name] = FakeManagedProcess()
+
+        launcher.start_process = AsyncMock(side_effect=_spawn)
+        reads = iter(
+            [
+                [self._cfg("p", restart_nonce="n1")],
+                [self._cfg("p", restart_nonce="n2")],
+            ]
+        )
+        launcher.get_process_configs = AsyncMock(side_effect=lambda: next(reads))
+        await asyncio.gather(launcher.reconcile_desired_state(), launcher.reconcile_desired_state())
+        assert launcher.start_process.await_count == 2
+        assert launcher._last_applied_restart_nonce["p"] == "n2"
+        assert "p" in launcher.started_processes
+
     def test_clear_watchdog_state_drops_reconcile_counters(
         self, launcher: ProcessLauncherService
     ) -> None:
@@ -3996,3 +4172,116 @@ class TestReconcileHardening:
         assert sleeper.cancelled()
         assert "p" not in launcher._restart_tasks
         assert launcher.is_parked("p") is True
+
+
+class TestReconcileRealStop:
+    """§8 state-matrix with a REAL, non-AsyncMock instance.stop().
+
+    The §3 matrix rows all mock stop_process_by_name, so instance.stop() is
+    never awaited and the per-name lock it holds around the real stop is never
+    taken during a matrix row. These tests drive the REAL stop through
+    reconcile so a lock-structural regression (a stop that fails to release the
+    per-name lock, or a start that re-nests inside a held lock) is caught — the
+    blind spot the AsyncMock stub can never surface.
+    """
+
+    @staticmethod
+    def _cfg(
+        name: str,
+        *,
+        enabled: bool = True,
+        restart_nonce: str | None = None,
+    ) -> ProcessConfigModel:
+        """Build a minimal owned config (delegates to the P0.3 helper).
+
+        Args:
+            name: Process name.
+            enabled: Desired-state enabled flag.
+            restart_nonce: Persisted operator restart nonce.
+
+        Returns:
+            A populated ProcessConfigModel.
+        """
+        return TestReconcileDesiredState._cfg(name, enabled=enabled, restart_nonce=restart_nonce)
+
+    @pytest.mark.asyncio
+    async def test_disabled_running_real_stop_completes_and_releases_lock(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A disabled+running row stops a REAL instance and releases the per-name lock.
+
+        Everything on the stop path stays real (no _instrument): the fake's
+        awaitable stop actually runs under _restart_lock_for('p'), and the lock
+        must be free afterwards.
+        """
+        fake = FakeManagedProcess(lock=launcher._restart_lock_for("p"))
+        launcher.started_processes["p"] = fake
+        await launcher._reconcile_one(self._cfg("p", enabled=False))
+        assert fake.stop_entered is True
+        assert fake.stop_completed is True
+        assert fake.lock_held_during_stop is True
+        assert "p" not in launcher.started_processes
+        assert launcher._restart_lock_for("p").locked() is False
+        assert "p" not in launcher._terminal_no_restart_generation
+
+    @pytest.mark.asyncio
+    async def test_hung_real_stop_is_bounded_and_releases_the_lock(
+        self, launcher: ProcessLauncherService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wedged REAL stop is cancelled by the ceiling, releasing the per-name lock.
+
+        The core §8 debt: a hung instance.stop() held under _restart_lock_for
+        must be bounded by the per-convergence ceiling AND the per-name lock
+        must be RELEASED when the cancellation unwinds (asyncio.CancelledError
+        is a BaseException, so stop_process_by_name's ``except Exception`` does
+        not swallow it and the ``async with`` block releases the lock). The
+        timeout charges the failure budget, and the pass still converges the
+        healthy row. An AsyncMock stop can never exercise this.
+        """
+        monkeypatch.setattr(launcher_module, "_RECONCILE_ONE_TIMEOUT_S", 0.05)
+        fake = FakeManagedProcess(hang=True)
+        launcher.started_processes["p"] = fake
+        launcher.start_process = AsyncMock()
+        launcher._start_native_process_monitoring = MagicMock()
+        launcher.get_process_configs = AsyncMock(
+            return_value=[self._cfg("p", enabled=False), self._cfg("q", enabled=True)]
+        )
+        launcher.autostart_includes = MagicMock(return_value=True)
+        await launcher.reconcile_desired_state()
+        assert fake.stop_entered is True
+        assert fake.stop_completed is False
+        assert launcher._restart_lock_for("p").locked() is False
+        assert launcher._reconcile_start_failures.get("p") == 1
+        started = {call.args[0].name for call in launcher.start_process.await_args_list}
+        assert started == {"q"}
+        fake.release.set()
+
+    @pytest.mark.asyncio
+    async def test_nonce_bounce_real_stop_then_real_start_no_reentrant_deadlock(
+        self, launcher: ProcessLauncherService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operator restart runs a REAL stop then a REAL start without deadlocking.
+
+        The stop releases the per-name lock before the reconcile start
+        re-acquires it. A regression that held the lock across the stop→start
+        seam would hang; the 1s ceiling converts that into a failure instead.
+        """
+        monkeypatch.setattr(launcher_module, "_RECONCILE_ONE_TIMEOUT_S", 1.0)
+        fake = FakeManagedProcess()
+        launcher.started_processes["p"] = fake
+        launcher._start_native_process_monitoring = MagicMock()
+
+        def _respawn(config: ProcessConfigModel) -> None:
+            launcher.started_processes[config.name] = FakeManagedProcess()
+
+        launcher.start_process = AsyncMock(side_effect=_respawn)
+        launcher.get_process_configs = AsyncMock(
+            return_value=[self._cfg("p", enabled=True, restart_nonce="n1")]
+        )
+        launcher.autostart_includes = MagicMock(return_value=True)
+        await launcher.reconcile_desired_state()
+        assert fake.stop_completed is True
+        launcher.start_process.assert_awaited_once()
+        assert launcher._last_applied_restart_nonce["p"] == "n1"
+        assert launcher._restart_lock_for("p").locked() is False
+        assert launcher._reconcile_start_failures.get("p") is None

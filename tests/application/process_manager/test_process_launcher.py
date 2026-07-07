@@ -921,6 +921,48 @@ class TestStartAllProcesses:
         repository.list_grant_covered_instrument_public_ids.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_reconcile_start_fails_closed_when_grant_revoked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§8 grant-revoked: the reconcile start path fails closed on a REAL revoked grant.
+
+        The boot path proves the grant gate; this drives the SAME real resolver
+        (enforce_classified_strategy_scope_complete via _prepare_owned_config_for_start)
+        through the RECONCILE start path. With a live grant a reconcile start
+        spawns the strategy; once the grant is revoked (empty active grants) the
+        next reconcile start raises and counts a reconcile failure instead of
+        spawning — a real revoked grant, not a synthetic exception injected at
+        the scope boundary.
+        """
+        config = _strategy_autostart_config()
+        repository = MagicMock(spec=SQLAlchemyRepository)
+        repository.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-live")]
+        )
+        repository.list_active_scope_grants_for_wallet = AsyncMock(
+            return_value=[{"operator_public_id": "op-1"}]
+        )
+        repository.list_grant_covered_instrument_public_ids = AsyncMock(
+            return_value={"instrument-btc"}
+        )
+        repository.get_instrument_public_ids_by_symbols = AsyncMock(
+            return_value={"orders.BTC-USD": "instrument-btc"}
+        )
+        factory = ProcessLauncherService(_create_settings())
+        factory.start_process = AsyncMock()
+        factory._start_native_process_monitoring = MagicMock()
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+
+        await factory._reconcile_one(config)
+        factory.start_process.assert_awaited_once()
+
+        repository.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+        with pytest.raises(StrategyScopeError):
+            await factory._reconcile_one(config)
+        assert factory.start_process.await_count == 1
+        assert factory._reconcile_start_failures.get("strategy") == 1
+
+    @pytest.mark.asyncio
     async def test_start_all_processes_enforces_registry_strategy_over_core_row(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
