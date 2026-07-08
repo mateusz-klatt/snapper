@@ -4086,6 +4086,35 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def list_ai_reviews(
+        self,
+        *,
+        limit: int,
+        status: str | None = None,
+        wallet_public_id: str | None = None,
+        strategy_public_id: str | None = None,
+        operator_public_ids: list[str] | None = None,
+    ) -> list[AiReviewRow]:
+        """List :class:`AiReview` rows for operator/admin observability.
+
+        Newest-first (``created_at DESC``), bounded by ``limit``, with
+        optional exact-match ``status`` / ``wallet_public_id`` /
+        ``strategy_public_id`` filters. Unlike
+        :meth:`list_pending_reviews_for_delegate` this is NOT keyed by a
+        delegate identity and returns terminal (decided) rows too, so an
+        operator can audit what the AI actually decided. Backs the
+        ``GET /api/ai-reviews`` admin/operator REST endpoint.
+
+        ``operator_public_ids`` narrows the snapshot to reviews owned by
+        those operators — the route passes the caller's operator
+        memberships for a non-admin so an operator cannot read another
+        book's reviews; ``None`` (admin) returns every operator's rows.
+        An empty list matches nothing (an operator with no memberships
+        sees no reviews).
+        """
+        ...
+
+    @abstractmethod
     async def insert_ai_review(self, row: AiReviewInsertRow) -> str:
         """INSERT new :class:`AiReview` row; returns ``public_id``.
 
@@ -15855,6 +15884,39 @@ class SQLAlchemyRepository(Repository):
             )
             return {status: int(count) for status, count in result.all()}
 
+    @staticmethod
+    def _ai_review_row_from_orm(row: AiReview) -> AiReviewRow:
+        """Project an :class:`AiReview` ORM row into an :class:`AiReviewRow`."""
+        return cast(
+            AiReviewRow,
+            {
+                "public_id": row.public_id,
+                "session_id": row.session_id,
+                "sequence_id": row.sequence_id,
+                "user_public_id": row.user_public_id,
+                "operator_public_id": row.operator_public_id,
+                "wallet_public_id": row.wallet_public_id,
+                "instrument_public_id": row.instrument_public_id,
+                "strategy_public_id": row.strategy_public_id,
+                "selected_delegate_public_id": row.selected_delegate_public_id,
+                "responding_delegate_public_id": row.responding_delegate_public_id,
+                "resolution_mode": row.resolution_mode,
+                "status": row.status,
+                "signal_envelope": row.signal_envelope,
+                "signal_snapshot_hash": row.signal_snapshot_hash,
+                "instrument_metadata": row.instrument_metadata,
+                "deadline": row.deadline,
+                "fanout_after": row.fanout_after,
+                "decision": row.decision,
+                "rationale": row.rationale,
+                "dispatch_version": row.dispatch_version,
+                "counter_decremented_at": row.counter_decremented_at,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+                "resolved_at": row.resolved_at,
+            },
+        )
+
     async def get_ai_review(self, review_public_id: str) -> AiReviewRow | None:
         """Fetch :class:`AiReview` row by public_id."""
         async with self.session() as s:
@@ -15863,35 +15925,40 @@ class SQLAlchemyRepository(Repository):
             ).scalar_one_or_none()
             if row is None:
                 return None
-            return cast(
-                AiReviewRow,
-                {
-                    "public_id": row.public_id,
-                    "session_id": row.session_id,
-                    "sequence_id": row.sequence_id,
-                    "user_public_id": row.user_public_id,
-                    "operator_public_id": row.operator_public_id,
-                    "wallet_public_id": row.wallet_public_id,
-                    "instrument_public_id": row.instrument_public_id,
-                    "strategy_public_id": row.strategy_public_id,
-                    "selected_delegate_public_id": row.selected_delegate_public_id,
-                    "responding_delegate_public_id": row.responding_delegate_public_id,
-                    "resolution_mode": row.resolution_mode,
-                    "status": row.status,
-                    "signal_envelope": row.signal_envelope,
-                    "signal_snapshot_hash": row.signal_snapshot_hash,
-                    "instrument_metadata": row.instrument_metadata,
-                    "deadline": row.deadline,
-                    "fanout_after": row.fanout_after,
-                    "decision": row.decision,
-                    "rationale": row.rationale,
-                    "dispatch_version": row.dispatch_version,
-                    "counter_decremented_at": row.counter_decremented_at,
-                    "created_at": row.created_at,
-                    "updated_at": row.updated_at,
-                    "resolved_at": row.resolved_at,
-                },
-            )
+            return self._ai_review_row_from_orm(row)
+
+    async def list_ai_reviews(
+        self,
+        *,
+        limit: int,
+        status: str | None = None,
+        wallet_public_id: str | None = None,
+        strategy_public_id: str | None = None,
+        operator_public_ids: list[str] | None = None,
+    ) -> list[AiReviewRow]:
+        """List :class:`AiReview` rows newest-first for operator audit.
+
+        NOT delegate-keyed and includes terminal decided rows, so an
+        operator/admin can see what the AI decided. Optional exact-match
+        filters narrow by ``status`` / ``wallet_public_id`` /
+        ``strategy_public_id``. ``operator_public_ids`` (when provided)
+        restricts the snapshot to those operators' reviews — the route
+        passes a non-admin caller's memberships so an operator cannot
+        read another book's reviews; an empty list matches nothing.
+        """
+        async with self.session() as s:
+            query = select(AiReview)
+            if status is not None:
+                query = query.where(AiReview.status == status)
+            if wallet_public_id is not None:
+                query = query.where(AiReview.wallet_public_id == wallet_public_id)
+            if strategy_public_id is not None:
+                query = query.where(AiReview.strategy_public_id == strategy_public_id)
+            if operator_public_ids is not None:
+                query = query.where(AiReview.operator_public_id.in_(operator_public_ids))
+            query = query.order_by(AiReview.created_at.desc()).limit(limit)
+            rows = (await s.execute(query)).scalars().all()
+            return [self._ai_review_row_from_orm(row) for row in rows]
 
     async def insert_ai_review(self, row: AiReviewInsertRow) -> str:
         """INSERT new :class:`AiReview` row; returns ``public_id``."""

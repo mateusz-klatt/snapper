@@ -47,8 +47,10 @@ from snapper.application.ai_review.service import ERROR_REVIEW_EXPIRED
 from snapper.application.ai_review.service import ERROR_REVIEW_NOT_FOUND
 from snapper.application.ai_review.service import get_ai_review_service
 from snapper.auth.dependencies import require_permission
+from snapper.auth.dependencies import require_role
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.core.json_types import JsonObject
@@ -155,6 +157,43 @@ class PendingReviewListResponse(StrictBody):
     """Top-level envelope for ``GET /api/ai-reviews/pending`` payloads."""
 
     items: list[PendingReviewSummaryItem]
+    count: int
+
+
+class AdminAiReviewItem(StrictBody):
+    """Per-row shape returned by ``GET /api/ai-reviews`` (operator audit).
+
+    Carries the full state-machine outcome — ``status``, ``decision``,
+    ``rationale``, ``resolution_mode`` and the responding delegate — so
+    an operator/admin can see WHAT the AI decided and WHY, plus the raw
+    ``signal_envelope`` (thesis / side / news anchors) for context. This
+    is the read-only, non-delegate-scoped counterpart to the pending
+    inbox.
+    """
+
+    review_public_id: str
+    strategy_public_id: str
+    user_public_id: str
+    operator_public_id: str
+    wallet_public_id: str
+    instrument_public_id: str
+    selected_delegate_public_id: str
+    responding_delegate_public_id: str | None
+    status: str
+    decision: str | None
+    rationale: str | None
+    resolution_mode: str | None
+    dispatch_version: int
+    created_at: datetime
+    resolved_at: datetime | None
+    deadline: datetime
+    signal_envelope: JsonObject | None = None
+
+
+class AdminAiReviewListResponse(StrictBody):
+    """Top-level envelope for ``GET /api/ai-reviews`` payloads."""
+
+    items: list[AdminAiReviewItem]
     count: int
 
 
@@ -342,6 +381,81 @@ async def list_pending_ai_reviews(
         for row in rows
     ]
     return PendingReviewListResponse(items=items, count=len(items))
+
+
+@router.get(
+    "",
+    responses={
+        status.HTTP_403_FORBIDDEN: {"description": "Caller lacks the operator role"},
+    },
+)
+async def list_ai_reviews_route(
+    principal: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    wallet_public_id: Annotated[str | None, Query()] = None,
+    strategy_public_id: Annotated[str | None, Query()] = None,
+) -> AdminAiReviewListResponse:
+    """List AI reviews newest-first for operator/admin observability.
+
+    Read-only audit surface answering "what did the AI decide?". Gated
+    at OPERATOR (operator + admin). Unlike ``/pending`` it is NOT keyed
+    by ``AuthPrincipal.delegate_public_id`` (so it does not 422 for a
+    non-delegate) and it returns terminal decided rows, not only pending
+    ones. Optional exact-match query filters narrow the snapshot.
+
+    Scope: an ADMIN sees every operator's reviews; a non-admin OPERATOR
+    is narrowed server-side to the operators it is a member of
+    (``AuthPrincipal.operator_public_ids``) so it cannot read another
+    book's reviews. This mirrors the non-admin narrowing on the other
+    list surfaces (scope grants, orders/alerts scope filters).
+
+    Args:
+        principal: Authenticated OPERATOR/ADMIN caller (drives scoping).
+        repo: Repository handle.
+        limit: Max rows returned (clamped to ``[1, 500]``).
+        status_filter: Optional ``status`` filter (query alias
+            ``status``; the Python name avoids shadowing
+            :mod:`fastapi.status`).
+        wallet_public_id: Optional wallet filter.
+        strategy_public_id: Optional strategy filter.
+
+    Returns:
+        :class:`AdminAiReviewListResponse` with up to ``limit`` items,
+        newest first.
+    """
+    operator_scope = None if principal.role == UserRole.ADMIN else principal.operator_public_ids
+    rows = await repo.list_ai_reviews(
+        limit=limit,
+        status=status_filter,
+        wallet_public_id=wallet_public_id,
+        strategy_public_id=strategy_public_id,
+        operator_public_ids=operator_scope,
+    )
+    items = [
+        AdminAiReviewItem(
+            review_public_id=row["public_id"],
+            strategy_public_id=row["strategy_public_id"],
+            user_public_id=row["user_public_id"],
+            operator_public_id=row["operator_public_id"],
+            wallet_public_id=row["wallet_public_id"],
+            instrument_public_id=row["instrument_public_id"],
+            selected_delegate_public_id=row["selected_delegate_public_id"],
+            responding_delegate_public_id=row["responding_delegate_public_id"],
+            status=row["status"],
+            decision=row["decision"],
+            rationale=row["rationale"],
+            resolution_mode=row["resolution_mode"],
+            dispatch_version=row["dispatch_version"],
+            created_at=row["created_at"],
+            resolved_at=row["resolved_at"],
+            deadline=row["deadline"],
+            signal_envelope=row["signal_envelope"],
+        )
+        for row in rows
+    ]
+    return AdminAiReviewListResponse(items=items, count=len(items))
 
 
 __all__: list[Any] = ["router"]

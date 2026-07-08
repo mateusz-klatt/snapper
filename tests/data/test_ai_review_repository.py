@@ -409,6 +409,170 @@ async def test_insert_and_get_ai_review_round_trip(tmp_path: Path) -> None:
     assert row["decision"] is None
 
 
+async def _insert_review_row(
+    repo: SQLAlchemyRepository,
+    *,
+    as_of: datetime,
+    status: str = "pending",
+    wallet_public_id: str | None = None,
+    strategy_public_id: str | None = None,
+    operator_public_id: str | None = None,
+    created_at: datetime | None = None,
+) -> str:
+    """Insert a minimal AiReview row for ``list_ai_reviews`` tests; return public_id."""
+    review_id = str(uuid7())
+    created = created_at if created_at is not None else as_of
+    await repo.insert_ai_review(
+        {
+            "public_id": review_id,
+            "session_id": str(uuid7()),
+            "sequence_id": 1,
+            "user_public_id": str(uuid7()),
+            "operator_public_id": (
+                operator_public_id if operator_public_id is not None else str(uuid7())
+            ),
+            "wallet_public_id": wallet_public_id if wallet_public_id is not None else str(uuid7()),
+            "instrument_public_id": str(uuid7()),
+            "strategy_public_id": (
+                strategy_public_id if strategy_public_id is not None else str(uuid7())
+            ),
+            "selected_delegate_public_id": str(uuid7()),
+            "status": status,
+            "signal_envelope": {"side": "buy"},
+            "signal_snapshot_hash": "h",
+            "instrument_metadata": {},
+            "deadline": as_of + timedelta(seconds=60),
+            "fanout_after": as_of + timedelta(seconds=30),
+            "dispatch_version": 0,
+            "created_at": created,
+            "updated_at": created,
+        }
+    )
+    return review_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_list_ai_reviews_returns_empty_on_empty_table(tmp_path: Path) -> None:
+    """No rows -> empty list (no crash, no filters applied)."""
+    repo = await _build_repo(tmp_path, "list_reviews_empty.db")
+    result = await repo.list_ai_reviews(limit=100)
+    assert result == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_list_ai_reviews_orders_newest_first_and_respects_limit(tmp_path: Path) -> None:
+    """Rows come back ``created_at DESC`` and ``limit`` caps the snapshot."""
+    repo = await _build_repo(tmp_path, "list_reviews_order.db")
+    now = _now()
+    older = await _insert_review_row(repo, as_of=now, created_at=now - timedelta(seconds=10))
+    newer = await _insert_review_row(repo, as_of=now, created_at=now)
+    result = await repo.list_ai_reviews(limit=100)
+    assert [r["public_id"] for r in result] == [newer, older]
+    limited = await repo.list_ai_reviews(limit=1)
+    assert [r["public_id"] for r in limited] == [newer]
+
+
+async def _mark_review_resolved(
+    repo: SQLAlchemyRepository,
+    *,
+    review_public_id: str,
+    decision: str,
+    responding_delegate_public_id: str,
+    as_of: datetime,
+) -> None:
+    """Flip a pending review to ``resolved_approved`` consistently (direct UPDATE).
+
+    Satisfies ``ck_ai_reviews_status_consistency`` (terminal status needs a
+    non-NULL decision / responding delegate / resolution_mode / resolved_at)
+    without threading the full admission + resolve service path.
+    """
+    async with repo.session() as s:
+        await s.execute(
+            __import__("sqlalchemy")
+            .update(AiReview)
+            .where(AiReview.public_id == review_public_id)
+            .values(
+                status="resolved_approved",
+                decision=decision,
+                responding_delegate_public_id=responding_delegate_public_id,
+                resolution_mode="pick_one_primary",
+                resolved_at=as_of,
+                updated_at=as_of,
+            )
+        )
+        await s.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_list_ai_reviews_filters_by_status(tmp_path: Path) -> None:
+    """The ``status`` filter narrows to matching rows only."""
+    repo = await _build_repo(tmp_path, "list_reviews_status.db")
+    now = _now()
+    await _insert_review_row(repo, as_of=now, status="pending")
+    dispatched = await _insert_review_row(repo, as_of=now, status="fanout_dispatched")
+    result = await repo.list_ai_reviews(limit=100, status="fanout_dispatched")
+    assert [r["public_id"] for r in result] == [dispatched]
+    assert result[0]["status"] == "fanout_dispatched"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_list_ai_reviews_surfaces_terminal_decision(tmp_path: Path) -> None:
+    """A resolved review surfaces its ``decision`` — the operator-audit contract."""
+    repo = await _build_repo(tmp_path, "list_reviews_decision.db")
+    now = _now()
+    review_id = await _insert_review_row(repo, as_of=now)
+    await _mark_review_resolved(
+        repo,
+        review_public_id=review_id,
+        decision="approve",
+        responding_delegate_public_id=str(uuid7()),
+        as_of=now,
+    )
+    result = await repo.list_ai_reviews(limit=100)
+    assert len(result) == 1
+    assert result[0]["status"] == "resolved_approved"
+    assert result[0]["decision"] == "approve"
+    assert result[0]["responding_delegate_public_id"] is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_list_ai_reviews_filters_by_wallet_and_strategy(tmp_path: Path) -> None:
+    """The ``wallet_public_id`` and ``strategy_public_id`` filters both narrow exactly."""
+    repo = await _build_repo(tmp_path, "list_reviews_wallet_strategy.db")
+    now = _now()
+    wallet = str(uuid7())
+    strategy = str(uuid7())
+    target = await _insert_review_row(
+        repo, as_of=now, wallet_public_id=wallet, strategy_public_id=strategy
+    )
+    await _insert_review_row(repo, as_of=now)
+    by_wallet = await repo.list_ai_reviews(limit=100, wallet_public_id=wallet)
+    assert [r["public_id"] for r in by_wallet] == [target]
+    by_strategy = await repo.list_ai_reviews(limit=100, strategy_public_id=strategy)
+    assert [r["public_id"] for r in by_strategy] == [target]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_list_ai_reviews_filters_by_operator_membership(tmp_path: Path) -> None:
+    """``operator_public_ids`` restricts the snapshot to those operators' reviews."""
+    repo = await _build_repo(tmp_path, "list_reviews_operator.db")
+    now = _now()
+    op_mine = str(uuid7())
+    op_other = str(uuid7())
+    mine = await _insert_review_row(repo, as_of=now, operator_public_id=op_mine)
+    await _insert_review_row(repo, as_of=now, operator_public_id=op_other)
+    scoped = await repo.list_ai_reviews(limit=100, operator_public_ids=[op_mine])
+    assert [r["public_id"] for r in scoped] == [mine]
+    empty = await repo.list_ai_reviews(limit=100, operator_public_ids=[])
+    assert empty == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
 async def test_get_ai_delegate_by_user_public_id_returns_none_when_unknown(

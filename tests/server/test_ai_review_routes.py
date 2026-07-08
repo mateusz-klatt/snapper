@@ -440,3 +440,134 @@ class TestListPendingRoute:
         kwargs = repo.list_pending_reviews_for_delegate.await_args.kwargs
         assert kwargs["wallet_public_id"] == "wal-9"
         assert kwargs["selected_delegate_public_id"] == "del-1"
+
+
+def _admin_principal() -> AuthPrincipal:
+    """ADMIN principal — above the OPERATOR gate on ``GET /api/ai-reviews``."""
+    return AuthPrincipal(
+        username="admin-1",
+        role=UserRole.ADMIN,
+        user_public_id="admin-user-1",
+        operator_public_ids=["op-1"],
+        primary_operator_public_id="op-1",
+    )
+
+
+def _admin_review_row(**overrides: Any) -> dict[str, Any]:
+    """Build a full ``AiReviewRow``-shaped dict for the list route mock."""
+    now = datetime(2026, 7, 8, 12, 0, 0, tzinfo=UTC)
+    base: dict[str, Any] = {
+        "public_id": "rev-1",
+        "session_id": "sess-1",
+        "sequence_id": 1,
+        "user_public_id": "user-1",
+        "operator_public_id": "op-1",
+        "wallet_public_id": "wal-1",
+        "instrument_public_id": "inst-1",
+        "strategy_public_id": "strat-1",
+        "selected_delegate_public_id": "del-1",
+        "responding_delegate_public_id": "del-1",
+        "resolution_mode": "pick_one_primary",
+        "status": "resolved_approved",
+        "signal_envelope": {"side": "buy", "thesis": "t"},
+        "signal_snapshot_hash": "h",
+        "instrument_metadata": {},
+        "deadline": now + timedelta(seconds=60),
+        "fanout_after": now + timedelta(seconds=30),
+        "decision": "approve",
+        "rationale": "looks good",
+        "dispatch_version": 0,
+        "counter_decremented_at": None,
+        "created_at": now,
+        "updated_at": now,
+        "resolved_at": now,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestListAiReviewsRoute:
+    """``GET /api/ai-reviews`` operator/admin read-only observability surface."""
+
+    def test_operator_sees_review_with_decision(self) -> None:
+        """An operator gets the terminal decision + rationale + envelope."""
+        repo = AsyncMock()
+        repo.list_ai_reviews = AsyncMock(return_value=[_admin_review_row()])
+        client = _create_client(repo=repo, principal=_operator_principal())
+        response = client.get("/api/ai-reviews")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 1
+        item = body["items"][0]
+        assert item["review_public_id"] == "rev-1"
+        assert item["decision"] == "approve"
+        assert item["rationale"] == "looks good"
+        assert item["status"] == "resolved_approved"
+        assert item["responding_delegate_public_id"] == "del-1"
+        assert item["signal_envelope"] == {"side": "buy", "thesis": "t"}
+        kwargs = repo.list_ai_reviews.await_args.kwargs
+        assert kwargs["operator_public_ids"] == ["op-1"]
+
+    def test_operator_is_scoped_to_its_operator_memberships(self) -> None:
+        """A non-admin operator only sees its own operators' reviews (no cross-tenant read)."""
+        repo = AsyncMock()
+        repo.list_ai_reviews = AsyncMock(return_value=[])
+        client = _create_client(repo=repo, principal=_operator_principal())
+        response = client.get("/api/ai-reviews")
+        assert response.status_code == 200
+        kwargs = repo.list_ai_reviews.await_args.kwargs
+        assert kwargs["operator_public_ids"] == ["op-1"]
+
+    def test_admin_is_allowed_and_unscoped(self) -> None:
+        """ADMIN is admitted and sees every operator's rows (no operator scoping)."""
+        repo = AsyncMock()
+        repo.list_ai_reviews = AsyncMock(return_value=[])
+        client = _create_client(repo=repo, principal=_admin_principal())
+        response = client.get("/api/ai-reviews")
+        assert response.status_code == 200
+        assert response.json()["count"] == 0
+        kwargs = repo.list_ai_reviews.await_args.kwargs
+        assert kwargs["operator_public_ids"] is None
+
+    def test_viewer_is_forbidden(self) -> None:
+        """VIEWER is below the OPERATOR gate -> 403."""
+        repo = AsyncMock()
+        repo.list_ai_reviews = AsyncMock(return_value=[])
+        client = _create_client(repo=repo, principal=_viewer_principal())
+        response = client.get("/api/ai-reviews")
+        assert response.status_code == 403
+
+    def test_delegate_is_forbidden(self) -> None:
+        """AI_DELEGATE (role below OPERATOR) is 403 and cannot read other books' reviews."""
+        repo = AsyncMock()
+        repo.list_ai_reviews = AsyncMock(return_value=[])
+        client = _create_client(repo=repo, principal=_delegate_principal())
+        response = client.get("/api/ai-reviews")
+        assert response.status_code == 403
+        repo.list_ai_reviews.assert_not_awaited()
+
+    def test_query_filters_threaded_to_repo(self) -> None:
+        """``status`` / ``wallet_public_id`` / ``strategy_public_id`` / ``limit`` forward."""
+        repo = AsyncMock()
+        repo.list_ai_reviews = AsyncMock(return_value=[])
+        client = _create_client(repo=repo, principal=_operator_principal())
+        response = client.get(
+            "/api/ai-reviews?status=resolved_approved&wallet_public_id=wal-9"
+            "&strategy_public_id=strat-9&limit=25"
+        )
+        assert response.status_code == 200
+        repo.list_ai_reviews.assert_awaited_once()
+        kwargs = repo.list_ai_reviews.await_args.kwargs
+        assert kwargs["status"] == "resolved_approved"
+        assert kwargs["wallet_public_id"] == "wal-9"
+        assert kwargs["strategy_public_id"] == "strat-9"
+        assert kwargs["limit"] == 25
+        assert kwargs["operator_public_ids"] == ["op-1"]
+
+    def test_limit_out_of_range_is_422(self) -> None:
+        """``limit=0`` violates the ``ge=1`` bound -> 422 before the repo call."""
+        repo = AsyncMock()
+        repo.list_ai_reviews = AsyncMock(return_value=[])
+        client = _create_client(repo=repo, principal=_operator_principal())
+        response = client.get("/api/ai-reviews?limit=0")
+        assert response.status_code == 422
