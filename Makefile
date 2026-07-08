@@ -620,9 +620,11 @@ endif
 
 docker-build-dev:
 	docker build --build-arg UID=$(DOCKER_DEV_UID) --target runtime -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	docker image prune -f
 
 docker-build-prod:
 	docker build --build-arg UID=$(DOCKER_PROD_UID) --target runtime -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	docker image prune -f
 
 docker-migrate-dev:
 	$(DOCKER_RUN) db-init
