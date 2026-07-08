@@ -9,6 +9,14 @@ Mirrors scripts/ui_refresh.py but uses npm (snapper-mcp's package manager of
 record) and npm-check-updates for the latest-version bump, since snapper-mcp
 ships its own ``package-lock.json`` and is published as a standalone npm
 package.
+
+``PROTECTED_DEPENDENCIES`` are held at their current ranges rather than bumped
+to ``latest`` because a newer major would break an ``npm install`` peer
+resolution: ``eslint`` / ``@eslint/js`` are pinned to the major the flat-config
+plugins support, and ``typescript`` is held below 6.1.0 because the latest
+stable ``@typescript-eslint/*`` (8.x) declares a peer of ``typescript
+>=4.8.4 <6.1.0`` and does not yet support TypeScript 7. Un-protect ``typescript``
+and bump both together once a stable typescript-eslint widens that peer range.
 """
 
 from pathlib import Path
@@ -22,7 +30,7 @@ from scripts.ui_refresh import write_package_json
 
 MCP_DIR_NAME = "integrations/snapper-mcp"
 NPM_LOCK_FILE = "package-lock.json"
-PROTECTED_DEPENDENCIES: tuple[str, ...] = ("eslint", "@eslint/js")
+PROTECTED_DEPENDENCIES: tuple[str, ...] = ("eslint", "@eslint/js", "typescript")
 
 
 def remove_npm_lock_file(mcp_dir: Path) -> bool:
