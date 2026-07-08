@@ -61,7 +61,7 @@ psycopg2-binary = "^2.9.12"
 ruff = "^0.15.20"
 black = {extras = ["jupyter"], version = "^26.5.1"}
 isort = "^8.0.1"
-mypy = "^2.1.0"
+mypy = "^2.2.0"
 types-PyYAML = ">=6.0.12.20260518"
 pytest = "^9.1.1"
 pytest-asyncio = "^1.4.0"
