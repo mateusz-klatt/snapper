@@ -407,10 +407,13 @@ primitive; the service admits it only when an eligible delegate's
 connect handshake bumps `last_seen_at`, and every client ping re-bumps
 it (throttled server-side to at most one write per 5s per delegate).
 The bundled `HeartbeatConsult` strategy exercises the full loop with
-one consult per 1h candle and a target-flat (`strength=0.0`) paper
-signal on approval; its process config must supply UUID7
-`ai_review_user_public_id` and `ai_review_strategy_public_id` params
-plus a scoped wallet/operator pair whose grant covers the output
+one consult per 1h candle and, on approval, a paper signal at the
+configurable `heartbeat_signal_strength` param (default `0.0` =
+target-flat, opening no position; a value in `[0.0, 1.0]` opens an
+actionable paper long so the signal→order→fill→position plane is
+exercised — still paper-only by construction). Its process config must
+supply UUID7 `ai_review_user_public_id` and `ai_review_strategy_public_id`
+params plus a scoped wallet/operator pair whose grant covers the output
 instrument.
 
 Operator steps to arm the wake surface:

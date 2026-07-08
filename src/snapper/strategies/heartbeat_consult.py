@@ -1,13 +1,18 @@
 """Heartbeat CONSULT strategy exercising the AI-review wake path.
 
-Emits one AI-delegate CONSULT per completed higher-timeframe candle
-(1h by default config) and, on an approved decision, publishes a
-target-flat signal (``strength=0.0``) so the emit path with AI-review
-attribution is exercised without ever opening a position. The strategy
-exists to prove the strategy -> ``ai_reviews`` -> MCP-delegate wake ->
-decision -> resume loop end-to-end (plan
-``plan_2026_07_03_strategy_runtime_split_and_mcp_wake.md`` P1); it is
-NOT a trading strategy and refuses to run outside the paper exchange.
+Emits one AI-delegate CONSULT per completed candle (1h by default
+config) and, on an approved decision, publishes a signal whose strength
+is the configurable ``heartbeat_signal_strength`` param. The default
+(0.0) keeps the historical target-flat behaviour — the emit path with
+AI-review attribution is exercised without ever opening a position —
+while a value in ``[0.0, 1.0]`` lets an approved round emit an actionable
+PAPER long so the full signal -> order -> fill -> position execution
+plane can be exercised end-to-end. The strategy proves the strategy ->
+``ai_reviews`` -> MCP-delegate wake -> decision -> resume loop
+(plan ``plan_2026_07_03_strategy_runtime_split_and_mcp_wake.md`` P1) and
+remains PAPER-ONLY by construction (the constructor rejects any non-paper
+exchange), so even an actionable strength can never carry live-order
+intent.
 
 Identity requirements: the outbound ``ai_reviews.{user}.{strategy}.request``
 frame topic validates both ids as UUID7 at publish time while the review
@@ -60,6 +65,20 @@ resolves long before the next bar can open a new one.
 MIN_CONSULT_DEADLINE_SECONDS = 5
 MAX_CONSULT_DEADLINE_SECONDS = 300
 
+MIN_HEARTBEAT_SIGNAL_STRENGTH = 0.0
+"""Lower bound for the configurable emit strength (0.0 = target-flat, no position)."""
+
+MAX_HEARTBEAT_SIGNAL_STRENGTH = 1.0
+"""Upper bound; downstream ``SignalData.strength`` enforces the same [0.0, 1.0] cap."""
+
+DEFAULT_HEARTBEAT_SIGNAL_STRENGTH = 0.0
+"""Default emit strength.
+
+0.0 preserves the historical target-flat heartbeat (an approved round
+opens no position); a higher value in ``[0.0, 1.0]`` makes an approved
+round emit an actionable paper long, exercising the execution plane.
+"""
+
 
 @register_strategy("HeartbeatConsult")
 @create_strategy_process(
@@ -73,6 +92,7 @@ MAX_CONSULT_DEADLINE_SECONDS = 300
             "ai_review_user_public_id": "",
             "ai_review_strategy_public_id": "",
             "ai_review_deadline_seconds": DEFAULT_CONSULT_DEADLINE_SECONDS,
+            "heartbeat_signal_strength": DEFAULT_HEARTBEAT_SIGNAL_STRENGTH,
         },
     },
 )
@@ -99,6 +119,9 @@ class HeartbeatConsult(BaseStrategy):
             strategy instance on review rows and wake-frame topics;
             seeded once by the operator in the process config.
         consult_deadline_seconds: Per-round decision deadline.
+        consult_signal_strength: Emit strength for an approved round in
+            ``[0.0, 1.0]``; 0.0 (default) stays target-flat, higher opens
+            an actionable paper long.
     """
 
     REFERENCE_IDENTITY_PARAMS: ClassVar[Mapping[str, str]] = {"ai_review_user_public_id": "user"}
@@ -111,11 +134,14 @@ class HeartbeatConsult(BaseStrategy):
             config: Strategy configuration; must use the paper exchange
                 and carry UUID7 ``ai_review_user_public_id`` and
                 ``ai_review_strategy_public_id`` params plus a sane
-                ``ai_review_deadline_seconds``.
+                ``ai_review_deadline_seconds`` and an optional
+                ``heartbeat_signal_strength`` in ``[0.0, 1.0]``
+                (default 0.0 = target-flat).
 
         Raises:
             ValueError: Non-paper exchange, missing/non-UUID7 identity
-                params, or an out-of-range deadline.
+                params, an out-of-range deadline, or an out-of-range
+                ``heartbeat_signal_strength``.
         """
         super().__init__(config)
         if config.exchange != ExchangeEnum.PAPER:
@@ -151,9 +177,20 @@ class HeartbeatConsult(BaseStrategy):
                 f"[{MIN_CONSULT_DEADLINE_SECONDS}, {MAX_CONSULT_DEADLINE_SECONDS}], "
                 f"got {deadline_seconds}"
             )
+        signal_strength = float(
+            self.params.get("heartbeat_signal_strength", DEFAULT_HEARTBEAT_SIGNAL_STRENGTH)
+            or DEFAULT_HEARTBEAT_SIGNAL_STRENGTH
+        )
+        if not MIN_HEARTBEAT_SIGNAL_STRENGTH <= signal_strength <= MAX_HEARTBEAT_SIGNAL_STRENGTH:
+            raise ValueError(
+                f"Strategy {config.name}: param 'heartbeat_signal_strength' must be in "
+                f"[{MIN_HEARTBEAT_SIGNAL_STRENGTH}, {MAX_HEARTBEAT_SIGNAL_STRENGTH}] "
+                f"(downstream SignalData enforces the same bound), got {signal_strength}"
+            )
         self.consult_user_public_id = user_public_id
         self.consult_strategy_public_id = strategy_public_id
         self.consult_deadline_seconds = deadline_seconds
+        self.consult_signal_strength = signal_strength
         self._last_consult_open_at: datetime | None = None
 
     async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
@@ -161,9 +198,10 @@ class HeartbeatConsult(BaseStrategy):
 
         A revised or republished bar for an already-consulted ``open_at``
         never re-consults (one decision per window regardless of the
-        prior round's outcome). Approved rounds emit the target-flat
-        heartbeat signal directly via :meth:`BaseStrategy.emit_signal`
-        so the AI-review attribution is stamped; the callback itself
+        prior round's outcome). Approved rounds emit the heartbeat signal
+        at the configured ``consult_signal_strength`` (0.0 = target-flat)
+        directly via :meth:`BaseStrategy.emit_signal` so the AI-review
+        attribution is stamped; the callback itself
         always returns ``None``. The emit is wrapped fail-soft — an
         emit-path failure (publisher setup, send) must not escape into
         ``_listen_loop`` and stop the strategy, because the heartbeat's
@@ -188,7 +226,7 @@ class HeartbeatConsult(BaseStrategy):
                 StrategySignal(
                     instrument=instrument,
                     side=TradeSideEnum.BUY,
-                    strength=0.0,
+                    strength=self.consult_signal_strength,
                     reason="heartbeat approved",
                     price=candle.close,
                 ),

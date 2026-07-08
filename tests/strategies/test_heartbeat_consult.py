@@ -24,6 +24,7 @@ from snapper.application.ai_review.service import DelegateBusyError
 from snapper.application.ai_review.service import NoLiveDelegateError
 from snapper.application.services.signals.service import signal_service
 from snapper.core.types import AiReviewStatusEnum
+from snapper.core.types import TradeSideEnum
 from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.heartbeat_consult import CONSULT_SEQUENCE_STREAM
@@ -126,6 +127,7 @@ class TestHeartbeatConsultConstruction:
         assert strategy.consult_user_public_id == config.params["ai_review_user_public_id"]
         assert strategy.consult_strategy_public_id == config.params["ai_review_strategy_public_id"]
         assert strategy.consult_deadline_seconds == DEFAULT_CONSULT_DEADLINE_SECONDS
+        assert strategy.consult_signal_strength == 0.0
 
     def test_non_paper_exchange_rejected(self) -> None:
         """Verify a live exchange is rejected.
@@ -192,6 +194,51 @@ class TestHeartbeatConsultConstruction:
         with pytest.raises(ValueError, match="ai_review_deadline_seconds"):
             HeartbeatConsult(_config(params=params))
 
+    def test_signal_strength_out_of_range_rejected(self) -> None:
+        """Verify an out-of-range signal strength is rejected.
+
+        Given: Params with heartbeat_signal_strength=1.5 (above the cap),
+        When: HeartbeatConsult is instantiated,
+        Then: ValueError names 'heartbeat_signal_strength'.
+        """
+        params = _consult_params(heartbeat_signal_strength=1.5)
+        with pytest.raises(ValueError, match="heartbeat_signal_strength"):
+            HeartbeatConsult(_config(params=params))
+
+    def test_signal_strength_negative_rejected(self) -> None:
+        """Verify a negative signal strength is rejected (not coerced to default).
+
+        Given: Params with heartbeat_signal_strength=-0.1 (stays truthy, so the
+            `or DEFAULT` guard does not mask it),
+        When: HeartbeatConsult is instantiated,
+        Then: ValueError names 'heartbeat_signal_strength'.
+        """
+        params = _consult_params(heartbeat_signal_strength=-0.1)
+        with pytest.raises(ValueError, match="heartbeat_signal_strength"):
+            HeartbeatConsult(_config(params=params))
+
+    def test_signal_strength_upper_boundary_accepted(self) -> None:
+        """Verify the inclusive 1.0 upper boundary constructs.
+
+        Given: Params with heartbeat_signal_strength=1.0 (the cap),
+        When: HeartbeatConsult is instantiated,
+        Then: consult_signal_strength binds to 1.0.
+        """
+        strategy = HeartbeatConsult(_config(params=_consult_params(heartbeat_signal_strength=1.0)))
+        assert strategy.consult_signal_strength == 1.0
+
+    def test_absent_signal_strength_defaults_flat(self) -> None:
+        """Verify an omitted signal-strength param defaults to target-flat.
+
+        Given: Params without 'heartbeat_signal_strength',
+        When: HeartbeatConsult is instantiated,
+        Then: consult_signal_strength is the 0.0 target-flat default.
+        """
+        params = _consult_params()
+        assert "heartbeat_signal_strength" not in params
+        strategy = HeartbeatConsult(_config(params=params))
+        assert strategy.consult_signal_strength == 0.0
+
 
 class TestHeartbeatConsultOnCandle:
     """Per-window consult dispatch and emission semantics."""
@@ -219,6 +266,29 @@ class TestHeartbeatConsultOnCandle:
         assert signal.strength == 0.0
         assert signal.instrument == "BTC-USD"
         assert emit.await_args.kwargs["outcome"] is outcome
+
+    @pytest.mark.asyncio
+    async def test_configured_strength_emits_actionable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify a configured strength>0 emits an actionable paper long.
+
+        Given: A config with heartbeat_signal_strength=0.5 and an approved consult,
+        When: A new candle arrives,
+        Then: emit_signal publishes the configured strength on the BUY side.
+        """
+        strategy = HeartbeatConsult(_config(params=_consult_params(heartbeat_signal_strength=0.5)))
+        outcome = _approved_outcome()
+        monkeypatch.setattr(strategy, "_consult", AsyncMock(return_value=outcome))
+        emit = AsyncMock()
+        monkeypatch.setattr(strategy, "emit_signal", emit)
+        result = await strategy.on_candle("BTC-USD", _candle())
+        assert result is None
+        emit.assert_awaited_once()
+        assert emit.await_args is not None
+        signal = emit.await_args.args[0]
+        assert signal.strength == 0.5
+        assert signal.side == TradeSideEnum.BUY
 
     @pytest.mark.asyncio
     async def test_emit_failure_is_fail_soft(self, monkeypatch: pytest.MonkeyPatch) -> None:
