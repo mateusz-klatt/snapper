@@ -516,6 +516,14 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
     parent_template: str | None = Field(
         None, description="Template the per-wallet instance was synthesized from; None otherwise"
     )
+    template: str | None = Field(
+        None,
+        description=(
+            "Registry name (``template or name``) this config was created from; lets the "
+            "scope editor resolve the strategy's declared reference-identity params. None when "
+            "the config carries no registry template."
+        ),
+    )
     coordinator: str | None = Field(
         None,
         description="Slug of the node owning this process; None when a remote owner is unknown",
@@ -962,3 +970,85 @@ class ProcessDesiredStateResponse(
     """
 
     type: Literal["process_desired_state_response"] = "process_desired_state_response"
+
+
+class ProcessConfigScopeBody(StrictBody):
+    """Body for the scope-config PATCH: retarget an existing strategy's scope.
+
+    Only the scope-bearing parameters are updatable; the launcher ``class``,
+    ``role``, ``template``, ``mode``, ``enabled`` flag and non-scope kwargs are
+    preserved untouched. Values are stored VERBATIM — ``label:<...>`` references
+    (e.g. ``label:paper``) are kept and resolve to UUIDs at (re)start, NOT at
+    edit time — so an operator can retarget a strategy's operator / wallet /
+    reviewer without hand-editing the ``process_<name>`` config JSON. The PATCH
+    does NOT restart the process; the change applies on the next (re)start.
+
+    Attributes:
+        operator_public_id: New operator scope — a wallet-operator public_id or
+            a ``label:<operator>`` reference. Omit (``None``) to leave unchanged;
+            an empty string clears it (deferred wallet-mode resolution).
+        wallet_public_id: New wallet scope — a wallet public_id or a
+            ``label:<wallet>`` reference. Omit to leave unchanged.
+        reference_identity_params: New values for the strategy's nested
+            reference-identity params (declared by its
+            ``reference_identity_params`` schema, e.g.
+            ``{"ai_review_user_public_id": "label:<username>"}``). Merged into
+            the persisted ``parameters.params`` subtree. Omit to leave unchanged.
+    """
+
+    operator_public_id: str | None = Field(
+        None, max_length=256, description="Operator public_id or label:<operator>"
+    )
+    wallet_public_id: str | None = Field(
+        None, max_length=256, description="Wallet public_id or label:<wallet>"
+    )
+    reference_identity_params: dict[str, str] | None = Field(
+        None, description="Nested reference-identity param overrides merged into params.*"
+    )
+
+
+class ProcessConfigScopeRequest(
+    PayloadRequest[Literal["process_config_scope_request"], ProcessConfigScopeBody]
+):
+    """Scope-config PATCH request envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["process_config_scope_request"] = "process_config_scope_request"
+
+
+class ProcessConfigScopeData(StrictDataSchema[Literal["process_config_scope"]]):
+    """Result of a scope-config PATCH.
+
+    Attributes:
+        type: Payload item type discriminator.
+        status: Always ``success`` (failures surface as HTTP errors).
+        name: Process name.
+        parameters: The full persisted ``parameters`` subtree after the merge
+            (labels preserved), so the client can re-render the saved scope.
+        restart_required: Always True — the endpoint persists the config but
+            does NOT restart the process, so the change only takes effect on the
+            next (re)start. The UI surfaces this as a "restart required" banner.
+    """
+
+    type: Literal["process_config_scope"] = "process_config_scope"
+    status: Literal["success"] = "success"
+    name: str = Field(description=_PROCESS_NAME_DESC)
+    parameters: JsonObject = Field(description="Persisted parameters subtree after the merge")
+    restart_required: bool = Field(
+        True, description="Whether the process must be restarted for the change to take effect"
+    )
+
+
+class ProcessConfigScopeResponse(
+    PayloadResponse[Literal["process_config_scope_response"], ProcessConfigScopeData]
+):
+    """Scope-config PATCH response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["process_config_scope_response"] = "process_config_scope_response"

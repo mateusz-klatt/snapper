@@ -521,3 +521,70 @@ class ProcessRegistrySyncer:
                 bus_time=datetime.now(UTC),
             )
             await session.commit()
+
+    async def update_process_config_parameters(
+        self,
+        *,
+        name: str,
+        parameters: dict[str, Any],
+        updated_by: str,
+    ) -> dict[str, Any]:
+        """Replace the ``parameters`` subtree of an existing process config.
+
+        The scope-editor SCD-2 UPDATE path: loads the active
+        ``process_<name>`` Setting, swaps its ``parameters`` for the caller's
+        (``label:<...>`` references preserved VERBATIM — they resolve to UUIDs
+        at (re)start, not here), back-fills any missing seeded-identity token
+        fill-if-empty, and persists a new bitemporal version via
+        close-and-insert. Every other config key (``class``, ``role``,
+        ``mode``, ``template``, ``enabled``, ``restart_nonce``, ...)
+        round-trips untouched, and NO ``restart_nonce`` is minted — the change
+        applies only when the process is next (re)started.
+
+        Args:
+            name: Process name whose parameters to replace.
+            parameters: The new full ``parameters`` dict to persist.
+            updated_by: Principal recorded in the temporal audit trail so
+                operator edits are distinguishable from ``sync_registry``.
+
+        Returns:
+            The persisted ``parameters`` dict (after the seeded-identity
+            back-fill), so callers can echo the saved scope.
+
+        Raises:
+            KeyError: If no active config exists for ``name`` (the REST layer
+                maps this to 404).
+        """
+        repository = get_repository(self.settings.db_url)
+        config_key = f"process_{name}"
+        async with repository.session() as session:
+            result = await session.execute(
+                select(Setting).where(Setting.key == config_key, *where_active_now(Setting))
+            )
+            existing = result.scalar_one_or_none()
+            if existing is None:
+                raise KeyError(f"Process '{name}' is not configured")
+            config_dict = json.loads(existing.value)
+            config_dict["parameters"] = parameters
+            _mint_missing_seeded_identities(
+                config_dict.get("parameters"),
+                _seeded_identity_params_for_registry_name(str(config_dict.get("template") or name)),
+            )
+            await close_and_insert(
+                session=session,
+                model=Setting,
+                match_filters=[Setting.key == config_key],
+                new_values={
+                    "key": config_key,
+                    "value": json.dumps(config_dict, indent=4),
+                    "category": existing.category,
+                    "description": existing.description,
+                    "is_encrypted": existing.is_encrypted,
+                    "updated_by": updated_by,
+                    "session_id": self._tracker.session_id,
+                    "sequence_id": self._tracker.next_sequence(_SETTINGS_TOPIC),
+                },
+                bus_time=datetime.now(UTC),
+            )
+            await session.commit()
+            return dict(config_dict["parameters"])
