@@ -18,6 +18,7 @@ import datetime as dt
 from datetime import UTC
 from datetime import datetime
 from typing import Annotated
+from uuid import UUID
 from uuid import uuid7
 
 from fastapi import APIRouter
@@ -66,6 +67,39 @@ _SCOPE_XOR_VIOLATION = (
 )
 
 
+def _require_canonical_uuid(value: str, field: str) -> None:
+    """Reject a public-id field that is not a canonical-form UUID.
+
+    Python's ``uuid.UUID`` parser tolerates ``urn:uuid:``-prefixed,
+    brace-wrapped, and over-hyphenated spellings that asyncpg/Postgres
+    reject at bind time. Because the route forwards the ORIGINAL string
+    unchanged to the UUID-typed DB column, only the canonical dashed
+    form (lower- or upper-case) is accepted here so a
+    tolerated-but-non-canonical value fails with a clean 400 instead of
+    an asyncpg ``DataError`` surfacing as an uncaught 500.
+
+    Args:
+        value: Candidate public-id string taken from the request body.
+        field: Field name embedded in the 400 detail for the client.
+
+    Raises:
+        HTTPException: 400 when ``value`` is not parseable as a UUID or
+            is not already in canonical dashed form.
+    """
+    try:
+        parsed = UUID(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field} must be a well-formed UUID",
+        ) from exc
+    if str(parsed) != value.lower():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field} must be a canonical UUID",
+        )
+
+
 def _scope_grant_info(row: ScopeGrantRow) -> ScopeGrantInfo:
     """Project a ``ScopeGrantRow`` TypedDict to the transport schema."""
     return ScopeGrantInfo(
@@ -85,16 +119,43 @@ def _scope_grant_info(row: ScopeGrantRow) -> ScopeGrantInfo:
 
 
 def _validate_scope_xor(body: CreateScopeGrantCommand) -> None:
-    """Reject create payloads whose scope_kind doesn't match the provided IDs."""
+    """Reject structurally invalid create payloads before the service call.
+
+    Enforces three invariants so the client receives a clean 400 rather
+    than an opaque DB error surfacing as a 500:
+
+    1. ``operator_public_id`` and ``wallet_public_id`` are canonical
+       UUIDs — both feed UUID-typed DB columns on the insert / lookup
+       path, so a non-UUID value would raise an asyncpg ``DataError``.
+    2. Exactly one of ``underlying_public_id`` / ``instrument_public_id``
+       is set, matching ``scope_kind`` (XOR).
+    3. The populated resource id is a canonical UUID (same DB-column
+       reasoning; a bare ticker like ``"BTC"`` must not reach the DB).
+
+    Args:
+        body: The create command envelope to validate.
+
+    Raises:
+        HTTPException: 400 when any public id is not a canonical UUID or
+            the scope_kind/id XOR invariant is violated.
+    """
     payload = body.payload
-    underlying_set = payload.underlying_public_id is not None
-    instrument_set = payload.instrument_public_id is not None
+    _require_canonical_uuid(payload.operator_public_id, "operator_public_id")
+    _require_canonical_uuid(payload.wallet_public_id, "wallet_public_id")
+    underlying = payload.underlying_public_id
+    instrument = payload.instrument_public_id
     if payload.scope_kind == "underlying":
-        matches = underlying_set and not instrument_set
+        if underlying is None or instrument is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_XOR_VIOLATION
+            )
+        _require_canonical_uuid(underlying, "underlying_public_id")
     else:
-        matches = instrument_set and not underlying_set
-    if not matches:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_XOR_VIOLATION)
+        if instrument is None or underlying is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_XOR_VIOLATION
+            )
+        _require_canonical_uuid(instrument, "instrument_public_id")
 
 
 @router.get("")
@@ -194,8 +255,9 @@ async def create_scope_grant(
         ``ScopeGrantResponse`` wrapping the newly-inserted grant row.
 
     Raises:
-        HTTPException: 400 on XOR violation; 409 on overlap; 404 if
-            the target operator / wallet does not exist.
+        HTTPException: 400 on XOR violation or a malformed (non-UUID)
+            resource id; 409 on overlap; 404 if the target operator /
+            wallet does not exist.
     """
     _validate_scope_xor(command)
     tracker: SequenceTracker = request.app.state.rest_tracker

@@ -207,6 +207,8 @@ def _make_create_command(
     scope_kind: str = "underlying",
     underlying_public_id: str | None = "00000000-0000-7000-8000-0000000000aa",
     instrument_public_id: str | None = None,
+    operator_public_id: str = "00000000-0000-7000-8000-000000000100",
+    wallet_public_id: str = "00000000-0000-7000-8000-000000000200",
 ) -> CreateScopeGrantCommand:
     """Return a minimal valid create command envelope."""
     return CreateScopeGrantCommand(
@@ -215,8 +217,8 @@ def _make_create_command(
         public_id="00000000-0000-7000-8000-000000000500",
         timestamp=datetime.now(UTC),
         payload=CreateScopeGrantBody(
-            operator_public_id="00000000-0000-7000-8000-000000000100",
-            wallet_public_id="00000000-0000-7000-8000-000000000200",
+            operator_public_id=operator_public_id,
+            wallet_public_id=wallet_public_id,
             scope_kind=scope_kind,
             underlying_public_id=underlying_public_id,
             instrument_public_id=instrument_public_id,
@@ -304,6 +306,148 @@ class TestCreateScopeGrant:
             underlying_public_id="00000000-0000-7000-8000-0000000000aa",
             instrument_public_id="00000000-0000-7000-8000-0000000000bb",
         )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                command=command,
+                scope_grant_service=mock_service,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_service.create_grant.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_uuid_underlying_id_rejected_with_400_before_repo_call(self) -> None:
+        """A non-UUID underlying id fails fast with 400, never reaching the repo.
+
+        Given: A command with ``scope_kind='underlying'`` whose
+            ``underlying_public_id`` is a bare ticker (``"BTC"``) rather
+            than a UUID,
+        When: ``create_scope_grant`` is called,
+        Then: HTTPException 400 is raised before the service call so the
+            value never reaches the UUID-typed DB column (which would
+            otherwise raise an asyncpg ``DataError`` surfacing as 500).
+        """
+        mock_service = AsyncMock()
+        command = _make_create_command(
+            scope_kind="underlying",
+            underlying_public_id="BTC",
+            instrument_public_id=None,
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                command=command,
+                scope_grant_service=mock_service,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_service.create_grant.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_uuid_instrument_id_rejected_with_400_before_repo_call(self) -> None:
+        """A non-UUID instrument id fails fast with 400, never reaching the repo.
+
+        Given: A command with ``scope_kind='instrument'`` whose
+            ``instrument_public_id`` is a non-UUID string,
+        When: ``create_scope_grant`` is called,
+        Then: HTTPException 400 is raised and the repository is never
+            consulted.
+        """
+        mock_service = AsyncMock()
+        command = _make_create_command(
+            scope_kind="instrument",
+            underlying_public_id=None,
+            instrument_public_id="not-a-uuid",
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                command=command,
+                scope_grant_service=mock_service,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_service.create_grant.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_canonical_target_uuid_rejected_with_400(self) -> None:
+        """A ``urn:uuid:``-prefixed target is rejected even though UUID() parses it.
+
+        Given: A command whose ``underlying_public_id`` is a valid UUID
+            wearing a ``urn:uuid:`` prefix — a form Python's ``UUID``
+            tolerates but asyncpg/Postgres reject at bind time,
+        When: ``create_scope_grant`` is called,
+        Then: HTTPException 400 is raised (canonical-form check) before
+            the service call so the non-canonical string never reaches
+            the UUID-typed DB column.
+        """
+        mock_service = AsyncMock()
+        command = _make_create_command(
+            scope_kind="underlying",
+            underlying_public_id="urn:uuid:00000000-0000-7000-8000-0000000000aa",
+            instrument_public_id=None,
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                command=command,
+                scope_grant_service=mock_service,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_service.create_grant.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_uuid_wallet_id_rejected_with_400_before_repo_call(self) -> None:
+        """A non-UUID wallet id fails fast with 400, never reaching the repo.
+
+        Given: A command whose ``wallet_public_id`` is a bare ticker
+            (``"BTC"``) rather than a UUID — the wallet id feeds a
+            UUID-typed DB column on the create path,
+        When: ``create_scope_grant`` is called,
+        Then: HTTPException 400 is raised before the service call.
+        """
+        mock_service = AsyncMock()
+        command = _make_create_command(wallet_public_id="BTC")
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                command=command,
+                scope_grant_service=mock_service,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_service.create_grant.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_uuid_operator_id_rejected_with_400_before_repo_call(self) -> None:
+        """A non-UUID operator id fails fast with 400, never reaching the repo.
+
+        Given: A command whose ``operator_public_id`` is a non-UUID
+            string — the operator id feeds a UUID-typed DB column on the
+            insert path,
+        When: ``create_scope_grant`` is called,
+        Then: HTTPException 400 is raised and the repository is never
+            consulted.
+        """
+        mock_service = AsyncMock()
+        command = _make_create_command(operator_public_id="BTC")
 
         with pytest.raises(HTTPException) as excinfo:
             await create_scope_grant(
