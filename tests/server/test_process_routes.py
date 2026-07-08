@@ -17,6 +17,8 @@ from fastapi import Request
 from pydantic import ValidationError
 
 from snapper.api.schemas.process import ProcessCategoryCount
+from snapper.api.schemas.process import ProcessConfigScopeBody
+from snapper.api.schemas.process import ProcessConfigScopeRequest
 from snapper.api.schemas.process import ProcessCreateBody
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.api.schemas.process import ProcessDesiredStateBody
@@ -59,6 +61,7 @@ from snapper.server.process_routes import list_process_runs
 from snapper.server.process_routes import set_process_desired_state
 from snapper.server.process_routes import start_process
 from snapper.server.process_routes import stop_process
+from snapper.server.process_routes import update_process_scope_config
 
 
 def _make_rest_request() -> MagicMock:
@@ -4091,3 +4094,250 @@ class TestSetProcessDesiredState:
             action="restart", restart_nonce="01960a7e-2c1a-7c00-8000-000000000000"
         )
         assert body.restart_nonce is not None
+
+
+class TestUpdateProcessScopeConfig:
+    """Tests for the PATCH /{name}/config strategy scope editor."""
+
+    _ENFORCE = "snapper.server.process_routes._enforce_strategy_scope"
+    _REF_LOOKUP = "snapper.server.process_routes.reference_identity_params_for_registry_name"
+
+    @staticmethod
+    def _config(
+        name: str,
+        *,
+        role: ProcessRoleEnum = ProcessRoleEnum.STRATEGY,
+        parameters: dict[str, object] | None = None,
+        template: str | None = None,
+    ) -> ProcessConfigModel:
+        """Build a strategy config the scope-editor handler reads."""
+        return ProcessConfigModel(
+            name=name,
+            enabled=True,
+            mode="thread",
+            class_path="x.Y",
+            method="start",
+            parameters=parameters if parameters is not None else {},
+            role=role,
+            template=template,
+        )
+
+    @staticmethod
+    def _factory(
+        config: ProcessConfigModel | None,
+        *,
+        persisted: dict[str, object] | None = None,
+        writer_raises: BaseException | None = None,
+    ) -> MagicMock:
+        """Mock launcher exposing get_process_configs + the parameters writer."""
+        factory = MagicMock()
+        factory.get_process_configs = AsyncMock(return_value=[config] if config else [])
+        if writer_raises is not None:
+            factory.update_process_config_parameters = AsyncMock(side_effect=writer_raises)
+        else:
+            factory.update_process_config_parameters = AsyncMock(
+                return_value=persisted if persisted is not None else {}
+            )
+        return factory
+
+    @staticmethod
+    def _body(
+        *,
+        operator: str | None = None,
+        wallet: str | None = None,
+        reference: dict[str, str] | None = None,
+    ) -> ProcessConfigScopeRequest:
+        """Build a scope-config PATCH envelope."""
+        return ProcessConfigScopeRequest(
+            session_id="s",
+            sequence_id=1,
+            public_id="p",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessConfigScopeBody(
+                operator_public_id=operator,
+                wallet_public_id=wallet,
+                reference_identity_params=reference,
+            ),
+        )
+
+    @staticmethod
+    async def _invoke(
+        name: str,
+        factory: MagicMock,
+        body: ProcessConfigScopeRequest,
+        *,
+        operator_public_ids: list[str] | None = None,
+    ) -> object:
+        """Invoke the scope-config handler with mocked dependencies."""
+        return await update_process_scope_config(
+            http_request=_make_rest_request(),
+            name=name,
+            factory=factory,
+            repo=MagicMock(),
+            principal=MagicMock(username="alice", operator_public_ids=operator_public_ids or []),
+            _csrf=None,
+            body=body,
+        )
+
+    @pytest.mark.asyncio
+    async def test_updates_scope_and_merges_reference_after_enforcement(self) -> None:
+        """Concrete operator/wallet + a declared reference persist once scope enforcement passes."""
+        config = self._config(
+            "p7_heartbeat_consult_btc_1h",
+            template="strategy_heartbeat_consult_btc_1h",
+            parameters={
+                "operator_public_id": "op-old",
+                "params": {"ai_review_strategy_public_id": "uuid-seed"},
+            },
+        )
+        persisted = {
+            "operator_public_id": "op-a",
+            "wallet_public_id": "wal-1",
+            "params": {
+                "ai_review_strategy_public_id": "uuid-seed",
+                "ai_review_user_public_id": "label:bob",
+            },
+        }
+        factory = self._factory(config, persisted=persisted)
+        with (
+            patch(self._ENFORCE, new_callable=AsyncMock) as mock_enforce,
+            patch(self._REF_LOOKUP, return_value={"ai_review_user_public_id": "user"}),
+        ):
+            result = await self._invoke(
+                "p7_heartbeat_consult_btc_1h",
+                factory,
+                self._body(
+                    operator="op-a",
+                    wallet="wal-1",
+                    reference={"ai_review_user_public_id": "label:bob"},
+                ),
+                operator_public_ids=["op-a"],
+            )
+        assert result.payload.restart_required is True
+        assert result.payload.parameters == persisted
+        mock_enforce.assert_awaited_once()
+        assert mock_enforce.await_args is not None
+        enforced = mock_enforce.await_args.args[0]
+        assert enforced["operator_public_id"] == "op-a"
+        assert enforced["params"]["ai_review_user_public_id"] == "label:bob"
+        kwargs = factory.update_process_config_parameters.await_args.kwargs
+        merged = kwargs["parameters"]
+        assert merged["operator_public_id"] == "op-a"
+        assert merged["wallet_public_id"] == "wal-1"
+        assert merged["params"]["ai_review_user_public_id"] == "label:bob"
+        assert merged["params"]["ai_review_strategy_public_id"] == "uuid-seed"
+
+    @pytest.mark.asyncio
+    async def test_scope_enforcement_rejection_propagates_and_skips_write(self) -> None:
+        """A 403 from the scope enforcement aborts before persisting."""
+        config = self._config("p7_rsi_eth_1h", parameters={"operator_public_id": "op-mine"})
+        factory = self._factory(config)
+        rejection = HTTPException(status_code=403, detail="no membership")
+        with (
+            patch(self._ENFORCE, new_callable=AsyncMock, side_effect=rejection),
+            patch(self._REF_LOOKUP, return_value={}),
+            pytest.raises(HTTPException) as exc,
+        ):
+            await self._invoke("p7_rsi_eth_1h", factory, self._body(operator="op-foreign"))
+        assert exc.value.status_code == 403
+        factory.update_process_config_parameters.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_undeclared_reference_param_is_400(self) -> None:
+        """A reference key the strategy does not declare is rejected before enforcement/write."""
+        config = self._config("p7_rsi_eth_1h", template="strategy_rsi")
+        factory = self._factory(config)
+        with (
+            patch(self._ENFORCE, new_callable=AsyncMock) as mock_enforce,
+            patch(self._REF_LOOKUP, return_value={"ai_review_user_public_id": "user"}),
+            pytest.raises(HTTPException) as exc,
+        ):
+            await self._invoke(
+                "p7_rsi_eth_1h",
+                factory,
+                self._body(reference={"entry_threshold": "999"}),
+            )
+        assert exc.value.status_code == 400
+        assert "entry_threshold" in exc.value.detail
+        mock_enforce.assert_not_awaited()
+        factory.update_process_config_parameters.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_executor_instance_is_404(self) -> None:
+        """A per-wallet executor instance has no editable config -> 404."""
+        factory = self._factory(None)
+        with pytest.raises(HTTPException) as exc:
+            await self._invoke("executor_kraken_w1234567890ab", factory, self._body(wallet="wal-1"))
+        assert exc.value.status_code == 404
+        factory.update_process_config_parameters.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unknown_process_is_404(self) -> None:
+        """No active config for the name -> 404."""
+        factory = self._factory(None)
+        with pytest.raises(HTTPException) as exc:
+            await self._invoke("nope_strategy", factory, self._body(wallet="wal-1"))
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_non_strategy_is_400(self) -> None:
+        """A non-strategy config is not scope-editable -> 400."""
+        config = self._config("kraken_feed_publisher", role=ProcessRoleEnum.CORE)
+        factory = self._factory(config)
+        with pytest.raises(HTTPException) as exc:
+            await self._invoke("kraken_feed_publisher", factory, self._body(wallet="wal-1"))
+        assert exc.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_writer_keyerror_maps_to_404(self) -> None:
+        """A KeyError from the writer (config vanished mid-request) maps to 404."""
+        config = self._config("p7_rsi_eth_1h", parameters={"operator_public_id": "op-mine"})
+        factory = self._factory(config, writer_raises=KeyError("gone"))
+        with (
+            patch(self._ENFORCE, new_callable=AsyncMock),
+            patch(self._REF_LOOKUP, return_value={}),
+            pytest.raises(HTTPException) as exc,
+        ):
+            await self._invoke(
+                "p7_rsi_eth_1h",
+                factory,
+                self._body(operator="op-mine"),
+                operator_public_ids=["op-mine"],
+            )
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_partial_update_only_wallet_skips_reference_whitelist(self) -> None:
+        """Omitting reference params leaves other fields intact and skips the whitelist lookup."""
+        config = self._config(
+            "p7_rsi_eth_1h",
+            parameters={"operator_public_id": "op-a", "wallet_public_id": "wal-old"},
+        )
+        factory = self._factory(config, persisted={})
+        with (
+            patch(self._ENFORCE, new_callable=AsyncMock),
+            patch(self._REF_LOOKUP, return_value={}) as mock_ref,
+        ):
+            await self._invoke("p7_rsi_eth_1h", factory, self._body(wallet="wal-new"))
+        merged = factory.update_process_config_parameters.await_args.kwargs["parameters"]
+        assert merged["wallet_public_id"] == "wal-new"
+        assert merged["operator_public_id"] == "op-a"
+        assert "params" not in merged
+        mock_ref.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reference_params_seed_new_nested_when_absent(self) -> None:
+        """A reference edit seeds a fresh params subtree when the config had none."""
+        config = self._config("p7_rsi_eth_1h", template="strategy_rsi", parameters={})
+        factory = self._factory(config, persisted={})
+        with (
+            patch(self._ENFORCE, new_callable=AsyncMock),
+            patch(self._REF_LOOKUP, return_value={"ai_review_user_public_id": "user"}),
+        ):
+            await self._invoke(
+                "p7_rsi_eth_1h",
+                factory,
+                self._body(reference={"ai_review_user_public_id": "label:bob"}),
+            )
+        merged = factory.update_process_config_parameters.await_args.kwargs["parameters"]
+        assert merged["params"] == {"ai_review_user_public_id": "label:bob"}

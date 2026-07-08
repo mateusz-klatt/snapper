@@ -1889,6 +1889,77 @@ class TestUpdateProcessConfig:
                 name="ghost", enabled=True, updated_by="alice"
             )
 
+    @pytest.mark.asyncio
+    async def test_update_parameters_replaces_subtree_preserving_other_keys(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Replacing parameters rewrites only that subtree; other keys round-trip.
+
+        Given: an active strategy config with class/enabled/role/template and
+            old parameters,
+        When: update_process_config_parameters(parameters={new}) is called,
+        Then: close_and_insert persists the new parameters, every other config
+            key survives, NO restart_nonce is added, and the persisted
+            parameters dict is returned.
+        """
+        existing = self._existing_setting(
+            {
+                "class": "a.B",
+                "enabled": True,
+                "mode": "thread",
+                "role": "strategy",
+                "template": "strategy_heartbeat_consult_btc_1h",
+                "parameters": {"operator_public_id": "label:old", "params": {}},
+            }
+        )
+        mock_repo, mock_session = self._mock_repo_with_existing(existing)
+        new_params = {
+            "operator_public_id": "label:default",
+            "wallet_public_id": "label:paper",
+            "params": {"ai_review_user_public_id": "label:bob"},
+        }
+        with (
+            patch(
+                "snapper.application.process_manager.registry_syncer.get_repository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "snapper.application.process_manager.registry_syncer.close_and_insert",
+                new_callable=AsyncMock,
+            ) as mock_cai,
+        ):
+            returned = await launcher._registry_syncer.update_process_config_parameters(
+                name="p", parameters=new_params, updated_by="alice"
+            )
+        await_args = mock_cai.await_args
+        assert await_args is not None
+        written = json.loads(await_args.kwargs["new_values"]["value"])
+        assert written["parameters"] == new_params
+        assert written["class"] == "a.B"
+        assert written["enabled"] is True
+        assert written["role"] == "strategy"
+        assert "restart_nonce" not in written
+        assert await_args.kwargs["new_values"]["updated_by"] == "alice"
+        assert returned == new_params
+        mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_update_parameters_raises_keyerror_when_config_absent(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """A missing active config raises KeyError (the REST layer maps to 404)."""
+        mock_repo, _ = self._mock_repo_with_existing(None)
+        with (
+            patch(
+                "snapper.application.process_manager.registry_syncer.get_repository",
+                return_value=mock_repo,
+            ),
+            pytest.raises(KeyError),
+        ):
+            await launcher._registry_syncer.update_process_config_parameters(
+                name="ghost", parameters={}, updated_by="alice"
+            )
+
 
 class TestHandleProcessCompletion:
     """Tests for _handle_process_completion method."""
@@ -3174,6 +3245,35 @@ class TestEmitSitesIntegration:
         assert any(t.startswith("processes.events.configured.") for t in topics)
         assert any(t.startswith("processes.events.summary.") for t in topics)
         assert not any(t.startswith("strategies.events.list.") for t in topics)
+
+    @pytest.mark.asyncio
+    async def test_update_process_config_parameters_emits_snapshots_and_echoes(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """The scope-editor wrapper emits configured + summary + strategy-list, echoes params.
+
+        A scope edit always targets a strategy, so all three snapshots refresh;
+        the DAL's persisted parameters pass through so the REST layer can echo
+        the saved scope.
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        persisted = {"operator_public_id": "label:default"}
+        launcher._registry_syncer.update_process_config_parameters = AsyncMock(
+            return_value=persisted
+        )
+        launcher.get_process_configs = AsyncMock(return_value=[])
+
+        returned = await launcher.update_process_config_parameters(
+            name="momentum",
+            parameters={"operator_public_id": "label:default"},
+            updated_by="op",
+        )
+        assert returned == persisted
+        topics = [topic for topic, _ in publisher.sent]
+        assert any(t.startswith("processes.events.configured.") for t in topics)
+        assert any(t.startswith("processes.events.summary.") for t in topics)
+        assert any(t.startswith("strategies.events.list.") for t in topics)
 
     @pytest.mark.asyncio
     async def test_stop_all_processes_clears_active_runs(

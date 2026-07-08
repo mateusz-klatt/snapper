@@ -4182,3 +4182,42 @@ class ProcessLauncherService:
         await self._emit_summary_snapshot()
         if is_strategy:
             await self._emit_strategy_list_snapshot()
+
+    async def update_process_config_parameters(
+        self,
+        *,
+        name: str,
+        parameters: dict[str, Any],
+        updated_by: str,
+    ) -> dict[str, Any]:
+        """Replace a strategy config's ``parameters`` subtree (scope editor).
+
+        Delegates to the registry syncer's bitemporal parameters-writer, then
+        emits ``processes.events.configured`` + ``strategies.events.list``
+        snapshots so subscribers refresh without polling. Persists DESIRED
+        config only; NO restart is triggered — the change applies on the next
+        (re)start, so this is safe to call on the API node for a remotely-owned
+        strategy.
+
+        Args:
+            name: Process name whose parameters to replace.
+            parameters: The new full ``parameters`` dict to persist.
+            updated_by: Principal recorded in the temporal audit trail.
+
+        Returns:
+            The persisted ``parameters`` dict (after the seeded-identity
+            back-fill), so the REST layer can echo the saved scope.
+
+        Raises:
+            KeyError: If no active config exists for ``name`` (mapped to 404
+                by the REST layer).
+        """
+        persisted = await self._registry_syncer.update_process_config_parameters(
+            name=name,
+            parameters=parameters,
+            updated_by=updated_by,
+        )
+        await self._emit_configured_snapshot()
+        await self._emit_summary_snapshot()
+        await self._emit_strategy_list_snapshot()
+        return persisted

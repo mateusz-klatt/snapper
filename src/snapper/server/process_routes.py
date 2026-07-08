@@ -51,6 +51,9 @@ from snapper.api.schemas.process import AvailableProcessesResponse
 from snapper.api.schemas.process import ConfiguredProcess
 from snapper.api.schemas.process import ConfiguredProcessesResponse
 from snapper.api.schemas.process import ProcessCategoryCount
+from snapper.api.schemas.process import ProcessConfigScopeData
+from snapper.api.schemas.process import ProcessConfigScopeRequest
+from snapper.api.schemas.process import ProcessConfigScopeResponse
 from snapper.api.schemas.process import ProcessCreateData
 from snapper.api.schemas.process import ProcessCreatedInfo
 from snapper.api.schemas.process import ProcessCreateRequest
@@ -92,6 +95,9 @@ from snapper.application.process_manager.strategy_scope import (
 )
 from snapper.application.process_manager.strategy_scope import enforce_wallet_grant_exists
 from snapper.application.process_manager.strategy_scope import find_uncovered_outputs
+from snapper.application.process_manager.strategy_scope import (
+    reference_identity_params_for_registry_name,
+)
 from snapper.application.process_manager.strategy_scope import resolve_role_for_class_path
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
@@ -920,6 +926,7 @@ async def list_configured_processes(
                 kind=kind,
                 wallet_public_id=None,
                 parent_template=None,
+                template=config.template or config.name,
                 coordinator=coordinator,
                 coordinator_label=_configured_coordinator_label(
                     factory, cache, config, coordinator, managed_remotely=managed_remotely
@@ -959,6 +966,7 @@ async def list_configured_processes(
                 kind="instance",
                 wallet_public_id=wallet_id,
                 parent_template=parent_template_for_instance(instance_name),
+                template=instance_config.template,
                 coordinator=coordinator,
                 coordinator_label=_coordinator_label(
                     factory, cache, coordinator, managed_remotely=managed_remotely
@@ -1396,6 +1404,157 @@ async def set_process_desired_state(
         message=message,
     )
     return ProcessDesiredStateResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=data,
+    )
+
+
+def _reject_undeclared_reference_params(
+    submitted: dict[str, str], registry_name: str | None, name: str
+) -> None:
+    """Reject reference-identity keys the target strategy does not declare.
+
+    The scope editor may only set a strategy's DECLARED reference-identity
+    params (e.g. ``ai_review_user_public_id``); it is NOT a general parameters
+    editor. Whitelisting the submitted keys against the registry's declared set
+    stops a MANAGE_PROCESSES caller from reaching non-scope runtime knobs
+    (thresholds, sizing, deadlines) under ``parameters.params`` through the
+    audited "scope" endpoint.
+
+    Args:
+        submitted: The caller's ``reference_identity_params`` mapping.
+        registry_name: The strategy's registry name (``template or name``)
+            used to resolve its declared reference identities.
+        name: Process name, for the error detail.
+
+    Raises:
+        HTTPException: 400 listing every submitted key the strategy does not
+            declare as a reference identity.
+    """
+    allowed = reference_identity_params_for_registry_name(registry_name)
+    undeclared = sorted(key for key in submitted if key not in allowed)
+    if undeclared:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Process '{name}' does not declare reference-identity "
+                f"param(s): {', '.join(undeclared)}"
+            ),
+        )
+
+
+@router.patch(
+    "/{name}/config",
+    openapi_extra=openapi_schema(ProcessConfigScopeRequest),
+    responses=_PROCESS_DESIRED_STATE_RESPONSES,
+)
+async def update_process_scope_config(
+    http_request: Request,
+    name: str,
+    factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
+    repo: Annotated[Repository, Depends(get_repository_for_processes)],
+    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    body: Annotated[ProcessConfigScopeRequest, Depends(json_body(ProcessConfigScopeRequest))],
+) -> ProcessConfigScopeResponse:
+    """Retarget an existing STRATEGY config's scope (operator / wallet / reviewer).
+
+    Replaces the scope-bearing parameters of the ``process_<name>`` config so an
+    operator can retarget a strategy WITHOUT hand-editing the config JSON. The
+    endpoint does NOT restart the process — the change applies on the next
+    (re)start — but it FULLY enforces the caller's authorization AT EDIT TIME
+    (it does NOT defer cross-tenant checks to the trusted (re)start resolver,
+    which resolves with ``principal_operator_public_ids=None``). Gated by
+    MANAGE_PROCESSES + CSRF.
+
+    Enforcement, all fail-closed against the CALLER's principal:
+    - Only STRATEGY-role configs are editable (executor instance 404, unknown
+      404, non-strategy 400).
+    - ``reference_identity_params`` keys are whitelisted against the strategy's
+      DECLARED reference identities (400 on an undeclared key) so the endpoint
+      cannot reach arbitrary runtime params.
+    - The merged parameters are run through :func:`_enforce_strategy_scope`
+      (operator membership, wallet grant, output coverage) on a throwaway copy;
+      a non-member operator or ungranted wallet raises 403/400. Because that
+      check membership-tests the LITERAL operator value, a ``label:`` operator
+      reference (which the UI resolves to a concrete public_id before sending)
+      also fails closed here — callers must supply a concrete operator/wallet
+      they are authorized for, so the persisted config carries concrete UUIDs.
+
+    Args:
+        http_request: FastAPI request (provenance).
+        name: Strategy process name whose scope to edit.
+        factory: Process launcher service (config read + bitemporal write).
+        repo: Repository for the operator/wallet/grant scope check.
+        principal: Authenticated caller (recorded as the editor).
+        _csrf: CSRF guard (Bearer callers bypass).
+        body: The new scope (operator / wallet / reference-identity params);
+            each field is optional — omitted fields are left unchanged.
+
+    Returns:
+        :class:`ProcessConfigScopeResponse` echoing the persisted parameters
+        subtree with ``restart_required=True``.
+
+    Raises:
+        HTTPException: 404 (executor instance / unknown / not configured),
+            400 (not a strategy / undeclared reference param / wallet
+            resolution), 403 (operator not a member / missing grant /
+            output not covered).
+    """
+    if is_executor_instance(name):
+        raise HTTPException(
+            status_code=404,
+            detail=f"'{name}' is a per-wallet executor instance with no editable config",
+        )
+    _reject_executor_template_start(name)
+    configs = await factory.get_process_configs()
+    config = next((candidate for candidate in configs if candidate.name == name), None)
+    if config is None:
+        raise HTTPException(status_code=404, detail=f"Process '{name}' is not configured")
+    if config.role is not ProcessRoleEnum.STRATEGY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Process '{name}' is not a strategy; only strategy scope is editable",
+        )
+    scope = body.payload
+    new_parameters: dict[str, object] = dict(config.parameters)
+    if scope.operator_public_id is not None:
+        new_parameters["operator_public_id"] = scope.operator_public_id
+    if scope.wallet_public_id is not None:
+        new_parameters["wallet_public_id"] = scope.wallet_public_id
+    if scope.reference_identity_params is not None:
+        _reject_undeclared_reference_params(
+            scope.reference_identity_params, config.template or name, name
+        )
+        existing_nested = new_parameters.get("params")
+        nested: dict[str, object] = (
+            dict(existing_nested) if isinstance(existing_nested, dict) else {}
+        )
+        nested.update(scope.reference_identity_params)
+        new_parameters["params"] = nested
+    await _enforce_strategy_scope(dict(new_parameters), config.role, principal, repo)
+    try:
+        persisted = await factory.update_process_config_parameters(
+            name=name,
+            parameters=new_parameters,
+            updated_by=principal.username,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Process '{name}' is not configured") from exc
+    sid, seq, pid, ts = _mint_provenance(http_request)
+    data = ProcessConfigScopeData(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=str(uuid7()),
+        timestamp=ts,
+        name=name,
+        parameters=cast(JsonObject, persisted),
+        restart_required=True,
+    )
+    return ProcessConfigScopeResponse(
         session_id=sid,
         sequence_id=seq,
         public_id=pid,
