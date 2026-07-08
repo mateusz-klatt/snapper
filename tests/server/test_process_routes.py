@@ -4216,6 +4216,7 @@ class TestUpdateProcessScopeConfig:
         assert result.payload.restart_required is True
         assert result.payload.parameters == persisted
         mock_enforce.assert_awaited_once()
+        assert mock_enforce.await_args is not None
         enforced = mock_enforce.await_args.args[0]
         assert enforced["operator_public_id"] == "op-a"
         assert enforced["params"]["ai_review_user_public_id"] == "label:bob"
