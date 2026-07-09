@@ -339,7 +339,7 @@ caches (no REST polling).
 | Topic | Description |
 | ----- | ----------- |
 | `processes.events.summary.<instance_id>` | Full snapshot of every configured process's current status (start/stop/crash/completion transitions) |
-| `processes.events.configured.<instance_id>` | Snapshot of currently-known process names. Emits in two places: `create_process_config` (persisted-config-row create), and `spawn_per_wallet_executors` (per-wallet executor instances appear). It does NOT fire on persisted-row delete or on per-wallet teardown today. The snapshot's `process_names` is the union of persisted config names and `instance_configs.keys()`. |
+| `processes.events.configured.<instance_id>` | Snapshot of currently-known process names. Emits in four places: `create_process_config` (persisted-config-row create), `spawn_per_wallet_executors` (per-wallet executor instances appear), `update_process_config` (desired-state mutation), and `update_process_config_parameters` (strategy scope editor). It does NOT fire on persisted-row delete or on per-wallet teardown today. The snapshot's `process_names` is the union of persisted config names and `instance_configs.keys()`. |
 | `processes.events.runs.<process_name>` | Per-run lifecycle transitions: `running` / `succeeded` / `failed` / `cancelled` |
 | `strategies.events.list.<instance_id>` | Snapshot of canonical class paths for every STRATEGY-role process config (drives the Strategies view) |
 
@@ -657,24 +657,31 @@ its React Query cache entry wholesale — no diff reconciliation.
 | ----- | ---- | ----------- |
 | `type` | string | `"process_summary_event"` |
 | `coordinator` | string | Topic-safe slug of the emitting node (default `coord-0`); mirrors the topic suffix so consumers can attribute rows to the coordinator that sampled them |
+| `coordinator_label` | string \| None | Human-readable container label (`API` / `Feed` / `Strategies`) derived from the emitting node's autostart profile, `None` for the single-container `ALL` profile; lets consumers render a friendly name instead of the raw `coord-<id>` slug |
 | `processes` | list[`ProcessSummaryItem`] | Unordered snapshot of per-process rows (configured first in repository row order, then runtime per-wallet instances — consumers must not rely on this order) |
 | `snapshot_at` | datetime | Bus time the snapshot was assembled |
 
 `ProcessSummaryItem` fields: `name`, `running`, `enabled`, `role`,
 `lifecycle`, `active_public_id`, `rss_bytes` (int | None, subprocess
 resident set size in bytes; `None` for thread-mode/unsampled
-processes), and `cpu_percent` (float | None, whole-process CPU% which
+processes), `cpu_percent` (float | None, whole-process CPU% which
 can exceed 100 on multi-threaded children; `None` under the same
-conditions and `0.0` on the first sample after a restart). PID /
+conditions and `0.0` on the first sample after a restart), and
+`owned` (bool, default False; True when the emitting node's autostart
+profile runs this process or it is locally running — lets consumers
+attribute a not-running process to the container that owns it by
+profile rather than to whichever node most recently listed it). PID /
 command / exit_code are intentionally absent — they only exist for
 native subprocesses, so detailed status is fetched via REST when needed.
 
 ### ProcessConfiguredEventData
 
-Published on `processes.events.configured.<instance_id>` from two
-launcher sites only: `create_process_config` (persisted-config-row
-create) and `spawn_per_wallet_executors` (per-wallet executor
-instances appear). The launcher does NOT emit on persisted-row
+Published on `processes.events.configured.<instance_id>` from four
+launcher sites: `create_process_config` (persisted-config-row
+create), `spawn_per_wallet_executors` (per-wallet executor
+instances appear), `update_process_config` (desired-state
+enabled/restart_nonce writes), and `update_process_config_parameters`
+(strategy scope editor). The launcher does NOT emit on persisted-row
 delete or on per-wallet teardown today. `process_names` is the
 sorted union of persisted config names AND
 `instance_configs.keys()` at snapshot time.

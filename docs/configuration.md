@@ -401,9 +401,13 @@ are ignored and may be deleted.
 | `session_domain` | `""` | Session cookie domain override |
 | `ui_origin` | `""` | Additional allowed UI origins for CORS and WS origin validation |
 
-When `SNAPPER_ENV` is `production`, `prod`, or `staging`, these
-database-backed placeholders are refused. Configure real values in the
-settings table before switching a deployment into production mode.
+These settings are ordinary tunables with working defaults; none of
+them are placeholders and none are refused at any `SNAPPER_ENV` value.
+When `SNAPPER_ENV` is `production`, `prod`, or `staging`, the only
+placeholder refused at startup is the development default for
+`MASTER_PASSWORD` (checked in
+`BootstrapSettingsLoader._validate_production_secret_defaults`), from
+which the JWT and CSRF signing keys are derived.
 
 ## `.env.example` File
 

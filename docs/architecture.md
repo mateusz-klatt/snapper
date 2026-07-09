@@ -508,7 +508,7 @@ External integrations:
 
 - **Exchanges** (`exchanges/`) — Exchange clients (Kraken, Walutomat).
   `kraken_sdk_patches.py` is a version-coupled patch layer over
-  python-kraken-sdk (3.2.x) that the Kraken venue implementations
+  python-kraken-sdk (3.3.x) that the Kraken venue implementations
   install at import time, so every process that builds a Kraken WS
   client — executors as well as publishers — is covered. Among its
   fixes is WS teardown hardening: the stock SDK reconnect backoff

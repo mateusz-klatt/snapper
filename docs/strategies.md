@@ -178,21 +178,29 @@ candle buffer from history BEFORE subscribing to the live feed, so the strategy 
 indicator-ready from a cold start instead of waiting that many live periods (a
 restart re-warms the same way).
 
-Warm-up is **DB-first** (Phase 3 slice 5) and **opt-in + crypto-scoped**: it reads
-the persisted `1d` plane (`get_candles` under the leg's live venue) so the warmed
-series is continuous with the live synthesized 1d bars and the read path is
+Warm-up is **DB-first** (Phase 3 slice 5) and **opt-in via
+`required_candle_history() > 0`**: it reads the persisted plane of each leg's own
+timeframe (`get_candles` under the leg's live venue) so the warmed
+series is continuous with the live synthesized bars and the read path is
 single-source. Only when the persisted plane is short for some leg (e.g. before
 the operator has applied the daily backfill) does it fall back to the local
-Polygon **crypto daily** cache as a non-canonical bootstrap (logged as such).
+Polygon **crypto daily** cache as a non-canonical bootstrap (logged as such) —
+that fallback alone is crypto-scoped and `1d`-only.
 
-- Set `params["warmup_market_type"] = "crypto"` to enable it (without it, warm-up
-  is skipped and the buffer fills live-only). This keeps a non-crypto strategy
-  from ever loading a crypto ticker.
+- Set `params["warmup_market_type"] = "crypto"` to enable ONLY the non-canonical
+  Polygon crypto daily cache fallback for aligned `1d` legs; the DB-first warm-up
+  itself runs for any strategy declaring a positive history requirement, with or
+  without this param. This keeps a non-crypto strategy from ever loading a crypto
+  ticker.
 - Set `params["buffer_size"]` (default 100) `>=` the lookback, or warm-up is
   skipped with a warning (no silent under-warm).
 - Optional `params["polygon_cache_root"]` (default `data/polygon/cache`) — the
   bootstrap fallback root, used only when the DB is short.
-- Only `1d` candle inputs are warmed (others rely on live fill).
+- Candle input legs are warmed from the persisted DB plane under their own
+  timeframe (`1h`, `1d`, ...) for single-leg strategies and for multi-leg
+  strategies whose legs SHARE one timeframe — mixed-timeframe leg sets skip
+  warm-up entirely (live-only fill); only the Polygon crypto cache bootstrap
+  fallback is restricted to `1d` legs with `warmup_market_type="crypto"`.
 - **Aligned all-or-nothing for multi-leg strategies**: a pair (e.g. cointegration)
   is warmed only if every leg shares at least the required number of common UTC
   days; on any shortfall NO leg is warmed (symmetric live-only fill), so the

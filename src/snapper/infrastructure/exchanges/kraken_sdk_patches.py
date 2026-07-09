@@ -860,7 +860,7 @@ async def _patched_reconnect(self: ConnectSpotWebsocketBase) -> None:
     Calling unconditionally would raise ``AttributeError`` and break every
     reconnect cycle for those owners.
 
-    Then mirrors the SDK's reconnect semantics (python-kraken-sdk 3.2.x —
+    Then mirrors the SDK's reconnect semantics (python-kraken-sdk 3.3.x —
     version-coupled reimplementation, same precedent as
     :func:`_patched_recover_subscriptions`) with the #143 teardown hardening:
 
@@ -925,7 +925,7 @@ async def _patched_reconnect(self: ConnectSpotWebsocketBase) -> None:
 async def _patched_futures_reconnect(self: ConnectFuturesWebsocket) -> None:
     """Hardened replacement for the Futures connector's ``__reconnect``.
 
-    Mirrors the SDK's reconnect semantics (python-kraken-sdk 3.2.x —
+    Mirrors the SDK's reconnect semantics (python-kraken-sdk 3.3.x —
     version-coupled reimplementation) with the same #143 teardown hardening
     as :func:`_patched_reconnect`: interruptible backoff, no child spawn
     after a ``keep_alive`` flip, and guaranteed child reaping so cancelling
