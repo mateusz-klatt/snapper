@@ -107,6 +107,12 @@ class ProcessInstanceInfo(RegisterableProcess):
         last_heartbeat: Last known heartbeat timestamp.
         started_monotonic: Monotonic process start timestamp for durations.
         last_heartbeat_monotonic: Monotonic heartbeat timestamp for durations.
+        run_public_id: Public id of the ``process_runs`` row minted for
+            this instance's launch, so a superseded instance's late
+            completion can finalize its exact row.
+        launch_generation: Per-name launch attempt counter value this
+            instance was spawned under, so a stale completion cannot
+            drive the watchdog after a newer launch attempt.
     """
 
     name: str
@@ -119,6 +125,8 @@ class ProcessInstanceInfo(RegisterableProcess):
     last_heartbeat: datetime | None = None
     started_monotonic: float | None = None
     last_heartbeat_monotonic: float | None = None
+    run_public_id: str | None = None
+    launch_generation: int | None = None
     _stopped: bool = field(default=False, repr=False)
 
     async def start(self) -> None:
@@ -128,15 +136,27 @@ class ProcessInstanceInfo(RegisterableProcess):
     async def stop(self) -> None:
         """Stop the subprocess via spawner.
 
-        Uses the spawner reference to terminate and cleanup
-        the subprocess resources.
+        Uses the spawner reference to terminate and cleanup the
+        subprocess resources. The spawner registry is name-keyed, so
+        when the registry entry for this name is a DIFFERENT info object
+        (a successor re-registered the name after this instance was
+        superseded), the terminate/cleanup is skipped — it would kill
+        the successor's live child. An absent entry (already cleaned) or
+        a non-dict registry (test double) proceeds: terminate is a
+        harmless no-op for an unknown name.
         """
         if self._stopped:
             return
         self._stopped = True
-        if self.spawner is not None:
-            self.spawner.terminate(self.name)
-            self.spawner.cleanup(self.name)
+        if self.spawner is None:
+            return
+        registry = getattr(self.spawner, "processes", None)
+        if isinstance(registry, dict):
+            registered = registry.get(self.name)
+            if registered is not None and registered is not self:
+                return
+        self.spawner.terminate(self.name)
+        self.spawner.cleanup(self.name)
 
     def get_status(self) -> dict[str, Any]:
         """Get subprocess status information.

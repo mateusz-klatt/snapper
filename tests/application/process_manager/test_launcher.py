@@ -114,7 +114,9 @@ async def test_start_process_handles_run_record_failure(monkeypatch: pytest.Monk
     launcher._update_process_run_record = AsyncMock()
     launcher._finalize_process_run = AsyncMock()
     launcher.import_class = lambda path, name=None, template=None: DummyProcess
-    launcher._register_task_completion = lambda name, task: None
+    launcher._register_task_completion = (
+        lambda name, task, run_public_id=None, launch_generation=None: None
+    )
     config = ProcessConfigModel(
         name="dummy",
         enabled=True,
@@ -154,7 +156,9 @@ async def test_start_process_rejects_invalid_mode(monkeypatch: pytest.MonkeyPatc
     launcher._create_process_run_record = AsyncMock()
     launcher._update_process_run_record = AsyncMock()
     launcher._finalize_process_run = AsyncMock()
-    launcher._register_task_completion = lambda name, task: None
+    launcher._register_task_completion = (
+        lambda name, task, run_public_id=None, launch_generation=None: None
+    )
     launcher.import_class = lambda path, name=None, template=None: AsyncDummyProcess
     config = ProcessConfigModel(
         name="async_proc",
@@ -3015,6 +3019,7 @@ class TestCompletionEmitBranches:
         proc_info = MagicMock()
         proc_info.process = MagicMock()
         proc_info.process.returncode = 0
+        launcher.started_processes["momentum"] = proc_info
 
         await launcher._handle_process_completion("momentum", proc_info)
 
@@ -3045,7 +3050,12 @@ class TestEmitSitesIntegration:
             del name
             return DummyProcess
 
-        def _no_op_register(_name: str, _task: asyncio.Task[Any]) -> None:
+        def _no_op_register(
+            _name: str,
+            _task: asyncio.Task[Any],
+            _run_public_id: str | None = None,
+            _launch_generation: int | None = None,
+        ) -> None:
             return None
 
         publisher = _RecordingPublisher()

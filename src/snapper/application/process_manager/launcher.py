@@ -147,6 +147,36 @@ cancels the stuck convergence and the pass moves on; 120 s is far above
 any healthy stop/start so a cancellation here always indicates a wedged
 process, which the log line then surfaces."""
 
+_REAP_PREDECESSOR_TIMEOUT_S: Final[float] = 10.0
+"""Ceiling for reaping a live predecessor before starting a successor.
+
+:meth:`start_process` refuses to register a successor while a live
+predecessor instance still holds the per-name tracking slots — the
+2026-07-08 zombie incident began exactly there: a second start
+overwrote ``process_tasks[name]`` / ``started_processes[name]`` and
+dropped the ONLY handles to a still-running strategy, leaving it
+unreachable by every stop path. A predecessor that survives
+cancellation for this long is wedged (a healthy strategy task unwinds
+in milliseconds); the start then fails loudly instead of double-running
+the name, and the retained handles keep the wedged instance stoppable."""
+
+_FINALIZED_RUN_IDS_CAP: Final[int] = 512
+"""Bound on the remembered finalized-run-id set.
+
+The set exists to make run finalization idempotent across the two
+finalizers (the by-name pop in :meth:`_finalize_process_run` and the
+per-run :meth:`_finalize_superseded_run` used by stale completions), so
+a superseded instance's late completion callback can never re-finalize
+a row the stop path already closed and never emits a duplicate terminal
+run event. Insertion-ordered eviction at this cap bounds memory for the
+process's lifetime; 512 far exceeds any plausible number of in-flight
+terminal races between restarts. Accepted residual: an id evicted past
+the cap COULD be double-finalized if its completion callback were still
+pending after 512 newer finalizations — that requires an event-loop
+stall spanning hundreds of terminal transitions, and the worst case is
+one duplicate terminal run event on an already-closed row, never a
+tracking corruption."""
+
 _WALLET_LABEL_PIN_PREFIX: Final = "label:"
 """Prefix marking a wallet pin as a label lookup.
 
@@ -448,6 +478,8 @@ class ProcessLauncherService:
         self._reconcile_start_failures: dict[str, int] = {}
         self._reconcile_attempted_nonce: dict[str, str] = {}
         self._terminal_no_restart_generation: dict[str, str] = {}
+        self._finalized_run_ids: dict[str, None] = {}
+        self._launch_generation: dict[str, int] = {}
 
     def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
         """Inject the bus publisher used for processes/strategies fanout.
@@ -793,7 +825,16 @@ class ProcessLauncherService:
         started_at = self.active_run_started_at.pop(name, None)
         if public_id is None:
             return
-        await self._run_recorder.update_run_record(public_id, status, result=result, error=error)
+        if public_id in self._finalized_run_ids:
+            return
+        self._mark_run_finalized(public_id)
+        try:
+            await self._run_recorder.update_run_record(
+                public_id, status, result=result, error=error
+            )
+        except BaseException:
+            self._finalized_run_ids.pop(public_id, None)
+            raise
         completed_at = datetime.now(UTC)
         await self._emit_run_event(
             process_name=name,
@@ -804,6 +845,160 @@ class ProcessLauncherService:
             error=error,
             exit_code=exit_code,
         )
+
+    def _mark_run_finalized(self, public_id: str) -> None:
+        """Remember a run id as finalized, evicting the oldest past the cap.
+
+        Shared bookkeeping between :meth:`_finalize_process_run` (the
+        by-name pop) and :meth:`_finalize_superseded_run` (the per-run
+        stale path) so whichever finalizer runs FIRST wins and the other
+        becomes a no-op — a superseded instance's late completion
+        callback can never re-close a row or duplicate a terminal run
+        event. A plain insertion-ordered dict bounded by
+        ``_FINALIZED_RUN_IDS_CAP`` keeps the memory constant.
+
+        Args:
+            public_id: The run public id that just reached a terminal
+                status.
+        """
+        self._finalized_run_ids[public_id] = None
+        while len(self._finalized_run_ids) > _FINALIZED_RUN_IDS_CAP:
+            self._finalized_run_ids.pop(next(iter(self._finalized_run_ids)))
+
+    async def _finalize_superseded_run(
+        self,
+        name: str,
+        run_public_id: str | None,
+        status: ProcessRunStatusEnum,
+        error: str | None = None,
+    ) -> None:
+        """Finalize the EXACT run of a superseded (no longer tracked) instance.
+
+        The per-run counterpart of the by-name :meth:`_finalize_process_run`:
+        a completion callback that lost its tracking slot to a successor must
+        never touch ``active_runs`` (which now belongs to the successor) —
+        the 2026-07-08 incident's forever-``running`` orphan row came from a
+        stop finalizing the successor's row by name while the superseded
+        run's row was never closed. Idempotent via the finalized-run-id set,
+        so a row the stop or reap path already closed is not re-closed and no
+        duplicate terminal event is emitted. A ``None`` run id (legacy caller
+        or a run whose record never persisted) is a no-op.
+
+        Args:
+            name: Logical process name, for the run event only.
+            run_public_id: The superseded run's public id, captured at
+                start time.
+            status: Terminal status resolved from the dead task/child.
+            error: Optional error detail.
+        """
+        if run_public_id is None or run_public_id in self._finalized_run_ids:
+            return
+        self._mark_run_finalized(run_public_id)
+        try:
+            await self._run_recorder.update_run_record(run_public_id, status, error=error)
+        except BaseException:
+            self._finalized_run_ids.pop(run_public_id, None)
+            raise
+        completed_at = datetime.now(UTC)
+        await self._emit_run_event(
+            process_name=name,
+            run_id=run_public_id,
+            status=status,
+            started_at=completed_at,
+            completed_at=completed_at,
+            error=error,
+        )
+
+    async def _reap_superseded_instance(self, name: str) -> None:
+        """Stop and finalize a live predecessor before a successor starts.
+
+        The lock-owned replace-safely-or-refuse guard at the top of
+        :meth:`start_process` (every caller holds
+        ``_restart_lock_for(name)``, so this never races another starter).
+        Without it a second start silently overwrites
+        ``process_tasks[name]`` / ``started_processes[name]`` /
+        ``active_runs[name]`` — dropping the ONLY handles to a
+        still-running instance, which is exactly how the 2026-07-08
+        zombie strategy survived every stop/disable/reconcile.
+
+        The predecessor's tracking slots are popped BEFORE its task is
+        cancelled / its instance stopped — INCLUDING a done-but-still
+        tracked task slot, whose pending done-callback could otherwise
+        classify itself as the slot owner during the reap awaits and
+        CHAIN a fresh live task into a slot the successor is about to
+        overwrite. With the slots detached, the predecessor's completion
+        callback classifies itself as SUPERSEDED and can only finalize
+        its own run — it can never take the current-completion path,
+        chain, reach the watchdog under the released lock, or tombstone
+        the SUCCESSOR's config. A cancellation-timeout refusal restores
+        the popped task slot, so the wedge stays stoppable.
+
+        A live predecessor task is cancelled and awaited for
+        ``_REAP_PREDECESSOR_TIMEOUT_S``; one that survives (a
+        cancellation-absorbing wedge) makes the start FAIL with the
+        handles retained, so the wedged instance stays stoppable and the
+        name is never double-run. A tracked instance object is stopped
+        via ``instance.stop()`` (identity-guarded spawner teardown for
+        native children); a stop failure likewise refuses the start.
+        EVERY abandonment path restores the popped handle it was holding
+        — including an outer CANCELLATION of the reap awaits (the
+        reconcile pass bounds each convergence with ``asyncio.wait_for``,
+        whose cancel would otherwise strand a detached-but-live
+        predecessor that ``stop_process_by_name`` reports NOT_RUNNING).
+        The predecessor's dangling run row is finalized by name BEFORE
+        the successor mints its own record, so the by-name pop is still
+        unambiguous here (idempotent against a completion callback that
+        already closed the row mid-reap).
+
+        Args:
+            name: Logical process name about to be (re)started.
+
+        Raises:
+            RuntimeError: If the predecessor survives cancellation or its
+                instance stop fails — the successor must not start.
+        """
+        task = self.process_tasks.get(name)
+        instance = self.started_processes.get(name)
+        if task is None and instance is None:
+            return
+        live_task = task is not None and not task.done()
+        logger.warning(
+            "start_process: live predecessor of '{}' still tracked; reaping before successor",
+            name,
+        )
+        if task is not None:
+            del self.process_tasks[name]
+        if task is not None and live_task:
+            task.cancel()
+            try:
+                done, _pending = await asyncio.wait({task}, timeout=_REAP_PREDECESSOR_TIMEOUT_S)
+            except BaseException:
+                self.process_tasks[name] = task
+                raise
+            if not done:
+                self.process_tasks[name] = task
+                raise RuntimeError(
+                    f"Live predecessor task of '{name}' survived cancellation for "
+                    f"{_REAP_PREDECESSOR_TIMEOUT_S}s; refusing to start a successor"
+                )
+        if instance is not None:
+            self.started_processes.pop(name, None)
+            try:
+                await instance.stop()
+            except BaseException as exc:
+                self.started_processes[name] = instance
+                if isinstance(exc, Exception):
+                    raise RuntimeError(
+                        f"Live predecessor instance of '{name}' failed to stop: {exc}; "
+                        f"refusing to start a successor"
+                    ) from exc
+                raise
+        await self._finalize_process_run(
+            name, ProcessRunStatusEnum.CANCELLED, error="superseded by a newer start"
+        )
+        self.started_processes.pop(name, None)
+        self.process_lifecycles.pop(name, None)
+        self.process_roles.pop(name, None)
 
     @staticmethod
     def _resolve_lifecycle(
@@ -895,7 +1090,12 @@ class ProcessLauncherService:
         """
         task = asyncio.create_task(method())
         self.process_tasks[config.name] = task
-        self._register_task_completion(config.name, task)
+        self._register_task_completion(
+            config.name,
+            task,
+            self.active_runs.get(config.name),
+            self._launch_generation.get(config.name),
+        )
         logger.info(f"Process '{config.name}' started as async task")
         await asyncio.sleep(0.1)
         if not task.done():
@@ -966,6 +1166,8 @@ class ProcessLauncherService:
             template_name=config.template,
         )
         logger.info(f"Process '{config.name}' started with PID {process_info.pid}")
+        process_info.run_public_id = self.active_runs.get(config.name)
+        process_info.launch_generation = self._launch_generation.get(config.name)
         self.started_processes[config.name] = process_info
 
     async def _start_in_process(self, config: ProcessConfigModel) -> None:
@@ -1151,8 +1353,13 @@ class ProcessLauncherService:
             config: Process configuration to start.
 
         Raises:
-            Exception: Re-raised from process startup failures.
+            Exception: Re-raised from process startup failures, and
+                ``RuntimeError`` from :meth:`_reap_superseded_instance`
+                when a live predecessor cannot be reaped — the successor
+                must not start while the name is still live.
         """
+        await self._reap_superseded_instance(config.name)
+        self._launch_generation[config.name] = self._launch_generation.get(config.name, 0) + 1
         self.process_lifecycles[config.name] = config.lifecycle
         self.process_roles[config.name] = config.role
         self._restart_configs[config.name] = config
@@ -2347,37 +2554,97 @@ class ProcessLauncherService:
         self._restart_tasks.clear()
         self._restart_locks.clear()
         self._terminal_no_restart_generation.clear()
+        self._finalized_run_ids.clear()
+        self._launch_generation.clear()
         self._process_metrics.clear()
         self._psutil_handles.clear()
 
-    def _try_chain_result(self, name: str, result: Any) -> bool:
+    def _try_chain_result(
+        self,
+        name: str,
+        result: Any,
+        completed_task: asyncio.Task[object] | None = None,
+        run_public_id: str | None = None,
+        launch_generation: int | None = None,
+    ) -> bool:
         """Chain a task or coroutine result into a new tracked task.
+
+        Chaining continues the SAME logical run, so the chained task
+        inherits the originating run's public id. A completion whose
+        lineage no longer owns the name must NOT chain: overwriting the
+        slot would drop the live successor's only cancellable handle
+        (one of the 2026-07-08 zombie's leak paths), and re-tracking
+        after a stop would resurrect a deliberately stopped name. Two
+        staleness signals, mirroring
+        :meth:`_is_superseded_task_completion`: ``active_runs[name]``
+        carrying a run other than this lineage's (a successor installed
+        its run id before overwriting the task slot), and a tracked slot
+        that is not ``completed_task``. Such a stale result is
+        cancelled/closed instead of tracked.
 
         Args:
             name: Process name for tracking.
             result: The result from a completed task.
+            completed_task: The task that produced ``result``; identity
+                is checked against the tracked slot. ``None`` skips the
+                slot-identity check (direct callers own the slot).
+            run_public_id: The originating run's public id, propagated
+                to the chained task's completion registration.
+            launch_generation: The originating lineage's launch attempt
+                counter value, propagated unchanged (chaining continues
+                the same launch).
 
         Returns:
             True if the result was chained, False otherwise.
         """
+        current_run = self.active_runs.get(name)
+        stale = (current_run is not None and current_run != run_public_id) or (
+            completed_task is not None and self.process_tasks.get(name) is not completed_task
+        )
         if isinstance(result, asyncio.Task):
             result_task: asyncio.Task[object] = result
+            if stale:
+                logger.warning("Discarding chained task from a superseded instance of '{}'", name)
+                result_task.cancel()
+                return False
             self.process_tasks[name] = result_task
-            self._register_task_completion(name, result_task)
+            self._register_task_completion(name, result_task, run_public_id, launch_generation)
             return True
         if inspect.iscoroutine(result):
+            if stale:
+                logger.warning(
+                    "Discarding chained coroutine from a superseded instance of '{}'", name
+                )
+                result.close()
+                return False
             chained_task = asyncio.create_task(result)
             self.process_tasks[name] = chained_task
-            self._register_task_completion(name, chained_task)
+            self._register_task_completion(name, chained_task, run_public_id, launch_generation)
             return True
         return False
 
-    def _register_task_completion(self, name: str, task: asyncio.Task[object]) -> None:
+    def _register_task_completion(
+        self,
+        name: str,
+        task: asyncio.Task[object],
+        run_public_id: str | None = None,
+        launch_generation: int | None = None,
+    ) -> None:
         """Register a done-callback that handles task completion or chains results.
 
         Args:
             name: Process name for tracking.
             task: The asyncio task to monitor.
+            run_public_id: The run public id this task lineage belongs
+                to, captured at start time so a late completion of a
+                superseded instance can finalize ITS OWN run row without
+                touching the successor's ``active_runs`` entry.
+            launch_generation: The per-name launch attempt counter value
+                this lineage was started under; the watchdog rejects a
+                restart decision whose generation is no longer current,
+                so a reaped lineage's late completion cannot tombstone a
+                successor config even when the successor's own start
+                failed before installing any live tracking.
         """
 
         def _callback(completed_task: asyncio.Task[Any]) -> None:
@@ -2396,11 +2663,17 @@ class ProcessLauncherService:
                     try:
                         result = completed_task.result()
                     except Exception:
-                        await self._handle_task_completion(name, completed_task)
+                        await self._handle_task_completion(
+                            name, completed_task, run_public_id, launch_generation
+                        )
                         return
-                    if self._try_chain_result(name, result):
+                    if self._try_chain_result(
+                        name, result, completed_task, run_public_id, launch_generation
+                    ):
                         return
-                await self._handle_task_completion(name, completed_task)
+                await self._handle_task_completion(
+                    name, completed_task, run_public_id, launch_generation
+                )
 
             loop.create_task(_handle_completion())
 
@@ -2810,7 +3083,14 @@ class ProcessLauncherService:
         logger.info(f"Scheduling restart of '{name}' in {delay:.2f}s (attempt {attempts})")
         self._restart_tasks[name] = asyncio.create_task(self._delayed_restart(name, delay))
 
-    async def _maybe_schedule_restart(self, name: str, run_status: ProcessRunStatusEnum) -> None:
+    async def _maybe_schedule_restart(
+        self,
+        name: str,
+        run_status: ProcessRunStatusEnum,
+        completed_task: asyncio.Task[object] | None = None,
+        completed_instance: RegisterableProcess | None = None,
+        launch_generation: int | None = None,
+    ) -> None:
         """Reconcile a dead process toward its desired state (watchdog core).
 
         Acquires the per-name lock, then immediately bails out as a pure
@@ -2818,7 +3098,15 @@ class ProcessLauncherService:
         live-task guard runs BEFORE any counter/escalation mutation, so a
         re-entrant FAILED completion arriving while a restart sleeps can
         neither burn restart budget nor escalate without a real new
-        attempt). Otherwise it decides whether the death
+        attempt). It ALSO bails out when the name's tracking is owned by
+        a DIFFERENT lineage than the completion that called here (a live
+        task other than ``completed_task``, or an instance other than
+        ``completed_instance``): the completion handlers await run
+        finalization before deciding on a restart, and a reap + successor
+        start can land inside that await — without the ownership guard
+        the stale decision would evaluate the predecessor's exit status
+        against the SUCCESSOR's config and could tombstone or clear the
+        successor's watchdog state. Otherwise it decides whether the death
         warrants a restart based on the desired state, the registered
         ``restart_policy``, and the run status. Escalation is driven by
         FAILED deaths ONLY, via two counters: :attr:`_restart_attempts`
@@ -2834,10 +3122,44 @@ class ProcessLauncherService:
         Args:
             name: Process name that died.
             run_status: The resolved terminal run status.
+            completed_task: The dead lineage's own task, when called from
+                the task-completion handler; a tracked task other than
+                this one marks the caller stale.
+            completed_instance: The dead lineage's own instance object,
+                captured by the calling handler BEFORE its awaits; a
+                tracked instance other than this one marks the caller
+                stale.
+            launch_generation: The dead lineage's launch attempt counter
+                value; a value behind the CURRENT per-name counter marks
+                the caller stale even when the newer launch failed
+                before installing any live tracking — without this a
+                reaped lineage's late completion could evaluate its exit
+                against the failed successor's config and tombstone it.
         """
         async with self._restart_lock_for(name):
             if self._has_live_restart_task(name):
                 logger.info(f"Restart of '{name}' already pending; not scheduling a second")
+                return
+            if (
+                launch_generation is not None
+                and self._launch_generation.get(name) != launch_generation
+            ):
+                logger.info(
+                    "Restart decision for '{}' dropped: a newer launch attempt exists", name
+                )
+                return
+            live_task = self.process_tasks.get(name)
+            if live_task is not None and live_task is not completed_task and not live_task.done():
+                logger.info(
+                    "Restart decision for '{}' dropped: a successor task is already live", name
+                )
+                return
+            live_instance = self.started_processes.get(name)
+            if live_instance is not None and live_instance is not completed_instance:
+                logger.info(
+                    "Restart decision for '{}' dropped: a successor instance is already live",
+                    name,
+                )
                 return
             config = self._restart_config_for_status(name, run_status)
             if config is None:
@@ -3061,7 +3383,11 @@ class ProcessLauncherService:
 
         Sleeps the backoff OUTSIDE the lock (so a stop can cancel it
         cleanly), then acquires the per-name lock and respawns only if the
-        desired state is still RUNNING. Because ``spawner.spawn`` is
+        desired state is still RUNNING AND no instance is already live —
+        a stale watchdog respawn firing after reconcile (or a manual
+        start) already recovered the name must no-op, not double-start:
+        the 2026-07-08 zombie began with exactly such a respawn
+        overwriting the per-name tracking of a live instance. Because ``spawner.spawn`` is
         synchronous (no suspension point), a stop cannot land mid-spawn;
         the post-spawn re-check under the lock tears down the just-spawned
         process if a stop set desired=STOPPED while we were spawning. A
@@ -3087,6 +3413,16 @@ class ProcessLauncherService:
         async with self._restart_lock_for(name):
             try:
                 if self._desired_state.get(name) is not _DesiredState.RUNNING:
+                    return
+                existing_task = self.process_tasks.get(name)
+                if name in self.started_processes or (
+                    existing_task is not None and not existing_task.done()
+                ):
+                    logger.info(
+                        "Respawn of '{}' skipped: an instance is already live "
+                        "(reconcile or a manual start won the race)",
+                        name,
+                    )
                     return
                 config = self._restart_configs.get(name)
                 if config is None or not config.enabled:
@@ -3163,10 +3499,37 @@ class ProcessLauncherService:
         A STRATEGY-role process still emits a strategy-list snapshot here
         because the monitor loop does not.
 
+        A completion whose ``proc_info`` no longer owns
+        ``started_processes[name]`` is SUPERSEDED (a reap + successor
+        start replaced it between the monitor's snapshot and this
+        handler): it finalizes only its OWN run row and must not touch
+        the successor — the name-keyed ``spawner.cleanup`` would
+        terminate the successor's live child. In the owned path the
+        identity check, exit-status resolution, and spawner cleanup all
+        run synchronously (no awaits between them), so a successor
+        cannot register in the spawner before the dead child is cleaned;
+        the ``finally`` pops are identity-guarded because the awaited
+        finalize/restart steps CAN yield to a replacing start.
+
         Args:
             name: Logical process name of the dead subprocess.
             proc_info: The tracked instance info carrying the OS process.
         """
+        if self.started_processes.get(name) is not proc_info:
+            logger.warning(
+                "Completion of a superseded native instance of '{}' (run {}); "
+                "leaving the live successor untouched",
+                name,
+                proc_info.run_public_id,
+            )
+            exit_code = proc_info.process.returncode
+            await self._finalize_superseded_run(
+                name,
+                proc_info.run_public_id,
+                ProcessRunStatusEnum.CANCELLED,
+                error=f"superseded instance exited (code {exit_code})",
+            )
+            return
         was_strategy = self.process_roles.get(name) is ProcessRoleEnum.STRATEGY
         try:
             lifecycle = self.process_lifecycles.get(name, ProcessLifecycleEnum.LONG_RUNNING)
@@ -3182,16 +3545,22 @@ class ProcessLauncherService:
             await self._finalize_process_run(
                 name, run_status, error=error_message, exit_code=exit_code
             )
-            await self._maybe_schedule_restart(name, run_status)
+            await self._maybe_schedule_restart(
+                name,
+                run_status,
+                completed_instance=proc_info,
+                launch_generation=proc_info.launch_generation,
+            )
         except Exception as e:
             logger.error(f"Error handling completion of native process '{name}': {e}")
         finally:
-            self.process_lifecycles.pop(name, None)
-            self.process_roles.pop(name, None)
-            self.started_processes.pop(name, None)
-            self.expected_terminations.discard(name)
-            self._process_metrics[name] = (None, None)
-            self._psutil_handles.pop(name, None)
+            if self.started_processes.get(name) is proc_info:
+                self.process_lifecycles.pop(name, None)
+                self.process_roles.pop(name, None)
+                self.started_processes.pop(name, None)
+                self.expected_terminations.discard(name)
+                self._process_metrics[name] = (None, None)
+                self._psutil_handles.pop(name, None)
             if was_strategy:
                 await self._emit_strategy_list_snapshot()
 
@@ -3260,11 +3629,19 @@ class ProcessLauncherService:
         :meth:`stop_all_processes` (full reset) and on
         :meth:`_cleanup_failed_start` (the entry was never legitimate).
 
+        A stored task that is NOT the completed one means a live
+        successor owns the slot — nothing is popped then, so a stale
+        completion can never evict the successor's tracking (the
+        superseded guard in :meth:`_handle_task_completion` normally
+        returns before reaching here; this is defense in depth).
+
         Args:
             name: Process name to clean up.
             task: Task to remove if it matches the stored task.
         """
         stored_task = self.process_tasks.get(name)
+        if stored_task is not None and stored_task is not task:
+            return
         if stored_task is task:
             del self.process_tasks[name]
         self.started_processes.pop(name, None)
@@ -3272,7 +3649,60 @@ class ProcessLauncherService:
         self.process_roles.pop(name, None)
         self.expected_terminations.discard(name)
 
-    async def _handle_task_completion(self, name: str, task: asyncio.Task[Any]) -> None:
+    def _is_superseded_task_completion(
+        self, name: str, task: asyncio.Task[Any], run_public_id: str | None
+    ) -> bool:
+        """Return whether a completed task lost the name's ownership to a successor.
+
+        Run identity outranks slot identity: when ``active_runs[name]``
+        already carries a DIFFERENT run than this completion's lineage,
+        the completion is superseded even if its dead task still sits in
+        ``process_tasks[name]`` — a successor start installs its run id
+        (and awaits the run event) BEFORE overwriting the task slot, and
+        a pending done-callback of a done-but-tracked predecessor landing
+        in that window must not finalize the successor's fresh row by
+        name. After the run check: another task holding
+        ``process_tasks[name]``, or a gone task slot with a live instance
+        in ``started_processes[name]`` (a native or sync-executor
+        successor after a mode switch), also mark supersession. A
+        superseded completion must not finalize by name, drive the
+        watchdog, or pop the name maps — all of those would hit the
+        SUCCESSOR (the 2026-07-08 zombie chain: stale completion popped
+        the successor's ``started_processes`` entry, stop then reported
+        NOT_RUNNING, reconcile double-started). A completion whose
+        tracking is simply gone (a stop or reap cleared the whole name)
+        is NOT superseded: the legacy path is a benign no-op there and
+        existing stop semantics rely on it.
+
+        Args:
+            name: Process name whose task completed.
+            task: The completed asyncio task.
+            run_public_id: The completing lineage's own run id, or None
+                when its run record never persisted — a lineage whose
+                record failed leaves ``active_runs[name]`` empty (the
+                reap finalizes any predecessor row before a successor
+                mints one), so a populated entry that differs from this
+                id ALWAYS belongs to a successor, including the
+                ``None``-id case.
+
+        Returns:
+            True when a successor owns the name's run or tracking.
+        """
+        current_run = self.active_runs.get(name)
+        if current_run is not None and current_run != run_public_id:
+            return True
+        stored = self.process_tasks.get(name)
+        if stored is not None:
+            return stored is not task
+        return name in self.started_processes
+
+    async def _handle_task_completion(
+        self,
+        name: str,
+        task: asyncio.Task[Any],
+        run_public_id: str | None = None,
+        launch_generation: int | None = None,
+    ) -> None:
         """Finalize an asyncio-task process and drive the restart watchdog.
 
         Mirrors the native-subprocess completion handler
@@ -3288,9 +3718,26 @@ class ProcessLauncherService:
         restart machinery itself (terminal lifecycles, clean exits, stop
         paths), never unconditionally here.
 
+        A SUPERSEDED completion (see
+        :meth:`_is_superseded_task_completion`) touches nothing owned by
+        the live successor: it only closes its OWN run row via
+        :meth:`_finalize_superseded_run` and returns. A completion that
+        passed the entry guard but whose launch generation went stale
+        during the awaited finalize (a successor start landed inside the
+        await) additionally SKIPS the tracking cleanup — a native or
+        sync-executor successor has no task slot, so the task-identity
+        check alone would not stop the cleanup from popping the
+        successor's ``started_processes`` entry.
+
         Args:
             name: Process name whose task completed.
             task: The completed asyncio task.
+            run_public_id: The run public id captured when this task
+                lineage started; lets a superseded completion finalize
+                the exact row it owns.
+            launch_generation: The launch attempt counter value this
+                lineage started under, forwarded to the watchdog so a
+                stale decision cannot outlive a newer launch attempt.
         """
         try:
             lifecycle = self.process_lifecycles.get(name, ProcessLifecycleEnum.LONG_RUNNING)
@@ -3307,12 +3754,35 @@ class ProcessLauncherService:
             should_finalize = task.cancelled() or not isinstance(
                 task.exception(), (GeneratorExit, StopAsyncIteration)
             )
+            if self._is_superseded_task_completion(name, task, run_public_id):
+                logger.warning(
+                    "Completion of a superseded instance of '{}' (run {}); "
+                    "leaving the live successor untouched",
+                    name,
+                    run_public_id,
+                )
+                if should_finalize:
+                    await self._finalize_superseded_run(
+                        name, run_public_id, run_status, error=error_message
+                    )
+                return
+            owned_instance = self.started_processes.get(name)
             try:
                 if should_finalize:
                     await self._finalize_process_run(name, run_status, error=error_message)
             finally:
-                await self._maybe_schedule_restart(name, run_status)
-                self._cleanup_task_tracking(name, task)
+                await self._maybe_schedule_restart(
+                    name,
+                    run_status,
+                    completed_task=task,
+                    completed_instance=owned_instance,
+                    launch_generation=launch_generation,
+                )
+                if (
+                    launch_generation is None
+                    or self._launch_generation.get(name) == launch_generation
+                ):
+                    self._cleanup_task_tracking(name, task)
             await self._emit_summary_snapshot()
             if was_strategy:
                 await self._emit_strategy_list_snapshot()
@@ -3898,6 +4368,12 @@ class ProcessLauncherService:
         the in-flight start sees desired=STOPPED in its post-spawn re-check
         and tears the just-started process down. The not-running path
         clears the watchdog state so the STOPPED marker never leaks.
+        "Running" means EITHER a tracked instance in
+        ``started_processes`` OR a live task in ``process_tasks``: a
+        task-only survivor (an instance whose ``started_processes``
+        entry was lost) is still cancelled and finalized instead of
+        being reported NOT_RUNNING — the 2026-07-08 zombie was exactly
+        a live task the old check refused to stop.
 
         Once the lock is held the stop re-cancels every restart task for
         the name via :meth:`_cancel_restart_tasks_locked`: a manual
@@ -3921,7 +4397,9 @@ class ProcessLauncherService:
         try:
             async with self._restart_lock_for(name):
                 await self._cancel_restart_tasks_locked(name)
-                if name not in self.started_processes:
+                live_task = self.process_tasks.get(name)
+                has_live_task = live_task is not None and not live_task.done()
+                if name not in self.started_processes and not has_live_task:
                     logger.warning(f"Process '{name}' is not running")
                     self._clear_watchdog_state(name)
                     self._unpark(name)
