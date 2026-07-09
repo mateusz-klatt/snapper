@@ -1115,6 +1115,10 @@ autostarts (see `snapper.core.types.ProcessAutostartProfileEnum`):
   subprocess (`mode=PROCESS`, uvloop) via
   `ProcessLauncherService.start_feed_publishers`. A market-data publisher
   is any registered process tagged both `market-data` and `publisher`.
+- `strategy` — ONLY role-STRATEGY processes (the strategies container).
+  Set by the `strategies-engine` CLI command, which starts them
+  THREAD-mode off the backend loop; the backend excludes them via
+  `STRATEGIES_EMBEDDED=false`.
 
 A market-data publisher is filtered out of the backend's `start_all_processes`
 under the `api` profile, and `get_core_health` honours the same filter so a
@@ -1162,6 +1166,24 @@ API's `RemoteSummaryCache` (15s TTL) always sees fresh `coord-2`
 snapshots even with zero strategies running. Out-of-tree strategies
 register via `STRATEGY_EXTRA_PACKAGES` + `PYTHONPATH` (compose mounts
 `./proprietary` read-only).
+
+Alert delivery runs in its own `snapper-notify` container (`snapper
+notify`): a bare CLI (no `PROCESS_AUTOSTART_PROFILE`, healthcheck
+disabled, SQLAlchemy pool clamped to `DB_POOL_SIZE=2` /
+`DB_MAX_OVERFLOW=3`). It subscribes to the source event topics its
+notify rules watch (`orders.events.` / `plans.decisions.` /
+`system.heartbeats.` for the default rule set, plus `admin.scope_revoked`
+/ `admin.user_deactivated`), evaluates each rule to mint an
+`AlertEventData`, persists it SCD2 (`alert_events` plus one queued
+`alert_deliveries` row per active device), publishes an `AlertEventData`
+frame on `alerts.{user_public_id}.{alert_type}` for the web live-refresh
+bridge, and fans each delivery out to the target user's active APNs
+devices via the outbox-backed `NotifySidecar`
+(`application/notify/sidecar.py`), retrying server/throttled failures on
+its own 30s scheduler. Its `apns_*` settings are read from the database;
+its only supervision is the compose `restart: unless-stopped` policy —
+the outbox drain on the next start recovers any queued deliveries left
+behind.
 
 `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` clamp each publisher subprocess's
 SQLAlchemy pool (PostgreSQL only). `get_repository` caches one engine per

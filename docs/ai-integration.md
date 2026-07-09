@@ -198,7 +198,7 @@ plugin's `userConfig` schema in
 Run `/mcp list` to confirm the `snapper` server is connected. The
 plugin pins the runtime to a specific `@mateusz-klatt/snapper-mcp`
 version — the manifest hardcodes the exact version string in
-`mcpServers.snapper.args` (currently `@0.11.0`), kept in lockstep
+`mcpServers.snapper.args` (currently `@0.12.0`), kept in lockstep
 with the plugin's own `version` field by the
 `integrations/snapper-mcp/test/plugin_manifest.test.ts` parity
 test so a bump to either side fails CI until both match. Future
@@ -441,6 +441,17 @@ offline. Short-deadline rounds such as `HeartbeatConsult` (25s) time
 out before that window opens, so a missed heartbeat frame is simply
 lost and the next 1h round retries — the catch-up read matters for
 strategies configured with deadlines longer than the fanout window.
+
+Operators and admins audit what the AI decided across the whole book
+via `GET /api/ai-reviews` (OPERATOR-gated; an ADMIN sees every
+operator's reviews, a non-admin OPERATOR is narrowed server-side to its
+own operators). It returns `AdminAiReviewListResponse` (`items` +
+`count`) with the full per-row outcome — `status`, `decision`,
+`rationale`, `resolution_mode`, and the responding delegate — and
+accepts optional exact-match `status`, `wallet_public_id`, and
+`strategy_public_id` filters plus a `limit` (1-500, default 100),
+newest first. Unlike `/pending` it is not keyed by the delegate
+identity and returns terminal decided rows, not only pending ones.
 
 ---
 

@@ -145,6 +145,30 @@ class RSIReversion(BaseStrategy):
 | `wallet_public_id` | string | Wallet that will execute orders for this strategy. Still defaults to empty and is NOT validated by `StrategyConfig` itself (the dataclass keeps an empty default pending the NOT NULL tightening migration). Process routes validate active operator/wallet grant coverage when both this field and `operator_public_id` are populated; a wallet without an operator is rejected. The non-empty requirement applies at runtime via the caps guard for any strategy that uses `create_ai_review_and_await()` — see "AI delegate consultation" below. |
 | `operator_public_id` | string | Trading-identity operator that owns this strategy instance. Empty default; validated against the launching principal's `operator_public_ids` when populated, and used with `wallet_public_id` for active grant and live-output coverage checks. |
 
+### Scoped-strategy reference identities
+
+`operator_public_id` and `wallet_public_id` accept either a concrete
+public id or a `label:<name>` reference; the launch-time scope resolver
+(`snapper.application.process_manager.strategy_scope`) rewrites each
+`label:` value to a canonical UUID against the active operator / wallet
+catalogue (fail-closed on a blank, unknown, or ambiguous label).
+
+A strategy can also declare identity references nested inside `params`:
+
+- `REFERENCE_IDENTITY_PARAMS: ClassVar[Mapping[str, str]]` maps a nested
+    `params` key to its reference kind (`"operator"`, `"wallet"`, or
+    `"user"`). A `label:<name>` value under that key is resolved the same
+    way at launch (a nested reference of any kind fails closed when the
+    launch has no resolved operator to scope it).
+- `SEEDED_IDENTITY_PARAMS: ClassVar[tuple[str, ...]]` names nested keys
+    that carry a generate-once UUID7 correlation token; they are minted
+    fill-if-empty by the persistence layer, never label-resolved, and
+    never rotated once populated.
+
+`HeartbeatConsult` is the canonical scoped strategy — it declares
+`REFERENCE_IDENTITY_PARAMS = {"ai_review_user_public_id": "user"}` and
+`SEEDED_IDENTITY_PARAMS = ("ai_review_strategy_public_id",)`.
+
 ### Candle history warm-up (A3-smoke)
 
 A strategy that needs historical bars before it can compute indicators overrides
@@ -392,6 +416,37 @@ A3-smoke Polygon crypto daily warm-up and sets `buffer_size=100`, so a
 fresh default process can prefill the 60-bar spread window from the
 persisted 1d history (falling back to the local Polygon crypto cache
 only when the DB plane is short for a leg).
+
+### HeartbeatConsult
+
+A paper-only heartbeat that emits one AI-delegate CONSULT per completed
+candle to exercise the AI-review / consult wake path end-to-end (strategy
+-> `ai_reviews` -> MCP-delegate wake -> decision -> resume). On an
+approved decision it publishes a signal whose strength is the
+configurable `heartbeat_signal_strength` param: the default `0.0` stays
+target-flat (the emit + AI-review attribution path runs without ever
+opening a position), while a value in `[0.0, 1.0]` opens an actionable
+paper long so the full signal -> order -> fill -> position plane is
+exercised. The constructor rejects any non-paper exchange and requires a
+scoped config (both `wallet_public_id` and `operator_public_id`), and
+validates `ai_review_user_public_id` / `ai_review_strategy_public_id` as
+canonical UUID7 fail-fast.
+
+**Parameters:**
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `ai_review_user_public_id` | `""` | UUID7 of the strategy owner stamped on review rows; accepts a `label:<username>` reference (declared reference-identity param). |
+| `ai_review_strategy_public_id` | `""` | Stable UUID7 identifying this strategy instance; seeded-once (minted fill-if-empty), never label-resolved. |
+| `ai_review_deadline_seconds` | `25` | Per-round decision deadline, bounded `[5, 300]`. |
+| `heartbeat_signal_strength` | `0.0` | Approved-round emit strength, bounded `[0.0, 1.0]`; `0.0` = target-flat. |
+
+```python
+from snapper.strategies.heartbeat_consult import HeartbeatConsult
+```
+
+The registered paper process is `strategy_heartbeat_consult_btc_1h`
+(1h BTC-USD candles).
 
 ## Proprietary strategies
 

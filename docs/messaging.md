@@ -123,6 +123,7 @@ database artifacts used by the trade runtime. They are not additional ZMQ topics
 | `system.heartbeats.executor.{exchange}.{wallet_short}` | Per-wallet executor heartbeat (5 segments). `wallet_short` is the **last** 12 lowercase hex characters of the wallet UUID (see `snapper.core.wallet_short`) |
 | `system.heartbeats.strategy.{name}` | Strategy heartbeat (e.g. `strategy.rsi_btc_1h`) |
 | `system.heartbeats.feed.{exchange}` | Feed heartbeat (e.g. `feed.kraken`, `feed.paper.kraken`) |
+| `system.heartbeats.marketdata.{exchange}` | Synthetic exchange-silence heartbeat from the API-side market-data watchdog; WARNING bursts on whole-exchange candle silence drive the `critical_system_error` alert pipeline (distinct from `feed` on purpose so its WARNING frames satisfy the 3-consecutive gate) |
 | `system.heartbeats.host.disk` | API host disk-pressure heartbeat from `SystemMetricsSnapshotter` |
 | `system.egress.snapshot` | Read-only process-local egress pool snapshot for API aggregation |
 | `system.egress.transfer` | Read-only snapper-egress WireGuard transfer samples for API route load |
@@ -131,7 +132,7 @@ database artifacts used by the trade runtime. They are not additional ZMQ topics
 
 Heartbeat `component` values use dot notation matching the topic path after
 `system.heartbeats.`: `executor.kraken`, `executor.kraken.019d6ca45f2e`,
-`strategy.rsi_btc_1h`, `feed.kraken`, `feed.paper.kraken`, `host.disk`.
+`strategy.rsi_btc_1h`, `feed.kraken`, `feed.paper.kraken`, `marketdata.kraken`, `host.disk`.
 The per-wallet executor heartbeat envelope additionally carries
 `meta.wallet_public_id` so
 subscribers that prefix-match the 4-segment parent topic can still
@@ -350,6 +351,17 @@ the default instance therefore emits on `coord-0`, and instance 7 emits
 on `coord-7`. The launcher emits these best-effort: if no
 `MessagePublisher` is wired the helper no-ops, and send failures are
 logged without corrupting process state.
+
+The desired-state control plane adds two further ZMQ topic families that
+are validated by `validate_topic` but deliberately kept off WS RBAC (the
+payload HMAC signature, not a topic ACL, is the trust boundary). After a
+`PATCH /api/processes/{name}/desired-state`, the API coordinator publishes
+a signed `ProcessCommandData` nudge on `processes.commands.<coordinator>`
+(3 segments) so the owning coordinator reconciles immediately, and that
+coordinator replies with `ProcessCommandAckData` on
+`processes.events.command_ack.<coordinator>` (4 segments) so the API's
+blocking PATCH resolves against the ack (falling back to the periodic
+reconcile when no publisher/registry is wired or the ack times out).
 
 ## Message Data Classes
 

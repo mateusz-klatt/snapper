@@ -24,8 +24,8 @@ This sidecar is part of the egress-multiplexer subsystem.
   settings via the same Fernet path; a mismatched master password makes
   the settings load raise (`Failed to decrypt encrypted setting`) and
   the sidecar exits at startup, so the container crash-loops, never
-  reports healthy, and blocks `snapper` / `snapper-feed` via
-  `depends_on: service_healthy`.
+  reports healthy, and blocks `snapper`, `snapper-feed`, and
+  `snapper-strategies` via `depends_on: service_healthy`.
 - **`DB_URL` and `ZMQ_BROKER_XSUB`** are both hard-required by the
   sidecar entrypoint (`snapper.egress.__main__`). The process exits with
   **code 2** at startup if either is missing: `DB_URL` lets the
@@ -279,28 +279,34 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
 ## Verification
 
 1. **Sidecar healthy?**
-   ```
-   docker compose exec snapper-egress \
-     python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/ready', timeout=2).read())"
-   ```
-   Expect a 200 with the running + failed tunnel id arrays. This is the
-   Compose health endpoint and intentionally stays 200 after bootstrap
-   even if an individual tunnel failed.
+
+    ```
+    docker compose exec snapper-egress \
+      python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/ready', timeout=2).read())"
+    ```
+
+    Expect a 200 with the running + failed tunnel id arrays. This is the
+    Compose health endpoint and intentionally stays 200 after bootstrap
+    even if an individual tunnel failed.
 
 2. **All tunnels up?**
-   ```
-   docker compose exec snapper-egress \
-     python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/readyz', timeout=2).read())"
-   ```
-   Expect 200 only when every declared tunnel is up; otherwise it
-   returns 503 with the failed tunnel ids.
+
+    ```
+    docker compose exec snapper-egress \
+      python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/readyz', timeout=2).read())"
+    ```
+
+    Expect 200 only when every declared tunnel is up; otherwise it
+    returns 503 with the failed tunnel ids.
 
 3. **Tunnel status detail?**
-   ```
-   docker compose exec snapper-egress \
-     python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/tunnels', timeout=2).read())"
-   ```
-   Each tunnel id maps to `{"status": "up", "reason": null}`.
+
+    ```
+    docker compose exec snapper-egress \
+      python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/tunnels', timeout=2).read())"
+    ```
+
+    Each tunnel id maps to `{"status": "up", "reason": null}`.
 
 4. **Backend egress snapshot visible?** From an authenticated operator
    session with `read:system_status`, call `GET /api/health/egress`.
@@ -322,12 +328,14 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
 
 5. **WireGuard handshake established?** (operator debugging — uses
    `iproute2` shipped in the image)
-   ```
-   docker compose exec snapper-egress ip -d link show wg-uk-1
-   docker compose exec snapper-egress ip rule show table 5000
-   ```
-   The interface should be `UP` and the rule should pin `from
-   <tunnel_addr>` → table N.
+
+    ```
+    docker compose exec snapper-egress ip -d link show wg-uk-1
+    docker compose exec snapper-egress ip rule show table 5000
+    ```
+
+    The interface should be `UP` and the rule should pin `from
+    <tunnel_addr>` → table N.
 
 6. **Kraken WS uses the tunnel?** The pool is a process-local
    singleton inside each feed-publisher process — `get_egress_pool()`
@@ -343,15 +351,17 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    priority when done.
 
 7. **Stable tick flow?**
-   ```sql
-   SELECT i.exchange, COUNT(*) AS n
-   FROM ticks t JOIN instruments i ON i.public_id = t.instrument_public_id
-   WHERE t.timestamp > NOW() - INTERVAL '60 seconds'
-   GROUP BY i.exchange ORDER BY n DESC;
-   ```
-   Kraken should show consistent counts (~1500-2000 ticks/s in steady
-   state). Drops indicate either the tunnel is flapping or the SOCKS5
-   listener is mis-bound.
+
+    ```sql
+    SELECT i.exchange, COUNT(*) AS n
+    FROM ticks t JOIN instruments i ON i.public_id = t.instrument_public_id
+    WHERE t.timestamp > NOW() - INTERVAL '60 seconds'
+    GROUP BY i.exchange ORDER BY n DESC;
+    ```
+
+    Kraken should show consistent counts (~1500-2000 ticks/s in steady
+    state). Drops indicate either the tunnel is flapping or the SOCKS5
+    listener is mis-bound.
 
 ## Threat-model + security notes
 

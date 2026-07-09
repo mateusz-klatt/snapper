@@ -500,7 +500,7 @@ docker compose up -d
 
 ### Compose topology
 
-The compose stack runs four application services on the internal
+The compose stack runs seven application services on the internal
 `snapper-internal` bridge network, all from a **single image**
 (`klattm/snapper:latest`) that bundles the python runtime + the Caddy
 binary. Each service overrides `entrypoint` / `command` to launch the
@@ -543,7 +543,7 @@ right process. The optional `postgres` service is gated behind the
   `command: ["run", "--config", "/etc/caddy/Caddyfile"]`. Owns the host
   `127.0.0.1:8000:8000` bind.
 
-All four application services are `restart: unless-stopped` so they come back automatically
+All seven application services are `restart: unless-stopped` so they come back automatically
 after a host reboot (assuming `systemctl is-enabled docker` returns
 `enabled`). Services explicitly stopped via `docker compose stop` stay
 stopped.

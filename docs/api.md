@@ -1761,6 +1761,7 @@ List configured process instances with runtime state. Requires
             "kind": "instance",
             "wallet_public_id": null,
             "parent_template": null,
+            "template": "zmq_broker",
             "coordinator": "coord-0",
             "managed_remotely": false
         }
@@ -1981,6 +1982,158 @@ X-CSRF-Token: <csrf_token>
     }
 }
 ```
+
+### PATCH /api/processes/{name}/desired-state
+
+Set the persistent desired state (`enable`, `disable`, or `restart`) of the
+`process_<name>` config — the source of truth for the reconcile loop. This
+NEVER starts or stops anything locally, so it is safe for a process owned by
+another container: the owning coordinator's reconcile loop converges the
+running state to what is written here. Requires `manage:processes` permission
+and CSRF for cookie auth.
+
+**Request:**
+
+```http
+PATCH /api/processes/strategy_rsi_btc_1h/desired-state
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{
+    "type": "process_desired_state_request",
+    "public_id": "<uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "payload": {
+        "action": "restart",
+        "restart_nonce": "01960a7e-2c1a-7c00-8000-000000000000"
+    }
+}
+```
+
+`action` is `enable`, `disable`, or `restart`. `restart_nonce` is a
+client-minted idempotency token (pattern `^[A-Za-z0-9_-]+$`, length 8-64),
+**required** for `restart` and ignored otherwise; re-sending the same nonce
+does not double-bounce the process. Enabling a strategy re-runs the
+operator/wallet/grant scope check (fail-closed) before the write.
+
+**Response (200):**
+
+```json
+{
+    "type": "process_desired_state_response",
+    "public_id": "<uuid7>",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": {
+        "type": "process_desired_state",
+        "public_id": "<uuid7>",
+        "session_id": "<server-session>",
+        "sequence_id": 1,
+        "timestamp": "2026-01-18T12:00:00Z",
+        "topic": null,
+        "status": "success",
+        "name": "strategy_rsi_btc_1h",
+        "action": "restart",
+        "coordinator": "coord-2",
+        "managed_remotely": true,
+        "message": "Desired state persisted; coord-2 will reconcile"
+    }
+}
+```
+
+**Errors:** 404 (per-wallet executor instance or unknown process), 422 (bare
+executor template, or a `restart` without `restart_nonce`), 409 (`restart` of a
+disabled process), 403/400 (strategy operator/wallet/grant scope denied).
+
+### PATCH /api/processes/{name}/config
+
+Retarget an existing **strategy** config's scope (operator / wallet /
+AI-reviewer reference-identity params) without hand-editing the config JSON.
+Requires `manage:processes` permission and CSRF for cookie auth. The endpoint
+does NOT restart the process — the response carries `restart_required: true`
+(surfaced by the UI as a "restart required" banner) and the change applies on
+the next (re)start. Authorization is FULLY enforced at edit time against the
+caller's principal (it does not defer cross-tenant checks to the trusted
+(re)start resolver).
+
+**Request:**
+
+```http
+PATCH /api/processes/strategy_rsi_btc_1h/config
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{
+    "type": "process_config_scope_request",
+    "public_id": "<uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "payload": {
+        "operator_public_id": "019d6ca4-...",
+        "wallet_public_id": "019d7e9a-...",
+        "reference_identity_params": {
+            "ai_review_user_public_id": "label:reviewer"
+        }
+    }
+}
+```
+
+All payload fields are optional; an omitted field is left unchanged, and an
+empty-string `operator_public_id` clears it. `operator_public_id` /
+`wallet_public_id` accept either a concrete public_id or a `label:<name>`
+reference. The scope is authorized at edit time against the caller's principal: a
+`label:` reference is resolved scope-qualified to the caller's own operator
+memberships (and, for a wallet, the resolved operator's accessible wallets of the
+strategy's paper/live mode), so it can never resolve outside the caller's
+authority. A label that resolves to exactly one in-scope entity is accepted; a
+blank, unresolved, or ambiguous label is rejected with 400, and a concrete
+operator the caller has no membership on is rejected with 403. Values are
+persisted **verbatim** — a `label:` reference is stored as-is and resolved to a
+concrete UUID only at the next (re)start (the authorization check runs on a
+throwaway resolved copy). `reference_identity_params` values may likewise be
+`label:<name>` references (e.g. `label:<username>` for the AI reviewer); their
+keys must be reference-identity params the strategy **declares** (whitelisted
+against the registry; an undeclared key returns 400).
+
+**Response (200):**
+
+```json
+{
+    "type": "process_config_scope_response",
+    "public_id": "<uuid7>",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": {
+        "type": "process_config_scope",
+        "public_id": "<uuid7>",
+        "session_id": "<server-session>",
+        "sequence_id": 1,
+        "timestamp": "2026-01-18T12:00:00Z",
+        "topic": null,
+        "status": "success",
+        "name": "strategy_rsi_btc_1h",
+        "parameters": {
+            "operator_public_id": "019d6ca4-...",
+            "wallet_public_id": "019d7e9a-...",
+            "params": { "ai_review_user_public_id": "label:reviewer" }
+        },
+        "restart_required": true
+    }
+}
+```
+
+**Errors:** 404 (per-wallet executor instance or not configured), 422 (bare
+executor template), 400 (not a strategy, undeclared reference-identity key,
+blank/unresolved/ambiguous operator or wallet label, or wallet resolution
+failure), 403
+(operator not a member / missing wallet grant / output not covered).
 
 ### GET /api/processes/runs
 
@@ -3456,6 +3609,33 @@ AI delegate principal receive `422`.
 resolved `instrument` ticker plus the raw `signal_envelope`
 payload (thesis, side, news anchors) so the AI delegate inbox
 can render a meaningful row without a follow-up read.
+
+### GET /api/ai-reviews
+
+Operator/admin audit list of AI reviews, newest first — the read-only
+counterpart to `/pending` that answers "what did the AI decide, and why?".
+Unlike `/pending` it is NOT keyed by the delegate identity (so it never returns
+`422`) and it includes terminal decided rows, not just pending ones. Requires
+the `operator` role (operator or admin); callers lacking it receive `403`. An
+ADMIN sees every operator's reviews; a non-admin OPERATOR is narrowed
+server-side to the operators it is a member of.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `limit` | int | Page size, 1..500 (default 100) |
+| `status` | string | Optional exact-match status filter |
+| `wallet_public_id` | string | Optional wallet filter |
+| `strategy_public_id` | string | Optional strategy filter |
+
+**Response:** `AdminAiReviewListResponse` (`items` + `count`). Each
+`AdminAiReviewItem` carries `review_public_id`, `strategy_public_id`,
+`user_public_id`, `operator_public_id`, `wallet_public_id`,
+`instrument_public_id`, `selected_delegate_public_id`,
+`responding_delegate_public_id`, `status`, `decision`, `rationale`,
+`resolution_mode`, `dispatch_version`, `created_at`, `resolved_at`,
+`deadline`, and the raw `signal_envelope`.
 
 ## Devices
 

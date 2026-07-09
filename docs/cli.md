@@ -210,6 +210,25 @@ setup failure does not abort feed startup.
 snapper feed-engine
 ```
 
+### `strategies-engine`
+
+Runs the dedicated strategies-container entrypoint. It syncs the process
+registry (including `STRATEGY_EXTRA_PACKAGES` mounts), then starts every
+role-`STRATEGY` process THREAD-mode inside this container exactly as they
+ran embedded in the backend (boot wallet/grant scope enforcement,
+watchdog, parking). Set `STRATEGIES_EMBEDDED=false` on the backend so it
+stops owning strategies, and run this container with
+`PROCESS_AUTOSTART_PROFILE=strategy` (required for the reconcile loop that
+converges running processes to the DB desired-state). It does not start a
+broker; it connects to the backend's configured `ZMQ_BROKER_*` endpoints.
+Exits non-zero only when a CORE process fails to start — strategy crashes
+are watchdog-managed and, after the restart budget, parked (visible via
+the coordinator summary frames), never container-fatal.
+
+```bash
+snapper strategies-engine
+```
+
 ### `zmq-logger`
 
 Monitors and logs ZMQ message traffic.

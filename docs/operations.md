@@ -961,6 +961,51 @@ Those instances load credentials through `CredentialResolver` and ignore
 commands for other wallets. Operators should start/stop the generated
 wallet instances, not the bare templates.
 
+## Persistent process control across containers
+
+`POST /api/processes/<name>/start` and `/stop` are LOCAL runtime
+operations on the node that receives them, so in the split topology
+(feed in `snapper-feed`, strategies in `snapper-strategies`, executors
+under their coordinator) they cannot control a process owned by a
+different container. The persistent, cross-container-safe control is
+`PATCH /api/processes/<name>/desired-state` (gated by `MANAGE_PROCESSES`
++ CSRF): it mutates only the DB desired-state (`enabled` /
+`restart_nonce`) of the `process_<name>` config — the source of truth —
+and NEVER starts or stops anything locally; the owning coordinator's
+reconcile loop converges the running state. The payload `action` is
+`enable`, `disable`, or `restart`. A `restart` requires the process to
+be enabled (409 otherwise) and a client-minted `restart_nonce`
+(`^[A-Za-z0-9_-]+$`, 8-64 chars, 422 if missing; idempotent — resending
+the same nonce does not double-bounce). A per-wallet executor instance
+(404) and a bare executor template (422) have no desired-state row;
+enabling a STRATEGY re-runs the operator/wallet/grant scope check
+fail-closed before the write.
+
+### Retargeting a strategy's scope (restart required)
+
+`PATCH /api/processes/<name>/config` retargets an existing STRATEGY
+config's scope (operator / wallet / AI-reviewer reference-identity
+params) without hand-editing the config JSON. It is gated by
+`MANAGE_PROCESSES` + CSRF and FULLY enforces the caller's authorization
+at edit time via `_enforce_strategy_scope` (operator membership, wallet
+grant, output coverage → 403/400). A non-strategy target → 400, an
+executor instance / unknown name → 404, a bare executor template → 422,
+and an undeclared reference-identity key → 400. `operator_public_id` /
+`wallet_public_id` may be a concrete public_id or a `label:<name>`
+reference: a label is resolved at edit time scope-qualified to the
+caller's own operator memberships (so it can never resolve outside the
+caller's authority), and an in-scope unambiguous label is accepted while
+a blank/unresolved/ambiguous label → 400 and a concrete foreign operator
+→ 403. The value is persisted verbatim — a `label:` reference is stored
+as-is and resolved to a concrete UUID only at the next (re)start (the
+authorization check runs on a throwaway resolved copy). The edit does NOT
+restart the process: the
+response carries `restart_required: true` (surfaced in the UI as a
+"restart required" banner) and the new scope takes effect only on the
+next (re)start of the owning process (via the desired-state `restart`
+action above, or a `snapper-strategies` restart subject to the
+flat-restart discipline above).
+
 ## Enable the feed
 
 ```

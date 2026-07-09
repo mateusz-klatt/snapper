@@ -78,11 +78,13 @@ exchange, with `meta` carrying `silent_seconds`, `threshold_seconds`,
 and `latest_candle_open_at` for forensics.
 
 Scheduled venue closures are suppressed via the shared CME calendar
-(`core/market_hours.py`): `kraken_equities` never alerts inside the
-daily 21:00-22:00 UTC break or the Friday 21:00 UTC - Sunday
-22:00 UTC weekend closure, and after a closure ends its silence clock
-restarts at the reopen boundary instead of the last pre-closure
-candle. Per-exchange thresholds can be overridden (or one exchange
+(`core/market_hours.py`), whose schedule is defined in Chicago wall
+time (CT) and converted per call: `kraken_equities` never alerts
+inside the daily 16:00-17:00 CT maintenance break, the Friday
+16:00 CT - Sunday 17:00 CT weekend closure, or a curated US-holiday
+closure, and after a closure ends its silence clock restarts at the
+reopen boundary instead of the last pre-closure candle.
+Per-exchange thresholds can be overridden (or one exchange
 disabled with `0`) via `MARKET_DATA_WATCHDOG_EXCHANGE_THRESHOLDS`
 (`exchange=seconds` CSV), and `MARKET_DATA_WATCHDOG_DISABLED=true`
 parks the watchdog entirely. Detection runs level-triggered — an
