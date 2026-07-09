@@ -527,6 +527,45 @@ class TestUpgradeDependencies:
             call(["pnpm", "up"], cwd=tmp_path, check=True),
         ]
 
+    def test_protects_typescript_against_native_major_upgrade(self, tmp_path: Path) -> None:
+        """Verify upgrade_dependencies pins typescript when pnpm up --latest bumps it to 7.x.
+
+        Given: A package.json with typescript pinned to a 6.x range,
+        When: upgrade_dependencies runs and the upgrade step rewrites it to 7.x,
+        Then: package.json is restored to the original 6.x spec so the native
+            TypeScript 7 compiler cannot break openapi-typescript codegen.
+        """
+        package_json = tmp_path / "package.json"
+        package_json.write_text(
+            json.dumps(
+                {
+                    "name": "snapper-ui",
+                    "devDependencies": {"typescript": "^6.0.3"},
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        def side_effect(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            _ = kwargs
+            if args == ["pnpm", "up", "--latest"]:
+                data = json.loads(package_json.read_text(encoding="utf-8"))
+                data["devDependencies"]["typescript"] = "^7.0.2"
+                package_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0)
+
+        with patch("scripts.ui_refresh.run_cmd", side_effect=side_effect) as mock_run:
+            upgrade_dependencies(tmp_path)
+
+        updated = json.loads(package_json.read_text(encoding="utf-8"))
+        assert updated["devDependencies"]["typescript"] == "^6.0.3"
+        assert mock_run.call_args_list == [
+            call(["pnpm", "up", "--latest"], cwd=tmp_path, check=True),
+            call(["pnpm", "up"], cwd=tmp_path, check=True),
+        ]
+
     def test_does_not_write_or_reresolve_when_no_change_needed(self, tmp_path: Path) -> None:
         """Verify upgrade_dependencies skips the rewrite and re-resolve when nothing changes.
 

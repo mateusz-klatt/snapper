@@ -352,6 +352,14 @@ def upgrade_dependencies(ui_dir: Path) -> None:
     makes the refresh deterministic against regressions: a stale registry cache
     can never push a dependency backward.
 
+    ``typescript`` is protected alongside ``eslint``/``@eslint/js`` because the
+    TypeScript 7 native compiler ships only a ``tsc`` binary and drops the
+    JavaScript compiler API (``ts.factory``) that ``openapi-typescript`` (the
+    API-types codegen) and ``typescript-eslint`` build on. Pinning its committed
+    ``6.x`` range keeps ``make ui-refresh`` from silently upgrading it to 7 and
+    breaking codegen; remove it from the protected list once the frontend
+    toolchain supports the native compiler.
+
     Args:
         ui_dir: Path to the UI directory containing package.json.
     """
@@ -360,7 +368,7 @@ def upgrade_dependencies(ui_dir: Path) -> None:
         print(f"Skipping dependency upgrade (missing {package_json})")
         return
 
-    protected_dependency_names = ["eslint", "@eslint/js"]
+    protected_dependency_names = ["eslint", "@eslint/js", "typescript"]
     package_data_before = read_package_json(package_json)
     protected_specs: dict[str, tuple[str, str]] = {}
     for dep_name in protected_dependency_names:
