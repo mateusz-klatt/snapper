@@ -909,6 +909,36 @@ class ProcessLauncherService:
             error=error,
         )
 
+    async def _stop_superseded_predecessor_instance(
+        self,
+        name: str,
+        instance: RegisterableProcess,
+    ) -> None:
+        """Stop a detached predecessor instance and restore it on failure.
+
+        Args:
+            name: Logical process name being superseded.
+            instance: Captured predecessor instance to stop.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If stopping fails with an ordinary exception.
+            BaseException: If stopping is interrupted by cancellation or
+                another non-Exception control-flow failure.
+        """
+        try:
+            await instance.stop()
+        except BaseException as exc:
+            self.started_processes[name] = instance
+            if isinstance(exc, Exception):
+                raise RuntimeError(
+                    f"Live predecessor instance of '{name}' failed to stop: {exc}; "
+                    f"refusing to start a successor"
+                ) from exc
+            raise
+
     async def _reap_superseded_instance(self, name: str) -> None:
         """Stop and finalize a live predecessor before a successor starts.
 
@@ -983,16 +1013,7 @@ class ProcessLauncherService:
                 )
         if instance is not None:
             self.started_processes.pop(name, None)
-            try:
-                await instance.stop()
-            except BaseException as exc:
-                self.started_processes[name] = instance
-                if isinstance(exc, Exception):
-                    raise RuntimeError(
-                        f"Live predecessor instance of '{name}' failed to stop: {exc}; "
-                        f"refusing to start a successor"
-                    ) from exc
-                raise
+            await self._stop_superseded_predecessor_instance(name, instance)
         await self._finalize_process_run(
             name, ProcessRunStatusEnum.CANCELLED, error="superseded by a newer start"
         )

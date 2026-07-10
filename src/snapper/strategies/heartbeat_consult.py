@@ -175,6 +175,9 @@ def _sma(closes: list[float], bars: int) -> float | None:
 def _rsi(closes: list[float], bars: int = RSI_BARS) -> float | None:
     """Wilder-smoothed RSI over the full series.
 
+    Gain and loss averages derive from non-negative deltas, so non-positive
+    guards detect only their exact-zero states.
+
     Args:
         closes: Close series in ascending bar order.
         bars: RSI period.
@@ -198,9 +201,9 @@ def _rsi(closes: list[float], bars: int = RSI_BARS) -> float | None:
     for gain, loss in zip(gains[bars:], losses[bars:], strict=True):
         avg_gain = (avg_gain * (bars - 1) + gain) / bars
         avg_loss = (avg_loss * (bars - 1) + loss) / bars
-    if avg_gain == 0.0 and avg_loss == 0.0:
+    if avg_gain <= 0.0 and avg_loss <= 0.0:
         return 50.0
-    if avg_loss == 0.0:
+    if avg_loss <= 0.0:
         return 100.0
     return _finite_or_none(round(100.0 - 100.0 / (1.0 + avg_gain / avg_loss), 2))
 

@@ -51,6 +51,7 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.json_types import JsonObject
 from snapper.core.types import AllExchange
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionMode
@@ -432,6 +433,45 @@ async def _resolve_paper_reference_price(
     )
 
 
+def _build_create_order_plan_params(
+    *,
+    body: CreateOrderBody,
+    client_order_id: str,
+    execution_exchange: str,
+    command_price: float | None,
+) -> JsonObject:
+    """Build persisted parameters for a manual order plan.
+
+    Args:
+        body: Validated create-order request payload.
+        client_order_id: Generated client order identifier.
+        execution_exchange: Effective execution venue after routing.
+        command_price: Explicit or paper reference price for the command.
+
+    Returns:
+        JSON-compatible execution-plan parameters.
+    """
+    plan_params: JsonObject = {
+        "order_type": body.order_type,
+        "side": body.side,
+        "time_in_force": body.time_in_force,
+        "post_only": body.post_only,
+        "child_client_order_id": client_order_id,
+        "native_instrument": body.instrument,
+    }
+    if execution_exchange != body.exchange:
+        plan_params["source_exchange"] = body.exchange
+    if command_price is not None and body.price is None:
+        plan_params["reference_price"] = command_price
+    if body.price is not None:
+        plan_params["price"] = body.price
+    if body.stop_price is not None:
+        plan_params["stop_price"] = body.stop_price
+    if body.leverage is not None:
+        plan_params["leverage"] = body.leverage
+    return plan_params
+
+
 @router.post(
     "",
     openapi_extra=openapi_schema(CreateOrderCommand),
@@ -562,24 +602,12 @@ async def create_order(
     user_pid = principal.user_public_id or principal.username
 
     client_order_id = str(uuid7())
-    plan_params: dict[str, Any] = {
-        "order_type": body.order_type,
-        "side": body.side,
-        "time_in_force": body.time_in_force,
-        "post_only": body.post_only,
-        "child_client_order_id": client_order_id,
-        "native_instrument": body.instrument,
-    }
-    if execution_exchange != body.exchange:
-        plan_params["source_exchange"] = body.exchange
-    if command_price is not None and body.price is None:
-        plan_params["reference_price"] = command_price
-    if body.price is not None:
-        plan_params["price"] = body.price
-    if body.stop_price is not None:
-        plan_params["stop_price"] = body.stop_price
-    if body.leverage is not None:
-        plan_params["leverage"] = body.leverage
+    plan_params = _build_create_order_plan_params(
+        body=body,
+        client_order_id=client_order_id,
+        execution_exchange=execution_exchange,
+        command_price=command_price,
+    )
 
     submission = TradeCommandSubmission(
         user_public_id=principal.user_public_id,
