@@ -1519,6 +1519,25 @@ def test_apply_breaker_open_is_rejection_equivalent_terminal() -> None:
     assert cmd.status == "failed"
 
 
+def test_apply_interlock_blocked_is_rejection_equivalent_terminal() -> None:
+    """order_interlock_blocked clears in-flight like a rejection.
+
+    Given: a TradeService with an in-flight command whose shard then
+        receives an order_interlock_blocked venue event (status 'failed'),
+    When: the event is applied,
+    Then: in_flight clears and the command status reads 'failed' — the
+        projection converges to the terminal state via _apply_order_terminal
+        rather than hitting the unknown-venue-event-type warning branch, so
+        replay and checkpoint recovery agree with the live REJECTED publish.
+    """
+    svc = TradeService()
+    event = _make_venue_event(event_id=1, event_type="order_interlock_blocked", status="failed")
+    svc.apply_venue_event(event)
+    cmd = svc.get_command_state("kraken.BTC-USD.live")
+    assert cmd.in_flight is False
+    assert cmd.status == "failed"
+
+
 def test_reset_shard_reseeds_initial_cash() -> None:
     """reset_shard replaces a shard with a fresh projection at initial cash.
 

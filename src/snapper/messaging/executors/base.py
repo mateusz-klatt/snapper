@@ -281,6 +281,40 @@ _COMMAND_TERMINAL_STATUSES = frozenset(
     }
 )
 
+_LIVE_TRADING_MODE_KEY = "live_trading_mode"
+_LIVE_TRADING_HALTED = "halted"
+_LIVE_TRADING_REDUCE_ONLY = "reduce_only"
+_LIVE_TRADING_ENABLED = "enabled"
+_LIVE_TRADING_UNAVAILABLE = "__unavailable__"
+"""Sentinel returned when the mode cannot be read authoritatively.
+
+Distinct from a genuine ``halted`` value so the interlock can surface
+``live_trading_mode_unavailable`` (an infrastructure incident: no
+settings service, a timed-out or errored read, a missing row, or an
+unrecognized value) separately from a deliberate operator ``halted``.
+Both block — the sentinel is never a permitted mode — but the reason
+tells the two apart. Never stored; not one of the three valid modes.
+"""
+_LIVE_TRADING_MODE_READ_TIMEOUT_S = 2.0
+"""Bound on the per-submit fresh read of ``live_trading_mode``.
+
+The interlock reads the setting straight from the database on every
+non-paper submit (the ZMQ-refreshed cache is best-effort — a lost
+``system.settings`` broadcast would leave a kill-switch stale). A
+wedged database must not starve the serialized per-wallet handler and
+its queued cancels, so the read is time-boxed and a timeout fails
+closed to blocked.
+"""
+_INTERLOCK_REASON_HALTED = "live_trading_halted"
+_INTERLOCK_REASON_REDUCE_ONLY = "live_trading_reduce_only_unavailable"
+_INTERLOCK_REASON_MODE_UNAVAILABLE = "live_trading_mode_unavailable"
+_INTERLOCK_REASON_BY_MODE = {
+    _LIVE_TRADING_HALTED: _INTERLOCK_REASON_HALTED,
+    _LIVE_TRADING_REDUCE_ONLY: _INTERLOCK_REASON_REDUCE_ONLY,
+    _LIVE_TRADING_UNAVAILABLE: _INTERLOCK_REASON_MODE_UNAVAILABLE,
+}
+_INTERLOCK_BLOCKED_EVENT_TYPE = "order_interlock_blocked"
+
 _RECON_CYCLE_TIMEOUT_S = 300.0
 """Bound on one full reconciliation cycle INCLUDING lock acquisition.
 
@@ -468,6 +502,8 @@ class PendingOrderState:
     unknown_published: bool = field(default=False)
     accept_event_pending: bool = field(default=False)
     breaker_open_pending: bool = field(default=False)
+    interlock_blocked_pending: bool = field(default=False)
+    interlock_blocked_reason: str = field(default=_INTERLOCK_REASON_MODE_UNAVAILABLE)
     adopted_accept_publish_pending: bool = field(default=False)
     fill_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -517,6 +553,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.exchange_client: T | None = None
         self._client_context_active: bool = False
         self.repository: Repository | None = None
+        self._settings_service: SettingsService | None = None
         self.pending_orders: dict[str, PendingOrderState] = {}
         self.client_by_exchange: dict[str, str] = {}
         self.orphaned_executions: dict[str, tuple[ExecutionUpdate, float]] = {}
@@ -626,6 +663,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             self.settings.zmq_broker_xsub,
         )
         self.settings = get_settings_with_service(settings_service)
+        self._settings_service = settings_service
         logger.info("AppSettings service initialized with database access")
 
     async def _resolve_credentials(self, exchange_name: OrderExchange) -> None:
@@ -1686,6 +1724,19 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         )
                         await self._handle_breaker_open_submit(order)
                         return True
+                    if await self.repository.has_venue_event(cid, _INTERLOCK_BLOCKED_EVENT_TYPE):
+                        logger.warning(
+                            f"[{exchange_name}] Replayed submit {cid} carries "
+                            f"interlock-blocked evidence — rerunning the terminal "
+                            f"disposition instead of a silent drop (an executor "
+                            f"crash mid-disposition would otherwise strand the "
+                            f"engine's intent; the original block reason is not "
+                            f"reconstructed post-release)"
+                        )
+                        await self._handle_interlock_blocked_submit(
+                            order, _INTERLOCK_REASON_MODE_UNAVAILABLE
+                        )
+                        return True
                     logger.warning(
                         f"[{exchange_name}] Duplicate submit {cid} dropped: durable "
                         f"venue-event evidence exists (crash-replayed dispatch)"
@@ -1858,6 +1909,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
             self.pending_orders.pop(order.client_order_id, None)
             await self._publish_order_status(order, OrderEventEnum.REJECTED)
+            return
+        if await self._is_live_trading_interlocked(order, exchange_name):
             return
         try:
             self.pending_orders[order.client_order_id] = PendingOrderState(request=order)
@@ -2070,6 +2123,248 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if await self._complete_breaker_open_disposition(pending.request):
             logger.info(
                 f"[{self._get_exchange_name()}] Recon healed the breaker-open "
+                f"disposition for {client_order_id}"
+            )
+
+    async def _read_live_trading_mode(self) -> str:
+        """Fresh-read ``live_trading_mode`` for the interlock, fail-closed.
+
+        Reads the setting directly from the database (never the
+        ZMQ-refreshed cache — a lost broadcast would leave a kill-switch
+        stale) under a hard timeout so a wedged database cannot starve
+        the serialized handler. A genuine operator value passes through
+        as-is. Every FAILURE mode — no settings service, timeout,
+        query/decrypt error, a duplicate active row, a missing row, or a
+        value that is not exactly one of the three accepted strings —
+        collapses to :data:`_LIVE_TRADING_UNAVAILABLE`, a blocking
+        sentinel distinct from a deliberate ``halted`` so the caller can
+        report the incident honestly. The result is one of the three
+        valid modes or the sentinel; never an arbitrary stored string.
+
+        Returns:
+            ``halted``, ``reduce_only``, ``enabled``, or
+            :data:`_LIVE_TRADING_UNAVAILABLE`.
+        """
+        if self._settings_service is None:
+            logger.error(
+                f"[{self._get_exchange_name()}] live_trading_mode unreadable: no "
+                f"settings service wired — failing closed to blocked"
+            )
+            return _LIVE_TRADING_UNAVAILABLE
+        try:
+            async with asyncio.timeout(_LIVE_TRADING_MODE_READ_TIMEOUT_S):
+                raw = await self._settings_service.get_setting_fresh(_LIVE_TRADING_MODE_KEY)
+        except Exception as exc:
+            logger.error(
+                f"[{self._get_exchange_name()}] live_trading_mode fresh read failed "
+                f"({type(exc).__name__}) — failing closed to blocked"
+            )
+            return _LIVE_TRADING_UNAVAILABLE
+        if raw in (_LIVE_TRADING_HALTED, _LIVE_TRADING_REDUCE_ONLY, _LIVE_TRADING_ENABLED):
+            return raw
+        logger.error(
+            f"[{self._get_exchange_name()}] live_trading_mode is missing or invalid "
+            f"({raw!r}) — failing closed to blocked"
+        )
+        return _LIVE_TRADING_UNAVAILABLE
+
+    async def _is_live_trading_interlocked(
+        self, order: OrderRequestData, exchange_name: str
+    ) -> bool:
+        """Gate a submit on the durable live-trading interlock.
+
+        Paper venues are simulated and ALWAYS pass — the discriminator
+        is the executor's venue (never the caller-supplied ``order.mode``,
+        which a client could forge); halting paper would kill the
+        heartbeat-consult validation loop. For every other venue the
+        mode is read fresh per submit: only ``enabled`` proceeds. In
+        Phase 0 ``reduce_only`` blocks like ``halted`` (a caller's
+        reduce assertion is not proof, and authoritative position truth
+        does not exist yet), differing only in the observability reason.
+        A block runs the distinct interlock-blocked disposition (a
+        durable ``order_interlock_blocked`` terminal, then REJECTED) so a
+        replayed frame can never execute after the mode later flips to
+        ``enabled``.
+
+        Args:
+            order: The incoming submit.
+            exchange_name: This executor's venue.
+
+        Returns:
+            True when the submit was blocked and disposed of.
+        """
+        if exchange_name == ExchangeEnum.PAPER:
+            return False
+        mode = await self._read_live_trading_mode()
+        if mode == _LIVE_TRADING_ENABLED:
+            return False
+        reason = _INTERLOCK_REASON_BY_MODE.get(mode, _INTERLOCK_REASON_MODE_UNAVAILABLE)
+        logger.warning(
+            f"[{exchange_name}] Order {order.client_order_id} blocked by live-trading "
+            f"interlock (mode={mode}, reason={reason}) — distinct interlock disposition"
+        )
+        await self._handle_interlock_blocked_submit(order, reason)
+        return True
+
+    async def _handle_interlock_blocked_submit(self, order: OrderRequestData, reason: str) -> None:
+        """Give an interlock-blocked submit its redispatch-safe disposition.
+
+        Mirrors :meth:`_handle_breaker_open_submit`: the interlock is
+        authoritative not-submitted but NOT a venue rejection, so the
+        command must not blind-retry after the mode flips to ``enabled``.
+        The sequence records a durable ``order_interlock_blocked`` event
+        (IS submit evidence — the dup guard drops any redispatch), CASes
+        the command to FAILED, and ONLY THEN publishes REJECTED so the
+        engine releases intent. Any step failing parks the entry with
+        ``interlock_blocked_pending`` for the recon loop to rerun.
+
+        Args:
+            order: The submit refused by the interlock.
+            reason: Stable machine-readable reason for the wire REJECTED.
+        """
+        if await self._complete_interlock_blocked_disposition(order, reason):
+            return
+        pending = self.pending_orders.get(order.client_order_id)
+        if pending is None:
+            pending = PendingOrderState(request=order)
+            self.pending_orders[order.client_order_id] = pending
+        pending.interlock_blocked_pending = True
+        pending.interlock_blocked_reason = reason
+        logger.warning(
+            f"[{self._get_exchange_name()}] interlock disposition incomplete for "
+            f"{order.client_order_id} — entry parked, recon retries (engine intent "
+            f"stays held until the durable terminal lands)"
+        )
+
+    async def _complete_interlock_blocked_disposition(
+        self, order: OrderRequestData, reason: str
+    ) -> bool:
+        """Run the interlock sequence: record, CAS FAILED, publish REJECTED.
+
+        Idempotent for retries: the durable event write is probe-guarded,
+        the lifecycle CAS tolerates an already-FAILED row, and the
+        REJECTED publish is engine-idempotent. The pending entry is
+        popped only on full success. The durable event and command carry
+        the canonical ``order_interlock_blocked`` error; only the wire
+        REJECTED reason varies for observability.
+
+        Args:
+            order: The interlock-refused order request.
+            reason: Stable machine-readable reason for the wire REJECTED.
+
+        Returns:
+            True when the full sequence completed.
+        """
+        exchange_name = self._get_exchange_name()
+        cid = order.client_order_id
+        try:
+            already_recorded = isinstance(
+                self.repository, SQLAlchemyRepository
+            ) and await self.repository.has_venue_event(cid, _INTERLOCK_BLOCKED_EVENT_TYPE)
+            if not already_recorded:
+                await self._record_venue_event(
+                    {
+                        "event_type": _INTERLOCK_BLOCKED_EVENT_TYPE,
+                        "exchange_name": exchange_name,
+                        "instrument": order.instrument,
+                        "client_order_id": cid,
+                        "side": order.side,
+                        "status": TradeCommandStatusEnum.FAILED.value,
+                        "error": _INTERLOCK_BLOCKED_EVENT_TYPE,
+                        "strategy_tag": order.strategy_tag,
+                    }
+                )
+        except Exception:
+            logger.warning(
+                f"[{exchange_name}] {_INTERLOCK_BLOCKED_EVENT_TYPE} event write failed "
+                f"for {cid} — retrying via recon"
+            )
+            return False
+        if not await self._fail_command_for_interlock(order):
+            return False
+        if not await self._publish_order_status(order, OrderEventEnum.REJECTED, reason=reason):
+            logger.warning(
+                f"[{exchange_name}] REJECTED publish failed for interlock-blocked {cid} "
+                f"— retrying via recon (intent must not silently stay held)"
+            )
+            return False
+        self.pending_orders.pop(cid, None)
+        return True
+
+    async def _fail_command_for_interlock(self, order: OrderRequestData) -> bool:
+        """CAS the interlock-refused command row to FAILED.
+
+        Byte-for-byte the breaker CAS (:meth:`_fail_command_for_breaker`)
+        with an ``order_interlock_blocked`` ``last_error``: STRICT cid
+        lookup, already-terminal counts as done, otherwise CAS-advance
+        through ``(dispatched, direct_dispatched, created) -> failed``.
+        Publishing REJECTED before the durable terminal would let a
+        still-CREATED row redispatch after the engine released intent, so
+        a DB error fails the sequence.
+
+        Args:
+            order: The interlock-refused order request.
+
+        Returns:
+            True when the row is verifiably terminal (or no SQL
+            repository is wired — paper/test mode has no outbox).
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return True
+        now = datetime.now(UTC)
+        try:
+            cmd = await self.repository.get_active_create_command_by_client_order_id(
+                order.client_order_id, self._get_exchange_name()
+            )
+            if cmd is None:
+                return True
+            if cmd["status"] in _COMMAND_TERMINAL_STATUSES:
+                return True
+            for expected in (
+                TradeCommandStatusEnum.DISPATCHED.value,
+                TradeCommandStatusEnum.DIRECT_DISPATCHED.value,
+                TradeCommandStatusEnum.CREATED.value,
+            ):
+                if await self.repository.advance_trade_command_lifecycle(
+                    public_id=cmd["public_id"],
+                    expected_status=expected,
+                    new_status=TradeCommandStatusEnum.FAILED.value,
+                    bus_time=now,
+                    session_id=cmd["session_id"],
+                    sequence_id=cmd["sequence_id"],
+                    terminal_at=now,
+                    last_error=_INTERLOCK_BLOCKED_EVENT_TYPE,
+                ):
+                    return True
+            current = await self.repository.get_current_trade_command_status(cmd["public_id"])
+        except Exception as e:
+            logger.warning(
+                f"[{self._get_exchange_name()}] interlock FAILED CAS errored for "
+                f"{order.client_order_id}: {e}"
+            )
+            return False
+        if current is None or current in _COMMAND_TERMINAL_STATUSES:
+            return True
+        logger.warning(
+            f"[{self._get_exchange_name()}] interlock CAS lost for "
+            f"{order.client_order_id} (row at {current}) — retrying via recon"
+        )
+        return False
+
+    async def _retry_interlock_blocked(self, client_order_id: str) -> None:
+        """Rerun one parked interlock disposition from the recon loop.
+
+        Args:
+            client_order_id: Key into ``pending_orders``.
+        """
+        pending = self.pending_orders.get(client_order_id)
+        if pending is None or not pending.interlock_blocked_pending:
+            return
+        if await self._complete_interlock_blocked_disposition(
+            pending.request, pending.interlock_blocked_reason
+        ):
+            logger.info(
+                f"[{self._get_exchange_name()}] Recon healed the interlock "
                 f"disposition for {client_order_id}"
             )
 
@@ -2816,6 +3111,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         for breaker_cid, breaker_entry in tuple(self.pending_orders.items()):
             if breaker_entry.breaker_open_pending:
                 await self._retry_breaker_open(breaker_cid)
+
+        for interlock_cid, interlock_entry in tuple(self.pending_orders.items()):
+            if interlock_entry.interlock_blocked_pending:
+                await self._retry_interlock_blocked(interlock_cid)
 
         for adopted_cid, adopted_entry in tuple(self.pending_orders.items()):
             if adopted_entry.adopted_accept_publish_pending:

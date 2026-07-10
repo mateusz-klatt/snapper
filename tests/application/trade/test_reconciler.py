@@ -280,6 +280,65 @@ class TestFoldLifecycleAdvance:
         assert advance.status == TradeCommandStatusEnum.FAILED
         assert advance.last_error == "circuit_breaker_open"
 
+    def test_interlock_blocked_event_advances_to_failed(self) -> None:
+        """An order_interlock_blocked row folds to FAILED (interlock, not venue).
+
+        Given: a dispatched command with an interlock-blocked event carrying
+            the interlock's error text,
+        When: the fold runs,
+        Then: target is FAILED with the interlock's error and terminal_at —
+            the live-trading interlock rejects the submit before the venue.
+        """
+        received = datetime.now(UTC)
+        advance = _fold_lifecycle_advance(
+            _make_cmd(),
+            [
+                _make_event(
+                    event_type="order_interlock_blocked",
+                    error="live trading disabled",
+                    received_at=received,
+                )
+            ],
+        )
+        assert advance is not None
+        assert advance.status == TradeCommandStatusEnum.FAILED
+        assert advance.last_error == "live trading disabled"
+        assert advance.terminal_at == received
+
+    def test_interlock_blocked_without_error_gets_fallback_reason(self) -> None:
+        """An interlock rejection without error text still records a reason.
+
+        Given: an order_interlock_blocked event whose error field is None,
+        When: the fold runs,
+        Then: last_error falls back to the generic order_interlock_blocked note.
+        """
+        advance = _fold_lifecycle_advance(
+            _make_cmd(), [_make_event(event_type="order_interlock_blocked", error=None)]
+        )
+        assert advance is not None
+        assert advance.status == TradeCommandStatusEnum.FAILED
+        assert advance.last_error == "order_interlock_blocked"
+
+    def test_interlock_blocked_is_never_superseded_by_later_live_evidence(self) -> None:
+        """An interlock-killed command is never resurrected by a stray accept.
+
+        Given: order_interlock_blocked (id=1) then order_accepted (id=2, an
+            out-of-order or anomalous write),
+        When: the fold runs,
+        Then: target stays FAILED — unlike a plain REJECTED, a FAILED interlock
+            terminal is never cleared by later live evidence, so a late accept
+            cannot resurrect a command the interlock already killed.
+        """
+        advance = _fold_lifecycle_advance(
+            _make_cmd(),
+            [
+                _make_event(id=1, event_type="order_interlock_blocked"),
+                _make_event(id=2, event_type="order_accepted"),
+            ],
+        )
+        assert advance is not None
+        assert advance.status == TradeCommandStatusEnum.FAILED
+
     def test_terminal_event_maps_known_statuses(self) -> None:
         """An order_terminal row maps its status onto the command enum.
 

@@ -4208,6 +4208,119 @@ async def test_get_setting_by_key_not_found(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_active_setting_value_plaintext(tmp_path: Path) -> None:
+    """Verify get_active_setting_value returns a plaintext value with False flag.
+
+    Given: an active plaintext setting row,
+    When: get_active_setting_value is called with the key,
+    Then: it returns the stored value paired with is_encrypted False.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Setting(
+                key="live_trading_mode",
+                value="enabled",
+                category="trading",
+                description="mode",
+                updated_by="admin",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=60,
+            )
+        )
+        await s.commit()
+    result = await r.get_active_setting_value("live_trading_mode")
+    assert result == ("enabled", False)
+
+
+@pytest.mark.asyncio
+async def test_get_active_setting_value_encrypted_returns_raw_value(tmp_path: Path) -> None:
+    """Verify get_active_setting_value returns the raw ciphertext plus the flag.
+
+    Given: an active encrypted setting row (is_encrypted True),
+    When: get_active_setting_value is called with the key,
+    Then: it returns the RAW stored ciphertext and True — no decryption
+        happens at the repository layer.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Setting(
+                key="api_key",
+                value="ciphertext-blob",
+                category="auth",
+                description="key",
+                updated_by="admin",
+                is_encrypted=True,
+                timestamp=now,
+                session_id="s1",
+                sequence_id=60,
+            )
+        )
+        await s.commit()
+    result = await r.get_active_setting_value("api_key")
+    assert result == ("ciphertext-blob", True)
+
+
+@pytest.mark.asyncio
+async def test_get_active_setting_value_missing_returns_none(tmp_path: Path) -> None:
+    """Verify get_active_setting_value returns None when the key is absent.
+
+    Given: a repository with no matching setting,
+    When: get_active_setting_value is called,
+    Then: it returns None.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    result = await r.get_active_setting_value("nonexistent")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_active_setting_value_selects_open_version(tmp_path: Path) -> None:
+    """Verify get_active_setting_value reads the OPEN SCD2 version only.
+
+    Given: a closed historical row (known_to != KNOWN_TO_MAX) and an open
+        row (known_to == KNOWN_TO_MAX) sharing the same key,
+    When: get_active_setting_value is called,
+    Then: it returns the open row's value, ignoring the superseded one.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Setting(
+                key="live_trading_mode",
+                value="halted",
+                category="trading",
+                description="mode",
+                updated_by="admin",
+                known_to=datetime(2023, 1, 1, tzinfo=UTC),
+                timestamp=now,
+                session_id="s1",
+                sequence_id=60,
+            )
+        )
+        s.add(
+            Setting(
+                key="live_trading_mode",
+                value="enabled",
+                category="trading",
+                description="mode",
+                updated_by="admin",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=61,
+            )
+        )
+        await s.commit()
+    result = await r.get_active_setting_value("live_trading_mode")
+    assert result == ("enabled", False)
+
+
+@pytest.mark.asyncio
 async def test_get_setting_categories_returns_sorted(tmp_path: Path) -> None:
     """Verify get_setting_categories returns sorted distinct categories.
 

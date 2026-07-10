@@ -303,7 +303,7 @@ class TradeService:
 
         if event_type == "order_accepted":
             self._apply_order_accepted(shard, event)
-        elif event_type in ("order_rejected", "order_breaker_open"):
+        elif event_type in ("order_rejected", "order_breaker_open", "order_interlock_blocked"):
             self._apply_order_terminal(shard, event)
         elif event_type == "fill_observed":
             self._apply_fill(shard, event)

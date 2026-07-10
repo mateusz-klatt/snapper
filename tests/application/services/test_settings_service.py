@@ -775,6 +775,170 @@ class TestSettingsService:
             assert "jwt_secret" in result
             assert result["jwt_secret"] == "secret123"
 
+    @pytest.mark.asyncio
+    async def test_get_setting_fresh_returns_parsed_plaintext_value(self, init_db: None) -> None:
+        """Verify get_setting_fresh reads and parses a plaintext DB value.
+
+        Given: An active Setting row storing the string 'halted',
+        When: get_setting_fresh is called for its key,
+        Then: The parsed value 'halted' is returned straight from the database.
+        """
+        service = SettingsService(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
+        )
+        repo = get_repository("sqlite+aiosqlite:///:memory:")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="live_trading_mode",
+                    value="halted",
+                    category="trading",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="test-session",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        with (
+            patch.object(service, "_setup_zmq_publisher", new_callable=AsyncMock),
+            patch("snapper.application.services.settings.get_repository", return_value=repo),
+        ):
+            result = await service.get_setting_fresh("live_trading_mode")
+        assert result == "halted"
+
+    @pytest.mark.asyncio
+    async def test_get_setting_fresh_parses_numeric_plaintext_as_float(self, init_db: None) -> None:
+        """Verify get_setting_fresh applies _parse_value type coercion.
+
+        Given: An active Setting row storing the string '1.0',
+        When: get_setting_fresh is called for its key,
+        Then: The value is coerced to the float 1.0 via _parse_value.
+        """
+        service = SettingsService(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
+        )
+        repo = get_repository("sqlite+aiosqlite:///:memory:")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="live_trading_multiplier",
+                    value="1.0",
+                    category="trading",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="test-session",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        with (
+            patch.object(service, "_setup_zmq_publisher", new_callable=AsyncMock),
+            patch("snapper.application.services.settings.get_repository", return_value=repo),
+        ):
+            result = await service.get_setting_fresh("live_trading_multiplier")
+        assert result == 1.0
+        assert isinstance(result, float)
+
+    @pytest.mark.asyncio
+    async def test_get_setting_fresh_decrypts_encrypted_value(self, init_db: None) -> None:
+        """Verify get_setting_fresh decrypts an encrypted DB value.
+
+        Given: An active Setting row whose value is Fernet-encrypted with
+            is_encrypted=True,
+        When: get_setting_fresh is called for its key,
+        Then: The decrypted, parsed plaintext is returned.
+        """
+        service = SettingsService(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
+        )
+        encrypted_value = get_encryption_service().encrypt("halted")
+        repo = get_repository("sqlite+aiosqlite:///:memory:")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="live_trading_mode",
+                    value=encrypted_value,
+                    category="trading",
+                    is_encrypted=True,
+                    timestamp=datetime.now(UTC),
+                    session_id="test-session",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        with (
+            patch.object(service, "_setup_zmq_publisher", new_callable=AsyncMock),
+            patch("snapper.application.services.settings.get_repository", return_value=repo),
+        ):
+            result = await service.get_setting_fresh("live_trading_mode")
+        assert result == "halted"
+
+    @pytest.mark.asyncio
+    async def test_get_setting_fresh_missing_key_returns_none(self, init_db: None) -> None:
+        """Verify get_setting_fresh returns None when no active row exists.
+
+        Given: A database with no row for the queried key,
+        When: get_setting_fresh is called,
+        Then: None is returned so callers fail closed.
+        """
+        service = SettingsService(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
+        )
+        repo = get_repository("sqlite+aiosqlite:///:memory:")
+        await repo.create_all()
+        with (
+            patch.object(service, "_setup_zmq_publisher", new_callable=AsyncMock),
+            patch("snapper.application.services.settings.get_repository", return_value=repo),
+        ):
+            result = await service.get_setting_fresh("absent_interlock_key")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_setting_fresh_bypasses_stale_cache(self, init_db: None) -> None:
+        """Verify get_setting_fresh ignores the in-memory cache entirely.
+
+        Given: A service whose _cache holds a stale 'STALE' value while the
+            database holds the true active value 'halted',
+        When: get_setting_fresh is called for that key,
+        Then: The database value 'halted' is returned, proving the cache is
+            never consulted — the safety interlock must honour operator changes
+            even when a system.settings broadcast was lost.
+        """
+        service = SettingsService(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
+        )
+        repo = get_repository("sqlite+aiosqlite:///:memory:")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="live_trading_mode",
+                    value="halted",
+                    category="trading",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="test-session",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        service._cache["live_trading_mode"] = "STALE"
+        with (
+            patch.object(service, "_setup_zmq_publisher", new_callable=AsyncMock),
+            patch("snapper.application.services.settings.get_repository", return_value=repo),
+        ):
+            result = await service.get_setting_fresh("live_trading_mode")
+        assert result == "halted"
+
 
 @pytest.mark.asyncio
 async def test_get_settings_service_reuses_instance() -> None:

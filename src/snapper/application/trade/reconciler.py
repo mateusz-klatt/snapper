@@ -110,6 +110,8 @@ class _LifecycleFoldState:
             self._ingest_rejection(event)
         elif event_type == "order_breaker_open":
             self._ingest_breaker_open(event)
+        elif event_type == "order_interlock_blocked":
+            self._ingest_interlock_blocked(event)
         elif event_type == "order_terminal":
             self._ingest_terminal(event)
 
@@ -155,6 +157,20 @@ class _LifecycleFoldState:
         self.terminal_status = TradeCommandStatusEnum.FAILED
         self.terminal_at = event["received_at"]
         self.last_error = "circuit_breaker_open"
+
+    def _ingest_interlock_blocked(self, event: VenueEventRow) -> None:
+        """Fold a live-trading-interlock rejection observation.
+
+        Mirrors :meth:`_ingest_breaker_open`: the interlock rejects a
+        submit before the venue, so the command is terminally FAILED and
+        (unlike a plain REJECTED) is never cleared by later live
+        evidence — ``_clear_rejection`` only reopens a REJECTED target,
+        never a FAILED one, so a stray late accept/fill cannot resurrect
+        a command the interlock already killed.
+        """
+        self.terminal_status = TradeCommandStatusEnum.FAILED
+        self.terminal_at = event["received_at"]
+        self.last_error = event["error"] or "order_interlock_blocked"
 
     def _ingest_terminal(self, event: VenueEventRow) -> None:
         """Fold a terminal venue lifecycle observation."""

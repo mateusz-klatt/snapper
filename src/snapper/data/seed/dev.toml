@@ -58,6 +58,30 @@ value = "[]"
 category = "market_stats"
 description = "Cross-exchange pairs for Pearson + cointegration computation (cap 50, configured at implementation time)"
 
+[[settings]]
+key = "live_trading_mode"
+value = "halted"
+category = "risk"
+description = "Live-trading interlock: halted|reduce_only|enabled. Seeded halted; only enabled admits non-paper submits. Read fresh from DB on every non-paper submit; paper is exempt. Flipping to enabled is an explicit operator money-risk action."
+
+[[settings]]
+key = "risk_max_leverage"
+value = "1.0"
+category = "risk"
+description = "Maximum prospective gross exposure as a multiple of equity, enforced by the portfolio risk gate (Phase 6). Placeholder until the gate ships."
+
+[[settings]]
+key = "risk_max_drawdown"
+value = "0.15"
+category = "risk"
+description = "Maximum flow-adjusted drawdown fraction from the epoch peak before the portfolio risk gate blocks exposure increases (Phase 6). Placeholder until the gate ships."
+
+[[settings]]
+key = "risk_r_per_trade"
+value = "0.005"
+category = "risk"
+description = "Fraction of equity risked per trade for risk-based position sizing. Placeholder until the sizing/gate path ships."
+
 [[wallets]]
 label = "paper"
 is_paper = true

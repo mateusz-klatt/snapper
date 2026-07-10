@@ -451,6 +451,7 @@ _ORDER_SUBMIT_EVIDENCE_EVENT_TYPES: tuple[str, ...] = (
     "order_terminal",
     "order_submit_unknown",
     "order_breaker_open",
+    "order_interlock_blocked",
 )
 """Venue event types proving an order submit must not be re-submitted.
 
@@ -466,6 +467,11 @@ either: the engine's intent releases on its REJECTED publish, so a
 late redispatched frame submitting after the breaker closes would
 place an order nobody tracks — breaker-open commands must wait for the
 engine to decide anew (#145 P2-5 §2d).
+``order_interlock_blocked`` IS included for the identical reason: the
+live-trading interlock rejects the submit before the venue and releases
+the engine on its REJECTED publish, so a replayed frame arriving after
+the mode flips to ``enabled`` must NOT auto-place — the engine decides
+anew.
 """
 _ORDER_LIFECYCLE_EVENT_TYPES: tuple[str, ...] = (
     "order_accepted",
@@ -474,6 +480,7 @@ _ORDER_LIFECYCLE_EVENT_TYPES: tuple[str, ...] = (
     "fill_observed",
     "order_submit_unknown",
     "order_breaker_open",
+    "order_interlock_blocked",
 )
 """Venue event types the trade-command lifecycle fold consumes.
 
@@ -482,9 +489,9 @@ into durable ``TradeCommand`` status advances (ack/partial/terminal),
 so the command table can drive venue-side reconciliation instead of
 warning forever about rows stuck at ``dispatched``. Superset of
 ``_ORDER_SUBMIT_EVIDENCE_EVENT_TYPES``: the fold also needs
-``order_rejected`` (REJECTED advance) and ``order_breaker_open``
-(FAILED advance) which the duplicate-submit guard deliberately treats
-differently.
+``order_rejected`` (REJECTED advance) and ``order_breaker_open`` /
+``order_interlock_blocked`` (FAILED advance) which the duplicate-submit
+guard deliberately treats differently.
 """
 _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE = 300
 _ORDER_RESOLVING_EVENT_TYPES: tuple[str, ...] = (
@@ -493,6 +500,7 @@ _ORDER_RESOLVING_EVENT_TYPES: tuple[str, ...] = (
     "order_terminal",
     "fill_observed",
     "order_breaker_open",
+    "order_interlock_blocked",
 )
 """Venue event types that RESOLVE a dispatched command's fate.
 
@@ -1526,6 +1534,33 @@ class Repository(ABC):
 
         Returns:
             Setting dict or None if not found.
+        """
+        ...
+
+    @abstractmethod
+    async def get_active_setting_value(self, key: str) -> tuple[str, bool] | None:
+        """Return ``(value, is_encrypted)`` for the OPEN version of a setting.
+
+        Matches the active SCD2 version by the ``known_to`` sentinel —
+        NOT a caller-clock ``where_active`` window — so a committed
+        change is honoured regardless of cross-host clock skew. This is
+        required by the live-trading interlock, which must never read a
+        stale ``enabled`` after an operator commits ``halted`` merely
+        because the writer's clock ran ahead of the reader's. Uses
+        ``one_or_none`` so a duplicate active row RAISES rather than
+        masking the ambiguity; the interlock caller fails closed on any
+        exception. Returns the RAW stored value plus the encryption flag
+        so the caller (``SettingsService``) owns decryption and parsing.
+
+        Args:
+            key: Setting key to read.
+
+        Returns:
+            ``(value, is_encrypted)`` for the active row, or ``None``
+            when no active row exists for ``key``.
+
+        Raises:
+            MultipleResultsFound: If more than one active row exists.
         """
         ...
 
@@ -7365,6 +7400,19 @@ class SQLAlchemyRepository(Repository):
             }
             return row
 
+    async def get_active_setting_value(self, key: str) -> tuple[str, bool] | None:
+        """Return ``(value, is_encrypted)`` for the OPEN version of a setting."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(Setting.value, Setting.is_encrypted).where(
+                    Setting.key == key, Setting.known_to == KNOWN_TO_MAX
+                )
+            )
+            row = result.one_or_none()
+            if row is None:
+                return None
+            return (row.value, row.is_encrypted)
+
     async def get_setting_categories(self, as_of: datetime) -> list[str]:
         """Return distinct setting category names."""
         async with self.session() as s:
@@ -9789,7 +9837,12 @@ class SQLAlchemyRepository(Repository):
             .where(
                 VenueEvent.client_order_id == client_order_id,
                 VenueEvent.event_type.in_(
-                    ("order_terminal", "order_rejected", "order_breaker_open")
+                    (
+                        "order_terminal",
+                        "order_rejected",
+                        "order_breaker_open",
+                        "order_interlock_blocked",
+                    )
                 ),
             )
             .limit(1)

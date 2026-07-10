@@ -288,6 +288,19 @@ class MergedDummyExecutor(ExchangeExecutorService[Any]):
         return "kraken"
 
 
+def _enable_live_trading(executor: Any) -> None:
+    """Wire the live-trading interlock to report ``enabled``.
+
+    The interlock reads ``live_trading_mode`` fresh per non-paper submit
+    and fails closed to ``halted`` when no settings service is wired, so
+    submit-path tests that must reach the venue call point the settings
+    service at an ``enabled`` fresh read.
+    """
+    executor._settings_service = SimpleNamespace(
+        get_setting_fresh=AsyncMock(return_value="enabled")
+    )
+
+
 def make_order(**overrides: Any) -> OrderRequestData:
     """Create an OrderRequestData with optional overrides."""
     return OrderRequestData(
@@ -1585,6 +1598,7 @@ class TestProcessOrder:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
+        _enable_live_trading(service_any)
         published_statuses: list[tuple[Any, str]] = []
 
         async def track_publish_execution(topic: str, fill: Any) -> None:
@@ -3191,6 +3205,7 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
+        _enable_live_trading(service_any)
         service_any._publish_order_status = AsyncMock()
         service_any._publish_execution = AsyncMock()
         service_any._execute_live_order = AsyncMock(return_value="abc123")
@@ -3216,6 +3231,7 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
+        _enable_live_trading(service_any)
         service_any._publish_order_status = AsyncMock()
         service_any._publish_execution = AsyncMock()
         service_any._execute_paper_order = AsyncMock(return_value=None)
@@ -4316,6 +4332,7 @@ class TestExecutorWebSocketExecutions:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service.running = True
+        _enable_live_trading(service)
         service.publisher = AsyncMock()
         order = OrderRequestData(
             session_id="",
@@ -4366,6 +4383,7 @@ class TestExecutorWebSocketExecutions:
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
         service.running = True
+        _enable_live_trading(service)
         service.publisher = AsyncMock()
         order = OrderRequestData(
             session_id="",
@@ -6576,6 +6594,7 @@ class TestAmbiguousSubmitHandling:
         """Build a running dummy executor with tracked publish/record mocks."""
         ex: Any = MergedDummyExecutor()
         ex.running = True
+        _enable_live_trading(ex)
         ex._publish_order_status = AsyncMock()
         ex._record_venue_event = AsyncMock()
         monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
@@ -7007,6 +7026,7 @@ class TestDuplicateSubmitGuard:
         """Build a running executor with tracked submit-path mocks."""
         ex: Any = MergedDummyExecutor()
         ex.running = True
+        _enable_live_trading(ex)
         ex._publish_order_status = AsyncMock(return_value=True)
         ex._record_venue_event = AsyncMock()
         ex._execute_live_order = AsyncMock(return_value="ex-dup-1")
@@ -7110,6 +7130,40 @@ class TestDuplicateSubmitGuard:
         ex._execute_live_order.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_interlock_evidence_replay_reruns_disposition(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A replay with interlock-blocked evidence reruns the terminal release.
+
+        Given: Durable evidence whose breaker probe answers False but the
+            interlock probe answers True (an executor crashed between the
+            interlock event write and the REJECTED publish — the in-memory
+            retry queue died with it),
+        When: The redispatched frame arrives,
+        Then: Instead of a silent drop the disposition reruns idempotently
+            — no duplicate event write, the command row CAS-es FAILED, and
+            REJECTED publishes so the engine intent releases; the venue is
+            never touched.
+        """
+        ex = self._executor(monkeypatch)
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.has_order_submit_evidence = AsyncMock(return_value=True)
+
+        async def _has_event(_cid: str, event_type: str) -> bool:
+            return event_type == "order_interlock_blocked"
+
+        repo.has_venue_event = AsyncMock(side_effect=_has_event)
+        repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
+        ex.repository = repo
+        ex._record_venue_event = AsyncMock()
+        order = make_order()
+        await ex._process_order(order)
+        ex._record_venue_event.assert_not_awaited()
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["rejected"]
+        ex._execute_live_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_no_evidence_proceeds_with_normal_submit(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -7181,6 +7235,7 @@ class TestStaleCommandGate:
         """
         ex: Any = MergedDummyExecutor()
         ex.running = True
+        _enable_live_trading(ex)
         ex.settings = SimpleNamespace(trade_command_dispatch_ttl_s=ttl)
         ex._publish_order_status = AsyncMock(return_value=True)
         ex._record_venue_event = AsyncMock()
@@ -9783,6 +9838,7 @@ class TestCoreToWireOrderRequest:
         service = KrakenOrderExecutor()
         service_any = cast(Any, service)
         service_any.running = True
+        _enable_live_trading(service_any)
         service_any._is_duplicate_submit = AsyncMock(return_value=False)
         service_any._reject_if_stale = AsyncMock(return_value=False)
         mock_exchange_client = AsyncMock()

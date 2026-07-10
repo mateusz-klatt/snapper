@@ -2870,6 +2870,7 @@ async def test_compensation_reopens_leg_when_current_flatten_fully_fills_with_re
         ("order_terminal", "cancelled"),
         ("order_rejected", "rejected"),
         ("order_breaker_open", "failed"),
+        ("order_interlock_blocked", "failed"),
     ],
 )
 async def test_compensation_reopens_leg_when_current_flatten_aborts_with_residual(
@@ -4133,6 +4134,7 @@ class TestHasOrderSubmitEvidence:
             "order_terminal",
             "order_submit_unknown",
             "order_breaker_open",
+            "order_interlock_blocked",
         ],
     )
     async def test_evidence_event_types_return_true(

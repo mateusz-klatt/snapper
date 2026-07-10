@@ -1,5 +1,6 @@
 """Tests for venue reconciliation in executor."""
 
+import asyncio
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -14,6 +15,7 @@ import pytest
 from loguru import logger
 
 from snapper.application.trade.command_request import order_request_from_command
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import OrderEventEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges.contracts import AccountBalance
@@ -25,6 +27,7 @@ from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
 from snapper.messaging.executors import base as base_module
+from snapper.messaging.executors.base import _LIVE_TRADING_UNAVAILABLE
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.base import PendingOrderState
 
@@ -53,6 +56,19 @@ def _make_executor() -> Any:
     ex.exchange_client.supports_fill_summary = False
     ex.repository = MagicMock()
     return ex
+
+
+def _enable_live_trading(executor: Any) -> None:
+    """Wire the live-trading interlock to report ``enabled``.
+
+    The interlock reads ``live_trading_mode`` fresh per non-paper submit
+    and fails closed to ``halted`` when no settings service is wired, so
+    submit-path tests that must reach the venue call point the settings
+    service at an ``enabled`` fresh read.
+    """
+    executor._settings_service = SimpleNamespace(
+        get_setting_fresh=AsyncMock(return_value="enabled")
+    )
 
 
 def _make_order_snapshot(
@@ -2074,6 +2090,7 @@ class TestBreakerOpenDisposition:
     def _order_executor(self, monkeypatch: pytest.MonkeyPatch) -> Any:
         """Build a sweep executor whose submit raises breaker-open."""
         ex = _make_sweep_executor()
+        _enable_live_trading(ex)
         ex.repository.has_order_submit_evidence = AsyncMock(return_value=False)
         ex.repository.has_venue_event = AsyncMock(return_value=False)
         ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
@@ -2385,6 +2402,521 @@ class TestBreakerOpenEdges:
         pending = ex.pending_orders["cid-1"]
         assert pending.last_recorded_cum_qty == 0.6
         assert pending.last_recorded_fee == {"EUR": pytest.approx(0.03)}
+
+
+class TestInterlockBlockedDisposition:
+    """Distinct, redispatch-safe handling of interlock-blocked submits."""
+
+    def _order_executor(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        """Build a sweep executor whose submit is blocked by the interlock."""
+        ex = _make_sweep_executor()
+        ex._settings_service = SimpleNamespace(get_setting_fresh=AsyncMock(return_value="halted"))
+        ex.repository.has_order_submit_evidence = AsyncMock(return_value=False)
+        ex.repository.has_venue_event = AsyncMock(return_value=False)
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row()
+        )
+        ex.repository.get_current_trade_command_status = AsyncMock(return_value="failed")
+        ex.settings.trade_command_dispatch_ttl_s = 0.0
+        monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_happy_path_records_fails_and_publishes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The full disposition runs record -> CAS FAILED -> REJECTED.
+
+        Given: a submit blocked by the halted interlock,
+        When: _process_order runs,
+        Then: an order_interlock_blocked event records with status failed,
+            the command CAS-es to FAILED, REJECTED publishes with the
+            live_trading_halted reason, and the pending entry pops.
+        """
+        ex = self._order_executor(monkeypatch)
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        events = [c.args[0] for c in ex._record_venue_event.await_args_list]
+        interlock_events = [e for e in events if e["event_type"] == "order_interlock_blocked"]
+        assert len(interlock_events) == 1
+        assert interlock_events[0]["status"] == "failed"
+        cas_kwargs = ex.repository.advance_trade_command_lifecycle.await_args_list[0].kwargs
+        assert cas_kwargs["public_id"] == "cmd-1"
+        assert cas_kwargs["new_status"] == "failed"
+        assert cas_kwargs["last_error"] == "order_interlock_blocked"
+        reject_calls = [
+            c
+            for c in ex._publish_order_status.await_args_list
+            if c.args[1] == OrderEventEnum.REJECTED
+        ]
+        assert reject_calls[0].kwargs["reason"] == "live_trading_halted"
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_reduce_only_mode_uses_reduce_only_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A reduce_only interlock publishes the reduce-only wire reason.
+
+        Given: a submit blocked while the mode reads reduce_only,
+        When: _process_order runs,
+        Then: REJECTED publishes with the live_trading_reduce_only_unavailable
+            reason while the durable event keeps the canonical error.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex._settings_service = SimpleNamespace(
+            get_setting_fresh=AsyncMock(return_value="reduce_only")
+        )
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        reject_calls = [
+            c
+            for c in ex._publish_order_status.await_args_list
+            if c.args[1] == OrderEventEnum.REJECTED
+        ]
+        assert reject_calls[0].kwargs["reason"] == "live_trading_reduce_only_unavailable"
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_event_write_failure_parks_without_publish(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed durable event write parks the entry — intent stays held.
+
+        Given: the order_interlock_blocked write raising,
+        When: _process_order runs,
+        Then: no REJECTED publishes and the entry parks with
+            interlock_blocked_pending.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        reject_calls = [
+            c
+            for c in ex._publish_order_status.await_args_list
+            if c.args[1] == OrderEventEnum.REJECTED
+        ]
+        assert reject_calls == []
+        assert ex.pending_orders["cid-1"].interlock_blocked_pending is True
+
+    @pytest.mark.asyncio
+    async def test_lost_cas_with_live_row_parks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-terminal row after all CAS attempts parks the entry.
+
+        Given: every FAILED CAS losing while the row reads dispatched,
+        When: _process_order runs,
+        Then: no REJECTED publishes and the entry parks.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository.advance_trade_command_lifecycle = AsyncMock(return_value=False)
+        ex.repository.get_current_trade_command_status = AsyncMock(return_value="dispatched")
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        reject_calls = [
+            c
+            for c in ex._publish_order_status.await_args_list
+            if c.args[1] == OrderEventEnum.REJECTED
+        ]
+        assert reject_calls == []
+        assert ex.pending_orders["cid-1"].interlock_blocked_pending is True
+
+    @pytest.mark.asyncio
+    async def test_already_terminal_row_counts_as_done(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A row already FAILED (earlier attempt / fold) completes the CAS step.
+
+        Given: all CAS attempts losing while the current status reads failed,
+        When: _process_order runs,
+        Then: the disposition completes and the entry pops.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository.advance_trade_command_lifecycle = AsyncMock(return_value=False)
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_terminal_row_short_circuits_cas(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A row the fold already terminalized needs no CAS attempts.
+
+        Given: the strict lookup returning a FAILED command row,
+        When: _process_order hits the interlock,
+        Then: no CAS is attempted and the disposition completes.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row(status="failed")
+        )
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        ex.repository.advance_trade_command_lifecycle.assert_not_awaited()
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_missing_command_row_counts_as_done(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No durable command row means nothing to terminalize.
+
+        Given: the strict lookup returning None (manual/paper flow),
+        When: _process_order hits the interlock,
+        Then: the disposition completes without any CAS.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        ex.repository.advance_trade_command_lifecycle.assert_not_awaited()
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_publish_failure_parks_for_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failed REJECTED publish parks the entry for the recon retry.
+
+        Given: a publisher returning False for the REJECTED,
+        When: _process_order runs,
+        Then: the entry parks with interlock_blocked_pending.
+        """
+        ex = self._order_executor(monkeypatch)
+
+        async def _publish(order: Any, status: str, *args: Any, **kwargs: Any) -> bool:
+            return status != OrderEventEnum.REJECTED
+
+        ex._publish_order_status = AsyncMock(side_effect=_publish)
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        assert ex.pending_orders["cid-1"].interlock_blocked_pending is True
+
+    @pytest.mark.asyncio
+    async def test_recon_retry_heals_parked_disposition(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The recon sweep reruns the disposition probe-guarded.
+
+        Given: a parked interlock_blocked_pending entry whose event already
+            committed (probe True),
+        When: the retry runs,
+        Then: no duplicate event writes, the CAS and publish complete,
+            and the entry pops.
+        """
+        ex = self._order_executor(monkeypatch)
+        order = order_request_from_command(_make_cmd_row())
+        pending = PendingOrderState(request=order)
+        pending.interlock_blocked_pending = True
+        ex.pending_orders["cid-1"] = pending
+        ex.repository.has_venue_event = AsyncMock(return_value=True)
+        await ex._retry_interlock_blocked("cid-1")
+        ex._record_venue_event.assert_not_awaited()
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_retry_skips_unflagged_entries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The retry only touches parked interlock entries.
+
+        Given: a normal pending entry without the flag,
+        When: the retry runs,
+        Then: nothing happens.
+        """
+        ex = self._order_executor(monkeypatch)
+        order = order_request_from_command(_make_cmd_row())
+        ex.pending_orders["cid-1"] = PendingOrderState(request=order)
+        await ex._retry_interlock_blocked("cid-1")
+        assert "cid-1" in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_plain_repository_skips_cas(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without a SQL repository the CAS step is a pass-through.
+
+        Given: a paper/test executor with a plain MagicMock repository,
+        When: _process_order hits the interlock,
+        Then: the disposition still completes (publish + pop).
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository = MagicMock()
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_cas_error_parks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A DB error during the FAILED CAS parks the entry.
+
+        Given: advance_trade_command_lifecycle raising,
+        When: _process_order runs,
+        Then: no REJECTED publishes and the entry parks.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository.advance_trade_command_lifecycle = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        assert ex.pending_orders["cid-1"].interlock_blocked_pending is True
+
+
+class TestInterlockBlockedEdges:
+    """Residual coverage edges of the interlock disposition and seeding."""
+
+    @pytest.mark.asyncio
+    async def test_incomplete_disposition_without_pending_parks_fresh_entry(self) -> None:
+        """A failed disposition with no pending entry parks a FRESH one.
+
+        Given: an interlock resume invoked while no pending entry exists
+            (the interlock gate runs before the submit entry is created)
+            and the disposition failing,
+        When: _handle_interlock_blocked_submit runs directly,
+        Then: a pending entry is created, parked, and stamped with the
+            block reason so the recon retry carries the wire reason.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.has_venue_event = AsyncMock(return_value=False)
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        order = order_request_from_command(_make_cmd_row())
+        await ex._handle_interlock_blocked_submit(order, "live_trading_halted")
+        parked = ex.pending_orders["cid-1"]
+        assert parked.interlock_blocked_pending is True
+        assert parked.interlock_blocked_reason == "live_trading_halted"
+
+    @pytest.mark.asyncio
+    async def test_incomplete_disposition_reuses_existing_pending(self) -> None:
+        """A failed disposition keeps and flags the existing pending entry.
+
+        Given: an interlock resume invoked while a pending entry already
+            exists and the disposition failing,
+        When: _handle_interlock_blocked_submit runs directly,
+        Then: the SAME entry object is retained, flagged, and stamped with
+            the reduce-only reason.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.has_venue_event = AsyncMock(return_value=False)
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        order = order_request_from_command(_make_cmd_row())
+        existing = PendingOrderState(request=order)
+        ex.pending_orders["cid-1"] = existing
+        await ex._handle_interlock_blocked_submit(order, "live_trading_reduce_only_unavailable")
+        assert ex.pending_orders["cid-1"] is existing
+        assert existing.interlock_blocked_pending is True
+        assert existing.interlock_blocked_reason == "live_trading_reduce_only_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_retry_keeps_parked_entry_on_repeat_failure(self) -> None:
+        """A still-failing retry leaves the entry parked.
+
+        Given: a parked interlock entry whose event write keeps raising,
+        When: the retry runs,
+        Then: the entry stays parked with the flag set.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.has_venue_event = AsyncMock(return_value=False)
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        order = order_request_from_command(_make_cmd_row())
+        pending = PendingOrderState(request=order)
+        pending.interlock_blocked_pending = True
+        ex.pending_orders["cid-1"] = pending
+        await ex._retry_interlock_blocked("cid-1")
+        assert ex.pending_orders["cid-1"].interlock_blocked_pending is True
+
+    @pytest.mark.asyncio
+    async def test_recon_cycle_drives_parked_interlock_retries(self) -> None:
+        """The recon cycle replays parked interlock dispositions.
+
+        Given: a parked interlock entry whose durable event already
+            committed and a healthy repository,
+        When: one reconciliation cycle runs,
+        Then: the disposition completes and the entry pops.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.has_venue_event = AsyncMock(return_value=True)
+        ex.repository.get_current_trade_command_status = AsyncMock(return_value="failed")
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        order = order_request_from_command(_make_cmd_row())
+        pending = PendingOrderState(request=order)
+        pending.interlock_blocked_pending = True
+        ex.pending_orders["cid-1"] = pending
+        await ex._reconcile_with_exchange()
+        assert "cid-1" not in ex.pending_orders
+
+
+class TestLiveTradingModeRead:
+    """Fail-closed fresh read of live_trading_mode for the interlock."""
+
+    def _executor(self) -> Any:
+        """Build a minimal executor for direct mode reads."""
+        return _make_executor()
+
+    @pytest.mark.asyncio
+    async def test_no_service_fails_closed_to_unavailable(self) -> None:
+        """A missing settings service collapses to the UNAVAILABLE sentinel.
+
+        Given: an executor whose settings service was never wired,
+        When: _read_live_trading_mode runs,
+        Then: it returns the blocking UNAVAILABLE sentinel without touching
+            any read.
+        """
+        ex = self._executor()
+        ex._settings_service = None
+        assert await ex._read_live_trading_mode() == _LIVE_TRADING_UNAVAILABLE
+
+    @pytest.mark.asyncio
+    async def test_read_exception_fails_closed_to_unavailable(self) -> None:
+        """A raising fresh read collapses to the UNAVAILABLE sentinel.
+
+        Given: get_setting_fresh raising a query/decrypt error,
+        When: _read_live_trading_mode runs,
+        Then: the except branch returns the blocking UNAVAILABLE sentinel.
+        """
+        ex = self._executor()
+        ex._settings_service = SimpleNamespace(
+            get_setting_fresh=AsyncMock(side_effect=RuntimeError("db down"))
+        )
+        assert await ex._read_live_trading_mode() == _LIVE_TRADING_UNAVAILABLE
+
+    @pytest.mark.asyncio
+    async def test_invalid_value_fails_closed_to_unavailable(self) -> None:
+        """A stored value outside the three modes collapses to UNAVAILABLE.
+
+        Given: get_setting_fresh returning an unrecognized string,
+        When: _read_live_trading_mode runs,
+        Then: it returns the blocking UNAVAILABLE sentinel rather than the
+            arbitrary value.
+        """
+        ex = self._executor()
+        ex._settings_service = SimpleNamespace(get_setting_fresh=AsyncMock(return_value="bogus"))
+        assert await ex._read_live_trading_mode() == _LIVE_TRADING_UNAVAILABLE
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["halted", "reduce_only", "enabled"])
+    async def test_valid_value_passes_through(self, mode: str) -> None:
+        """Each of the three valid modes returns unchanged.
+
+        Given: get_setting_fresh returning a recognized mode,
+        When: _read_live_trading_mode runs,
+        Then: it returns that exact mode.
+        """
+        ex = self._executor()
+        ex._settings_service = SimpleNamespace(get_setting_fresh=AsyncMock(return_value=mode))
+        assert await ex._read_live_trading_mode() == mode
+
+    @pytest.mark.asyncio
+    async def test_slow_read_trips_timeout_and_fails_closed_to_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A read slower than the time-box fails closed to UNAVAILABLE.
+
+        Given: a fresh read that sleeps beyond the (shrunk) timeout,
+        When: _read_live_trading_mode runs,
+        Then: asyncio.timeout cancels it and the except branch returns the
+            blocking UNAVAILABLE sentinel so a wedged database cannot starve
+            the handler.
+        """
+        ex = self._executor()
+
+        async def _slow(_key: str) -> str:
+            await asyncio.sleep(1.0)
+            return "enabled"
+
+        ex._settings_service = SimpleNamespace(get_setting_fresh=_slow)
+        monkeypatch.setattr(base_module, "_LIVE_TRADING_MODE_READ_TIMEOUT_S", 0.02)
+        assert await ex._read_live_trading_mode() == _LIVE_TRADING_UNAVAILABLE
+
+
+class TestLiveTradingInterlockGate:
+    """Venue-scoped gating of submits on the live-trading interlock."""
+
+    def _executor(self) -> Any:
+        """Build a sweep executor with the disposition and mode read spied."""
+        ex = _make_sweep_executor()
+        ex._handle_interlock_blocked_submit = AsyncMock()
+        ex._read_live_trading_mode = AsyncMock(return_value="halted")
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_paper_venue_always_passes_ignoring_order_mode(self) -> None:
+        """A paper venue passes even when order.mode is live.
+
+        Given: a paper executor and an order whose mode is live,
+        When: _is_live_trading_interlocked runs with the venue name,
+        Then: it returns False, never reads the mode, and never disposes —
+            the discriminator is the venue, not the caller-supplied mode.
+        """
+        ex = self._executor()
+        ex._get_exchange_name = lambda: ExchangeEnum.PAPER
+        order = order_request_from_command(_make_cmd_row())
+        assert order.mode == "live"
+        result = await ex._is_live_trading_interlocked(order, ex._get_exchange_name())
+        assert result is False
+        ex._read_live_trading_mode.assert_not_awaited()
+        ex._handle_interlock_blocked_submit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_enabled_mode_passes(self) -> None:
+        """An enabled mode lets a non-paper submit proceed.
+
+        Given: a kraken executor whose mode reads enabled,
+        When: _is_live_trading_interlocked runs,
+        Then: it returns False without disposing.
+        """
+        ex = self._executor()
+        ex._read_live_trading_mode = AsyncMock(return_value="enabled")
+        order = order_request_from_command(_make_cmd_row())
+        result = await ex._is_live_trading_interlocked(order, ex._get_exchange_name())
+        assert result is False
+        ex._handle_interlock_blocked_submit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_halted_mode_blocks_with_halted_reason(self) -> None:
+        """A halted mode blocks and disposes with the halted reason.
+
+        Given: a kraken executor whose mode reads halted,
+        When: _is_live_trading_interlocked runs,
+        Then: it returns True and disposes with the live_trading_halted reason.
+        """
+        ex = self._executor()
+        order = order_request_from_command(_make_cmd_row())
+        result = await ex._is_live_trading_interlocked(order, ex._get_exchange_name())
+        assert result is True
+        ex._handle_interlock_blocked_submit.assert_awaited_once_with(order, "live_trading_halted")
+
+    @pytest.mark.asyncio
+    async def test_reduce_only_mode_blocks_with_reduce_only_reason(self) -> None:
+        """A reduce_only mode blocks and disposes with the reduce-only reason.
+
+        Given: a kraken executor whose mode reads reduce_only,
+        When: _is_live_trading_interlocked runs,
+        Then: it returns True and disposes with the reduce-only reason.
+        """
+        ex = self._executor()
+        ex._read_live_trading_mode = AsyncMock(return_value="reduce_only")
+        order = order_request_from_command(_make_cmd_row())
+        result = await ex._is_live_trading_interlocked(order, ex._get_exchange_name())
+        assert result is True
+        ex._handle_interlock_blocked_submit.assert_awaited_once_with(
+            order, "live_trading_reduce_only_unavailable"
+        )
+
+    @pytest.mark.asyncio
+    async def test_unavailable_mode_blocks_with_mode_unavailable_reason(self) -> None:
+        """An unreadable mode blocks and disposes with the mode-unavailable reason.
+
+        Given: a kraken executor whose mode read collapses to the blocking
+            UNAVAILABLE sentinel (no authoritative value — no settings
+            service, a timed-out/errored read, or an unrecognized value),
+        When: _is_live_trading_interlocked runs,
+        Then: it returns True and disposes with the live_trading_mode_unavailable
+            reason (the default interlock reason for a non-authoritative read),
+            keeping an infrastructure incident distinct from a deliberate halt.
+        """
+        ex = self._executor()
+        ex._read_live_trading_mode = AsyncMock(return_value=_LIVE_TRADING_UNAVAILABLE)
+        order = order_request_from_command(_make_cmd_row())
+        result = await ex._is_live_trading_interlocked(order, ex._get_exchange_name())
+        assert result is True
+        ex._handle_interlock_blocked_submit.assert_awaited_once_with(
+            order, "live_trading_mode_unavailable"
+        )
 
 
 class TestCorrectiveFeeDeferral:

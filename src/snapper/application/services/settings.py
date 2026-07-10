@@ -261,6 +261,40 @@ class SettingsService:
             return default
         return self._cache.get(key, default)
 
+    async def get_setting_fresh(self, key: str) -> JsonValue:
+        """Read the active value for ``key`` directly from the database.
+
+        Deliberately bypasses the in-memory cache and the ZMQ-refreshed
+        path used by :meth:`get_setting`. The cache is best-effort — a
+        lost ``system.settings`` broadcast leaves it stale — which is
+        unacceptable for a safety interlock whose whole purpose is that
+        an operator change is guaranteed to be honoured on the next
+        submit. Delegates the temporal query to
+        :meth:`Repository.get_active_setting_value`, which matches the
+        active SCD2 version by the ``known_to`` sentinel (clock-free, so
+        a committed change survives cross-host clock skew — unlike the
+        caller-clock ``where_active`` window) and raises on a duplicate
+        active row rather than masking it; this service owns only the
+        decryption and type parsing.
+
+        Args:
+            key: Setting key to read.
+
+        Returns:
+            The decrypted, type-parsed value, or ``None`` when no active
+            row exists for ``key``.
+
+        Raises:
+            MultipleResultsFound: If more than one active row exists for
+                ``key`` (a corruption the caller must treat as unsafe).
+        """
+        repository = get_repository(self.db_url)
+        row = await repository.get_active_setting_value(key)
+        if row is None:
+            return None
+        value, is_encrypted = row
+        return self._parse_value(decrypt_if_encrypted(value, is_encrypted))
+
     async def _close_and_insert_setting(
         self,
         key: str,
