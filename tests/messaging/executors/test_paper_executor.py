@@ -150,6 +150,7 @@ class TestPaperOrderClientCoverage:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=0.5,
+            price=50000.0,
             client_order_id="test_order_123",
         )
         result = await client.create_order(request)
@@ -158,6 +159,7 @@ class TestPaperOrderClientCoverage:
         assert result.amount == pytest.approx(0.5)
         assert result.status == ExchangeOrderStatusEnum.OPEN
         assert result.client_order_id == "test_order_123"
+        assert result.price == pytest.approx(50000.0)
         await client.disconnect()
 
     @pytest.mark.asyncio
@@ -205,6 +207,7 @@ class TestPaperOrderClientCoverage:
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.MARKET,
             amount=0.1,
+            price=50000.0,
             client_order_id=None,
         )
         result = await client.create_order(request)
@@ -354,6 +357,7 @@ class TestPaperOrderClientCoverage:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.1,
+                price=50000.0,
                 client_order_id="order1",
             )
         )
@@ -394,6 +398,7 @@ class TestPaperOrderClientCoverage:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.1,
+                price=50000.0,
                 client_order_id="execution_test",
             )
         )
@@ -401,6 +406,7 @@ class TestPaperOrderClientCoverage:
             assert execution.symbol == "BTC-USD"
             assert execution.order_status == ExchangeOrderStatusEnum.CLOSED
             assert execution.cum_qty == pytest.approx(0.1)
+            assert execution.last_price == pytest.approx(50000.0)
             break
         await client.disconnect()
 
@@ -438,6 +444,7 @@ class TestPaperOrderClientCoverage:
                 side=OrderSideEnum.BUY,
                 type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.1,
+                price=50000.0,
             )
         )
         await client.disconnect()
@@ -462,6 +469,7 @@ class TestPaperOrderClientCoverage:
                     side=OrderSideEnum.BUY,
                     type=ExchangeOrderTypeEnum.MARKET,
                     amount=0.1,
+                    price=50000.0,
                 )
             )
             assert order.status == ExchangeOrderStatusEnum.OPEN

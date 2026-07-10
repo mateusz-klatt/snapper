@@ -1682,3 +1682,67 @@ async def test_create_order_rejects_stop_types_before_storing() -> None:
         assert client._fill_simulator_tasks == set()
     finally:
         await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_create_order_accepts_priceless_market_order() -> None:
+    """A priceless market order is ACCEPTED for fill-time price resolution.
+
+    Given: a connected paper client and a market request with price=None,
+    When: create_order is called,
+    Then: the order is accepted OPEN with a None snapshot price and a fill
+        simulator task is scheduled — the reference price is resolved at
+        FILL time from source-venue candles, and the simulator CANCELS the
+        order when none is resolvable (it never fills at 0.0).
+    """
+    client = PaperExchangeClient(fill_delay=30.0)
+    await client.connect()
+    try:
+        order = await client.create_order(
+            ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=ExchangeOrderTypeEnum.MARKET,
+                amount=0.5,
+                price=None,
+                client_order_id="cid-paper-priceless",
+            )
+        )
+        assert order.status is ExchangeOrderStatusEnum.OPEN
+        assert order.price is None
+        assert order.id in client._orders
+        assert len(client._fill_simulator_tasks) == 1
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_create_order_rejects_zero_and_non_finite_price() -> None:
+    """Paper trading rejects a PRESENT price that is zero or non-finite.
+
+    Given: a connected paper client and market requests carrying price=0.0
+        and price=NaN,
+    When: create_order is called for each,
+    Then: a ValueError with the poisoned-fill message surfaces for both —
+        a present price must be POSITIVE and FINITE (priceless orders are
+        accepted and priced at fill time instead), so a zero or NaN
+        reference can never reach the fill simulator.
+    """
+    client = PaperExchangeClient()
+    await client.connect()
+    try:
+        for bad_price in (0.0, float("nan")):
+            request = ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=ExchangeOrderTypeEnum.MARKET,
+                amount=0.5,
+                price=bad_price,
+                client_order_id=f"cid-paper-bad-{bad_price!r}",
+            )
+            with pytest.raises(ValueError, match="positive finite reference"):
+                await client.create_order(request)
+        assert client._orders == {}
+        assert client._fill_simulator_tasks == set()
+    finally:
+        await client.disconnect()

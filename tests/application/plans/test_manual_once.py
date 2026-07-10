@@ -155,6 +155,31 @@ class TestManualOnceEvaluator:
         with pytest.raises(ValueError, match="requires stop_price"):
             evaluator.validate_params({"order_type": "stop", "side": "sell"})
 
+    def test_validate_params_market_with_price_rejected(self) -> None:
+        """A market order carrying a price raises ValueError.
+
+        Given: market params whose ``price`` is set,
+        When: ``validate_params`` runs,
+        Then: it raises ValueError matching "must not carry price"; on the
+            paper venue the fill reference is resolved server-side and a
+            caller-supplied price would desynchronize the plan, command,
+            and caps views of the order.
+        """
+        evaluator = ManualOnceEvaluator()
+        with pytest.raises(ValueError, match="must not carry price"):
+            evaluator.validate_params({"order_type": "market", "side": "buy", "price": 50000.0})
+
+    def test_validate_params_market_explicit_none_price_accepted(self) -> None:
+        """A market order with ``price`` explicitly None is accepted.
+
+        Given: market params carrying ``price=None`` explicitly,
+        When: ``validate_params`` runs,
+        Then: it returns without raising — only a non-None price is
+            rejected for market orders.
+        """
+        evaluator = ManualOnceEvaluator()
+        evaluator.validate_params({"order_type": "market", "side": "sell", "price": None})
+
     def test_requires_capabilities_empty(self) -> None:
         """Manual orders have no special capability requirements."""
         evaluator = ManualOnceEvaluator()

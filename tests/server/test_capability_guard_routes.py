@@ -165,6 +165,29 @@ class TestOrderRouteCapabilityGuard:
         repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
         repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
         repo.update_execution_plan_status = AsyncMock(return_value=2)
+        repo.list_active_wallets = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "wallet-1",
+                    "label": "main",
+                    "description": None,
+                    "is_paper": False,
+                    "timestamp": _ts(),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                }
+            ]
+        )
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-1",
+                    "wallet_public_id": "wallet-1",
+                    "exchange": "kraken",
+                    "credential_type": "api",
+                }
+            ]
+        )
         repo.get_execution_plan = AsyncMock(
             return_value={
                 "public_id": "plan-1",

@@ -437,11 +437,15 @@ class TradingCapsEnforcer:
         """Reject if new submission pushes rolling 24h USD above cap.
 
         Sum basis: ``submit_qty × submit_price`` per prior
-        non-rejected row. Prior rows where ``price IS NULL`` (market
-        orders) are SKIPPED with a WARN log because no submit-time
-        price was committed on those rows. The NEW submission's
-        notional is computed via :meth:`USDConverter.to_usd`
-        (falls back to
+        non-rejected LIVE row — ``mode='paper'`` history is excluded
+        by :meth:`Repository.get_user_recent_submits` because paper
+        commands carry a simulator reference price and simulated
+        notional must not consume the user's live allowance. The
+        CURRENT submission is evaluated regardless of mode. Prior rows
+        where ``price IS NULL`` (live market orders) are SKIPPED with
+        a WARN log because no submit-time price was committed on those
+        rows. The NEW submission's notional is computed via
+        :meth:`USDConverter.to_usd` (falls back to
         ``CapsViolationError(price_unavailable)`` if the oracle
         is stale / missing).
 

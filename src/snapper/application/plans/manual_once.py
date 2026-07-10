@@ -111,6 +111,13 @@ class ManualOnceEvaluator(PlanEvaluator):
             raise ValueError(f"order_type={order_type!r} requires price")
         if order_type in ("stop", "stop_limit") and params.get("stop_price") is None:
             raise ValueError(f"order_type={order_type!r} requires stop_price")
+        if order_type == "market" and params.get("price") is not None:
+            raise ValueError(
+                "order_type='market' must not carry price; on the paper "
+                "venue the fill reference is resolved server-side and a "
+                "caller-supplied value would desynchronize the plan, "
+                "command, and caps views of the order"
+            )
 
     def requires_capabilities(self) -> list[str]:
         """Manual orders have no special capability requirements.

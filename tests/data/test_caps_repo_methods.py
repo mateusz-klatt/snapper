@@ -72,6 +72,7 @@ async def _insert_trade_command(
     price: float | None = 100.0,
     instrument: str = "BTC-USD",
     exchange: str = "kraken",
+    mode: str = "live",
 ) -> None:
     """Seed a :class:`TradeCommand` row with defaults for cap-test scenarios."""
     async with repo.session() as s:
@@ -81,13 +82,13 @@ async def _insert_trade_command(
             session_id="seed",
             sequence_id=1,
             command_type=command_type,
-            shard_key=f"{exchange}.{instrument}.live",
+            shard_key=f"{exchange}.{instrument}.{mode}",
             wallet_public_id="",
             operator_public_id=None,
             user_public_id=user_public_id,
             exchange=exchange,
             instrument=instrument,
-            mode="live",
+            mode=mode,
             strategy_id="manual",
             client_order_id=f"cid-{command_type}-{status}",
             venue_client_id=f"vcid-{command_type}-{status}",
@@ -246,6 +247,44 @@ async def test_get_user_recent_submits_filters_to_window(
     assert len(rows) == 2
     notionals = sorted(r["quantity"] * r["price"] for r in rows if r["price"] is not None)
     assert notionals == [600.0, 1000.0]
+
+
+@pytest.mark.asyncio
+async def test_get_user_recent_submits_excludes_paper_mode(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Paper-mode submits are excluded from the rolling 24h notional basis.
+
+    Given: a user with an in-window live ``submit`` carrying a price and
+        an in-window paper ``submit`` carrying a simulator reference
+        price on the same ``price`` column,
+    When: ``get_user_recent_submits`` runs with ``since=now-1h``,
+    Then: only the live row is returned. Counting the paper reference
+        notional against the rolling 24h cap would let simulated paper
+        activity exhaust the user's LIVE trading allowance.
+    """
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-paper",
+        command_type="submit",
+        mode="live",
+        created_at=_NOW,
+        quantity=2.0,
+        price=500.0,
+    )
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-paper",
+        command_type="submit",
+        mode="paper",
+        created_at=_NOW,
+        quantity=7.0,
+        price=1000.0,
+    )
+    rows = await repo.get_user_recent_submits("user-paper", since=_NOW - timedelta(hours=1))
+    assert len(rows) == 1
+    assert rows[0]["quantity"] == 2.0
+    assert rows[0]["price"] == 500.0
 
 
 @pytest.mark.asyncio

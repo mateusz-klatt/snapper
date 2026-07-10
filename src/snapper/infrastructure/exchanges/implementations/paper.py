@@ -221,7 +221,16 @@ class PaperExchangeClient(ExchangeClientBase):
                 simulator has no trigger logic, so accepting a stop
                 would fill it IMMEDIATELY and misrepresent the
                 protective semantics (#156). Pre-send rejection keeps
-                the executor's definitive-reject branch honest.
+                the executor's definitive-reject branch honest. Also if
+                the request carries a NON-None price that is not
+                positive and finite — the simulator fills at
+                ``order.price`` when present, so a zero/NaN price would
+                book a poisoned fill. Priceless MARKET orders remain
+                accepted: the fill simulator resolves a source-venue
+                reference at fill time and CANCELS when none exists.
+                Priced producers (the engine forwards the signal price
+                for paper venues; the manual route resolves a fresh
+                reference at create) fill at their own price.
         """
         if not self._running:
             raise RuntimeError(_NOT_CONNECTED_MSG)
@@ -230,6 +239,12 @@ class PaperExchangeClient(ExchangeClientBase):
             ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
         ):
             raise ValueError("Paper trading does not support stop orders (no trigger simulation)")
+        if request.price is not None and (not math.isfinite(request.price) or request.price <= 0.0):
+            raise ValueError(
+                "Paper trading requires the order price, when present, to be "
+                f"a positive finite reference (got {request.price!r}); a "
+                "zero/NaN price would simulate a poisoned fill"
+            )
         order_id = str(uuid.uuid4())
         timestamp = request.signaled_at.timestamp() if request.signaled_at else time.time()
         logger.info(

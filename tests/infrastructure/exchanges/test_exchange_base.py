@@ -1316,3 +1316,103 @@ async def test_log_order_to_db_persists_request_type_over_snapshot_type(
     assert result == (99, "order-uuid-repair")
     insert_kwargs = mock_repo.insert_order.call_args.kwargs
     assert insert_kwargs["order_type"] == "stop_limit"
+
+
+@pytest.mark.asyncio()
+@patch(
+    "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
+    return_value="fake-spid",
+)
+async def test_log_order_to_db_labels_paper_exchange_as_paper_mode(
+    mock_resolve: AsyncMock,
+) -> None:
+    """A paper-venue client durably records the order as ``mode='paper'``.
+
+    Given: a client whose ``exchange_name`` is the paper venue,
+    When: _log_order_to_db persists an accepted order,
+    Then: insert_order receives ``mode='paper'`` — the repository default
+        of ``live`` previously mislabeled paper orders, and mode
+        participates in the active-order uniqueness index and fill-gap
+        recovery matching, so the label is operational, not cosmetic.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.ensure_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
+    mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-paper"))
+    client = DummyExchangeClient(repository=mock_repo, exchange_name="paper")
+    client.set_tracker(SequenceTracker())
+    request = ExchangeOrderRequest(
+        client_order_id="client_paper",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+    )
+    order = ExchangeOrderSnapshot(
+        id="order_paper",
+        client_order_id="client_paper",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+        filled=0.0,
+        remaining=0.0,
+        status=ExchangeOrderStatusEnum.OPEN,
+        timestamp=1234567890.0,
+    )
+    result = await client._log_order_to_db(request, order)
+    assert result == (99, "order-uuid-paper")
+    mock_resolve.assert_awaited_once()
+    insert_kwargs = mock_repo.insert_order.call_args.kwargs
+    assert insert_kwargs["mode"] == "paper"
+
+
+@pytest.mark.asyncio()
+@patch(
+    "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
+    return_value="fake-spid",
+)
+async def test_log_order_to_db_labels_non_paper_exchange_as_live_mode(
+    mock_resolve: AsyncMock,
+) -> None:
+    """A real-venue client durably records the order as ``mode='live'``.
+
+    Given: a client whose ``exchange_name`` is a live venue (kraken),
+    When: _log_order_to_db persists an accepted order,
+    Then: insert_order receives ``mode='live'`` — anything that is not the
+        paper venue maps to live, mirroring the engine mode rule.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.ensure_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
+    mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-live"))
+    client = DummyExchangeClient(repository=mock_repo, exchange_name="kraken")
+    client.set_tracker(SequenceTracker())
+    request = ExchangeOrderRequest(
+        client_order_id="client_live",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+    )
+    order = ExchangeOrderSnapshot(
+        id="order_live",
+        client_order_id="client_live",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+        filled=0.0,
+        remaining=0.0,
+        status=ExchangeOrderStatusEnum.OPEN,
+        timestamp=1234567890.0,
+    )
+    result = await client._log_order_to_db(request, order)
+    assert result == (99, "order-uuid-live")
+    mock_resolve.assert_awaited_once()
+    insert_kwargs = mock_repo.insert_order.call_args.kwargs
+    assert insert_kwargs["mode"] == "live"

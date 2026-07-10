@@ -9,9 +9,11 @@ and are scoped to the caller's accessible wallets.
 """
 
 import datetime as dt
+import math
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated
 from typing import Any
@@ -49,6 +51,8 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.types import AllExchange
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionMode
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderExchange
@@ -227,6 +231,207 @@ async def _resolve_create_order_wallet(
     return wallet_public_id
 
 
+def _require_paper_mode_for_paper_exchange(body: CreateOrderBody) -> None:
+    """Reject ``exchange='paper'`` requests that are not ``mode='paper'``.
+
+    A pure-literal check needing no lookups, so the route runs it FIRST
+    — before the capability guard and instrument resolution — otherwise
+    a cold database without a paper Instrument row would 422 on
+    ``unknown_instrument`` and the promised 400 would be unreachable.
+
+    Args:
+        body: Create-order request payload.
+
+    Raises:
+        HTTPException: 400 ``paper_exchange_requires_paper_mode``.
+    """
+    if body.exchange == ExchangeEnum.PAPER.value and body.mode != ExecutionModeEnum.PAPER.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "paper_exchange_requires_paper_mode",
+                "exchange": body.exchange,
+                "mode": body.mode,
+                "reason": "exchange='paper' orders must set mode='paper'",
+            },
+        )
+
+
+async def _resolve_execution_venue(
+    *,
+    repo: Repository,
+    body: CreateOrderBody,
+    wallet_public_id: str,
+    as_of: datetime,
+) -> str:
+    """Validate mode/wallet/exchange consistency and derive the execution venue.
+
+    Enforces the paper-routing matrix so a manual order can never be
+    dispatched onto a topic no executor consumes (the pre-fix behaviour:
+    ``exchange=kraken`` + ``mode=paper`` published to
+    ``orders.commands.kraken.*`` where the paper executor never listens
+    and live executors drop the foreign wallet — a silent, forever-active
+    plan). Rules:
+
+    - ``exchange='paper'`` requires ``mode='paper'`` (never coerced;
+      enforced first by :func:`_require_paper_mode_for_paper_exchange`
+      at the top of the route, before any lookup-dependent guard).
+    - The resolved wallet's ``is_paper`` flag must equal
+      ``mode == 'paper'`` — paper orders need a paper wallet, live
+      orders a live wallet.
+    - ``mode='paper'`` remaps the execution venue to ``'paper'``; the
+      request exchange remains the market-data source (validated by the
+      capability guard and preserved in plan params as
+      ``source_exchange``).
+    - The wallet must hold an active credential row for the effective
+      venue — per-wallet executors are spawned from credential rows, so
+      a missing credential means no consumer exists for the command.
+
+    Args:
+        repo: Repository for wallet and credential lookups.
+        body: Create-order request payload.
+        wallet_public_id: Already scope-checked target wallet.
+        as_of: Bus time for the temporal queries.
+
+    Returns:
+        The effective execution exchange for the plan and command rows.
+
+    Raises:
+        HTTPException: 400 on any matrix violation, with a structured
+            ``error_code`` detail.
+    """
+    wants_paper = body.mode == ExecutionModeEnum.PAPER.value
+    wallets = await repo.list_active_wallets(as_of=as_of)
+    wallet = next((w for w in wallets if w["public_id"] == wallet_public_id), None)
+    if wallet is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "unknown_wallet",
+                "wallet_public_id": wallet_public_id,
+                "reason": "no active wallet row for the supplied wallet_public_id",
+            },
+        )
+    if wallet["is_paper"] != wants_paper:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "mode_wallet_mismatch",
+                "mode": body.mode,
+                "wallet_public_id": wallet_public_id,
+                "wallet_is_paper": wallet["is_paper"],
+                "reason": "mode='paper' requires a paper wallet and mode='live' a live wallet",
+            },
+        )
+    effective_exchange = ExchangeEnum.PAPER.value if wants_paper else body.exchange
+    credentials = await repo.list_active_wallet_credentials(as_of=as_of)
+    has_credential = any(
+        credential["wallet_public_id"] == wallet_public_id
+        and credential["exchange"] == effective_exchange
+        for credential in credentials
+    )
+    if not has_credential:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "wallet_credential_missing",
+                "wallet_public_id": wallet_public_id,
+                "exchange": effective_exchange,
+                "reason": (
+                    "no active wallet credential for the execution venue; "
+                    "no executor instance exists to consume the command"
+                ),
+            },
+        )
+    return effective_exchange
+
+
+_PAPER_SNAPSHOT_MAX_AGE = timedelta(seconds=30)
+_PAPER_CANDLE_MAX_AGE = timedelta(seconds=120)
+
+
+def _positive_finite(value: float | None) -> bool:
+    """Return whether a candidate reference price is usable."""
+    return value is not None and math.isfinite(value) and value > 0.0
+
+
+async def _resolve_paper_reference_price(
+    *,
+    repo: Repository,
+    body: CreateOrderBody,
+    source_instrument_public_id: str,
+    as_of: datetime,
+) -> float:
+    """Resolve the fill reference price for a manual paper MARKET order.
+
+    The paper simulator fills a market order at ``order.price`` and
+    (since the zero-fill fix) rejects priceless orders, so the route
+    must attach a fresh reference price at create time. Sources, in
+    order (source identity = the request's market-data exchange —
+    never guessed from the symbol alone):
+
+    1. Freshest market snapshot within 30 s — side-aware: BUY prices at
+       the ask, SELL at the bid, falling back to ``last``.
+    2. Freshest 1m candle close whose persistence timestamp is within
+       120 s (provisional rows included — they carry the newest close).
+    3. Otherwise 400 ``no_reference_price`` — a definitive, loud
+       rejection instead of the historic silent 0.0 fill.
+
+    Args:
+        repo: Repository for snapshot/candle lookups.
+        body: Create-order request payload (side + source exchange).
+        source_instrument_public_id: Instrument resolved against the
+            request's market-data exchange.
+        as_of: Bus time for the temporal queries.
+
+    Returns:
+        A positive finite reference price.
+
+    Raises:
+        HTTPException: 400 when no fresh positive price exists.
+    """
+    snapshots = await repo.get_market_snapshots(
+        [source_instrument_public_id],
+        as_of - _PAPER_SNAPSHOT_MAX_AGE,
+        as_of,
+        as_of,
+    )
+    if snapshots:
+        newest = max(snapshots, key=lambda row: row["ts"])
+        side_price = newest["ask"] if body.side == "buy" else newest["bid"]
+        for candidate in (side_price, newest["last"]):
+            if _positive_finite(candidate):
+                return float(cast(float, candidate))
+    candles = await repo.get_candles(
+        instrument=body.instrument,
+        timeframe="1m",
+        start=None,
+        end=None,
+        exchange=cast(AllExchange, body.exchange),
+        as_of=as_of,
+        limit=1,
+        order="desc",
+    )
+    if candles:
+        newest_candle = candles[0]
+        fresh = as_of - newest_candle["timestamp"] <= _PAPER_CANDLE_MAX_AGE
+        if fresh and _positive_finite(newest_candle["close"]):
+            return float(newest_candle["close"])
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={
+            "error_code": "no_reference_price",
+            "instrument": body.instrument,
+            "exchange": body.exchange,
+            "reason": (
+                "no fresh reference price (snapshot ≤30s or 1m candle "
+                "≤120s) on the source exchange; a paper market order "
+                "cannot be priced"
+            ),
+        },
+    )
+
+
 @router.post(
     "",
     openapi_extra=openapi_schema(CreateOrderCommand),
@@ -268,11 +473,15 @@ async def create_order(
 
     Raises:
         HTTPException: 422 if params invalid, 403 if wallet not accessible
-            409 if idempotency key already used.
+            409 if idempotency key already used, 400 on a mode/wallet/
+            exchange consistency violation (see
+            :func:`_resolve_execution_venue`).
     """
     tracker: SequenceTracker = request.app.state.rest_tracker
     body = command.payload
     now = datetime.now(UTC)
+
+    _require_paper_mode_for_paper_exchange(body)
 
     try:
         _EVALUATOR.validate_params(
@@ -316,6 +525,22 @@ async def create_order(
         as_of=now,
     )
 
+    execution_exchange = await _resolve_execution_venue(
+        repo=repo,
+        body=body,
+        wallet_public_id=wallet_public_id,
+        as_of=now,
+    )
+
+    command_price = body.price
+    if execution_exchange == ExchangeEnum.PAPER.value and body.order_type == "market":
+        command_price = await _resolve_paper_reference_price(
+            repo=repo,
+            body=body,
+            source_instrument_public_id=resolved_instrument_public_id,
+            as_of=now,
+        )
+
     await _validate_create_order_ai_review_citation(
         repo=repo,
         principal=principal,
@@ -325,7 +550,7 @@ async def create_order(
 
     shard_key = compute_shard_key(
         instrument=body.instrument,
-        exchange=cast(OrderExchange, body.exchange),
+        exchange=cast(OrderExchange, execution_exchange),
         mode=cast(ExecutionMode, body.mode),
         wallet_public_id=wallet_public_id,
         strategy_tag=None,
@@ -345,6 +570,10 @@ async def create_order(
         "child_client_order_id": client_order_id,
         "native_instrument": body.instrument,
     }
+    if execution_exchange != body.exchange:
+        plan_params["source_exchange"] = body.exchange
+    if command_price is not None and body.price is None:
+        plan_params["reference_price"] = command_price
     if body.price is not None:
         plan_params["price"] = body.price
     if body.stop_price is not None:
@@ -375,7 +604,7 @@ async def create_order(
                     "created_by_user_id": user_pid,
                     "created_via": "api",
                     "instrument_public_id": resolved_instrument_public_id,
-                    "exchange": body.exchange,
+                    "exchange": execution_exchange,
                     "mode": body.mode,
                     "shard_key": shard_key,
                     "wallet_public_id": wallet_public_id,
@@ -409,7 +638,7 @@ async def create_order(
                 cmd_row: TradeCommandInsertRow = {
                     "command_type": "create",
                     "shard_key": shard_key,
-                    "exchange": body.exchange,
+                    "exchange": execution_exchange,
                     "instrument": body.instrument,
                     "mode": body.mode,
                     "strategy_id": "manual",
@@ -418,7 +647,7 @@ async def create_order(
                     "side": body.side,
                     "order_type": body.order_type,
                     "quantity": body.quantity,
-                    "price": body.price,
+                    "price": command_price,
                     "stop_price": body.stop_price,
                     "leverage": body.leverage,
                     "reduce_only": body.reduce_only,

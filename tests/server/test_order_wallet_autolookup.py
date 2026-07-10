@@ -209,13 +209,43 @@ def _make_plan_row(wallet_public_id: str) -> ExecutionPlanRow:
 
 
 def _make_repo(*, plan_wallet_public_id: str = "wallet-1") -> AsyncMock:
-    """Build a repository mock for direct create-order calls."""
+    """Build a repository mock for direct create-order calls.
+
+    Arms the execution-venue consistency lookups
+    (``list_active_wallets`` / ``list_active_wallet_credentials``) with
+    a live wallet + kraken credential for ``plan_wallet_public_id`` so
+    the mode/wallet/exchange matrix admits the default live-kraken
+    request bodies used across this module.
+    """
     repo = AsyncMock()
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
     repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
     repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-1"))
     repo.update_execution_plan_status = AsyncMock(return_value=2)
     repo.get_execution_plan = AsyncMock(return_value=_make_plan_row(plan_wallet_public_id))
+    repo.list_active_wallets = AsyncMock(
+        return_value=[
+            {
+                "public_id": plan_wallet_public_id,
+                "label": "main",
+                "description": None,
+                "is_paper": False,
+                "timestamp": _NOW,
+                "session_id": "s1",
+                "sequence_id": 1,
+            }
+        ]
+    )
+    repo.list_active_wallet_credentials = AsyncMock(
+        return_value=[
+            {
+                "public_id": "cred-1",
+                "wallet_public_id": plan_wallet_public_id,
+                "exchange": "kraken",
+                "credential_type": "api",
+            }
+        ]
+    )
     return repo
 
 
@@ -250,9 +280,7 @@ def test_create_order_schema_rejects_blank_wallet_public_id(
 
 
 @pytest.mark.asyncio
-async def test_create_order_omitted_wallet_resolves_single_live_wallet(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_omitted_wallet_resolves_single_live_wallet() -> None:
     """Single live accessible wallet is bound when the request omits a wallet.
 
     Given: an operator principal with exactly one accessible live wallet,
@@ -263,7 +291,6 @@ async def test_create_order_omitted_wallet_resolves_single_live_wallet(
     repo.list_accessible_wallets_for_operators = AsyncMock(
         return_value=[_make_wallet("wallet-live")]
     )
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     response = await order_routes.create_order(
         request=_make_request(),
@@ -283,9 +310,7 @@ async def test_create_order_omitted_wallet_resolves_single_live_wallet(
 
 
 @pytest.mark.asyncio
-async def test_create_order_with_ai_review_citation_uses_resolved_wallet(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_with_ai_review_citation_uses_resolved_wallet() -> None:
     """AI-review citation validation receives the resolved wallet.
 
     Given: an omitted-wallet order with one live wallet and a valid citation,
@@ -304,7 +329,6 @@ async def test_create_order_with_ai_review_citation_uses_resolved_wallet(
             "status": "resolved_approved",
         }
     )
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     await order_routes.create_order(
         request=_make_request(),
@@ -319,9 +343,7 @@ async def test_create_order_with_ai_review_citation_uses_resolved_wallet(
 
 
 @pytest.mark.asyncio
-async def test_create_order_unknown_ai_review_citation_returns_403(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_unknown_ai_review_citation_returns_403() -> None:
     """AI-review citation failures map to HTTP 403.
 
     Given: an omitted-wallet order whose cited AI review is unknown,
@@ -333,7 +355,6 @@ async def test_create_order_unknown_ai_review_citation_returns_403(
         return_value=[_make_wallet("wallet-live")]
     )
     repo.get_ai_review = AsyncMock(return_value=None)
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -351,9 +372,7 @@ async def test_create_order_unknown_ai_review_citation_returns_403(
 
 
 @pytest.mark.asyncio
-async def test_create_order_omitted_wallet_rejects_multiple_live_wallets(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_omitted_wallet_rejects_multiple_live_wallets() -> None:
     """Multiple live candidates are a 400 and no order rows are written.
 
     Given: an operator principal with two accessible live wallets,
@@ -364,7 +383,6 @@ async def test_create_order_omitted_wallet_rejects_multiple_live_wallets(
     repo.list_accessible_wallets_for_operators = AsyncMock(
         return_value=[_make_wallet("wallet-a"), _make_wallet("wallet-b")]
     )
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -383,9 +401,7 @@ async def test_create_order_omitted_wallet_rejects_multiple_live_wallets(
 
 
 @pytest.mark.asyncio
-async def test_create_order_omitted_wallet_rejects_zero_live_wallets(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_omitted_wallet_rejects_zero_live_wallets() -> None:
     """Zero live candidates are a 400 and no order rows are written.
 
     Given: an operator principal with no accessible live wallets,
@@ -394,7 +410,6 @@ async def test_create_order_omitted_wallet_rejects_zero_live_wallets(
     """
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -413,9 +428,7 @@ async def test_create_order_omitted_wallet_rejects_zero_live_wallets(
 
 
 @pytest.mark.asyncio
-async def test_create_order_omitted_live_wallet_rejects_single_paper_wallet(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_omitted_live_wallet_rejects_single_paper_wallet() -> None:
     """A live order never binds a single accessible paper wallet.
 
     Given: an operator principal with exactly one accessible paper wallet,
@@ -426,7 +439,6 @@ async def test_create_order_omitted_live_wallet_rejects_single_paper_wallet(
     repo.list_accessible_wallets_for_operators = AsyncMock(
         return_value=[_make_wallet("wallet-paper", is_paper=True)]
     )
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -445,9 +457,7 @@ async def test_create_order_omitted_live_wallet_rejects_single_paper_wallet(
 
 
 @pytest.mark.asyncio
-async def test_create_order_omitted_live_wallet_rejects_missing_operator_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_omitted_live_wallet_rejects_missing_operator_context() -> None:
     """Live autolookup fails closed when the principal has no operators.
 
     Given: an operator principal whose operator set is empty,
@@ -456,7 +466,6 @@ async def test_create_order_omitted_live_wallet_rejects_missing_operator_context
     """
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock()
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -486,7 +495,6 @@ async def test_create_order_omitted_live_wallet_rejects_missing_operator_context
 async def test_create_order_blank_wallet_rejects_before_autolookup(
     wallet_public_id: str,
     wallets: list[WalletRow],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Blank REST wallet IDs do not enter single-wallet autolookup.
 
@@ -496,7 +504,6 @@ async def test_create_order_blank_wallet_rejects_before_autolookup(
     """
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=wallets)
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -516,9 +523,7 @@ async def test_create_order_blank_wallet_rejects_before_autolookup(
 
 
 @pytest.mark.asyncio
-async def test_create_order_explicit_wallet_bypasses_autolookup_but_keeps_scope_check(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_explicit_wallet_bypasses_autolookup_but_keeps_scope_check() -> None:
     """Explicit in-scope wallet writes unchanged even when multiple wallets exist.
 
     Given: an operator principal with multiple accessible live wallets,
@@ -529,7 +534,6 @@ async def test_create_order_explicit_wallet_bypasses_autolookup_but_keeps_scope_
     repo.list_accessible_wallets_for_operators = AsyncMock(
         return_value=[_make_wallet("wallet-1"), _make_wallet("wallet-2")]
     )
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     await order_routes.create_order(
         request=_make_request(),
@@ -548,9 +552,7 @@ async def test_create_order_explicit_wallet_bypasses_autolookup_but_keeps_scope_
 
 
 @pytest.mark.asyncio
-async def test_create_order_invalid_params_return_422(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_invalid_params_return_422() -> None:
     """Manual-order validation failures map to HTTP 422.
 
     Given: a limit order with no limit price,
@@ -558,7 +560,6 @@ async def test_create_order_invalid_params_return_422(
     Then: the handler raises HTTP 422 before repository writes.
     """
     repo = _make_repo()
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -575,9 +576,7 @@ async def test_create_order_invalid_params_return_422(
 
 
 @pytest.mark.asyncio
-async def test_create_order_unknown_instrument_returns_422(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_unknown_instrument_returns_422() -> None:
     """Unknown canonical instrument lookup maps to HTTP 422.
 
     Given: the capability guard admits a symbol that cannot be canonicalized,
@@ -587,7 +586,6 @@ async def test_create_order_unknown_instrument_returns_422(
     repo = _make_repo()
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
     repo.list_accessible_wallets_for_operators = AsyncMock()
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -605,9 +603,7 @@ async def test_create_order_unknown_instrument_returns_422(
 
 
 @pytest.mark.asyncio
-async def test_create_order_stop_with_leverage_persists_optional_params(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_stop_with_leverage_persists_optional_params() -> None:
     """Optional stop and leverage params are persisted on the plan.
 
     Given: a stop order with stop price and leverage but no limit price,
@@ -616,7 +612,6 @@ async def test_create_order_stop_with_leverage_persists_optional_params(
     """
     repo = _make_repo(plan_wallet_public_id="wallet-1")
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_make_wallet("wallet-1")])
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     await order_routes.create_order(
         request=_make_request(),
@@ -640,9 +635,7 @@ async def test_create_order_stop_with_leverage_persists_optional_params(
 
 
 @pytest.mark.asyncio
-async def test_create_order_plan_insert_unique_conflict_returns_409(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_plan_insert_unique_conflict_returns_409() -> None:
     """Plan idempotency conflicts map to HTTP 409.
 
     Given: the execution-plan insert raises a duplicate-key error,
@@ -652,7 +645,6 @@ async def test_create_order_plan_insert_unique_conflict_returns_409(
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_make_wallet("wallet-1")])
     repo.insert_execution_plan = AsyncMock(side_effect=RuntimeError("duplicate key"))
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -669,9 +661,7 @@ async def test_create_order_plan_insert_unique_conflict_returns_409(
 
 
 @pytest.mark.asyncio
-async def test_create_order_plan_insert_generic_error_returns_500(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_plan_insert_generic_error_returns_500() -> None:
     """Generic plan insert failures map to HTTP 500.
 
     Given: the execution-plan insert raises an unexpected error,
@@ -681,7 +671,6 @@ async def test_create_order_plan_insert_generic_error_returns_500(
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_make_wallet("wallet-1")])
     repo.insert_execution_plan = AsyncMock(side_effect=RuntimeError("database down"))
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -698,9 +687,7 @@ async def test_create_order_plan_insert_generic_error_returns_500(
 
 
 @pytest.mark.asyncio
-async def test_create_order_command_insert_failure_compensates_plan(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_command_insert_failure_compensates_plan() -> None:
     """Command insert failures compensate the plan and return HTTP 500.
 
     Given: the execution-plan insert succeeds but command insert fails,
@@ -710,7 +697,6 @@ async def test_create_order_command_insert_failure_compensates_plan(
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_make_wallet("wallet-1")])
     repo.insert_trade_command = AsyncMock(side_effect=RuntimeError("command insert failed"))
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -728,9 +714,7 @@ async def test_create_order_command_insert_failure_compensates_plan(
 
 
 @pytest.mark.asyncio
-async def test_create_order_caps_violation_returns_422(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_caps_violation_returns_422() -> None:
     """Caps violations map to HTTP 422.
 
     Given: the caps enforcer rejects the submission,
@@ -739,7 +723,6 @@ async def test_create_order_caps_violation_returns_422(
     """
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_make_wallet("wallet-1")])
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -757,9 +740,7 @@ async def test_create_order_caps_violation_returns_422(
 
 
 @pytest.mark.asyncio
-async def test_create_order_plan_missing_after_insert_returns_500(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_plan_missing_after_insert_returns_500() -> None:
     """Post-insert plan reload failure maps to HTTP 500.
 
     Given: plan and command inserts succeed but plan reload returns none,
@@ -769,7 +750,6 @@ async def test_create_order_plan_missing_after_insert_returns_500(
     repo = _make_repo()
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[_make_wallet("wallet-1")])
     repo.get_execution_plan = AsyncMock(return_value=None)
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(
@@ -942,9 +922,7 @@ async def test_cancel_by_client_order_id_delegates_to_cancel_flow(
 
 
 @pytest.mark.asyncio
-async def test_create_order_explicit_wallet_out_of_scope_returns_403(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_explicit_wallet_out_of_scope_returns_403() -> None:
     """Explicit out-of-scope wallet keeps the existing 403 scope rejection.
 
     Given: an operator principal without access to the explicit wallet,
@@ -955,7 +933,6 @@ async def test_create_order_explicit_wallet_out_of_scope_returns_403(
     repo.list_accessible_wallets_for_operators = AsyncMock(
         return_value=[_make_wallet("wallet-other")]
     )
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
 
     with pytest.raises(HTTPException) as exc_info:
         await order_routes.create_order(

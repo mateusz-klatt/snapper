@@ -2718,8 +2718,11 @@ class UserTradingCaps(TemporalMixin, Base):
           exposure cap, not a rate cap.
         ``max_daily_notional_usd``: rolling 24h sum of
           ``submit_quantity * submit_price_usd`` over non-rejected
-          commands. Submit-time commitment basis; partial fills do
-          not change accounting.
+          LIVE commands (``mode='paper'`` history is excluded — paper
+          commands carry a simulator reference price and simulated
+          notional must not consume the live allowance; the current
+          submission is evaluated regardless of mode). Submit-time
+          commitment basis; partial fills do not change accounting.
         ``max_cancels_per_minute``: sliding 60-second count of
           the user's cancel commands.
     """

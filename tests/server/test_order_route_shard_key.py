@@ -127,9 +127,7 @@ def _make_enforcer() -> TradingCapsEnforcer:
 
 
 @pytest.mark.asyncio
-async def test_create_order_uses_wallet_aware_canonical_shard_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_order_uses_wallet_aware_canonical_shard_key() -> None:
     """REST create order persists the canonical wallet-aware shard key.
 
     Given: a valid manual order with ``wallet_public_id`` set,
@@ -150,7 +148,29 @@ async def test_create_order_uses_wallet_aware_canonical_shard_key(
     repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-1"))
     repo.update_execution_plan_status = AsyncMock(return_value=2)
     repo.get_execution_plan = AsyncMock(return_value=_make_plan_row(expected_shard_key))
-    monkeypatch.setattr(order_routes, "require_tradable", AsyncMock())
+    repo.list_active_wallets = AsyncMock(
+        return_value=[
+            {
+                "public_id": _WALLET_PUBLIC_ID,
+                "label": "main",
+                "description": None,
+                "is_paper": False,
+                "timestamp": _NOW,
+                "session_id": "s1",
+                "sequence_id": 1,
+            }
+        ]
+    )
+    repo.list_active_wallet_credentials = AsyncMock(
+        return_value=[
+            {
+                "public_id": "cred-1",
+                "wallet_public_id": _WALLET_PUBLIC_ID,
+                "exchange": "kraken",
+                "credential_type": "api",
+            }
+        ]
+    )
 
     response = await order_routes.create_order(
         request=_make_request(),

@@ -317,6 +317,7 @@ class TradingEngineService:
         session_id: str,
         sequence_id: int,
         grouped_correlation_id: str | None = None,
+        reference_price: float | None = None,
     ) -> TradeCommandInsertRow:
         """Return the TradeCommand insert row for a strategy submit.
 
@@ -330,6 +331,13 @@ class TradingEngineService:
         paired-execution group and is held by the outbox arming gate until
         the group arms; otherwise ``correlation_id`` defaults to the order's
         own public id (the existing per-order behaviour).
+
+        ``reference_price`` is the paper-venue fill reference: the paper
+        simulator fills a market order at ``order.price``, so paper
+        engines pass the validated signal price here and it rides the
+        existing ``price`` column onto the dispatch payload. Live-venue
+        market commands MUST keep it ``None`` — a real exchange must
+        never receive a market order carrying a price.
         """
         return {
             "command_type": OrderCommandEnum.SUBMIT,
@@ -343,7 +351,7 @@ class TradingEngineService:
             "side": side,
             "order_type": "market",
             "quantity": size,
-            "price": None,
+            "price": reference_price,
             "leverage": leverage,
             "reduce_only": reduce_only,
             "status": TradeCommandStatusEnum.CREATED,
@@ -710,7 +718,11 @@ class TradingEngineService:
         Args:
             side: Order side ("buy" or "sell").
             size: Order quantity.
-            price: Reference price (for market orders, used for logging).
+            price: Reference price. On paper-venue engines it is
+                forwarded as the market order's fill reference (the
+                paper simulator fills at ``order.price``; previously it
+                was discarded and paper fills booked at 0.0). Live-venue
+                market commands never carry it.
             reason: Order reason tag (e.g., "engine-buy", "engine-stop").
             signaled_at: Unix timestamp when signal was generated.
             leverage: Margin leverage (None for spot).
@@ -742,6 +754,7 @@ class TradingEngineService:
         signaled_at_dt = None
         if signaled_at is not None:
             signaled_at_dt = dt.datetime.fromtimestamp(signaled_at, tz=dt.UTC)
+        reference_price = price if self.exchange == ExchangeEnum.PAPER else None
         topic = order_command_topic(self.exchange, self.instrument, OrderCommandEnum.SUBMIT)
         order_public_id = str(uuid7())
         now = dt.datetime.now(dt.UTC)
@@ -786,6 +799,7 @@ class TradingEngineService:
                 session_id=session_id,
                 sequence_id=sequence_id,
                 grouped_correlation_id=grouped_correlation_id,
+                reference_price=reference_price,
             )
             command_public_id = await self._insert_strategy_trade_command(
                 strategy_submission,
@@ -809,7 +823,7 @@ class TradingEngineService:
                 side=side,
                 order_type=OrderTypeEnum.MARKET,
                 quantity=size,
-                price=None,
+                price=reference_price,
                 client_order_id=order_public_id,
                 exchange=self.exchange,
                 strategy_tag=self._strategy_tag,

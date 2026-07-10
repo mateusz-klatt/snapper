@@ -3,6 +3,7 @@
 from collections.abc import AsyncGenerator
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import Any
 from unittest.mock import ANY
 from unittest.mock import AsyncMock
@@ -107,6 +108,133 @@ def _wallet_row(public_id: str, *, is_paper: bool = False) -> dict[str, object]:
     return {"public_id": public_id, "is_paper": is_paper}
 
 
+def _arm_execution_venue(
+    repo: AsyncMock,
+    *,
+    wallet_public_id: str = "wallet-1",
+    is_paper: bool = False,
+    credential_exchanges: tuple[str, ...] = ("kraken",),
+) -> None:
+    """Arm ``repo`` with the wallet and credential rows the venue check reads.
+
+    :func:`snapper.server.order_routes._resolve_execution_venue` runs after
+    wallet resolution and before the AI-review citation gate. It calls
+    ``list_active_wallets`` to confirm the resolved wallet exists and match
+    its ``is_paper`` flag against ``mode == 'paper'``, then
+    ``list_active_wallet_credentials`` to require an active credential for
+    the effective execution venue. Any create-order test that reaches this
+    step must supply both rows or the route rejects with HTTP 400.
+
+    Args:
+        repo: The AsyncMock repository armed in place.
+        wallet_public_id: Public id of the single active wallet row, which
+            must equal the wallet the route resolves for the request.
+        is_paper: The wallet row's ``is_paper`` flag; must equal
+            ``mode == 'paper'`` for the mode/wallet check to pass.
+        credential_exchanges: Exchanges for which an active credential row
+            exists on ``wallet_public_id``; must include the effective
+            venue (``'paper'`` under paper mode, else the request exchange).
+    """
+    repo.list_active_wallets = AsyncMock(
+        return_value=[
+            {
+                "public_id": wallet_public_id,
+                "label": "main",
+                "description": None,
+                "is_paper": is_paper,
+                "timestamp": _ts(),
+                "session_id": "s1",
+                "sequence_id": 1,
+            }
+        ]
+    )
+    repo.list_active_wallet_credentials = AsyncMock(
+        return_value=[
+            {
+                "public_id": f"cred-{index}",
+                "wallet_public_id": wallet_public_id,
+                "exchange": exchange,
+                "credential_type": "api",
+            }
+            for index, exchange in enumerate(credential_exchanges, start=1)
+        ]
+    )
+
+
+def _snapshot_row(
+    *,
+    ts: datetime | None = None,
+    bid: float | None = 100.0,
+    ask: float | None = 101.0,
+    last: float | None = 100.5,
+) -> dict[str, object]:
+    """Build a ``MarketSnapshotRow`` for paper reference-price tests.
+
+    Only ``ts`` (recency ordering) and the ``bid``/``ask``/``last`` price
+    legs are read by
+    :func:`snapper.server.order_routes._resolve_paper_reference_price`; the
+    remaining depth/OHLC fields round out the row shape.
+    """
+    return {
+        "ts": ts if ts is not None else _ts(),
+        "instrument_public_id": "inst-1",
+        "bid": bid,
+        "bid_volume": 1.0,
+        "ask": ask,
+        "ask_volume": 1.0,
+        "last": last,
+        "volume": 10.0,
+        "vwap": 100.4,
+        "low": 99.0,
+        "high": 102.0,
+    }
+
+
+def _candle_row(
+    *,
+    close: float = 250.0,
+    timestamp: datetime | None = None,
+) -> dict[str, object]:
+    """Build a ``CandleRow`` for paper reference-price candle-fallback tests.
+
+    ``timestamp`` drives the ≤120 s freshness gate and ``close`` is the
+    fallback reference price; the rest complete the 1m candle row shape.
+    """
+    anchor = timestamp if timestamp is not None else datetime.now(UTC)
+    return {
+        "open_at": anchor,
+        "timeframe": "1m",
+        "open": 249.0,
+        "high": 251.0,
+        "low": 248.0,
+        "close": close,
+        "volume": 5.0,
+        "vwap": None,
+        "trades": None,
+        "source": "native",
+        "complete": True,
+        "public_id": "candle-1",
+        "timestamp": anchor,
+        "session_id": "s1",
+        "sequence_id": 1,
+    }
+
+
+def _paper_market_body(*, side: str = "buy") -> dict[str, Any]:
+    """Return a paper-mode MARKET create-order body (no limit price).
+
+    Paper MARKET orders trigger the reference-price resolver; the request
+    exchange stays kraken so the venue remaps to ``paper`` while kraken
+    remains the market-data source.
+    """
+    body = _create_order_body()
+    body["payload"]["mode"] = "paper"
+    body["payload"]["order_type"] = "market"
+    body["payload"]["side"] = side
+    body["payload"].pop("price", None)
+    return body
+
+
 def _create_order_repo(plan_wallet_public_id: str = "wallet-1") -> AsyncMock:
     """Build a repository mock for successful create-order tests."""
     repo = AsyncMock()
@@ -117,6 +245,7 @@ def _create_order_repo(plan_wallet_public_id: str = "wallet-1") -> AsyncMock:
     repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
     repo.update_execution_plan_status = AsyncMock(return_value=2)
     repo.get_execution_plan = AsyncMock(return_value=plan_row)
+    _arm_execution_venue(repo, wallet_public_id=plan_wallet_public_id)
     return repo
 
 
@@ -225,6 +354,7 @@ class TestCreateOrder:
         repo.update_execution_plan_status = AsyncMock(return_value=2)
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         client = _create_client(repo)
         response = client.post("/api/orders", json=_create_order_body())
         assert response.status_code == 200
@@ -248,6 +378,7 @@ class TestCreateOrder:
         repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
         repo.update_execution_plan_status = AsyncMock(return_value=2)
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
 
         class _CapsGuard:
             async def __aenter__(self) -> None:
@@ -323,6 +454,7 @@ class TestCreateOrder:
         repo = AsyncMock()
         repo.insert_execution_plan = AsyncMock(side_effect=Exception("UNIQUE constraint failed"))
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         client = _create_client(repo)
         response = client.post("/api/orders", json=_create_order_body())
         assert response.status_code == 409
@@ -335,6 +467,7 @@ class TestCreateOrder:
         repo.insert_trade_command = AsyncMock(side_effect=Exception("DB error"))
         repo.update_execution_plan_status = AsyncMock(return_value=2)
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         client = _create_client(repo)
         response = client.post("/api/orders", json=_create_order_body())
         assert response.status_code == 500
@@ -481,6 +614,7 @@ class TestCreateOrder:
         repo = AsyncMock()
         repo.insert_execution_plan = AsyncMock(side_effect=Exception("unexpected"))
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         client = _create_client(repo)
         response = client.post("/api/orders", json=_create_order_body())
         assert response.status_code == 500
@@ -493,6 +627,7 @@ class TestCreateOrder:
         repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
         repo.get_execution_plan = AsyncMock(return_value=None)
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         client = _create_client(repo)
         response = client.post("/api/orders", json=_create_order_body())
         assert response.status_code == 500
@@ -505,6 +640,7 @@ class TestCreateOrder:
         repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         client = _create_client(repo)
         body = _create_order_body()
         body["payload"]["order_type"] = "stop"
@@ -530,6 +666,7 @@ class TestCreateOrder:
         repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         client = _create_client(repo)
         body = _create_order_body()
         body["payload"]["order_type"] = "stop"
@@ -559,6 +696,7 @@ class TestCreateOrder:
         repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         client = _create_client(repo)
         body = _create_order_body()
         body["payload"]["order_type"] = "stop_limit"
@@ -579,6 +717,7 @@ class TestCreateOrder:
         repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         client = _create_client(repo)
         body = _create_order_body()
         body["payload"]["leverage"] = 5
@@ -595,12 +734,54 @@ class TestCreateOrder:
         repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         client = _create_client(repo)
         body = _create_order_body()
         body["payload"]["order_type"] = "market"
         body["payload"].pop("price", None)
         response = client.post("/api/orders", json=body)
         assert response.status_code == 200
+        client.close()
+
+    def test_create_order_market_with_price_returns_422(self) -> None:
+        """Given a market order carrying a price, When creating, Then 422.
+
+        Given: a market-order body whose ``price`` is set,
+        When: the client POSTs the order,
+        Then: the route funnels the evaluator ValueError to HTTP 422 and
+            the detail carries "must not carry price"; the guard runs
+            before persistence so no order row is written.
+        """
+        repo = AsyncMock()
+        client = _create_client(repo)
+        body = _create_order_body()
+        body["payload"]["order_type"] = "market"
+        body["payload"]["price"] = 50000.0
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 422
+        assert "must not carry price" in response.json()["detail"]
+        repo.insert_execution_plan.assert_not_called()
+        client.close()
+
+    def test_create_order_unknown_instrument_returns_422(self) -> None:
+        """Given an unresolvable instrument, When creating, Then 422 unknown_instrument.
+
+        Given: an instrument that clears the capability guard but resolves
+            to no active Instrument row (``get_instrument_public_id_by_symbol``
+            returns None),
+        When: the client POSTs the order,
+        Then: the route rejects with HTTP 422 error_code
+            ``unknown_instrument`` and no order row is written.
+        """
+        repo = AsyncMock()
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_create_order_body())
+        assert response.status_code == 422
+        assert response.json()["detail"]["error_code"] == "unknown_instrument"
+        repo.insert_execution_plan.assert_not_called()
         client.close()
 
 
@@ -913,6 +1094,7 @@ class TestCreateOrderAiReviewCitation:
         repo.update_execution_plan_status = AsyncMock(return_value=2)
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         repo.get_ai_review = AsyncMock(
             return_value={
                 "public_id": "review-ok-1",
@@ -959,6 +1141,7 @@ class TestCreateOrderAiReviewCitation:
         repo.insert_execution_plan = AsyncMock()
         repo.insert_trade_command = AsyncMock()
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         repo.get_ai_review = AsyncMock(return_value=None)
         body = _create_order_body()
         body["payload"]["ai_review_public_id"] = "ghost-review"
@@ -984,6 +1167,7 @@ class TestCreateOrderAiReviewCitation:
         repo.insert_execution_plan = AsyncMock()
         repo.insert_trade_command = AsyncMock()
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        _arm_execution_venue(repo)
         repo.get_ai_review = AsyncMock(
             return_value={
                 "public_id": "review-stranger",
@@ -1000,4 +1184,384 @@ class TestCreateOrderAiReviewCitation:
         assert "owner mismatch" in response.json()["detail"]
         repo.insert_execution_plan.assert_not_called()
         repo.insert_trade_command.assert_not_called()
+        client.close()
+
+
+def _venue_failure_repo() -> AsyncMock:
+    """Build a repo that reaches ``_resolve_execution_venue`` then rejects there.
+
+    Instrument resolution is stubbed so the request clears the capability
+    guard and the instrument lookup and lands on the venue check; the
+    execution-plan and trade-command inserts stay unarmed so each matrix
+    violation can assert that neither write fired.
+    """
+    repo = AsyncMock()
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+    repo.insert_execution_plan = AsyncMock()
+    repo.insert_trade_command = AsyncMock()
+    repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+    return repo
+
+
+class TestExecutionVenueMatrix:
+    """Branch coverage for ``order_routes._resolve_execution_venue``.
+
+    Exercises every arm of the paper-routing matrix the venue check
+    enforces between wallet resolution and the AI-review citation gate:
+    the paper-exchange guard, wallet existence, the mode/wallet paper
+    parity check in both directions, the effective-venue credential
+    requirement, and the two success shapes — paper remap (venue coerced
+    to ``paper`` with the request exchange preserved as
+    ``source_exchange``) and live passthrough.
+    """
+
+    def test_paper_exchange_requires_paper_mode_returns_400(self) -> None:
+        """Reject exchange='paper' with mode='live' ahead of instrument resolution.
+
+        Given: a body pairing exchange='paper' with mode='live' against a
+            repo whose ``get_instrument_public_id_by_symbol`` returns None
+            (an unknown instrument that would otherwise 422),
+        When: the client POSTs the order,
+        Then: the pure-literal paper-mode guard rejects with error_code
+            ``paper_exchange_requires_paper_mode`` and HTTP 400 (NOT the
+            422 ``unknown_instrument`` the later resolution would raise),
+            proving the guard runs first — before instrument resolution
+            and before the wallet catalogue is touched, so
+            ``list_active_wallets`` is never called and no order row is
+            written.
+        """
+        repo = _venue_failure_repo()
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        body = _create_order_body()
+        body["payload"]["exchange"] = "paper"
+        body["payload"]["mode"] = "live"
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_code"] == "paper_exchange_requires_paper_mode"
+        repo.list_active_wallets.assert_not_called()
+        repo.insert_execution_plan.assert_not_called()
+        client.close()
+
+    def test_unknown_wallet_returns_400(self) -> None:
+        """Reject when the resolved wallet is absent from the active catalogue.
+
+        Given: a live order whose wallet clears scope resolution but the
+            active-wallet catalogue holds only a different wallet id,
+        When: the client POSTs the order,
+        Then: the venue check rejects with error_code ``unknown_wallet``
+            and no order row is written.
+        """
+        repo = _venue_failure_repo()
+        _arm_execution_venue(repo, wallet_public_id="wallet-other")
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_create_order_body())
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_code"] == "unknown_wallet"
+        repo.insert_execution_plan.assert_not_called()
+        client.close()
+
+    def test_mode_wallet_mismatch_paper_mode_live_wallet_returns_400(self) -> None:
+        """Reject a paper-mode order that resolves to a live wallet.
+
+        Given: a paper-mode order whose resolved wallet is a live wallet
+            (``is_paper`` False),
+        When: the client POSTs the order,
+        Then: the venue check rejects with error_code
+            ``mode_wallet_mismatch`` and no order row is written.
+        """
+        repo = _venue_failure_repo()
+        _arm_execution_venue(repo, is_paper=False)
+        body = _create_order_body()
+        body["payload"]["mode"] = "paper"
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_code"] == "mode_wallet_mismatch"
+        repo.insert_execution_plan.assert_not_called()
+        client.close()
+
+    def test_mode_wallet_mismatch_live_mode_paper_wallet_returns_400(self) -> None:
+        """Reject a live-mode order that resolves to a paper wallet.
+
+        Given: a live-mode order whose resolved wallet is a paper wallet
+            (``is_paper`` True) — the mirror of the paper-mode mismatch,
+        When: the client POSTs the order,
+        Then: the venue check rejects with error_code
+            ``mode_wallet_mismatch`` and no order row is written.
+        """
+        repo = _venue_failure_repo()
+        _arm_execution_venue(repo, is_paper=True)
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_create_order_body())
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_code"] == "mode_wallet_mismatch"
+        repo.insert_execution_plan.assert_not_called()
+        client.close()
+
+    def test_wallet_credential_missing_returns_400(self) -> None:
+        """Reject a paper order whose wallet lacks a paper credential.
+
+        Given: a paper-mode order on a paper wallet whose only active
+            credential is for a different venue (kraken, not the paper
+            venue the order remaps to),
+        When: the client POSTs the order,
+        Then: the venue check rejects with error_code
+            ``wallet_credential_missing`` for the ``paper`` venue because
+            no executor consumes the command, and no order row is written.
+        """
+        repo = _venue_failure_repo()
+        _arm_execution_venue(repo, is_paper=True, credential_exchanges=("kraken",))
+        body = _create_order_body()
+        body["payload"]["mode"] = "paper"
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error_code"] == "wallet_credential_missing"
+        assert detail["exchange"] == "paper"
+        repo.insert_execution_plan.assert_not_called()
+        client.close()
+
+    def test_paper_mode_remaps_venue_and_records_source_exchange(self) -> None:
+        """Remap a valid paper order to the paper venue and preserve the source.
+
+        Given: a paper-mode order on a paper wallet holding a ``paper``
+            credential while sourcing kraken market data,
+        When: the client POSTs the order,
+        Then: the response is 200 and the persisted plan and command rows
+            carry exchange='paper' while the plan params preserve the
+            request exchange as ``source_exchange`` and the shard key is
+            the canonical paper-venue key.
+        """
+        repo = _create_order_repo()
+        _arm_execution_venue(repo, is_paper=True, credential_exchanges=("paper",))
+        body = _create_order_body()
+        body["payload"]["mode"] = "paper"
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 200
+        plan_insert = repo.insert_execution_plan.call_args[0][0]
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        assert plan_insert["exchange"] == "paper"
+        assert plan_insert["params"]["source_exchange"] == "kraken"
+        assert plan_insert["shard_key"] == "paper.BTC-USD.paper.wwallet1"
+        assert cmd_insert["exchange"] == "paper"
+        client.close()
+
+    def test_live_mode_passes_through_without_source_exchange(self) -> None:
+        """Pass a valid live order straight through with no venue remap.
+
+        Given: a live-mode kraken order on a live wallet holding a kraken
+            credential,
+        When: the client POSTs the order,
+        Then: the response is 200 and the persisted plan keeps
+            exchange='kraken' with the canonical live shard key and no
+            ``source_exchange`` remap key, and the command row keeps
+            exchange='kraken'.
+        """
+        repo = _create_order_repo()
+        _arm_execution_venue(repo, is_paper=False, credential_exchanges=("kraken",))
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_create_order_body())
+        assert response.status_code == 200
+        plan_insert = repo.insert_execution_plan.call_args[0][0]
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        assert plan_insert["exchange"] == "kraken"
+        assert plan_insert["shard_key"] == "kraken.BTC-USD.live.wwallet1"
+        assert "source_exchange" not in plan_insert["params"]
+        assert cmd_insert["exchange"] == "kraken"
+        client.close()
+
+
+class TestPaperReferencePrice:
+    """Branch coverage for ``order_routes._resolve_paper_reference_price``.
+
+    A manual paper MARKET order carries no limit price, but the paper
+    simulator rejects a priceless fill, so ``create_order`` attaches a
+    fresh reference price at create time. These tests exercise every
+    resolution arm: the side-aware snapshot leg, the snapshot→candle
+    fall-through, the candle freshness gate, the hard ``no_reference_price``
+    rejection, and the LIMIT short-circuit that skips pricing entirely.
+    """
+
+    def _paper_market_repo(self) -> AsyncMock:
+        """Build a repo that clears the paper venue and reaches pricing."""
+        repo = _create_order_repo()
+        _arm_execution_venue(repo, is_paper=True, credential_exchanges=("paper",))
+        return repo
+
+    def test_paper_market_buy_uses_snapshot_ask(self) -> None:
+        """Price a paper MARKET buy at the freshest snapshot ask.
+
+        Given: a paper MARKET buy whose freshest snapshot has a positive
+            ask,
+        When: the client POSTs the order,
+        Then: the trade-command price and the plan's ``reference_price``
+            param are the ask, confirming the buy side prices at the ask.
+        """
+        repo = self._paper_market_repo()
+        repo.get_market_snapshots = AsyncMock(
+            return_value=[_snapshot_row(bid=100.0, ask=101.0, last=100.5)]
+        )
+        repo.get_candles = AsyncMock(return_value=[])
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_paper_market_body(side="buy"))
+        assert response.status_code == 200
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        plan_insert = repo.insert_execution_plan.call_args[0][0]
+        assert cmd_insert["price"] == 101.0
+        assert plan_insert["params"]["reference_price"] == 101.0
+        repo.get_candles.assert_not_called()
+        client.close()
+
+    def test_paper_market_sell_uses_snapshot_bid(self) -> None:
+        """Price a paper MARKET sell at the freshest snapshot bid.
+
+        Given: a paper MARKET sell whose freshest snapshot has a positive
+            bid,
+        When: the client POSTs the order,
+        Then: the trade-command price is the bid, confirming the sell side
+            prices at the bid (the mirror of the buy-at-ask rule).
+        """
+        repo = self._paper_market_repo()
+        repo.get_market_snapshots = AsyncMock(
+            return_value=[_snapshot_row(bid=100.0, ask=101.0, last=100.5)]
+        )
+        repo.get_candles = AsyncMock(return_value=[])
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_paper_market_body(side="sell"))
+        assert response.status_code == 200
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        assert cmd_insert["price"] == 100.0
+        client.close()
+
+    def test_paper_market_picks_freshest_snapshot(self) -> None:
+        """Select the newest snapshot by ``ts`` when several are returned.
+
+        Given: two snapshots for the instrument with different ``ts`` and
+            asks,
+        When: the client POSTs a paper MARKET buy,
+        Then: the price is the ask of the newest snapshot, confirming the
+            resolver orders by ``ts`` rather than trusting list order.
+        """
+        repo = self._paper_market_repo()
+        older = _snapshot_row(ts=_ts() - timedelta(seconds=10), ask=90.0)
+        newer = _snapshot_row(ts=_ts(), ask=105.0)
+        repo.get_market_snapshots = AsyncMock(return_value=[older, newer])
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_paper_market_body(side="buy"))
+        assert response.status_code == 200
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        assert cmd_insert["price"] == 105.0
+        client.close()
+
+    def test_paper_market_falls_through_to_candle_when_snapshot_unusable(self) -> None:
+        """Fall through to a fresh candle close when snapshot legs are unusable.
+
+        Given: a snapshot whose bid, ask and last are all None,
+        When: the client POSTs a paper MARKET buy and a fresh 1m candle
+            exists,
+        Then: the price is the candle close — the resolver exhausts the
+            snapshot legs then uses the candle fallback.
+        """
+        repo = self._paper_market_repo()
+        repo.get_market_snapshots = AsyncMock(
+            return_value=[_snapshot_row(bid=None, ask=None, last=None)]
+        )
+        repo.get_candles = AsyncMock(
+            return_value=[_candle_row(close=250.0, timestamp=datetime.now(UTC))]
+        )
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_paper_market_body(side="buy"))
+        assert response.status_code == 200
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        plan_insert = repo.insert_execution_plan.call_args[0][0]
+        assert cmd_insert["price"] == 250.0
+        assert plan_insert["params"]["reference_price"] == 250.0
+        client.close()
+
+    def test_paper_market_uses_candle_when_no_snapshot(self) -> None:
+        """Use a fresh candle close when no snapshot is returned at all.
+
+        Given: an empty snapshot list and a fresh 1m candle,
+        When: the client POSTs a paper MARKET buy,
+        Then: the price is the candle close, covering the no-snapshot
+            branch into the candle fallback.
+        """
+        repo = self._paper_market_repo()
+        repo.get_market_snapshots = AsyncMock(return_value=[])
+        repo.get_candles = AsyncMock(
+            return_value=[_candle_row(close=300.0, timestamp=datetime.now(UTC))]
+        )
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_paper_market_body(side="buy"))
+        assert response.status_code == 200
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        assert cmd_insert["price"] == 300.0
+        client.close()
+
+    def test_paper_market_stale_candle_returns_400(self) -> None:
+        """Reject when the only candle is older than the 120 s freshness gate.
+
+        Given: no snapshot and a 1m candle whose timestamp is 300 s old,
+        When: the client POSTs a paper MARKET buy,
+        Then: the response is 400 ``no_reference_price`` and no order row
+            is written — a stale candle is not a valid fill reference.
+        """
+        repo = _venue_failure_repo()
+        _arm_execution_venue(repo, is_paper=True, credential_exchanges=("paper",))
+        repo.get_market_snapshots = AsyncMock(return_value=[])
+        repo.get_candles = AsyncMock(
+            return_value=[
+                _candle_row(close=250.0, timestamp=datetime.now(UTC) - timedelta(seconds=300))
+            ]
+        )
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_paper_market_body(side="buy"))
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_code"] == "no_reference_price"
+        repo.insert_execution_plan.assert_not_called()
+        client.close()
+
+    def test_paper_market_no_price_source_returns_400(self) -> None:
+        """Reject when neither a snapshot nor a candle is available.
+
+        Given: an empty snapshot list and an empty candle list,
+        When: the client POSTs a paper MARKET buy,
+        Then: the response is 400 ``no_reference_price`` and no order row
+            is written, covering the no-candle rejection arm.
+        """
+        repo = _venue_failure_repo()
+        _arm_execution_venue(repo, is_paper=True, credential_exchanges=("paper",))
+        repo.get_market_snapshots = AsyncMock(return_value=[])
+        repo.get_candles = AsyncMock(return_value=[])
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=_paper_market_body(side="buy"))
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_code"] == "no_reference_price"
+        repo.insert_execution_plan.assert_not_called()
+        client.close()
+
+    def test_paper_limit_order_skips_reference_price(self) -> None:
+        """Keep the limit price and never resolve a reference for LIMIT paper orders.
+
+        Given: a paper LIMIT order carrying an explicit price,
+        When: the client POSTs the order,
+        Then: the trade-command price is the limit price, the snapshot
+            lookup is never called, and no ``reference_price`` param is
+            written — pricing is skipped for non-MARKET orders.
+        """
+        repo = self._paper_market_repo()
+        repo.get_market_snapshots = AsyncMock(return_value=[_snapshot_row()])
+        body = _create_order_body()
+        body["payload"]["mode"] = "paper"
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 200
+        cmd_insert = repo.insert_trade_command.call_args[0][0]
+        plan_insert = repo.insert_execution_plan.call_args[0][0]
+        assert cmd_insert["price"] == 50000.0
+        assert "reference_price" not in plan_insert["params"]
+        repo.get_market_snapshots.assert_not_called()
         client.close()

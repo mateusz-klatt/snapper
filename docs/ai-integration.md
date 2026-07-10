@@ -470,13 +470,16 @@ optional; `null` means "unbounded on this axis".
     commands (every non-terminal status: `created/dispatched/
     direct_dispatched/accepted/partially_filled`).
 - `max_daily_notional_usd` — rolling 24h sum of `submit_quantity *
-    submit_price` per prior non-rejected command (raw submit-time
-    price, no USD re-conversion; prior market orders with no submit
-    price are skipped with a WARN log), plus the new submission's
-    USD-converted notional via the USD price oracle
+    submit_price` per prior non-rejected LIVE command (`mode='paper'`
+    history is excluded: paper commands carry a simulator reference
+    price and simulated notional must not consume the live allowance;
+    raw submit-time price, no USD re-conversion; prior live market
+    orders with no submit price are skipped with a WARN log), plus the
+    new submission's USD-converted notional via the USD price oracle
     (`price_unavailable` caps violation when the oracle is stale or
-    missing). Submit-time commitment basis; partial fills don't
-    change accounting.
+    missing) — the current submission is evaluated regardless of mode.
+    Submit-time commitment basis; partial fills don't change
+    accounting.
 - `max_cancels_per_minute` — sliding-window cancel rate.
 
 Caps are enforced at trade-command insert sites via the

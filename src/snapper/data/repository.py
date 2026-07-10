@@ -105,6 +105,7 @@ from snapper.core.paired_execution import compute_paired_group_key
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
 from snapper.core.types import AllExchange
+from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
 from snapper.core.types import PairedFillProjection
@@ -2430,12 +2431,16 @@ class Repository(ABC):
     async def get_user_recent_submits(
         self, user_public_id: str, since: datetime
     ) -> list[UserRecentSubmitRow]:
-        """Return user's submit commands since a cut-off timestamp.
+        """Return user's LIVE submit commands since a cut-off timestamp.
 
         Used by the ``max_daily_notional_usd`` cap: the enforcer
         sums ``quantity × price`` over these rows to get the
         rolling 24h USD commitment. Excludes rows whose
-        current status is ``rejected``.
+        current status is ``rejected`` AND every ``mode='paper'``
+        row — paper commands carry a simulator reference price on
+        the ``price`` column, and simulated notional must not
+        consume the user's live allowance (the CURRENT submission
+        is evaluated by the enforcer regardless of mode).
 
         Args:
             user_public_id: UUID of the user.
@@ -2443,7 +2448,7 @@ class Repository(ABC):
                 ``now - 24h``).
 
         Returns:
-            List of projected rows (one per submit command).
+            List of projected rows (one per live submit command).
         """
         ...
 
@@ -7630,6 +7635,12 @@ class SQLAlchemyRepository(Repository):
         REST/plan inserts, ``submit`` from strategy/engine, ``replace``
         from amends) — the 24h notional cap limits user exposure
         regardless of origin surface.
+
+        Excludes ``mode='paper'`` rows: paper commands carry a
+        simulator reference price on the ``price`` column (the paper
+        fill executes at ``order.price``), and counting simulated
+        notional against the rolling 24h cap would let paper activity
+        exhaust a user's LIVE trading allowance.
         """
         async with self.session() as s:
             result = await s.execute(
@@ -7642,6 +7653,7 @@ class SQLAlchemyRepository(Repository):
                     TradeCommand.user_public_id == user_public_id,
                     TradeCommand.command_type.in_(("create", "submit", "replace")),
                     TradeCommand.status != TradeCommandStatusEnum.REJECTED,
+                    TradeCommand.mode != ExecutionModeEnum.PAPER.value,
                     TradeCommand.created_at >= since,
                     TradeCommand.known_to == KNOWN_TO_MAX,
                 )

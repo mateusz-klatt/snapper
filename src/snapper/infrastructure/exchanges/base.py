@@ -33,6 +33,8 @@ from typing import Self
 from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
 
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import ExecutionModeEnum
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
@@ -987,6 +989,16 @@ class ExchangeClientBase(ABC):
         path would durably misrepresent a protective stop as a plain
         order.
 
+        ``mode`` is derived from the client's ``exchange_name`` (paper
+        venue ⇒ ``paper``, anything else ⇒ ``live``), mirroring the
+        engine rule in
+        :meth:`snapper.application.engine.service.TradingEngineService.mode`.
+        Before this was passed explicitly, the repository defaulted every
+        omitted mode to ``live``, durably mislabeling paper orders — and
+        mode participates in the active-order uniqueness index and in
+        fill-gap recovery matching, so the label is operational, not
+        cosmetic.
+
         Args:
             request: Original order request with parameters.
             order: Exchange response with order details.
@@ -1013,6 +1025,11 @@ class ExchangeClientBase(ABC):
                 timestamp=order_time,
             )
             seq = self._tracker.next_sequence("orders")
+            mode = (
+                ExecutionModeEnum.PAPER.value
+                if self.exchange_name == ExchangeEnum.PAPER.value
+                else ExecutionModeEnum.LIVE.value
+            )
             return await self.repository.insert_order(
                 instrument_public_id=instrument_public_id,
                 client_order_id=order.client_order_id,
@@ -1024,6 +1041,7 @@ class ExchangeClientBase(ABC):
                 size=order.amount,
                 status=order.status.value,
                 time_in_force=None,
+                mode=mode,
                 session_id=self._tracker.session_id,
                 sequence_id=seq,
                 timestamp=order_time,

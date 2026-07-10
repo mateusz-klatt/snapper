@@ -1578,7 +1578,10 @@ def register_mcp_tools(
             ValueError: if order params fail the manual-order rule
                 (unknown ``order_type``, ``limit``/``stop_limit``
                 without ``price``, ``stop``/``stop_limit`` without
-                ``stop_price``) — same evaluator rule as REST 422.
+                ``stop_price``, ``market`` WITH ``price`` — the field
+                is a limit price per this contract, and on the paper
+                venue the fill reference is resolved server-side) —
+                same evaluator rule as REST 422.
             RuntimeError: if repository / caps enforcer are not
                 initialized yet.
             CapsViolationError: on a caps rejection — surfaced to the

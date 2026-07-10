@@ -1667,6 +1667,72 @@ async def test_send_order_ai_attributed_routes_through_attribution_guard() -> No
 
 
 @pytest.mark.asyncio
+async def test_send_order_paper_durable_row_carries_reference_price() -> None:
+    """Paper durable row carries the reference price; caps submission stays priceless.
+
+    Given: a paper TradingEngine (exchange='paper') wired with a
+        repository and a caps enforcer that captures the built
+        submission,
+    When: ``_send_order`` runs on the durable path,
+    Then: the inserted TradeCommand row's ``price`` equals the passed
+        reference price (the paper simulator fills at ``order.price``)
+        while the captured ``TradeCommandSubmission`` keeps ``price=None``
+        so the 24h notional caps do not double-count the paper reference.
+    """
+    engine, captured = _engine_with_caps_capture()
+    await engine._send_order(side="buy", size=1.0, price=42.5, reason="test")
+    insert_row = cast(AsyncMock, engine._repository).insert_trade_command.call_args.args[0]
+    assert insert_row["price"] == 42.5
+    assert captured[0].price is None
+
+
+@pytest.mark.asyncio
+async def test_send_order_paper_direct_publishes_reference_price() -> None:
+    """Paper direct path publishes the reference price on the OrderRequestData.
+
+    Given: a paper TradingEngine with neither repository nor outbox, so
+        ``_send_order`` takes the direct-publish path,
+    When: ``_send_order`` runs,
+    Then: the published ``OrderRequestData.price`` equals the passed
+        reference price so the paper simulator fills at that reference
+        instead of the historic 0.0.
+    """
+    engine, socket = _make_engine()
+    await engine._send_order(side="buy", size=1.0, price=33.0, reason="test")
+    assert socket.sent
+    published = socket.sent[0]
+    assert published.price == 33.0
+
+
+@pytest.mark.asyncio
+async def test_send_order_live_strips_reference_price() -> None:
+    """A live-venue market command never carries a price on either path.
+
+    Given: a live TradingEngine (exchange='kraken') with a repository and
+        no outbox, so the durable insert and the direct publish both run,
+    When: ``_send_order`` runs,
+    Then: the durable TradeCommand row and the published
+        ``OrderRequestData`` both carry ``price=None`` — a real exchange
+        must never receive a market order carrying a price.
+    """
+    socket = _SocketStub()
+    repo_mock = AsyncMock()
+    repo_mock.insert_trade_command = AsyncMock(return_value=(1, "cmd-live"))
+    engine = TradingEngineService(
+        instrument="BTC-USD",
+        execution_socket=cast(Any, socket),
+        cfg=EngineConfigModel(initial_cash=1_000.0, fee_bps=10.0),
+        exchange="kraken",
+        repository=repo_mock,
+    )
+    await engine._send_order(side="buy", size=1.0, price=55.0, reason="test")
+    insert_row = repo_mock.insert_trade_command.call_args.args[0]
+    assert insert_row["price"] is None
+    assert socket.sent
+    assert socket.sent[0].price is None
+
+
+@pytest.mark.asyncio
 async def test_sync_fill_to_trade_service() -> None:
     """Coordinator sync fills to TradeService and BalanceService on applied fill.
 

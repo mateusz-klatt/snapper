@@ -49,7 +49,7 @@ pytestmark = pytest.mark.integration
 _INSTRUMENT_PUBLIC_ID = "inst-btc-usd"
 _NATIVE_INSTRUMENT = "BTC-USD"
 _EXCHANGE = "paper"
-_MODE = "live"
+_MODE = "paper"
 _WALLET = "wallet-e2e"
 
 
