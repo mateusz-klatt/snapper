@@ -3,6 +3,7 @@
 import json as _json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -4022,6 +4023,51 @@ class TestSetProcessDesiredState:
         kwargs = factory.update_process_config.await_args.kwargs
         assert kwargs["restart_nonce"] == "nonce-restart-01"
         assert kwargs["enabled"] is None
+
+    @pytest.mark.asyncio
+    async def test_retried_restart_with_same_nonce_is_accepted_and_writes_identically(
+        self,
+    ) -> None:
+        """§8 retry-idempotency (route leg): a re-sent restart PATCH is never rejected.
+
+        Given: an enabled locally-owned process and a client-minted UUID-shaped
+            restart nonce, with a STATEFUL factory whose desired-state write is
+            visible to the next config read (the first PATCH persists the nonce,
+            so the second PATCH reads a config already carrying that same nonce),
+        When: the identical restart PATCH is sent twice (a client retry),
+        Then: both requests succeed with action 'restart' and both persist the
+            IDENTICAL kwargs (same nonce, enabled untouched) — the route never
+            rejects a nonce equal to the one already persisted; de-duplication
+            is the reconcile loop's job.
+        """
+        nonce = "01960a7e-2c1a-7c00-8000-000000000000"
+        persisted: dict[str, ProcessConfigModel] = {"config": self._config("p", enabled=True)}
+        factory = self._factory(persisted["config"], autostart_includes=True)
+        factory.get_process_configs = AsyncMock(side_effect=lambda: [persisted["config"]])
+
+        async def _persist_write(
+            *,
+            name: str,
+            enabled: bool | None,
+            restart_nonce: str | None,
+            updated_by: str,
+            is_strategy: bool,
+        ) -> None:
+            persisted["config"] = replace(persisted["config"], restart_nonce=restart_nonce)
+
+        factory.update_process_config = AsyncMock(side_effect=_persist_write)
+        first = await self._patch("p", factory, self._body("restart", restart_nonce=nonce))
+        assert persisted["config"].restart_nonce == nonce
+        second = await self._patch("p", factory, self._body("restart", restart_nonce=nonce))
+        assert first.payload.action == "restart"
+        assert second.payload.action == "restart"
+        assert factory.update_process_config.await_count == 2
+        first_kwargs, second_kwargs = (
+            call.kwargs for call in factory.update_process_config.await_args_list
+        )
+        assert first_kwargs == second_kwargs
+        assert first_kwargs["restart_nonce"] == nonce
+        assert first_kwargs["enabled"] is None
 
     @pytest.mark.asyncio
     async def test_restart_disabled_process_conflicts(self) -> None:

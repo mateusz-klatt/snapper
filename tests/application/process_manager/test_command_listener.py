@@ -225,6 +225,28 @@ class TestHandleFrame:
         assert ack.detail == "duplicate"
 
     @pytest.mark.asyncio
+    async def test_stale_duplicate_is_dropped_before_dedup(self) -> None:
+        """§8 hardening: a stale re-send of a seen command id is dropped, not re-acked.
+
+        Given: a command id already handled, remembered, and acked once,
+        When: the SAME command id arrives again with an issued_at outside the
+            freshness window,
+        Then: the freshness gate (which runs BEFORE dedup) drops it silently —
+            no duplicate re-ack is published and no second reconcile runs, so
+            replay beyond the seen-cache stays bounded by freshness alone.
+        """
+        launcher = _launcher()
+        listener = ProcessCommandListener(launcher)
+
+        await listener._handle_frame(_signed_command(command_id="cmd-stale-dup"))
+        assert launcher.message_publisher.send.await_count == 1
+        stale = datetime.now(UTC) - timedelta(seconds=120)
+        await listener._handle_frame(_signed_command(command_id="cmd-stale-dup", issued_at=stale))
+
+        assert launcher.reconcile_desired_state.await_count == 1
+        assert launcher.message_publisher.send.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_reconcile_failure_acks_rejected(self) -> None:
         """A reconcile exception acks 'rejected' with the error detail.
 
@@ -335,6 +357,40 @@ class TestFreshnessAndDedup:
         listener = ProcessCommandListener(_launcher())
         naive = datetime.now(UTC).replace(tzinfo=None)
         assert listener._is_fresh(naive) is True
+
+    def test_future_skew_accepted_inside_abs_window_rejected_beyond(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§8 hardening: the abs() freshness gate admits bounded FUTURE clock skew.
+
+        The listener's wall-clock read is FROZEN via a datetime stub, so
+        the probes deterministically pin the exact ±30s window edge —
+        no deschedule between building the timestamp and the comparison
+        can move a probe across the boundary, and a runtime widening of
+        _FRESHNESS_WINDOW fails the +31s rejection.
+
+        Given: a frozen listener clock and the default ±30s abs() window,
+        When: freshness is evaluated for issue times +29s and +31s in
+            the future relative to the frozen instant,
+        Then: +29s is accepted (a skewed-but-honest clock still nudges)
+            and +31s is rejected (the window bounds replay in both
+            directions).
+        """
+        frozen = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
+
+        class _FrozenDatetime:
+            """Datetime stand-in pinning the listener's now() read."""
+
+            @staticmethod
+            def now(tz: object = None) -> datetime:
+                """Return the frozen instant regardless of tz argument."""
+                del tz
+                return frozen
+
+        monkeypatch.setattr(mod, "datetime", _FrozenDatetime)
+        listener = ProcessCommandListener(_launcher())
+        assert listener._is_fresh(frozen + timedelta(seconds=29)) is True
+        assert listener._is_fresh(frozen + timedelta(seconds=31)) is False
 
     def test_remember_evicts_oldest_past_bound(self) -> None:
         """The seen-cache stays bounded, evicting the oldest id first."""

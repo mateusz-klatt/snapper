@@ -20,6 +20,7 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.application.process_manager import launcher as launcher_module
 from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.launcher import ProcessLauncherService
+from snapper.application.process_manager.launcher import ProcessStopResult
 from snapper.application.process_manager.launcher import _DesiredState
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
@@ -34,6 +35,7 @@ from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
+from snapper.core.types import StopProcessStatusEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ProcessConfiguredEventData
 from snapper.messaging.schemas.data import ProcessRunEventData
@@ -1875,6 +1877,83 @@ class TestUpdateProcessConfig:
         written = json.loads(await_args.kwargs["new_values"]["value"])
         assert written["restart_nonce"] == "n1"
         assert written["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_retried_nonce_update_writes_identical_harmless_versions(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """§8 PATCH retry idempotency (syncer leg): a re-sent nonce write is harmless.
+
+        Given: an active config with enabled=True and extra parameters behind
+            a STATEFUL close_and_insert stub — every write becomes the Setting
+            the NEXT active-row read returns, mirroring the real SCD2 table,
+        When: update_process_config(restart_nonce='n1') is called TWICE (the
+            client retried the same PATCH after a lost response), so the
+            second call reads a Setting whose value ALREADY carries
+            restart_nonce='n1' (asserted between the calls),
+        Then: the second write still succeeds against the first written
+            version and both SCD2 versions carry EQUAL JSON — same
+            restart_nonce and every other key round-tripped — so the
+            reconcile loop's equal-nonce no-op is the only dedup needed
+            downstream.
+        """
+        existing = self._existing_setting(
+            {"class": "a.B", "enabled": True, "mode": "thread", "parameters": {"k": "v"}}
+        )
+        current: dict[str, MagicMock] = {"setting": existing}
+
+        async def _read_active(*args: object, **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = current["setting"]
+            return result
+
+        def _persist_version(
+            *,
+            session: object,
+            model: object,
+            match_filters: object,
+            new_values: dict[str, object],
+            bus_time: object,
+        ) -> None:
+            successor = MagicMock()
+            successor.value = new_values["value"]
+            successor.category = new_values["category"]
+            successor.description = new_values["description"]
+            successor.is_encrypted = new_values["is_encrypted"]
+            current["setting"] = successor
+
+        mock_repo = MagicMock()
+        mock_session = MagicMock()
+        mock_session.execute = AsyncMock(side_effect=_read_active)
+        mock_session.commit = AsyncMock()
+        mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_repo.session.return_value.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch(
+                "snapper.application.process_manager.registry_syncer.get_repository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "snapper.application.process_manager.registry_syncer.close_and_insert",
+                new_callable=AsyncMock,
+                side_effect=_persist_version,
+            ) as mock_cai,
+        ):
+            await launcher._registry_syncer.update_process_config(
+                name="p", restart_nonce="n1", updated_by="alice"
+            )
+            assert json.loads(current["setting"].value)["restart_nonce"] == "n1"
+            await launcher._registry_syncer.update_process_config(
+                name="p", restart_nonce="n1", updated_by="alice"
+            )
+        assert mock_cai.await_count == 2
+        first = json.loads(mock_cai.await_args_list[0].kwargs["new_values"]["value"])
+        second = json.loads(mock_cai.await_args_list[1].kwargs["new_values"]["value"])
+        assert first == second
+        assert second["restart_nonce"] == "n1"
+        assert second["enabled"] is True
+        assert second["parameters"] == {"k": "v"}
+        assert second["class"] == "a.B"
 
     @pytest.mark.asyncio
     async def test_update_raises_keyerror_when_config_absent(
@@ -3855,6 +3934,32 @@ class TestReconcileDesiredState:
         launcher.start_process.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_retried_patch_same_nonce_bounces_once_then_noops(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """§8 PATCH retry idempotency (reconcile leg): a re-sent nonce never double-bounces.
+
+        Given: a running process with NO pre-seeded nonce baseline, so the
+            first reconcile pass records 'n1' through the real
+            _reconcile_restart/_reconcile_start_owned path,
+        When: a second pass re-reads a FRESH identical config carrying the
+            same nonce (a retried PATCH wrote a harmless identical version),
+        Then: the first pass stops once, starts once, and records the nonce;
+            the second pass takes the running no-op branch leaving both stop
+            and start counts unchanged.
+        """
+        self._instrument(launcher)
+        launcher.started_processes["p"] = MagicMock()
+        await launcher._reconcile_one(self._cfg("p", enabled=True, restart_nonce="n1"))
+        launcher.stop_process_by_name.assert_awaited_once_with("p")
+        launcher.start_process.assert_awaited_once()
+        assert launcher._last_applied_restart_nonce["p"] == "n1"
+        launcher.started_processes["p"] = MagicMock()
+        await launcher._reconcile_one(self._cfg("p", enabled=True, restart_nonce="n1"))
+        assert launcher.stop_process_by_name.await_count == 1
+        assert launcher.start_process.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_parked_first_operator_nonce_recovers(
         self, launcher: ProcessLauncherService
     ) -> None:
@@ -4063,6 +4168,49 @@ class TestReconcileHardening:
         assert launcher._last_applied_restart_nonce["p"] == "n1"
         await launcher._reconcile_one(cfg)
         assert launcher.start_process.await_count == budget
+
+    @pytest.mark.asyncio
+    async def test_budget_park_then_failed_fresh_nonce_never_reenters_carousel(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """§8 parked-stays-parked: a REAL budget park survives a failing fresh-nonce episode.
+
+        Given: a name parked through the REAL failure budget driven through
+            the REAL start_process — only the thread-spawn seam
+            _start_in_process is poisoned to raise, so the success-side
+            _unpark inside start_process stays live and a mutation moving it
+            into the failed-start path flips the parked assertions below,
+        When: a FRESH restart nonce arrives with the spawn still poisoned (a
+            full second budget of raising _reconcile_one calls, each a
+            genuine bounce attempt on the re-armed budget),
+        Then: the parked marker survives EVERY failed attempt, the exhausted
+            budget records the nonce as applied by design (recovery is a
+            fresh nonce), and one further tick is a parked no-op — the
+            poisoned-spawn count stays flat and no delayed restart is
+            pending — never the start carousel.
+        """
+        _stub_run_tracking(launcher)
+        budget = launcher_module._RECONCILE_START_FAILURE_BUDGET
+        plain = self._cfg("p")
+        bounced = self._cfg("p", restart_nonce="n2")
+        with patch.object(
+            launcher, "_start_in_process", side_effect=RuntimeError("boot poison")
+        ) as poisoned:
+            for _ in range(budget):
+                with pytest.raises(RuntimeError, match="boot poison"):
+                    await launcher._reconcile_one(plain)
+            assert launcher.is_parked("p") is True
+            assert "p" not in launcher._desired_state
+            assert poisoned.await_count == budget
+            for attempt in range(1, budget + 1):
+                with pytest.raises(RuntimeError, match="boot poison"):
+                    await launcher._reconcile_one(bounced)
+                assert launcher.is_parked("p") is True
+                assert poisoned.await_count == budget + attempt
+            assert launcher._last_applied_restart_nonce["p"] == "n2"
+            await launcher._reconcile_one(bounced)
+            assert poisoned.await_count == 2 * budget
+        assert launcher._has_pending_restart("p") is False
 
     @pytest.mark.asyncio
     async def test_new_nonce_rearms_the_failure_budget(
@@ -4395,3 +4543,160 @@ class TestReconcileRealStop:
         assert launcher._last_applied_restart_nonce["p"] == "n1"
         assert launcher._restart_lock_for("p").locked() is False
         assert launcher._reconcile_start_failures.get("p") is None
+
+    @pytest.mark.asyncio
+    async def test_public_stop_during_in_flight_reconcile_start_converges_without_hang(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """§8 deadlock-guard: a public stop racing an in-flight reconcile-start converges.
+
+        Given: a reconcile-start that holds _restart_lock_for('p') and is
+            suspended inside an instrumented spawn on an event HANDSHAKE (no
+            wall-clock sleeps: the spawn signals spawn_started, then blocks
+            on spawn_release BEFORE registering the instance), with the REAL
+            public stop created only after spawn_started fired and then
+            queued on that same lock — contention PROVEN by the lock still
+            being held with the stop task unfinished after its scheduling
+            slot,
+        When: spawn_release is set and both complete under a 2s ceiling (a
+            refactor nesting the public stop inside a held per-name lock, or
+            holding the lock across the stop-start seam, would hang here and
+            fail the wait_for),
+        Then: the start won the lock and spawned (True), the queued stop then
+            found the just-registered instance and REALLY stopped it under
+            the lock (SUCCESS, not NOT_RUNNING), the final state is stopped
+            with no watchdog residue, and the per-name lock is released.
+        """
+        spawned: list[FakeManagedProcess] = []
+        spawn_started = asyncio.Event()
+        spawn_release = asyncio.Event()
+
+        async def _spawn(config: ProcessConfigModel) -> None:
+            spawn_started.set()
+            await spawn_release.wait()
+            fake = FakeManagedProcess(lock=launcher._restart_lock_for(config.name))
+            spawned.append(fake)
+            launcher.started_processes[config.name] = fake
+
+        launcher.start_process = AsyncMock(side_effect=_spawn)
+        launcher._start_native_process_monitoring = MagicMock()
+        start_task = asyncio.create_task(launcher._reconcile_start_owned(self._cfg("p")))
+        stop_task: asyncio.Task[ProcessStopResult] | None = None
+        try:
+            await asyncio.wait_for(spawn_started.wait(), timeout=2.0)
+            stop_task = asyncio.create_task(launcher.stop_process_by_name("p"))
+            await asyncio.sleep(0)
+            assert launcher._restart_lock_for("p").locked() is True
+            assert stop_task.done() is False
+            spawn_release.set()
+            started, stop_result = await asyncio.wait_for(
+                asyncio.gather(start_task, stop_task), timeout=2.0
+            )
+            assert started is True
+            assert stop_result.status is StopProcessStatusEnum.SUCCESS
+            fake = spawned[0]
+            assert fake.stop_completed is True
+            assert fake.lock_held_during_stop is True
+            assert "p" not in launcher.started_processes
+            assert "p" not in launcher.process_tasks
+            assert launcher._restart_lock_for("p").locked() is False
+            assert "p" not in launcher._desired_state
+        finally:
+            spawn_release.set()
+            for task in (start_task, stop_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    if task is not None:
+                        await asyncio.wait_for(task, timeout=2.0)
+        assert "p" not in launcher._restart_tasks
+
+    @pytest.mark.asyncio
+    async def test_nonce_bounce_real_stop_and_real_start_spawn_live_successor(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """§8 matrix: a nonce bounce runs the REAL stop AND the REAL start end-to-end.
+
+        Given: a running FakeManagedProcess observing the per-name lock,
+            import_class returning a blocking successor class, and run
+            recording stubbed so the real start mints no DB rows,
+        When: one reconcile pass converges a restart_nonce='n1' config (real
+            stop under the lock, then real start_process spawning a live
+            asyncio task),
+        Then: the predecessor's stop ran under the per-name lock, the
+            successor is a REAL live instance with a live task, the nonce is
+            recorded applied, no failure was charged, and a subsequent real
+            public stop tears the successor down cleanly — run in a finally
+            block so even a failing assertion never strands the live
+            successor task.
+        """
+
+        class _LongRunning(RegisterableProcess):
+            """Blocking successor whose start waits until cancelled."""
+
+            async def start(self) -> None:
+                """Wait forever; unwinds cleanly on task cancellation."""
+                await asyncio.Event().wait()
+
+            async def stop(self) -> None:
+                """No-op stop matching the launcher's instance-stop contract."""
+                return None
+
+        _stub_run_tracking(launcher)
+        fake = FakeManagedProcess(lock=launcher._restart_lock_for("p"))
+        launcher.started_processes["p"] = fake
+        launcher.import_class = lambda path, name=None, template=None: _LongRunning
+        launcher._start_native_process_monitoring = MagicMock()
+        launcher.get_process_configs = AsyncMock(
+            return_value=[self._cfg("p", enabled=True, restart_nonce="n1")]
+        )
+        launcher.autostart_includes = MagicMock(return_value=True)
+        await launcher.reconcile_desired_state()
+        try:
+            assert fake.stop_entered is True
+            assert fake.stop_completed is True
+            assert fake.lock_held_during_stop is True
+            assert isinstance(launcher.started_processes.get("p"), _LongRunning)
+            successor_task = launcher.process_tasks.get("p")
+            assert successor_task is not None
+            assert successor_task.done() is False
+            assert launcher._restart_lock_for("p").locked() is False
+            assert launcher._last_applied_restart_nonce["p"] == "n1"
+            assert launcher._reconcile_start_failures.get("p") is None
+        finally:
+            result = await launcher.stop_process_by_name("p")
+            await asyncio.sleep(0.05)
+        assert result.status is StopProcessStatusEnum.SUCCESS
+        assert "p" not in launcher.started_processes
+        assert "p" not in launcher.process_tasks
+        assert launcher._restart_lock_for("p").locked() is False
+
+    @pytest.mark.asyncio
+    async def test_disabled_running_process_mode_row_stops_via_spawner(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """§8 matrix: a disabled PROCESS-mode row runs the REAL ProcessInstanceInfo.stop.
+
+        Given: a running native ProcessInstanceInfo whose spawner registry
+            holds this exact instance under its name,
+        When: a disabled-row _reconcile_one drives the REAL stop path,
+        Then: the spawner's terminate and cleanup both fired exactly once for
+            the name, the instance left started_processes, and the per-name
+            lock is released.
+        """
+        spawner = SimpleNamespace(processes={}, terminate=MagicMock(), cleanup=MagicMock())
+        info = ProcessInstanceInfo(
+            name="p",
+            pid=4321,
+            started_at=datetime.now(UTC),
+            config={},
+            process=MagicMock(),
+            spawner=spawner,
+        )
+        spawner.processes["p"] = info
+        launcher.started_processes["p"] = info
+        await launcher._reconcile_one(self._cfg("p", enabled=False))
+        spawner.terminate.assert_called_once_with("p")
+        spawner.cleanup.assert_called_once_with("p")
+        assert "p" not in launcher.started_processes
+        assert launcher._restart_lock_for("p").locked() is False

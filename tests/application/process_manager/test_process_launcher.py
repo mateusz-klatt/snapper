@@ -43,6 +43,7 @@ from snapper.application.process_manager.registry_syncer import (
     _seeded_identity_params_for_registry_name,
 )
 from snapper.application.process_manager.spawner import ProcessSpawnerService
+from snapper.application.process_manager.strategy_scope import StrategyGrantScopeError
 from snapper.application.process_manager.strategy_scope import StrategyLabelAmbiguousError
 from snapper.application.process_manager.strategy_scope import StrategyLabelInvalidError
 from snapper.application.process_manager.strategy_scope import StrategyLabelUnresolvedError
@@ -971,10 +972,199 @@ class TestStartAllProcesses:
         factory.start_process.assert_awaited_once()
 
         repository.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
-        with pytest.raises(StrategyScopeError):
+        with pytest.raises(StrategyGrantScopeError):
             await factory._reconcile_one(config)
         assert factory.start_process.await_count == 1
         assert factory._reconcile_start_failures.get("strategy") == 1
+
+    @pytest.mark.asyncio
+    async def test_reconcile_start_fails_closed_when_wallet_label_revoked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§8 grant-revoked: a revoked wallet label fails the reconcile start closed.
+
+        Given: A strategy config pinning ``wallet_public_id='label:main'`` while the
+            operator's accessible-wallet catalogue contains NO active wallet at all
+            (the labelled wallet was revoked), so the negative is unambiguous and
+            does not accidentally pin the paper/live mode filter; the downstream
+            grant and output-coverage legs are mocked to PASS so the label
+            resolver is the ONLY gate that can fail here,
+        When: The reconcile start path resolves the config through the REAL label
+            resolver (``_resolve_wallet_label`` via ``_prepare_owned_config_for_start``),
+        Then: It raises exactly StrategyLabelUnresolvedError (not any downstream
+            scope error), ``start_process`` is never awaited — in particular never
+            with the raw ``label:``-carrying parameters — and exactly one
+            reconcile start failure is counted.
+        """
+        config = _strategy_autostart_config(wallet_public_id="label:main")
+        repository = MagicMock(spec=SQLAlchemyRepository)
+        repository.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
+        repository.list_active_scope_grants_for_wallet = AsyncMock(
+            return_value=[{"operator_public_id": "op-1"}]
+        )
+        repository.list_grant_covered_instrument_public_ids = AsyncMock(
+            return_value={"instrument-btc"}
+        )
+        repository.get_instrument_public_ids_by_symbols = AsyncMock(
+            return_value={"orders.BTC-USD": "instrument-btc"}
+        )
+        factory = ProcessLauncherService(_create_settings())
+        factory.start_process = AsyncMock()
+        factory._start_native_process_monitoring = MagicMock()
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+
+        with pytest.raises(StrategyLabelUnresolvedError):
+            await factory._reconcile_one(config)
+
+        factory.start_process.assert_not_awaited()
+        assert factory._reconcile_start_failures.get("strategy") == 1
+
+    @pytest.mark.asyncio
+    async def test_reconcile_scope_failure_leaves_no_desired_running_residue(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§8 grant-revoked: scope resolution precedes desired-RUNNING arming.
+
+        Given: A strategy config whose resolved wallet has NO active scope grants
+            (revoked before the process ever started) while output coverage is
+            mocked to PASS, so the grant gate is the ONLY gate that can fail,
+        When: A reconcile start attempt fails closed inside the real resolver,
+        Then: It raises exactly StrategyGrantScopeError and no ``_desired_state``
+            RUNNING residue is armed for the name —
+            ``_prepare_owned_config_for_start`` runs BEFORE ``_arm_desired_running``
+            in ``_reconcile_start_owned``, so a failed-closed start leaves nothing
+            for the watchdog to respawn from — and the spawn never happened.
+        """
+        config = _strategy_autostart_config()
+        repository = MagicMock(spec=SQLAlchemyRepository)
+        repository.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-live")]
+        )
+        repository.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+        repository.list_grant_covered_instrument_public_ids = AsyncMock(
+            return_value={"instrument-btc"}
+        )
+        repository.get_instrument_public_ids_by_symbols = AsyncMock(
+            return_value={"orders.BTC-USD": "instrument-btc"}
+        )
+        factory = ProcessLauncherService(_create_settings())
+        factory.start_process = AsyncMock()
+        factory._start_native_process_monitoring = MagicMock()
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+
+        with pytest.raises(StrategyGrantScopeError):
+            await factory._reconcile_one(config)
+
+        assert "strategy" not in factory._desired_state
+        factory.start_process.assert_not_awaited()
+        assert factory._reconcile_start_failures.get("strategy") == 1
+
+    @pytest.mark.asyncio
+    async def test_reconcile_loop_survives_grant_revoked_and_converges_siblings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§8 grant-revoked: a failing-scope strategy never stalls the pass.
+
+        Given: A desired-state catalogue holding a grant-revoked strategy config
+            (output coverage mocked to PASS so the grant gate is the ONLY gate
+            that can fail) followed by a healthy non-strategy sibling, neither
+            running,
+        When: ``reconcile_desired_state`` runs one full tick,
+        Then: The pass returns without raising (per-config exceptions are
+            fail-soft), the healthy sibling IS started, the strategy is NOT,
+            only the strategy accrues a reconcile start failure, and the single
+            swallowed exception logged by the fail-soft branch is exactly
+            StrategyGrantScopeError — pinning WHICH gate failed the strategy.
+        """
+        strategy = _strategy_autostart_config()
+        healthy = ProcessConfigModel(
+            name="backfill",
+            enabled=True,
+            mode="thread",
+            class_path="snapper.fake.Backfill",
+            method="start",
+            parameters={"exchange": "kraken"},
+            role=ProcessRoleEnum.TASK,
+        )
+        repository = MagicMock(spec=SQLAlchemyRepository)
+        repository.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-live")]
+        )
+        repository.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+        repository.list_grant_covered_instrument_public_ids = AsyncMock(
+            return_value={"instrument-btc"}
+        )
+        repository.get_instrument_public_ids_by_symbols = AsyncMock(
+            return_value={"orders.BTC-USD": "instrument-btc"}
+        )
+        factory = ProcessLauncherService(_create_settings())
+        factory.get_process_configs = AsyncMock(return_value=[strategy, healthy])
+        factory.autostart_includes = MagicMock(return_value=True)
+        factory.start_process = AsyncMock()
+        factory._start_native_process_monitoring = MagicMock()
+        error_mock = MagicMock()
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+        monkeypatch.setattr(launcher_module.logger, "error", error_mock)
+
+        await factory.reconcile_desired_state()
+
+        factory.start_process.assert_awaited_once()
+        started = {call.args[0].name for call in factory.start_process.await_args_list}
+        assert started == {"backfill"}
+        assert factory._reconcile_start_failures == {"strategy": 1}
+        assert error_mock.call_count == 1
+        assert error_mock.call_args.args[1] == "strategy"
+        assert isinstance(error_mock.call_args.args[2], StrategyGrantScopeError)
+
+    @pytest.mark.asyncio
+    async def test_reconcile_grant_revoked_parks_after_budget_and_stops_retrying(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§8 grant-revoked: fail-closed is level-triggered, not a hot retry loop.
+
+        Given: A strategy config whose wallet grant stays revoked across every
+            reconcile attempt while output coverage is mocked to PASS, so the
+            grant gate is the ONLY gate that can fail,
+        When: Reconcile starts fail ``_RECONCILE_START_FAILURE_BUDGET``
+            consecutive times — each raising exactly StrategyGrantScopeError
+            after a REAL scope-resolution attempt — and one further tick runs,
+        Then: The name is parked and the further tick is a true no-op: no spawn
+            and no additional scope-resolution repository reads (wallet or
+            grant lookups) — the parked no-op branch ends the carousel until
+            an operator recovers it.
+        """
+        config = _strategy_autostart_config()
+        repository = MagicMock(spec=SQLAlchemyRepository)
+        repository.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-live")]
+        )
+        repository.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
+        repository.list_grant_covered_instrument_public_ids = AsyncMock(
+            return_value={"instrument-btc"}
+        )
+        repository.get_instrument_public_ids_by_symbols = AsyncMock(
+            return_value={"orders.BTC-USD": "instrument-btc"}
+        )
+        factory = ProcessLauncherService(_create_settings())
+        factory.start_process = AsyncMock()
+        factory._start_native_process_monitoring = MagicMock()
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+
+        for _ in range(launcher_module._RECONCILE_START_FAILURE_BUDGET):
+            with pytest.raises(StrategyGrantScopeError):
+                await factory._reconcile_one(config)
+
+        assert factory.is_parked("strategy") is True
+        wallet_reads_before = repository.list_accessible_wallets_for_operators.await_count
+        grant_reads_before = repository.list_active_scope_grants_for_wallet.await_count
+        assert wallet_reads_before == launcher_module._RECONCILE_START_FAILURE_BUDGET
+
+        await factory._reconcile_one(config)
+
+        factory.start_process.assert_not_awaited()
+        assert factory.is_parked("strategy") is True
+        assert repository.list_accessible_wallets_for_operators.await_count == wallet_reads_before
+        assert repository.list_active_scope_grants_for_wallet.await_count == grant_reads_before
 
     @pytest.mark.asyncio
     async def test_start_all_processes_enforces_registry_strategy_over_core_row(
@@ -9432,6 +9622,108 @@ class TestStartAllProcessesProfileFilter:
         start_mock.assert_awaited_once_with(publisher)
 
 
+class TestReconcileProfileFilter:
+    """§8 driver-not-on-API: reconcile passes honour the REAL autostart profile."""
+
+    @pytest.mark.asyncio
+    async def test_api_profile_reconcile_leaves_non_owned_untouched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An API-node reconcile pass never touches publishers or external strategies.
+
+        Given: An API-profile launcher (real AppSettings, enum profile) with
+            ``strategies_embedded=False`` and a desired-state catalogue holding
+            an enabled publisher, an enabled strategy, and an enabled broker,
+            none running,
+        When: ``reconcile_desired_state`` runs with the REAL
+            ``autostart_includes`` predicate (nothing mocked at the gate),
+        Then: Only the broker — the positive control proving the pass actually
+            ran — is started; the publisher and the strategy are never started
+            or stopped, and the strategy's scope resolution is never reached
+            (``get_repository`` is never called), because reconcile is
+            fail-soft and a swallowed scope error would otherwise mask a
+            broken gate.
+        """
+        factory = ProcessLauncherService(_settings_with_profile("api", strategies_embedded=False))
+        publisher = _publisher_config()
+        strategy = _strategy_config()
+        broker = _non_publisher_config()
+        monkeypatch.setattr(
+            factory,
+            "get_process_configs",
+            mock.AsyncMock(return_value=[publisher, strategy, broker]),
+        )
+        start_mock = mock.AsyncMock()
+        stop_mock = mock.AsyncMock()
+        repository_gate = mock.MagicMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "stop_process_by_name", stop_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", repository_gate)
+
+        await factory.reconcile_desired_state()
+
+        start_mock.assert_awaited_once()
+        started = {call.args[0].name for call in start_mock.await_args_list}
+        assert started == {broker.name}
+        assert publisher.name not in started
+        assert strategy.name not in started
+        stop_mock.assert_not_awaited()
+        repository_gate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_api_profile_reconcile_includes_embedded_strategies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The strategy exclusion comes from STRATEGIES_EMBEDDED, not the API profile.
+
+        Given: An API-profile launcher with the embedded-strategies DEFAULT and
+            a catalogue holding an enabled resolvable strategy, an enabled
+            publisher, and an enabled broker, none running,
+        When: ``reconcile_desired_state`` runs with the REAL predicate,
+        Then: The strategy AND the broker are started while the publisher stays
+            excluded by the API profile — pinning that the strategy negative in
+            the sibling test is driven specifically by
+            ``strategies_embedded=False``, not by the profile itself.
+        """
+        factory = ProcessLauncherService(_settings_with_profile("api"))
+        publisher = _publisher_config()
+        strategy = _strategy_autostart_config()
+        broker = _non_publisher_config()
+        repository = MagicMock(spec=SQLAlchemyRepository)
+        repository.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[_wallet_row("wallet-live")]
+        )
+        repository.list_active_scope_grants_for_wallet = AsyncMock(
+            return_value=[{"operator_public_id": "op-1"}]
+        )
+        repository.list_grant_covered_instrument_public_ids = AsyncMock(
+            return_value={"instrument-btc"}
+        )
+        repository.get_instrument_public_ids_by_symbols = AsyncMock(
+            return_value={"orders.BTC-USD": "instrument-btc"}
+        )
+        monkeypatch.setattr(
+            factory,
+            "get_process_configs",
+            mock.AsyncMock(return_value=[publisher, strategy, broker]),
+        )
+        start_mock = mock.AsyncMock()
+        stop_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "stop_process_by_name", stop_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repository)
+
+        await factory.reconcile_desired_state()
+
+        assert start_mock.await_count == 2
+        started = {call.args[0].name for call in start_mock.await_args_list}
+        assert started == {strategy.name, broker.name}
+        assert publisher.name not in started
+        stop_mock.assert_not_awaited()
+
+
 @pytest.mark.asyncio()
 async def test_get_core_health_profile_filtered_publisher_ignored(
     monkeypatch: pytest.MonkeyPatch,
@@ -12802,6 +13094,56 @@ class TestParkedExecutorDetection:
         ):
             await factory.start_process(config)
         assert "executor_kraken_wabc" in factory._parked_processes
+
+    @pytest.mark.asyncio
+    async def test_failed_real_restart_keeps_reburst_task_alive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§8 parked-stays-parked: a FAILED real restart never cancels the reburst.
+
+        Given: An executor instance parked by the watchdog give-up branch
+            (``_escalate_restart``) with its live hourly reburst task registered
+            in ``_park_heartbeat_tasks``,
+        When: The REAL ``start_process`` for that name fails (spawn poisoned) —
+            not an AsyncMock, which could never call ``_unpark`` and would pin
+            nothing,
+        Then: The parked marker survives AND the reburst task is still the SAME
+            live, uncancelled task with NO cancellation pending
+            (``cancelling() == 0`` catches an in-flight cancel that
+            ``cancelled()`` alone would miss before the task runs) — only
+            ``_unpark`` (start success or a deliberate stop) may cancel it, so
+            a failed restart can never silence the level-triggered parked
+            alerting. Cleanup runs in ``finally`` so a failed assertion cannot
+            strand the burst task and leak a pending-task warning.
+        """
+        factory = self._factory()
+        _stub_run_tracking(factory)
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher._PARK_HEARTBEAT_SPACING_S",
+            0.0,
+        )
+        name = "executor_kraken_wabc123def456"
+        config = _watchdog_config(name=name, role=ProcessRoleEnum.CORE, tags=("orders",))
+        factory._escalate_restart(name, config)
+        assert name in factory._parked_processes
+        burst = factory._park_heartbeat_tasks[name]
+        try:
+            with (
+                mock.patch.object(
+                    factory, "_start_as_subprocess", side_effect=RuntimeError("boot poison")
+                ),
+                mock.patch.object(factory, "_finalize_process_run", new=mock.AsyncMock()),
+                pytest.raises(RuntimeError, match="boot poison"),
+            ):
+                await factory.start_process(config)
+            assert name in factory._parked_processes
+            assert factory._park_heartbeat_tasks[name] is burst
+            assert not burst.cancelled()
+            assert burst.cancelling() == 0
+        finally:
+            factory._unpark(name)
+            with contextlib.suppress(asyncio.CancelledError):
+                await burst
 
     @pytest.mark.asyncio
     async def test_deliberate_stop_unparks_and_invalidates_cache(self) -> None:
