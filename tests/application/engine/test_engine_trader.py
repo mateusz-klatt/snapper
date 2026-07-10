@@ -5241,17 +5241,26 @@ class TestResolveInstrumentSpecs:
         assert result == {"UNKNOWN": {"tick_size": 0.01, "lot_size": 0.0001}}
 
     @pytest.mark.asyncio
-    async def test_returns_fallback_when_spec_is_none(
+    async def test_missing_spec_row_keeps_resolved_public_id(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Verify fallback returned when InstrumentSpec is None."""
+        """Verify a missing SPEC row degrades sizing only, never identity.
+
+        Given: the instrument resolves but has no instrument_specs row
+            (the paper-venue reality — paper instruments carry no
+            tick/lot spec),
+        When: ``_resolve_instrument_specs`` runs,
+        Then: default tick/lot are used but ``public_id`` stays
+            populated, so AI-attributed emits can pass the fail-closed
+            attribution gate and reach the caps evaluator.
+        """
         _configure_settings(monkeypatch)
         coord = TraderCoordinator()
         coord.repository = AsyncMock()
         coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
         coord.repository.get_instrument_spec = AsyncMock(return_value=None)
-        result = await cast(Any, coord)._resolve_instrument_specs("BTC-USD", "kraken")
-        assert result == {"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}}
+        result = await cast(Any, coord)._resolve_instrument_specs("BTC-USD", "paper")
+        assert result == {"BTC-USD": {"public_id": "inst-1", "tick_size": 0.01, "lot_size": 0.0001}}
 
     @pytest.mark.asyncio
     async def test_returns_real_values_from_spec(self, monkeypatch: pytest.MonkeyPatch) -> None:

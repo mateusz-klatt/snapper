@@ -1567,6 +1567,37 @@ async def test_send_order_ai_attributed_fail_closed_on_missing_public_id() -> No
 
 
 @pytest.mark.asyncio
+async def test_send_order_ai_attributed_paper_identity_passes_gate() -> None:
+    """AI emits clear the gate on a default-sized paper identity.
+
+    Regression for the first live consult-approved paper order
+    (2026-07-10): the spec loader now keeps the resolved ``public_id``
+    even when the instrument has no sizing spec row (the paper-venue
+    reality), so an AI-attributed emit must clear the fail-closed
+    attribution gate and reach the caps guard carrying the PAPER-venue
+    instrument identity. Pins the current semantics ahead of the
+    planned canonical source-to-paper identity mapping for cap keys.
+    """
+    engine, captured = _engine_with_caps_capture()
+    engine.instrument_specs = {
+        "BTC-USD": InstrumentSpec(public_id="paper-inst-uuid", tick_size=0.01, lot_size=0.0001),
+    }
+    await engine._send_order(
+        side="buy",
+        size=0.01,
+        price=64352.3,
+        reason="heartbeat approved",
+        ai_review_public_id="rev-uuid",
+        ai_review_dispatch_version=0,
+    )
+    assert len(captured) == 1
+    submission = captured[0]
+    assert submission.instrument_public_id == "paper-inst-uuid"
+    assert submission.ai_review_public_id == "rev-uuid"
+    assert submission.quantity == Decimal("0.01")
+
+
+@pytest.mark.asyncio
 async def test_send_order_ai_attributed_fail_closed_without_repository() -> None:
     """AI fail-closed applies on the no-repo path too.
 

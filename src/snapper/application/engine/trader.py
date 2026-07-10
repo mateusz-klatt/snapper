@@ -2181,13 +2181,17 @@ class TraderCoordinator(RegisterableProcess):
     ) -> dict[str, InstrumentSpec]:
         """Resolve tick_size, lot_size, and public_id from InstrumentSpec repository.
 
-        Falls back to conservative defaults (without ``public_id``) when the
-        lookup fails or the instrument has no spec row yet. The
-        ``public_id`` key is populated only when the upstream lookup
-        succeeds — the strategy hot-path's AI-attribution gate
-        reads it for fail-closed cap evaluation
-        on AI-attributed emits, while non-AI emits remain tolerant of
-        an absent ``public_id``.
+        Falls back to conservative defaults when the lookup fails. The
+        ``public_id`` key is populated whenever the INSTRUMENT lookup
+        succeeds — a missing SPEC row (tick/lot sizing) only degrades
+        the sizing fields to defaults, never the identity: paper
+        instruments legitimately have no spec row, and dropping the
+        resolved ``public_id`` for them made every AI-attributed paper
+        emit fail closed with :class:`InstrumentSpecMissingError`
+        (first live consult-approved order, 2026-07-10). The strategy
+        hot-path's AI-attribution gate reads ``public_id`` for
+        fail-closed cap evaluation on AI-attributed emits, while
+        non-AI emits remain tolerant of an absent ``public_id``.
         """
         fallback: dict[str, InstrumentSpec] = {
             instrument: InstrumentSpec(tick_size=0.01, lot_size=0.0001)
@@ -2201,7 +2205,9 @@ class TraderCoordinator(RegisterableProcess):
                 return fallback
             spec = await self.repository.get_instrument_spec(inst_pid, as_of=now)
             if spec is None:
-                return fallback
+                return {
+                    instrument: InstrumentSpec(public_id=inst_pid, tick_size=0.01, lot_size=0.0001)
+                }
             tick = spec["tick_size"] if spec["tick_size"] is not None else 0.01
             lot = spec["lot_size"] if spec["lot_size"] is not None else 0.0001
             return {instrument: InstrumentSpec(public_id=inst_pid, tick_size=tick, lot_size=lot)}
