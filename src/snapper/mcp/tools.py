@@ -84,6 +84,15 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _MCP_SOURCE_SURFACE = "mcp"
 _MCP_TOOL_STREAM = "rest.mcp"
+"""Named SEQUENCE STREAM for MCP manual-order provenance rows.
+
+This is a sequence-stream NAME (like the strategies' consult stream),
+never a ``session_id`` value: ``session_id`` columns are UUID-typed in
+Postgres, so writing this literal there fails with an asyncpg
+DataError (2026-07-10 prod incident — SQLite-backed tests were blind
+to the type violation). Rows stamp ``tracker.session_id`` (UUID7) and
+advance ``tracker.next_sequence(_MCP_TOOL_STREAM)``.
+"""
 
 _PG_UNIQUE_VIOLATION_SQLSTATE = "23505"
 _SQLITE_CONSTRAINT_UNIQUE_EXTCODE = 2067
@@ -138,6 +147,7 @@ class _PreparedManualOrder:
     user_public_id: str
     shard_key: str
     client_order_id: str
+    tracker: SequenceTracker
 
 
 def _is_unique_constraint_violation(exc: IntegrityError) -> bool:
@@ -587,6 +597,7 @@ async def _prepare_manual_order(
     caps_enforcer_getter: Callable[[], TradingCapsEnforcer | None],
     claims_getter: Callable[[], TokenClaims],
     order: _ManualOrderInput,
+    tracker: SequenceTracker,
 ) -> _PreparedManualOrder | CallToolResult:
     """Validate access and precompute immutable rows for manual-order dispatch.
 
@@ -678,8 +689,8 @@ async def _prepare_manual_order(
         "status": "pending",
         "created_at": created_at,
         "idempotency_key": order.idempotency_key,
-        "session_id": _MCP_TOOL_STREAM,
-        "sequence_id": 1,
+        "session_id": tracker.session_id,
+        "sequence_id": tracker.next_sequence(_MCP_TOOL_STREAM),
         "timestamp": bus_time,
     }
     return _PreparedManualOrder(
@@ -702,6 +713,7 @@ async def _prepare_manual_order(
         user_public_id=user_public_id,
         shard_key=shard_key,
         client_order_id=client_order_id,
+        tracker=tracker,
     )
 
 
@@ -743,8 +755,8 @@ def _build_manual_order_command_row(
         "status": TradeCommandStatusEnum.CREATED,
         "created_at": prepared.created_at,
         "correlation_id": plan_public_id,
-        "session_id": _MCP_TOOL_STREAM,
-        "sequence_id": 2,
+        "session_id": prepared.tracker.session_id,
+        "sequence_id": prepared.tracker.next_sequence(_MCP_TOOL_STREAM),
         "timestamp": prepared.bus_time,
         "wallet_public_id": prepared.wallet_public_id,
         "operator_public_id": prepared.operator_public_id,
@@ -759,6 +771,7 @@ async def _compensate_failed_plan_insert(
     plan_public_id: str,
     bus_time: dt.datetime,
     exc: Exception,
+    tracker: SequenceTracker,
 ) -> None:
     """Best-effort compensation when command persistence fails after plan insert."""
     logger.error(
@@ -771,8 +784,8 @@ async def _compensate_failed_plan_insert(
             public_id=plan_public_id,
             new_status="failed",
             bus_time=bus_time,
-            session_id=_MCP_TOOL_STREAM,
-            sequence_id=3,
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence(_MCP_TOOL_STREAM),
             last_error=f"MCP TradeCommand insert failed: {exc}",
         )
     except Exception as comp_exc:
@@ -1607,6 +1620,7 @@ def register_mcp_tools(
             caps_enforcer_getter=caps_enforcer_getter,
             claims_getter=claims_getter,
             order=order,
+            tracker=_tracker_getter() or SequenceTracker(),
         )
         if isinstance(prepared, CallToolResult):
             return prepared
@@ -1626,6 +1640,7 @@ def register_mcp_tools(
                     plan_public_id,
                     prepared.bus_time,
                     exc,
+                    prepared.tracker,
                 )
                 raise
         assert command_public_id is not None

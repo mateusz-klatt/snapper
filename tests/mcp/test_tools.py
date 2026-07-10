@@ -34,6 +34,7 @@ from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.core.ids import is_uuid7
 from snapper.core.types import ExecutionMode
 from snapper.core.types import OrderExchange
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
@@ -283,6 +284,53 @@ class TestSubmitManualOrderTool:
         assert plan_row["shard_key"] == expected_shard_key
         assert cmd_row["shard_key"] == expected_shard_key
         assert cmd_row["source_surface"] == "mcp"
+
+    @pytest.mark.asyncio
+    async def test_provenance_rows_carry_uuid7_session_id(self) -> None:
+        """Plan and command rows stamp a canonical UUID7 session_id.
+
+        Regression for the 2026-07-10 prod incident: the MCP path used
+        to write the literal sequence-stream NAME ('rest.mcp') into the
+        UUID-typed ``session_id`` columns — Postgres rejected the
+        insert with an asyncpg DataError while SQLite-backed tests were
+        blind to the type violation. This pin validates UUID7-ness
+        directly so no dialect can mask it again.
+
+        Given: a valid manual-order call against mocked persistence,
+        When: ``submit_manual_order`` is dispatched,
+        Then: BOTH the execution-plan row and the trade-command row
+            carry a canonical UUID7 ``session_id`` (identical across
+            the two rows — one tracker session) and their sequence_ids
+            advance monotonically within the manual-order stream.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-pid"))
+        repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-pid"))
+        _allow_wallet(repo)
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 0.5,
+                "wallet_public_id": "wallet-1",
+                "idempotency_key": "idem-uuid7-pin",
+                "price": 50000.0,
+            },
+        )
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert is_uuid7(plan_row["session_id"])
+        assert is_uuid7(cmd_row["session_id"])
+        assert plan_row["session_id"] == cmd_row["session_id"]
+        assert cmd_row["sequence_id"] == plan_row["sequence_id"] + 1
 
     @pytest.mark.asyncio
     async def test_omitted_wallet_resolves_single_live_wallet(self) -> None:
@@ -918,6 +966,11 @@ class TestSubmitManualOrderTool:
         compensation_kwargs = repo.update_execution_plan_status.await_args.kwargs
         assert compensation_kwargs["public_id"] == "plan-pid"
         assert compensation_kwargs["new_status"] == "failed"
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert is_uuid7(compensation_kwargs["session_id"])
+        assert compensation_kwargs["session_id"] == plan_row["session_id"]
+        assert compensation_kwargs["sequence_id"] == cmd_row["sequence_id"] + 1
 
     @pytest.mark.asyncio
     async def test_compensation_failure_still_reraises_original(self) -> None:
