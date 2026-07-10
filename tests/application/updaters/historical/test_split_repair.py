@@ -279,12 +279,16 @@ class TestRepairChain:
         """A confirmed break drives refetch, prune, supersede, reload, synth.
 
         Given: One confirmed stale NFLX basis whose re-check comes back
-            clean, pre-window and in-window cache files on disk,
+            clean, pre-window and in-window cache files on disk, and the
+            service clock frozen to the module's ``_TODAY`` (the window
+            assertions would otherwise flake when import and run straddle
+            a UTC midnight),
         When: The service runs,
         Then: Every composed service is constructed with the repair
             window, all seven timeframes are superseded, only the
             pre-window file is pruned, and NFLX is reported repaired.
         """
+        monkeypatch.setattr(PolygonSplitRepairService, "_utc_today", staticmethod(lambda: _TODAY))
         broken = _closes_rows([471.0, 470.5, 47.1, 47.3])
         clean = _closes_rows([47.0, 47.5, 47.2, 47.4])
         repo = _wire_common(

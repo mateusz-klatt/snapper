@@ -169,6 +169,18 @@ class PolygonSplitRepairService:
         self._dry_run = dry_run
         self.settings = get_settings()
 
+    @staticmethod
+    def _utc_today() -> date:
+        """Return the current UTC calendar day.
+
+        The single clock source for every date-window computation in the
+        service (split lookback ``since``, re-fetch ``window_start``, the
+        CSV loader ``until``), so one run always sees ONE consistent day
+        — and tests freeze it in one place instead of racing a midnight
+        rollover between module import and run time.
+        """
+        return datetime.now(UTC).date()
+
     async def start(self) -> SplitRepairSummary:
         """Run detection and (unless dry-run) the full repair chain.
 
@@ -205,7 +217,7 @@ class PolygonSplitRepairService:
             Summary of detection and repair outcomes.
         """
         summary = SplitRepairSummary(dry_run=self._dry_run)
-        since = datetime.now(UTC).date() - timedelta(days=self._lookback_days)
+        since = self._utc_today() - timedelta(days=self._lookback_days)
         events = await client.list_splits(execution_date_gte=since)
         summary.splits_seen = len(events)
         universe = {
@@ -331,7 +343,7 @@ class PolygonSplitRepairService:
             summary: Mutable run summary to fill in.
         """
         natives = sorted({c.native_symbol for c in confirmed})
-        window_start = datetime.now(UTC).date() - timedelta(days=self._window_days)
+        window_start = self._utc_today() - timedelta(days=self._window_days)
         logger.info(
             "Repairing {n} symbol(s): {syms} (window from {w})",
             n=len(natives),
@@ -363,7 +375,7 @@ class PolygonSplitRepairService:
             symbols=natives,
             timespan=_TIMESPAN,
             since=window_start,
-            until=datetime.now(UTC).date(),
+            until=self._utc_today(),
         )
         await loader.start()
         synth = SynthesizedCandleBackfillService(
