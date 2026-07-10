@@ -384,7 +384,7 @@ async def test_tick_and_concurrent_nudge_spawn_once_and_ack_applied() -> None:
     assert launcher.start_process.await_count == 1
     ack_publisher.send.assert_awaited_once()
     topic, ack = ack_publisher.send.await_args.args
-    assert topic == "processes.events.command_ack.coord-0"
+    assert topic == f"processes.events.command_ack.{launcher.coordinator_topic_slug()}"
     assert ack.status == "applied"
     assert launcher._reconcile_lock.locked() is False
     assert launcher._restart_lock_for("p").locked() is False
