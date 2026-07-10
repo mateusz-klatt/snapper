@@ -440,6 +440,18 @@ scoped config (both `wallet_public_id` and `operator_public_id`), and
 validates `ai_review_user_public_id` / `ai_review_strategy_public_id` as
 canonical UUID7 fail-fast.
 
+The consult round runs DETACHED from the listen loop: `on_candle`
+spawns the round and returns immediately, so the strategy keeps
+draining feed heartbeats and its health lag never absorbs the decision
+deadline (raising `ai_review_deadline_seconds` has no alerting side
+effects). At most one round is in flight; `stop`/`reset` cancel it.
+Each consult's `signal_envelope` carries the proposed action plus a
+self-contained `market` snapshot (SMA 20/50, Wilder RSI 14, 1-bar and
+24-bar percent changes, 24-bar high/low, 24-bar realized volatility)
+computed from the trailing 200 complete persisted bars bounded at the
+trigger window, so the delegate can decide without follow-up lookups;
+`null` fields mean the history is still warming up.
+
 **Parameters:**
 
 | Parameter | Default | Description |

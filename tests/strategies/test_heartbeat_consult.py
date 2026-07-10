@@ -3,12 +3,19 @@
 Fast-smoke coverage of plan P1
 (``plan_2026_07_03_strategy_runtime_split_and_mcp_wake.md``): construction
 fail-fast validation (paper-only, scoped config, UUID7 identity params,
-deadline bounds), one-consult-per-window dedup, approved-outcome
-target-flat emission with AI-review attribution, and fail-soft behavior
-for every consult error mode. The AI-review service and repository are
-mocked — the end-to-end DB path lives in the ai_review test suites.
+deadline bounds), one-consult-per-window dedup, DETACHED consult rounds
+(``on_candle`` returns immediately; ``stop``/``reset`` cancel the
+in-flight round), approved-outcome emission with AI-review attribution,
+the self-contained market snapshot in the consult envelope, and fail-soft
+behavior for every consult error mode. The AI-review service and
+repository are mocked — the end-to-end DB path lives in the ai_review
+test suites.
 """
 
+import asyncio
+import contextlib
+import math
+import statistics
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -28,8 +35,17 @@ from snapper.core.types import TradeSideEnum
 from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.heartbeat_consult import CONSULT_SEQUENCE_STREAM
+from snapper.strategies.heartbeat_consult import DAY_BARS
 from snapper.strategies.heartbeat_consult import DEFAULT_CONSULT_DEADLINE_SECONDS
+from snapper.strategies.heartbeat_consult import SNAPSHOT_BARS
+from snapper.strategies.heartbeat_consult import SNAPSHOT_RANGE_START
 from snapper.strategies.heartbeat_consult import HeartbeatConsult
+from snapper.strategies.heartbeat_consult import _build_market_snapshot
+from snapper.strategies.heartbeat_consult import _finite_or_none
+from snapper.strategies.heartbeat_consult import _pct_change
+from snapper.strategies.heartbeat_consult import _realized_vol_pct
+from snapper.strategies.heartbeat_consult import _rsi
+from snapper.strategies.heartbeat_consult import _sma
 
 _OPEN_AT = datetime(2026, 7, 3, 12, 0, tzinfo=UTC)
 
@@ -67,7 +83,12 @@ def _config(**overrides: Any) -> StrategyConfig:
     return StrategyConfig(**base)
 
 
-def _candle(open_at: datetime = _OPEN_AT, close: float = 50000.0) -> CandleData:
+def _candle(
+    open_at: datetime = _OPEN_AT,
+    close: float = 50000.0,
+    high: float | None = None,
+    low: float | None = None,
+) -> CandleData:
     """Build a 1h kraken candle at the given window."""
     return CandleData(
         session_id="",
@@ -76,8 +97,8 @@ def _candle(open_at: datetime = _OPEN_AT, close: float = 50000.0) -> CandleData:
         instrument="BTC-USD",
         timeframe="1h",
         open=close - 100,
-        high=close + 100,
-        low=close - 200,
+        high=high if high is not None else close + 100,
+        low=low if low is not None else close - 200,
         close=close,
         volume=10.0,
         exchange="kraken",
@@ -112,6 +133,333 @@ def _rejected_outcome() -> AiReviewDecisionOutcome:
     )
 
 
+async def _drain_round(strategy: HeartbeatConsult) -> None:
+    """Await the strategy's detached consult round to completion."""
+    task = strategy._consult_task
+    if task is not None:
+        await task
+
+
+def _desc_rows(closes: list[float], last_open_at: datetime) -> list[dict[str, Any]]:
+    """Build repository candle rows NEWEST-FIRST (the ``order='desc'`` contract).
+
+    The newest row carries ``last_open_at``; each older row steps back
+    one hour. Highs sit one above the close, lows one below.
+    """
+    ordered = [
+        {
+            "open_at": last_open_at - timedelta(hours=len(closes) - 1 - index),
+            "close": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+        }
+        for index, close in enumerate(closes)
+    ]
+    return list(reversed(ordered))
+
+
+class _BlockedConsult:
+    """A ``_consult`` stand-in that blocks until released, counting calls."""
+
+    def __init__(self) -> None:
+        """Initialize the coordination events and call counter."""
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def __call__(self, instrument: str, candle: CandleData) -> AiReviewDecisionOutcome | None:
+        """Record the call, block until released, then fall through."""
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        return None
+
+
+class _StubbornConsult:
+    """A ``_consult`` stand-in whose cancellation blocks until released.
+
+    Models a round that takes extra event-loop turns to die (e.g. one
+    cancelled inside ``emit_signal``), pinning the stop/reset drain gap
+    the dispatch gate must cover.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the coordination events and call counter."""
+        self.started = asyncio.Event()
+        self.cancel_seen = asyncio.Event()
+        self.release_cancel = asyncio.Event()
+        self.calls = 0
+
+    async def __call__(self, instrument: str, candle: CandleData) -> AiReviewDecisionOutcome | None:
+        """Record the call, then absorb cancellation until released."""
+        self.calls += 1
+        self.started.set()
+        blocker: asyncio.Event = asyncio.Event()
+        try:
+            await blocker.wait()
+        except asyncio.CancelledError:
+            self.cancel_seen.set()
+            await self.release_cancel.wait()
+            raise
+        return None
+
+
+class TestIndicatorHelpers:
+    """Exact-value coverage of the pure snapshot indicator helpers."""
+
+    def test_finite_passes_non_finite_filtered(self) -> None:
+        """Verify the finiteness filter passes numbers and drops inf.
+
+        Given: A finite float and a non-finite float,
+        When: _finite_or_none filters both,
+        Then: The finite value survives and inf becomes None.
+        """
+        assert _finite_or_none(1.5) == 1.5
+        assert _finite_or_none(math.inf) is None
+
+    def test_sma_exact_and_short_series(self) -> None:
+        """Verify SMA math on a known window and the short-series guard.
+
+        Given: Four closes and a window of two,
+        When: _sma computes the trailing average,
+        Then: The last two closes average; a window longer than the
+            series yields None.
+        """
+        assert _sma([1.0, 2.0, 3.0, 4.0], 2) == 3.5
+        assert _sma([1.0, 2.0, 3.0], 4) is None
+
+    def test_rsi_gains_only_is_100(self) -> None:
+        """Verify a monotonic ramp saturates RSI at 100.
+
+        Given: Nineteen strictly rising closes (Wilder smoothing runs),
+        When: _rsi computes over the series,
+        Then: The zero-loss branch returns 100.0.
+        """
+        assert _rsi([float(value) for value in range(1, 20)]) == 100.0
+
+    def test_rsi_losses_only_is_0(self) -> None:
+        """Verify a monotonic decline pins RSI at 0.
+
+        Given: Nineteen strictly falling closes,
+        When: _rsi computes over the series,
+        Then: The general branch evaluates to 0.0.
+        """
+        assert _rsi([float(value) for value in range(19, 0, -1)]) == 0.0
+
+    def test_rsi_flat_series_is_neutral(self) -> None:
+        """Verify a flat series reads as neutral rather than saturated.
+
+        Given: Twenty identical closes (no gains, no losses),
+        When: _rsi computes over the series,
+        Then: The neutral 50.0 sentinel is returned.
+        """
+        assert _rsi([5.0] * 20) == 50.0
+
+    def test_rsi_alternating_is_50(self) -> None:
+        """Verify balanced gains/losses compute a true 50 via the formula.
+
+        Given: Fifteen closes alternating 1, 2, 1, 2, ... (seven +1
+            deltas and seven -1 deltas in the seed window),
+        When: _rsi computes over the series,
+        Then: RS is 1 and RSI is exactly 50.0.
+        """
+        closes = [1.0 if index % 2 == 0 else 2.0 for index in range(15)]
+        assert _rsi(closes) == 50.0
+
+    def test_rsi_short_series_is_none(self) -> None:
+        """Verify fewer closes than period+1 yields None.
+
+        Given: Fourteen closes for a 14-period RSI,
+        When: _rsi computes over the series,
+        Then: None marks the warm-up state.
+        """
+        assert _rsi([float(value) for value in range(14)]) is None
+
+    def test_pct_change_exact_and_zero_reference(self) -> None:
+        """Verify percent-change math and the non-positive-reference guard.
+
+        Given: A 100 -> 110 move and a zero reference,
+        When: _pct_change computes both,
+        Then: The move reads 10.0 percent and the zero reference is None.
+        """
+        assert _pct_change(110.0, 100.0) == 10.0
+        assert _pct_change(5.0, 0.0) is None
+
+    def test_realized_vol_flat_is_zero(self) -> None:
+        """Verify a flat series has zero realized volatility.
+
+        Given: Thirty identical closes,
+        When: _realized_vol_pct computes the trailing window,
+        Then: The volatility is exactly 0.0.
+        """
+        assert _realized_vol_pct([5.0] * 30) == 0.0
+
+    def test_realized_vol_short_series_is_none(self) -> None:
+        """Verify fewer closes than bars+1 yields None.
+
+        Given: Exactly DAY_BARS closes,
+        When: _realized_vol_pct computes,
+        Then: None marks the warm-up state.
+        """
+        assert _realized_vol_pct([5.0] * DAY_BARS) is None
+
+    def test_realized_vol_non_positive_close_is_none(self) -> None:
+        """Verify a non-positive close inside the window poisons the calc.
+
+        Given: A window containing a zero close,
+        When: _realized_vol_pct computes,
+        Then: None is returned instead of a degenerate return series.
+        """
+        closes = [1.0] * 10 + [0.0] + [1.0] * 20
+        assert _realized_vol_pct(closes) is None
+
+    def test_realized_vol_non_positive_final_close_is_none(self) -> None:
+        """Verify a non-positive FINAL close also poisons the calc.
+
+        Given: Windows whose last close is zero or negative (the final
+            close is never used as a return denominator, so it needs
+            its own guard),
+        When: _realized_vol_pct computes,
+        Then: None is returned instead of a finite nonsense volatility.
+        """
+        assert _realized_vol_pct([1.0] * 24 + [0.0]) is None
+        assert _realized_vol_pct([1.0] * 24 + [-1.0]) is None
+
+
+class TestBuildMarketSnapshot:
+    """Snapshot assembly from repository rows plus the triggering bar."""
+
+    @pytest.mark.asyncio
+    async def test_full_history_computes_all_fields(self) -> None:
+        """Verify every snapshot field on a fully warmed ramp series.
+
+        Given: Sixty persisted ramp closes (1..60) and a newer trigger
+            bar closing at 61,
+        When: _build_market_snapshot assembles the envelope section,
+        Then: Every field matches the hand-computed indicator values and
+            the trigger bar is appended exactly once.
+        """
+        last_db_open_at = _OPEN_AT - timedelta(hours=1)
+        repo = AsyncMock()
+        repo.get_candles = AsyncMock(
+            return_value=_desc_rows([float(value) for value in range(1, 61)], last_db_open_at)
+        )
+        candle = _candle(open_at=_OPEN_AT, close=61.0, high=62.0, low=59.0)
+        snapshot = await _build_market_snapshot(repo, "BTC-USD", candle, _OPEN_AT)
+        expected_vol = round(statistics.pstdev([1.0 / value for value in range(37, 61)]) * 100.0, 4)
+        assert snapshot == {
+            "timeframe": "1h",
+            "bars": 61,
+            "last_close": 61.0,
+            "change_1_bar_pct": 1.6667,
+            "change_24_bar_pct": 64.8649,
+            "sma_20": 51.5,
+            "sma_50": 36.5,
+            "rsi_14": 100.0,
+            "high_24_bar": 62.0,
+            "low_24_bar": 37.0,
+            "realized_vol_24_bar_pct": expected_vol,
+        }
+        repo.get_candles.assert_awaited_once_with(
+            "BTC-USD",
+            "1h",
+            SNAPSHOT_RANGE_START,
+            _OPEN_AT,
+            "kraken",
+            _OPEN_AT,
+            limit=SNAPSHOT_BARS,
+            order="desc",
+            complete=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_already_persisted_trigger_not_double_counted(self) -> None:
+        """Verify a trigger bar the store already holds is not appended.
+
+        Given: Thirty persisted closes whose newest row shares the
+            trigger's open_at,
+        When: _build_market_snapshot assembles the envelope section,
+        Then: The bar count equals the persisted depth.
+        """
+        repo = AsyncMock()
+        repo.get_candles = AsyncMock(
+            return_value=_desc_rows([float(value) for value in range(1, 31)], _OPEN_AT)
+        )
+        snapshot = await _build_market_snapshot(
+            repo, "BTC-USD", _candle(open_at=_OPEN_AT, close=30.0), _OPEN_AT
+        )
+        assert snapshot["bars"] == 30
+        assert snapshot["last_close"] == 30.0
+
+    @pytest.mark.asyncio
+    async def test_empty_store_warms_up_from_trigger_only(self) -> None:
+        """Verify an empty candle store yields a single-bar warm-up snapshot.
+
+        Given: No persisted candles,
+        When: _build_market_snapshot assembles the envelope section,
+        Then: Only the trigger bar counts and every indicator is None.
+        """
+        repo = AsyncMock()
+        repo.get_candles = AsyncMock(return_value=[])
+        snapshot = await _build_market_snapshot(repo, "BTC-USD", _candle(), _OPEN_AT)
+        assert snapshot == {
+            "timeframe": "1h",
+            "bars": 1,
+            "last_close": 50000.0,
+            "change_1_bar_pct": None,
+            "change_24_bar_pct": None,
+            "sma_20": None,
+            "sma_50": None,
+            "rsi_14": None,
+            "high_24_bar": None,
+            "low_24_bar": None,
+            "realized_vol_24_bar_pct": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_rows_newer_than_trigger_are_dropped(self) -> None:
+        """Verify the defensive filter drops nonconforming newer rows.
+
+        Given: A store returning thirty closes (1..30) whose newest
+            five bars open AFTER the trigger window (the range query
+            forbids this — the mock simulates a misbehaving store),
+        When: _build_market_snapshot assembles the envelope section,
+        Then: Only the 25 bars up to the trigger count — the trigger is
+            recognized as already persisted (close 25) and the newer
+            closes never leak into the snapshot.
+        """
+        repo = AsyncMock()
+        repo.get_candles = AsyncMock(
+            return_value=_desc_rows(
+                [float(value) for value in range(1, 31)], _OPEN_AT + timedelta(hours=5)
+            )
+        )
+        snapshot = await _build_market_snapshot(
+            repo, "BTC-USD", _candle(open_at=_OPEN_AT, close=25.0), _OPEN_AT
+        )
+        assert snapshot["bars"] == 25
+        assert snapshot["last_close"] == 25.0
+
+    @pytest.mark.asyncio
+    async def test_only_newer_rows_falls_back_to_trigger(self) -> None:
+        """Verify an all-nonconforming store degrades to a trigger-only warm-up.
+
+        Given: A misbehaving store returning only closes that open
+            after the trigger window (the range query forbids this),
+        When: _build_market_snapshot assembles the envelope section,
+        Then: The snapshot counts only the appended trigger bar.
+        """
+        repo = AsyncMock()
+        repo.get_candles = AsyncMock(
+            return_value=_desc_rows([10.0, 11.0], _OPEN_AT + timedelta(hours=2))
+        )
+        snapshot = await _build_market_snapshot(
+            repo, "BTC-USD", _candle(open_at=_OPEN_AT), _OPEN_AT
+        )
+        assert snapshot["bars"] == 1
+        assert snapshot["last_close"] == 50000.0
+
+
 class TestHeartbeatConsultConstruction:
     """Fail-fast validation at construction time."""
 
@@ -128,6 +476,7 @@ class TestHeartbeatConsultConstruction:
         assert strategy.consult_strategy_public_id == config.params["ai_review_strategy_public_id"]
         assert strategy.consult_deadline_seconds == DEFAULT_CONSULT_DEADLINE_SECONDS
         assert strategy.consult_signal_strength == 0.0
+        assert strategy._consult_task is None
 
     def test_non_paper_exchange_rejected(self) -> None:
         """Verify a live exchange is rejected.
@@ -250,7 +599,7 @@ class TestHeartbeatConsultOnCandle:
         """Verify an approved consult emits the target-flat heartbeat.
 
         Given: A consult resolving RESOLVED_APPROVED,
-        When: A new 1h candle arrives,
+        When: A new 1h candle arrives and the detached round drains,
         Then: emit_signal publishes strength 0.0 with the outcome stamped.
         """
         strategy = HeartbeatConsult(_config())
@@ -259,6 +608,7 @@ class TestHeartbeatConsultOnCandle:
         emit = AsyncMock()
         monkeypatch.setattr(strategy, "emit_signal", emit)
         result = await strategy.on_candle("BTC-USD", _candle())
+        await _drain_round(strategy)
         assert result is None
         emit.assert_awaited_once()
         assert emit.await_args is not None
@@ -274,7 +624,7 @@ class TestHeartbeatConsultOnCandle:
         """Verify a configured strength>0 emits an actionable paper long.
 
         Given: A config with heartbeat_signal_strength=0.5 and an approved consult,
-        When: A new candle arrives,
+        When: A new candle arrives and the detached round drains,
         Then: emit_signal publishes the configured strength on the BUY side.
         """
         strategy = HeartbeatConsult(_config(params=_consult_params(heartbeat_signal_strength=0.5)))
@@ -283,6 +633,7 @@ class TestHeartbeatConsultOnCandle:
         emit = AsyncMock()
         monkeypatch.setattr(strategy, "emit_signal", emit)
         result = await strategy.on_candle("BTC-USD", _candle())
+        await _drain_round(strategy)
         assert result is None
         emit.assert_awaited_once()
         assert emit.await_args is not None
@@ -292,12 +643,11 @@ class TestHeartbeatConsultOnCandle:
 
     @pytest.mark.asyncio
     async def test_emit_failure_is_fail_soft(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Verify an emit-path failure never escapes into the listen loop.
+        """Verify an emit-path failure never escapes the detached round.
 
         Given: An approved consult and emit_signal raising,
-        When: on_candle runs,
-        Then: None is returned and nothing propagates (the strategy
-            keeps probing next windows).
+        When: on_candle runs and the round drains,
+        Then: Nothing propagates (the strategy keeps probing next windows).
         """
         strategy = HeartbeatConsult(_config())
         monkeypatch.setattr(strategy, "_consult", AsyncMock(return_value=_approved_outcome()))
@@ -305,13 +655,14 @@ class TestHeartbeatConsultOnCandle:
             strategy, "emit_signal", AsyncMock(side_effect=RuntimeError("publisher down"))
         )
         assert await strategy.on_candle("BTC-USD", _candle()) is None
+        await _drain_round(strategy)
 
     @pytest.mark.asyncio
     async def test_rejected_outcome_does_not_emit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify a rejected consult never emits.
 
         Given: A consult resolving RESOLVED_REJECTED,
-        When: A new 1h candle arrives,
+        When: A new 1h candle arrives and the round drains,
         Then: No signal is emitted.
         """
         strategy = HeartbeatConsult(_config())
@@ -319,6 +670,7 @@ class TestHeartbeatConsultOnCandle:
         emit = AsyncMock()
         monkeypatch.setattr(strategy, "emit_signal", emit)
         assert await strategy.on_candle("BTC-USD", _candle()) is None
+        await _drain_round(strategy)
         emit.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -326,7 +678,7 @@ class TestHeartbeatConsultOnCandle:
         """Verify a fallen-through consult never emits.
 
         Given: A consult returning None (no delegate / error),
-        When: A new 1h candle arrives,
+        When: A new 1h candle arrives and the round drains,
         Then: No signal is emitted.
         """
         strategy = HeartbeatConsult(_config())
@@ -334,6 +686,7 @@ class TestHeartbeatConsultOnCandle:
         emit = AsyncMock()
         monkeypatch.setattr(strategy, "emit_signal", emit)
         assert await strategy.on_candle("BTC-USD", _candle()) is None
+        await _drain_round(strategy)
         emit.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -341,14 +694,16 @@ class TestHeartbeatConsultOnCandle:
         """Verify revised bars of an already-consulted window are skipped.
 
         Given: Two candles sharing the same open_at,
-        When: Both flow through on_candle,
+        When: Both flow through on_candle with the first round drained,
         Then: The consult runs exactly once.
         """
         strategy = HeartbeatConsult(_config())
         consult = AsyncMock(return_value=None)
         monkeypatch.setattr(strategy, "_consult", consult)
         await strategy.on_candle("BTC-USD", _candle())
+        await _drain_round(strategy)
         await strategy.on_candle("BTC-USD", _candle(close=51000.0))
+        await _drain_round(strategy)
         consult.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -358,15 +713,18 @@ class TestHeartbeatConsultOnCandle:
         """Verify ordering: older bars skip, a newer window consults again.
 
         Given: A consulted window, then an older bar, then a newer bar,
-        When: All flow through on_candle,
+        When: All flow through on_candle with rounds drained,
         Then: Only the two distinct forward windows consult.
         """
         strategy = HeartbeatConsult(_config())
         consult = AsyncMock(return_value=None)
         monkeypatch.setattr(strategy, "_consult", consult)
         await strategy.on_candle("BTC-USD", _candle())
+        await _drain_round(strategy)
         await strategy.on_candle("BTC-USD", _candle(open_at=_OPEN_AT - timedelta(hours=1)))
+        await _drain_round(strategy)
         await strategy.on_candle("BTC-USD", _candle(open_at=_OPEN_AT + timedelta(hours=1)))
+        await _drain_round(strategy)
         assert consult.await_count == 2
 
     @pytest.mark.asyncio
@@ -381,9 +739,221 @@ class TestHeartbeatConsultOnCandle:
         consult = AsyncMock(return_value=None)
         monkeypatch.setattr(strategy, "_consult", consult)
         await strategy.on_candle("BTC-USD", _candle())
+        await _drain_round(strategy)
         await strategy.reset()
         await strategy.on_candle("BTC-USD", _candle())
+        await _drain_round(strategy)
         assert consult.await_count == 2
+
+
+class TestHeartbeatConsultDetachedRound:
+    """The consult round must never block the listen loop."""
+
+    @pytest.mark.asyncio
+    async def test_on_candle_returns_while_round_in_flight(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify on_candle returns immediately while the consult deliberates.
+
+        Given: A consult blocked on an external event,
+        When: on_candle dispatches the round,
+        Then: The callback has already returned with the round still
+            pending, and the round completes only after release.
+        """
+        strategy = HeartbeatConsult(_config())
+        blocked = _BlockedConsult()
+        monkeypatch.setattr(strategy, "_consult", blocked)
+        result = await strategy.on_candle("BTC-USD", _candle())
+        assert result is None
+        await blocked.started.wait()
+        task = strategy._consult_task
+        assert task is not None
+        assert not task.done()
+        blocked.release.set()
+        await task
+        assert blocked.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_inflight_round_skips_window_without_consuming(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify a mid-round window is skipped but stays consultable.
+
+        Given: Window A's round blocked in flight and window B arriving,
+        When: B flows through on_candle during the round, then again
+            after the round resolves,
+        Then: B is skipped without spawning a second task, and consults
+            successfully on the republish.
+        """
+        strategy = HeartbeatConsult(_config())
+        blocked = _BlockedConsult()
+        monkeypatch.setattr(strategy, "_consult", blocked)
+        await strategy.on_candle("BTC-USD", _candle())
+        await blocked.started.wait()
+        task_a = strategy._consult_task
+        window_b = _candle(open_at=_OPEN_AT + timedelta(hours=1))
+        assert await strategy.on_candle("BTC-USD", window_b) is None
+        assert strategy._consult_task is task_a
+        assert blocked.calls == 1
+        blocked.release.set()
+        await _drain_round(strategy)
+        assert await strategy.on_candle("BTC-USD", window_b) is None
+        await _drain_round(strategy)
+        assert blocked.calls == 2
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_inflight_round(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify stop() cancels and drains the in-flight round.
+
+        Given: A consult blocked in flight,
+        When: stop() runs,
+        Then: The round task is cancelled and the slot cleared.
+        """
+        strategy = HeartbeatConsult(_config())
+        blocked = _BlockedConsult()
+        monkeypatch.setattr(strategy, "_consult", blocked)
+        await strategy.on_candle("BTC-USD", _candle())
+        await blocked.started.wait()
+        task = strategy._consult_task
+        assert task is not None
+        await strategy.stop()
+        assert task.cancelled()
+        assert strategy._consult_task is None
+
+    @pytest.mark.asyncio
+    async def test_reset_cancels_inflight_round_and_rearms(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify reset() cancels the round and re-arms the window guard.
+
+        Given: A consult blocked in flight,
+        When: reset() runs and the same window's candle arrives again,
+        Then: The old task is cancelled and a fresh round runs.
+        """
+        strategy = HeartbeatConsult(_config())
+        blocked = _BlockedConsult()
+        monkeypatch.setattr(strategy, "_consult", blocked)
+        await strategy.on_candle("BTC-USD", _candle())
+        await blocked.started.wait()
+        task = strategy._consult_task
+        assert task is not None
+        await strategy.reset()
+        assert task.cancelled()
+        assert strategy._consult_task is None
+        blocked.release.set()
+        await strategy.on_candle("BTC-USD", _candle())
+        await _drain_round(strategy)
+        assert blocked.calls == 2
+
+    @pytest.mark.asyncio
+    async def test_cancel_inflight_noop_on_done_round(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify cancelling with a completed round is a no-op clear.
+
+        Given: A drained (done) consult round,
+        When: _cancel_inflight_round runs,
+        Then: The slot clears without cancelling anything.
+        """
+        strategy = HeartbeatConsult(_config())
+        monkeypatch.setattr(strategy, "_consult", AsyncMock(return_value=None))
+        await strategy.on_candle("BTC-USD", _candle())
+        await _drain_round(strategy)
+        task = strategy._consult_task
+        assert task is not None
+        await strategy._cancel_inflight_round()
+        assert strategy._consult_task is None
+        assert not task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_stop_gate_blocks_dispatch_during_drain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify a candle landing mid-stop cannot spawn a fresh round.
+
+        Given: An in-flight round whose cancellation blocks in flight,
+        When: stop() drains it while a new window's candle arrives, and
+            another candle arrives after the stop completes,
+        Then: No replacement round ever spawns — the gate stays closed
+            permanently.
+        """
+        strategy = HeartbeatConsult(_config())
+        stubborn = _StubbornConsult()
+        monkeypatch.setattr(strategy, "_consult", stubborn)
+        await strategy.on_candle("BTC-USD", _candle())
+        await stubborn.started.wait()
+        stop_task = asyncio.create_task(strategy.stop())
+        await stubborn.cancel_seen.wait()
+        mid_stop = _candle(open_at=_OPEN_AT + timedelta(hours=1))
+        assert await strategy.on_candle("BTC-USD", mid_stop) is None
+        assert strategy._consult_task is None
+        assert stubborn.calls == 1
+        stubborn.release_cancel.set()
+        await stop_task
+        post_stop = _candle(open_at=_OPEN_AT + timedelta(hours=2))
+        assert await strategy.on_candle("BTC-USD", post_stop) is None
+        assert strategy._consult_task is None
+        assert stubborn.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_reset_gate_blocks_dispatch_during_drain_then_reopens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify a candle landing mid-reset is skipped, not lost forever.
+
+        Given: An in-flight round whose cancellation blocks in flight,
+        When: reset() drains it while a new window's candle arrives,
+        Then: The mid-reset window is skipped without consuming, and the
+            same window consults normally once the reset completes.
+        """
+        strategy = HeartbeatConsult(_config())
+        stubborn = _StubbornConsult()
+        monkeypatch.setattr(strategy, "_consult", stubborn)
+        await strategy.on_candle("BTC-USD", _candle())
+        await stubborn.started.wait()
+        reset_task = asyncio.create_task(strategy.reset())
+        await stubborn.cancel_seen.wait()
+        window_b = _candle(open_at=_OPEN_AT + timedelta(hours=1))
+        assert await strategy.on_candle("BTC-USD", window_b) is None
+        assert strategy._consult_task is None
+        assert stubborn.calls == 1
+        stubborn.release_cancel.set()
+        await reset_task
+        quick = AsyncMock(return_value=None)
+        monkeypatch.setattr(strategy, "_consult", quick)
+        await strategy.on_candle("BTC-USD", window_b)
+        await _drain_round(strategy)
+        quick.assert_awaited_once()
+        assert stubborn.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_stop_during_reset_keeps_gate_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify a reset unwound by a concurrent stop cannot reopen the gate.
+
+        Given: reset() blocked draining a stubborn in-flight round,
+        When: stop() completes while the reset is still draining, and
+            the reset then finishes (its finally clears only the
+            reset-scoped flag),
+        Then: The permanent stop gate survives and no candle can spawn
+            a fresh round afterwards.
+        """
+        strategy = HeartbeatConsult(_config())
+        stubborn = _StubbornConsult()
+        monkeypatch.setattr(strategy, "_consult", stubborn)
+        await strategy.on_candle("BTC-USD", _candle())
+        await stubborn.started.wait()
+        reset_task = asyncio.create_task(strategy.reset())
+        await stubborn.cancel_seen.wait()
+        await strategy.stop()
+        stubborn.release_cancel.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reset_task
+        post = _candle(open_at=_OPEN_AT + timedelta(hours=1))
+        assert await strategy.on_candle("BTC-USD", post) is None
+        assert strategy._consult_task is None
+        assert stubborn.calls == 1
 
 
 class TestHeartbeatConsultConsult:
@@ -395,10 +965,16 @@ class TestHeartbeatConsultConsult:
         *,
         instrument_public_id: str | None,
         primitive: AsyncMock,
+        candle_rows: list[dict[str, Any]] | None = None,
+        candles_error: Exception | None = None,
     ) -> AsyncMock:
         """Patch repository + primitive for a consult round, return the repo mock."""
         repo = AsyncMock()
         repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=instrument_public_id)
+        if candles_error is not None:
+            repo.get_candles = AsyncMock(side_effect=candles_error)
+        else:
+            repo.get_candles = AsyncMock(return_value=candle_rows or [])
         monkeypatch.setattr(
             "snapper.strategies.heartbeat_consult.get_repository", lambda db_url: repo
         )
@@ -413,10 +989,12 @@ class TestHeartbeatConsultConsult:
     ) -> None:
         """Verify the consult request carries every validated identity field.
 
-        Given: A resolvable instrument and a succeeding primitive,
+        Given: A resolvable instrument, an empty candle store, and a
+            succeeding primitive,
         When: _consult runs for a candle,
         Then: The AiReviewCreateRequest carries the config identities,
-            the consult sequence stream, and the candle envelope.
+            the consult sequence stream, the proposed action, and the
+            warm-up market snapshot.
         """
         config = _config()
         strategy = HeartbeatConsult(config)
@@ -446,9 +1024,52 @@ class TestHeartbeatConsultConsult:
             "kind": "heartbeat",
             "open_at": candle.open_at.isoformat(),
             "close": candle.close,
+            "proposed_side": "buy",
+            "proposed_strength": 0.0,
+            "market": {
+                "timeframe": "1h",
+                "bars": 1,
+                "last_close": candle.close,
+                "change_1_bar_pct": None,
+                "change_24_bar_pct": None,
+                "sma_20": None,
+                "sma_50": None,
+                "rsi_14": None,
+                "high_24_bar": None,
+                "low_24_bar": None,
+                "realized_vol_24_bar_pct": None,
+            },
         }
         assert request.instrument_metadata == {"last_price": candle.close}
         assert primitive.await_args.kwargs["deadline_seconds"] == DEFAULT_CONSULT_DEADLINE_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_snapshot_failure_downgrades_envelope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify a snapshot failure downgrades the envelope, not the round.
+
+        Given: A candle read raising mid-snapshot,
+        When: _consult runs,
+        Then: The request still goes out with the minimal envelope and
+            no 'market' section.
+        """
+        strategy = HeartbeatConsult(_config())
+        outcome = _approved_outcome()
+        primitive = AsyncMock(return_value=outcome)
+        self._wire(
+            monkeypatch,
+            instrument_public_id=str(uuid7()),
+            primitive=primitive,
+            candles_error=RuntimeError("candle store down"),
+        )
+        candle = _candle()
+        assert await strategy._consult("BTC-USD", candle) is outcome
+        assert primitive.await_args is not None
+        envelope = primitive.await_args.args[0].signal_envelope
+        assert "market" not in envelope
+        assert envelope["kind"] == "heartbeat"
+        assert envelope["proposed_side"] == "buy"
 
     @pytest.mark.asyncio
     async def test_consult_sequence_uses_named_stream(
