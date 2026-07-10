@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -217,9 +218,12 @@ async def test_disconnect_cancels_fill_task() -> None:
     """
     client = PaperExchangeClient()
     client._running = True
-    client._fill_simulator_task = asyncio.create_task(asyncio.sleep(0.5))
+    task_a = asyncio.create_task(asyncio.sleep(0.5))
+    task_b = asyncio.create_task(asyncio.sleep(0.5))
+    client._fill_simulator_tasks.update({task_a, task_b})
     await client.disconnect()
-    assert client._fill_simulator_task is None
+    assert client._fill_simulator_tasks == set()
+    assert task_a.cancelled() and task_b.cancelled()
 
 
 @pytest.mark.asyncio
@@ -249,6 +253,322 @@ async def test_simulate_fill_handles_queue_error() -> None:
     client._orders[order.id] = order
     client._execution_queue.put = AsyncMock(side_effect=RuntimeError("boom"))
     await client._simulate_fill(order)
+
+
+def _market_order(price: float | None = None) -> ExchangeOrderSnapshot:
+    """Build an OPEN market-order snapshot for fill-simulator tests."""
+    return ExchangeOrderSnapshot(
+        id="order-mkt-1",
+        client_order_id=None,
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.MARKET,
+        amount=0.01,
+        price=price,
+        status=ExchangeOrderStatusEnum.OPEN,
+        filled=0.0,
+        remaining=0.01,
+        timestamp=0.0,
+        fee=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_simulate_fill_market_order_uses_source_venue_close() -> None:
+    """Verify a market order fills at the freshest source-venue 1m close.
+
+    Given: A running client whose repository serves a kraken 1m candle,
+    When: _simulate_fill() runs for a priceless MARKET order,
+    Then: The trade execution carries the candle close as both average
+        and last price and the order closes fully filled.
+    """
+    repo = AsyncMock()
+    repo.get_candles = AsyncMock(return_value=[{"close": 64000.0, "open_at": datetime.now(UTC)}])
+    client = PaperExchangeClient(repository=cast(Repository, repo), fill_delay=0)
+    client._running = True
+    order = _market_order()
+    client._orders[order.id] = order
+    await client._simulate_fill(order)
+    execution = client._execution_queue.get_nowait()
+    assert execution.exec_type == "trade"
+    assert execution.average_price == 64000.0
+    assert execution.last_price == 64000.0
+    assert order.status == ExchangeOrderStatusEnum.CLOSED
+    assert order.filled == 0.01
+    assert repo.get_candles.await_args is not None
+    assert repo.get_candles.await_args.args[4] == ExchangeEnum.KRAKEN
+
+
+@pytest.mark.asyncio
+async def test_simulate_fill_market_order_cancels_without_reference_price() -> None:
+    """Verify an unpriceable market order is CANCELED, never zero-filled.
+
+    Given: A running client whose repository has no candles on any
+        source venue,
+    When: _simulate_fill() runs for a priceless MARKET order,
+    Then: A canceled execution is queued, the order is CANCELED with
+        its full amount remaining, and no 0.0-price fill exists.
+    """
+    repo = AsyncMock()
+    repo.get_candles = AsyncMock(return_value=[])
+    client = PaperExchangeClient(repository=cast(Repository, repo), fill_delay=0)
+    client._running = True
+    order = _market_order()
+    client._orders[order.id] = order
+    await client._simulate_fill(order)
+    execution = client._execution_queue.get_nowait()
+    assert execution.exec_type == "canceled"
+    assert execution.order_status == ExchangeOrderStatusEnum.CANCELED
+    assert execution.cum_qty == 0.0
+    assert order.status == ExchangeOrderStatusEnum.CANCELED
+    assert order.remaining == 0.01
+
+
+@pytest.mark.asyncio
+async def test_simulate_fill_market_order_cancels_without_repository() -> None:
+    """Verify a repository-less client cancels priceless market orders.
+
+    Given: A running client constructed without a repository,
+    When: _simulate_fill() runs for a priceless MARKET order,
+    Then: The order is CANCELED (no reference price is inventable).
+    """
+    client = PaperExchangeClient(fill_delay=0)
+    client._running = True
+    order = _market_order()
+    client._orders[order.id] = order
+    await client._simulate_fill(order)
+    assert order.status == ExchangeOrderStatusEnum.CANCELED
+
+
+@pytest.mark.asyncio
+async def test_simulate_fill_priced_order_fills_at_own_price() -> None:
+    """Verify a priced order still fills at its own price without lookups.
+
+    Given: A running client with NO repository and a priced order,
+    When: _simulate_fill() runs,
+    Then: The fill uses the order's own price (no reference lookup).
+    """
+    client = PaperExchangeClient(fill_delay=0)
+    client._running = True
+    order = _market_order(price=123.45)
+    client._orders[order.id] = order
+    await client._simulate_fill(order)
+    execution = client._execution_queue.get_nowait()
+    assert execution.exec_type == "trade"
+    assert execution.average_price == 123.45
+    assert order.status == ExchangeOrderStatusEnum.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_resolve_market_fill_price_prefers_source_exchange() -> None:
+    """Verify an explicit source_exchange short-circuits the venue list.
+
+    Given: A client constructed with source_exchange=kraken_futures,
+    When: _resolve_market_fill_price() runs,
+    Then: Only that venue is queried.
+    """
+    repo = AsyncMock()
+    repo.get_candles = AsyncMock(return_value=[{"close": 50.5, "open_at": datetime.now(UTC)}])
+    client = PaperExchangeClient(
+        repository=cast(Repository, repo), source_exchange=ExchangeEnum.KRAKEN_FUTURES
+    )
+    price = await client._resolve_market_fill_price("BTC-USD-PERP")
+    assert price == 50.5
+    repo.get_candles.assert_awaited_once()
+    assert repo.get_candles.await_args is not None
+    assert repo.get_candles.await_args.args[4] == ExchangeEnum.KRAKEN_FUTURES
+
+
+@pytest.mark.asyncio
+async def test_resolve_market_fill_price_rejects_stale_close() -> None:
+    """Verify a stale close is rejected (halted-venue policy).
+
+    Given: The only venue serving a candle older than the max-age cap,
+    When: _resolve_market_fill_price() runs,
+    Then: None is returned — a halted/closed venue must not price fills.
+    """
+    repo = AsyncMock()
+    repo.get_candles = AsyncMock(
+        return_value=[{"close": 100.0, "open_at": datetime.now(UTC) - timedelta(hours=3)}]
+    )
+    client = PaperExchangeClient(
+        repository=cast(Repository, repo), source_exchange=ExchangeEnum.KRAKEN
+    )
+    assert await client._resolve_market_fill_price("BTC-USD") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_market_fill_price_rejects_non_positive_close() -> None:
+    """Verify zero/non-finite closes count as per-venue misses.
+
+    Given: The first venue serving a 0.0 close and the second a valid one,
+    When: _resolve_market_fill_price() runs,
+    Then: The valid second-venue close wins.
+    """
+    repo = AsyncMock()
+    repo.get_candles = AsyncMock(
+        side_effect=[
+            [{"close": 0.0, "open_at": datetime.now(UTC)}],
+            [{"close": 88.0, "open_at": datetime.now(UTC)}],
+        ]
+    )
+    client = PaperExchangeClient(repository=cast(Repository, repo))
+    assert await client._resolve_market_fill_price("BTC-USD") == 88.0
+
+
+@pytest.mark.asyncio
+async def test_simulate_fill_loses_race_to_cancel_during_lookup() -> None:
+    """Verify a cancel racing the price lookup wins — no late fill.
+
+    Given: A market order whose price lookup cancels the order before
+        returning a valid price,
+    When: _simulate_fill() resumes after the lookup,
+    Then: No execution is queued and the order stays CANCELED.
+    """
+    repo = AsyncMock()
+    client = PaperExchangeClient(repository=cast(Repository, repo), fill_delay=0)
+    client._running = True
+    order = _market_order()
+    client._orders[order.id] = order
+
+    async def _cancel_then_price(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        await client.cancel_order(order.id)
+        return [{"close": 64000.0, "open_at": datetime.now(UTC)}]
+
+    repo.get_candles = AsyncMock(side_effect=_cancel_then_price)
+    await client._simulate_fill(order)
+    assert order.status == ExchangeOrderStatusEnum.CANCELED
+    assert client._execution_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_resolve_market_fill_price_rejects_future_dated_close() -> None:
+    """Verify a future-dated bar is rejected (corrupt-data guard).
+
+    Given: The only venue serving a candle whose open_at lies in the
+        future (negative age),
+    When: _resolve_market_fill_price() runs,
+    Then: None is returned — age must be within [0, cap].
+    """
+    repo = AsyncMock()
+    repo.get_candles = AsyncMock(
+        return_value=[{"close": 100.0, "open_at": datetime.now(UTC) + timedelta(days=3)}]
+    )
+    client = PaperExchangeClient(
+        repository=cast(Repository, repo), source_exchange=ExchangeEnum.KRAKEN
+    )
+    assert await client._resolve_market_fill_price("BTC-USD") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_market_fill_price_refused_in_replay_mode() -> None:
+    """Verify replay-mode clients never wall-clock-price market fills.
+
+    Given: A client constructed with a historical replay window,
+    When: _resolve_market_fill_price() runs,
+    Then: None is returned without any candle lookup — replay flows
+        must submit priced orders (wall-clock pricing is temporally
+        wrong for historical execution).
+    """
+    repo = AsyncMock()
+    repo.get_candles = AsyncMock(return_value=[{"close": 100.0, "open_at": datetime.now(UTC)}])
+    client = PaperExchangeClient(repository=cast(Repository, repo), start_time=0.0, end_time=1.0)
+    assert await client._resolve_market_fill_price("BTC-USD") is None
+    repo.get_candles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_terminalizes_open_orders() -> None:
+    """Verify disconnect cancels every still-OPEN tracked order.
+
+    Given: A connected client with an OPEN order whose fill task has
+        not yet been scheduled (the create/disconnect race window),
+    When: disconnect() runs, then the client reconnects,
+    Then: The order is CANCELED and stays CANCELED — it can never fill
+        in a later session.
+    """
+    client = PaperExchangeClient()
+    await client.connect()
+    order = _market_order(price=10.0)
+    client._orders[order.id] = order
+    await client.disconnect()
+    assert order.status == ExchangeOrderStatusEnum.CANCELED
+    assert order.remaining == order.amount
+    await client.connect()
+    await client._simulate_fill(order)
+    assert order.status == ExchangeOrderStatusEnum.CANCELED
+    assert client._execution_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_create_order_cancels_when_disconnected_during_db_logging() -> None:
+    """Verify a disconnect racing create_order's DB await cancels the order.
+
+    Given: A client whose order-logging await disconnects the client,
+    When: create_order() resumes after the await,
+    Then: RuntimeError routes the submit into the executor's failure
+        path, the tracked order is CANCELED, and no fill task exists.
+    """
+    client = PaperExchangeClient(fill_delay=0)
+    await client.connect()
+
+    async def _disconnect_during_log(*args: object, **kwargs: object) -> None:
+        await client.disconnect()
+        return None
+
+    with (
+        patch.object(
+            PaperExchangeClient, "_log_order_to_db", AsyncMock(side_effect=_disconnect_during_log)
+        ),
+        pytest.raises(RuntimeError, match="session ended"),
+    ):
+        await client.create_order(
+            ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=ExchangeOrderTypeEnum.MARKET,
+                amount=0.01,
+            )
+        )
+    tracked = next(iter(client._orders.values()))
+    assert tracked.status == ExchangeOrderStatusEnum.CANCELED
+    assert client._fill_simulator_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_refuses_to_rewrite_closed_order() -> None:
+    """Verify a late cancel cannot turn a CLOSED fill into CANCELED.
+
+    Given: A tracked order already CLOSED by the fill simulator,
+    When: cancel_order() is called,
+    Then: The snapshot is returned as-is, still CLOSED.
+    """
+    client = PaperExchangeClient()
+    client._running = True
+    order = _market_order(price=10.0)
+    order.status = ExchangeOrderStatusEnum.CLOSED
+    client._orders[order.id] = order
+    snapshot = await client.cancel_order(order.id)
+    assert snapshot.status == ExchangeOrderStatusEnum.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_resolve_market_fill_price_skips_failing_venue() -> None:
+    """Verify a failing venue lookup falls through to the next venue.
+
+    Given: The first source venue raising and the second returning a
+        candle,
+    When: _resolve_market_fill_price() runs,
+    Then: The second venue's close is returned.
+    """
+    repo = AsyncMock()
+    repo.get_candles = AsyncMock(
+        side_effect=[RuntimeError("venue down"), [{"close": 77.0, "open_at": datetime.now(UTC)}]]
+    )
+    client = PaperExchangeClient(repository=cast(Repository, repo))
+    price = await client._resolve_market_fill_price("BTC-USD")
+    assert price == 77.0
+    assert repo.get_candles.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -659,9 +979,11 @@ class TestPaperDisconnection:
         Then: Fill simulator task is cancelled and cleared.
         """
         await paper_client.connect()
-        paper_client._fill_simulator_task = asyncio.create_task(asyncio.sleep(10))
+        lingering = asyncio.create_task(asyncio.sleep(10))
+        paper_client._fill_simulator_tasks.add(lingering)
         await paper_client.disconnect()
-        assert paper_client._fill_simulator_task is None
+        assert paper_client._fill_simulator_tasks == set()
+        assert lingering.cancelled()
         assert not paper_client._running
 
 
@@ -1357,6 +1679,6 @@ async def test_create_order_rejects_stop_types_before_storing() -> None:
             with pytest.raises(ValueError, match="does not support stop orders"):
                 await client.create_order(request)
         assert client._orders == {}
-        assert client._fill_simulator_task is None
+        assert client._fill_simulator_tasks == set()
     finally:
         await client.disconnect()

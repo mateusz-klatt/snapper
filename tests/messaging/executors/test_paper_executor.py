@@ -27,13 +27,15 @@ def _make_repo_mock() -> MagicMock:
 
     Returns:
         MagicMock with ensure_instrument, insert_order, update_order,
-        and insert_execution configured as AsyncMock.
+        insert_execution, and get_candles (a fresh reference candle so
+        MARKET orders resolve a fill price) configured as AsyncMock.
     """
     repo = MagicMock()
     repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
     repo.insert_order = AsyncMock(return_value=(1, "order-uuid-0001"))
     repo.update_order = AsyncMock()
     repo.insert_execution = AsyncMock()
+    repo.get_candles = AsyncMock(return_value=[{"close": 64000.0, "open_at": datetime.now(UTC)}])
     session = AsyncMock()
     execute_result = MagicMock()
     execute_result.scalar_one_or_none = MagicMock(return_value="symbol-public-id")

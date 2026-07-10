@@ -29,6 +29,7 @@ The paper client is ideal for:
 import asyncio
 import contextlib
 import heapq
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -67,6 +68,32 @@ _REPO_REQUIRED_MSG = "Repository required for paper market data"
 _CALL_CONNECT_MSG = "Not connected - call connect() first"
 _TIME_RANGE_REQUIRED_MSG = "Time range (start_time, end_time) required for paper market data replay"
 _SOURCE_EXCHANGE_REQUIRED_MSG = "source_exchange required for paper market data replay"
+
+_MARKET_FILL_PRICE_MAX_AGE_S = 3600.0
+"""Maximum age of the reference close accepted for a paper MARKET fill.
+
+Explicit simulator policy: a source venue whose freshest complete 1m
+bar opened more than an hour ago is halted/closed (or its feed is
+dead) — paper orders must then CANCEL rather than fill at an
+arbitrarily old mark that no live venue would honor.
+"""
+
+_MARKET_FILL_PRICE_SOURCE_EXCHANGES: tuple[MarketDataExchange, ...] = (
+    ExchangeEnum.KRAKEN,
+    ExchangeEnum.KRAKEN_FUTURES,
+    ExchangeEnum.KRAKEN_EQUITIES,
+    ExchangeEnum.WALUTOMAT,
+)
+"""Source-venue preference order for pricing a paper MARKET fill.
+
+The paper venue mirrors instruments from live source venues, so a
+market order's fill price is the freshest persisted 1m close for the
+symbol on the first source venue that knows it. ``source_exchange``
+(when the client was constructed with one) takes precedence over this
+list. Without any resolvable price the simulator CANCELS the order
+instead of filling at 0.0 — a zero-price fill poisons position entry
+price, cash accounting, and every P&L consumer downstream.
+"""
 
 
 class _EmptyInstrumentsAsyncIterator(AsyncIterator[dict[str, Any]]):
@@ -127,7 +154,8 @@ class PaperExchangeClient(ExchangeClientBase):
         self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue()
         self._orders: dict[str, ExchangeOrderSnapshot] = {}
         self._balances: dict[str, AccountBalance] = {}
-        self._fill_simulator_task: asyncio.Task[None] | None = None
+        self._fill_simulator_tasks: set[asyncio.Task[None]] = set()
+        self._session_epoch = 0
 
     async def connect(self) -> None:
         """Initialize paper trading system with default balances."""
@@ -143,19 +171,31 @@ class PaperExchangeClient(ExchangeClientBase):
                 total=self.initial_balance,
             )
         self._running = True
+        self._session_epoch += 1
         logger.info("Paper Trading System connected")
 
     async def disconnect(self) -> None:
-        """Stop paper trading and clean up resources."""
+        """Stop paper trading and clean up resources.
+
+        Every still-OPEN tracked order is TERMINALIZED (CANCELED) here:
+        the simulated venue's session dies with the connection, so an
+        order created just before disconnect must never fill after a
+        reconnect (its fill task may not even have been scheduled yet —
+        ``create_order`` awaits DB logging before scheduling).
+        """
         if not self._running:
             return
         logger.info("Disconnecting from Paper Trading System...")
         self._running = False
-        if self._fill_simulator_task:
-            self._fill_simulator_task.cancel()
+        for task in tuple(self._fill_simulator_tasks):
+            task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._fill_simulator_task
-            self._fill_simulator_task = None
+                await task
+        self._fill_simulator_tasks.clear()
+        for order in self._orders.values():
+            if order.status is ExchangeOrderStatusEnum.OPEN:
+                order.status = ExchangeOrderStatusEnum.CANCELED
+                order.remaining = order.amount
         logger.info("Paper Trading System disconnected")
 
     async def create_order(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
@@ -168,7 +208,15 @@ class PaperExchangeClient(ExchangeClientBase):
             Created order snapshot with simulated fill pending.
 
         Raises:
-            RuntimeError: If client not connected.
+            RuntimeError: If client not connected, or if the session
+                ends (disconnect — even with a reconnect in between,
+                tracked via a session epoch) while the order row is
+                being logged: the tracked order is marked CANCELED, no
+                fill task is scheduled, and the raise routes the submit
+                into the executor's failure path so it is never
+                published as accepted (a silently-CANCELED snapshot
+                would be ignored — the executor does not read snapshot
+                status on the create path).
             ValueError: If the request is stop-typed — the paper fill
                 simulator has no trigger logic, so accepting a stop
                 would fill it IMMEDIATELY and misrepresent the
@@ -202,20 +250,169 @@ class PaperExchangeClient(ExchangeClientBase):
             fee=None,
         )
         self._orders[order_id] = order
+        create_epoch = self._session_epoch
         db_result = await self._log_order_to_db(request, order)
         if db_result is not None:
             order.db_order_id = db_result[0]
             order.db_order_public_id = db_result[1]
-        self._fill_simulator_task = asyncio.create_task(self._simulate_fill(order))
+        if not self._running or self._session_epoch != create_epoch:
+            order.status = ExchangeOrderStatusEnum.CANCELED
+            order.remaining = order.amount
+            logger.warning(
+                f"PAPER REJECT (session ended during create): {order_id} {request.symbol} — "
+                f"client disconnected/reconnected while logging the order"
+            )
+            raise RuntimeError(
+                f"PaperExchangeClient session ended while creating order {order_id} — "
+                f"submit is void; the executor's failure path owns the rejection"
+            )
+        fill_task = asyncio.create_task(self._simulate_fill(order))
+        self._fill_simulator_tasks.add(fill_task)
+        fill_task.add_done_callback(self._fill_simulator_tasks.discard)
         return order
 
+    async def _resolve_market_fill_price(self, symbol: str) -> float | None:
+        """Resolve a market-order fill price from persisted source-venue candles.
+
+        Tries ``source_exchange`` first when the client was constructed
+        with one, then each venue in
+        ``_MARKET_FILL_PRICE_SOURCE_EXCHANGES``, returning the freshest
+        complete 1m close for the symbol from the first venue that has
+        an ACCEPTABLE one: the close must be a finite positive number
+        and its bar must have opened within
+        ``_MARKET_FILL_PRICE_MAX_AGE_S`` (explicit simulator policy — a
+        halted or closed source venue must NOT fill paper orders at an
+        arbitrarily old mark). A row failing validation counts as a
+        per-venue miss and the next venue is tried. Returns ``None``
+        when the client has no repository or no venue yields an
+        acceptable price — the caller must then CANCEL the order rather
+        than invent a price.
+
+        Args:
+            symbol: Native venue symbol of the paper order.
+
+        Returns:
+            The reference fill price, or ``None`` when unresolvable.
+        """
+        if self.repository is None:
+            return None
+        if self.start_time is not None or self.end_time is not None:
+            logger.warning(
+                f"Paper fill-price refused for {symbol}: client is in historical "
+                f"replay mode (start/end window set) — wall-clock pricing would be "
+                f"temporally wrong; replay flows must submit priced orders"
+            )
+            return None
+        now = datetime.now(UTC)
+        candidates: tuple[MarketDataExchange, ...] = (
+            (self.source_exchange,) if self.source_exchange else _MARKET_FILL_PRICE_SOURCE_EXCHANGES
+        )
+        for exchange in candidates:
+            try:
+                rows = await self.repository.get_candles(
+                    symbol,
+                    "1m",
+                    None,
+                    None,
+                    exchange,
+                    now,
+                    limit=1,
+                    order="desc",
+                    complete=True,
+                )
+                if not rows:
+                    continue
+                price = float(rows[0]["close"])
+                age_s = (now - rows[0]["open_at"]).total_seconds()
+            except Exception as exc:
+                logger.warning(f"Paper fill-price lookup failed on {exchange}: {exc}")
+                continue
+            if not (math.isfinite(price) and price > 0.0):
+                logger.warning(
+                    f"Paper fill-price on {exchange} rejected for {symbol}: "
+                    f"non-positive/non-finite close {price!r}"
+                )
+                continue
+            if not 0.0 <= age_s <= _MARKET_FILL_PRICE_MAX_AGE_S:
+                logger.warning(
+                    f"Paper fill-price on {exchange} rejected for {symbol}: "
+                    f"close age {age_s:.0f}s outside [0, "
+                    f"{_MARKET_FILL_PRICE_MAX_AGE_S:.0f}]s (stale or future-dated bar)"
+                )
+                continue
+            logger.info(f"Paper market fill price for {symbol}: {price} (source {exchange})")
+            return price
+        return None
+
+    def _order_still_fillable(self, order: ExchangeOrderSnapshot) -> bool:
+        """Re-check order lifecycle after every await in the fill simulator.
+
+        The price lookup and the fill delay both yield to the event
+        loop, where ``cancel_order`` or ``disconnect`` may have raced
+        the round: a cancelled or untracked order must never transition
+        again (a late fill after cancel — or a late cancel rewriting a
+        CLOSED fill — desyncs the executor's projection).
+        """
+        return (
+            self._running
+            and order.id in self._orders
+            and order.status is ExchangeOrderStatusEnum.OPEN
+        )
+
     async def _simulate_fill(self, order: ExchangeOrderSnapshot) -> None:
+        """Fill the order after ``fill_delay``, or cancel it when unpriceable.
+
+        Priced (limit) orders fill at their own price. Market orders
+        fill at the resolved source-venue reference price; when NO
+        acceptable reference price exists (no repository, unknown
+        symbol, non-positive/stale close) the order is CANCELED — never
+        filled at 0.0, which would poison position entry price and P&L
+        accounting downstream. Order lifecycle is re-checked after
+        every await so a racing ``cancel_order``/``disconnect`` wins.
+
+        Known accepted residual: the executor's execution-stream cancel
+        path updates the order row and drops correlation WITHOUT
+        publishing a bus event, so the engine's in-flight guard stays
+        set — it is LAZY: cleared only when a LATER signal for the same
+        engine re-evaluates it after 60s, and until then subsequent
+        signals for the instrument are dropped. Acceptable here because
+        unpriceable-cancel is rare by construction; publishing
+        stream-sourced terminal order events is tracked explicitly in
+        plan_2026_07_10_portfolio_truth_risk_pnl.md Phase 1.
+        """
         try:
             await asyncio.sleep(self.fill_delay)
-            if not self._running or order.id not in self._orders:
+            if not self._order_still_fillable(order):
                 return
-            from datetime import datetime
-
+            fill_price = order.price
+            if fill_price is None:
+                fill_price = await self._resolve_market_fill_price(order.symbol)
+                if not self._order_still_fillable(order):
+                    return
+            if fill_price is None:
+                order.status = ExchangeOrderStatusEnum.CANCELED
+                order.remaining = order.amount
+                cancel = ExecutionUpdate(
+                    order_id=order.id,
+                    exec_type="canceled",
+                    symbol=order.symbol,
+                    side=order.side,
+                    order_type=order.type,
+                    order_status=ExchangeOrderStatusEnum.CANCELED,
+                    timestamp=datetime.fromtimestamp(order.timestamp, tz=UTC),
+                    order_qty=order.amount,
+                    cum_qty=0.0,
+                    last_qty=0.0,
+                    average_price=0.0,
+                    last_price=0.0,
+                    fee_usd_equiv=0.0,
+                )
+                await self._execution_queue.put(cancel)
+                logger.warning(
+                    f"PAPER CANCEL (no reference price): {order.id} {order.symbol} — "
+                    f"market order unpriceable, refusing a 0.0 fill"
+                )
+                return
             execution = ExecutionUpdate(
                 order_id=order.id,
                 exec_type="trade",
@@ -227,15 +424,15 @@ class PaperExchangeClient(ExchangeClientBase):
                 order_qty=order.amount,
                 cum_qty=order.amount,
                 last_qty=order.amount,
-                average_price=order.price or 0.0,
-                last_price=order.price or 0.0,
+                average_price=fill_price,
+                last_price=fill_price,
                 fee_usd_equiv=0.0,
             )
             order.status = ExchangeOrderStatusEnum.CLOSED
             order.filled = order.amount
             order.remaining = 0.0
             await self._execution_queue.put(execution)
-            logger.info(f"PAPER FILL: {order.id} - {order.amount}@{order.price}")
+            logger.info(f"PAPER FILL: {order.id} - {order.amount}@{fill_price}")
         except Exception as e:
             logger.error(f"Error simulating fill for order {order.id}: {e}")
 
@@ -247,7 +444,10 @@ class PaperExchangeClient(ExchangeClientBase):
             symbol: Trading pair (optional).
 
         Returns:
-            Snapshot of the cancelled order.
+            Snapshot of the cancelled order. A tracked order that is no
+            longer OPEN (already filled or cancelled) is returned AS-IS
+            without a status rewrite — a late cancel must never turn a
+            CLOSED fill into CANCELED under the fill simulator's feet.
 
         Raises:
             RuntimeError: If client not connected.
@@ -257,7 +457,8 @@ class PaperExchangeClient(ExchangeClientBase):
         logger.info(f"PAPER CANCEL: {order_id} ({symbol})")
         if order_id in self._orders:
             order = self._orders[order_id]
-            order.status = ExchangeOrderStatusEnum.CANCELED
+            if order.status is ExchangeOrderStatusEnum.OPEN:
+                order.status = ExchangeOrderStatusEnum.CANCELED
             return order
         return ExchangeOrderSnapshot(
             id=order_id,
