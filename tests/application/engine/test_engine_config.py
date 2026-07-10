@@ -1573,10 +1573,15 @@ async def test_send_order_ai_attributed_paper_identity_passes_gate() -> None:
     Regression for the first live consult-approved paper order
     (2026-07-10): the spec loader now keeps the resolved ``public_id``
     even when the instrument has no sizing spec row (the paper-venue
-    reality), so an AI-attributed emit must clear the fail-closed
-    attribution gate and reach the caps guard carrying the PAPER-venue
-    instrument identity. Pins the current semantics ahead of the
-    planned canonical source-to-paper identity mapping for cap keys.
+    reality). Pins the current semantics ahead of the planned
+    canonical source-to-paper identity mapping for cap keys.
+
+    Given: ``instrument_specs`` carrying a resolved ``public_id`` with
+        default tick/lot sizing (no spec row),
+    When: ``_send_order`` is called WITH ``ai_review_public_id``,
+    Then: The fail-closed attribution gate passes and the caps guard
+        receives the submission with the PAPER-venue instrument
+        identity, the AI citation, and the exact quantity.
     """
     engine, captured = _engine_with_caps_capture()
     engine.instrument_specs = {
