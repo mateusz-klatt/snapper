@@ -63,6 +63,8 @@ from snapper.strategies.cointegration import _FET_RENDER_DEFAULT_CONFIG
 from snapper.strategies.cointegration import CointegrationPairs
 from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.factory import StrategyNotFoundError
+from snapper.strategies.frame_context import get_frame_provenance
+from snapper.strategies.frame_context import set_frame_provenance
 from snapper.strategies.macd import MACDCrossover
 from snapper.strategies.rsi import RSIReversion
 
@@ -7281,3 +7283,77 @@ class TestWarmupDbFirst:
         )
         await strat._warmup_candle_buffer()
         assert strat.candle_buffer == {}
+
+
+@pytest.mark.asyncio
+async def test_emit_signal_stamps_frame_provenance() -> None:
+    """The signal envelope carries the triggering frame's provenance.
+
+    Given: a strategy whose current context recorded a REPLAY frame
+        (the paper publisher's stamped window),
+    When: emit_signal publishes,
+    Then: the SignalData envelope carries origin='replay' plus both
+        window stamps — the engine persists them onto the command row
+        and the executor rejects it pre-venue.
+    """
+    strategy = FakeStrategy(_strategy_config(exchange="paper"))
+    mock_msg_publisher = MagicMock()
+    mock_msg_publisher.send = AsyncMock()
+    mock_msg_publisher.tracker = SequenceTracker()
+    mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
+    strategy.msg_publisher = mock_msg_publisher
+    strategy._last_data_ts = 200.0
+    window_start = datetime(2026, 7, 1, tzinfo=UTC)
+    window_end = datetime(2026, 7, 2, tzinfo=UTC)
+    set_frame_provenance("replay", window_start, window_end)
+    await strategy.emit_signal(
+        StrategySignal(
+            instrument="BTC-USD",
+            side="buy",
+            strength=0.5,
+            reason="replayed bar",
+            price=10.0,
+        )
+    )
+    set_frame_provenance("live", None, None)
+    sent_envelope = mock_msg_publisher.send.call_args.args[1]
+    assert sent_envelope.origin == "replay"
+    assert sent_envelope.replay_window_start == window_start
+    assert sent_envelope.replay_window_end == window_end
+
+
+@pytest.mark.asyncio
+async def test_handle_candle_data_records_frame_provenance() -> None:
+    """Parsing a replayed candle records its provenance in context.
+
+    Given: a candle payload stamped origin='replay' with a window,
+    When: the strategy's candle handler parses it,
+    Then: the frame-provenance context reflects the replay stamps
+        (everything the bar triggers inherits them).
+    """
+    strategy = FakeStrategy(_strategy_config(exchange="paper"))
+    window_start = datetime(2026, 7, 1, tzinfo=UTC)
+    candle = CandleData(
+        public_id="candle-replay-1",
+        timestamp=datetime.now(UTC),
+        session_id="s1",
+        sequence_id=1,
+        instrument="BTC-USD",
+        exchange="kraken",
+        timeframe="1m",
+        open_at=datetime(2026, 7, 1, 12, 0, tzinfo=UTC),
+        open=1.0,
+        high=2.0,
+        low=0.5,
+        close=1.5,
+        volume=10.0,
+        origin="replay",
+        replay_window_start=window_start,
+        replay_window_end=None,
+    )
+    await strategy._handle_candle_data("BTC-USD", candle.to_json())
+    origin, start, end = get_frame_provenance()
+    set_frame_provenance("live", None, None)
+    assert origin == "replay"
+    assert start == window_start
+    assert end is None

@@ -379,6 +379,9 @@ class TradeCommandRow(TypedDict):
     signal_public_id: NotRequired[str | None]
     ai_review_public_id: NotRequired[str | None]
     submitted_notional_usd: NotRequired[float | None]
+    origin: NotRequired[str]
+    replay_window_start: NotRequired[datetime | None]
+    replay_window_end: NotRequired[datetime | None]
 
 
 class TradeCommandDispatchUpdate(TypedDict):
@@ -622,6 +625,9 @@ class TradeCommandInsertRow(TypedDict, total=False):
     signal_public_id: str | None
     ai_review_public_id: str | None
     submitted_notional_usd: float | None
+    origin: str
+    replay_window_start: datetime | None
+    replay_window_end: datetime | None
 
 
 class VenueEventInsertRow(TypedDict, total=False):

@@ -1873,6 +1873,65 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except (AttributeError, TypeError, ValueError):
             return 0.0
 
+    async def _reject_if_replay_origin(self, order: OrderRequestData) -> bool:
+        """Reject a replay-origin market command before any venue call.
+
+        PnL Phase 1 S4 (incident 2026-07-10 #3): a strategy fed
+        REPLAYED historical frames drives the live engine into real
+        market commands — without this gate they fill a live (paper)
+        account at historical prices. The frame's ``origin`` is
+        stamped by the replaying publisher, carried immutably through
+        SignalData → the durable command row → the outbox rebuild, so
+        the gate re-fires DETERMINISTICALLY on every replay of the
+        same command (no interlock-style disposition machinery
+        needed). Runs AFTER the duplicate guard (a replayed frame of
+        an already-accepted order must drop as a duplicate, never
+        fabricate a REJECTED) and BEFORE the stale gate (replay origin
+        is a harder verdict than age).
+
+        Publish-first like the stale reject: a durable
+        ``order_rejected`` row before a confirmed publish would exempt
+        the command from the dispatched-verification sweep while the
+        engine guard stays held.
+
+        Args:
+            order: The incoming order request.
+
+        Returns:
+            True when the command was consumed here (rejected);
+            False when it should proceed.
+        """
+        if order.origin != "replay":
+            return False
+        exchange_name = self._get_exchange_name()
+        window = f"window=[{order.replay_window_start} .. {order.replay_window_end}]"
+        logger.warning(
+            f"[{exchange_name}] Rejecting REPLAY-ORIGIN command "
+            f"{order.client_order_id} ({window}) — replayed historical frames "
+            f"must never trade against a live account"
+        )
+        if not await self._publish_order_status(
+            order, OrderEventEnum.REJECTED, reason="replay_origin"
+        ):
+            logger.warning(
+                f"[{exchange_name}] REJECTED publish failed for REPLAY-ORIGIN "
+                f"{order.client_order_id} — NOT recording order_rejected; the "
+                f"frame is consumed and the sweep retries the release durably"
+            )
+            return True
+        await self._record_venue_event(
+            {
+                "event_type": "order_rejected",
+                "exchange_name": exchange_name,
+                "instrument": order.instrument,
+                "client_order_id": order.client_order_id,
+                "side": order.side,
+                "error": f"replay-origin command rejected pre-venue ({window})",
+                "strategy_tag": order.strategy_tag,
+            }
+        )
+        return True
+
     async def _process_order(self, order: OrderRequestData) -> None:
         """Submit an order to the exchange and handle the response.
 
@@ -1901,6 +1960,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         exchange_name = self._get_exchange_name()
         if await self._is_duplicate_submit(order):
+            return
+        if await self._reject_if_replay_origin(order):
             return
         if await self._reject_if_stale(order):
             return

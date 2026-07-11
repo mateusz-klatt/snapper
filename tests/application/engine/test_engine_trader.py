@@ -319,6 +319,9 @@ class TestTraderCoverage:
         assert mock_engine.execute_desired_units.called
         forwarded = mock_engine.execute_desired_units.call_args.kwargs
         assert forwarded["signal_public_id"] == "test-public-id"
+        assert forwarded["origin"] == "live"
+        assert forwarded["replay_window_start"] is None
+        assert forwarded["replay_window_end"] is None
         assert trader.last_signal_time["BTC-USD@kraken-live"] == pytest.approx(1234567890.0)
 
     @pytest.mark.asyncio
@@ -777,8 +780,11 @@ class _EngineStub:
         ai_review_dispatch_version: int | None = None,
         grouped_correlation_id: str | None = None,
         signal_public_id: str | None = None,
+        origin: str = "live",
+        replay_window_start: Any = None,
+        replay_window_end: Any = None,
     ) -> None:
-        del grouped_correlation_id
+        del grouped_correlation_id, origin, replay_window_start, replay_window_end
         self.execute_calls.append(
             {
                 "desired_units": desired_units,
@@ -2528,10 +2534,13 @@ class StubEngine:
         ai_review_dispatch_version: int | None = None,
         grouped_correlation_id: str | None = None,
         signal_public_id: str | None = None,
+        origin: str = "live",
+        replay_window_start: Any = None,
+        replay_window_end: Any = None,
     ) -> None:
         """Record desired units and timestamp for verification."""
         del ai_review_public_id, ai_review_dispatch_version, grouped_correlation_id
-        del signal_public_id
+        del signal_public_id, origin, replay_window_start, replay_window_end
         self.calls.append((desired_units, signaled_at))
 
 

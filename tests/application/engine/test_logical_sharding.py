@@ -210,9 +210,12 @@ class TestCoordinatorSharding:
             ai_review_dispatch_version: int | None = None,
             grouped_correlation_id: str | None = None,
             signal_public_id: str | None = None,
+            origin: str = "live",
+            replay_window_start: Any = None,
+            replay_window_end: Any = None,
         ) -> None:
             del ai_review_public_id, ai_review_dispatch_version, grouped_correlation_id
-            del signal_public_id
+            del signal_public_id, origin, replay_window_start, replay_window_end
             engine.pending_client_order_id = "order-456"
 
         engine.execute_desired_units = AsyncMock(side_effect=_mock_execute)

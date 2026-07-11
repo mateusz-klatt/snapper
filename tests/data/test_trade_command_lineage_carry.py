@@ -346,3 +346,58 @@ async def test_advance_lifecycle_with_stale_clock_keeps_interval_monotone(
     assert row is not None
     assert row["status"] == "dispatched"
     assert row["timestamp"] == now
+
+
+@pytest.mark.asyncio
+async def test_origin_and_window_carry_through_successor(tmp_path: Path) -> None:
+    """Replay provenance survives SCD2 status transitions.
+
+    Given: a replay-origin command with a persisted replay window,
+    When: the status transitions created → dispatched,
+    Then: the successor carries origin and both window stamps — the
+        outbox rebuild would otherwise dispatch a guard-invisible
+        payload.
+    """
+    repo = await _fresh_repo(tmp_path, "origin_carry.db")
+    now = datetime.now(UTC)
+    row = _lineage_row(now)
+    row["origin"] = "replay"
+    row["replay_window_start"] = now - timedelta(days=2)
+    row["replay_window_end"] = now - timedelta(days=1)
+    _, cmd_pid = await repo.insert_trade_command(row)
+    t1 = now + timedelta(seconds=1)
+    assert (
+        await repo.update_trade_command_status(
+            public_id=cmd_pid,
+            new_status="dispatched",
+            bus_time=t1,
+            session_id="s1",
+            sequence_id=2,
+            dispatched_at=t1,
+        )
+        is not None
+    )
+    read = await repo.get_trade_command_by_public_id(cmd_pid, as_of=t1)
+    assert read is not None
+    assert read["origin"] == "replay"
+    assert read["replay_window_start"] == now - timedelta(days=2)
+    assert read["replay_window_end"] == now - timedelta(days=1)
+
+
+@pytest.mark.asyncio
+async def test_origin_defaults_to_live_when_omitted(tmp_path: Path) -> None:
+    """Rows inserted without provenance keys default to live.
+
+    Given: an insert row omitting origin and window keys (manual
+        REST/MCP and plan paths never set them),
+    When: the command is inserted and fetched,
+    Then: origin reads ``live`` with NULL windows.
+    """
+    repo = await _fresh_repo(tmp_path, "origin_default.db")
+    now = datetime.now(UTC)
+    _, cmd_pid = await repo.insert_trade_command(_lineage_row(now))
+    read = await repo.get_trade_command_by_public_id(cmd_pid, as_of=now)
+    assert read is not None
+    assert read["origin"] == "live"
+    assert read["replay_window_start"] is None
+    assert read["replay_window_end"] is None

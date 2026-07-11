@@ -205,3 +205,45 @@ class TestOrderRequestFromCommand:
         legacy.pop("stop_price", None)
         order = order_request_from_command(cast(TradeCommandRow, legacy))
         assert order.stop_price is None
+
+
+class TestReplayProvenanceProjection:
+    """Outbox rebuild carries the command's replay provenance."""
+
+    def test_replay_origin_projects_onto_payload(self) -> None:
+        """A replay-origin row rebuilds a guard-visible payload.
+
+        Given: a command row stamped ``origin='replay'`` with a window,
+        When: the dispatch payload is rebuilt,
+        Then: the payload carries the origin and both window stamps —
+            the executor's pre-venue guard re-fires deterministically
+            on every replay of the same command.
+        """
+        window_start = datetime(2026, 7, 1, tzinfo=UTC)
+        window_end = datetime(2026, 7, 2, tzinfo=UTC)
+        row = _cmd(
+            origin="replay",
+            replay_window_start=window_start,
+            replay_window_end=window_end,
+        )
+        order = order_request_from_command(row)
+        assert order.origin == "replay"
+        assert order.replay_window_start == window_start
+        assert order.replay_window_end == window_end
+
+    def test_missing_origin_key_defaults_to_live(self) -> None:
+        """Legacy rows without the origin key rebuild as live.
+
+        Given: a pre-0019 command row projection lacking the origin
+            and window keys entirely,
+        When: the dispatch payload is rebuilt,
+        Then: it defaults to live with NULL windows.
+        """
+        row = dict(_cmd())
+        row.pop("origin", None)
+        row.pop("replay_window_start", None)
+        row.pop("replay_window_end", None)
+        order = order_request_from_command(cast(TradeCommandRow, row))
+        assert order.origin == "live"
+        assert order.replay_window_start is None
+        assert order.replay_window_end is None

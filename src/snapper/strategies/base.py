@@ -63,6 +63,10 @@ from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
 from snapper.messaging.topics.builders import parse_market_topic
 from snapper.messaging.topics.builders import signal_topic
+from snapper.strategies.frame_context import get_frame_provenance
+from snapper.strategies.frame_context import restore_frame_provenance
+from snapper.strategies.frame_context import set_frame_provenance
+from snapper.strategies.frame_context import snapshot_frame_provenance
 from snapper.strategies.health import StrategyHealthMonitor
 from snapper.strategies.models import StrategyConfig
 from snapper.strategies.models import StrategySignal
@@ -760,34 +764,42 @@ class BaseStrategy(ABC):
         path is broken (the decision would be silently lost bar after
         bar), so it propagates to :meth:`_listen_loop`, which re-raises
         for the process watchdog to restart the strategy. Only
-        cancellation propagates from the isolated section.
+        cancellation propagates from the isolated section. The frame's
+        provenance context is SCOPED to this call: dispatched handlers
+        record it after parsing, emission reads it, and the ``finally``
+        restores the pre-frame value so a replay frame never sticks to
+        the long-lived listener task (detached tasks keep their copy).
 
         Args:
             topic_str: The decoded frame topic.
             payload_str: The decoded frame payload JSON.
         """
         signals: list[StrategySignal] = []
+        provenance_token = snapshot_frame_provenance()
         try:
-            self._check_gap_parsed(topic_str, payload_str)
-            if topic_str.startswith("system."):
-                await self._handle_system_message(topic_str, payload_str)
-                return
-            if topic_str.startswith(_MARKET_TOPIC_PREFIX):
-                parsed = parse_market_topic(topic_str)
-                if parsed is None:
-                    logger.warning(f"Strategy {self.name}: Malformed market topic: {topic_str}")
+            try:
+                self._check_gap_parsed(topic_str, payload_str)
+                if topic_str.startswith("system."):
+                    await self._handle_system_message(topic_str, payload_str)
                     return
-                signals = await self._dispatch_market_data(
-                    topic_str, parsed.instrument, payload_str
+                if topic_str.startswith(_MARKET_TOPIC_PREFIX):
+                    parsed = parse_market_topic(topic_str)
+                    if parsed is None:
+                        logger.warning(f"Strategy {self.name}: Malformed market topic: {topic_str}")
+                        return
+                    signals = await self._dispatch_market_data(
+                        topic_str, parsed.instrument, payload_str
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    f"Strategy {self.name}: frame on {topic_str} skipped after handler error: {e}"
                 )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.warning(
-                f"Strategy {self.name}: frame on {topic_str} skipped after handler error: {e}"
-            )
-            return
-        await self._emit_signal_group(signals)
+                return
+            await self._emit_signal_group(signals)
+        finally:
+            restore_frame_provenance(provenance_token)
 
     async def _handle_candle_data(self, instrument: str, payload: str) -> list[StrategySignal]:
         """Handle incoming candle data.
@@ -813,6 +825,7 @@ class BaseStrategy(ABC):
             before return, so callers receive only publishable signals.
         """
         candle = CandleData.from_json(payload)
+        set_frame_provenance(candle.origin, candle.replay_window_start, candle.replay_window_end)
         self._last_data_ts = candle.open_at.timestamp()
         self._buffer_candle(instrument, candle)
         high_water = self._warmup_high_water.get(instrument)
@@ -1329,10 +1342,12 @@ class BaseStrategy(ABC):
             return await self._handle_candle_data(instrument, payload)
         if ".ticks" in topic:
             tick = TickData.from_json(payload)
+            set_frame_provenance(tick.origin, tick.replay_window_start, tick.replay_window_end)
             self._last_data_ts = tick.timestamp.timestamp()
             return self._normalize_signal_group(await self.on_tick(instrument, tick))
         if ".trades" in topic:
             trade = TradeData.from_json(payload)
+            set_frame_provenance(trade.origin, trade.replay_window_start, trade.replay_window_end)
             self._last_data_ts = (trade.executed_at or trade.timestamp).timestamp()
             return self._normalize_signal_group(await self.on_trade(instrument, trade))
         logger.warning(f"Strategy {self.name}: Unknown market data topic type: {topic}")
@@ -1509,6 +1524,7 @@ class BaseStrategy(ABC):
             await self._setup_publisher()
         tracker = self.msg_publisher.tracker if self.msg_publisher else self._tracker
         now = signal.timestamp or datetime.now(UTC)
+        frame_origin, frame_window_start, frame_window_end = get_frame_provenance()
         signal_envelope = SignalData(
             public_id=str(uuid7()),
             timestamp=now,
@@ -1531,6 +1547,9 @@ class BaseStrategy(ABC):
             paired_group_index=paired_group_index,
             paired_group_policy=paired_group_policy,
             paired_group_key=paired_group_key,
+            origin=frame_origin,
+            replay_window_start=frame_window_start,
+            replay_window_end=frame_window_end,
         )
 
         if self.msg_publisher is not None:

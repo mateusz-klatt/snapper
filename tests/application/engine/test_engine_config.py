@@ -3645,3 +3645,61 @@ async def test_send_order_service_principal_stamps_notional_on_row() -> None:
     assert insert_row["submitted_notional_usd"] is None
     assert insert_row["signal_public_id"] == "sig-uuid-10"
     assert insert_row["ai_review_public_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_send_order_stamps_replay_provenance_on_row() -> None:
+    """Replay provenance rides the durable command row.
+
+    Given: a strategy emit whose signal carried origin='replay' with a
+        window,
+    When: ``_send_order`` inserts the durable row,
+    Then: the row carries origin and both window stamps — the outbox
+        rebuild republishes them so the executor guard re-fires on
+        every replay.
+    """
+    engine, _captured = _engine_with_caps_capture()
+    engine.instrument_specs = {
+        "BTC-USD": InstrumentSpec(public_id="inst-uuid-11", tick_size=0.01, lot_size=0.0001),
+    }
+    window_start = datetime(2026, 7, 1, tzinfo=UTC)
+    window_end = datetime(2026, 7, 2, tzinfo=UTC)
+    await engine._send_order(
+        side="buy",
+        size=0.5,
+        price=100.0,
+        reason="engine-buy",
+        origin="replay",
+        replay_window_start=window_start,
+        replay_window_end=window_end,
+    )
+    insert_row = cast(AsyncMock, engine._repository).insert_trade_command.call_args.args[0]
+    assert insert_row["origin"] == "replay"
+    assert insert_row["replay_window_start"] == window_start
+    assert insert_row["replay_window_end"] == window_end
+
+
+@pytest.mark.asyncio
+async def test_send_order_direct_payload_carries_replay_provenance() -> None:
+    """The no-outbox direct publish carries the same provenance.
+
+    Given: an engine with neither repository nor outbox (the direct
+        in-process fallback path),
+    When: ``_send_order`` publishes with replay provenance,
+    Then: the OrderRequestData on the wire carries origin and window —
+        the executor guard sees it even without the durable rebuild.
+    """
+    engine, socket = _make_engine()
+    window_start = datetime(2026, 7, 1, tzinfo=UTC)
+    await engine._send_order(
+        side="buy",
+        size=1.0,
+        price=33.0,
+        reason="test",
+        origin="replay",
+        replay_window_start=window_start,
+    )
+    published = socket.sent[0]
+    assert published.origin == "replay"
+    assert published.replay_window_start == window_start
+    assert published.replay_window_end is None

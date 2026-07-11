@@ -42,6 +42,7 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.core.types import AllExchange
+from snapper.core.types import FrameOrigin
 from snapper.core.types import HealthStatusEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
@@ -1770,6 +1771,21 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return None
 
+    def _get_frame_provenance(self) -> tuple[FrameOrigin, datetime | None, datetime | None]:
+        """Return the provenance stamped on every published market frame.
+
+        The REPLAYING paper publisher overrides this with
+        ``("replay", window_start, window_end)`` — it is the only
+        component that knows its window, and per-frame immutable
+        provenance is what lets a detached consult task inherit the
+        triggering frame's origin (PnL Phase 1, incident #3). Live
+        publishers stamp ``("live", None, None)``.
+
+        Returns:
+            Tuple of (origin, replay window start, replay window end).
+        """
+        return ("live", None, None)
+
     def _resolve_candle_public_id(
         self, instrument_public_id: str, timeframe: str, open_at: datetime
     ) -> str:
@@ -2994,6 +3010,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         window_closed = received_at >= candle.interval_begin + timedelta(
             seconds=window_seconds(timeframe)
         )
+        frame_origin, frame_window_start, frame_window_end = self._get_frame_provenance()
         candle_msg = CandleData(
             public_id=public_id,
             timestamp=received_at,
@@ -3011,6 +3028,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             vwap=candle.vwap,
             trades=candle.trades,
             complete=window_closed,
+            origin=frame_origin,
+            replay_window_start=frame_window_start,
+            replay_window_end=frame_window_end,
         )
         row = self._build_candle_row(
             candle_msg,
@@ -3064,6 +3084,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         topic = self._build_data_topic(
             native_symbol, MarketDataTypeEnum.CANDLES, timeframe=timeframe
         )
+        frame_origin, frame_window_start, frame_window_end = self._get_frame_provenance()
         candle_msg = CandleData(
             public_id=public_id,
             timestamp=datetime.now(UTC),
@@ -3081,6 +3102,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             vwap=candle.vwap,
             trades=candle.trades,
             complete=candle.complete,
+            origin=frame_origin,
+            replay_window_start=frame_window_start,
+            replay_window_end=frame_window_end,
         )
         row = self._build_candle_row(
             candle_msg,
@@ -3539,6 +3563,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TICKS)
         t_after_topic = perf_counter_ns()
         probe.record("build_topic", t_after_topic - t_start)
+        frame_origin, frame_window_start, frame_window_end = self._get_frame_provenance()
         tick_msg = TickData(
             public_id=str(uuid7()),
             timestamp=received_at,
@@ -3552,6 +3577,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             last=message.last,
             is_delayed=message.is_delayed,
             is_extended_hours=message.is_extended_hours,
+            origin=frame_origin,
+            replay_window_start=frame_window_start,
+            replay_window_end=frame_window_end,
         )
         t_after_build = perf_counter_ns()
         probe.record("build_tick_model", t_after_build - t_after_topic)
@@ -3741,6 +3769,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TRADES)
         t_after_topic = perf_counter_ns()
         trade_probe.record("build_topic", t_after_topic - t_start)
+        frame_origin, frame_window_start, frame_window_end = self._get_frame_provenance()
         trade_msg = TradeData(
             public_id=str(uuid7()),
             timestamp=received_at,
@@ -3753,6 +3782,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             volume=trade.quantity,
             side=trade.side if trade.side in (TradeSideEnum.BUY, TradeSideEnum.SELL) else None,
             trade_id=trade.trade_id,
+            origin=frame_origin,
+            replay_window_start=frame_window_start,
+            replay_window_end=frame_window_end,
         )
         t_after_build = perf_counter_ns()
         trade_probe.record("build_trade_model", t_after_build - t_after_topic)

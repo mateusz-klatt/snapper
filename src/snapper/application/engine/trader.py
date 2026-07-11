@@ -4098,6 +4098,9 @@ class TraderCoordinator(RegisterableProcess):
             ai_review_dispatch_version=signal.ai_review_dispatch_version,
             grouped_correlation_id=group_public_id,
             signal_public_id=signal.public_id,
+            origin=signal.origin,
+            replay_window_start=signal.replay_window_start,
+            replay_window_end=signal.replay_window_end,
         )
         new_oid = engine.pending_client_order_id
         if new_oid and new_oid != prev_oid:

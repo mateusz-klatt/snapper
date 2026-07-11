@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import cast
 
 from snapper.core.types import ExecutionMode
+from snapper.core.types import FrameOrigin
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderType
 from snapper.core.types import TradeSide
@@ -99,4 +100,7 @@ def order_request_from_command(cmd: TradeCommandRow) -> OrderRequestData:
         operator_public_id=cmd.get("operator_public_id"),
         user_public_id=cmd.get("user_public_id"),
         signaled_at=cmd["created_at"],
+        origin=cast(FrameOrigin, cmd.get("origin", "live")),
+        replay_window_start=cmd.get("replay_window_start"),
+        replay_window_end=cmd.get("replay_window_end"),
     )

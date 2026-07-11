@@ -10547,3 +10547,103 @@ class TestStreamTerminalOrdering:
         assert result is True
         assert call_log == ["durable", "publish"]
         assert order.client_order_id not in ex.pending_orders
+
+
+class TestReplayOriginGuard:
+    """Pre-venue rejection of replay-origin commands (PnL Phase 1 S4)."""
+
+    @pytest.mark.asyncio
+    async def test_replay_origin_rejected_before_venue(self) -> None:
+        """A replay-origin submit rejects with a durable trail.
+
+        Given: an order request stamped ``origin='replay'`` with a
+            replay window,
+        When: the guard runs,
+        Then: it consumes the frame, publishes REJECTED with the
+            ``replay_origin`` reason, and records the durable
+            ``order_rejected`` event carrying the window.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex._publish_order_status = AsyncMock(return_value=True)
+        ex._record_venue_event = AsyncMock()
+        order = make_order(client_order_id="replay-1")
+        replayed = order.model_copy(
+            update={
+                "origin": "replay",
+                "replay_window_start": datetime(2026, 7, 1, tzinfo=UTC),
+                "replay_window_end": datetime(2026, 7, 2, tzinfo=UTC),
+            }
+        )
+        consumed = await ex._reject_if_replay_origin(replayed)
+        assert consumed is True
+        ex._publish_order_status.assert_awaited_once()
+        assert ex._publish_order_status.call_args.kwargs["reason"] == "replay_origin"
+        recorded = ex._record_venue_event.call_args.args[0]
+        assert recorded["event_type"] == "order_rejected"
+        assert "replay-origin" in recorded["error"]
+        assert "2026-07-01" in recorded["error"]
+
+    @pytest.mark.asyncio
+    async def test_live_origin_passes(self) -> None:
+        """A live-origin submit passes the guard untouched.
+
+        Given: a default (live) order request,
+        When: the guard runs,
+        Then: it returns False and neither publishes nor records.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex._publish_order_status = AsyncMock()
+        ex._record_venue_event = AsyncMock()
+        consumed = await ex._reject_if_replay_origin(make_order(client_order_id="live-1"))
+        assert consumed is False
+        ex._publish_order_status.assert_not_awaited()
+        ex._record_venue_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_replay_publish_failure_consumes_without_record(self) -> None:
+        """A failed REJECTED publish never writes the terminal row first.
+
+        Given: a replay-origin submit whose REJECTED publish fails,
+        When: the guard runs,
+        Then: the frame is still consumed but NO durable
+            ``order_rejected`` is recorded — a terminal row before a
+            confirmed publish would exempt the command from the
+            dispatched-verification sweep while the engine guard is
+            held.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex._publish_order_status = AsyncMock(return_value=False)
+        ex._record_venue_event = AsyncMock()
+        order = make_order(client_order_id="replay-2")
+        replayed = order.model_copy(update={"origin": "replay"})
+        consumed = await ex._reject_if_replay_origin(replayed)
+        assert consumed is True
+        ex._record_venue_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_process_order_runs_replay_guard_after_duplicate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard sits between the duplicate and stale gates.
+
+        Given: a replay-origin submit whose duplicate gate passes,
+        When: ``_process_order`` runs,
+        Then: the replay guard consumes it BEFORE the stale gate or
+            any venue call, and no pending entry is registered.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex._is_duplicate_submit = AsyncMock(return_value=False)
+        ex._reject_if_stale = AsyncMock(return_value=False)
+        ex._publish_order_status = AsyncMock(return_value=True)
+        ex._record_venue_event = AsyncMock()
+        ex._execute_live_order = AsyncMock()
+        order = make_order(client_order_id="replay-3")
+        replayed = order.model_copy(update={"origin": "replay"})
+        await ex._process_order(replayed)
+        ex._reject_if_stale.assert_not_awaited()
+        ex._execute_live_order.assert_not_awaited()
+        assert "replay-3" not in ex.pending_orders

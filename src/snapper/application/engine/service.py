@@ -28,6 +28,7 @@ from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import FillStatusEnum
+from snapper.core.types import FrameOrigin
 from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderTypeEnum
@@ -320,6 +321,9 @@ class TradingEngineService:
         reference_price: float | None = None,
         signal_public_id: str | None = None,
         ai_review_public_id: str | None = None,
+        origin: FrameOrigin = "live",
+        replay_window_start: dt.datetime | None = None,
+        replay_window_end: dt.datetime | None = None,
     ) -> TradeCommandInsertRow:
         """Return the TradeCommand insert row for a strategy submit.
 
@@ -375,6 +379,9 @@ class TradingEngineService:
             "source_surface": "strategy",
             "signal_public_id": signal_public_id,
             "ai_review_public_id": ai_review_public_id,
+            "origin": origin,
+            "replay_window_start": replay_window_start,
+            "replay_window_end": replay_window_end,
         }
 
     def _check_in_flight_timeout(self) -> None:
@@ -725,6 +732,9 @@ class TradingEngineService:
         ai_review_dispatch_version: int | None = None,
         grouped_correlation_id: str | None = None,
         signal_public_id: str | None = None,
+        origin: FrameOrigin = "live",
+        replay_window_start: dt.datetime | None = None,
+        replay_window_end: dt.datetime | None = None,
     ) -> _OrderDispatch:
         """Publish order request via the durable-outbox path.
 
@@ -762,6 +772,11 @@ class TradingEngineService:
                 emit, threaded from the coordinator so the command row
                 records its decision provenance. ``None`` for
                 signal-less callers (test fixtures, internal stops).
+            origin: The triggering frame's provenance — persisted on
+                the command row and the dispatch payload so executors
+                reject replay-origin submits pre-venue.
+            replay_window_start: Replay window start, when replaying.
+            replay_window_end: Replay window end, when replaying.
 
         Returns:
             An :class:`_OrderDispatch` carrying the venue ``client_order_id``
@@ -827,6 +842,9 @@ class TradingEngineService:
                 reference_price=reference_price,
                 signal_public_id=signal_public_id,
                 ai_review_public_id=ai_review_public_id,
+                origin=origin,
+                replay_window_start=replay_window_start,
+                replay_window_end=replay_window_end,
             )
             command_public_id = await self._insert_strategy_trade_command(
                 strategy_submission,
@@ -859,6 +877,9 @@ class TradingEngineService:
                 reduce_only=reduce_only,
                 wallet_public_id=self.wallet_public_id,
                 operator_public_id=self.operator_public_id or None,
+                origin=origin,
+                replay_window_start=replay_window_start,
+                replay_window_end=replay_window_end,
             )
             await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)
             if self._repository is not None:
@@ -945,6 +966,9 @@ class TradingEngineService:
         ai_review_dispatch_version: int | None = None,
         grouped_correlation_id: str | None = None,
         signal_public_id: str | None = None,
+        origin: FrameOrigin = "live",
+        replay_window_start: dt.datetime | None = None,
+        replay_window_end: dt.datetime | None = None,
     ) -> str | None:
         """Execute position change based on desired position size.
 
@@ -978,6 +1002,11 @@ class TradingEngineService:
                 ``signals.public_id``, forwarded from the coordinator's
                 ``_on_signal`` and persisted onto the command row as
                 decision lineage (PnL Phase 1).
+            origin: The triggering frame's provenance carried on the
+                signal — ``"replay"`` commands are rejected pre-venue
+                by every executor (incident 2026-07-10 #3).
+            replay_window_start: Replay window start, when replaying.
+            replay_window_end: Replay window end, when replaying.
 
         Returns:
             The durable command ``public_id`` when an order was dispatched
@@ -1023,6 +1052,9 @@ class TradingEngineService:
             ai_review_dispatch_version=ai_review_dispatch_version,
             grouped_correlation_id=grouped_correlation_id,
             signal_public_id=signal_public_id,
+            origin=origin,
+            replay_window_start=replay_window_start,
+            replay_window_end=replay_window_end,
         )
         self.order_in_flight = True
         self.pending_client_order_id = dispatch.client_order_id

@@ -8860,6 +8860,9 @@ class SQLAlchemyRepository(Repository):
                 if cmd.submitted_notional_usd is not None
                 else None
             ),
+            "origin": cmd.origin,
+            "replay_window_start": cmd.replay_window_start,
+            "replay_window_end": cmd.replay_window_end,
         }
 
     @staticmethod
@@ -8914,6 +8917,9 @@ class SQLAlchemyRepository(Repository):
             "signal_public_id": existing.signal_public_id,
             "ai_review_public_id": existing.ai_review_public_id,
             "submitted_notional_usd": existing.submitted_notional_usd,
+            "origin": existing.origin,
+            "replay_window_start": existing.replay_window_start,
+            "replay_window_end": existing.replay_window_end,
             "wallet_public_id": existing.wallet_public_id,
             "operator_public_id": existing.operator_public_id,
             "user_public_id": existing.user_public_id,

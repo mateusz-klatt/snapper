@@ -45,6 +45,7 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.json_types import JsonObject
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import FrameOrigin
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
@@ -88,6 +89,9 @@ class TickData(StrictDataSchema[Literal["tick"]]):
     last: float | None = None
     is_delayed: bool = False
     is_extended_hours: bool | None = None
+    origin: FrameOrigin = "live"
+    replay_window_start: datetime | None = None
+    replay_window_end: datetime | None = None
 
 
 class CandleData(StrictDataSchema[Literal["candle"]]):
@@ -128,6 +132,9 @@ class CandleData(StrictDataSchema[Literal["candle"]]):
     vwap: float | None = None
     trades: int | None = None
     complete: bool = True
+    origin: FrameOrigin = "live"
+    replay_window_start: datetime | None = None
+    replay_window_end: datetime | None = None
 
 
 class TradeData(StrictDataSchema[Literal["trade"]]):
@@ -154,6 +161,9 @@ class TradeData(StrictDataSchema[Literal["trade"]]):
     volume: float
     side: str | None = None
     trade_id: str | None = None
+    origin: FrameOrigin = "live"
+    replay_window_start: datetime | None = None
+    replay_window_end: datetime | None = None
 
 
 class SignalData(StrictDataSchema[Literal["signal"]]):
@@ -204,6 +214,9 @@ class SignalData(StrictDataSchema[Literal["signal"]]):
     paired_group_index: int | None = None
     paired_group_policy: PairedExecutionPolicy | None = None
     paired_group_key: str | None = None
+    origin: FrameOrigin = "live"
+    replay_window_start: datetime | None = None
+    replay_window_end: datetime | None = None
 
     @model_validator(mode="after")
     def _paper_requires_strategy_name(self) -> Self:
@@ -460,6 +473,9 @@ class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
     paired_group_size: int | None = None
     paired_group_index: int | None = None
     paired_group_policy: PairedExecutionPolicy | None = None
+    origin: FrameOrigin = "live"
+    replay_window_start: datetime | None = None
+    replay_window_end: datetime | None = None
 
 
 class OrderCancelData(StrictDataSchema[Literal["order_cancel"]]):

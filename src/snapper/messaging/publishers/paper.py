@@ -28,6 +28,7 @@ from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import AllExchange
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import FrameOrigin
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
 from snapper.core.types import ProcessModeEnum
@@ -95,6 +96,30 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
             The bound source exchange name.
         """
         return str(self._source_exchange)
+
+    def _get_frame_provenance(self) -> tuple[FrameOrigin, datetime | None, datetime | None]:
+        """Stamp replay provenance from this publisher's actual window.
+
+        The paper publisher only emits when a replay window is set
+        (idle otherwise), so a window marks every frame — and
+        everything a strategy derives from it — as replay-origin. The
+        executors reject replay-origin market commands pre-venue
+        (incident 2026-07-10 #3: replayed historical bars filled a
+        live paper account at historical prices).
+
+        Returns:
+            ``("replay", start, end)`` when the window is set, else
+            the live default.
+        """
+        if self.start_time is None and self.end_time is None:
+            return ("live", None, None)
+        window_start = (
+            datetime.fromtimestamp(self.start_time, tz=UTC) if self.start_time is not None else None
+        )
+        window_end = (
+            datetime.fromtimestamp(self.end_time, tz=UTC) if self.end_time is not None else None
+        )
+        return ("replay", window_start, window_end)
 
     def _get_process_name(self) -> str:
         """Return process name including source exchange for log context."""

@@ -691,3 +691,51 @@ class TestPaperPublisherParametersValidation:
             }
         )
         assert len(params.paper_instruments) == 2
+
+
+class TestFrameProvenance:
+    """Per-frame replay provenance stamping (PnL Phase 1 S4)."""
+
+    def test_windowed_publisher_stamps_replay(self) -> None:
+        """A replay window marks every frame as replay-origin.
+
+        Given: a PerSourcePaperPublisher with a replay window,
+        When: the frame provenance resolves,
+        Then: origin is replay with the window converted to UTC
+            datetimes.
+        """
+        pub = PerSourcePaperPublisher(
+            source_exchange="kraken",
+            symbols=["BTC-USD"],
+            start_time=1751328000.0,
+            end_time=1751414400.0,
+        )
+        origin, start, end = pub._get_frame_provenance()
+        assert origin == "replay"
+        assert start == datetime.fromtimestamp(1751328000.0, tz=UTC)
+        assert end == datetime.fromtimestamp(1751414400.0, tz=UTC)
+
+    def test_windowless_publisher_stamps_live(self) -> None:
+        """No window means live provenance (idle publisher default).
+
+        Given: a PerSourcePaperPublisher without a window,
+        When: the frame provenance resolves,
+        Then: the live default returns.
+        """
+        pub = PerSourcePaperPublisher(source_exchange="kraken", symbols=["BTC-USD"])
+        assert pub._get_frame_provenance() == ("live", None, None)
+
+    def test_half_open_window_still_marks_replay(self) -> None:
+        """A start-only window is still a replay session.
+
+        Given: a publisher with only start_time set,
+        When: the frame provenance resolves,
+        Then: origin is replay with a NULL window end.
+        """
+        pub = PerSourcePaperPublisher(
+            source_exchange="kraken", symbols=["BTC-USD"], start_time=1751328000.0
+        )
+        origin, start, end = pub._get_frame_provenance()
+        assert origin == "replay"
+        assert start is not None
+        assert end is None

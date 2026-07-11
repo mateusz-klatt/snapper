@@ -611,6 +611,17 @@ FillStatus = Literal[FillStatusEnum.FILLED, FillStatusEnum.PARTIAL]
 CancelEventType = Literal[OrderEventEnum.CANCELLED, OrderEventEnum.REJECTED]
 """Event types for cancel command responses."""
 
+FrameOrigin = Literal["live", "replay"]
+"""Provenance of a market frame and everything it triggers (PnL Phase 1).
+
+Stamped per-frame by the replaying paper publisher (the ONLY component
+that knows its window), carried immutably through
+CandleData/TickData/TradeData → SignalData → OrderRequestData →
+``trade_commands.origin``. A replay-origin market command must be
+rejected PRE-VENUE by every executor — replayed historical bars can
+otherwise fill against a live account at historical prices
+(incident 2026-07-10 #3)."""
+
 StreamTerminalEventType = Literal[OrderEventEnum.CANCELLED, OrderEventEnum.EXPIRED]
 """Event types for venue-stream-sourced order terminals (PnL Phase 1).
 

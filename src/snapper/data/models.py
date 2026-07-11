@@ -1233,6 +1233,10 @@ class TradeCommand(TemporalMixin, Base):
         CheckConstraint(_CK_SIDE_BUY_SELL, name="ck_trade_commands_side"),
         CheckConstraint(_CK_ORDER_TYPE_VALUES, name="ck_trade_commands_order_type"),
         CheckConstraint(_CK_TRADE_COMMAND_STATUS, name="ck_trade_commands_status"),
+        CheckConstraint(
+            "origin IN ('live', 'replay')",
+            name="ck_trade_commands_origin",
+        ),
     )
     command_type: Mapped[str] = mapped_column(String(16))
     shard_key: Mapped[str] = mapped_column(String(256))
@@ -1268,6 +1272,16 @@ class TradeCommand(TemporalMixin, Base):
     signal_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True, index=True)
     ai_review_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True, index=True)
     submitted_notional_usd: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
+    origin: Mapped[str] = mapped_column(String(8), nullable=False, server_default="live")
+    """Provenance of the triggering market frame (PnL Phase 1).
+
+    ``live`` or ``replay`` — stamped at insert from the signal's
+    frame provenance and carried immutably across SCD2 successors.
+    Executors reject ``replay`` submits pre-venue; the outbox rebuild
+    (``order_request_from_command``) projects it onto the dispatch
+    payload so the guard re-fires deterministically on replay."""
+    replay_window_start: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    replay_window_end: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
 class VenueEvent(TemporalMixin, Base):
