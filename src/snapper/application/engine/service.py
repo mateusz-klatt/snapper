@@ -318,6 +318,8 @@ class TradingEngineService:
         sequence_id: int,
         grouped_correlation_id: str | None = None,
         reference_price: float | None = None,
+        signal_public_id: str | None = None,
+        ai_review_public_id: str | None = None,
     ) -> TradeCommandInsertRow:
         """Return the TradeCommand insert row for a strategy submit.
 
@@ -338,6 +340,12 @@ class TradingEngineService:
         existing ``price`` column onto the dispatch payload. Live-venue
         market commands MUST keep it ``None`` — a real exchange must
         never receive a market order carrying a price.
+
+        ``signal_public_id`` and ``ai_review_public_id`` are the
+        decision-lineage stamps (PnL Phase 1): the durable command row
+        records which signal fired it and which AI review approved it.
+        Both are nullable — non-AI strategy emits carry only the
+        signal, and test fixtures may carry neither.
         """
         return {
             "command_type": OrderCommandEnum.SUBMIT,
@@ -365,6 +373,8 @@ class TradingEngineService:
             "wallet_public_id": self.wallet_public_id or "",
             "operator_public_id": self.operator_public_id or None,
             "source_surface": "strategy",
+            "signal_public_id": signal_public_id,
+            "ai_review_public_id": ai_review_public_id,
         }
 
     def _check_in_flight_timeout(self) -> None:
@@ -650,10 +660,16 @@ class TradingEngineService:
 
         Three-way selection:
             1. ``ai_review_public_id`` set → AI-attribution guard
-               (resolves user from cited row, runs caps).
+               (resolves user from cited row, runs caps). The yielded
+               guard's ATTRIBUTED ``user_public_id`` and admission
+               ``submitted_notional_usd`` are stamped onto the row —
+               without the user stamp, AI-approved strategy commands
+               would evade the rolling-notional and open-order
+               history on every subsequent cap evaluation.
             2. caps_enforcer wired but no AI attribution →
                ``guard_service_principal`` (existing audit-bypass
-               behaviour, byte-identical for non-AI strategy emits).
+               behaviour for non-AI strategy emits; still snapshots
+               the best-effort admission notional).
             3. No caps_enforcer (test fixture) → direct insert.
 
         Args:
@@ -676,13 +692,16 @@ class TradingEngineService:
                 submission,
                 ai_review_public_id=ai_review_public_id,
                 ai_review_dispatch_version=ai_review_dispatch_version,
-            ):
+            ) as guard:
+                insert_row["user_public_id"] = guard.submission.user_public_id
+                insert_row["submitted_notional_usd"] = guard.submitted_notional_usd
                 _, command_public_id = await repository.insert_trade_command(
                     insert_row, ownership=self._ownership
                 )
             return command_public_id
         if self._caps_enforcer is not None:
-            async with self._caps_enforcer.guard_service_principal(submission):
+            async with self._caps_enforcer.guard_service_principal(submission) as guard:
+                insert_row["submitted_notional_usd"] = guard.submitted_notional_usd
                 _, command_public_id = await repository.insert_trade_command(
                     insert_row, ownership=self._ownership
                 )
@@ -705,6 +724,7 @@ class TradingEngineService:
         ai_review_public_id: str | None = None,
         ai_review_dispatch_version: int | None = None,
         grouped_correlation_id: str | None = None,
+        signal_public_id: str | None = None,
     ) -> _OrderDispatch:
         """Publish order request via the durable-outbox path.
 
@@ -737,6 +757,11 @@ class TradingEngineService:
             grouped_correlation_id: When set (a paired-execution leg),
                 stamped as the command's correlation_id so it joins its
                 group and is held by the outbox arming gate until armed.
+            signal_public_id: Durable lineage stamp — the
+                ``signals.public_id`` of the envelope that fired this
+                emit, threaded from the coordinator so the command row
+                records its decision provenance. ``None`` for
+                signal-less callers (test fixtures, internal stops).
 
         Returns:
             An :class:`_OrderDispatch` carrying the venue ``client_order_id``
@@ -800,6 +825,8 @@ class TradingEngineService:
                 sequence_id=sequence_id,
                 grouped_correlation_id=grouped_correlation_id,
                 reference_price=reference_price,
+                signal_public_id=signal_public_id,
+                ai_review_public_id=ai_review_public_id,
             )
             command_public_id = await self._insert_strategy_trade_command(
                 strategy_submission,
@@ -917,6 +944,7 @@ class TradingEngineService:
         ai_review_public_id: str | None = None,
         ai_review_dispatch_version: int | None = None,
         grouped_correlation_id: str | None = None,
+        signal_public_id: str | None = None,
     ) -> str | None:
         """Execute position change based on desired position size.
 
@@ -946,6 +974,10 @@ class TradingEngineService:
                 stamped as the command's correlation_id so the command
                 joins its paired-execution group and is held by the outbox
                 arming gate until the group arms.
+            signal_public_id: The firing signal's durable
+                ``signals.public_id``, forwarded from the coordinator's
+                ``_on_signal`` and persisted onto the command row as
+                decision lineage (PnL Phase 1).
 
         Returns:
             The durable command ``public_id`` when an order was dispatched
@@ -990,6 +1022,7 @@ class TradingEngineService:
             ai_review_public_id=ai_review_public_id,
             ai_review_dispatch_version=ai_review_dispatch_version,
             grouped_correlation_id=grouped_correlation_id,
+            signal_public_id=signal_public_id,
         )
         self.order_in_flight = True
         self.pending_client_order_id = dispatch.client_order_id

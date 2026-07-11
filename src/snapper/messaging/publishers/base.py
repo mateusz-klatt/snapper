@@ -1751,9 +1751,24 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
             timestamp=now,
+            source_exchange=self._get_instrument_source_exchange(),
         )
         self._instrument_cache[native_symbol] = instrument_public_id
         return instrument_public_id
+
+    def _get_instrument_source_exchange(self) -> str | None:
+        """Return the source-venue identity to stamp on ensured instruments.
+
+        The paper publisher overrides this with its bound source
+        exchange so the paper instrument row records which real venue
+        it replays/prices from (the canonical source→paper identity
+        mapping, PnL Phase 1). Real-venue publishers return ``None`` —
+        their instruments ARE the source.
+
+        Returns:
+            The lowercase source exchange name, or ``None``.
+        """
+        return None
 
     def _resolve_candle_public_id(
         self, instrument_public_id: str, timeframe: str, open_at: datetime

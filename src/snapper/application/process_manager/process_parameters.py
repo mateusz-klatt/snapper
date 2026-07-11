@@ -15,6 +15,8 @@ parameters externally, then instantiates via keyword unpacking.
 from datetime import date
 from datetime import datetime
 
+from pydantic import model_validator
+
 from snapper.api.schemas.base import StrictBody
 from snapper.core.json_types import JsonObject
 from snapper.core.types import ExchangeEnum
@@ -74,6 +76,9 @@ class PaperPublisherParameters(StrictBody):
 
     Attributes:
         paper_instruments: Mapping of exchange to symbol lists for replay.
+            Each symbol may appear under exactly ONE source exchange —
+            the source→paper identity mapping (PnL Phase 1) must be
+            deterministic.
         start_time: Start timestamp for backtesting (Unix seconds).
         end_time: End timestamp for backtesting (Unix seconds).
     """
@@ -81,6 +86,31 @@ class PaperPublisherParameters(StrictBody):
     paper_instruments: dict[str, list[str]] = {}
     start_time: float | None = None
     end_time: float | None = None
+
+    @model_validator(mode="after")
+    def _reject_cross_source_symbol_duplicates(self) -> PaperPublisherParameters:
+        """Reject a symbol listed under more than one source exchange.
+
+        Returns:
+            The validated model.
+
+        Raises:
+            ValueError: When a symbol appears under multiple source
+                exchanges (case-insensitive on the exchange name).
+        """
+        symbol_sources: dict[str, str] = {}
+        for source_exchange, symbols in self.paper_instruments.items():
+            normalized = source_exchange.lower()
+            for symbol in symbols:
+                prior = symbol_sources.get(symbol)
+                if prior is not None and prior != normalized:
+                    raise ValueError(
+                        f"paper_instruments lists symbol {symbol!r} under both "
+                        f"{prior!r} and {normalized!r}; assign each symbol to "
+                        "exactly one source exchange"
+                    )
+                symbol_sources[symbol] = normalized
+        return self
 
 
 class AggregatesBackfillParameters(StrictBody):

@@ -25,6 +25,7 @@ import pytest
 from sqlalchemy import Select
 from sqlalchemy import select as _sa_select
 from sqlalchemy import text
+from sqlalchemy import update as sqlalchemy_update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
@@ -2639,15 +2640,16 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session.rollback.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_ensure_instrument_race_retry_uses_bus_time(
+    async def test_ensure_instrument_race_retry_targets_current_row(
         self, mock_postgres_repo: SQLAlchemyRepository
     ) -> None:
-        """Regression: retry after IntegrityError uses caller's bus_time.
+        """Retry after IntegrityError targets the CURRENT active row.
 
         Given: Historical timestamp passed to ensure_instrument,
         When: First INSERT hits IntegrityError (race),
-        Then: Retry lookup calls where_active with the same bus_time,
-              not datetime.now(UTC).
+        Then: The retry lookup filters ``known_to == KNOWN_TO_MAX``
+            (clock-free), never the caller's possibly-lagging bus time
+            — an as-of miss here would fork a duplicate active row.
         """
         historical_time = datetime(2024, 1, 15, tzinfo=UTC)
         mock_session = AsyncMock()
@@ -2656,6 +2658,7 @@ class TestSQLAlchemyRepositoryDialects:
         mock_instrument = Mock()
         mock_instrument.id = 42
         mock_instrument.public_id = "hist-pid"
+        mock_instrument.source_exchange = None
         mock_result2 = Mock()
         mock_result2.scalar_one_or_none.return_value = mock_instrument
         mock_session.execute.side_effect = [mock_result, mock_result2]
@@ -2678,7 +2681,8 @@ class TestSQLAlchemyRepositoryDialects:
             retry_stmt = mock_session.execute.call_args_list[1].args[0]
             compiled = retry_stmt.compile(compile_kwargs={"literal_binds": True})
             compiled_sql = str(compiled)
-            assert "2024-01-15" in compiled_sql
+            assert "9999-12-31" in compiled_sql
+            assert "2024-01-15" not in compiled_sql
 
     @pytest.mark.asyncio
     async def test_ensure_instrument_integrity_error_reraise(
@@ -5970,20 +5974,19 @@ async def test_bulk_dispatch_trade_commands_skips_missing_public_id(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_bulk_dispatch_trade_commands_skips_row_outside_per_spec_bus_time(
+async def test_bulk_dispatch_trade_commands_clamps_stale_clock_spec(
     tmp_path: Path,
 ) -> None:
-    """Per-row SCD2 guard rejects rows whose timestamp is beyond their spec's bus_time.
+    """A lagging dispatcher clock cannot strand a published command.
 
     Given: Two persisted trade commands at ``now`` and a mixed batch of
-        dispatch specs — one with ``bus_time < now`` (would create a
-        backwards-in-time SCD2 transition) and one with ``bus_time > now``,
+        dispatch specs — one with ``bus_time < now`` (a dispatcher whose
+        clock lags the writer's bus time) and one with ``bus_time > now``,
     When: ``bulk_dispatch_trade_commands`` runs,
-    Then: The bulk SELECT's aggregate ``min/max`` bounds catch both active
-        rows, but the per-row guard at the iteration site skips the row
-        whose ``existing.timestamp`` exceeds its own spec's ``bus_time``
-        (covering the False branch of the per-row check); only the
-        well-ordered spec applies and ``applied == 1``.
+    Then: BOTH rows transition — the stale-clock spec's close/successor
+        timestamps are clamped to the row's own (later) bus time, so a
+        successfully published command can never stay ``created`` and be
+        redispatched just because the dispatcher's clock lagged.
     """
     db_path = tmp_path / "cmd_bulk_dispatch_per_row.db"
     r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
@@ -6036,11 +6039,13 @@ async def test_bulk_dispatch_trade_commands_skips_row_outside_per_spec_bus_time(
             },
         ]
     )
-    assert applied == 1
+    assert applied == 2
     active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", t_post)
     statuses = {row["public_id"]: row["status"] for row in active}
-    assert statuses[inserted_pids[0]] == "created"
+    timestamps = {row["public_id"]: row["timestamp"] for row in active}
+    assert statuses[inserted_pids[0]] == "dispatched"
     assert statuses[inserted_pids[1]] == "dispatched"
+    assert timestamps[inserted_pids[0]] == now
 
 
 @pytest.mark.asyncio
@@ -9999,7 +10004,14 @@ async def test_get_orders_returns_plan_public_id(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_get_order_by_command_public_id_returns_matching_order(tmp_path: Path) -> None:
-    """Lookup by ``trade_commands.public_id`` resolves the linked order."""
+    """Lookup by ``trade_commands.public_id`` resolves the linked order.
+
+    Given: a manual-style command (plan-linked) whose scoped
+        ``client_order_id`` was echoed onto an orders row with the same
+        wallet, mode, and instrument exchange,
+    When: ``get_order_by_command_public_id`` runs,
+    Then: the order resolves via the cid join.
+    """
     r, _, inst_pid = await _seed_full_repo(tmp_path)
     plan_pid = "00000000-0000-7000-8000-0000000b0001"
     now = datetime.now(UTC)
@@ -10011,8 +10023,8 @@ async def test_get_order_by_command_public_id_returns_matching_order(tmp_path: P
             "instrument": "BTC-USD",
             "mode": "live",
             "strategy_id": "engine-buy",
-            "client_order_id": "cid-100",
-            "venue_client_id": "vcid-100",
+            "client_order_id": "cid-101",
+            "venue_client_id": "cid-101",
             "side": "buy",
             "order_type": "market",
             "quantity": 0.5,
@@ -10023,6 +10035,7 @@ async def test_get_order_by_command_public_id_returns_matching_order(tmp_path: P
             "session_id": "s-test",
             "sequence_id": 100,
             "timestamp": now,
+            "wallet_public_id": _TEST_WALLET_A,
             "plan_public_id": plan_pid,
         }
     )
@@ -10033,6 +10046,132 @@ async def test_get_order_by_command_public_id_returns_matching_order(tmp_path: P
     assert found is not None
     assert found["plan_public_id"] == plan_pid
     assert found["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_get_order_by_command_public_id_resolves_plan_less_strategy_command(
+    tmp_path: Path,
+) -> None:
+    """A strategy command (NULL plan) resolves its order via the cid.
+
+    Given: a strategy emit whose command carries NO ``plan_public_id``
+        (the historical plan join could never match NULL == NULL) but
+        whose cid was echoed onto the executor-written orders row,
+    When: ``get_order_by_command_public_id`` runs,
+    Then: the order resolves — no more perpetual ``pending_dispatch``.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    _, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-201",
+            "venue_client_id": "cid-201",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-201",
+            "session_id": "s-test",
+            "sequence_id": 200,
+            "timestamp": now,
+            "wallet_public_id": _TEST_WALLET_A,
+        }
+    )
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=201, now=now)
+    found = await r.get_order_by_command_public_id(cmd_pid, as_of=datetime.now(UTC))
+    assert found is not None
+    assert found["status"] == "open"
+    assert found["plan_public_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_order_by_command_public_id_scopes_by_wallet(tmp_path: Path) -> None:
+    """A cid collision across wallets never resolves the wrong order.
+
+    Given: a command and an orders row sharing a ``client_order_id``
+        but owned by DIFFERENT wallets,
+    When: ``get_order_by_command_public_id`` runs,
+    Then: the lookup returns None (defence-in-depth scoping).
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    _, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-301",
+            "venue_client_id": "cid-301",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-301",
+            "session_id": "s-test",
+            "sequence_id": 300,
+            "timestamp": now,
+            "wallet_public_id": "00000000-0000-7000-8000-00000000dead",
+        }
+    )
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=301, now=now)
+    found = await r.get_order_by_command_public_id(cmd_pid, as_of=datetime.now(UTC))
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_get_order_by_command_public_id_cancel_resolves_original_order(
+    tmp_path: Path,
+) -> None:
+    """A cancel command's public_id resolves the ORIGINAL order.
+
+    Given: a cancel command deliberately reusing the original order's
+        ``client_order_id`` (the cancel-command convention),
+    When: ``get_order_by_command_public_id`` runs with the CANCEL
+        command's public_id,
+    Then: the original order resolves — documented, expected behaviour.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    _, cancel_pid = await r.insert_trade_command(
+        {
+            "command_type": "cancel",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "manual",
+            "client_order_id": "cid-401",
+            "venue_client_id": "cid-401",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-401",
+            "session_id": "s-test",
+            "sequence_id": 400,
+            "timestamp": now,
+            "wallet_public_id": _TEST_WALLET_A,
+        }
+    )
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=401, now=now)
+    found = await r.get_order_by_command_public_id(cancel_pid, as_of=datetime.now(UTC))
+    assert found is not None
+    assert found["client_order_id"] == "cid-401"
 
 
 @pytest.mark.asyncio
@@ -11397,3 +11536,105 @@ async def test_upsert_candles_persists_and_returns_provenance(tmp_path: Path) ->
     assert len(rows) == 1
     assert rows[0]["source"] == "synthesized"
     assert rows[0]["complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_order_by_command_public_id_scopes_by_mode(tmp_path: Path) -> None:
+    """A cid collision across modes never resolves the wrong order.
+
+    Given: a PAPER command and a LIVE orders row sharing a
+        ``client_order_id``,
+    When: ``get_order_by_command_public_id`` runs,
+    Then: the lookup returns None — mode is part of the join scope.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    _, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "paper.BTC-USD.paper",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "paper",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-501",
+            "venue_client_id": "cid-501",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-501",
+            "session_id": "s-test",
+            "sequence_id": 500,
+            "timestamp": now,
+            "wallet_public_id": _TEST_WALLET_A,
+        }
+    )
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=501, now=now)
+    found = await r.get_order_by_command_public_id(cmd_pid, as_of=datetime.now(UTC))
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_get_order_by_command_public_id_survives_symbol_rename(tmp_path: Path) -> None:
+    """The lookup survives a symbol rename (identity, not spelling).
+
+    Given: a resolvable command/order pair whose SYMBOL row is then
+        SCD2-renamed to a new native spelling,
+    When: ``get_order_by_command_public_id`` runs after the rename,
+    Then: the order still resolves — the join never compares the
+        current symbol spelling to the command's frozen instrument
+        string.
+    """
+    r, sym_pid, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    _, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-601",
+            "venue_client_id": "cid-601",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-601",
+            "session_id": "s-test",
+            "sequence_id": 600,
+            "timestamp": now,
+            "wallet_public_id": _TEST_WALLET_A,
+        }
+    )
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=601, now=now)
+    rename_at = now + timedelta(seconds=1)
+    async with r.session() as s:
+        await s.execute(
+            sqlalchemy_update(Symbol)
+            .where(Symbol.public_id == sym_pid, Symbol.known_to == KNOWN_TO_MAX)
+            .values(known_to=rename_at)
+        )
+        s.add(
+            Symbol(
+                public_id=sym_pid,
+                native_symbol="XBT-USD",
+                base="XBT",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=rename_at,
+                session_id="s-test",
+                sequence_id=602,
+            )
+        )
+        await s.commit()
+    found = await r.get_order_by_command_public_id(cmd_pid, as_of=rename_at + timedelta(seconds=1))
+    assert found is not None
+    assert found["instrument"] == "XBT-USD"

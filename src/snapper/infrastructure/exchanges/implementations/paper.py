@@ -385,15 +385,12 @@ class PaperExchangeClient(ExchangeClientBase):
         accounting downstream. Order lifecycle is re-checked after
         every await so a racing ``cancel_order``/``disconnect`` wins.
 
-        Known accepted residual: the executor's execution-stream cancel
-        path updates the order row and drops correlation WITHOUT
-        publishing a bus event, so the engine's in-flight guard stays
-        set — it is LAZY: cleared only when a LATER signal for the same
-        engine re-evaluates it after 60s, and until then subsequent
-        signals for the instrument are dropped. Acceptable here because
-        unpriceable-cancel is rare by construction; publishing
-        stream-sourced terminal order events is tracked explicitly in
-        plan_2026_07_10_portfolio_truth_risk_pnl.md Phase 1.
+        The unpriceable-cancel emitted here rides the executor's
+        stream-terminal path, which (since PnL Phase 1) publishes an
+        ``OrderEventData`` with the ``cancelled`` suffix after the
+        durable ``order_terminal`` write — the engine's in-flight
+        guard releases promptly instead of starving until the 60s
+        in-flight timeout valve.
         """
         try:
             await asyncio.sleep(self.fill_delay)

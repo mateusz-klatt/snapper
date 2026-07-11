@@ -55,6 +55,33 @@ def test_trader_coordinator_build_caps_enforcer_returns_instance_for_sqlalchemy(
     assert isinstance(enforcer, TradingCapsEnforcer)
 
 
+def _stub_plan_guard() -> Guard:
+    """Build the Guard payload the plan-service guard stubs yield.
+
+    Returns:
+        A :class:`Guard` with a placeholder submission and a NULL
+        admission notional, matching what ``_emit_trade_command``
+        reads after context entry.
+    """
+    return Guard(
+        submission=TradeCommandSubmission(
+            user_public_id=None,
+            operator_public_id=None,
+            wallet_public_id="w1",
+            instrument_public_id="inst-1",
+            command_type="submit",
+            side="buy",
+            order_type="market",
+            quantity=None,
+            price=None,
+            source_surface="rest",
+            idempotency_key=None,
+        ),
+        assigned_public_id="guard-pid",
+        submitted_notional_usd=55.5,
+    )
+
+
 @pytest.mark.asyncio
 async def test_trading_engine_send_order_with_enforcer_exercises_guard_branch() -> None:
     """``_send_order`` wraps the insert in ``guard_service_principal`` when enforcer set.
@@ -167,8 +194,9 @@ async def test_plan_executor_emit_trade_command_service_principal_path() -> None
     bypass_calls = {"n": 0}
 
     class _BypassCtx:
-        async def __aenter__(self) -> None:
+        async def __aenter__(self) -> Guard:
             bypass_calls["n"] += 1
+            return _stub_plan_guard()
 
         async def __aexit__(self, *_args: Any) -> None:
             """No-op exit — service-principal path skips caps."""
@@ -205,6 +233,8 @@ async def test_plan_executor_emit_trade_command_service_principal_path() -> None
         quantity=1.0,
     )
     assert bypass_calls["n"] == 1
+    inserted = service.repository.insert_trade_command.await_args.args[0]
+    assert inserted["submitted_notional_usd"] == 55.5
 
 
 @pytest.mark.asyncio
@@ -248,8 +278,9 @@ async def test_plan_executor_emit_trade_command_user_bound_path_uses_guard() -> 
     guard_calls = {"n": 0}
 
     class _GuardCtx:
-        async def __aenter__(self) -> None:
+        async def __aenter__(self) -> Guard:
             guard_calls["n"] += 1
+            return _stub_plan_guard()
 
         async def __aexit__(self, *_args: Any) -> None:
             """No-op exit — guard holds per-user lock across block."""
@@ -278,6 +309,8 @@ async def test_plan_executor_emit_trade_command_user_bound_path_uses_guard() -> 
         quantity=1.0,
     )
     assert guard_calls["n"] == 1
+    inserted = service.repository.insert_trade_command.await_args.args[0]
+    assert inserted["submitted_notional_usd"] == 55.5
 
 
 def _usd_converter_unused_marker() -> USDConverter | None:

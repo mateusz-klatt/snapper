@@ -611,6 +611,15 @@ FillStatus = Literal[FillStatusEnum.FILLED, FillStatusEnum.PARTIAL]
 CancelEventType = Literal[OrderEventEnum.CANCELLED, OrderEventEnum.REJECTED]
 """Event types for cancel command responses."""
 
+StreamTerminalEventType = Literal[OrderEventEnum.CANCELLED, OrderEventEnum.EXPIRED]
+"""Event types for venue-stream-sourced order terminals (PnL Phase 1).
+
+A cancel/expiry arriving on the venue EXECUTION STREAM (as opposed to a
+cancel-command response) must publish a bus terminal so the engine's
+in-flight guard releases promptly instead of waiting for the lazy 60s
+valve. Distinct from :data:`CancelEventType` because stream terminals
+can be EXPIRED but never REJECTED."""
+
 ReplaceEventType = Literal[OrderEventEnum.REPLACED, OrderEventEnum.REJECTED]
 """Event types for replace command responses."""
 

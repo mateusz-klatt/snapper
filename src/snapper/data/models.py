@@ -280,10 +280,24 @@ class Instrument(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
+        CheckConstraint(
+            "source_exchange IS NULL OR "
+            "(source_exchange = LOWER(source_exchange) AND exchange = 'paper')",
+            name="ck_instrument_source_exchange",
+        ),
         Index("ix_instruments_exchange", "exchange"),
     )
     symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     exchange: Mapped[str] = mapped_column(String(32))
+    source_exchange: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """Source-venue identity a PAPER instrument replays/prices from.
+
+    Authored by the source-bound paper publisher (it knows which real
+    venue its frames come from — the trader's settings view may
+    differ). NULL for every non-paper instrument (CHECK-enforced) and
+    for paper instruments minted before the mapping existed. The
+    canonical source→paper identity map for cap keys and USD valuation
+    resolves through this column (PnL Phase 1)."""
     requires_ai_review: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
@@ -1251,6 +1265,9 @@ class TradeCommand(TemporalMixin, Base):
     correlation_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     plan_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True, index=True)
     source_surface: Mapped[str] = mapped_column(String(20), nullable=False, server_default="rest")
+    signal_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True, index=True)
+    ai_review_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True, index=True)
+    submitted_notional_usd: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
 
 
 class VenueEvent(TemporalMixin, Base):

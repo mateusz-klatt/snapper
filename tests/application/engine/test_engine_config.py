@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import dataclasses
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC
@@ -26,6 +27,7 @@ from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.trade.balance_service import BalanceService
+from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
@@ -1469,7 +1471,7 @@ def _engine_with_caps_capture() -> tuple[TradingEngineService, list[Any]]:
     class _CapsCapture:
         def guard_service_principal(self, submission: Any) -> Any:
             captured.append(submission)
-            return _NullCM()
+            return _GuardCM(submission)
 
         def guard_with_ai_review_attribution(
             self,
@@ -1478,13 +1480,26 @@ def _engine_with_caps_capture() -> tuple[TradingEngineService, list[Any]]:
             ai_review_public_id: str,
             ai_review_dispatch_version: int | None,
         ) -> Any:
-            del ai_review_public_id, ai_review_dispatch_version
+            del ai_review_dispatch_version
             captured.append(submission)
-            return _NullCM()
+            return _GuardCM(
+                dataclasses.replace(
+                    submission,
+                    user_public_id="user-from-review",
+                    ai_review_public_id=ai_review_public_id,
+                )
+            )
 
-    class _NullCM:
-        async def __aenter__(self) -> Any:
-            return self
+    class _GuardCM:
+        def __init__(self, submission: Any) -> None:
+            self._guard = Guard(
+                submission=submission,
+                assigned_public_id="guard-pid",
+                submitted_notional_usd=None,
+            )
+
+        async def __aenter__(self) -> Guard:
+            return self._guard
 
         async def __aexit__(self, *_a: Any) -> None:
             return None
@@ -3570,3 +3585,63 @@ def test_setup_trade_services_wires_dispatch_ttl_and_expiry() -> None:
     coord._setup_trade_services()
     assert coord.outbox is not None
     assert coord.outbox._dispatch_ttl_s is None
+
+
+@pytest.mark.asyncio
+async def test_send_order_ai_attributed_stamps_guard_identity_on_row() -> None:
+    """The AI-attribution branch persists the guard's resolved identity.
+
+    Given: an AI-attributed strategy emit whose caps guard resolves the
+        acting user from the cited review (the yielded Guard carries
+        the ATTRIBUTED submission),
+    When: ``_send_order`` inserts the durable row,
+    Then: the row carries the resolved ``user_public_id`` plus the
+        guard's admission notional and both lineage stamps — without
+        the user stamp, AI-approved strategy commands would evade the
+        rolling-notional and open-order history.
+    """
+    engine, _captured = _engine_with_caps_capture()
+    engine.instrument_specs = {
+        "BTC-USD": InstrumentSpec(public_id="inst-uuid-9", tick_size=0.01, lot_size=0.0001),
+    }
+    await engine._send_order(
+        side="buy",
+        size=0.5,
+        price=100.0,
+        reason="heartbeat approved",
+        ai_review_public_id="rev-uuid-9",
+        ai_review_dispatch_version=1,
+        signal_public_id="sig-uuid-9",
+    )
+    insert_row = cast(AsyncMock, engine._repository).insert_trade_command.call_args.args[0]
+    assert insert_row["user_public_id"] == "user-from-review"
+    assert insert_row["submitted_notional_usd"] is None
+    assert insert_row["signal_public_id"] == "sig-uuid-9"
+    assert insert_row["ai_review_public_id"] == "rev-uuid-9"
+
+
+@pytest.mark.asyncio
+async def test_send_order_service_principal_stamps_notional_on_row() -> None:
+    """The service-principal branch persists the guard's notional quote.
+
+    Given: a non-AI strategy emit routed through
+        ``guard_service_principal`` (best-effort admission quote),
+    When: ``_send_order`` inserts the durable row,
+    Then: the row carries the guard's ``submitted_notional_usd``, a
+        ``signal_public_id`` lineage stamp, and a NULL review citation.
+    """
+    engine, _captured = _engine_with_caps_capture()
+    engine.instrument_specs = {
+        "BTC-USD": InstrumentSpec(public_id="inst-uuid-10", tick_size=0.01, lot_size=0.0001),
+    }
+    await engine._send_order(
+        side="sell",
+        size=0.25,
+        price=90.0,
+        reason="engine-sell",
+        signal_public_id="sig-uuid-10",
+    )
+    insert_row = cast(AsyncMock, engine._repository).insert_trade_command.call_args.args[0]
+    assert insert_row["submitted_notional_usd"] is None
+    assert insert_row["signal_public_id"] == "sig-uuid-10"
+    assert insert_row["ai_review_public_id"] is None

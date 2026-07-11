@@ -30,7 +30,9 @@ from sqlalchemy.exc import IntegrityError
 from snapper.application.engine.service import compute_shard_key
 from snapper.application.plans import cancel_service
 from snapper.application.trade.caps_enforcer import CapsViolationError
+from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
@@ -87,6 +89,7 @@ def _allow_wallet(repo: Any, wallet_public_id: str = "wallet-1") -> None:
     repo.list_accessible_wallets_for_operators = AsyncMock(
         return_value=[_wallet_row(wallet_public_id)]
     )
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
 
 
 def _build_server(
@@ -199,6 +202,32 @@ class TestListInstrumentsTool:
                 ROLE_PERMISSIONS[UserRole.VIEWER] = saved
 
 
+def _stub_mcp_guard() -> Guard:
+    """Build the Guard payload an admitting MCP enforcer stub yields.
+
+    Returns:
+        A :class:`Guard` with a placeholder submission and a NULL
+        admission notional, matching what the tool body reads.
+    """
+    return Guard(
+        submission=TradeCommandSubmission(
+            user_public_id="user-1",
+            operator_public_id=None,
+            wallet_public_id="wallet-1",
+            instrument_public_id=None,
+            command_type="create",
+            side="buy",
+            order_type="market",
+            quantity=None,
+            price=None,
+            source_surface="mcp",
+            idempotency_key=None,
+        ),
+        assigned_public_id="guard-pid",
+        submitted_notional_usd=77.25,
+    )
+
+
 class TestSubmitManualOrderTool:
     """Coverage for the ``submit_manual_order`` MCP tool."""
 
@@ -207,7 +236,7 @@ class TestSubmitManualOrderTool:
 
         @asynccontextmanager
         async def _admit(submission: Any) -> Any:
-            yield None
+            yield _stub_mcp_guard()
 
         enforcer = MagicMock()
         enforcer.guard = _admit
@@ -284,6 +313,8 @@ class TestSubmitManualOrderTool:
         assert plan_row["shard_key"] == expected_shard_key
         assert cmd_row["shard_key"] == expected_shard_key
         assert cmd_row["source_surface"] == "mcp"
+        assert cmd_row["submitted_notional_usd"] == 77.25
+        assert cmd_row["ai_review_public_id"] is None
 
     @pytest.mark.asyncio
     async def test_provenance_rows_carry_uuid7_session_id(self) -> None:
@@ -333,6 +364,83 @@ class TestSubmitManualOrderTool:
         assert cmd_row["sequence_id"] == plan_row["sequence_id"] + 1
 
     @pytest.mark.asyncio
+    async def test_spoofed_instrument_public_id_is_rejected(self) -> None:
+        """A caller-cited PID mismatching the symbol/exchange rejects.
+
+        Given: a BTC-USD/kraken order citing an UNRELATED instrument's
+            public id (a delegate trying to price caps against a
+            cheaper identity),
+        When: ``submit_manual_order`` runs,
+        Then: the tool rejects with ``instrument_identity_mismatch``
+            and neither the plan nor the command inserts.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        _allow_wallet(repo)
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-real-btc")
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-cheap-shitcoin",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1.0,
+                "wallet_public_id": "wallet-1",
+                "idempotency_key": "idem-spoof",
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "instrument_identity_mismatch"
+        assert envelope["details"]["resolved_instrument_public_id"] == "inst-real-btc"
+        repo.insert_execution_plan.assert_not_awaited()
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unknown_instrument_identity_is_rejected(self) -> None:
+        """A (symbol, exchange) pair with no active instrument rejects.
+
+        Given: a submission whose (instrument, exchange) resolves to no
+            active instrument row,
+        When: ``submit_manual_order`` runs,
+        Then: the tool rejects with ``instrument_identity_mismatch``.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        _allow_wallet(repo)
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        result = await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "GHOST-USD",
+                "instrument_public_id": "inst-ghost",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1.0,
+                "wallet_public_id": "wallet-1",
+                "idempotency_key": "idem-ghost",
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "instrument_identity_mismatch"
+        assert envelope["details"]["resolved_instrument_public_id"] is None
+        repo.insert_trade_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_omitted_wallet_resolves_single_live_wallet(self) -> None:
         """Omitted wallet resolves to the caller's single accessible live wallet."""
         repo = AsyncMock()
@@ -341,6 +449,7 @@ class TestSubmitManualOrderTool:
         repo.list_accessible_wallets_for_operators = AsyncMock(
             return_value=[_wallet_row("wallet-live")]
         )
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
@@ -562,6 +671,7 @@ class TestSubmitManualOrderTool:
         repo.list_accessible_wallets_for_operators = AsyncMock(
             return_value=[_wallet_row("wallet-1"), _wallet_row("wallet-2")]
         )
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
@@ -1116,8 +1226,8 @@ class TestSubmitManualOrderTool:
         captured: dict[str, Any] = {}
 
         class _Ctx:
-            async def __aenter__(self) -> None:
-                return None
+            async def __aenter__(self) -> Guard:
+                return _stub_mcp_guard()
 
             async def __aexit__(self, *_args: Any) -> None:
                 return None

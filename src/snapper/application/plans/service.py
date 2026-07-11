@@ -634,10 +634,12 @@ class PlanExecutorService(RegisterableProcess):
             idempotency_key=row.get("idempotency_key"),
         )
         if user_public_id is not None:
-            async with self._caps_enforcer.guard(submission):
+            async with self._caps_enforcer.guard(submission) as caps_guard:
+                row["submitted_notional_usd"] = caps_guard.submitted_notional_usd
                 await self.repository.insert_trade_command(row, ownership=None)
         else:
-            async with self._caps_enforcer.guard_service_principal(submission):
+            async with self._caps_enforcer.guard_service_principal(submission) as caps_guard:
+                row["submitted_notional_usd"] = caps_guard.submitted_notional_usd
                 await self.repository.insert_trade_command(row, ownership=None)
 
     async def _reemit_single_stranded_cancel(

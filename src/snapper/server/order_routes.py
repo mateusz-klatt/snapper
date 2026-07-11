@@ -625,7 +625,7 @@ async def create_order(
     )
     plan_public_id: str | None = None
     try:
-        async with caps_enforcer.guard(submission):
+        async with caps_enforcer.guard(submission) as caps_guard:
             try:
                 plan_row: ExecutionPlanInsertRow = {
                     "plan_type": "manual_once",
@@ -689,6 +689,8 @@ async def create_order(
                     "operator_public_id": body.operator_public_id,
                     "user_public_id": user_pid,
                     "plan_public_id": plan_public_id,
+                    "ai_review_public_id": body.ai_review_public_id,
+                    "submitted_notional_usd": caps_guard.submitted_notional_usd,
                 }
                 await repo.insert_trade_command(cmd_row, ownership=None)
             except Exception as exc:

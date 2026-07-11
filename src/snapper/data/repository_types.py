@@ -376,6 +376,9 @@ class TradeCommandRow(TypedDict):
     user_public_id: str | None
     source_surface: str
     plan_public_id: NotRequired[str | None]
+    signal_public_id: NotRequired[str | None]
+    ai_review_public_id: NotRequired[str | None]
+    submitted_notional_usd: NotRequired[float | None]
 
 
 class TradeCommandDispatchUpdate(TypedDict):
@@ -458,6 +461,23 @@ class UserActiveTokenVerificationRow(TypedDict):
     user_is_active: bool
 
 
+class InstrumentSourceResolution(TypedDict):
+    """Outcome of the source→paper identity resolution (PnL Phase 1).
+
+    ``valuation_public_id`` is the identity caps and the USD oracle
+    should key by — the SOURCE instrument for a mapped paper
+    instrument, else the input echoed back. ``is_paper`` and
+    ``mapped`` let the caps enforcer distinguish an unmapped paper
+    instrument (source-keyed caps must FAIL CLOSED — the configured
+    key cannot be found, which must never read as unbounded) from a
+    non-paper instrument whose identity is already canonical.
+    """
+
+    valuation_public_id: str
+    is_paper: bool
+    mapped: bool
+
+
 class UserRecentSubmitRow(TypedDict):
     """Row returned by ``get_user_recent_submits`` for notional-cap math.
 
@@ -467,17 +487,18 @@ class UserRecentSubmitRow(TypedDict):
     ``exchange``; these are carried so the enforcer can optionally
     resolve to ``instrument_public_id`` for converter lookups on
     market orders where ``price`` is NULL.
-    For market orders with ``price IS NULL``
-    the enforcer skips the row from the rolling sum and emits a
-    WARN log. A follow-up plan can snapshot the submit-time USD
-    notional into a dedicated column when non-USD-quoted
-    instruments are onboarded.
+    Sum precedence in the enforcer: ``submitted_notional_usd`` (the
+    admission-time USD quote snapshotted by the caps enforcer) when
+    non-NULL, else the legacy ``quantity × price`` product, else the
+    row is skipped with a WARN log (historical market orders that
+    predate the notional snapshot carry neither value).
     """
 
     instrument: str
     exchange: str
     quantity: float
     price: float | None
+    submitted_notional_usd: float | None
 
 
 class VenueEventRow(TypedDict):
@@ -598,6 +619,9 @@ class TradeCommandInsertRow(TypedDict, total=False):
     plan_public_id: str | None
     exchange_order_id: str | None
     source_surface: str
+    signal_public_id: str | None
+    ai_review_public_id: str | None
+    submitted_notional_usd: float | None
 
 
 class VenueEventInsertRow(TypedDict, total=False):

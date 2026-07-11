@@ -9,7 +9,9 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
+from snapper.application.process_manager.process_parameters import PaperPublisherParameters
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.messaging.publishers.paper import PaperMarketDataPublisher
@@ -592,3 +594,100 @@ class TestPaperMarketDataPublisher:
             await pub.start()
         assert len(start_order) == 2
         assert set(start_order) == {"kraken", "polygon"}
+
+
+class TestSourceExchangeMapping:
+    """Source→paper identity authoring (PnL Phase 1)."""
+
+    def test_per_source_publisher_exposes_source_exchange_hook(self) -> None:
+        """The paper publisher authors its bound source venue.
+
+        Given: a PerSourcePaperPublisher bound to kraken,
+        When: the instrument-source hook is read,
+        Then: it returns "kraken" — the value stamped onto ensured
+            paper instrument rows.
+        """
+        pub = PerSourcePaperPublisher(source_exchange="kraken", symbols=["BTC-USD"])
+        assert pub._get_instrument_source_exchange() == "kraken"
+
+    def test_validate_rejects_cross_source_symbol_duplicate(self) -> None:
+        """A symbol under two sources is rejected at validation.
+
+        Given: paper_instruments listing BTC-USD under both kraken and
+            walutomat,
+        When: the orchestrator validates the mapping,
+        Then: ValueError names the ambiguous symbol — the identity
+            mapping must be deterministic.
+        """
+        with pytest.raises(ValueError, match="BTC-USD"):
+            PaperMarketDataPublisher(
+                paper_instruments={
+                    "kraken": ["BTC-USD"],
+                    "walutomat": ["EUR-PLN", "BTC-USD"],
+                }
+            )
+
+    def test_validate_allows_disjoint_symbol_sets(self) -> None:
+        """Disjoint per-source symbol sets validate cleanly.
+
+        Given: paper_instruments with distinct symbols per source,
+        When: the orchestrator validates the mapping,
+        Then: both sources survive validation.
+        """
+        pub = PaperMarketDataPublisher(
+            paper_instruments={
+                "kraken": ["BTC-USD"],
+                "walutomat": ["EUR-PLN"],
+            }
+        )
+        assert len(pub.paper_instruments) == 2
+
+
+class TestPaperPublisherParametersValidation:
+    """Spawn-boundary validation of the paper publisher parameters."""
+
+    def test_params_reject_cross_source_symbol_duplicate(self) -> None:
+        """The parameters model rejects an ambiguous symbol mapping.
+
+        Given: paper_instruments listing EUR-PLN under two sources,
+        When: PaperPublisherParameters validates,
+        Then: a validation error names the symbol.
+        """
+        with pytest.raises(ValidationError, match="EUR-PLN"):
+            PaperPublisherParameters(
+                paper_instruments={
+                    "walutomat": ["EUR-PLN"],
+                    "kraken": ["EUR-PLN"],
+                }
+            )
+
+    def test_params_accept_disjoint_sources(self) -> None:
+        """Disjoint symbol sets validate at the spawn boundary.
+
+        Given: paper_instruments with distinct symbols per source,
+        When: PaperPublisherParameters validates,
+        Then: the model round-trips the mapping unchanged.
+        """
+        params = PaperPublisherParameters(
+            paper_instruments={
+                "kraken": ["BTC-USD"],
+                "walutomat": ["EUR-PLN"],
+            }
+        )
+        assert params.paper_instruments["kraken"] == ["BTC-USD"]
+
+    def test_params_tolerate_same_symbol_same_source_case_variants(self) -> None:
+        """Case variants of ONE source exchange do not false-positive.
+
+        Given: the same source exchange spelled in two cases, each
+            listing the same symbol,
+        When: PaperPublisherParameters validates,
+        Then: no duplicate error raises (both normalize to one source).
+        """
+        params = PaperPublisherParameters(
+            paper_instruments={
+                "kraken": ["BTC-USD"],
+                "KRAKEN": ["BTC-USD"],
+            }
+        )
+        assert len(params.paper_instruments) == 2

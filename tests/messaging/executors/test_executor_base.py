@@ -5629,6 +5629,8 @@ class TestExecutorBasePersistence:
         call_args = mock_client._log_order_update_to_db.call_args
         assert call_args.kwargs["db_order_id"] == 42
         assert call_args.kwargs["status"] == ExchangeOrderStatusEnum.CLOSED
+        assert call_args.kwargs["filled_size"] == 1.0
+        assert call_args.kwargs["average_price"] == 50000.0
 
     @pytest.mark.asyncio
     async def test_process_execution_partial_logs_open_status(self) -> None:
@@ -5647,6 +5649,7 @@ class TestExecutorBasePersistence:
         ex.pending_orders[order.client_order_id] = pending
         ex.client_by_exchange["ex-partial"] = order.client_order_id
         mock_client = AsyncMock()
+        mock_client._log_order_update_to_db = AsyncMock(return_value=77)
         ex.exchange_client = mock_client
         ex._publish_execution = AsyncMock()
         execution = ExecutionUpdate(
@@ -5666,7 +5669,51 @@ class TestExecutorBasePersistence:
         await ex._process_execution(execution)
         call_args = mock_client._log_order_update_to_db.call_args
         assert call_args.kwargs["status"] == ExchangeOrderStatusEnum.OPEN
+        assert call_args.kwargs["filled_size"] == 0.5
+        assert call_args.kwargs["average_price"] == 50000.0
         assert order.client_order_id in ex.pending_orders
+        assert pending.db_order_id == 77
+
+    @pytest.mark.asyncio
+    async def test_persist_fill_keeps_db_order_id_when_update_fails(self) -> None:
+        """A failed order-row update must not clobber the tracked id.
+
+        Given: a pending partial order whose ``_log_order_update_to_db``
+            returns None (repository unavailable or SQL error),
+        When: the fill is processed,
+        Then: ``pending.db_order_id`` keeps its prior value so the next
+            partial retries against the last known version.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="db-partial-2")
+        pending = base_module.PendingOrderState(
+            request=order, db_order_id=42, order_public_id="pub-42"
+        )
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-partial-2"] = order.client_order_id
+        mock_client = AsyncMock()
+        mock_client._log_order_update_to_db = AsyncMock(return_value=None)
+        ex.exchange_client = mock_client
+        ex._publish_execution = AsyncMock()
+        execution = ExecutionUpdate(
+            order_id="ex-partial-2",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.OPEN,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.25,
+            average_price=None,
+            last_qty=0.25,
+            last_price=49000.0,
+            fee_usd_equiv=0.1,
+        )
+        await ex._process_execution(execution)
+        call_args = mock_client._log_order_update_to_db.call_args
+        assert call_args.kwargs["average_price"] is None
+        assert pending.db_order_id == 42
 
     @pytest.mark.asyncio
     async def test_process_execution_no_db_ids_skips_logging(self) -> None:
@@ -8501,8 +8548,9 @@ class TestRecoveryWatermarkSeeding:
         Given: Venue reports CANCELED with filled=0.5, durable plane empty,
         When: Recovery runs,
         Then: The gap corrective publishes first, then the canceled
-            terminal flows through the pipeline, and the order is not
-            left pending.
+            terminal flows through the pipeline — publishing the
+            stream-terminal ``cancelled`` event (PnL Phase 1) so the
+            engine guard releases — and the order is not left pending.
         """
         ex = self._executor(
             fill_rows=[],
@@ -8513,9 +8561,10 @@ class TestRecoveryWatermarkSeeding:
         ex._publish_cancel_event = AsyncMock()
         await ex._recover_pending_orders("kraken")
         sent = _recovery_sent_fills(ex)
-        assert len(sent) == 1
+        assert len(sent) == 2
         assert sent[0].trade_id == "recon-ex-1-c0.5"
         assert sent[0].last_size == pytest.approx(0.5)
+        assert sent[1].event == "cancelled"
         assert "c1" not in ex.pending_orders
 
     @pytest.mark.asyncio
@@ -10126,3 +10175,375 @@ async def test_retry_sweep_routes_parked_adopted_publishes() -> None:
     ex._publish_order_status.assert_awaited_once()
     assert ex._publish_order_status.await_args.kwargs.get("reason") == "adopted"
     assert parked_entry.adopted_accept_publish_pending is False
+
+
+class TestStreamTerminalPublication:
+    """Stream-sourced terminal events reach the bus (PnL Phase 1)."""
+
+    @staticmethod
+    def _cancel_execution(exec_type: str, order_id: str) -> ExecutionUpdate:
+        """Build a stream terminal ExecutionUpdate frame.
+
+        Args:
+            exec_type: Venue terminal vocabulary (canceled/expired).
+            order_id: Exchange-assigned order id for the frame.
+
+        Returns:
+            The terminal execution frame.
+        """
+        status = (
+            ExchangeOrderStatusEnum.CANCELED
+            if exec_type == "canceled"
+            else ExchangeOrderStatusEnum.EXPIRED
+        )
+        return ExecutionUpdate(
+            order_id=order_id,
+            exec_type=exec_type,
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=status,
+            timestamp=datetime.now(UTC),
+        )
+
+    @pytest.mark.asyncio
+    async def test_stream_cancel_publishes_cancelled_event(self) -> None:
+        """A venue-stream cancel publishes an OrderEventData terminal.
+
+        Given: a tracked pending order and a wired bus publisher,
+        When: a ``canceled`` execution frame is handled,
+        Then: an ``OrderEventData`` with the ``cancelled`` suffix and
+            the pending request's wallet attribution is published, and
+            the correlation maps are dropped.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.msg_publisher = AsyncMock()
+        order = make_order(client_order_id="stream-cxl-1")
+        pending = base_module.PendingOrderState(
+            request=order, db_order_id=11, order_public_id="pub-11"
+        )
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-stream-1"] = order.client_order_id
+        ex.exchange_client = AsyncMock()
+        result = await ex._handle_cancellation(
+            self._cancel_execution("canceled", "ex-stream-1"),
+            "ex-stream-1",
+            order.client_order_id,
+            "kraken",
+        )
+        assert result is True
+        ex.msg_publisher.send.assert_awaited_once()
+        topic, payload = ex.msg_publisher.send.call_args.args
+        assert topic.endswith(".cancelled")
+        assert payload.event == "cancelled"
+        assert payload.client_order_id == order.client_order_id
+        assert payload.wallet_public_id == order.wallet_public_id
+        assert order.client_order_id not in ex.pending_orders
+        assert "ex-stream-1" not in ex.client_by_exchange
+
+    @pytest.mark.asyncio
+    async def test_stream_expiry_publishes_expired_event(self) -> None:
+        """A venue-stream expiry publishes the ``expired`` suffix.
+
+        Given: a tracked pending order and a wired bus publisher,
+        When: an ``expired`` execution frame is handled,
+        Then: the published event carries the ``expired`` suffix (the
+            cancel-command publisher cannot express it).
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.msg_publisher = AsyncMock()
+        order = make_order(client_order_id="stream-exp-1")
+        pending = base_module.PendingOrderState(
+            request=order, db_order_id=12, order_public_id="pub-12"
+        )
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-stream-2"] = order.client_order_id
+        ex.exchange_client = AsyncMock()
+        await ex._handle_cancellation(
+            self._cancel_execution("expired", "ex-stream-2"),
+            "ex-stream-2",
+            order.client_order_id,
+            "kraken",
+        )
+        _, payload = ex.msg_publisher.send.call_args.args
+        assert payload.event == "expired"
+
+    @pytest.mark.asyncio
+    async def test_publish_failure_still_cleans_correlation(self) -> None:
+        """A failed terminal publish degrades to the lazy-valve status quo.
+
+        Given: a bus publisher whose ``send`` raises,
+        When: a stream cancel is handled,
+        Then: the handler still returns True and drops correlation —
+            liveness falls back to the 60s in-flight valve, never a
+            leaked pending entry.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.msg_publisher = AsyncMock()
+        ex.msg_publisher.send = AsyncMock(side_effect=RuntimeError("broker down"))
+        order = make_order(client_order_id="stream-fail-1")
+        pending = base_module.PendingOrderState(
+            request=order, db_order_id=13, order_public_id="pub-13"
+        )
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-stream-3"] = order.client_order_id
+        ex.exchange_client = AsyncMock()
+        result = await ex._handle_cancellation(
+            self._cancel_execution("canceled", "ex-stream-3"),
+            "ex-stream-3",
+            order.client_order_id,
+            "kraken",
+        )
+        assert result is True
+        assert order.client_order_id not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_missing_publisher_warns_and_cleans(self) -> None:
+        """An unwired publisher never blocks terminal cleanup.
+
+        Given: no bus publisher on the executor,
+        When: a stream cancel is handled,
+        Then: the handler warns, returns True, and drops correlation.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.msg_publisher = None
+        order = make_order(client_order_id="stream-nopub-1")
+        pending = base_module.PendingOrderState(
+            request=order, db_order_id=14, order_public_id="pub-14"
+        )
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-stream-4"] = order.client_order_id
+        ex.exchange_client = AsyncMock()
+        result = await ex._handle_cancellation(
+            self._cancel_execution("canceled", "ex-stream-4"),
+            "ex-stream-4",
+            order.client_order_id,
+            "kraken",
+        )
+        assert result is True
+        assert order.client_order_id not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_untracked_terminal_publishes_with_empty_attribution(self) -> None:
+        """A terminal for an untracked cid still publishes (recon path).
+
+        Given: NO pending entry for the cid (a reconciliation-synthetic
+            terminal after a restart can arrive uncorrelated),
+        When: the stream cancel is handled,
+        Then: the event publishes with empty wallet attribution so the
+            engine intent-clear still fires on the cid.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.msg_publisher = AsyncMock()
+        ex.exchange_client = AsyncMock()
+        result = await ex._handle_cancellation(
+            self._cancel_execution("canceled", "ex-stream-5"),
+            "ex-stream-5",
+            "untracked-cid-1",
+            "kraken",
+        )
+        assert result is True
+        _, payload = ex.msg_publisher.send.call_args.args
+        assert payload.client_order_id == "untracked-cid-1"
+        assert payload.wallet_public_id == ""
+
+
+def _durable_fill_row(
+    fill_size: float, *, exec_id: str | None, trade_id: str | None
+) -> dict[str, Any]:
+    """Build a minimal fill_observed row for dedup-driven tests.
+
+    Args:
+        fill_size: Additive delta recorded on the row.
+        exec_id: Venue execution identity (dedup key).
+        trade_id: Venue trade identity (alternate dedup key).
+
+    Returns:
+        Row dict shaped like VenueEventRow for the canonical dedup.
+    """
+    return {
+        "event_type": "fill_observed",
+        "client_order_id": "cum-2",
+        "fill_size": fill_size,
+        "fill_price": 100.0,
+        "exec_id": exec_id,
+        "trade_id": trade_id,
+    }
+
+
+class TestResolvePersistedCumulative:
+    """Venue-true cumulative resolution for the order-row fill write."""
+
+    @staticmethod
+    def _frame(cum_qty: float | None) -> ExecutionUpdate:
+        """Build a fill frame with or without a venue cumulative.
+
+        Args:
+            cum_qty: Venue cumulative (None models delta-only venues).
+
+        Returns:
+            The execution frame.
+        """
+        return ExecutionUpdate(
+            order_id="ex-cum",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.OPEN,
+            timestamp=datetime.now(UTC),
+            cum_qty=cum_qty,
+            last_qty=0.5,
+            last_price=100.0,
+        )
+
+    @staticmethod
+    def _fill(size: float) -> Any:
+        """Build a minimal fill payload carrying a cumulative size.
+
+        Args:
+            size: Published-anchored cumulative.
+
+        Returns:
+            A stand-in object exposing ``size``.
+        """
+        return SimpleNamespace(size=size)
+
+    @pytest.mark.asyncio
+    async def test_cum_carrying_frame_uses_venue_cumulative(self) -> None:
+        """A venue cumulative persists verbatim without a DB read.
+
+        Given: a frame carrying ``cum_qty``,
+        When: the persisted cumulative resolves,
+        Then: ``fill.size`` returns and the durable sum is never read.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.repository = AsyncMock()
+        pending = base_module.PendingOrderState(request=make_order(client_order_id="cum-1"))
+        resolved = await ex._resolve_persisted_cumulative(
+            self._frame(cum_qty=0.5), self._fill(0.5), "cum-1", pending
+        )
+        assert resolved == 0.5
+        ex.repository.get_fill_venue_events_for_order_identity.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_delta_only_frame_uses_higher_additive_truth(self) -> None:
+        """Delta-only frames recover the durable additive cumulative.
+
+        Given: a delta-only frame whose published-anchored ``fill.size``
+            reads 0.5 while the durable plane holds two DISTINCT 0.5
+            fills plus a redelivered duplicate (same exec id) and a
+            trade-id-only redelivery — canonical dedup keeps exactly
+            two rows,
+        When: the persisted cumulative resolves,
+        Then: the durable additive truth (1.0) wins and duplicates
+            never double-count.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.repository = AsyncMock()
+        rows = [
+            _durable_fill_row(0.5, exec_id="ex-a", trade_id="t-1"),
+            _durable_fill_row(0.5, exec_id="ex-a", trade_id="t-1"),
+            _durable_fill_row(0.5, exec_id=None, trade_id="t-1"),
+            _durable_fill_row(0.5, exec_id="ex-b", trade_id="t-2"),
+        ]
+        ex.repository.get_fill_venue_events_for_order_identity = AsyncMock(return_value=rows)
+        pending = base_module.PendingOrderState(request=make_order(client_order_id="cum-2"))
+        resolved = await ex._resolve_persisted_cumulative(
+            self._frame(cum_qty=None), self._fill(0.5), "cum-2", pending
+        )
+        assert resolved == 1.0
+
+    @pytest.mark.asyncio
+    async def test_delta_only_frame_falls_back_on_repo_error(self) -> None:
+        """A durable-plane read failure degrades to the fabricated value.
+
+        Given: a delta-only frame and a repository raising on the
+            additive-sum read,
+        When: the persisted cumulative resolves,
+        Then: the published-anchored ``fill.size`` returns (never an
+            exception on the fill path).
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.repository = AsyncMock()
+        ex.repository.get_fill_venue_events_for_order_identity = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        pending = base_module.PendingOrderState(request=make_order(client_order_id="cum-3"))
+        resolved = await ex._resolve_persisted_cumulative(
+            self._frame(cum_qty=None), self._fill(0.5), "cum-3", pending
+        )
+        assert resolved == 0.5
+
+    @pytest.mark.asyncio
+    async def test_delta_only_frame_without_repository_uses_fill_size(self) -> None:
+        """A repo-less executor persists the fabricated cumulative.
+
+        Given: a delta-only frame and no repository wired,
+        When: the persisted cumulative resolves,
+        Then: ``fill.size`` returns.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.repository = None
+        pending = base_module.PendingOrderState(request=make_order(client_order_id="cum-4"))
+        resolved = await ex._resolve_persisted_cumulative(
+            self._frame(cum_qty=None), self._fill(0.5), "cum-4", pending
+        )
+        assert resolved == 0.5
+
+
+class TestStreamTerminalOrdering:
+    """Durable write → bus publish → correlation pop invariant."""
+
+    @pytest.mark.asyncio
+    async def test_durable_write_precedes_publish_precedes_pop(self) -> None:
+        """The three terminal steps run in replay-safe order.
+
+        Given: a tracked stream cancel with instrumented durable-write
+            and publish hooks,
+        When: ``_handle_cancellation`` runs,
+        Then: the durable ``order_terminal`` write lands BEFORE the bus
+            publish, and the correlation maps still hold the order at
+            publish time (pop happens last).
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="order-cxl-1")
+        pending = base_module.PendingOrderState(
+            request=order, db_order_id=21, order_public_id="pub-21"
+        )
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-order-1"] = order.client_order_id
+        ex.exchange_client = AsyncMock()
+        call_log: list[str] = []
+
+        async def _record(_payload: Any) -> None:
+            call_log.append("durable")
+
+        async def _send(_topic: str, _payload: Any) -> None:
+            call_log.append("publish")
+            assert order.client_order_id in ex.pending_orders
+
+        ex._record_venue_event = AsyncMock(side_effect=_record)
+        ex.msg_publisher = AsyncMock()
+        ex.msg_publisher.send = AsyncMock(side_effect=_send)
+        execution = ExecutionUpdate(
+            order_id="ex-order-1",
+            exec_type="canceled",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.CANCELED,
+            timestamp=datetime.now(UTC),
+        )
+        result = await ex._handle_cancellation(
+            execution, "ex-order-1", order.client_order_id, "kraken"
+        )
+        assert result is True
+        assert call_log == ["durable", "publish"]
+        assert order.client_order_id not in ex.pending_orders

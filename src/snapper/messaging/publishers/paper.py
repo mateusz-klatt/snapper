@@ -83,6 +83,19 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
         """Return 'paper' as the trading exchange identity."""
         return ExchangeEnum.PAPER
 
+    def _get_instrument_source_exchange(self) -> str | None:
+        """Author the paper instrument's source-venue mapping.
+
+        This publisher is bound to exactly one real source exchange, so
+        it is the authoritative writer of
+        ``instruments.source_exchange`` for the paper instruments it
+        replays (PnL Phase 1 identity mapping).
+
+        Returns:
+            The bound source exchange name.
+        """
+        return str(self._source_exchange)
+
     def _get_process_name(self) -> str:
         """Return process name including source exchange for log context."""
         return f"pub:paper:{self._source_exchange}"
@@ -276,14 +289,26 @@ class PaperMarketDataPublisher(RegisterableProcess):
         exchanges not in MarketDataExchange. If all entries are
         filtered, returns empty dict (idle mode).
 
+        A symbol listed under MORE THAN ONE source exchange is
+        rejected with :class:`ValueError`: the source→paper identity
+        mapping (``instruments.source_exchange``, PnL Phase 1) must be
+        deterministic — two sources claiming one symbol would make the
+        paper instrument's valuation identity ambiguous and let the
+        last-started publisher silently flip it.
+
         Args:
             paper_instruments: Raw mapping of exchange names to symbol lists.
 
         Returns:
             Validated mapping with MarketDataExchange keys and deduplicated symbols.
+
+        Raises:
+            ValueError: When a symbol appears under multiple source
+                exchanges.
         """
         valid_exchanges = set(get_args(MarketDataExchange))
         validated: dict[MarketDataExchange, list[str]] = {}
+        symbol_sources: dict[str, str] = {}
         for source_exchange, symbols in paper_instruments.items():
             if not source_exchange:
                 continue
@@ -294,6 +319,16 @@ class PaperMarketDataPublisher(RegisterableProcess):
                 )
                 continue
             validated_symbols = list(dict.fromkeys(symbols))
+            for symbol in validated_symbols:
+                prior = symbol_sources.get(symbol)
+                if prior is not None and prior != normalized:
+                    raise ValueError(
+                        f"paper_instruments lists symbol {symbol!r} under both "
+                        f"{prior!r} and {normalized!r}; the source->paper identity "
+                        "mapping must be deterministic — assign each symbol to "
+                        "exactly one source exchange"
+                    )
+                symbol_sources[symbol] = normalized
             if validated_symbols:
                 validated[cast(MarketDataExchange, normalized)] = validated_symbols
         return validated

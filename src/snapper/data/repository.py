@@ -42,6 +42,7 @@ Example:
 """
 
 import asyncio
+import math
 import os
 import weakref
 from abc import ABC
@@ -105,6 +106,7 @@ from snapper.core.paired_execution import compute_paired_group_key
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
 from snapper.core.types import AllExchange
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
@@ -205,6 +207,7 @@ from snapper.data.repository_types import InstrumentFeedHealthUpsertRow
 from snapper.data.repository_types import InstrumentFrontMonthRow
 from snapper.data.repository_types import InstrumentOrderCapabilityRow
 from snapper.data.repository_types import InstrumentRelatedRow
+from snapper.data.repository_types import InstrumentSourceResolution
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentSymbolRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
@@ -853,13 +856,95 @@ class Repository(ABC):
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
+        source_exchange: str | None = None,
     ) -> tuple[int, str]:
         """Idempotent resolve-or-create for instrument identity.
 
         Looks up the active Instrument by business key
         (symbol_public_id, exchange).  Returns (id, public_id) of the
-        existing row, or inserts a new one if none exists.
-        Never closes an existing version.
+        existing row, or inserts a new one if none exists. A supplied
+        ``source_exchange`` that differs from the active row's value
+        revises the row via SCD2 close-and-insert (same ``public_id``);
+        ``None`` never clears an existing mapping.
+        """
+        ...
+
+    @abstractmethod
+    async def resolve_source_instrument_public_id(
+        self, instrument_public_id: str
+    ) -> InstrumentSourceResolution:
+        """Map a paper instrument's identity to its SOURCE instrument.
+
+        Canonical valuation identity (PnL Phase 1): market snapshots
+        and AI reviews key by the SOURCE venue's instrument, while
+        strategy emission keys by the paper instrument. Resolves via
+        the paper row's ``source_exchange`` + shared
+        ``symbol_public_id`` on CURRENT active rows (clock-free —
+        a caller-clock temporal read here could go stale exactly like
+        the Phase-0 kill-switch bug).
+
+        Returns:
+            An :class:`InstrumentSourceResolution`.
+            ``valuation_public_id`` carries the source instrument's
+            public_id for a mapped paper instrument, else the INPUT
+            echoed back. ``mapped`` is True only when a paper
+            instrument resolved to an EXISTING source instrument;
+            ``is_paper`` lets the caps enforcer fail closed on
+            source-keyed caps for unmapped paper identities.
+        """
+        ...
+
+    @abstractmethod
+    async def get_fill_venue_events_for_order_identity(
+        self,
+        client_order_id: str,
+        wallet_public_id: str,
+        mode: str,
+        exchange: str,
+        exchange_order_id: str | None,
+    ) -> list[VenueEventRow]:
+        """Read an order's durable fill rows scoped by STABLE identity.
+
+        Scope = (client_order_id, wallet_public_id, mode, exchange),
+        plus ``exchange_order_id`` when known (rows carrying a
+        DIFFERENT venue order id are excluded; rows without one — the
+        pre-ACK writes — still count). The native symbol spelling is
+        deliberately NOT part of the identity: it is temporally
+        unstable (symbol renames would hide historical fills). Rows
+        come back id-ordered so callers can apply the canonical replay
+        dedup (``TradeService.dedup_fill_events``) and sum
+        ``fill_size`` additively.
+
+        Returns:
+            Id-ordered ``fill_observed`` rows; empty when none exist.
+        """
+        ...
+
+    @abstractmethod
+    async def get_active_instrument_quote_currency(self, instrument_public_id: str) -> str | None:
+        """Read the CURRENT quote currency for an instrument (clock-free).
+
+        Joins the active Instrument row to its active Symbol row on
+        ``known_to == KNOWN_TO_MAX`` — the USD oracle must never miss a
+        freshly-written active row because the reader's clock lags the
+        writer's bus time.
+
+        Returns:
+            The quote currency code, or ``None`` when no active
+            instrument/symbol pair exists.
+        """
+        ...
+
+    @abstractmethod
+    async def get_active_market_snapshot_price(
+        self, instrument_public_id: str
+    ) -> tuple[float | None, datetime] | None:
+        """Read the CURRENT market-snapshot price row (clock-free).
+
+        Returns:
+            ``(last_price, snapshot_timestamp)`` of the active
+            MarketSnapshot row, or ``None`` when no active row exists.
+            ``last_price`` may itself be NULL (venue never traded).
         """
         ...
 
@@ -1343,20 +1428,22 @@ class Repository(ABC):
         """Resolve an order from its triggering trade-command public_id.
 
         ``Order`` rows do NOT carry ``command_public_id`` directly;
-        the link is via the parent
-        ``execution_plan``: ``trade_commands.public_id == :command``
-        AND ``trade_commands.plan_public_id == orders.plan_public_id``.
-        Implementation issues an internal JOIN on those columns.
+        the link is the command's ``client_order_id``, which the
+        executor echoes onto the orders row for every origin surface
+        (strategy emits carry a NULL ``plan_public_id``, so the
+        historical plan join could never resolve them). The join is
+        scoped by wallet, mode, and the instrument's exchange as
+        defence-in-depth.
 
         Returns ``None`` when:
 
         - The trade command does not exist (caller's responsibility to
           distinguish from "command exists but order not yet ACK'd" by
           calling :meth:`get_trade_command_by_public_id` first), OR
-        - The trade command exists but no order has been written for
-          its ``plan_public_id`` yet (the exchange has not ACK'd the
-          submission). Callers surface this as a ``pending_dispatch``
-          synthetic envelope using the command row's ``plan_public_id``.
+        - The trade command exists but the exchange has not ACK'd the
+          submission (no orders row carries its cid yet). Callers
+          surface this as a ``pending_dispatch`` synthetic envelope
+          using the command row's ``plan_public_id``.
 
         Args:
             command_public_id: UUID7 of the ``trade_commands`` row.
@@ -5084,31 +5171,56 @@ class SQLAlchemyRepository(Repository):
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
+        source_exchange: str | None = None,
     ) -> tuple[int, str]:
         """Idempotent resolve-or-create for instrument identity.
 
         Looks up the active Instrument by business key
         (symbol_public_id, exchange) as of *timestamp*.  Returns
         (id, public_id) of the existing row, or inserts a new one
-        if none exists.  Never closes an existing version.
+        if none exists.
+
+        ``source_exchange`` (PnL Phase 1 identity mapping) is authored
+        by the source-bound paper publisher: when supplied and DIFFERENT
+        from the active row's value, the row is revised via SCD2
+        close-and-insert under a ``FOR UPDATE`` row lock — same
+        ``public_id``, ``requires_ai_review`` preserved, and a
+        non-inverting effective timestamp
+        (``max(timestamp, existing.timestamp)``). ``None`` NEVER clears
+        an existing mapping (callers that don't know the source must
+        not erase it).
+
+        The lookup targets the CURRENT active row
+        (``known_to == KNOWN_TO_MAX``, clock-free): a caller clock
+        lagging a future-stamped current version must still find it —
+        an as-of miss here would insert a duplicate active row. After
+        an insert race the winner is re-read the same way and, when the
+        caller supplied a mapping the winner lacks, reconciled via a
+        recursive revision pass so the requested mapping is never
+        silently dropped.
         """
         bus_time = timestamp
         async with self.session() as s:
-            ts_filter, kt_filter = where_active(Instrument, bus_time)
             q = await s.execute(
-                select(Instrument).where(
+                select(Instrument)
+                .where(
                     Instrument.symbol_public_id == symbol_public_id,
                     Instrument.exchange == exchange,
-                    ts_filter,
-                    kt_filter,
+                    Instrument.known_to == KNOWN_TO_MAX,
                 )
+                .with_for_update()
             )
             inst = q.scalar_one_or_none()
             if inst is not None:
-                return (int(inst.id), str(inst.public_id))
+                if source_exchange is None or inst.source_exchange == source_exchange:
+                    return (int(inst.id), str(inst.public_id))
+                return await self._revise_instrument_source(
+                    s, inst, source_exchange, session_id, sequence_id, bus_time
+                )
             new_inst = Instrument(
                 symbol_public_id=symbol_public_id,
                 exchange=exchange,
+                source_exchange=source_exchange,
                 session_id=session_id,
                 sequence_id=sequence_id,
                 timestamp=bus_time,
@@ -5118,21 +5230,223 @@ class SQLAlchemyRepository(Repository):
                 await s.commit()
             except IntegrityError as exc:
                 await s.rollback()
-                retry_ts, retry_kt = where_active(Instrument, bus_time)
                 q2 = await s.execute(
-                    select(Instrument).where(
+                    select(Instrument)
+                    .where(
                         Instrument.symbol_public_id == symbol_public_id,
                         Instrument.exchange == exchange,
-                        retry_ts,
-                        retry_kt,
+                        Instrument.known_to == KNOWN_TO_MAX,
                     )
+                    .with_for_update()
                 )
                 inst = q2.scalar_one_or_none()
                 if inst is None:
                     raise exc
+                if source_exchange is not None and inst.source_exchange != source_exchange:
+                    return await self._revise_instrument_source(
+                        s, inst, source_exchange, session_id, sequence_id, bus_time
+                    )
                 return (int(inst.id), str(inst.public_id))
             await s.refresh(new_inst)
             return (int(new_inst.id), str(new_inst.public_id))
+
+    @staticmethod
+    async def _revise_instrument_source(
+        s: AsyncSession,
+        inst: Instrument,
+        source_exchange: str,
+        session_id: str,
+        sequence_id: int,
+        bus_time: datetime,
+    ) -> tuple[int, str]:
+        """SCD2-revise an instrument's source mapping (locked row).
+
+        Shared by the direct revision path and the insert-race
+        reconcile in :meth:`ensure_instrument` so a concurrent
+        source-less winner never silently drops the requested mapping.
+        Preserves ``requires_ai_review`` and clamps the effective
+        timestamp to ``max(bus_time, inst.timestamp)``.
+
+        Args:
+            s: Open session holding the row lock.
+            inst: The active row being revised.
+            source_exchange: The mapping to author.
+            session_id: Bus session for the successor.
+            sequence_id: Bus sequence for the successor.
+            bus_time: Caller bus timestamp.
+
+        Returns:
+            ``(successor_id, public_id)``.
+        """
+        effective_ts = max(bus_time, inst.timestamp)
+        await s.execute(
+            update(Instrument).where(Instrument.id == inst.id).values(known_to=effective_ts)
+        )
+        revised = Instrument(
+            public_id=inst.public_id,
+            symbol_public_id=inst.symbol_public_id,
+            exchange=inst.exchange,
+            requires_ai_review=inst.requires_ai_review,
+            source_exchange=source_exchange,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            timestamp=effective_ts,
+        )
+        s.add(revised)
+        await s.flush()
+        revised_id = revised.id
+        await s.commit()
+        return (int(revised_id), str(inst.public_id))
+
+    async def resolve_source_instrument_public_id(
+        self, instrument_public_id: str
+    ) -> InstrumentSourceResolution:
+        """Map a paper instrument's identity to its SOURCE instrument.
+
+        Clock-free reads (``known_to == KNOWN_TO_MAX``) — see the
+        abstract contract for the rationale.
+
+        Args:
+            instrument_public_id: Emission-side instrument identity.
+
+        Returns:
+            An :class:`InstrumentSourceResolution` — see the abstract
+            contract for the field semantics.
+        """
+        async with self.session() as s:
+            row = (
+                await s.execute(
+                    select(
+                        Instrument.symbol_public_id,
+                        Instrument.exchange,
+                        Instrument.source_exchange,
+                    ).where(
+                        Instrument.public_id == instrument_public_id,
+                        Instrument.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            ).one_or_none()
+            if row is None:
+                return {
+                    "valuation_public_id": instrument_public_id,
+                    "is_paper": False,
+                    "mapped": False,
+                }
+            symbol_public_id, exchange, source_exchange = row
+            is_paper = exchange == ExchangeEnum.PAPER.value
+            if not is_paper or source_exchange is None:
+                return {
+                    "valuation_public_id": instrument_public_id,
+                    "is_paper": is_paper,
+                    "mapped": False,
+                }
+            source_pid = (
+                await s.execute(
+                    select(Instrument.public_id).where(
+                        Instrument.symbol_public_id == symbol_public_id,
+                        Instrument.exchange == source_exchange,
+                        Instrument.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            ).scalar_one_or_none()
+            if source_pid is None:
+                return {
+                    "valuation_public_id": instrument_public_id,
+                    "is_paper": True,
+                    "mapped": False,
+                }
+            return {
+                "valuation_public_id": source_pid,
+                "is_paper": True,
+                "mapped": True,
+            }
+
+    async def get_fill_venue_events_for_order_identity(
+        self,
+        client_order_id: str,
+        wallet_public_id: str,
+        mode: str,
+        exchange: str,
+        exchange_order_id: str | None,
+    ) -> list[VenueEventRow]:
+        """Read an order's durable fill rows scoped by STABLE identity.
+
+        Args:
+            client_order_id: Order correlation id.
+            wallet_public_id: Owning wallet (identity scope).
+            mode: Execution mode (identity scope).
+            exchange: Venue discriminator (identity scope).
+            exchange_order_id: Venue order id when known — rows with a
+                DIFFERENT id are excluded, id-less rows still count.
+
+        Returns:
+            Id-ordered ``fill_observed`` rows; empty when none exist.
+        """
+        filters = [
+            VenueEvent.event_type == "fill_observed",
+            VenueEvent.client_order_id == client_order_id,
+            VenueEvent.wallet_public_id == wallet_public_id,
+            VenueEvent.mode == mode,
+            VenueEvent.exchange == exchange,
+        ]
+        if exchange_order_id is not None:
+            filters.append(
+                or_(
+                    VenueEvent.exchange_order_id.is_(None),
+                    VenueEvent.exchange_order_id == exchange_order_id,
+                )
+            )
+        async with self.session() as s:
+            result = await s.execute(
+                select(VenueEvent).where(*filters).order_by(VenueEvent.id.asc())
+            )
+            return [self._venue_event_to_row(ve) for ve in result.scalars().all()]
+
+    async def get_active_instrument_quote_currency(self, instrument_public_id: str) -> str | None:
+        """Read the CURRENT quote currency for an instrument (clock-free).
+
+        Args:
+            instrument_public_id: Instrument identity to resolve.
+
+        Returns:
+            The quote currency code, or ``None`` when no active
+            instrument/symbol pair exists.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(Symbol.quote)
+                .join(Instrument, Instrument.symbol_public_id == Symbol.public_id)
+                .where(
+                    Instrument.public_id == instrument_public_id,
+                    Instrument.known_to == KNOWN_TO_MAX,
+                    Symbol.known_to == KNOWN_TO_MAX,
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def get_active_market_snapshot_price(
+        self, instrument_public_id: str
+    ) -> tuple[float | None, datetime] | None:
+        """Read the CURRENT market-snapshot price row (clock-free).
+
+        Args:
+            instrument_public_id: Instrument identity to resolve.
+
+        Returns:
+            ``(last_price, snapshot_timestamp)`` of the active row, or
+            ``None`` when no active row exists.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(MarketSnapshot.last_price, MarketSnapshot.timestamp).where(
+                    MarketSnapshot.instrument_public_id == instrument_public_id,
+                    MarketSnapshot.known_to == KNOWN_TO_MAX,
+                )
+            )
+            row = result.one_or_none()
+            if row is None:
+                return None
+            return (row.last_price, row.timestamp)
 
     async def revise_instrument(
         self,
@@ -5144,6 +5458,11 @@ class SQLAlchemyRepository(Repository):
         timestamp: datetime,
     ) -> int:
         """SCD2 close+insert for instrument business attributes.
+
+        The successor carries ``requires_ai_review`` verbatim and keeps
+        ``source_exchange`` when the destination exchange stays paper
+        (a re-key away from paper must clear it — the CHECK constrains
+        the mapping to paper rows).
 
         Raises ValueError when no active version exists or when the
         target business key is already occupied by another instrument.
@@ -5176,6 +5495,7 @@ class SQLAlchemyRepository(Repository):
                     f"Business key ({symbol_public_id}, {exchange}) "
                     f"already occupied by instrument {conflict.public_id}"
                 )
+            carried_source = inst.source_exchange if exchange == ExchangeEnum.PAPER.value else None
             new_row = await close_and_insert(
                 s,
                 Instrument,
@@ -5183,6 +5503,8 @@ class SQLAlchemyRepository(Repository):
                 {
                     "symbol_public_id": symbol_public_id,
                     "exchange": exchange,
+                    "requires_ai_review": inst.requires_ai_review,
+                    "source_exchange": carried_source,
                     "session_id": session_id,
                     "sequence_id": sequence_id,
                 },
@@ -5853,14 +6175,52 @@ class SQLAlchemyRepository(Repository):
         filled_size: float | None = None,
         average_price: float | None = None,
     ) -> int:
-        """Close old order version and insert new one (SCD Type 2)."""
+        """Close old order version and insert new one (SCD Type 2).
+
+        Fill-truth semantics (PnL Phase 1): when ``filled_size`` is
+        provided the call is a FILL update and both fill columns are
+        authoritative — ``filled_size`` is written verbatim and
+        ``average_price`` is written as given; when the venue reported
+        no average (``None``) the successor's average is derived as the
+        VWAP of this order's active execution rows, but ONLY when their
+        summed delta size matches the supplied cumulative (a missed
+        frame makes the VWAP a lie — the successor then carries an
+        explicit NULL, never a stale predecessor average or a
+        last-delta price). When ``filled_size`` is ``None`` the call is
+        a status-only transition (cancel/expire/reject) and BOTH fill
+        columns carry forward from the closed version — a stray
+        ``average_price`` argument without its cumulative is
+        contradictory input and is ignored.
+
+        The close and the successor use
+        ``max(timestamp, old_row.timestamp)`` so a caller clock that
+        lags the row's bus time cannot create an inverted validity
+        interval. The successor id is read after ``flush`` (before
+        commit) so callers can re-point
+        ``PendingOrderState.db_order_id`` without a post-commit refresh
+        window.
+
+        Returns:
+            The new (successor) row's integer primary key.
+        """
         async with self.session() as s:
             old_order = (
                 (await s.execute(select(Order).where(Order.id == order_id).with_for_update()))
                 .scalars()
                 .one()
             )
-            await s.execute(update(Order).where(Order.id == order_id).values(known_to=timestamp))
+            effective_ts = max(timestamp, old_order.timestamp)
+            if filled_size is not None:
+                new_filled = filled_size
+                new_average = average_price
+                if new_average is None:
+                    new_average = await self._derive_average_price_from_executions(
+                        s, old_order.public_id, filled_size
+                    )
+            else:
+                new_filled = old_order.filled_size
+                new_average = old_order.average_price
+            await s.execute(update(Order).where(Order.id == order_id).values(known_to=effective_ts))
             new_order = Order(
                 public_id=old_order.public_id,
                 instrument_public_id=old_order.instrument_public_id,
@@ -5871,15 +6231,13 @@ class SQLAlchemyRepository(Repository):
                 exchange_order_id=exchange_order_id or old_order.exchange_order_id,
                 created_at=old_order.created_at,
                 updated_at=updated_at,
-                timestamp=timestamp,
+                timestamp=effective_ts,
                 side=old_order.side,
                 order_type=old_order.order_type,
                 price=old_order.price,
                 size=old_order.size,
-                filled_size=filled_size if filled_size is not None else old_order.filled_size,
-                average_price=(
-                    average_price if average_price is not None else old_order.average_price
-                ),
+                filled_size=new_filled,
+                average_price=new_average,
                 status=status,
                 time_in_force=old_order.time_in_force,
                 error=error,
@@ -5890,9 +6248,51 @@ class SQLAlchemyRepository(Repository):
                 sequence_id=sequence_id,
             )
             s.add(new_order)
+            await s.flush()
+            new_id = new_order.id
             await s.commit()
-            await s.refresh(new_order)
-            return new_order.id
+            return new_id
+
+    @staticmethod
+    async def _derive_average_price_from_executions(
+        s: AsyncSession, order_public_id: str, cumulative_size: float
+    ) -> float | None:
+        """Derive an order's average price as VWAP of its executions.
+
+        Used by :meth:`update_order` on fill updates where the venue
+        frame carried no ``average_price`` (some venues report only
+        ``last_qty``/``last_price``). The VWAP over the order's ACTIVE
+        execution rows (statuses ``filled``/``partial``) is trustworthy
+        only when the summed delta sizes reproduce the venue's
+        cumulative — a missed frame would skew the average, so a
+        mismatch yields ``None`` (an explicit unknown).
+
+        Args:
+            s: Open session of the enclosing ``update_order`` call.
+            order_public_id: Stable order identity linking executions.
+            cumulative_size: Venue-reported cumulative filled size.
+
+        Returns:
+            The VWAP as ``float``, or ``None`` when no executions
+            exist, the total is non-positive, or the sum does not
+            match the cumulative.
+        """
+        result = await s.execute(
+            select(
+                func.sum(Execution.price * Execution.size),
+                func.sum(Execution.size),
+            ).where(
+                Execution.order_public_id == order_public_id,
+                Execution.status.in_(("filled", "partial")),
+                Execution.known_to == KNOWN_TO_MAX,
+            )
+        )
+        notional, total = result.one()
+        if total is None or float(total) <= 0.0:
+            return None
+        if not math.isclose(float(total), cumulative_size, rel_tol=1e-9, abs_tol=1e-12):
+            return None
+        return float(notional) / float(total)
 
     async def insert_execution(
         self,
@@ -6859,7 +7259,23 @@ class SQLAlchemyRepository(Repository):
         command_public_id: str,
         as_of: datetime,
     ) -> OrderRow | None:
-        """Resolve an order by traversing trade_commands.plan_public_id."""
+        """Resolve an order via its command's scoped client_order_id.
+
+        The executor echoes the command's ``client_order_id`` onto the
+        orders row for EVERY origin surface (strategy emits stamp
+        ``client_order_id = venue_client_id = order_public_id``; manual
+        REST/MCP mint a fresh UUID7), so the cid join resolves
+        plan-less strategy commands that the historical
+        ``plan_public_id`` join could never match (NULL == NULL). The
+        cid is scoped defence-in-depth by wallet, mode, and the
+        instrument's exchange — ``uq_orders_client_oid`` only enforces
+        active uniqueness per ``(instrument, mode, cid)`` and MCP
+        authorizes the command's wallet before returning the order.
+        The current SYMBOL SPELLING is deliberately not compared:
+        stable instrument identity survives symbol renames. A cancel
+        command's public_id resolves the ORIGINAL order (cancels
+        deliberately reuse its cid) — documented, expected behaviour.
+        """
         async with self.session() as s:
             query = (
                 select(Order, Instrument, Symbol)
@@ -6867,7 +7283,9 @@ class SQLAlchemyRepository(Repository):
                 .join(
                     Order,
                     and_(
-                        Order.plan_public_id == TradeCommand.plan_public_id,
+                        Order.client_order_id == TradeCommand.client_order_id,
+                        Order.wallet_public_id == TradeCommand.wallet_public_id,
+                        Order.mode == TradeCommand.mode,
                         *where_active(Order, as_of),
                     ),
                 )
@@ -6875,6 +7293,7 @@ class SQLAlchemyRepository(Repository):
                     Instrument,
                     and_(
                         Order.instrument_public_id == Instrument.public_id,
+                        Instrument.exchange == TradeCommand.exchange,
                         *where_active(Instrument, as_of),
                     ),
                 )
@@ -6889,7 +7308,7 @@ class SQLAlchemyRepository(Repository):
                     TradeCommand.public_id == command_public_id,
                     *where_active(TradeCommand, as_of),
                 )
-                .order_by(desc(Order.created_at))
+                .order_by(desc(Order.created_at), desc(Order.id))
                 .limit(1)
             )
             result = await s.execute(query)
@@ -6943,43 +7362,7 @@ class SQLAlchemyRepository(Repository):
             cmd = result.scalars().first()
             if cmd is None:
                 return None
-            return {
-                "public_id": cmd.public_id,
-                "timestamp": cmd.timestamp,
-                "session_id": cmd.session_id,
-                "sequence_id": cmd.sequence_id,
-                "command_type": cmd.command_type,
-                "shard_key": cmd.shard_key,
-                "exchange": cmd.exchange,
-                "instrument": cmd.instrument,
-                "mode": cmd.mode,
-                "strategy_id": cmd.strategy_id,
-                "client_order_id": cmd.client_order_id,
-                "venue_client_id": cmd.venue_client_id,
-                "idempotency_key": cmd.idempotency_key,
-                "side": cmd.side,
-                "order_type": cmd.order_type,
-                "quantity": cmd.quantity,
-                "price": cmd.price,
-                "stop_price": cmd.stop_price,
-                "leverage": cmd.leverage,
-                "reduce_only": cmd.reduce_only,
-                "status": cmd.status,
-                "attempt_count": cmd.attempt_count,
-                "last_error": cmd.last_error,
-                "created_at": cmd.created_at,
-                "dispatched_at": cmd.dispatched_at,
-                "acked_at": cmd.acked_at,
-                "terminal_at": cmd.terminal_at,
-                "exchange_order_id": cmd.exchange_order_id,
-                "supersedes_command_id": cmd.supersedes_command_id,
-                "correlation_id": cmd.correlation_id,
-                "wallet_public_id": cmd.wallet_public_id,
-                "operator_public_id": cmd.operator_public_id,
-                "user_public_id": cmd.user_public_id,
-                "source_surface": cmd.source_surface,
-                "plan_public_id": cmd.plan_public_id,
-            }
+            return self._trade_command_to_row(cmd)
 
     async def get_executions_for_order(
         self,
@@ -7689,6 +8072,12 @@ class SQLAlchemyRepository(Repository):
         fill executes at ``order.price``), and counting simulated
         notional against the rolling 24h cap would let paper activity
         exhaust a user's LIVE trading allowance.
+
+        Projects ``submitted_notional_usd`` (the admission-time USD
+        quote the caps enforcer snapshotted) so market orders whose
+        ``price`` column is NULL still count against the rolling sum;
+        the enforcer falls back to ``quantity × price`` for legacy
+        rows that predate the snapshot column.
         """
         async with self.session() as s:
             result = await s.execute(
@@ -7697,6 +8086,7 @@ class SQLAlchemyRepository(Repository):
                     TradeCommand.exchange,
                     TradeCommand.quantity,
                     TradeCommand.price,
+                    TradeCommand.submitted_notional_usd,
                 ).where(
                     TradeCommand.user_public_id == user_public_id,
                     TradeCommand.command_type.in_(("create", "submit", "replace")),
@@ -7712,6 +8102,11 @@ class SQLAlchemyRepository(Repository):
                     "exchange": r.exchange,
                     "quantity": r.quantity,
                     "price": r.price,
+                    "submitted_notional_usd": (
+                        float(r.submitted_notional_usd)
+                        if r.submitted_notional_usd is not None
+                        else None
+                    ),
                 }
                 for r in result.all()
             ]
@@ -8055,15 +8450,24 @@ class SQLAlchemyRepository(Repository):
     ) -> int | None:
         """SCD2 close-and-insert for trade command status transition.
 
+        Targets the CURRENT active row (``known_to == KNOWN_TO_MAX``)
+        under a ``FOR UPDATE`` lock — an as-of read with a lagging
+        caller clock could select a HISTORICAL version and fork a
+        duplicate active successor. The close and the successor use
+        ``max(bus_time, existing.timestamp)`` so a stale clock cannot
+        invert the validity interval.
+
         Returns the new row id, or None if no active row found.
         """
         async with self.session() as s:
-            match_filters = [TradeCommand.public_id == public_id]
             existing = (
                 (
                     await s.execute(
                         select(TradeCommand)
-                        .where(*match_filters, *where_active(TradeCommand, bus_time))
+                        .where(
+                            TradeCommand.public_id == public_id,
+                            TradeCommand.known_to == KNOWN_TO_MAX,
+                        )
                         .with_for_update()
                     )
                 )
@@ -8072,33 +8476,19 @@ class SQLAlchemyRepository(Repository):
             )
             if existing is None:
                 return None
+            effective_ts = max(bus_time, existing.timestamp)
             await s.execute(
-                update(TradeCommand).where(TradeCommand.id == existing.id).values(known_to=bus_time)
+                update(TradeCommand)
+                .where(TradeCommand.id == existing.id)
+                .values(known_to=effective_ts)
             )
             new_cmd = TradeCommand(
-                public_id=existing.public_id,
-                command_type=existing.command_type,
-                shard_key=existing.shard_key,
-                exchange=existing.exchange,
-                instrument=existing.instrument,
-                mode=existing.mode,
-                strategy_id=existing.strategy_id,
-                client_order_id=existing.client_order_id,
-                venue_client_id=existing.venue_client_id,
-                idempotency_key=existing.idempotency_key,
-                side=existing.side,
-                order_type=existing.order_type,
-                quantity=existing.quantity,
-                price=existing.price,
-                stop_price=existing.stop_price,
-                leverage=existing.leverage,
-                reduce_only=existing.reduce_only,
+                **self._trade_command_carry_kwargs(existing),
                 status=new_status,
                 attempt_count=(
                     attempt_count if attempt_count is not None else existing.attempt_count
                 ),
                 last_error=last_error,
-                created_at=existing.created_at,
                 dispatched_at=(
                     dispatched_at if dispatched_at is not None else existing.dispatched_at
                 ),
@@ -8109,15 +8499,9 @@ class SQLAlchemyRepository(Repository):
                     if exchange_order_id is not None
                     else existing.exchange_order_id
                 ),
-                supersedes_command_id=existing.supersedes_command_id,
-                correlation_id=existing.correlation_id,
-                plan_public_id=existing.plan_public_id,
                 session_id=session_id,
                 sequence_id=sequence_id,
-                timestamp=bus_time,
-                wallet_public_id=existing.wallet_public_id,
-                operator_public_id=existing.operator_public_id,
-                user_public_id=existing.user_public_id,
+                timestamp=effective_ts,
             )
             s.add(new_cmd)
             await s.commit()
@@ -8218,35 +8602,21 @@ class SQLAlchemyRepository(Repository):
                 return False
             if existing.status != expected_status:
                 return False
+            effective_ts = max(bus_time, existing.timestamp)
             await s.execute(
-                update(TradeCommand).where(TradeCommand.id == existing.id).values(known_to=bus_time)
+                update(TradeCommand)
+                .where(TradeCommand.id == existing.id)
+                .values(known_to=effective_ts)
             )
             next_terminal_at = terminal_at if terminal_at is not None else existing.terminal_at
             if clear_terminal_at:
                 next_terminal_at = None
             s.add(
                 TradeCommand(
-                    public_id=existing.public_id,
-                    command_type=existing.command_type,
-                    shard_key=existing.shard_key,
-                    exchange=existing.exchange,
-                    instrument=existing.instrument,
-                    mode=existing.mode,
-                    strategy_id=existing.strategy_id,
-                    client_order_id=existing.client_order_id,
-                    venue_client_id=existing.venue_client_id,
-                    idempotency_key=existing.idempotency_key,
-                    side=existing.side,
-                    order_type=existing.order_type,
-                    quantity=existing.quantity,
-                    price=existing.price,
-                    stop_price=existing.stop_price,
-                    leverage=existing.leverage,
-                    reduce_only=existing.reduce_only,
+                    **self._trade_command_carry_kwargs(existing),
                     status=new_status,
                     attempt_count=existing.attempt_count,
                     last_error=last_error,
-                    created_at=existing.created_at,
                     dispatched_at=existing.dispatched_at,
                     acked_at=acked_at if acked_at is not None else existing.acked_at,
                     terminal_at=next_terminal_at,
@@ -8255,16 +8625,9 @@ class SQLAlchemyRepository(Repository):
                         if exchange_order_id is not None
                         else existing.exchange_order_id
                     ),
-                    supersedes_command_id=existing.supersedes_command_id,
-                    correlation_id=existing.correlation_id,
-                    plan_public_id=existing.plan_public_id,
-                    source_surface=existing.source_surface,
                     session_id=session_id,
                     sequence_id=sequence_id,
-                    timestamp=bus_time,
-                    wallet_public_id=existing.wallet_public_id,
-                    operator_public_id=existing.operator_public_id,
-                    user_public_id=existing.user_public_id,
+                    timestamp=effective_ts,
                 )
             )
             await s.commit()
@@ -8291,7 +8654,11 @@ class SQLAlchemyRepository(Repository):
         CREATED→EXPIRED, guard-scanner CREATED→CANCELLED) between this
         dispatcher's publish and the bulk write is SKIPPED — writing
         DISPATCHED over it would resurrect a terminal command and fork
-        overlapping SCD2 successors.
+        overlapping SCD2 successors. The dispatcher's clock never
+        filters the lookup: a successfully PUBLISHED future-stamped
+        command must still transition (a caller-time window would
+        leave it ``created`` and redispatchable forever), so the close
+        and the successor use ``max(bus_time, existing.timestamp)``.
 
         Failure semantics: any DB error rolls back the entire transaction.
         The OutboxDispatcher therefore falls back to per-row
@@ -8308,13 +8675,10 @@ class SQLAlchemyRepository(Repository):
         async with self.session() as s:
             for offset in range(0, len(public_ids), _OUTBOX_BULK_LOOKUP_CHUNK_SIZE):
                 pid_chunk = public_ids[offset : offset + _OUTBOX_BULK_LOOKUP_CHUNK_SIZE]
-                spec_chunk = [spec_by_pid[pid] for pid in pid_chunk]
-                max_bus_time = max(spec["bus_time"] for spec in spec_chunk)
                 result = await s.execute(
                     select(TradeCommand)
                     .where(
                         TradeCommand.public_id.in_(pid_chunk),
-                        TradeCommand.timestamp <= max_bus_time,
                         TradeCommand.known_to == KNOWN_TO_MAX,
                     )
                     .with_for_update()
@@ -8324,48 +8688,24 @@ class SQLAlchemyRepository(Repository):
                     bus_time = spec["bus_time"]
                     if existing.status != TradeCommandStatusEnum.CREATED.value:
                         continue
-                    if not (existing.timestamp <= bus_time and existing.known_to > bus_time):
-                        continue
+                    effective_ts = max(bus_time, existing.timestamp)
                     await s.execute(
                         update(TradeCommand)
                         .where(TradeCommand.id == existing.id)
-                        .values(known_to=bus_time)
+                        .values(known_to=effective_ts)
                     )
                     new_cmd = TradeCommand(
-                        public_id=existing.public_id,
-                        command_type=existing.command_type,
-                        shard_key=existing.shard_key,
-                        exchange=existing.exchange,
-                        instrument=existing.instrument,
-                        mode=existing.mode,
-                        strategy_id=existing.strategy_id,
-                        client_order_id=existing.client_order_id,
-                        venue_client_id=existing.venue_client_id,
-                        idempotency_key=existing.idempotency_key,
-                        side=existing.side,
-                        order_type=existing.order_type,
-                        quantity=existing.quantity,
-                        price=existing.price,
-                        stop_price=existing.stop_price,
-                        leverage=existing.leverage,
-                        reduce_only=existing.reduce_only,
+                        **self._trade_command_carry_kwargs(existing),
                         status=new_status,
                         attempt_count=spec["attempt_count"],
                         last_error=None,
-                        created_at=existing.created_at,
                         dispatched_at=spec["dispatched_at"],
                         acked_at=existing.acked_at,
                         terminal_at=existing.terminal_at,
                         exchange_order_id=existing.exchange_order_id,
-                        supersedes_command_id=existing.supersedes_command_id,
-                        correlation_id=existing.correlation_id,
-                        plan_public_id=existing.plan_public_id,
                         session_id=spec["session_id"],
                         sequence_id=spec["sequence_id"],
-                        timestamp=bus_time,
-                        wallet_public_id=existing.wallet_public_id,
-                        operator_public_id=existing.operator_public_id,
-                        user_public_id=existing.user_public_id,
+                        timestamp=effective_ts,
                     )
                     s.add(new_cmd)
                     applied += 1
@@ -8427,48 +8767,7 @@ class SQLAlchemyRepository(Repository):
                 .offset(offset)
                 .limit(limit)
             )
-            rows: list[TradeCommandRow] = []
-            for cmd in result.scalars().all():
-                rows.append(
-                    {
-                        "public_id": cmd.public_id,
-                        "timestamp": cmd.timestamp,
-                        "session_id": cmd.session_id,
-                        "sequence_id": cmd.sequence_id,
-                        "command_type": cmd.command_type,
-                        "shard_key": cmd.shard_key,
-                        "exchange": cmd.exchange,
-                        "instrument": cmd.instrument,
-                        "mode": cmd.mode,
-                        "strategy_id": cmd.strategy_id,
-                        "client_order_id": cmd.client_order_id,
-                        "venue_client_id": cmd.venue_client_id,
-                        "idempotency_key": cmd.idempotency_key,
-                        "side": cmd.side,
-                        "order_type": cmd.order_type,
-                        "quantity": cmd.quantity,
-                        "price": cmd.price,
-                        "stop_price": cmd.stop_price,
-                        "leverage": cmd.leverage,
-                        "reduce_only": cmd.reduce_only,
-                        "status": cmd.status,
-                        "attempt_count": cmd.attempt_count,
-                        "last_error": cmd.last_error,
-                        "created_at": cmd.created_at,
-                        "dispatched_at": cmd.dispatched_at,
-                        "acked_at": cmd.acked_at,
-                        "terminal_at": cmd.terminal_at,
-                        "exchange_order_id": cmd.exchange_order_id,
-                        "supersedes_command_id": cmd.supersedes_command_id,
-                        "correlation_id": cmd.correlation_id,
-                        "wallet_public_id": cmd.wallet_public_id,
-                        "operator_public_id": cmd.operator_public_id,
-                        "user_public_id": cmd.user_public_id,
-                        "source_surface": cmd.source_surface,
-                        "plan_public_id": cmd.plan_public_id,
-                    }
-                )
-            return rows
+            return [self._trade_command_to_row(cmd) for cmd in result.scalars().all()]
 
     async def get_active_commands_for_shard(
         self, shard_key: str, as_of: datetime
@@ -8485,48 +8784,7 @@ class SQLAlchemyRepository(Repository):
                 )
                 .order_by(TradeCommand.created_at)
             )
-            rows: list[TradeCommandRow] = []
-            for cmd in result.scalars().all():
-                rows.append(
-                    {
-                        "public_id": cmd.public_id,
-                        "timestamp": cmd.timestamp,
-                        "session_id": cmd.session_id,
-                        "sequence_id": cmd.sequence_id,
-                        "command_type": cmd.command_type,
-                        "shard_key": cmd.shard_key,
-                        "exchange": cmd.exchange,
-                        "instrument": cmd.instrument,
-                        "mode": cmd.mode,
-                        "strategy_id": cmd.strategy_id,
-                        "client_order_id": cmd.client_order_id,
-                        "venue_client_id": cmd.venue_client_id,
-                        "idempotency_key": cmd.idempotency_key,
-                        "side": cmd.side,
-                        "order_type": cmd.order_type,
-                        "quantity": cmd.quantity,
-                        "price": cmd.price,
-                        "stop_price": cmd.stop_price,
-                        "leverage": cmd.leverage,
-                        "reduce_only": cmd.reduce_only,
-                        "status": cmd.status,
-                        "attempt_count": cmd.attempt_count,
-                        "last_error": cmd.last_error,
-                        "created_at": cmd.created_at,
-                        "dispatched_at": cmd.dispatched_at,
-                        "acked_at": cmd.acked_at,
-                        "terminal_at": cmd.terminal_at,
-                        "exchange_order_id": cmd.exchange_order_id,
-                        "supersedes_command_id": cmd.supersedes_command_id,
-                        "correlation_id": cmd.correlation_id,
-                        "wallet_public_id": cmd.wallet_public_id,
-                        "operator_public_id": cmd.operator_public_id,
-                        "user_public_id": cmd.user_public_id,
-                        "source_surface": cmd.source_surface,
-                        "plan_public_id": cmd.plan_public_id,
-                    }
-                )
-            return rows
+            return [self._trade_command_to_row(cmd) for cmd in result.scalars().all()]
 
     async def get_active_commands_for_exchange(
         self, exchange: str, as_of: datetime
@@ -8595,6 +8853,70 @@ class SQLAlchemyRepository(Repository):
             "user_public_id": cmd.user_public_id,
             "source_surface": cmd.source_surface,
             "plan_public_id": cmd.plan_public_id,
+            "signal_public_id": cmd.signal_public_id,
+            "ai_review_public_id": cmd.ai_review_public_id,
+            "submitted_notional_usd": (
+                float(cmd.submitted_notional_usd)
+                if cmd.submitted_notional_usd is not None
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _trade_command_carry_kwargs(existing: TradeCommand) -> dict[str, Any]:
+        """Identity and intent columns copied verbatim onto every SCD2 successor.
+
+        Every trade-command status transition (close-and-insert) must
+        rebuild the successor row from the existing active row. Lifecycle
+        columns (``status``, ``attempt_count``, ``last_error``,
+        ``dispatched_at``, ``acked_at``, ``terminal_at``,
+        ``exchange_order_id``, ``session_id``, ``sequence_id``,
+        ``timestamp``) are deliberately NOT included — each successor
+        writer owns its own override rules for those. Every identity,
+        intent, and lineage column MUST be listed here: a column omitted
+        from a successor constructor silently resets to its server
+        default on the first status transition (the historical
+        ``source_surface`` loss in ``update_trade_command_status`` and
+        ``bulk_dispatch_trade_commands``, fixed by centralizing the
+        carry set in this helper). The ``dict[str, Any]`` return is a
+        deliberate SQLAlchemy-constructor boundary, mirroring
+        :meth:`insert_trade_command`'s splat.
+
+        Args:
+            existing: The active ORM row being closed.
+
+        Returns:
+            Keyword arguments for the successor ``TradeCommand``.
+        """
+        return {
+            "public_id": existing.public_id,
+            "command_type": existing.command_type,
+            "shard_key": existing.shard_key,
+            "exchange": existing.exchange,
+            "instrument": existing.instrument,
+            "mode": existing.mode,
+            "strategy_id": existing.strategy_id,
+            "client_order_id": existing.client_order_id,
+            "venue_client_id": existing.venue_client_id,
+            "idempotency_key": existing.idempotency_key,
+            "side": existing.side,
+            "order_type": existing.order_type,
+            "quantity": existing.quantity,
+            "price": existing.price,
+            "stop_price": existing.stop_price,
+            "leverage": existing.leverage,
+            "reduce_only": existing.reduce_only,
+            "created_at": existing.created_at,
+            "supersedes_command_id": existing.supersedes_command_id,
+            "correlation_id": existing.correlation_id,
+            "plan_public_id": existing.plan_public_id,
+            "source_surface": existing.source_surface,
+            "signal_public_id": existing.signal_public_id,
+            "ai_review_public_id": existing.ai_review_public_id,
+            "submitted_notional_usd": existing.submitted_notional_usd,
+            "wallet_public_id": existing.wallet_public_id,
+            "operator_public_id": existing.operator_public_id,
+            "user_public_id": existing.user_public_id,
         }
 
     async def get_active_create_command_by_client_order_id(

@@ -13,7 +13,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from snapper.application.trade.caps_enforcer import CapsViolationError
+from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
@@ -258,12 +260,42 @@ def _operator_principal(operator_public_ids: list[str] | None = None) -> AuthPri
     )
 
 
+def _stub_guard_payload() -> Guard:
+    """Build the Guard payload an admitting enforcer stub yields.
+
+    Returns:
+        A :class:`Guard` with a placeholder submission and a NULL
+        admission notional, matching what the route reads after entry.
+    """
+    return Guard(
+        submission=TradeCommandSubmission(
+            user_public_id="test_user",
+            operator_public_id=None,
+            wallet_public_id="wallet-1",
+            instrument_public_id=None,
+            command_type="create",
+            side="buy",
+            order_type="market",
+            quantity=None,
+            price=None,
+            source_surface="rest",
+            idempotency_key=None,
+        ),
+        assigned_public_id="guard-pid",
+        submitted_notional_usd=123.45,
+    )
+
+
 class _AdmitCapsGuard:
     """Async context manager that admits cap-guarded submissions."""
 
-    async def __aenter__(self) -> None:
-        """Enter without rejecting the submission."""
-        return None
+    async def __aenter__(self) -> Guard:
+        """Enter without rejecting the submission.
+
+        Returns:
+            The stub :class:`Guard` payload the route reads.
+        """
+        return _stub_guard_payload()
 
     async def __aexit__(self, *_args: object) -> None:
         """Exit without suppressing exceptions."""
@@ -1106,8 +1138,8 @@ class TestCreateOrderAiReviewCitation:
         captured: dict[str, Any] = {}
 
         class _Ctx:
-            async def __aenter__(self) -> None:
-                return None
+            async def __aenter__(self) -> Guard:
+                return _stub_guard_payload()
 
             async def __aexit__(self, *_args: Any) -> None:
                 return None
@@ -1126,6 +1158,9 @@ class TestCreateOrderAiReviewCitation:
         assert response.status_code == 200
         repo.get_ai_review.assert_awaited_once_with("review-ok-1")
         assert captured["submission"].ai_review_public_id == "review-ok-1"
+        cmd_row = repo.insert_trade_command.call_args.args[0]
+        assert cmd_row["ai_review_public_id"] == "review-ok-1"
+        assert cmd_row["submitted_notional_usd"] == 123.45
         client.close()
 
     def test_unknown_citation_returns_403(self) -> None:

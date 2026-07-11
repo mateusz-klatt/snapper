@@ -347,6 +347,7 @@ def _make_instrument_row(
         "sequence_id": row_id,
         "symbol_public_id": symbol_public_id,
         "exchange": exchange,
+        "source_exchange": None,
         "requires_ai_review": False,
     }
     return (row_id, *(values[c] for c in columns))

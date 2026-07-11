@@ -32,6 +32,7 @@ from snapper.application.engine.service import compute_shard_key
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
 from snapper.application.trade.command_request import order_request_from_command
+from snapper.application.trade.trade_service import TradeService
 from snapper.config.credentials import CredentialResolver
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
@@ -50,6 +51,7 @@ from snapper.core.types import OrderEventEnum
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
 from snapper.core.types import ReplaceEventType
+from snapper.core.types import StreamTerminalEventType
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import Repository
@@ -2808,6 +2810,83 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as e:
             logger.error(f"[{exchange_name}] Error publishing cancel event: {e}")
 
+    async def _publish_stream_terminal_event(
+        self,
+        *,
+        event: StreamTerminalEventType,
+        exchange_order_id: str,
+        client_order_id: str,
+        instrument: str,
+        exchange_name: OrderExchange,
+        pending: PendingOrderState | None,
+    ) -> None:
+        """Publish a bus terminal for a venue-stream cancel/expiry.
+
+        Historically a terminal arriving on the EXECUTION STREAM
+        (venue-initiated cancel, TIF expiry, the paper simulator's
+        unpriceable-market cancel) updated the order row and dropped
+        correlation WITHOUT any bus event — the engine's in-flight
+        guard then starved until the lazy 60s valve, dropping every
+        interim signal for the instrument (incident 2026-07-10 #2).
+        Publishing an :class:`OrderEventData` with the ``cancelled`` /
+        ``expired`` suffix feeds the trader's existing
+        ``_handle_order_event`` release (intent clear + paired-leg
+        projection) with zero consumer change.
+
+        Best-effort by design: the durable ``order_terminal`` venue
+        event is already written before this publish, and a publish
+        failure merely degrades to the pre-fix status quo (the 60s
+        valve backstop) — liveness, not safety — so failures log a
+        WARNING and never block the correlation cleanup.
+
+        Args:
+            event: ``cancelled`` or ``expired`` (wire vocabulary).
+            exchange_order_id: Venue-assigned order id.
+            client_order_id: Command/order client id (the engine's
+                intent key).
+            instrument: Native venue symbol for the topic.
+            exchange_name: Executor's venue discriminator.
+            pending: Tracked order state, when still correlated —
+                supplies wallet/operator/user attribution copied onto
+                the event (recon-synthetic terminals may lack it).
+        """
+        if not self.msg_publisher or not self.running:
+            logger.warning(
+                f"[{exchange_name}] Stream terminal {event} for {client_order_id} "
+                "NOT published (publisher unavailable); engine guard falls back "
+                "to the in-flight timeout valve"
+            )
+            return
+        now = datetime.now(UTC)
+        request = pending.request if pending is not None else None
+        try:
+            topic = order_event_topic(exchange_name, instrument, event)
+            payload = OrderEventData(
+                public_id=str(uuid7()),
+                timestamp=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(topic),
+                exchange_order_id=exchange_order_id,
+                client_order_id=client_order_id,
+                exchange=exchange_name,
+                instrument=instrument,
+                event=event,
+                wallet_public_id=request.wallet_public_id if request is not None else "",
+                operator_public_id=request.operator_public_id if request is not None else None,
+                user_public_id=request.user_public_id if request is not None else None,
+            )
+            await self.msg_publisher.send(topic, payload)
+            logger.info(
+                f"[{exchange_name}] Published stream terminal event: "
+                f"{client_order_id} - {event}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[{exchange_name}] Failed to publish stream terminal {event} for "
+                f"{client_order_id}: {e}; engine guard falls back to the "
+                "in-flight timeout valve"
+            )
+
     async def _publish_replace_event(
         self, replace: OrderReplaceData, event: ReplaceEventType
     ) -> None:
@@ -4717,6 +4796,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     ) -> bool:
         """Handle cancelled or expired execution by cleaning up maps.
 
+        Writes the durable ``order_terminal`` venue event FIRST (the
+        replay/fencing side), then publishes the stream-terminal bus
+        event (:meth:`_publish_stream_terminal_event`) so the engine's
+        in-flight guard releases promptly, then drops correlation.
+        Both the live venue stream and the reconciliation
+        disappeared-order path converge here, so one publish covers
+        both sinks.
+
         Args:
             execution: Execution update.
             exchange_order_id: Exchange-assigned order ID.
@@ -4754,11 +4841,24 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 "strategy_tag": tag,
             }
         )
+        terminal_event: StreamTerminalEventType = (
+            OrderEventEnum.CANCELLED
+            if execution.exec_type == "canceled"
+            else OrderEventEnum.EXPIRED
+        )
+        await self._publish_stream_terminal_event(
+            event=terminal_event,
+            exchange_order_id=exchange_order_id,
+            client_order_id=client_order_id,
+            instrument=instrument,
+            exchange_name=exchange_name,
+            pending=pending,
+        )
         self.pending_orders.pop(client_order_id, None)
         self.client_by_exchange.pop(exchange_order_id, None)
         logger.info(
             f"[{exchange_name}] Order {client_order_id} {execution.exec_type}, "
-            f"cleaned up maps (no execution published)"
+            f"cleaned up maps (stream terminal published)"
         )
         return True
 
@@ -5263,7 +5363,18 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         client_order_id: str,
         wallet_public_id: str,
     ) -> None:
-        """Persist execution and order status rows after a successful publish."""
+        """Persist execution and order status rows after a successful publish.
+
+        Fill truth (PnL Phase 1): the order-row update forwards the
+        venue-true CUMULATIVE (:meth:`_resolve_persisted_cumulative`)
+        and the RAW venue ``average_price`` (``fill.price`` may be a
+        delta-price fallback and must not be persisted as an average),
+        and the returned successor id re-points
+        ``pending.db_order_id`` — a multi-partial order is not popped
+        from tracking, so a stale id would make the second partial's
+        SCD2 update collide with the active-unique index and silently
+        fail.
+        """
         pending = self.pending_orders.get(client_order_id)
         if pending is None or self.exchange_client is None:
             return
@@ -5285,10 +5396,69 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 if fill.status == FillStatusEnum.FILLED
                 else ExchangeOrderStatusEnum.OPEN
             )
-            await self.exchange_client._log_order_update_to_db(
+            persisted_cum = await self._resolve_persisted_cumulative(
+                execution, fill, client_order_id, pending
+            )
+            new_db_order_id = await self.exchange_client._log_order_update_to_db(
                 db_order_id=pending.db_order_id,
                 status=db_status,
+                filled_size=persisted_cum,
+                average_price=execution.average_price,
             )
+            if new_db_order_id is not None:
+                pending.db_order_id = new_db_order_id
+
+    async def _resolve_persisted_cumulative(
+        self,
+        execution: ExecutionUpdate,
+        fill: ExecutionData,
+        client_order_id: str,
+        pending: PendingOrderState,
+    ) -> float:
+        """Resolve the venue-true cumulative to persist on the order row.
+
+        Cum-carrying frames persist the venue's own cumulative
+        (``fill.size``). DELTA-ONLY frames (futures: no ``cum_qty``)
+        fabricate ``fill.size`` from the PUBLISHED watermark, which
+        lags venue truth after a publish failure — two distinct 0.5
+        fills straddling a failed publish would both read as 0.5. For
+        those frames the durable additive truth is recomputed from the
+        stable-identity ``fill_observed`` rows deduplicated by the
+        CANONICAL replay rule (:meth:`TradeService.dedup_fill_events`
+        — exec_id OR trade_id, id-less fallback key, first row wins),
+        falling back to the fabricated value when the durable plane is
+        unreadable.
+
+        Args:
+            execution: The raw venue frame.
+            fill: The built execution payload.
+            client_order_id: Order correlation id.
+            pending: Tracked order state (stable-identity scope source).
+
+        Returns:
+            The cumulative filled size to persist.
+        """
+        if execution.cum_qty is not None:
+            return fill.size
+        if self.repository is None:
+            return fill.size
+        try:
+            rows = await self.repository.get_fill_venue_events_for_order_identity(
+                client_order_id,
+                self.wallet_public_id,
+                pending.request.mode,
+                self._get_exchange_name(),
+                pending.exchange_order_id,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Durable fill rows unreadable for {client_order_id}: {e}; "
+                "persisting the published-anchored cumulative"
+            )
+            return fill.size
+        deduped = TradeService.dedup_fill_events(rows)
+        additive = sum(row["fill_size"] or 0.0 for row in deduped)
+        return max(fill.size, additive)
 
     def _remove_filled_order(
         self,

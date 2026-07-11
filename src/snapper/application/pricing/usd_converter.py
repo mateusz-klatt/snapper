@@ -24,13 +24,7 @@ from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import select
-
-from snapper.data.models import Instrument
-from snapper.data.models import MarketSnapshot
-from snapper.data.models import Symbol
 from snapper.data.repository import Repository
-from snapper.data.repository import where_active
 
 CACHE_TTL_SECONDS = 60
 STALENESS_THRESHOLD_SECONDS = 300
@@ -148,42 +142,31 @@ class USDConverter:
             )
 
     async def _load_and_cache(self, instrument_public_id: str, now: datetime) -> _CacheEntry:
-        """Read active Instrument + MarketSnapshot, validate, cache.
+        """Read the CURRENT Instrument quote + MarketSnapshot, validate, cache.
 
-        ``quote`` lives on the :class:`Symbol` table; resolved via
-        temporal join on ``instruments.symbol_public_id``.
+        ``quote`` lives on the :class:`Symbol` table; resolved via the
+        repository's clock-free active-row reads (the current-version
+        sentinel filter) — a caller-clock temporal read here could
+        miss a freshly-written active row when this process's clock
+        lags the writer's bus time (the Phase-0 kill-switch clock-skew
+        class of bug). Staleness is still enforced against the
+        snapshot's own timestamp below.
         """
-        async with self._repository.session() as session:
-            instr_q = await session.execute(
-                select(Symbol.quote)
-                .join(Instrument, Instrument.symbol_public_id == Symbol.public_id)
-                .where(
-                    Instrument.public_id == instrument_public_id,
-                    *where_active(Instrument, now),
-                    *where_active(Symbol, now),
-                )
+        quote = await self._repository.get_active_instrument_quote_currency(instrument_public_id)
+        if quote is None:
+            raise PriceUnavailableError("instrument_not_found", instrument_public_id)
+        if quote != "USD":
+            raise PriceUnavailableError(
+                "quote_currency_not_usd",
+                instrument_public_id,
+                f"quote={quote} (one-hop conversion only)",
             )
-            quote = instr_q.scalar_one_or_none()
-            if quote is None:
-                raise PriceUnavailableError("instrument_not_found", instrument_public_id)
-            if quote != "USD":
-                raise PriceUnavailableError(
-                    "quote_currency_not_usd",
-                    instrument_public_id,
-                    f"quote={quote} (one-hop conversion only)",
-                )
-            snap_q = await session.execute(
-                select(MarketSnapshot.last_price, MarketSnapshot.timestamp).where(
-                    MarketSnapshot.instrument_public_id == instrument_public_id,
-                    *where_active(MarketSnapshot, now),
-                )
-            )
-            row = snap_q.one_or_none()
-            if row is None:
-                raise PriceUnavailableError("snapshot_missing", instrument_public_id)
-            last_price, ts = row
-            if last_price is None:
-                raise PriceUnavailableError("last_price_null", instrument_public_id)
+        row = await self._repository.get_active_market_snapshot_price(instrument_public_id)
+        if row is None:
+            raise PriceUnavailableError("snapshot_missing", instrument_public_id)
+        last_price, ts = row
+        if last_price is None:
+            raise PriceUnavailableError("last_price_null", instrument_public_id)
 
         entry = _CacheEntry(
             last_price=Decimal(str(last_price)),

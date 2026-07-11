@@ -11,7 +11,9 @@ Two-method API:
       caps (quantity, open orders, 24h USD notional, 60s cancels).
     :meth:`guard_service_principal` — strategy hot-path. Skips
       all caps and yields :class:`Guard` for UUID7 pre-generation
-      consistency.
+      consistency; still quotes the admission-time USD notional
+      best-effort so the durable row can snapshot
+      ``submitted_notional_usd``.
 
 Locking:
     ``WeakValueDictionary[str, asyncio.Lock]`` keyed by
@@ -39,6 +41,7 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from decimal import ROUND_UP
 from decimal import Decimal
 from decimal import InvalidOperation
 from uuid import uuid7
@@ -107,6 +110,46 @@ class CapsViolationError(Exception):
 
 
 @dataclass(frozen=True)
+class _Valuation:
+    """Resolved valuation identity for one admission (internal).
+
+    Attributes:
+        valuation_public_id: Identity the USD oracle and source-keyed
+            caps use, or ``None`` when the submission carries no
+            instrument identity or the resolution failed.
+        is_paper: True when the emission identity is a paper
+            instrument.
+        mapped: True only when a paper identity resolved to an
+            EXISTING source instrument.
+        failed: True when the repository resolution raised — keyed
+            caps must then fail closed (an unresolved identity must
+            never read as unbounded).
+    """
+
+    valuation_public_id: str | None
+    is_paper: bool
+    mapped: bool
+    failed: bool
+
+
+@dataclass(frozen=True)
+class _NotionalQuote:
+    """Admission-time USD quote split into its two consumers (internal).
+
+    Attributes:
+        comparison: Precision-safe Decimal for the rolling-cap
+            comparison — present even when the value cannot be stored
+            (an absurdly large notional must still trip the cap).
+        storage: Cent-quantized value representable in NUMERIC(18,2),
+            persisted as ``trade_commands.submitted_notional_usd``;
+            ``None`` when unquotable or unrepresentable.
+    """
+
+    comparison: Decimal | None
+    storage: float | None
+
+
+@dataclass(frozen=True)
 class Guard:
     """Payload yielded by :meth:`TradingCapsEnforcer.guard`.
 
@@ -114,16 +157,32 @@ class Guard:
         submission: The :class:`TradeCommandSubmission` the caller
             passed in — echoed back so downstream ``make_row``
             helpers can read it without capturing it separately.
+            The AI-attribution gate yields the ATTRIBUTED rebuild
+            (resolved ``user_public_id``), so insert sites must read
+            identity fields from here, not from their original
+            submission.
         assigned_public_id: UUID7 pre-generated inside the guard
             BEFORE yield so the caller can stamp it onto the
             TradeCommand row. Pre-generation keeps cap accounting
             identity consistent with the inserted row so a
             mid-insert failure can be traced to the same public_id
             seen at cap evaluation.
+        submitted_notional_usd: Admission-time USD quote for the
+            submission (``USDConverter.to_usd`` of the submitted
+            quantity, quantized UP to whole cents), or ``None`` when
+            the submission is a cancel, carries no quantity or
+            instrument identity, or the oracle could not price it
+            and no daily-notional cap forced a fail-closed reject.
+            Insert sites persist this verbatim as
+            ``trade_commands.submitted_notional_usd`` — an admission
+            snapshot, not a universal notional guarantee
+            (compensation and guard-scanner inserts bypass the
+            enforcer and legitimately stay NULL).
     """
 
     submission: TradeCommandSubmission
     assigned_public_id: str
+    submitted_notional_usd: float | None = None
 
 
 class TradingCapsEnforcer:
@@ -229,12 +288,16 @@ class TradingCapsEnforcer:
         lock = await self._get_user_lock(submission.user_public_id)
         async with lock:
             try:
-                await self._evaluate_caps(submission)
+                quoted_notional = await self._evaluate_caps(submission)
             except CapsViolationError as exc:
                 await self._publish_caps_violation_after_ai_approve(submission, exc)
                 raise
             assigned = str(uuid7())
-            yield Guard(submission=submission, assigned_public_id=assigned)
+            yield Guard(
+                submission=submission,
+                assigned_public_id=assigned,
+                submitted_notional_usd=quoted_notional,
+            )
 
     @asynccontextmanager
     async def guard_service_principal(
@@ -262,7 +325,11 @@ class TradingCapsEnforcer:
             acquired (no user to contend on).
             ``assigned_public_id`` is still pre-generated so the
             engine sees the same identity-generation pattern as
-            the user-bound path.
+            the user-bound path. The admission-time USD notional is
+            still quoted best-effort (never fail-closed — no user
+            means no notional cap) so the durable command row can
+            snapshot ``submitted_notional_usd`` when the oracle
+            resolves.
         Rationale: the bypass is an *explicit* named method so the
         audit trail at every insert site reveals whether caps are
         on or off. A REST handler that silently drops the user ID
@@ -270,8 +337,19 @@ class TradingCapsEnforcer:
         :meth:`guard`, which fails closed with
         ``missing_user_public_id``.
         """
+        if submission.command_type != "cancel":
+            valuation = await self._resolve_valuation(submission)
+        else:
+            valuation = _Valuation(
+                valuation_public_id=None, is_paper=False, mapped=False, failed=False
+            )
+        quote = await self._quote_submitted_notional(submission, valuation, fail_closed=False)
         assigned = str(uuid7())
-        yield Guard(submission=submission, assigned_public_id=assigned)
+        yield Guard(
+            submission=submission,
+            assigned_public_id=assigned,
+            submitted_notional_usd=quote.storage,
+        )
 
     @asynccontextmanager
     async def guard_with_ai_review_attribution(
@@ -351,42 +429,241 @@ class TradingCapsEnforcer:
         async with self.guard(attributed) as guard:
             yield guard
 
-    async def _evaluate_caps(self, submission: TradeCommandSubmission) -> None:
+    async def _evaluate_caps(self, submission: TradeCommandSubmission) -> float | None:
         """Dispatch cap evaluation on ``submission.command_type``.
 
         Submit / replace branches exercise quantity + open-orders
         + notional caps. Cancel branch exercises only the
-        cancels-per-minute cap.
+        cancels-per-minute cap. Cap ordering is stable: quantity and
+        open-order checks run BEFORE any pricing so a quantity
+        violation is reported even when the oracle is down.
+
+        Returns:
+            The admission-time USD notional quote for submit-type
+            commands (persisted as
+            ``trade_commands.submitted_notional_usd``), or ``None``
+            for cancels and unpriceable submissions. The quote is
+            computed exactly once regardless of whether a
+            daily-notional cap is configured; only a configured cap
+            makes an oracle failure fail-closed.
         """
         assert (
             submission.user_public_id is not None
         ), "guard() rejected None user before reaching evaluator"
         user_public_id = submission.user_public_id
         caps = await self._repository.get_user_trading_caps(user_public_id)
-        if caps is None:
-            return
         if submission.command_type == "cancel":
-            await self._check_cancels_cap(user_public_id, caps)
-            return
-        self._check_quantity_cap(submission, caps)
-        await self._check_open_orders_cap(user_public_id, caps)
-        await self._check_notional_cap(submission, user_public_id, caps)
+            if caps is not None:
+                await self._check_cancels_cap(user_public_id, caps)
+            return None
+        valuation = await self._resolve_valuation(submission)
+        if caps is not None:
+            self._check_quantity_cap(submission, caps, valuation)
+            await self._check_open_orders_cap(user_public_id, caps)
+        notional_limit = caps.get("max_daily_notional_usd") if caps is not None else None
+        quote = await self._quote_submitted_notional(
+            submission, valuation, fail_closed=notional_limit is not None
+        )
+        if notional_limit is not None and quote.comparison is not None:
+            await self._check_notional_cap(user_public_id, quote.comparison, float(notional_limit))
+        return quote.storage
+
+    async def _resolve_valuation(self, submission: TradeCommandSubmission) -> _Valuation:
+        """Resolve the canonical VALUATION identity for the submission.
+
+        Paper strategy emits carry the PAPER instrument's public id,
+        while market snapshots (the USD oracle's key) and operator cap
+        configuration live under the SOURCE venue's instrument. The
+        repository maps paper→source through
+        ``instruments.source_exchange`` (clock-free); non-paper
+        instruments resolve to themselves. Resolved ONCE per guard and
+        reused for both the per-instrument quantity-cap key and the
+        USD notional quote. A repository failure is captured on the
+        result (``failed=True``) rather than propagated — keyed caps
+        then fail closed while cap-less admissions proceed with a NULL
+        snapshot.
+
+        Args:
+            submission: The submission being admitted.
+
+        Returns:
+            The resolved :class:`_Valuation`.
+        """
+        if submission.instrument_public_id is None:
+            return _Valuation(valuation_public_id=None, is_paper=False, mapped=False, failed=False)
+        try:
+            resolution = await self._repository.resolve_source_instrument_public_id(
+                submission.instrument_public_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "caps_enforcer: source-identity resolution failed for "
+                f"instrument={submission.instrument_public_id}: {exc}; "
+                "keyed caps fail closed, notional snapshot stays NULL"
+            )
+            return _Valuation(valuation_public_id=None, is_paper=True, mapped=False, failed=True)
+        return _Valuation(
+            valuation_public_id=resolution["valuation_public_id"],
+            is_paper=resolution["is_paper"],
+            mapped=resolution["mapped"],
+            failed=False,
+        )
+
+    async def _quote_submitted_notional(
+        self,
+        submission: TradeCommandSubmission,
+        valuation: _Valuation,
+        *,
+        fail_closed: bool,
+    ) -> _NotionalQuote:
+        """Value the submission in USD at admission time.
+
+        Computes ``USDConverter.to_usd(valuation_pid, quantity)`` —
+        the current-mark valuation that works for market orders (no
+        submit price required), keyed by the SOURCE identity so paper
+        strategy emits price against the real venue's snapshot — and
+        quantizes the result UPWARD to whole cents so later
+        ``NUMERIC(18,2)`` accounting reproduces admission semantics
+        without under-counting. The comparison value survives even
+        when the quantized value cannot be represented in
+        ``NUMERIC(18,2)`` (an absurdly large notional must still trip
+        the cap while the storage snapshot stays NULL).
+
+        Args:
+            submission: The submission being admitted.
+            valuation: Resolved identity from
+                :meth:`_resolve_valuation`.
+            fail_closed: ``True`` when a daily-notional cap is
+                configured for the acting user — an oracle failure or
+                unresolved identity must then reject the command
+                (``price_unavailable``), matching the pre-existing
+                cap semantics. ``False`` keeps the quote strictly
+                best-effort: failures log a WARN and yield an empty
+                quote so optional recording never becomes a new
+                rejection path.
+
+        Returns:
+            The :class:`_NotionalQuote` (both fields ``None`` when
+            the submission is a cancel, lacks quantity or identity,
+            or the oracle could not price it in best-effort mode).
+
+        Raises:
+            CapsViolationError: with ``cap_type='price_unavailable'``
+                when ``fail_closed`` is set and the value cannot be
+                resolved.
+        """
+        if submission.command_type == "cancel" or submission.quantity is None:
+            return _NotionalQuote(comparison=None, storage=None)
+        if valuation.valuation_public_id is None:
+            if fail_closed and valuation.failed:
+                raise CapsViolationError(
+                    "price_unavailable",
+                    detail="source identity resolution failed",
+                )
+            return _NotionalQuote(comparison=None, storage=None)
+        try:
+            raw_notional = await self._pricing.to_usd(
+                valuation.valuation_public_id, submission.quantity
+            )
+        except PriceUnavailableError as exc:
+            if fail_closed:
+                raise CapsViolationError(
+                    "price_unavailable",
+                    detail=f"{exc.reason_code}: {exc.detail}",
+                ) from exc
+            logger.warning(
+                "caps_enforcer: submitted-notional quote unavailable for "
+                f"instrument={valuation.valuation_public_id} "
+                f"({exc.reason_code}); persisting NULL notional"
+            )
+            return _NotionalQuote(comparison=None, storage=None)
+        if not raw_notional.is_finite():
+            if fail_closed:
+                raise CapsViolationError(
+                    "price_unavailable",
+                    detail="non-finite USD notional from the oracle",
+                )
+            logger.warning(
+                "caps_enforcer: non-finite USD notional for "
+                f"instrument={valuation.valuation_public_id}; persisting NULL notional"
+            )
+            return _NotionalQuote(comparison=None, storage=None)
+        if raw_notional <= 0:
+            if fail_closed:
+                raise CapsViolationError(
+                    "price_unavailable",
+                    detail="non-positive USD notional from the oracle",
+                )
+            logger.warning(
+                "caps_enforcer: non-positive USD notional for "
+                f"instrument={valuation.valuation_public_id}; persisting NULL notional "
+                "(a negative snapshot would shrink later rolling sums)"
+            )
+            return _NotionalQuote(comparison=None, storage=None)
+        try:
+            quantized = raw_notional.quantize(Decimal("0.01"), rounding=ROUND_UP)
+        except InvalidOperation:
+            quantized = None
+        comparison = quantized if quantized is not None else raw_notional
+        storage: float | None = None
+        if quantized is not None and Decimal("0") < quantized < Decimal("1e15"):
+            storage = float(quantized)
+        else:
+            logger.warning(
+                "caps_enforcer: USD notional not representable in NUMERIC(18,2) "
+                f"for instrument={valuation.valuation_public_id}; persisting NULL "
+                "notional (cap comparison still applies). The 1e15 bound leaves "
+                "float-rounding headroom below the column maximum"
+            )
+        return _NotionalQuote(comparison=comparison, storage=storage)
 
     @staticmethod
-    def _check_quantity_cap(submission: TradeCommandSubmission, caps: UserTradingCapsRow) -> None:
+    def _check_quantity_cap(
+        submission: TradeCommandSubmission,
+        caps: UserTradingCapsRow,
+        valuation: _Valuation,
+    ) -> None:
         """Reject if submitted quantity exceeds per-instrument cap.
 
         JSON-dict form: ``{instrument_public_id: limit}`` per
-        instrument. Scalar form: single Decimal applies to every
-        instrument. Missing per-instrument key means unbounded.
+        instrument, keyed by the SOURCE (valuation) identity — the
+        convention operators configure against. A legacy key on the
+        emission (paper) identity is still honoured with a WARN so
+        pre-mapping limits are never silently dropped. An UNRESOLVED
+        paper identity (no mapping, or the resolution itself failed)
+        FAILS CLOSED when only a source-keyed dict exists: the
+        configured key cannot be found, and "not found" must never
+        read as unbounded. Scalar form: single Decimal applies to
+        every instrument. Missing per-instrument key means unbounded.
         """
         cap_raw = caps.get("max_order_quantity_per_instrument")
         if cap_raw is None or submission.quantity is None:
             return
         if isinstance(cap_raw, dict):
-            key = submission.instrument_public_id or ""
+            unresolved = valuation.failed or (valuation.is_paper and not valuation.mapped)
+            key = valuation.valuation_public_id or submission.instrument_public_id or ""
             per_inst = cap_raw.get(key)
             if per_inst is None:
+                legacy_key = submission.instrument_public_id or ""
+                if legacy_key and legacy_key != key:
+                    per_inst = cap_raw.get(legacy_key)
+                    if per_inst is not None:
+                        logger.warning(
+                            "caps_enforcer: per-instrument quantity cap matched the "
+                            f"legacy emission key {legacy_key} — re-key it to the "
+                            f"source identity {key}"
+                        )
+            if per_inst is None:
+                if unresolved:
+                    raise CapsViolationError(
+                        "max_order_quantity_per_instrument",
+                        detail=(
+                            "source identity unresolved for paper instrument "
+                            f"{submission.instrument_public_id} — per-instrument "
+                            "caps fail closed until the source_exchange mapping "
+                            "exists (run the paper publisher to author it)"
+                        ),
+                    )
                 return
             try:
                 limit = Decimal(str(per_inst))
@@ -430,71 +707,61 @@ class TradingCapsEnforcer:
 
     async def _check_notional_cap(
         self,
-        submission: TradeCommandSubmission,
         user_public_id: str,
-        caps: UserTradingCapsRow,
+        new_notional: Decimal,
+        limit: float,
     ) -> None:
         """Reject if new submission pushes rolling 24h USD above cap.
 
-        Sum basis: ``submit_qty × submit_price`` per prior
-        non-rejected LIVE row — ``mode='paper'`` history is excluded
-        by :meth:`Repository.get_user_recent_submits` because paper
+        Sum precedence per prior non-rejected LIVE row (``mode='paper'``
+        history is excluded by
+        :meth:`Repository.get_user_recent_submits` because paper
         commands carry a simulator reference price and simulated
-        notional must not consume the user's live allowance. The
-        CURRENT submission is evaluated regardless of mode. Prior rows
-        where ``price IS NULL`` (live market orders) are SKIPPED with
-        a WARN log because no submit-time price was committed on those
-        rows. The NEW submission's notional is computed via
-        :meth:`USDConverter.to_usd` (falls back to
-        ``CapsViolationError(price_unavailable)`` if the oracle
-        is stale / missing).
+        notional must not consume the user's live allowance):
+
+        1. ``submitted_notional_usd`` — the admission-time USD quote
+           snapshotted on the row (covers market orders).
+        2. Legacy ``quantity × price`` when the snapshot is NULL but
+           a submit price exists (pre-snapshot limit orders).
+        3. Skip with a WARN log when the row carries neither (legacy
+           market orders — no submit-time valuation survives).
+
+        The CURRENT submission's ``new_notional`` was quoted by
+        :meth:`_quote_submitted_notional` (fail-closed, since a cap is
+        configured whenever this method runs).
 
         Args:
-            submission: The :class:`TradeCommandSubmission` being
-                evaluated.
             user_public_id: Acting user (narrowed non-None).
-            caps: Active :class:`UserTradingCapsRow`.
+            new_notional: Admission quote for the current submission.
+            limit: Configured ``max_daily_notional_usd``.
 
         Raises:
             CapsViolationError: when the rolling sum + new
-                notional would exceed ``max_daily_notional_usd`` or
-                when the USD oracle is unavailable.
+                notional would exceed ``max_daily_notional_usd``.
         """
-        limit = caps.get("max_daily_notional_usd")
-        if limit is None or submission.quantity is None:
-            return
-        if submission.instrument_public_id is None:
-            return
-        try:
-            new_notional = await self._pricing.to_usd(
-                submission.instrument_public_id, submission.quantity
-            )
-        except PriceUnavailableError as exc:
-            raise CapsViolationError(
-                "price_unavailable",
-                detail=f"{exc.reason_code}: {exc.detail}",
-            ) from exc
-
         since = self._now() - ROLLING_NOTIONAL_WINDOW
         rows = await self._repository.get_user_recent_submits(user_public_id, since)
         prior_sum = Decimal("0")
-        skipped_market = 0
+        skipped_unpriced = 0
         for r in rows:
-            if r["price"] is None:
-                skipped_market += 1
-                continue
-            prior_sum += Decimal(str(r["quantity"])) * Decimal(str(r["price"]))
-        if skipped_market > 0:
+            stored_notional = r["submitted_notional_usd"]
+            if stored_notional is not None:
+                prior_sum += Decimal(str(stored_notional))
+            elif r["price"] is not None:
+                prior_sum += Decimal(str(r["quantity"])) * Decimal(str(r["price"]))
+            else:
+                skipped_unpriced += 1
+        if skipped_unpriced > 0:
             logger.warning(
                 "caps_enforcer: notional sum skipped "
-                f"{skipped_market} market-order row(s) with price=None "
-                f"for user={user_public_id}"
+                f"{skipped_unpriced} row(s) missing both submitted "
+                f"notional and price for user={user_public_id}"
             )
         total = prior_sum + new_notional
         if total > Decimal(str(limit)):
             raise CapsViolationError(
                 "max_daily_notional_usd",
-                attempted=float(total),
+                attempted=float(min(total, Decimal("1e300"))),
                 limit=float(limit),
             )
 

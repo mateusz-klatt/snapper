@@ -1060,18 +1060,30 @@ class ExchangeClientBase(ABC):
         status: ExchangeOrderStatusEnum,
         exchange_order_id: str | None = None,
         error: str | None = None,
+        filled_size: float | None = None,
+        average_price: float | None = None,
     ) -> int | None:
         """Close old order version and insert new one in the database (SCD Type 2).
 
         This internal method is called when an order status changes
         (e.g., filled, canceled, rejected). Returns the new version's
-        integer id so callers can link executions to the latest row.
+        integer id so callers can link executions to the latest row —
+        the fill path MUST re-point ``PendingOrderState.db_order_id``
+        to it, or the next version bump re-versions a closed row and
+        trips the active-unique index.
 
         Args:
             db_order_id: Database order ID to close and version.
             status: New order status.
             exchange_order_id: Exchange order ID if it changed.
             error: Error message if order was rejected.
+            filled_size: Venue-reported CUMULATIVE filled size — pass
+                on fill updates so the order row stays truthful;
+                ``None`` marks a status-only transition (fill columns
+                carry forward).
+            average_price: Venue-reported average fill price (raw —
+                may be ``None`` even on fills; the repository then
+                derives a VWAP from executions or stores NULL).
 
         Returns:
             New order version's integer id, or None if repository is
@@ -1088,6 +1100,8 @@ class ExchangeClientBase(ABC):
                 updated_at=now,
                 exchange_order_id=exchange_order_id,
                 error=error,
+                filled_size=filled_size,
+                average_price=average_price,
                 session_id=self._tracker.session_id,
                 sequence_id=seq,
                 timestamp=now,

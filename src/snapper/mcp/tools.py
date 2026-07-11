@@ -581,6 +581,43 @@ def _manual_order_wallet_unresolved_result() -> CallToolResult:
     return _manual_order_wallet_resolution_result(WalletUnresolvedError(candidates=[]))
 
 
+def _manual_order_instrument_identity_result(
+    order: _ManualOrderInput, resolved_instrument_public_id: str | None
+) -> CallToolResult:
+    """Build the error envelope for a spoofed/unknown instrument identity.
+
+    The caller-supplied ``instrument_public_id`` must match the ACTIVE
+    instrument for the submitted ``(instrument, exchange)`` pair — the
+    caps enforcer and USD oracle key on that identity, so a mismatched
+    citation would evaluate quantity and daily-notional caps against
+    the wrong (possibly cheaper) instrument.
+
+    Args:
+        order: The rejected manual-order input.
+        resolved_instrument_public_id: The server-resolved identity,
+            or ``None`` when no active instrument exists for the pair.
+
+    Returns:
+        The canonical failure envelope.
+    """
+    return to_call_tool_result(
+        success=False,
+        error_code="instrument_identity_mismatch",
+        message=(
+            "instrument_public_id does not match the active instrument for the "
+            "submitted (instrument, exchange) pair"
+        ),
+        details=sanitize_output(
+            {
+                "instrument": order.instrument,
+                "exchange": order.exchange,
+                "instrument_public_id": order.instrument_public_id,
+                "resolved_instrument_public_id": resolved_instrument_public_id,
+            }
+        ),
+    )
+
+
 def _manual_order_wallet_blank_result() -> CallToolResult:
     """Return the structured envelope for blank explicit wallet IDs."""
     return to_call_tool_result(
@@ -634,6 +671,14 @@ async def _prepare_manual_order(
     except (WalletAmbiguousError, WalletUnresolvedError) as exc:
         return _manual_order_wallet_resolution_result(exc)
     await validate_user_wallet_scope(claims, wallet_public_id, repo, as_of=created_at)
+    resolved_instrument_public_id = await repo.get_instrument_public_id_by_symbol(
+        order.instrument, order.exchange, created_at
+    )
+    if (
+        resolved_instrument_public_id is None
+        or order.instrument_public_id != resolved_instrument_public_id
+    ):
+        return _manual_order_instrument_identity_result(order, resolved_instrument_public_id)
     if order.ai_review_public_id is not None:
         await validate_ai_review_citation(
             repo,
@@ -734,8 +779,20 @@ async def _insert_execution_plan_or_raise_conflict(
 def _build_manual_order_command_row(
     prepared: _PreparedManualOrder,
     plan_public_id: str,
+    submitted_notional_usd: float | None = None,
 ) -> TradeCommandInsertRow:
-    """Build the trade-command row after the plan public ID is known."""
+    """Build the trade-command row after the plan public ID is known.
+
+    Args:
+        prepared: The validated manual-order preparation bundle.
+        plan_public_id: Public id of the just-inserted execution plan.
+        submitted_notional_usd: Admission-time USD quote from the caps
+            guard, persisted as decision/accounting lineage on the
+            command row (PnL Phase 1).
+
+    Returns:
+        The :class:`TradeCommandInsertRow` for the SQL insert.
+    """
     return {
         "command_type": "create",
         "shard_key": prepared.shard_key,
@@ -763,6 +820,8 @@ def _build_manual_order_command_row(
         "user_public_id": prepared.user_public_id,
         "plan_public_id": plan_public_id,
         "source_surface": _MCP_SOURCE_SURFACE,
+        "ai_review_public_id": prepared.submission.ai_review_public_id,
+        "submitted_notional_usd": submitted_notional_usd,
     }
 
 
@@ -1624,12 +1683,16 @@ def register_mcp_tools(
         )
         if isinstance(prepared, CallToolResult):
             return prepared
-        async with prepared.enforcer.guard(prepared.submission):
+        async with prepared.enforcer.guard(prepared.submission) as caps_guard:
             plan_public_id = await _insert_execution_plan_or_raise_conflict(
                 prepared.repo,
                 prepared.plan_row,
             )
-            cmd_row = _build_manual_order_command_row(prepared, plan_public_id)
+            cmd_row = _build_manual_order_command_row(
+                prepared,
+                plan_public_id,
+                submitted_notional_usd=caps_guard.submitted_notional_usd,
+            )
             try:
                 _cmd_id, command_public_id = await prepared.repo.insert_trade_command(
                     cmd_row, ownership=None
@@ -1756,7 +1819,9 @@ def register_mcp_tools(
             command_public_id: UUID7 returned by ``submit_manual_order``
                 (or any trade-command insert). The lookup is keyed on
                 ``trade_commands.public_id``; the ORDER row is reached
-                via ``trade_commands.plan_public_id == orders.plan_public_id``.
+                via the command's scoped ``client_order_id`` (echoed
+                onto the orders row by the executor), so plan-less
+                strategy commands resolve too.
 
         Returns:
             Canonical envelope. On success ``details`` carries the

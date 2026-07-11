@@ -15,7 +15,9 @@ import snapper.server.order_routes as order_routes
 from snapper.api.schemas.orders import CreateOrderBody
 from snapper.api.schemas.orders import CreateOrderCommand
 from snapper.application.engine.service import compute_shard_key
+from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.json_types import JsonObject
@@ -31,9 +33,29 @@ _WALLET_PUBLIC_ID = "01968a3b-7c4d-7e0f-8a1b-2c3d4e5f6a7b"
 class _AdmitCapsGuard:
     """Async context manager that admits cap-guarded submissions."""
 
-    async def __aenter__(self) -> None:
-        """Enter without rejecting the submission."""
-        return None
+    async def __aenter__(self) -> Guard:
+        """Enter without rejecting the submission.
+
+        Returns:
+            The stub :class:`Guard` payload the route reads.
+        """
+        return Guard(
+            submission=TradeCommandSubmission(
+                user_public_id="test_user",
+                operator_public_id=None,
+                wallet_public_id=_WALLET_PUBLIC_ID,
+                instrument_public_id=None,
+                command_type="create",
+                side="buy",
+                order_type="market",
+                quantity=None,
+                price=None,
+                source_surface="rest",
+                idempotency_key=None,
+            ),
+            assigned_public_id="guard-pid",
+            submitted_notional_usd=None,
+        )
 
     async def __aexit__(self, *_args: object) -> None:
         """Exit without suppressing exceptions."""

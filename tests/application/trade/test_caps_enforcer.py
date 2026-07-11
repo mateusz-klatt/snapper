@@ -38,6 +38,7 @@ from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.data.repository import Repository
+from snapper.data.repository_types import InstrumentSourceResolution
 from snapper.data.repository_types import UserRecentSubmitRow
 from snapper.data.repository_types import UserTradingCapsRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -84,6 +85,22 @@ def _caps(**overrides: object) -> UserTradingCapsRow:
     return base
 
 
+async def _echo_pid(instrument_public_id: str) -> InstrumentSourceResolution:
+    """Echo the input pid (identity source-resolver stub).
+
+    Args:
+        instrument_public_id: Emission-side instrument identity.
+
+    Returns:
+        A non-paper identity resolution echoing the input.
+    """
+    return {
+        "valuation_public_id": instrument_public_id,
+        "is_paper": False,
+        "mapped": False,
+    }
+
+
 def _stub_repo(
     caps: UserTradingCapsRow | None = None,
     *,
@@ -97,6 +114,8 @@ def _stub_repo(
     repo.count_user_open_commands = AsyncMock(return_value=open_commands)
     repo.get_user_recent_submits = AsyncMock(return_value=recent_submits or [])
     repo.count_user_rolling_cancels = AsyncMock(return_value=rolling_cancels)
+
+    repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
     return cast(Repository, repo)
 
 
@@ -307,7 +326,13 @@ async def test_notional_cap_rejects_when_sum_over_limit() -> None:
     """
     caps = _caps(max_daily_notional_usd=10_000.0)
     prior: list[UserRecentSubmitRow] = [
-        {"instrument": "BTC-USD", "exchange": "kraken", "quantity": 2.0, "price": 4000.0},
+        {
+            "instrument": "BTC-USD",
+            "exchange": "kraken",
+            "quantity": 2.0,
+            "price": 4000.0,
+            "submitted_notional_usd": None,
+        },
     ]
     enforcer = TradingCapsEnforcer(
         _stub_repo(caps, recent_submits=prior),
@@ -331,7 +356,13 @@ async def test_notional_cap_admits_when_sum_within_limit() -> None:
     """
     caps = _caps(max_daily_notional_usd=10_000.0)
     prior: list[UserRecentSubmitRow] = [
-        {"instrument": "BTC-USD", "exchange": "kraken", "quantity": 1.0, "price": 5000.0},
+        {
+            "instrument": "BTC-USD",
+            "exchange": "kraken",
+            "quantity": 1.0,
+            "price": 5000.0,
+            "submitted_notional_usd": None,
+        },
     ]
     enforcer = TradingCapsEnforcer(
         _stub_repo(caps, recent_submits=prior),
@@ -357,6 +388,7 @@ async def test_notional_cap_skips_market_orders_without_price() -> None:
             "exchange": "kraken",
             "quantity": 999.0,
             "price": None,
+            "submitted_notional_usd": None,
         },
     ]
     enforcer = TradingCapsEnforcer(
@@ -524,6 +556,7 @@ async def test_per_user_lock_serializes_concurrent_submissions_for_same_user() -
         return _caps(max_open_orders=1)
 
     repo = MagicMock()
+    repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
     repo.get_user_trading_caps = AsyncMock(side_effect=fake_caps)
     repo.count_user_open_commands = AsyncMock(side_effect=fake_count)
     repo.get_user_recent_submits = AsyncMock(return_value=[])
@@ -626,6 +659,7 @@ class TestCapsViolationAfterAiApprovePublish:
         """Cap violation on AI-approved submission -> publish bus event + raise."""
         caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_user_trading_caps = AsyncMock(return_value=caps)
         repo.count_user_open_commands = AsyncMock(return_value=0)
         repo.get_user_recent_submits = AsyncMock(return_value=[])
@@ -657,6 +691,7 @@ class TestCapsViolationAfterAiApprovePublish:
         """Non-AI submission cap violation -> raise WITHOUT publish."""
         caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_user_trading_caps = AsyncMock(return_value=caps)
         repo.count_user_open_commands = AsyncMock(return_value=0)
         repo.get_user_recent_submits = AsyncMock(return_value=[])
@@ -676,6 +711,7 @@ class TestCapsViolationAfterAiApprovePublish:
         """Missing publisher -> raise CapsViolationError (graceful degradation)."""
         caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_user_trading_caps = AsyncMock(return_value=caps)
         repo.count_user_open_commands = AsyncMock(return_value=0)
         repo.get_user_recent_submits = AsyncMock(return_value=[])
@@ -698,6 +734,7 @@ class TestCapsViolationAfterAiApprovePublish:
         """
         caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_user_trading_caps = AsyncMock(return_value=caps)
         repo.count_user_open_commands = AsyncMock(return_value=0)
         repo.get_user_recent_submits = AsyncMock(return_value=[])
@@ -718,6 +755,7 @@ class TestCapsViolationAfterAiApprovePublish:
         """Stale ai_review_public_id (row gone) -> warn + skip publish + still raise."""
         caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_user_trading_caps = AsyncMock(return_value=caps)
         repo.count_user_open_commands = AsyncMock(return_value=0)
         repo.get_user_recent_submits = AsyncMock(return_value=[])
@@ -738,6 +776,7 @@ class TestCapsViolationAfterAiApprovePublish:
         """price_unavailable cap_type does NOT publish — not delegate-actionable."""
         caps = _caps(max_daily_notional_usd=Decimal("1000"))
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_user_trading_caps = AsyncMock(return_value=caps)
         repo.count_user_open_commands = AsyncMock(return_value=0)
         repo.get_user_recent_submits = AsyncMock(return_value=[])
@@ -796,6 +835,7 @@ class TestCapsViolationAfterAiApprovePublish:
         """
         caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_user_trading_caps = AsyncMock(return_value=caps)
         repo.count_user_open_commands = AsyncMock(return_value=0)
         repo.get_user_recent_submits = AsyncMock(return_value=[])
@@ -823,6 +863,7 @@ class TestCapsViolationAfterAiApprovePublish:
         branch by calling the helper directly with a synthetic exception.
         """
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_ai_review = AsyncMock(return_value=_ai_review_row())
         enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
         publisher = _publisher_with_tracker()
@@ -839,6 +880,7 @@ class TestCapsViolationAfterAiApprovePublish:
         """The publish branch fires for ``max_open_orders`` too (every cap branch)."""
         caps = _caps(max_open_orders=2)
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_user_trading_caps = AsyncMock(return_value=caps)
         repo.count_user_open_commands = AsyncMock(return_value=2)
         repo.get_user_recent_submits = AsyncMock(return_value=[])
@@ -886,6 +928,7 @@ class TestGuardWithAiReviewAttribution:
             evaluation falling through cleanly with no caps row).
         """
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_ai_review = AsyncMock(
             return_value=_ai_review_row(review_public_id="rev-strat", dispatch_version=2)
         )
@@ -915,6 +958,7 @@ class TestGuardWithAiReviewAttribution:
         deeper in the validator.
         """
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_ai_review = AsyncMock()
         enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
         empty_wallet = TradeCommandSubmission(
@@ -949,6 +993,7 @@ class TestGuardWithAiReviewAttribution:
         """
         caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_ai_review = AsyncMock(
             return_value=_ai_review_row(review_public_id="rev-strat", dispatch_version=5)
         )
@@ -981,6 +1026,7 @@ class TestGuardWithAiReviewAttribution:
         ``AiReviewCitationError`` raised).
         """
         repo = MagicMock()
+        repo.resolve_source_instrument_public_id = AsyncMock(side_effect=_echo_pid)
         repo.get_ai_review = AsyncMock(
             return_value=_ai_review_row(review_public_id="rev-strat", dispatch_version=1)
         )
@@ -996,3 +1042,446 @@ class TestGuardWithAiReviewAttribution:
             ai_review_dispatch_version=42,
         ) as guard:
             assert guard.submission.ai_review_dispatch_version == 42
+
+
+@pytest.mark.asyncio
+async def test_guard_quotes_notional_without_caps_row() -> None:
+    """Admission notional is quoted even when the user has no caps row.
+
+    Given: no caps row for the user and a converter valuing the
+        submission at 1000 USD,
+    When: ``guard()`` yields,
+    Then: ``Guard.submitted_notional_usd == 1000.0`` — the snapshot
+        column populates regardless of cap configuration.
+    """
+    enforcer = TradingCapsEnforcer(_stub_repo(None), _stub_pricing(), now=lambda: _NOW)
+    async with enforcer.guard(_submission()) as guard:
+        assert guard.submitted_notional_usd == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_guard_quote_quantizes_up_to_cents() -> None:
+    """The admission quote rounds UP to whole cents.
+
+    Given: a converter returning ``3000.001`` USD,
+    When: ``guard()`` yields,
+    Then: the quote persists as ``3000.01`` so NUMERIC(18,2)
+        accounting never under-counts admission notional.
+    """
+    enforcer = TradingCapsEnforcer(
+        _stub_repo(None), _stub_pricing(Decimal("3000.001")), now=lambda: _NOW
+    )
+    async with enforcer.guard(_submission()) as guard:
+        assert guard.submitted_notional_usd == 3000.01
+
+
+@pytest.mark.asyncio
+async def test_guard_quote_fails_open_without_notional_cap() -> None:
+    """Oracle failure without a configured cap yields a NULL quote.
+
+    Given: no ``max_daily_notional_usd`` cap and a converter raising
+        ``PriceUnavailableError``,
+    When: ``guard()`` runs,
+    Then: the guard still yields (no new rejection path) and the
+        quote is None — recording stays strictly best-effort.
+    """
+    pricing = MagicMock(spec=USDConverter)
+    pricing.to_usd = AsyncMock(side_effect=PriceUnavailableError("snapshot_missing", "inst-btc"))
+    enforcer = TradingCapsEnforcer(
+        _stub_repo(_caps()), cast(USDConverter, pricing), now=lambda: _NOW
+    )
+    async with enforcer.guard(_submission()) as guard:
+        assert guard.submitted_notional_usd is None
+
+
+@pytest.mark.asyncio
+async def test_guard_cancel_yields_null_notional() -> None:
+    """Cancels carry no admission notional.
+
+    Given: a cancel-type submission,
+    When: ``guard()`` yields,
+    Then: the quote is None and the converter is never invoked.
+    """
+    pricing = _stub_pricing()
+    enforcer = TradingCapsEnforcer(_stub_repo(None), pricing, now=lambda: _NOW)
+    async with enforcer.guard(_submission(command_type="cancel", quantity=None)) as guard:
+        assert guard.submitted_notional_usd is None
+    assert cast(MagicMock, pricing.to_usd).await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_service_principal_quotes_notional_best_effort() -> None:
+    """The service-principal path snapshots the admission notional.
+
+    Given: a strategy hot-path submission and a working converter,
+    When: ``guard_service_principal()`` yields,
+    Then: ``Guard.submitted_notional_usd`` carries the quote while no
+        cap state is consulted.
+    """
+    repo = _stub_repo(None)
+    enforcer = TradingCapsEnforcer(repo, _stub_pricing(Decimal("42.5")), now=lambda: _NOW)
+    async with enforcer.guard_service_principal(_submission(user=None)) as guard:
+        assert guard.submitted_notional_usd == 42.5
+    assert cast(MagicMock, cast(MagicMock, repo).get_user_trading_caps).await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_service_principal_quote_failure_yields_none() -> None:
+    """Service-principal quote failures never reject.
+
+    Given: a converter raising ``PriceUnavailableError`` (the paper
+        source-identity gap) on the service-principal path,
+    When: ``guard_service_principal()`` runs,
+    Then: the guard yields with a None quote — a pricing failure must
+        never block a strategy emit that carries no cap.
+    """
+    pricing = MagicMock(spec=USDConverter)
+    pricing.to_usd = AsyncMock(side_effect=PriceUnavailableError("snapshot_missing", "inst-paper"))
+    enforcer = TradingCapsEnforcer(_stub_repo(None), cast(USDConverter, pricing), now=lambda: _NOW)
+    async with enforcer.guard_service_principal(_submission(user=None)) as guard:
+        assert guard.submitted_notional_usd is None
+
+
+@pytest.mark.asyncio
+async def test_notional_sum_prefers_stored_snapshot_over_price_product() -> None:
+    """Rolling-sum precedence: stored snapshot beats quantity × price.
+
+    Given: ``max_daily_notional_usd=10_000``, one prior row carrying
+        ``submitted_notional_usd=8000`` alongside a misleadingly tiny
+        ``quantity × price`` product, and a new 3000 USD submission,
+    When: ``guard()`` runs,
+    Then: the stored snapshot drives the sum (8000 + 3000 > 10000)
+        and the cap rejects.
+    """
+    caps = _caps(max_daily_notional_usd=10_000.0)
+    prior: list[UserRecentSubmitRow] = [
+        {
+            "instrument": "BTC-USD",
+            "exchange": "kraken",
+            "quantity": 1.0,
+            "price": 1.0,
+            "submitted_notional_usd": 8000.0,
+        },
+    ]
+    enforcer = TradingCapsEnforcer(
+        _stub_repo(caps, recent_submits=prior),
+        _stub_pricing(Decimal("3000")),
+        now=lambda: _NOW,
+    )
+    with pytest.raises(CapsViolationError) as exc:
+        async with enforcer.guard(_submission()):
+            raise AssertionError("guard should have rejected before yield")
+    assert exc.value.cap_type == "max_daily_notional_usd"
+
+
+@pytest.mark.asyncio
+async def test_notional_sum_counts_stored_market_order_snapshot() -> None:
+    """Market-order rows with a stored snapshot now count in the sum.
+
+    Given: a prior market-order row (``price=None``) carrying
+        ``submitted_notional_usd=5000`` and a 3000 USD submission
+        against a 10_000 cap,
+    When: ``guard()`` runs,
+    Then: the guard admits at 8000 — and the same row would have been
+        silently skipped before the snapshot column existed.
+    """
+    caps = _caps(max_daily_notional_usd=10_000.0)
+    prior: list[UserRecentSubmitRow] = [
+        {
+            "instrument": "BTC-USD",
+            "exchange": "kraken",
+            "quantity": 0.1,
+            "price": None,
+            "submitted_notional_usd": 5000.0,
+        },
+    ]
+    enforcer = TradingCapsEnforcer(
+        _stub_repo(caps, recent_submits=prior),
+        _stub_pricing(Decimal("3000")),
+        now=lambda: _NOW,
+    )
+    async with enforcer.guard(_submission()) as guard:
+        assert isinstance(guard, Guard)
+
+
+@pytest.mark.asyncio
+async def test_quantity_cap_keys_by_resolved_source_identity() -> None:
+    """Per-instrument quantity caps key by the SOURCE identity.
+
+    Given: a submission carrying the PAPER instrument identity whose
+        resolver maps it to the source identity, and a per-instrument
+        dict cap configured against the SOURCE key,
+    When: ``guard()`` runs with an over-limit quantity,
+    Then: the cap rejects — operators configure against the source.
+    """
+    caps = _caps(max_order_quantity_per_instrument={"inst-src": "1"})
+    repo = _stub_repo(caps)
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).side_effect = None
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).return_value = {
+        "valuation_public_id": "inst-src",
+        "is_paper": True,
+        "mapped": True,
+    }
+    enforcer = TradingCapsEnforcer(repo, _stub_pricing(), now=lambda: _NOW)
+    with pytest.raises(CapsViolationError) as exc:
+        async with enforcer.guard(
+            _submission(instrument_public_id="inst-paper", quantity=Decimal("2"))
+        ):
+            raise AssertionError("guard should have rejected before yield")
+    assert exc.value.cap_type == "max_order_quantity_per_instrument"
+
+
+@pytest.mark.asyncio
+async def test_quantity_cap_honours_legacy_emission_key_with_warning() -> None:
+    """A legacy paper-keyed quantity cap still enforces (with a WARN).
+
+    Given: a per-instrument dict cap configured against the LEGACY
+        emission (paper) identity while the resolver maps the
+        submission to a different source identity,
+    When: ``guard()`` runs with an over-limit quantity,
+    Then: the legacy key still rejects — pre-mapping limits are never
+        silently dropped.
+    """
+    caps = _caps(max_order_quantity_per_instrument={"inst-paper": "1"})
+    repo = _stub_repo(caps)
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).side_effect = None
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).return_value = {
+        "valuation_public_id": "inst-src",
+        "is_paper": True,
+        "mapped": True,
+    }
+    enforcer = TradingCapsEnforcer(repo, _stub_pricing(), now=lambda: _NOW)
+    with pytest.raises(CapsViolationError) as exc:
+        async with enforcer.guard(
+            _submission(instrument_public_id="inst-paper", quantity=Decimal("2"))
+        ):
+            raise AssertionError("guard should have rejected before yield")
+    assert exc.value.cap_type == "max_order_quantity_per_instrument"
+
+
+@pytest.mark.asyncio
+async def test_notional_quote_prices_resolved_source_identity() -> None:
+    """The USD quote is keyed by the resolved SOURCE identity.
+
+    Given: a paper-identity submission whose resolver maps to the
+        source instrument,
+    When: ``guard()`` quotes the admission notional,
+    Then: ``USDConverter.to_usd`` receives the SOURCE identity — the
+        snapshot only exists under the source venue.
+    """
+    repo = _stub_repo(None)
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).side_effect = None
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).return_value = {
+        "valuation_public_id": "inst-src",
+        "is_paper": True,
+        "mapped": True,
+    }
+    pricing = _stub_pricing(Decimal("500"))
+    enforcer = TradingCapsEnforcer(repo, pricing, now=lambda: _NOW)
+    async with enforcer.guard(_submission(instrument_public_id="inst-paper")) as guard:
+        assert guard.submitted_notional_usd == 500.0
+    priced_pid = cast(MagicMock, pricing.to_usd).call_args.args[0]
+    assert priced_pid == "inst-src"
+
+
+@pytest.mark.asyncio
+async def test_quantity_cap_fails_closed_for_unmapped_paper_identity() -> None:
+    """A dict quantity cap + unresolved paper identity rejects.
+
+    Given: a per-instrument dict cap and a PAPER submission whose
+        source identity is UNMAPPED (no matching key can exist under
+        the source convention),
+    When: ``guard()`` runs,
+    Then: the cap fails closed — "key not found" for an unresolved
+        identity must never read as unbounded.
+    """
+    caps = _caps(max_order_quantity_per_instrument={"inst-src": "1"})
+    repo = _stub_repo(caps)
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).side_effect = None
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).return_value = {
+        "valuation_public_id": "inst-paper",
+        "is_paper": True,
+        "mapped": False,
+    }
+    enforcer = TradingCapsEnforcer(repo, _stub_pricing(), now=lambda: _NOW)
+    with pytest.raises(CapsViolationError) as exc:
+        async with enforcer.guard(
+            _submission(instrument_public_id="inst-paper", quantity=Decimal("0.5"))
+        ):
+            raise AssertionError("guard should have rejected before yield")
+    assert exc.value.cap_type == "max_order_quantity_per_instrument"
+    assert "unresolved" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_resolution_failure_fails_closed_only_with_keyed_caps() -> None:
+    """A resolver failure warns + NULLs without caps, rejects with them.
+
+    Given: a repository whose identity resolution raises,
+    When: ``guard()`` runs for a user WITHOUT any caps row,
+    Then: the guard yields with a NULL notional snapshot (no new
+        rejection path) — and the same failure WITH a daily-notional
+        cap rejects as ``price_unavailable``.
+    """
+    repo = _stub_repo(None)
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).side_effect = (
+        RuntimeError("db down")
+    )
+    enforcer = TradingCapsEnforcer(repo, _stub_pricing(), now=lambda: _NOW)
+    async with enforcer.guard(_submission()) as guard:
+        assert guard.submitted_notional_usd is None
+
+    capped_repo = _stub_repo(_caps(max_daily_notional_usd=10_000.0))
+    cast(
+        MagicMock, cast(MagicMock, capped_repo).resolve_source_instrument_public_id
+    ).side_effect = RuntimeError("db down")
+    capped = TradingCapsEnforcer(capped_repo, _stub_pricing(), now=lambda: _NOW)
+    with pytest.raises(CapsViolationError) as exc:
+        async with capped.guard(_submission()):
+            raise AssertionError("guard should have rejected before yield")
+    assert exc.value.cap_type == "price_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_quote_survives_unrepresentable_notional() -> None:
+    """An absurd notional still trips the cap but stores NULL.
+
+    Given: an oracle valuing the submission beyond NUMERIC(18,2)
+        range and a 10k daily-notional cap,
+    When: ``guard()`` runs,
+    Then: the comparison still applies (cap rejects) — and WITHOUT a
+        cap the guard yields with a NULL storage snapshot.
+    """
+    huge = Decimal("1e20")
+    capped = TradingCapsEnforcer(
+        _stub_repo(_caps(max_daily_notional_usd=10_000.0)),
+        _stub_pricing(huge),
+        now=lambda: _NOW,
+    )
+    with pytest.raises(CapsViolationError) as exc:
+        async with capped.guard(_submission()):
+            raise AssertionError("guard should have rejected before yield")
+    assert exc.value.cap_type == "max_daily_notional_usd"
+
+    uncapped = TradingCapsEnforcer(_stub_repo(None), _stub_pricing(huge), now=lambda: _NOW)
+    async with uncapped.guard(_submission()) as guard:
+        assert guard.submitted_notional_usd is None
+
+
+@pytest.mark.asyncio
+async def test_quote_rejects_non_finite_notional_with_cap() -> None:
+    """A non-finite oracle value fails closed with a cap, warns without.
+
+    Given: an oracle returning ``Decimal('Infinity')``,
+    When: ``guard()`` runs with and without a daily-notional cap,
+    Then: the capped path rejects as ``price_unavailable`` and the
+        cap-less path yields with a NULL snapshot.
+    """
+    infinite = Decimal("Infinity")
+    capped = TradingCapsEnforcer(
+        _stub_repo(_caps(max_daily_notional_usd=10_000.0)),
+        _stub_pricing(infinite),
+        now=lambda: _NOW,
+    )
+    with pytest.raises(CapsViolationError) as exc:
+        async with capped.guard(_submission()):
+            raise AssertionError("guard should have rejected before yield")
+    assert exc.value.cap_type == "price_unavailable"
+
+    uncapped = TradingCapsEnforcer(_stub_repo(None), _stub_pricing(infinite), now=lambda: _NOW)
+    async with uncapped.guard(_submission()) as guard:
+        assert guard.submitted_notional_usd is None
+
+
+@pytest.mark.asyncio
+async def test_quote_unquantizable_notional_still_trips_cap() -> None:
+    """A notional too large to even quantize still trips the cap.
+
+    Given: an oracle value whose cent-quantization exceeds the Decimal
+        context precision (``1e30``),
+    When: ``guard()`` runs with a 10k daily-notional cap,
+    Then: the RAW Decimal drives the comparison and the cap rejects.
+    """
+    enforcer = TradingCapsEnforcer(
+        _stub_repo(_caps(max_daily_notional_usd=10_000.0)),
+        _stub_pricing(Decimal("1e30")),
+        now=lambda: _NOW,
+    )
+    with pytest.raises(CapsViolationError) as exc:
+        async with enforcer.guard(_submission()):
+            raise AssertionError("guard should have rejected before yield")
+    assert exc.value.cap_type == "max_daily_notional_usd"
+
+
+@pytest.mark.asyncio
+async def test_service_principal_cancel_skips_quote() -> None:
+    """A service-principal cancel never resolves or quotes.
+
+    Given: a cancel-type submission on the strategy hot path,
+    When: ``guard_service_principal()`` yields,
+    Then: the notional snapshot is None and neither the resolver nor
+        the oracle is consulted.
+    """
+    repo = _stub_repo(None)
+    pricing = _stub_pricing()
+    enforcer = TradingCapsEnforcer(repo, pricing, now=lambda: _NOW)
+    async with enforcer.guard_service_principal(
+        _submission(user=None, command_type="cancel", quantity=None)
+    ) as guard:
+        assert guard.submitted_notional_usd is None
+    assert (
+        cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).await_count == 0
+    )
+    assert cast(MagicMock, pricing.to_usd).await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_quantity_cap_admits_mapped_identity_without_matching_key() -> None:
+    """A MAPPED identity with no matching dict key stays unbounded.
+
+    Given: a mapped paper resolution and a per-instrument dict cap
+        keyed by an unrelated instrument (neither source nor legacy
+        key matches),
+    When: ``guard()`` runs,
+    Then: the guard admits — only UNRESOLVED identities fail closed.
+    """
+    caps = _caps(max_order_quantity_per_instrument={"inst-other": "1"})
+    repo = _stub_repo(caps)
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).side_effect = None
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).return_value = {
+        "valuation_public_id": "inst-src",
+        "is_paper": True,
+        "mapped": True,
+    }
+    enforcer = TradingCapsEnforcer(repo, _stub_pricing(), now=lambda: _NOW)
+    async with enforcer.guard(
+        _submission(instrument_public_id="inst-paper", quantity=Decimal("5"))
+    ) as guard:
+        assert isinstance(guard, Guard)
+
+
+@pytest.mark.asyncio
+async def test_quote_rejects_non_positive_notional_with_cap() -> None:
+    """A non-positive oracle value fails closed with a cap, warns without.
+
+    Given: an oracle returning a NEGATIVE notional (a poisoned
+        snapshot would otherwise shrink later rolling sums, and
+        ``-1e20`` would overflow the storage column),
+    When: ``guard()`` runs with and without a daily-notional cap,
+    Then: the capped path rejects as ``price_unavailable`` and the
+        cap-less path yields with a NULL snapshot.
+    """
+    negative = Decimal("-1e20")
+    capped = TradingCapsEnforcer(
+        _stub_repo(_caps(max_daily_notional_usd=10_000.0)),
+        _stub_pricing(negative),
+        now=lambda: _NOW,
+    )
+    with pytest.raises(CapsViolationError) as exc:
+        async with capped.guard(_submission()):
+            raise AssertionError("guard should have rejected before yield")
+    assert exc.value.cap_type == "price_unavailable"
+
+    uncapped = TradingCapsEnforcer(_stub_repo(None), _stub_pricing(negative), now=lambda: _NOW)
+    async with uncapped.guard(_submission()) as guard:
+        assert guard.submitted_notional_usd is None
