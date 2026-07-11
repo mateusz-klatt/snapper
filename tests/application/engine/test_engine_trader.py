@@ -5068,7 +5068,7 @@ class TestRecoveryAccrualReplayError:
         now = datetime(2026, 1, 2, tzinfo=UTC)
         recovered = await coord_any._recover_from_checkpoints(now)
         assert isinstance(recovered, set)
-        repo_mock.get_instrument_public_id_by_symbol.assert_called_once()
+        assert repo_mock.get_instrument_public_id_by_symbol.await_count >= 1
 
 
 class TestRecoveryAccrualReplayBranches:
@@ -5216,7 +5216,7 @@ class TestRecoveryNoCheckpointAt:
         now = datetime(2026, 1, 2, tzinfo=UTC)
         recovered = await coord_any._recover_from_checkpoints(now)
         assert "BTC-USD@kraken-live" in recovered
-        repo_mock.get_instrument_public_id_by_symbol.assert_not_called()
+        repo_mock.get_accruals.assert_not_called()
 
 
 class TestComputeBoundariesLimit:

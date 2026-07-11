@@ -404,9 +404,21 @@ class PositionData(StrictDataSchema[Literal["position"]]):
             lookup round-trip.
         exchange: Exchange where the position is held.
         quantity: Position size (positive for long, negative for short).
-        average_price: Average entry price.
-        unrealized_pnl: Unrealized profit/loss.
-        realized_pnl: Realized profit/loss.
+        average_price: Average entry price — honest NULL when an
+            aggregate of opposing paper strategy shards has no single
+            truthful entry or a component entry is unknown (never
+            zero-coerced).
+        unrealized_pnl: Mark-based unrealized profit/loss — honest
+            NULL when no usable mark or entry exists.
+        realized_pnl: Realized profit/loss (execution-fee-exclusive,
+            funding-inclusive).
+        mark_price: Stale-visible mark echoed from the active market
+            snapshot; NULL when no usable mark exists.
+        marked_at: The mark snapshot's own bus timestamp — consumers
+            judge freshness themselves; NULL with mark_price.
+        source_venue_event_id: Maximum durable venue-event watermark
+            consumed into this state (a recovery watermark, not the
+            exact causal fill); NULL when unknown.
         position_cycle_public_id: Public ID of the open position cycle, if any.
         wallet_public_id: Owning wallet UUID7 — non-null on the ORM
             so always present in projection. Surfaces here so iOS /
@@ -421,9 +433,12 @@ class PositionData(StrictDataSchema[Literal["position"]]):
     exchange: OrderExchange
     mode: ExecutionMode = ExecutionModeEnum.LIVE
     quantity: float
-    average_price: float
-    unrealized_pnl: float
+    average_price: float | None = None
+    unrealized_pnl: float | None = None
     realized_pnl: float
+    mark_price: float | None = None
+    marked_at: datetime | None = None
+    source_venue_event_id: int | None = None
     position_cycle_public_id: str | None = None
     wallet_public_id: str = ""
 

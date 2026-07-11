@@ -340,17 +340,18 @@ class TestCheckpointRecovery:
         assert engine.position_qty == pytest.approx(0.5)
 
     @pytest.mark.asyncio
-    async def test_full_replay_seeds_consumed_watermark_to_db_max(
+    async def test_full_replay_seeds_consumed_watermark_to_matched_fills(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Full-replay recovery seeds the consumed watermark to the shard DB-max.
+        """Full-replay seeds the watermark from MATCHED fills, never DB-max.
 
-        Given: no checkpoint but one execution to full-replay, with the shard's
-            latest durable venue event id = 42,
+        Given: no checkpoint but one execution to full-replay whose durable
+            venue event resolves to id 42 via identifier matching,
         When: _recover_engine_state runs,
-        Then: the per-shard consumed watermark is seeded to 42 so a later
-            non-fill (funding) checkpoint cannot persist 0 and re-replay the
-            whole shard on the next restart.
+        Then: the per-shard consumed watermark is 42 — derived from the
+            fill actually replayed, so a recorded-but-unreplayed venue
+            event with a higher id can never be over-claimed and skipped
+            on the next restart.
         """
         coord = _make_coord(monkeypatch)
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)
@@ -378,12 +379,15 @@ class TestCheckpointRecovery:
             ]
         )
         mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
-        mock_repo.get_latest_venue_event_id = AsyncMock(return_value=42)
+        mock_repo.get_consumed_fill_venue_event_id = AsyncMock(return_value=42)
         _set_sqlalchemy_repo(coord, mock_repo)
 
         await coord._recover_engine_state()
 
         assert coord._consumed_venue_event_watermarks["kraken.BTC-USD.live"] == 42
+        matched_call = mock_repo.get_consumed_fill_venue_event_id.await_args.kwargs
+        assert matched_call["client_order_id"] == "c1"
+        assert matched_call["trade_id"] == "t1"
 
     @pytest.mark.asyncio
     async def test_full_replay_seed_skipped_when_no_venue_events(

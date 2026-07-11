@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Position
+from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PositionProjectionUpsertRow
 
@@ -299,3 +300,138 @@ async def test_close_position_projection_clamps_lagging_bus_clock(tmp_path: Path
     assert closed is True
     rows = await _all_rows(repo)
     assert rows[0].known_to == t1
+
+
+async def test_projection_rows_surface_wallet_scoped_with_provenance(tmp_path: Path) -> None:
+    """Delegate-scoped reads see only accessible wallets, marks intact.
+
+    Given: projection rows written for two different wallets on a real
+        repository (the exact write path the trader uses),
+    When: get_positions runs scoped to one wallet — the parameter the
+        MCP list_positions tool passes from the delegate's wallet
+        grants,
+    Then: only that wallet's row is returned and it carries the full
+        mark provenance trio and watermark; the unscoped read sees
+        both.
+    """
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'scoped.db'}")
+    await repo.create_all()
+    now = datetime.now(UTC)
+    async with repo.session() as s:
+        sym = Symbol(
+            native_symbol="BTC-USD",
+            base="BTC",
+            quote="USD",
+            asset_type="crypto",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=1,
+        )
+        s.add(sym)
+        await s.commit()
+        await s.refresh(sym)
+    _, inst_pid = await repo.ensure_instrument(
+        symbol_public_id=sym.public_id,
+        exchange="kraken",
+        session_id="s1",
+        sequence_id=2,
+        timestamp=now,
+    )
+    other_wallet = "00000000-0000-7000-8000-000000000002"
+    await repo.upsert_position_projection(
+        _row(now, instrument_public_id=inst_pid, marked_at=now, source_venue_event_id=42)
+    )
+    await repo.upsert_position_projection(
+        _row(
+            now,
+            instrument_public_id=inst_pid,
+            wallet_public_id=other_wallet,
+            quantity=9.0,
+        )
+    )
+    scoped = await repo.get_positions(as_of=now, wallet_public_ids=[_WALLET])
+    assert len(scoped) == 1
+    row = scoped[0]
+    assert row["wallet_public_id"] == _WALLET
+    assert row["quantity"] == 0.5
+    assert row["mark_price"] == 50050.0
+    assert row["marked_at"] == now
+    assert row["source_venue_event_id"] == 42
+    everything = await repo.get_positions(as_of=now)
+    assert {r["wallet_public_id"] for r in everything} == {_WALLET, other_wallet}
+
+
+async def test_active_identity_scan_is_clock_free(tmp_path: Path) -> None:
+    """The recovery diagnostic sees every active row, even future-stamped.
+
+    Given: one active row stamped in the FUTURE relative to the caller
+        (a clamped clock-skew write) and one closed identity,
+    When: get_active_position_identities runs,
+    Then: the future-stamped active row is returned (a temporal as_of
+        query would hide it) and the closed identity is not.
+    """
+    repo = await _make_repo(tmp_path)
+    future = datetime.now(UTC) + timedelta(minutes=10)
+    await repo.upsert_position_projection(_row(future))
+    other = "00000000-0000-7000-8000-00000000000f"
+    now = datetime.now(UTC)
+    await repo.upsert_position_projection(_row(now, instrument_public_id=other))
+    await repo.close_position_projection(other, "paper", _WALLET, now)
+    active = await repo.get_active_position_identities()
+    assert [(row[1], row[2], row[3]) for row in active] == [(_INSTRUMENT, "paper", _WALLET)]
+    assert active[0][0]
+
+
+async def test_watermark_matches_trade_id_only_and_exec_id_only_fills(tmp_path: Path) -> None:
+    """Both venue identifier columns resolve the durable watermark.
+
+    Given: one fill event carrying ONLY a venue exec id and another
+        carrying ONLY a trade id (venues populate either),
+    When: the consumed-fill watermark resolves with both identifiers
+        passed the way execution-replay recovery now does,
+    Then: each fill matches its own venue-event row — a multi-partial
+        order recovered from executions can never leave the watermark
+        stuck on the first partial.
+    """
+    repo = await _make_repo(tmp_path)
+    base = {
+        "event_type": "fill_observed",
+        "shard_key": "kraken.BTC-USD.live",
+        "wallet_public_id": _WALLET,
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "client_order_id": "cid-1",
+        "side": "buy",
+        "status": "filled",
+        "fill_price": 50000.0,
+        "fill_size": 0.5,
+        "session_id": "s1",
+        "sequence_id": 1,
+        "timestamp": datetime.now(UTC),
+        "received_at": datetime.now(UTC),
+    }
+    exec_only = await repo.insert_venue_event(
+        {**base, "exec_id": "E-1", "trade_id": None, "cum_fill_size": 0.5}
+    )
+    trade_only = await repo.insert_venue_event(
+        {**base, "exec_id": None, "trade_id": "T-2", "cum_fill_size": 1.0}
+    )
+    matched_exec = await repo.get_consumed_fill_venue_event_id(
+        shard_key="kraken.BTC-USD.live",
+        client_order_id="cid-1",
+        exec_id="E-1",
+        cum_fill_size=0.5,
+        trade_id=None,
+    )
+    matched_trade = await repo.get_consumed_fill_venue_event_id(
+        shard_key="kraken.BTC-USD.live",
+        client_order_id="cid-1",
+        exec_id=None,
+        cum_fill_size=1.0,
+        trade_id="T-2",
+    )
+    assert matched_exec == exec_only
+    assert matched_trade == trade_only
+    assert matched_trade > matched_exec

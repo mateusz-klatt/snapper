@@ -39,6 +39,10 @@ from snapper.auth.schemas.tokens import TokenClaims
 from snapper.core.ids import is_uuid7
 from snapper.core.types import ExecutionMode
 from snapper.core.types import OrderExchange
+from snapper.data.models import Symbol
+from snapper.data.models import Wallet
+from snapper.data.models import WalletOperatorScopeGrant
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
 from snapper.mcp.server import get_current_claims
 from snapper.mcp.tools import _map_cancel_exception_to_envelope
@@ -1666,6 +1670,9 @@ _POSITION_ROW_FIXTURE: dict[str, Any] = {
     "average_price": 49500.0,
     "unrealized_pnl": 750.0,
     "realized_pnl": 100.0,
+    "mark_price": 50000.0,
+    "marked_at": datetime.now(UTC),
+    "source_venue_event_id": 42,
     "position_cycle_public_id": "cycle-1",
     "wallet_public_id": "wallet-1",
 }
@@ -2702,3 +2709,114 @@ class TestParseIso8601UtcHelper:
         """Unparseable input raises ``ValueError``."""
         with pytest.raises(ValueError):
             _parse_iso8601_utc("yesterday")
+
+
+class TestListPositionsDelegateScopeRealRepository:
+    """M5 consensus test: real-SQLite delegate wallet scoping + provenance."""
+
+    @pytest.mark.asyncio
+    async def test_delegate_sees_only_granted_wallet_with_provenance(self, tmp_path: Any) -> None:
+        """The delegate's grants gate real projection rows end to end.
+
+        Given: a REAL repository where the trader's projection writer
+            persisted rows for two wallets, and the AI_DELEGATE's
+            operator holds a scope grant on only one of them,
+        When: the list_positions MCP tool runs against that repository,
+        Then: only the granted wallet's position is serialized, carrying
+            the mark trio (ISO marked_at) and watermark, with the honest
+            NULL unrealized value intact — and the other wallet is
+            excluded.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'mcp_scope.db'}")
+        await repo.create_all()
+        now = datetime.now(UTC)
+        async with repo.session() as s:
+            sym = Symbol(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=now,
+                session_id="s1",
+                sequence_id=1,
+            )
+            s.add(sym)
+            await s.commit()
+            await s.refresh(sym)
+        _, inst_pid = await repo.ensure_instrument(
+            symbol_public_id=sym.public_id,
+            exchange="kraken",
+            session_id="s1",
+            sequence_id=2,
+            timestamp=now,
+        )
+        granted_wallet = "00000000-0000-7000-8000-00000000aaa1"
+        hidden_wallet = "00000000-0000-7000-8000-00000000aaa2"
+        async with repo.session() as s:
+            s.add(
+                Wallet(
+                    public_id=granted_wallet,
+                    label="granted",
+                    is_paper=True,
+                    timestamp=now,
+                    session_id="s1",
+                    sequence_id=3,
+                )
+            )
+            s.add(
+                Wallet(
+                    public_id=hidden_wallet,
+                    label="hidden",
+                    is_paper=True,
+                    timestamp=now,
+                    session_id="s1",
+                    sequence_id=4,
+                )
+            )
+            s.add(
+                WalletOperatorScopeGrant(
+                    operator_public_id="op-1",
+                    wallet_public_id=granted_wallet,
+                    granted_by_user_public_id="user-1",
+                    scope_kind="instrument",
+                    instrument_public_id=inst_pid,
+                    timestamp=now,
+                    session_id="s1",
+                    sequence_id=5,
+                )
+            )
+            await s.commit()
+        for wallet, qty, unrealized in (
+            (granted_wallet, 1.5, None),
+            (hidden_wallet, 9.0, 250.0),
+        ):
+            await repo.upsert_position_projection(
+                {
+                    "instrument_public_id": inst_pid,
+                    "mode": "paper",
+                    "wallet_public_id": wallet,
+                    "quantity": qty,
+                    "average_price": 50000.0,
+                    "unrealized_pnl": unrealized,
+                    "realized_pnl": 10.0,
+                    "mark_price": 50100.0,
+                    "marked_at": now,
+                    "source_venue_event_id": 42,
+                    "session_id": "00000000-0000-7000-8000-0000000000aa",
+                    "sequence_id": 6,
+                    "bus_time": now,
+                }
+            )
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool("list_positions", {})
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["count"] == 1
+        position = envelope["details"]["positions"][0]
+        assert position["wallet_public_id"] == granted_wallet
+        assert position["quantity"] == 1.5
+        assert position["unrealized_pnl"] is None
+        assert position["mark_price"] == 50100.0
+        assert position["marked_at"] == now.isoformat()
+        assert position["source_venue_event_id"] == 42

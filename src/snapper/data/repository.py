@@ -7410,6 +7410,7 @@ class SQLAlchemyRepository(Repository):
                     "session_id": exe.session_id,
                     "sequence_id": exe.sequence_id,
                     "trade_id": exe.trade_id,
+                    "exec_id": exe.exec_id,
                     "exchange_order_id": order.exchange_order_id,
                     "client_order_id": order.client_order_id or "",
                     "instrument": sym.native_symbol,
@@ -7472,6 +7473,7 @@ class SQLAlchemyRepository(Repository):
                     "session_id": exe.session_id,
                     "sequence_id": exe.sequence_id,
                     "trade_id": exe.trade_id,
+                    "exec_id": exe.exec_id,
                     "exchange_order_id": order.exchange_order_id,
                     "client_order_id": order.client_order_id or "",
                     "instrument": sym.native_symbol,
@@ -7614,6 +7616,7 @@ class SQLAlchemyRepository(Repository):
                     "session_id": exe.session_id,
                     "sequence_id": exe.sequence_id,
                     "trade_id": exe.trade_id,
+                    "exec_id": exe.exec_id,
                     "exchange_order_id": order.exchange_order_id,
                     "client_order_id": order.client_order_id or "",
                     "instrument": sym.native_symbol,
@@ -7735,6 +7738,9 @@ class SQLAlchemyRepository(Repository):
                     "average_price": pos.average_price,
                     "unrealized_pnl": pos.unrealized_pnl,
                     "realized_pnl": pos.realized_pnl,
+                    "mark_price": pos.mark_price,
+                    "marked_at": pos.marked_at,
+                    "source_venue_event_id": pos.source_venue_event_id,
                     "position_cycle_public_id": cycle_pid,
                     "wallet_public_id": pos.wallet_public_id,
                 }
@@ -11306,6 +11312,7 @@ class SQLAlchemyRepository(Repository):
         client_order_id: str,
         exec_id: str | None,
         cum_fill_size: float,
+        trade_id: str | None = None,
     ) -> int | None:
         """Return the durable id of a consumed ``fill_observed`` venue event.
 
@@ -11325,6 +11332,10 @@ class SQLAlchemyRepository(Repository):
             client_order_id: Client order id of the fill.
             exec_id: Venue execution id when present (``ExecutionData.trade_id``).
             cum_fill_size: Cumulative fill size, used for id-less venues.
+            trade_id: Venue trade id fallback matched against
+                ``VenueEvent.trade_id`` when no exec id exists — the
+                execution-replay recovery path carries both identifiers
+                because some venues populate only one of them.
 
         Returns:
             Lowest matching ``VenueEvent.id``, or ``None`` if no match.
@@ -11337,6 +11348,8 @@ class SQLAlchemyRepository(Repository):
             )
             if exec_id is not None:
                 query = query.where(VenueEvent.exec_id == exec_id)
+            elif trade_id is not None:
+                query = query.where(VenueEvent.trade_id == trade_id)
             else:
                 query = query.where(
                     VenueEvent.cum_fill_size.isnot(None),
@@ -11509,6 +11522,37 @@ class SQLAlchemyRepository(Repository):
                     AccrualLedger.exchange == exchange,
                     AccrualLedger.mode == mode,
                     *where_active(AccrualLedger, as_of),
+                )
+            )
+            return (result.scalar() or 0) > 0
+
+    async def shard_has_any_accruals(self, wallet_public_id: str, exchange: str, mode: str) -> bool:
+        """CLOCK-FREE existence check for accrual ledger rows.
+
+        The projection certification probe must not depend on the
+        recovery clock: accrual timestamps are coordinator-clock
+        values, so a skewed writer's row can sit AHEAD of a corrected
+        clock and hide from a ``timestamp <= as_of`` window while still
+        being durable funding truth. This reads by the current-version
+        sentinel filter with no temporal window at all.
+
+        Args:
+            wallet_public_id: Owning wallet.
+            exchange: Shard exchange.
+            mode: Execution mode (``live``/``paper``).
+
+        Returns:
+            True if ANY current accrual ledger row exists for the scope.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(func.count())
+                .select_from(AccrualLedger)
+                .where(
+                    AccrualLedger.wallet_public_id == wallet_public_id,
+                    AccrualLedger.exchange == exchange,
+                    AccrualLedger.mode == mode,
+                    AccrualLedger.known_to == KNOWN_TO_MAX,
                 )
             )
             return (result.scalar() or 0) > 0
@@ -11782,6 +11826,30 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             return True
 
+    async def get_active_position_identities(self) -> list[tuple[str, str, str, str]]:
+        """Clock-free scan of active position rows for recovery diagnostics.
+
+        Reads by the current-version sentinel filter with NO temporal
+        joins, so a row whose clamped timestamp sits ahead of the
+        recovery clock — or one a temporal Instrument/Symbol join would
+        hide — is still visible to the stale-row warning after the
+        projection rebuild.
+
+        Returns:
+            Tuples of (public_id, instrument_public_id, mode,
+            wallet_public_id) for every active row.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    Position.public_id,
+                    Position.instrument_public_id,
+                    Position.mode,
+                    Position.wallet_public_id,
+                ).where(Position.known_to == KNOWN_TO_MAX)
+            )
+            return [(str(r[0]), str(r[1]), str(r[2]), str(r[3])) for r in result.all()]
+
     async def get_checkpoint(
         self, shard_key: str, as_of: datetime
     ) -> TradeProjectionCheckpointRow | None:
@@ -11817,11 +11885,19 @@ class SQLAlchemyRepository(Repository):
             return row
 
     async def get_all_checkpoints(self, as_of: datetime) -> list[TradeProjectionCheckpointRow]:
-        """Return all active checkpoints for recovery."""
+        """Return all CURRENT checkpoints for recovery.
+
+        Clock-free: reads by the current-version sentinel filter, not a
+        caller-clock temporal window — a checkpoint whose clamped
+        timestamp sits ahead of a lagging recovery clock must still be
+        recovered (the Phase-0 clock-skew class). ``as_of`` is retained
+        for signature stability but no longer scopes the read.
+        """
+        del as_of
         async with self.session() as s:
             result = await s.execute(
                 select(TradeProjectionCheckpoint)
-                .where(*where_active(TradeProjectionCheckpoint, as_of))
+                .where(TradeProjectionCheckpoint.known_to == KNOWN_TO_MAX)
                 .order_by(TradeProjectionCheckpoint.shard_key)
             )
             rows: list[TradeProjectionCheckpointRow] = []
@@ -11843,6 +11919,7 @@ class SQLAlchemyRepository(Repository):
                         "seen_exec_ids": cp.seen_exec_ids,
                         "checkpoint_at": cp.checkpoint_at,
                         "session_id": cp.session_id,
+                        "wallet_public_id": cp.wallet_public_id,
                         "operator_public_id": cp.operator_public_id,
                     }
                 )

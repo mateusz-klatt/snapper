@@ -385,6 +385,9 @@ def _serialize_position_row(row: PositionRow) -> dict[str, Any]:
         "average_price": row["average_price"],
         "unrealized_pnl": row["unrealized_pnl"],
         "realized_pnl": row["realized_pnl"],
+        "mark_price": row["mark_price"],
+        "marked_at": row["marked_at"].isoformat() if row["marked_at"] else None,
+        "source_venue_event_id": row["source_venue_event_id"],
         "position_cycle_public_id": row["position_cycle_public_id"],
         "wallet_public_id": row["wallet_public_id"],
     }

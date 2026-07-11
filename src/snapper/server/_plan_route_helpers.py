@@ -87,16 +87,16 @@ def build_plan_route_context(request: Request, stream: str) -> PlanRouteContext:
     )
 
 
-def _native_instrument_from_shard(shard_key: str) -> str:
-    """Extract the native instrument symbol from a shard key."""
-    return shard_key.split(".")[1]
-
-
 def find_matching_position(
     positions: list[PositionRow],
     cycle: PositionCycleRow,
 ) -> PositionRow | None:
-    """Return the live position row matching the cycle shard.
+    """Return the live position row matching the cycle's stable identity.
+
+    Matching uses ``instrument_public_id`` + ``mode`` +
+    ``wallet_public_id`` — never the native symbol spelling (a rename
+    would break it) nor the exchange alone; the exchange is checked as
+    a defensive assertion and logged when it disagrees.
 
     Args:
         positions: Open positions visible to the wallet at the route timestamp.
@@ -105,13 +105,18 @@ def find_matching_position(
     Returns:
         The matching live position row, or ``None`` when no position matches.
     """
-    native_instrument = _native_instrument_from_shard(cycle["shard_key"])
     for position in positions:
         if (
-            position["exchange"] == cycle["exchange"]
+            position["instrument_public_id"] == cycle["instrument_public_id"]
             and position["mode"] == cycle["mode"]
-            and position["instrument"] == native_instrument
+            and position["wallet_public_id"] == cycle["wallet_public_id"]
         ):
+            if position["exchange"] != cycle["exchange"]:
+                logger.warning(
+                    f"Plan sizing: position {position['public_id']} matched cycle "
+                    f"{cycle['public_id']} by stable identity but exchanges differ "
+                    f"({position['exchange']} != {cycle['exchange']})"
+                )
             return position
     return None
 
@@ -141,15 +146,68 @@ def resolve_average_price(
     return average_value
 
 
-def _resolve_total_quantity(
+def resolve_plan_position(
     positions: list[PositionRow],
     cycle: PositionCycleRow,
-) -> float:
-    """Prefer live position size, then fall back to cycle max_qty."""
+) -> PositionRow:
+    """Return the truthful live position for a plan, or fail closed.
+
+    PnL Phase 2 removed the historical ``cycle.max_qty`` fallback: it
+    is the per-cycle PEAK quantity (never reduced), so sizing a plan
+    from it after a partial close OVERSTATES the position — the exact
+    lie this phase eliminates. Missing position truth, a direction
+    disagreeing with the cycle, or a position whose open-cycle link is
+    NULL or points at a DIFFERENT cycle (the multi-strategy paper
+    ambiguity, reachable by direct REST callers), or an exchange that
+    disagrees with the cycle (an instrument re-homed by
+    revise_instrument keeps its public id — a reduce-only command must
+    never target the wrong venue) all reject with 422 instead of
+    guessing.
+
+    Args:
+        positions: Open positions visible to the wallet at the route timestamp.
+        cycle: Position cycle being used to create or inspect a plan.
+
+    Returns:
+        The verified live position row backing the plan.
+
+    Raises:
+        HTTPException: 422 when position truth is missing or
+            inconsistent with the cycle.
+    """
     position = find_matching_position(positions, cycle)
-    if position is not None:
-        return abs(position["quantity"])
-    return cycle["max_qty"]
+    if position is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "No truthful live position found for this cycle — refusing "
+                "to size the plan from historical cycle peaks"
+            ),
+        )
+    if position["exchange"] != cycle["exchange"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "Position exchange disagrees with the cycle (instrument was "
+                "re-homed to another venue) — refusing to size the plan"
+            ),
+        )
+    expected_sign = 1.0 if cycle["direction"] == "long" else -1.0
+    if position["quantity"] * expected_sign <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=("Live position direction disagrees with the cycle — refusing to size the plan"),
+        )
+    cycle_pid = position["position_cycle_public_id"]
+    if cycle_pid is None or cycle_pid != cycle["public_id"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "Position is not unambiguously linked to this cycle "
+                "(multi-cycle ambiguity) — refusing to size the plan"
+            ),
+        )
+    return position
 
 
 async def load_open_accessible_cycle(
@@ -222,7 +280,8 @@ async def load_cycle_trading_context(
         as_of=route_context.now,
         wallet_public_ids=[cycle["wallet_public_id"]],
     )
-    total_quantity = _resolve_total_quantity(positions, cycle)
+    position = resolve_plan_position(positions, cycle)
+    total_quantity = abs(position["quantity"])
     if total_quantity <= 0:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -231,7 +290,7 @@ async def load_cycle_trading_context(
     return CycleTradingContext(
         cycle=cycle,
         positions=positions,
-        native_instrument=_native_instrument_from_shard(cycle["shard_key"]),
+        native_instrument=position["instrument"],
         total_quantity=total_quantity,
         side="buy" if cycle["direction"] == "long" else "sell",
     )

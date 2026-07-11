@@ -165,11 +165,15 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -224,11 +228,15 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -245,11 +253,15 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -267,11 +279,15 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -291,11 +307,15 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": -1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -315,11 +335,15 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": -1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -339,18 +363,22 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 0.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
         client = _create_client(repo)
         response = client.post("/api/execution-plans", json=_create_bracket_body())
         assert response.status_code == 422
-        assert "no open position" in response.json()["detail"].lower()
+        assert "direction disagrees" in response.json()["detail"].lower()
         client.close()
 
     def test_create_bracket_server_error_500(self) -> None:
@@ -360,11 +388,15 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -381,11 +413,15 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -406,17 +442,50 @@ class TestCreateBracket:
         assert response.status_code == 503
         client.close()
 
-    def test_create_bracket_no_position_falls_back_to_max_qty(self) -> None:
-        """Given no matching position, Then falls back to cycle.max_qty."""
+    def test_create_bracket_no_position_fails_closed_422(self) -> None:
+        """Given no matching position, Then 422 — never cycle.max_qty.
+
+        PnL Phase 2 removed the peak-quantity fallback that OVERSTATED
+        the position after a partial close; missing position truth now
+        refuses the plan instead of guessing.
+        """
         repo = AsyncMock()
         repo.get_position_cycle_by_public_id = AsyncMock(return_value=_make_cycle_row())
         repo.get_positions = AsyncMock(return_value=[])
-        repo.insert_execution_plan = AsyncMock(return_value=(1, "bracket-1"))
-        repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
-        repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
         client = _create_client(repo)
         response = client.post("/api/execution-plans", json=_create_bracket_body())
-        assert response.status_code == 200
+        assert response.status_code == 422
+        assert "refusing" in response.json()["detail"].lower()
+        client.close()
+
+    def test_create_bracket_mismatched_cycle_link_fails_closed_422(self) -> None:
+        """Given a position linked to a DIFFERENT open cycle, Then 422.
+
+        The multi-cycle ambiguity (paper wallet running several
+        strategy tags on one instrument) must fail closed for direct
+        REST callers instead of silently sizing from the aggregate.
+        """
+        repo = AsyncMock()
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=_make_cycle_row())
+        repo.get_positions = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "pos-1",
+                    "exchange": "kraken_futures",
+                    "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
+                    "mode": "paper",
+                    "wallet_public_id": "wallet-1",
+                    "quantity": 1.0,
+                    "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-other",
+                }
+            ]
+        )
+        client = _create_client(repo)
+        response = client.post("/api/execution-plans", json=_create_bracket_body())
+        assert response.status_code == 422
+        assert "ambiguity" in response.json()["detail"].lower()
         client.close()
 
     def test_create_bracket_short_tp_only_success(self) -> None:
@@ -428,18 +497,26 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-2",
                     "exchange": "kraken_futures",
                     "instrument": "ETH-USD",
+                    "instrument_public_id": "inst-eth",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": -5.0,
                     "average_price": 2000.0,
+                    "position_cycle_public_id": None,
                 },
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": -1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 },
             ]
         )
@@ -470,11 +547,15 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -502,11 +583,15 @@ class TestCreateBracket:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -747,9 +832,12 @@ class TestResolveAveragePrice:
         cycle = _make_cycle_row()
         positions = [
             {
+                "public_id": "pos-2",
                 "exchange": "kraken_futures",
                 "instrument": "ETH-USD",
+                "instrument_public_id": "inst-eth",
                 "mode": "paper",
+                "wallet_public_id": "wallet-1",
                 "average_price": 2000.0,
             }
         ]
@@ -761,9 +849,12 @@ class TestResolveAveragePrice:
         cycle = _make_cycle_row()
         positions = [
             {
+                "public_id": "pos-1",
                 "exchange": "kraken_futures",
                 "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
                 "mode": "paper",
+                "wallet_public_id": "wallet-1",
                 "average_price": 0.0,
             }
         ]
@@ -834,4 +925,71 @@ class TestListDecisions:
         client = _create_client(repo)
         response = client.get("/api/execution-plans/nonexistent/decisions")
         assert response.status_code == 404
+        client.close()
+
+
+class TestPlanSizingExchangeIntegrity:
+    """Exchange and rename semantics of the fail-closed plan sizing."""
+
+    def test_create_bracket_exchange_mismatch_fails_closed_422(self) -> None:
+        """Given a position re-homed to another venue, Then 422.
+
+        revise_instrument can keep the instrument public id while
+        changing the exchange — a reduce-only command must never target
+        the wrong venue.
+        """
+        repo = AsyncMock()
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=_make_cycle_row())
+        repo.get_positions = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "pos-1",
+                    "exchange": "binance",
+                    "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
+                    "mode": "paper",
+                    "wallet_public_id": "wallet-1",
+                    "quantity": 1.0,
+                    "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
+                }
+            ]
+        )
+        client = _create_client(repo)
+        response = client.post("/api/execution-plans", json=_create_bracket_body())
+        assert response.status_code == 422
+        assert "exchange disagrees" in response.json()["detail"].lower()
+        client.close()
+
+    def test_create_bracket_symbol_rename_uses_current_native_symbol(self) -> None:
+        """Given a renamed symbol on the same identity, Then 200.
+
+        Identity matching survives the rename and the plan freezes the
+        position's CURRENT native symbol, not the shard-key spelling.
+        """
+        repo = AsyncMock()
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=_make_cycle_row())
+        repo.get_positions = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "pos-1",
+                    "exchange": "kraken_futures",
+                    "instrument": "XBT-USD",
+                    "instrument_public_id": "inst-1",
+                    "mode": "paper",
+                    "wallet_public_id": "wallet-1",
+                    "quantity": 1.0,
+                    "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
+                }
+            ]
+        )
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "bracket-1"))
+        repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
+        client = _create_client(repo)
+        response = client.post("/api/execution-plans", json=_create_bracket_body())
+        assert response.status_code == 200
+        inserted = repo.insert_execution_plan.await_args.args[0]
+        assert inserted["params"]["native_instrument"] == "XBT-USD"
         client.close()

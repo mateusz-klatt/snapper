@@ -68,6 +68,9 @@ def _make_coord(repo: Any) -> TraderCoordinator:
     coord._consumed_venue_event_watermarks = {}
     coord._projection_identities = {}
     coord._projection_locks = {}
+    coord._trusted_recovery_shards = set()
+    coord._recovery_baseline_shards = set()
+    coord._recovery_certification_failed = False
     coord._ownership = None
     coord.repository = repo
     return coord
@@ -553,3 +556,342 @@ async def test_watermark_lookup_failure_never_kills_the_listener() -> None:
     checkpoint_row = repo.upsert_checkpoint.await_args.args[0]
     assert checkpoint_row["last_venue_event_id"] == 42
     repo.upsert_position_projection.assert_awaited_once()
+
+
+async def test_recovery_rebuild_refreshes_and_projects_once_per_identity() -> None:
+    """The rebuild refreshes checkpoints then projects each identity once.
+
+    Given: two recovered strategy shards sharing one identity,
+    When: _rebuild_position_projections runs,
+    Then: a checkpoint-only refresh commits per shard, the identity is
+        projected exactly once with the full aggregate, and a
+        pre-existing active row with no recovered local state is only
+        scanned — left visibly stale, never written or closed.
+    """
+    repo = _make_repo()
+    repo.upsert_checkpoint = AsyncMock(return_value=1)
+    repo.get_active_position_identities = AsyncMock(
+        return_value=[("pos-foreign", "inst-foreign", "paper", "wallet-foreign")]
+    )
+    coord = _make_coord(repo)
+    coord.engines = {}
+    _seed_shard(coord, _SHARD_A, 1.0, 50000.0, 0.0)
+    _seed_shard(coord, _SHARD_B, 2.0, 51000.0, 0.0)
+    coord._trusted_recovery_shards.update({_SHARD_A, _SHARD_B})
+    await coord._rebuild_position_projections()
+    assert repo.upsert_checkpoint.await_count == 2
+    repo.upsert_position_projection.assert_awaited_once()
+    row = repo.upsert_position_projection.await_args.args[0]
+    assert row["quantity"] == 3.0
+    repo.close_position_projection.assert_not_awaited()
+    repo.get_active_position_identities.assert_awaited_once()
+
+
+async def test_recovery_rebuild_contains_failures_and_degraded_backends() -> None:
+    """Rebuild failures never abort recovery.
+
+    Given: an identity whose projection write raises, a stale-row scan
+        that raises, and separately a non-repository backend,
+    When: _rebuild_position_projections runs,
+    Then: no exception escapes in either case and the degraded backend
+        performs no work at all.
+    """
+    repo = _make_repo()
+    repo.upsert_checkpoint = AsyncMock(return_value=1)
+    repo.upsert_position_projection.side_effect = RuntimeError("db down")
+    repo.get_active_position_identities = AsyncMock(side_effect=RuntimeError("scan down"))
+    coord = _make_coord(repo)
+    coord.engines = {}
+    _seed_shard(coord, _SHARD_A, 1.0, 50000.0, 0.0)
+    coord._trusted_recovery_shards.add(_SHARD_A)
+    await coord._rebuild_position_projections()
+    repo.get_active_position_identities.assert_awaited_once()
+    plain = MagicMock()
+    coord_degraded = _make_coord(plain)
+    await coord_degraded._rebuild_position_projections()
+    plain.upsert_checkpoint.assert_not_called()
+
+
+async def test_untrusted_component_blocks_refresh_and_projection() -> None:
+    """Uncertain recovered state is never certified as truth.
+
+    Given: two sibling shards of one identity where only one earned
+        positive recovery certification (the other's gap correction or
+        accrual replay failed),
+    When: the rebuild runs,
+    Then: only the trusted shard's checkpoint refreshes and the
+        identity is neither projected nor closed — a partially
+        recovered paper aggregate must not overwrite the shared row.
+    """
+    repo = _make_repo()
+    repo.upsert_checkpoint = AsyncMock(return_value=1)
+    repo.get_active_position_identities = AsyncMock(return_value=[])
+    coord = _make_coord(repo)
+    coord.engines = {}
+    _seed_shard(coord, _SHARD_A, 1.0, 50000.0, 0.0)
+    _seed_shard(coord, _SHARD_B, 2.0, 51000.0, 0.0)
+    coord._trusted_recovery_shards.add(_SHARD_A)
+    await coord._rebuild_position_projections()
+    assert repo.upsert_checkpoint.await_count == 1
+    repo.upsert_position_projection.assert_not_awaited()
+    repo.close_position_projection.assert_not_awaited()
+
+
+async def test_gap_discovery_failure_skips_the_whole_rebuild() -> None:
+    """A failed venue-event gap discovery uncertifies everything.
+
+    Given: the recovery pass could not enumerate shards with fills,
+    When: the rebuild runs,
+    Then: no checkpoint refresh and no projection happen at all —
+        recovered state cannot be certified.
+    """
+    repo = _make_repo()
+    repo.upsert_checkpoint = AsyncMock(return_value=1)
+    coord = _make_coord(repo)
+    coord.engines = {}
+    _seed_shard(coord, _SHARD_A, 1.0, 50000.0, 0.0)
+    coord._recovery_certification_failed = True
+    await coord._rebuild_position_projections()
+    repo.upsert_checkpoint.assert_not_awaited()
+    repo.upsert_position_projection.assert_not_awaited()
+
+
+def test_replay_venue_event_carries_both_venue_identifiers() -> None:
+    """Synthetic replay events keep exec_id AND trade_id.
+
+    Given: a recovery execution row that carries only a venue exec id
+        (trade id absent, as Kraken Futures commonly reports),
+    When: the synthetic replay venue event is built,
+    Then: the event carries the exec id so fill dedup and watermark
+        matching key exactly like the live path — a later checkpoint
+        delta replay cannot re-apply the fill under a different key.
+    """
+    coord = _make_coord(_make_repo())
+    engine = _make_engine(_SHARD_A)
+    fill_row: dict[str, Any] = {
+        "public_id": "exe-1",
+        "timestamp": _NOW,
+        "session_id": "s1",
+        "sequence_id": 1,
+        "trade_id": None,
+        "exec_id": "E-77",
+        "exchange_order_id": "X-1",
+        "client_order_id": "cid-1",
+        "instrument": "BTC-USD",
+        "exchange": "kraken",
+        "side": "buy",
+        "size": 0.5,
+        "price": 50000.0,
+        "fee": 0.1,
+        "fee_asset": "USD",
+        "status": "filled",
+        "executed_at": _NOW,
+        "wallet_public_id": _WALLET,
+        "operator_public_id": None,
+    }
+    event = coord._build_replay_venue_event(engine, fill_row, synthetic_id=7)
+    assert event["exec_id"] == "E-77"
+    assert event["trade_id"] is None
+    assert event["id"] == 7
+
+
+async def test_checkpoint_discovery_failure_fails_certification() -> None:
+    """A failed checkpoint enumeration blocks every certification.
+
+    Given: the checkpoint discovery query raises,
+    When: _recover_from_checkpoints runs,
+    Then: the global certification flag trips so the projection rebuild
+        will refuse to certify anything this boot.
+    """
+    repo = _make_repo()
+    repo.get_all_checkpoints = AsyncMock(side_effect=RuntimeError("db down"))
+    coord = _make_coord(repo)
+    recovered = await coord._recover_from_checkpoints(_NOW)
+    assert recovered == set()
+    assert coord._recovery_certification_failed is True
+
+
+async def test_failed_sibling_prefix_blocks_the_aggregate() -> None:
+    """A sibling that failed before registration blocks its aggregate.
+
+    Given: shard A registered and healthy while sibling B of the SAME
+        (exchange, instrument, mode, wallet) group failed recovery
+        before it could register an identity,
+    When: A's projection trigger runs,
+    Then: nothing is written — the aggregate cannot be certified from a
+        partial component set.
+    """
+    repo = _make_repo()
+    coord = _make_coord(repo)
+    _seed_shard(coord, _SHARD_A, 1.0, 50000.0, 0.0)
+    coord._failed_recovery_shard_prefixes = {("paper", "BTC-USD", "paper", _SHORT)}
+    await coord._persist_position_projection(_SHARD_A, now=_NOW)
+    repo.upsert_position_projection.assert_not_awaited()
+    repo.close_position_projection.assert_not_awaited()
+
+
+async def test_accrual_replay_certification_holes_return_false() -> None:
+    """Every uncertain accrual outcome refuses certification.
+
+    Given: a checkpoint without an anchor, an unresolvable instrument,
+        a failing accrual query, a clean nothing-to-replay pass, and a
+        TAGGED paper shard with pending accruals (the accrual ledger
+        carries no strategy-tag identity, so replaying into a sibling
+        would double-count funding),
+    When: _replay_checkpoint_accruals runs for each,
+    Then: only the clean pass returns True; every uncertain or
+        double-counting outcome returns False.
+    """
+    repo = _make_repo()
+    coord = _make_coord(repo)
+    kwargs: dict[str, Any] = {
+        "now": _NOW,
+        "instrument": "BTC-USD",
+        "exchange_str": "paper",
+        "mode_str": "paper",
+        "wallet_public_id": _WALLET,
+        "shard_key": _SHARD_A,
+    }
+    assert await coord._replay_checkpoint_accruals(checkpoint={}, **kwargs) is False
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+    assert (
+        await coord._replay_checkpoint_accruals(checkpoint={"checkpoint_at": _NOW}, **kwargs)
+        is False
+    )
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=_INSTRUMENT)
+    repo.get_accruals = AsyncMock(side_effect=RuntimeError("db down"))
+    assert (
+        await coord._replay_checkpoint_accruals(checkpoint={"checkpoint_at": _NOW}, **kwargs)
+        is False
+    )
+    repo.get_accruals = AsyncMock(return_value=[])
+    assert (
+        await coord._replay_checkpoint_accruals(checkpoint={"checkpoint_at": _NOW}, **kwargs)
+        is True
+    )
+    repo.get_accruals = AsyncMock(return_value=[{"amount": 1.0}])
+    assert (
+        await coord._replay_checkpoint_accruals(checkpoint={"checkpoint_at": _NOW}, **kwargs)
+        is False
+    )
+
+
+async def test_cycle_reconciliation_skips_uncertified_shards() -> None:
+    """Cycle reconciliation never infers flatness from uncertified state.
+
+    Given: two recovered engines where only one shard earned positive
+        certification,
+    When: _reconcile_position_cycles runs,
+    Then: only the certified engine's cycle is reconciled — an
+        active-order-only or failed-recovery engine cannot close its
+        open cycle from a fabricated zero position.
+    """
+    repo = _make_repo()
+    repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
+    coord = _make_coord(repo)
+    certified = _make_engine(_SHARD_A)
+    uncertified = _make_engine(_SHARD_B)
+    coord.engines = {"a": certified, "b": uncertified}
+    coord._trusted_recovery_shards = {_SHARD_A}
+    with patch.object(
+        coord, "_reconcile_position_cycle_for_engine", new_callable=AsyncMock
+    ) as reconcile:
+        await coord._reconcile_position_cycles()
+    reconcile.assert_awaited_once()
+    assert reconcile.await_args.args[1] is certified
+
+
+async def test_execution_replay_certifies_live_but_never_paper_lineage() -> None:
+    """Execution replay trust requires durable live lineage.
+
+    Given: one LIVE execution group whose shard registered an identity
+        and carries no accruals, and one PAPER group (execution rows
+        hold no durable shard key, so paper lineage is reconstructed),
+    When: _recover_execution_group replays each,
+    Then: the live shard is certified while the paper shard stays
+        uncertified.
+    """
+    live_shard = f"kraken.BTC-USD.live.w{_SHORT}"
+    fill: dict[str, Any] = {
+        "public_id": "exe-1",
+        "timestamp": _NOW,
+        "session_id": "s1",
+        "sequence_id": 1,
+        "trade_id": "t1",
+        "exec_id": None,
+        "exchange_order_id": "x1",
+        "client_order_id": "c1",
+        "instrument": "BTC-USD",
+        "exchange": "kraken",
+        "side": "buy",
+        "size": 0.5,
+        "price": 50000.0,
+        "fee": 0.1,
+        "fee_asset": "USD",
+        "status": "filled",
+        "executed_at": _NOW,
+        "wallet_public_id": _WALLET,
+        "operator_public_id": None,
+    }
+    repo = _make_repo()
+    repo.get_consumed_fill_venue_event_id = AsyncMock(return_value=7)
+    repo.shard_has_any_accruals = AsyncMock(return_value=False)
+    coord = _make_coord(repo)
+    coord.engines = {}
+    live_engine = _make_engine(live_shard)
+    live_engine.exchange = "kraken"
+    live_engine.mode = "live"
+    live_engine.position_qty = 0.5
+    live_engine.entry_price = 50000.0
+    coord._projection_identities[live_shard] = (_INSTRUMENT, "live", _WALLET)
+    with (
+        patch.object(coord, "_create_engine_for_recovery", AsyncMock(return_value=live_engine)),
+        patch.object(coord, "_restore_engine_from_shard", MagicMock()),
+        patch.object(coord, "_register_recovered_engine", MagicMock()),
+    ):
+        await coord._recover_execution_group(
+            engine_key="k1",
+            fills=[fill],
+            wallet_public_id=_WALLET,
+            operator_public_id="",
+        )
+    assert live_shard in coord._trusted_recovery_shards
+    paper_engine = _make_engine(_SHARD_A)
+    paper_engine.exchange = "paper"
+    paper_engine.position_qty = 0.5
+    paper_engine.entry_price = 50000.0
+    with (
+        patch.object(coord, "_create_engine_for_recovery", AsyncMock(return_value=paper_engine)),
+        patch.object(coord, "_restore_engine_from_shard", MagicMock()),
+        patch.object(coord, "_register_recovered_engine", MagicMock()),
+    ):
+        await coord._recover_execution_group(
+            engine_key="k2",
+            fills=[dict(fill, exchange="paper")],
+            wallet_public_id=_WALLET,
+            operator_public_id="",
+        )
+    assert _SHARD_A not in coord._trusted_recovery_shards
+
+
+async def test_global_certification_failure_quarantines_trusted_shards() -> None:
+    """A global recovery failure revokes even previously granted trust.
+
+    Given: a shard that earned trust before a discovery pass failed,
+    When: the rebuild runs and a live fill later triggers the writer,
+    Then: the rebuild clears recovery trust and the writer refuses the
+        baseline shard for the process lifetime.
+    """
+    repo = _make_repo()
+    repo.upsert_checkpoint = AsyncMock(return_value=1)
+    coord = _make_coord(repo)
+    coord.engines = {}
+    _seed_shard(coord, _SHARD_A, 1.0, 50000.0, 0.0)
+    coord._trusted_recovery_shards.add(_SHARD_A)
+    coord._recovery_certification_failed = True
+    await coord._rebuild_position_projections()
+    assert coord._trusted_recovery_shards == set()
+    assert _SHARD_A in coord._recovery_baseline_shards
+    await coord._persist_position_projection(_SHARD_A, now=_NOW)
+    repo.upsert_position_projection.assert_not_awaited()
+    repo.close_position_projection.assert_not_awaited()

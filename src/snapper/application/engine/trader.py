@@ -312,6 +312,10 @@ class TraderCoordinator(RegisterableProcess):
         self._consumed_venue_event_watermarks: dict[str, int] = {}
         self._projection_identities: dict[str, tuple[str, str, str]] = {}
         self._projection_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        self._trusted_recovery_shards: set[str] = set()
+        self._recovery_baseline_shards: set[str] = set()
+        self._failed_recovery_shard_prefixes: set[tuple[str, str, str, str]] = set()
+        self._recovery_certification_failed = False
         self._checkpoint_recovered_shard_keys: set[str] = set()
         self._rearm_retired_cids: OrderedDict[str, None] = OrderedDict()
         self._wallet_short_to_id: dict[str, str] = {}
@@ -630,6 +634,7 @@ class TraderCoordinator(RegisterableProcess):
         await self._recover_venue_event_gaps(now)
         await self._recover_active_orders(now)
         await self._reconcile_position_cycles()
+        await self._rebuild_position_projections()
         logger.info(
             f"ZMQTrader: Engine recovery complete: "
             f"{len(self.engines)} engines, "
@@ -886,6 +891,7 @@ class TraderCoordinator(RegisterableProcess):
             checkpoints = await self.repository.get_all_checkpoints(as_of=now)
         except Exception as e:
             logger.error(f"ZMQTrader: Failed to query checkpoints for recovery: {e}")
+            self._recovery_certification_failed = True
             return set()
         if not checkpoints:
             logger.info("ZMQTrader: No checkpoints found, using full replay")
@@ -893,10 +899,85 @@ class TraderCoordinator(RegisterableProcess):
 
         recovered: set[str] = set()
         for checkpoint in checkpoints:
-            engine_key = await self._recover_checkpoint_row(checkpoint, now)
+            try:
+                engine_key = await self._recover_checkpoint_row(checkpoint, now)
+            except Exception:
+                logger.exception(
+                    f"ZMQTrader: checkpoint recovery failed for {checkpoint['shard_key']}"
+                )
+                await self._record_recovery_shard_failure(
+                    checkpoint["shard_key"],
+                    durable_wallet_public_id=checkpoint.get("wallet_public_id") or None,
+                    anchor=checkpoint.get("checkpoint_at"),
+                )
+                continue
             if engine_key is not None:
                 recovered.add(engine_key)
         return recovered
+
+    async def _record_recovery_shard_failure(
+        self,
+        shard_key: str,
+        *,
+        durable_wallet_public_id: str | None = None,
+        anchor: datetime | None = None,
+    ) -> None:
+        """Attribute a failed recovery candidate to its aggregate group.
+
+        A candidate that fails BEFORE identity registration leaves no
+        registry component, so the projection writer cannot see the
+        missing sibling. The failure is recorded CANONICALLY as the
+        (instrument_public_id, mode, wallet_public_id) identity —
+        rename-proof and wallet-cache-proof — with the shard-key prefix
+        kept as a secondary net for same-boot spellings. When canonical
+        attribution is itself unavailable (unparsable key, unresolved
+        wallet or instrument), the WHOLE certification fails instead:
+        an unattributable failure must block everything.
+
+        Args:
+            shard_key: The failed recovery candidate.
+            durable_wallet_public_id: The candidate's DURABLE wallet id
+                (e.g. from its checkpoint row) — preferred over the
+                boot-time wallet-short cache, which renames and
+                collisions can poison.
+            anchor: Temporal anchor for the instrument resolution
+                (e.g. the checkpoint's own timestamp); defaults to now.
+        """
+        parsed = self._parse_shard_key(shard_key)
+        if parsed is None:
+            self._recovery_certification_failed = True
+            return
+        exchange_str, instrument, mode_str, wallet_short, _tag = parsed
+        prefixes = getattr(self, "_failed_recovery_shard_prefixes", None)
+        if prefixes is None:
+            prefixes = set()
+            self._failed_recovery_shard_prefixes = prefixes
+        prefixes.add((exchange_str, instrument, mode_str, wallet_short))
+        wallet_public_id = durable_wallet_public_id or (
+            self._wallet_short_to_id.get(wallet_short, "") if wallet_short else ""
+        )
+        instrument_public_id = None
+        if isinstance(self.repository, SQLAlchemyRepository):
+            try:
+                instrument_public_id = await self.repository.get_instrument_public_id_by_symbol(
+                    native_symbol=instrument,
+                    exchange=exchange_str,
+                    as_of=anchor or datetime.now(UTC),
+                )
+            except Exception:
+                instrument_public_id = None
+        if not wallet_public_id or instrument_public_id is None:
+            logger.warning(
+                f"ZMQTrader: failed recovery candidate {shard_key} cannot be "
+                f"canonically attributed — failing the WHOLE projection certification"
+            )
+            self._recovery_certification_failed = True
+            return
+        identities = getattr(self, "_failed_recovery_identities", None)
+        if identities is None:
+            identities = set()
+            self._failed_recovery_identities = identities
+        identities.add((instrument_public_id, mode_str, wallet_public_id))
 
     async def _recover_checkpoint_row(
         self,
@@ -920,8 +1001,15 @@ class TraderCoordinator(RegisterableProcess):
         exchange_str, instrument, mode_str, wallet_short, strategy_tag = parsed_shard
         if exchange_str not in get_args(OrderExchange):
             logger.warning(f"ZMQTrader: Checkpoint exchange {exchange_str} not valid, skipping")
+            await self._record_recovery_shard_failure(
+                shard_key,
+                durable_wallet_public_id=checkpoint.get("wallet_public_id") or None,
+                anchor=checkpoint.get("checkpoint_at"),
+            )
             return None
-        wallet_public_id = await self._resolve_checkpoint_wallet_public_id(
+        wallet_public_id = checkpoint.get(
+            "wallet_public_id"
+        ) or await self._resolve_checkpoint_wallet_public_id(
             shard_key,
             wallet_short,
             checkpoint["checkpoint_at"] or now,
@@ -931,11 +1019,11 @@ class TraderCoordinator(RegisterableProcess):
             return None
         self._restore_trade_service_from_checkpoint(checkpoint, shard_key, delta_events)
         self._checkpoint_recovered_shard_keys.add(shard_key)
-        await self._correct_checkpoint_fill_gap(
+        fill_state_certain = await self._correct_checkpoint_fill_gap(
             shard_key, wallet_public_id, exchange_str, mode_str, now
         )
         await self._register_checkpoint_open_orders(checkpoint, shard_key, now)
-        await self._replay_checkpoint_accruals(
+        accruals_certain = await self._replay_checkpoint_accruals(
             checkpoint=checkpoint,
             now=now,
             instrument=instrument,
@@ -944,6 +1032,20 @@ class TraderCoordinator(RegisterableProcess):
             wallet_public_id=wallet_public_id,
             shard_key=shard_key,
         )
+        if accruals_certain:
+            try:
+                if await self.repository.shard_has_any_accruals(
+                    wallet_public_id, exchange_str, mode_str
+                ):
+                    logger.warning(
+                        f"ZMQTrader: {shard_key} carries funding accruals; certification "
+                        f"requires the durable accrual watermark (Phase 4) — accrual "
+                        f"timestamps are coordinator-clock and a skewed writer could "
+                        f"hide one from the replay window; leaving UNCERTIFIED"
+                    )
+                    accruals_certain = False
+            except Exception:
+                accruals_certain = False
         self._restore_balance_service_from_shard(shard_key)
         engine = await self._create_engine_for_recovery(
             instrument,
@@ -953,6 +1055,7 @@ class TraderCoordinator(RegisterableProcess):
             operator_public_id=checkpoint.get("operator_public_id") or "",
         )
         if engine is None:
+            await self._record_recovery_shard_failure(shard_key)
             return None
         self._restore_engine_from_shard(engine, shard_key, instrument)
         engine_key = self._build_engine_key(
@@ -962,6 +1065,10 @@ class TraderCoordinator(RegisterableProcess):
             wallet_public_id,
         )
         self._register_recovered_engine(engine_key, engine)
+        if shard_key not in self._projection_identities:
+            await self._record_recovery_shard_failure(shard_key)
+        elif fill_state_certain and accruals_certain:
+            self._trusted_recovery_shards.add(shard_key)
         logger.info(
             f"ZMQTrader: Recovered {engine_key} from checkpoint: "
             f"pos={engine.position_qty:.6f}, "
@@ -1123,7 +1230,7 @@ class TraderCoordinator(RegisterableProcess):
         exchange_str: str,
         mode_str: str,
         now: datetime,
-    ) -> None:
+    ) -> bool:
         """Overlay a chronological venue-event replay when a checkpoint shard dropped a fill.
 
         The scalar checkpoint watermark can advance past a recorded-but-
@@ -1144,12 +1251,18 @@ class TraderCoordinator(RegisterableProcess):
             exchange_str: Shard exchange (for the funding gate).
             mode_str: Execution mode (for the funding gate).
             now: Recovery anchor for the temporal queries.
+
+        Returns:
+            True when the shard's fill state is CERTAIN (no gap, or the
+            gap was corrected); False when the state remains uncertain
+            (funding-gated status-quo or a failed correction) — the
+            projection rebuild must not certify such a shard as truth.
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
-            return
+            return True
         try:
             if not await self.repository.shard_has_fill_gap(shard_key, now):
-                return
+                return True
             if await self.repository.shard_has_accruals(
                 wallet_public_id, exchange_str, mode_str, now
             ):
@@ -1159,7 +1272,7 @@ class TraderCoordinator(RegisterableProcess):
                     f"spot-scoped, futures funding cash cannot be reconstructed from venue "
                     f"events)"
                 )
-                return
+                return False
             events = await self.repository.get_venue_events_after(shard_key, 0)
             projection = self.trade_service.project_fill_state_from_events(events)
             self.trade_service.overlay_fill_state(shard_key, projection)
@@ -1171,11 +1284,13 @@ class TraderCoordinator(RegisterableProcess):
                 f"venue-event overlay (pos={projection['position_qty']:.6f}, "
                 f"cash={projection['cash']:.2f})"
             )
+            return True
         except Exception as e:
             logger.error(
                 f"ZMQTrader: fill-gap correction failed for {shard_key}: {e}; "
                 f"leaving checkpoint-restored state in place"
             )
+            return False
 
     async def _recover_venue_event_gaps(self, now: datetime) -> None:
         """Rebuild non-checkpoint shards whose recorded fills were never consumed.
@@ -1199,6 +1314,7 @@ class TraderCoordinator(RegisterableProcess):
             shard_keys = await self.repository.get_shard_keys_with_fills()
         except Exception as e:
             logger.error(f"ZMQTrader: Failed to query shards with fills for gap recovery: {e}")
+            self._recovery_certification_failed = True
             return
         for shard_key in shard_keys:
             if shard_key in self._checkpoint_recovered_shard_keys:
@@ -1206,13 +1322,19 @@ class TraderCoordinator(RegisterableProcess):
             if self._ownership is not None and not self._ownership.owns(shard_key):
                 continue
             try:
-                await self._rebuild_shard_if_gapped(shard_key, now)
+                if await self._rebuild_shard_if_gapped(shard_key, now):
+                    if shard_key in self._projection_identities:
+                        self._trusted_recovery_shards.add(shard_key)
+                    else:
+                        await self._record_recovery_shard_failure(shard_key)
             except Exception as e:
                 logger.error(
                     f"ZMQTrader: venue-event gap rebuild failed for {shard_key}: {e}; skipping"
                 )
+                self._trusted_recovery_shards.discard(shard_key)
+                await self._record_recovery_shard_failure(shard_key)
 
-    async def _rebuild_shard_if_gapped(self, shard_key: str, now: datetime) -> None:
+    async def _rebuild_shard_if_gapped(self, shard_key: str, now: datetime) -> bool:
         """Rebuild one owned, non-funding, gapped shard from its venue-event history.
 
         All fallible DB reads (gap check, accruals, wallet resolve, engine
@@ -1220,16 +1342,26 @@ class TraderCoordinator(RegisterableProcess):
         (``reset_shard`` + replay), so the fail-soft handler in
         :meth:`_recover_venue_event_gaps` can never leave a half-wiped shard
         when a read raises.
+
+        Returns:
+            True when the shard was rebuilt to CERTAIN state (the caller
+            certifies it for the projection rebuild); False when nothing
+            was rebuilt — including the funding-gated and
+            unresolved-engine gates, which additionally REVOKE any trust
+            an earlier execution replay granted, because the shard is
+            provably gapped.
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
-            return
+            return False
         parsed_shard = self._parse_shard_key(shard_key)
         if parsed_shard is None:
             logger.warning(f"ZMQTrader: Invalid shard_key for gap recovery: {shard_key}, skipping")
-            return
+            self._trusted_recovery_shards.discard(shard_key)
+            await self._record_recovery_shard_failure(shard_key)
+            return False
         exchange_str, instrument, mode_str, wallet_short, strategy_tag = parsed_shard
         if not await self.repository.shard_has_fill_gap(shard_key, now):
-            return
+            return False
         wallet_public_id = await self._resolve_checkpoint_wallet_public_id(
             shard_key, wallet_short, now
         )
@@ -1238,7 +1370,9 @@ class TraderCoordinator(RegisterableProcess):
                 f"ZMQTrader: {shard_key} has a venue-event fill gap but carries funding "
                 f"accruals; leaving to status-quo recovery (R9 rebuild is spot-scoped)"
             )
-            return
+            self._trusted_recovery_shards.discard(shard_key)
+            await self._record_recovery_shard_failure(shard_key)
+            return False
         engine = next((e for e in self.engines.values() if e._shard_key == shard_key), None)
         created = engine is None
         if engine is None:
@@ -1254,7 +1388,9 @@ class TraderCoordinator(RegisterableProcess):
                 f"ZMQTrader: gap-recovery could not resolve a matching engine for "
                 f"{shard_key}, skipping"
             )
-            return
+            self._trusted_recovery_shards.discard(shard_key)
+            await self._record_recovery_shard_failure(shard_key)
+            return False
         events = await self.repository.get_venue_events_after(shard_key, 0)
         self.trade_service.reset_shard(shard_key)
         for event in self.trade_service.dedup_fill_events(events):
@@ -1276,6 +1412,7 @@ class TraderCoordinator(RegisterableProcess):
             f"pos={engine.position_qty:.6f}, entry={engine.entry_price}, "
             f"cash={engine.portfolio.cash:.2f}"
         )
+        return True
 
     async def _replay_checkpoint_accruals(
         self,
@@ -1287,11 +1424,24 @@ class TraderCoordinator(RegisterableProcess):
         mode_str: str,
         wallet_public_id: str,
         shard_key: str,
-    ) -> None:
-        """Replay persisted accruals between ``checkpoint_at`` and ``now``."""
+    ) -> bool:
+        """Replay persisted accruals between ``checkpoint_at`` and ``now``.
+
+        Returns:
+            True when the accrual state is CERTAIN (nothing to replay,
+            or the replay succeeded); False when it cannot be certified
+            — a missing checkpoint anchor, an unresolvable instrument,
+            or a failed replay all mean the shard's realized PnL may be
+            short an accrual and the projection rebuild must not
+            certify it as truth.
+        """
         checkpoint_at = checkpoint.get("checkpoint_at")
         if checkpoint_at is None:
-            return
+            logger.warning(
+                f"ZMQTrader: accrual replay for {shard_key} has no checkpoint anchor; "
+                f"accrual completeness cannot be certified"
+            )
+            return False
         try:
             instrument_public_id = await self.repository.get_instrument_public_id_by_symbol(
                 native_symbol=instrument,
@@ -1299,7 +1449,11 @@ class TraderCoordinator(RegisterableProcess):
                 as_of=now,
             )
             if instrument_public_id is None:
-                return
+                logger.warning(
+                    f"ZMQTrader: accrual replay for {shard_key} could not resolve the "
+                    f"instrument; accrual completeness cannot be certified"
+                )
+                return False
             pending_accruals = await self.repository.get_accruals(
                 instrument_public_id=instrument_public_id,
                 mode=mode_str,
@@ -1308,15 +1462,26 @@ class TraderCoordinator(RegisterableProcess):
                 wallet_public_id=wallet_public_id,
             )
             if not pending_accruals:
-                return
+                return True
+            parsed_shard = self._parse_shard_key(shard_key)
+            if parsed_shard is not None and parsed_shard[4]:
+                logger.warning(
+                    f"ZMQTrader: {shard_key} has pending accruals but the accrual "
+                    f"ledger carries no strategy-tag identity — replaying into a "
+                    f"tagged paper sibling would double-count funding; leaving "
+                    f"UNCERTIFIED"
+                )
+                return False
             self.trade_service.replay_funding_accruals(shard_key, pending_accruals)
             logger.info(
                 "ZMQTrader: Replayed {} accruals for {}",
                 len(pending_accruals),
                 shard_key,
             )
+            return True
         except Exception:
             logger.opt(exception=True).warning("ZMQTrader: Accrual replay failed for {}", shard_key)
+            return False
 
     def _restore_balance_service_from_shard(self, shard_key: str) -> None:
         """Mirror the recovered TradeService shard into BalanceService."""
@@ -1500,6 +1665,7 @@ class TraderCoordinator(RegisterableProcess):
             executions = await self.repository.get_executions_for_recovery(as_of=now)
         except Exception as e:
             logger.error(f"ZMQTrader: Failed to query executions for recovery: {e}")
+            self._recovery_certification_failed = True
             return []
         if not executions:
             logger.info("ZMQTrader: No executions to recover")
@@ -1606,9 +1772,51 @@ class TraderCoordinator(RegisterableProcess):
         self._restore_engine_from_shard(engine, shard_key, engine.instrument)
         self._register_recovered_engine(engine_key, engine)
         if isinstance(self.repository, SQLAlchemyRepository):
-            db_max = await self.repository.get_latest_venue_event_id(shard_key)
-            if db_max is not None:
-                self._consumed_venue_event_watermarks[shard_key] = db_max
+            matched_watermark = 0
+            for fill_row in fills:
+                try:
+                    resolved_id = await self.repository.get_consumed_fill_venue_event_id(
+                        shard_key=shard_key,
+                        client_order_id=fill_row["client_order_id"],
+                        exec_id=fill_row.get("exec_id"),
+                        cum_fill_size=fill_row["size"],
+                        trade_id=fill_row["trade_id"],
+                    )
+                except Exception:
+                    resolved_id = None
+                if isinstance(resolved_id, int) and resolved_id > matched_watermark:
+                    matched_watermark = resolved_id
+            if matched_watermark:
+                self._consumed_venue_event_watermarks[shard_key] = matched_watermark
+        parsed_lineage = self._parse_shard_key(shard_key)
+        live_lineage = (
+            parsed_lineage is not None
+            and parsed_lineage[2] == "live"
+            and str(engine.exchange) != "paper"
+        )
+        if not live_lineage:
+            logger.warning(
+                f"ZMQTrader: {shard_key} recovered from executions carries paper or "
+                f"reconstructed lineage (execution rows hold no durable shard key); "
+                f"leaving UNCERTIFIED for the position projection"
+            )
+            return
+        try:
+            shard_has_accruals = await self.repository.shard_has_any_accruals(
+                wallet_public_id, str(engine.exchange), str(engine.mode)
+            )
+        except Exception:
+            shard_has_accruals = True
+        if shard_has_accruals:
+            logger.warning(
+                f"ZMQTrader: {shard_key} recovered from executions but carries funding "
+                f"accruals the replay cannot reconstruct; leaving UNCERTIFIED for the "
+                f"position projection"
+            )
+        elif shard_key in self._projection_identities:
+            self._trusted_recovery_shards.add(shard_key)
+        else:
+            await self._record_recovery_shard_failure(shard_key)
         logger.info(
             f"ZMQTrader: Recovered {engine_key} via full-replay shadow: "
             f"pos={engine.position_qty:.6f}, "
@@ -1632,10 +1840,12 @@ class TraderCoordinator(RegisterableProcess):
         the stored watermark never collides with real ``venue_events.id``
         writes that land after recovery.
 
-        Dedup fidelity is preserved via ``trade_id`` (``ExecutionRow``
-        has no ``exec_id`` field, so the synthetic event passes
-        ``exec_id=None`` and ``_dedup_fill`` keys on ``trade_id`` alone —
-        matches the existing checkpoint-replay dedup behaviour).
+        Dedup fidelity is preserved via BOTH venue identifiers: the
+        recovery ``ExecutionRow`` carries ``exec_id`` and ``trade_id``
+        (some venues populate only one of them), and ``_dedup_fill``
+        keys on whichever exists — matching the live fill path so a
+        checkpoint delta replay after an execution replay never
+        re-applies the same fill under a different key.
 
         Args:
             engine: Engine whose shard_key owns this event.
@@ -1668,7 +1878,7 @@ class TraderCoordinator(RegisterableProcess):
             "cum_fill_size": None,
             "fee": fill_row["fee"],
             "fee_asset": fill_row["fee_asset"],
-            "exec_id": None,
+            "exec_id": fill_row.get("exec_id"),
             "trade_id": fill_row["trade_id"],
             "error": None,
             "venue_timestamp": fill_row["executed_at"],
@@ -1946,8 +2156,18 @@ class TraderCoordinator(RegisterableProcess):
             if eligible_shards
             else {}
         )
+        trusted = getattr(self, "_trusted_recovery_shards", None)
         for engine_key, engine in self.engines.items():
-            existing = open_cycles.get(engine._shard_key)
+            shard_key = engine._shard_key
+            if trusted is not None and shard_key not in trusted:
+                logger.warning(
+                    "ZMQTrader: position_cycle reconcile skipped for {} — recovered "
+                    "state is not positively certified (active-order-only or failed "
+                    "recovery); flatness must not be inferred",
+                    shard_key,
+                )
+                continue
+            existing = open_cycles.get(shard_key)
             await self._reconcile_position_cycle_for_engine(engine_key, engine, existing, now)
 
     async def _reconcile_position_cycle_for_engine(
@@ -3738,22 +3958,103 @@ class TraderCoordinator(RegisterableProcess):
                     f"no registered identity (engine identifiers incomplete)"
                 )
                 return
-            ownership = getattr(self, "_ownership", None)
-            if identity[1] == "paper" and ownership is not None and ownership.instance_count > 1:
-                logger.warning(
-                    f"TraderCoordinator: position projection skipped for {shard_key}: "
-                    f"paper aggregation under coordinator_instance_count > 1 is "
-                    f"unsupported — competing partial aggregates would corrupt the "
-                    f"shared identity row"
-                )
-                return
-            lock = self._projection_locks.setdefault(identity, asyncio.Lock())
-            async with lock:
-                await self._write_position_projection_locked(identity, now=now)
+            await self._project_identity(identity, now=now)
         except Exception:
             logger.exception(
                 f"TraderCoordinator: failed to persist position projection for {shard_key}"
             )
+
+    async def _project_identity(self, identity: tuple[str, str, str], *, now: datetime) -> None:
+        """Write one identity's truth behind its guards and lock.
+
+        Shared by the live checkpoint trigger and the recovery rebuild:
+        the paper multi-instance refusal and the per-identity
+        serialization live HERE so no caller can bypass them.
+
+        Args:
+            identity: The (instrument_public_id, mode, wallet_public_id)
+                triple being projected.
+            now: Bus time of the triggering event.
+        """
+        ownership = getattr(self, "_ownership", None)
+        if identity[1] == "paper" and ownership is not None and ownership.instance_count > 1:
+            logger.warning(
+                f"TraderCoordinator: position projection skipped for {identity}: "
+                f"paper aggregation under coordinator_instance_count > 1 is "
+                f"unsupported — competing partial aggregates would corrupt the "
+                f"shared identity row"
+            )
+            return
+        lock = self._projection_locks.setdefault(identity, asyncio.Lock())
+        async with lock:
+            await self._write_position_projection_locked(identity, now=now)
+
+    async def _rebuild_position_projections(self) -> None:
+        """One complete truthful-projection pass after recovery.
+
+        Consensus D4: runs AFTER every recovery pass and cycle
+        reconciliation. Checkpoints are first refreshed for every
+        recovered shard via the checkpoint-only commit helper (shards
+        recovered from executions or venue-event gaps may have never
+        checkpointed — the refresh makes their state durable WITHOUT
+        emitting per-shard partial aggregates), then every identity
+        registered by the successfully recreated engines is rebuilt
+        exactly once through the same guarded writer as the live path
+        (identity is NEVER derived from checkpoints alone — they carry
+        no instrument UUID). Pre-existing active rows whose identity
+        has no recovered local state are left VISIBLY STALE with a
+        warning: absence of state may mean foreign ownership or failed
+        recovery, never flatness. Every step is best-effort — recovery
+        must complete even when the projection surface is degraded.
+        """
+        repository = self.repository
+        if not isinstance(repository, SQLAlchemyRepository):
+            return
+        self._recovery_baseline_shards = set(self.trade_service.known_shard_keys())
+        if self._recovery_certification_failed:
+            self._trusted_recovery_shards.clear()
+            logger.warning(
+                "TraderCoordinator: skipping position projection rebuild — a recovery "
+                "discovery pass failed, recovered state cannot be certified; every "
+                "recovered shard (including previously trusted ones) stays "
+                "quarantined for the process lifetime"
+            )
+            return
+        now = datetime.now(UTC)
+        for shard_key in sorted(self._recovery_baseline_shards):
+            if shard_key not in self._trusted_recovery_shards:
+                logger.warning(
+                    f"TraderCoordinator: checkpoint refresh skipped for uncertified "
+                    f"recovered shard {shard_key}"
+                )
+                continue
+            await self._commit_checkpoint(shard_key)
+        identities = sorted(set(self._projection_identities.values()))
+        for identity in identities:
+            try:
+                await self._project_identity(identity, now=now)
+            except Exception:
+                logger.exception(f"TraderCoordinator: projection rebuild failed for {identity}")
+        try:
+            registered = set(identities)
+            stale = [
+                row
+                for row in await repository.get_active_position_identities()
+                if (row[1], row[2], row[3]) not in registered
+            ]
+            for row in stale:
+                logger.warning(
+                    f"TraderCoordinator: active position row {row[0]} "
+                    f"(instrument {row[1]} {row[2]} wallet {row[3]}) has no "
+                    f"recovered local state — left visibly stale (foreign "
+                    f"ownership or failed recovery)"
+                )
+        except Exception:
+            logger.warning("TraderCoordinator: stale position-row scan failed after rebuild")
+        logger.info(
+            f"TraderCoordinator: position projection rebuild complete "
+            f"({len(identities)} identities)"
+        )
 
     async def _write_position_projection_locked(
         self, identity: tuple[str, str, str], *, now: datetime
@@ -3791,6 +4092,36 @@ class TraderCoordinator(RegisterableProcess):
         if not isinstance(repository, SQLAlchemyRepository):
             return
         components = [sk for sk, ident in self._projection_identities.items() if ident == identity]
+        if identity in getattr(self, "_failed_recovery_identities", set()):
+            logger.warning(
+                f"TraderCoordinator: position projection skipped for {identity}: "
+                f"a candidate of this identity failed recovery — the aggregate "
+                f"cannot be certified"
+            )
+            return
+        failed_prefixes = getattr(self, "_failed_recovery_shard_prefixes", set())
+        if failed_prefixes:
+            for sk in components:
+                parsed = self._parse_shard_key(sk)
+                if parsed is not None and parsed[:4] in failed_prefixes:
+                    logger.warning(
+                        f"TraderCoordinator: position projection skipped for {identity}: "
+                        f"a sibling shard of {sk} failed recovery before identity "
+                        f"registration — the aggregate cannot be certified"
+                    )
+                    return
+        baseline = getattr(self, "_recovery_baseline_shards", set())
+        trusted = getattr(self, "_trusted_recovery_shards", set())
+        if getattr(self, "_recovery_certification_failed", False):
+            trusted = set()
+        uncertified = [sk for sk in components if sk in baseline and sk not in trusted]
+        if uncertified:
+            logger.warning(
+                f"TraderCoordinator: position projection skipped for {identity}: "
+                f"recovery-materialized components without positive certification "
+                f"{uncertified} — refusing to project uncertain truth"
+            )
+            return
         known = self.trade_service.known_shard_keys()
         missing = [sk for sk in components if sk not in known]
         if not components or missing:

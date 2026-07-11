@@ -289,6 +289,7 @@ class ExecutionRow(TypedDict):
     session_id: str
     sequence_id: int
     trade_id: str | None
+    exec_id: NotRequired[str | None]
     exchange_order_id: str | None
     client_order_id: str
     instrument: str
@@ -320,6 +321,9 @@ class PositionRow(TypedDict):
     average_price: float | None
     unrealized_pnl: float | None
     realized_pnl: float | None
+    mark_price: float | None
+    marked_at: datetime | None
+    source_venue_event_id: int | None
     position_cycle_public_id: str | None
     wallet_public_id: str
 
@@ -581,6 +585,7 @@ class TradeProjectionCheckpointRow(TypedDict):
     seen_exec_ids: str
     checkpoint_at: datetime
     session_id: str
+    wallet_public_id: NotRequired[str]
     operator_public_id: str | None
 
 

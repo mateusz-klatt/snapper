@@ -181,11 +181,15 @@ class TestCreateTrailingStop:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -237,11 +241,15 @@ class TestCreateTrailingStop:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -258,11 +266,15 @@ class TestCreateTrailingStop:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -279,11 +291,15 @@ class TestCreateTrailingStop:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": None,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -300,11 +316,15 @@ class TestCreateTrailingStop:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -322,11 +342,15 @@ class TestCreateTrailingStop:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
@@ -345,18 +369,26 @@ class TestCreateTrailingStop:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-2",
                     "exchange": "kraken_futures",
                     "instrument": "ETH-USD",
+                    "instrument_public_id": "inst-eth",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 2.0,
                     "average_price": 3000.0,
+                    "position_cycle_public_id": None,
                 },
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 },
             ]
         )
@@ -410,11 +442,15 @@ class TestCreateTrailingStop:
         repo.get_positions = AsyncMock(
             return_value=[
                 {
+                    "public_id": "pos-1",
                     "exchange": "kraken_futures",
                     "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
                     "mode": "paper",
+                    "wallet_public_id": "wallet-1",
                     "quantity": 1.0,
                     "average_price": 50000.0,
+                    "position_cycle_public_id": "cycle-1",
                 }
             ]
         )
