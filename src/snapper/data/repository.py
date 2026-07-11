@@ -67,6 +67,7 @@ from typing import cast
 from uuid import uuid7
 
 from loguru import logger
+from sqlalchemy import ColumnElement
 from sqlalchemy import Select
 from sqlalchemy import and_
 from sqlalchemy import case
@@ -231,6 +232,7 @@ from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
 from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import PositionCycleRow
+from snapper.data.repository_types import PositionProjectionUpsertRow
 from snapper.data.repository_types import PositionRow
 from snapper.data.repository_types import ScopeGrantRow
 from snapper.data.repository_types import SettingRow
@@ -11627,6 +11629,158 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             await s.refresh(obj)
             return int(obj.id)
+
+    @staticmethod
+    def _position_identity_filters(
+        instrument_public_id: str, mode: str, wallet_public_id: str
+    ) -> list[ColumnElement[bool]]:
+        """Build the identity predicate for one position projection row.
+
+        Args:
+            instrument_public_id: Instrument identity.
+            mode: Trading mode (live/paper).
+            wallet_public_id: Wallet identity.
+
+        Returns:
+            Filters matching the (instrument, mode, wallet) identity.
+        """
+        return [
+            Position.instrument_public_id == instrument_public_id,
+            Position.mode == mode,
+            Position.wallet_public_id == wallet_public_id,
+        ]
+
+    async def _position_projection_close_and_insert(
+        self, s: AsyncSession, row: PositionProjectionUpsertRow
+    ) -> int:
+        """Close the current position version and insert its successor.
+
+        Selects the CURRENT version by the current-version sentinel
+        filter under ``FOR UPDATE`` instead of the generic bus-time
+        ``close_and_insert`` helper: the trader's bus clock can lag a
+        previously stored row timestamp (the Phase-0 clock-skew bug
+        class), and a bus-time-scoped select would miss the active row
+        and collide with the partial unique index. The effective
+        timestamp is clamped to ``max(bus_time, existing.timestamp)``
+        so successors never travel back in time; the successor carries
+        the predecessor's ``public_id``.
+
+        Args:
+            s: Open session owned by the caller.
+            row: Full-state snapshot for the identity.
+
+        Returns:
+            The new active row id (flushed, not committed).
+        """
+        existing = (
+            (
+                await s.execute(
+                    select(Position)
+                    .where(
+                        Position.known_to == KNOWN_TO_MAX,
+                        *self._position_identity_filters(
+                            row["instrument_public_id"], row["mode"], row["wallet_public_id"]
+                        ),
+                    )
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .first()
+        )
+        effective = row["bus_time"]
+        new_values: dict[str, Any] = {k: v for k, v in row.items() if k != "bus_time"}
+        if existing is not None:
+            if existing.timestamp > effective:
+                effective = existing.timestamp
+            new_values["public_id"] = existing.public_id
+            await s.execute(
+                update(Position).where(Position.id == existing.id).values(known_to=effective)
+            )
+        new_values["timestamp"] = effective
+        new_values["known_to"] = KNOWN_TO_MAX
+        obj = Position(**new_values)
+        s.add(obj)
+        await s.flush()
+        return int(obj.id)
+
+    async def upsert_position_projection(self, row: PositionProjectionUpsertRow) -> int:
+        """Clock-safe SCD2 upsert for one truthful position identity.
+
+        A concurrent first insert losing the partial-unique race is
+        retried exactly once by re-reading the winner inside a fresh
+        transaction — the second pass finds the winner's active row and
+        closes it like any other update. Callers serialize writes per
+        identity (the trader holds a per-identity lock and shard
+        ownership keeps foreign processes away); the race retry only
+        covers the empty-identity first insert, not sustained
+        concurrent writers.
+
+        Args:
+            row: Full-state snapshot for the identity.
+
+        Returns:
+            The new active row id.
+        """
+        async with self.session() as s:
+            try:
+                new_id = await self._position_projection_close_and_insert(s, row)
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                new_id = await self._position_projection_close_and_insert(s, row)
+                await s.commit()
+            return new_id
+
+    async def close_position_projection(
+        self, instrument_public_id: str, mode: str, wallet_public_id: str, bus_time: datetime
+    ) -> bool:
+        """Close the active position row WITHOUT writing a successor.
+
+        Used when every component shard of the identity is proven flat
+        — the position disappears from the active surface while SCD2
+        history stays queryable via ``as_of``. The close timestamp is
+        clamped to ``max(bus_time, existing.timestamp)`` (same clock-
+        skew defense as the upsert). Callers MUST serialize this with
+        the upsert per identity (trader per-identity lock + shard
+        ownership): a concurrent close/upsert pair violates that
+        contract and has NO ordering guarantee — the close may miss a
+        successor committed after its snapshot.
+
+        Args:
+            instrument_public_id: Instrument identity.
+            mode: Trading mode (live/paper).
+            wallet_public_id: Wallet identity.
+            bus_time: Bus time of the proving event.
+
+        Returns:
+            True when an active row was closed, False when none existed.
+        """
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(Position)
+                        .where(
+                            Position.known_to == KNOWN_TO_MAX,
+                            *self._position_identity_filters(
+                                instrument_public_id, mode, wallet_public_id
+                            ),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return False
+            effective = bus_time if bus_time > existing.timestamp else existing.timestamp
+            await s.execute(
+                update(Position).where(Position.id == existing.id).values(known_to=effective)
+            )
+            await s.commit()
+            return True
 
     async def get_checkpoint(
         self, shard_key: str, as_of: datetime

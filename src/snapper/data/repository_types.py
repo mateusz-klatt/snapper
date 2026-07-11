@@ -317,11 +317,37 @@ class PositionRow(TypedDict):
     exchange: str
     mode: str
     quantity: float
-    average_price: float
+    average_price: float | None
     unrealized_pnl: float | None
     realized_pnl: float | None
     position_cycle_public_id: str | None
     wallet_public_id: str
+
+
+class PositionProjectionUpsertRow(TypedDict):
+    """Upsert params for upsert_position_projection.
+
+    Full-state snapshot of one (instrument, mode, wallet) position
+    identity, aggregated across its component TradeService shards. The
+    mark trio (``mark_price``/``marked_at``/``unrealized_pnl``) is NULL
+    when no usable mark exists — stale-visible, never faked current.
+    ``source_venue_event_id`` is the maximum durable venue-event
+    watermark consumed into this state (NULL when none is known).
+    """
+
+    instrument_public_id: str
+    mode: str
+    wallet_public_id: str
+    quantity: float
+    average_price: float | None
+    unrealized_pnl: float | None
+    realized_pnl: float
+    mark_price: float | None
+    marked_at: datetime | None
+    source_venue_event_id: int | None
+    session_id: str
+    sequence_id: int
+    bus_time: datetime
 
 
 class SettingRow(TypedDict):

@@ -630,7 +630,30 @@ class Execution(TemporalMixin, Base):
 
 
 class Position(TemporalMixin, Base):
-    """SQLAlchemy model for open trading positions."""
+    """Truthful position projection per (instrument, mode, wallet) identity.
+
+    PnL Phase 2: written by the trader after every committed checkpoint
+    (fill and funding paths) and rebuilt on recovery — before Phase 2 the
+    table had NO production writer and the read surface served an empty
+    projection. One SCD2 active row per identity; paper strategy-tag
+    shards aggregate into the identity (quantity is the fsum of shard
+    quantities, ``average_price`` is the absolute-quantity-weighted VWAP
+    of same-direction shards and NULL when directions oppose or any
+    non-flat shard lacks an entry).
+
+    Provenance columns are stale-VISIBLE, never faked current:
+    ``mark_price``/``marked_at`` echo the active market snapshot
+    (``marked_at`` is the snapshot's own bus timestamp, no age gate) and
+    all three of ``mark_price``/``marked_at``/``unrealized_pnl`` are NULL
+    when no usable mark exists — a previous mark is never carried
+    forward. ``source_venue_event_id`` is the maximum durable
+    venue-event WATERMARK consumed into this state, not the exact causal
+    fill: recovery may advance it over non-fill lifecycle events and
+    funding changes ``realized_pnl`` without advancing it (funding
+    provenance lives in the accrual ledger). ``realized_pnl`` is
+    execution-fee-exclusive but funding-inclusive, mirroring
+    TradeService semantics.
+    """
 
     __tablename__ = "positions"
     __table_args__ = (
@@ -655,9 +678,12 @@ class Position(TemporalMixin, Base):
     mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     quantity: Mapped[float] = mapped_column(Float)
-    average_price: Mapped[float] = mapped_column(Float)
-    unrealized_pnl: Mapped[float] = mapped_column(Float)
+    average_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unrealized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     realized_pnl: Mapped[float] = mapped_column(Float)
+    mark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    marked_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    source_venue_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class Signal(TemporalMixin, Base):

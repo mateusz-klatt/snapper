@@ -19,6 +19,7 @@ import csv
 import json
 from collections import defaultdict
 from collections.abc import Callable
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from datetime import datetime
@@ -128,6 +129,27 @@ def _candle_row_to_csv_tuple(
     )
 
 
+def _read_existing_csv_with_header(
+    path: Path,
+) -> tuple[list[str] | None, list[tuple[str, ...]]]:
+    """Read an existing CSV file, returning its header and data rows.
+
+    Args:
+        path: Path to existing CSV file.
+
+    Returns:
+        Tuple of (header column names or None, data-row string tuples).
+    """
+    if not path.exists():
+        return None, []
+    with path.open(encoding="utf-8", newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        if header is None:
+            return None, []
+        return list(header), [tuple(row) for row in reader]
+
+
 def _read_existing_csv(path: Path) -> list[tuple[str, ...]]:
     """Read existing CSV file and return data rows as string tuples.
 
@@ -137,14 +159,59 @@ def _read_existing_csv(path: Path) -> list[tuple[str, ...]]:
     Returns:
         List of string tuples (excluding header row).
     """
-    if not path.exists():
-        return []
-    with path.open(encoding="utf-8", newline="") as f:
-        reader = csv.reader(f)
-        header = next(reader, None)
-        if header is None:
-            return []
-        return [tuple(row) for row in reader]
+    return _read_existing_csv_with_header(path)[1]
+
+
+def _normalize_rows_to_columns(
+    header: list[str] | None,
+    rows: list[tuple[str, ...]],
+    columns: Sequence[str],
+) -> list[tuple[str, ...]]:
+    """Remap rows exported under an old header onto the current columns.
+
+    Schema-evolution guard: a state-table export merges pre-existing
+    archive rows with fresh DB rows and rewrites the file under the
+    CURRENT model header. When the model gained columns since the file
+    was written (e.g. the positions provenance columns), old-width
+    tuples merged verbatim would misalign against the wider header and
+    break restore with an index error. Rows are remapped by column
+    NAME; columns the old schema lacked are padded with empty strings,
+    which every CSV value parser restores as NULL.
+
+    Args:
+        header: Header the existing rows were written under (None when
+            the file was absent or empty).
+        rows: Existing data rows read from the file.
+        columns: Current model archive column order.
+
+    Returns:
+        Rows aligned to the current column order. Rows whose temporal
+        identity (public_id, timestamp, known_to — the first three
+        archive columns) cannot be recovered are dropped: they are
+        unrestorable and would crash the merge dedup or a later
+        restore.
+    """
+    if header is None:
+        return rows
+    width = len(columns)
+    same_header = header == list(columns)
+    index_by_name = {name: index for index, name in enumerate(header)}
+    normalized: list[tuple[str, ...]] = []
+    for row in rows:
+        if same_header and len(row) == width:
+            normalized.append(row)
+            continue
+        normalized.append(
+            tuple(
+                (
+                    row[index_by_name[name]]
+                    if name in index_by_name and index_by_name[name] < len(row)
+                    else ""
+                )
+                for name in columns
+            )
+        )
+    return [row for row in normalized if row[0] and row[1] and row[2]]
 
 
 def _merge_and_dedup(
@@ -1204,8 +1271,9 @@ class StateArchiver:
 
         files_written = 0
         for path in sorted(files):
-            existing = _read_existing_csv(path)
-            merged = _merge_and_dedup_events(existing, files[path])
+            existing_header, existing = _read_existing_csv_with_header(path)
+            normalized = _normalize_rows_to_columns(existing_header, existing, columns)
+            merged = _merge_and_dedup_events(normalized, files[path])
             _write_event_csv(path, columns, merged)
             files_written += 1
 

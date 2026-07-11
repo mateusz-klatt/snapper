@@ -19,11 +19,13 @@ from snapper.data.archiver import StateArchiver
 from snapper.data.archiver import StateTableSpec
 from snapper.data.archiver import _format_value
 from snapper.data.archiver import _get_model_archive_columns
+from snapper.data.archiver import _normalize_rows_to_columns
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import Instrument
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Order
+from snapper.data.models import Position
 from snapper.data.models import Setting
 from snapper.data.models import Symbol
 from snapper.data.repository import DatabaseRepository
@@ -736,3 +738,164 @@ def test_cli_archive_state_purge_requires_closed_only() -> None:
     )
     assert result.exit_code == 1
     assert "closed-only" in result.output.lower()
+
+
+def test_normalize_rows_passthrough_on_matching_or_missing_header() -> None:
+    """Rows pass through untouched when no remap is needed.
+
+    Given: rows read under the current header, or no header at all,
+    When: _normalize_rows_to_columns runs,
+    Then: the exact row objects are returned unchanged.
+    """
+    columns = ("public_id", "timestamp", "known_to", "quantity")
+    rows = [("p1", "2024-01-01T00:00:00", "9999-12-31T23:59:59", "1.5")]
+    assert _normalize_rows_to_columns(list(columns), rows, columns) == rows
+    assert _normalize_rows_to_columns(None, rows, columns) == rows
+
+
+def test_normalize_rows_pads_old_narrower_header() -> None:
+    """Rows written before a schema widening gain empty-string padding.
+
+    Given: a row exported under a header lacking the trailing
+        provenance columns,
+    When: _normalize_rows_to_columns remaps it onto the wider header,
+    Then: known columns keep their values and the new columns are
+        empty strings (restored as NULL by the CSV parsers).
+    """
+    old_header = ["public_id", "timestamp", "known_to", "quantity"]
+    columns = ("public_id", "timestamp", "known_to", "quantity", "mark_price", "marked_at")
+    rows = [("p1", "2024-01-01T00:00:00", "9999-12-31T23:59:59", "1.5")]
+    normalized = _normalize_rows_to_columns(old_header, rows, columns)
+    assert normalized == [("p1", "2024-01-01T00:00:00", "9999-12-31T23:59:59", "1.5", "", "")]
+
+
+def test_normalize_rows_remaps_by_name_and_drops_unidentifiable_rows() -> None:
+    """Remapping is by column NAME and unidentifiable fragments drop.
+
+    Given: an old header with a different column order plus a dropped
+        legacy column, and one truncated row that lost its temporal
+        identity cells,
+    When: _normalize_rows_to_columns runs,
+    Then: values land under their named columns, the legacy column is
+        dropped, missing cells become empty strings, and the row
+        without a recoverable (public_id, timestamp, known_to) identity
+        is discarded instead of corrupting the merge.
+    """
+    old_header = ["quantity", "public_id", "timestamp", "known_to", "legacy_flag"]
+    columns = ("public_id", "timestamp", "known_to", "quantity", "mark_price")
+    rows = [("1.5", "p1", "t1", "t2", "x"), ("2.5",)]
+    normalized = _normalize_rows_to_columns(old_header, rows, columns)
+    assert normalized == [("p1", "t1", "t2", "1.5", "")]
+
+
+def test_normalize_rows_repairs_truncated_current_header_rows() -> None:
+    """Truncated rows under the CURRENT header are padded, not passed.
+
+    Given: a file already carrying the current header where one row was
+        truncated mid-write but keeps its temporal identity and another
+        fragment lost even the identity cells,
+    When: _normalize_rows_to_columns runs,
+    Then: the identifiable row is padded to full width and the
+        unidentifiable fragment is dropped — the matching-header fast
+        path never lets a short row through to the merge dedup.
+    """
+    columns = ("public_id", "timestamp", "known_to", "quantity", "mark_price")
+    rows = [("p1", "t1", "t2", "1.5"), ("p2",)]
+    normalized = _normalize_rows_to_columns(list(columns), rows, columns)
+    assert normalized == [("p1", "t1", "t2", "1.5", "")]
+
+
+def _make_position_row(
+    row_id: int,
+    public_id: str,
+    ts: datetime,
+    known_to: datetime,
+) -> tuple[Any, ...]:
+    """Build a positions DB row tuple matching the archive column order.
+
+    Args:
+        row_id: Synthetic database id.
+        public_id: Row public id.
+        ts: Row bus timestamp.
+        known_to: SCD2 close timestamp.
+
+    Returns:
+        Row tuple shaped like get_scd2_rows_for_archive output.
+    """
+    columns = _get_model_archive_columns(Position)
+    values: dict[str, Any] = {
+        "public_id": public_id,
+        "timestamp": ts,
+        "known_to": known_to,
+        "session_id": "test-session",
+        "sequence_id": row_id,
+        "instrument_public_id": "inst-1",
+        "mode": "paper",
+        "wallet_public_id": "wallet-1",
+        "quantity": 1.5,
+        "average_price": 50000.0,
+        "unrealized_pnl": 25.0,
+        "realized_pnl": 10.0,
+        "mark_price": 50050.0,
+        "marked_at": ts,
+        "source_venue_event_id": 42,
+    }
+    return (row_id, *(values[c] for c in columns))
+
+
+def test_state_export_normalizes_old_header_position_archive(tmp_path: Path) -> None:
+    """Merging into a pre-provenance positions archive stays aligned.
+
+    Given: an existing positions archive file written BEFORE the 0020
+        provenance columns (narrower header, one old row),
+    When: a fresh export merges a new full-width row into that file,
+    Then: the rewritten file carries the current header, every data row
+        has the full width, and the old row's provenance cells are
+        empty strings.
+    """
+    columns = _get_model_archive_columns(Position)
+    provenance = {"mark_price", "marked_at", "source_venue_event_id"}
+    old_header = [c for c in columns if c not in provenance]
+    ts = datetime(2024, 1, 1, 14, 30, tzinfo=UTC)
+    old_values = {
+        "public_id": "pub-old",
+        "timestamp": ts.isoformat(),
+        "known_to": KNOWN_TO_MAX.isoformat(),
+        "session_id": "old-session",
+        "sequence_id": "1",
+        "instrument_public_id": "inst-1",
+        "mode": "paper",
+        "wallet_public_id": "wallet-1",
+        "quantity": "1.0",
+        "average_price": "49000.0",
+        "unrealized_pnl": "5.0",
+        "realized_pnl": "0.0",
+    }
+    csv_path = tmp_path / "archive" / "positions" / "2024" / "2024-01-01.csv"
+    csv_path.parent.mkdir(parents=True)
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f, lineterminator="\n")
+        writer.writerow(old_header)
+        writer.writerow([old_values[c] for c in old_header])
+    repo = _StateStubRepo(
+        rows=[_make_position_row(2, "pub-new", ts.replace(minute=45), KNOWN_TO_MAX)]
+    )
+    archiver = StateArchiver(repo, tmp_path)
+    result = archiver.export(
+        table="positions", day_start=date(2024, 1, 1), day_end=date(2024, 1, 1)
+    )
+    assert result.files_written == 1
+    with csv_path.open(encoding="utf-8", newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        data = list(reader)
+    assert header == list(columns)
+    assert len(data) == 2
+    assert all(len(row) == len(columns) for row in data)
+    by_pid = {row[0]: row for row in data}
+    mark_index = list(columns).index("mark_price")
+    watermark_index = list(columns).index("source_venue_event_id")
+    assert by_pid["pub-old"][mark_index] == ""
+    assert by_pid["pub-old"][watermark_index] == ""
+    assert by_pid["pub-new"][mark_index] == "50050"
+    assert by_pid["pub-new"][watermark_index] == "42"
