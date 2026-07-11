@@ -961,6 +961,36 @@ class TestPlanSizingExchangeIntegrity:
         assert "exchange disagrees" in response.json()["detail"].lower()
         client.close()
 
+    def test_create_bracket_null_entry_price_fails_closed_422(self) -> None:
+        """Given a matched position with an honest-NULL entry, Then 422.
+
+        An opposing-shard aggregate has no truthful entry price, so
+        SL/TP sanity cannot be validated — the bracket must refuse
+        instead of silently skipping the wrong-side guards.
+        """
+        repo = AsyncMock()
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=_make_cycle_row())
+        repo.get_positions = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "pos-1",
+                    "exchange": "kraken_futures",
+                    "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
+                    "mode": "paper",
+                    "wallet_public_id": "wallet-1",
+                    "quantity": 1.0,
+                    "average_price": None,
+                    "position_cycle_public_id": "cycle-1",
+                }
+            ]
+        )
+        client = _create_client(repo)
+        response = client.post("/api/execution-plans", json=_create_bracket_body())
+        assert response.status_code == 422
+        assert "entry price" in response.json()["detail"].lower()
+        client.close()
+
     def test_create_bracket_symbol_rename_uses_current_native_symbol(self) -> None:
         """Given a renamed symbol on the same identity, Then 200.
 

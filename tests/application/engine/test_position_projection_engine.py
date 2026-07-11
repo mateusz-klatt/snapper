@@ -13,6 +13,7 @@ durable consumed id, and nothing ever raises into the trading path.
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -22,6 +23,8 @@ import pytest
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.trade.trade_service import TradeService
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import ExecutionRow
+from snapper.data.repository_types import TradeProjectionCheckpointRow
 
 _WALLET = "00000000-0000-7000-8000-aabbccddeeff"
 _SHORT = "aabbccddeeff"
@@ -70,6 +73,8 @@ def _make_coord(repo: Any) -> TraderCoordinator:
     coord._projection_locks = {}
     coord._trusted_recovery_shards = set()
     coord._recovery_baseline_shards = set()
+    coord._failed_recovery_shard_prefixes = set()
+    coord._failed_recovery_identities = set()
     coord._recovery_certification_failed = False
     coord._ownership = None
     coord.repository = repo
@@ -145,6 +150,7 @@ async def test_projection_triggers_only_after_committed_checkpoint() -> None:
         trigger.assert_not_awaited()
         await coord._persist_checkpoint(_SHARD_A)
         trigger.assert_awaited_once()
+        assert trigger.await_args is not None
         assert trigger.await_args.args == (_SHARD_A,)
         assert isinstance(trigger.await_args.kwargs["now"], datetime)
 
@@ -752,26 +758,39 @@ async def test_accrual_replay_certification_holes_return_false() -> None:
         "wallet_public_id": _WALLET,
         "shard_key": _SHARD_A,
     }
-    assert await coord._replay_checkpoint_accruals(checkpoint={}, **kwargs) is False
+    assert (
+        await coord._replay_checkpoint_accruals(
+            checkpoint=cast(TradeProjectionCheckpointRow, {}), **kwargs
+        )
+        is False
+    )
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
     assert (
-        await coord._replay_checkpoint_accruals(checkpoint={"checkpoint_at": _NOW}, **kwargs)
+        await coord._replay_checkpoint_accruals(
+            checkpoint=cast(TradeProjectionCheckpointRow, {"checkpoint_at": _NOW}), **kwargs
+        )
         is False
     )
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=_INSTRUMENT)
     repo.get_accruals = AsyncMock(side_effect=RuntimeError("db down"))
     assert (
-        await coord._replay_checkpoint_accruals(checkpoint={"checkpoint_at": _NOW}, **kwargs)
+        await coord._replay_checkpoint_accruals(
+            checkpoint=cast(TradeProjectionCheckpointRow, {"checkpoint_at": _NOW}), **kwargs
+        )
         is False
     )
     repo.get_accruals = AsyncMock(return_value=[])
     assert (
-        await coord._replay_checkpoint_accruals(checkpoint={"checkpoint_at": _NOW}, **kwargs)
+        await coord._replay_checkpoint_accruals(
+            checkpoint=cast(TradeProjectionCheckpointRow, {"checkpoint_at": _NOW}), **kwargs
+        )
         is True
     )
     repo.get_accruals = AsyncMock(return_value=[{"amount": 1.0}])
     assert (
-        await coord._replay_checkpoint_accruals(checkpoint={"checkpoint_at": _NOW}, **kwargs)
+        await coord._replay_checkpoint_accruals(
+            checkpoint=cast(TradeProjectionCheckpointRow, {"checkpoint_at": _NOW}), **kwargs
+        )
         is False
     )
 
@@ -798,6 +817,7 @@ async def test_cycle_reconciliation_skips_uncertified_shards() -> None:
     ) as reconcile:
         await coord._reconcile_position_cycles()
     reconcile.assert_awaited_once()
+    assert reconcile.await_args is not None
     assert reconcile.await_args.args[1] is certified
 
 
@@ -851,7 +871,7 @@ async def test_execution_replay_certifies_live_but_never_paper_lineage() -> None
     ):
         await coord._recover_execution_group(
             engine_key="k1",
-            fills=[fill],
+            fills=[cast(ExecutionRow, fill)],
             wallet_public_id=_WALLET,
             operator_public_id="",
         )
@@ -867,7 +887,7 @@ async def test_execution_replay_certifies_live_but_never_paper_lineage() -> None
     ):
         await coord._recover_execution_group(
             engine_key="k2",
-            fills=[dict(fill, exchange="paper")],
+            fills=[cast(ExecutionRow, dict(fill, exchange="paper"))],
             wallet_public_id=_WALLET,
             operator_public_id="",
         )
@@ -895,3 +915,50 @@ async def test_global_certification_failure_quarantines_trusted_shards() -> None
     await coord._persist_position_projection(_SHARD_A, now=_NOW)
     repo.upsert_position_projection.assert_not_awaited()
     repo.close_position_projection.assert_not_awaited()
+
+
+async def test_canonically_failed_identity_blocks_projection() -> None:
+    """A canonical failure record blocks its exact identity.
+
+    Given: the identity itself is recorded in the canonical failure
+        set (a sibling failed recovery and was attributed by
+        instrument/mode/wallet),
+    When: the projection trigger runs,
+    Then: nothing is written or closed.
+    """
+    repo = _make_repo()
+    coord = _make_coord(repo)
+    _seed_shard(coord, _SHARD_A, 1.0, 50000.0, 0.0)
+    coord._failed_recovery_identities = {_IDENTITY}
+    await coord._persist_position_projection(_SHARD_A, now=_NOW)
+    repo.upsert_position_projection.assert_not_awaited()
+    repo.close_position_projection.assert_not_awaited()
+
+
+async def test_non_matching_failed_prefix_does_not_block_projection() -> None:
+    """Failure records for OTHER aggregates never block this one.
+
+    Given: a recorded failure prefix for a different instrument,
+    When: the projection trigger runs,
+    Then: the identity still projects normally.
+    """
+    repo = _make_repo()
+    coord = _make_coord(repo)
+    _seed_shard(coord, _SHARD_A, 1.0, 50000.0, 0.0)
+    coord._failed_recovery_shard_prefixes = {("kraken", "ETH-USD", "live", "")}
+    await coord._persist_position_projection(_SHARD_A, now=_NOW)
+    repo.upsert_position_projection.assert_awaited_once()
+
+
+async def test_recorder_without_repository_fails_certification() -> None:
+    """A failure that cannot resolve its instrument blocks everything.
+
+    Given: a recorder invocation on a coordinator whose backend is not
+        a SQLAlchemy repository (no instrument lookup possible),
+    When: the failure is recorded,
+    Then: canonical attribution is unavailable and the global flag
+        trips.
+    """
+    coord = _make_coord(MagicMock())
+    await coord._record_recovery_shard_failure(f"kraken.BTC-USD.live.w{_SHORT}")
+    assert coord._recovery_certification_failed is True

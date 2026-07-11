@@ -1511,3 +1511,218 @@ class TestR9GapRecovery:
         assert coord.trade_service._shards[
             "kraken.BTC-USD.live"
         ].position.position_qty == pytest.approx(0.5)
+
+
+class TestRecoveryCertification:
+    """Positive-certification paths of the projection trust model."""
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_happy_path_grants_trust(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fully certain checkpoint recovery certifies its shard.
+
+        Given: a checkpoint shard with no fill gap, certain accruals,
+            no accrual-ledger rows, and a registered identity,
+        When: _recover_checkpoint_row completes,
+        Then: the shard joins the trusted set.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo.get_accruals = AsyncMock(return_value=[])
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        coord._projection_identities["kraken.BTC-USD.live"] = ("inst-pid", "live", "w-1")
+        engine_key = await coord._recover_checkpoint_row(_make_checkpoint(), datetime.now(UTC))
+        assert engine_key is not None
+        assert "kraken.BTC-USD.live" in coord._trusted_recovery_shards
+
+    @pytest.mark.asyncio
+    async def test_certification_probe_failure_refuses_trust(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing accrual existence probe leaves the shard untrusted.
+
+        Given: the clock-free accrual probe raises,
+        When: _recover_checkpoint_row completes,
+        Then: the shard is NOT trusted (uncertain accrual state).
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo.get_accruals = AsyncMock(return_value=[])
+        mock_repo.shard_has_any_accruals = AsyncMock(side_effect=RuntimeError("db down"))
+        _set_sqlalchemy_repo(coord, mock_repo)
+        coord._projection_identities["kraken.BTC-USD.live"] = ("inst-pid", "live", "w-1")
+        engine_key = await coord._recover_checkpoint_row(_make_checkpoint(), datetime.now(UTC))
+        assert engine_key is not None
+        assert "kraken.BTC-USD.live" not in coord._trusted_recovery_shards
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_row_exception_records_and_continues(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A crashing checkpoint candidate blocks certification, not boot.
+
+        Given: _recover_checkpoint_row raises for the only checkpoint
+            and the candidate cannot be canonically attributed,
+        When: _recover_from_checkpoints runs,
+        Then: recovery survives, nothing is recovered, and the global
+            certification flag trips.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[_make_checkpoint()])
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        with patch.object(
+            coord, "_recover_checkpoint_row", AsyncMock(side_effect=RuntimeError("boom"))
+        ):
+            recovered = await coord._recover_from_checkpoints(datetime.now(UTC))
+        assert recovered == set()
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_invalid_exchange_checkpoint_records_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An invalid-exchange candidate is denied, never ignored.
+
+        Given: a checkpoint whose shard key names an unknown exchange
+            and cannot be canonically attributed,
+        When: _recover_checkpoint_row runs,
+        Then: it returns None and the global certification flag trips.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        result = await coord._recover_checkpoint_row(
+            _make_checkpoint(shard_key="nope.BTC-USD.live"), datetime.now(UTC)
+        )
+        assert result is None
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_recorder_lazily_initializes_failure_sets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The failure recorder tolerates bare coordinator instances.
+
+        Given: a coordinator whose failure sets were never initialized,
+        When: the recorder attributes a canonical failure,
+        Then: both sets materialize and carry the identity.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        _set_sqlalchemy_repo(coord, mock_repo)
+        coord._wallet_short_to_id = {"aabbccddeeff": "w-full"}
+        del coord._failed_recovery_shard_prefixes
+        del coord._failed_recovery_identities
+        await coord._record_recovery_shard_failure("kraken.BTC-USD.live.waabbccddeeff")
+        assert ("kraken", "BTC-USD", "live", "aabbccddeeff") in (
+            coord._failed_recovery_shard_prefixes
+        )
+        assert ("inst-pid", "live", "w-full") in coord._failed_recovery_identities
+
+    @pytest.mark.asyncio
+    async def test_gap_rebuild_with_registration_grants_trust(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A certified gap rebuild with a registered identity certifies.
+
+        Given: the gapped rebuild succeeds and the shard registered an
+            identity,
+        When: _recover_venue_event_gaps runs,
+        Then: the shard joins the trusted set.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_shard_keys_with_fills = AsyncMock(return_value=["kraken.BTC-USD.live"])
+        coord._projection_identities["kraken.BTC-USD.live"] = ("inst-pid", "live", "w-1")
+        with patch.object(coord, "_rebuild_shard_if_gapped", AsyncMock(return_value=True)):
+            await coord._recover_venue_event_gaps(datetime.now(UTC))
+        assert "kraken.BTC-USD.live" in coord._trusted_recovery_shards
+
+    @pytest.mark.asyncio
+    async def test_gap_rebuild_without_registration_records_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rebuilt-but-unregistered gap shard is denied certification.
+
+        Given: the gapped rebuild succeeds but no identity registered,
+        When: _recover_venue_event_gaps runs,
+        Then: the shard is not trusted and the unattributable candidate
+            trips the global flag.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_shard_keys_with_fills = AsyncMock(return_value=["kraken.BTC-USD.live"])
+        with patch.object(coord, "_rebuild_shard_if_gapped", AsyncMock(return_value=True)):
+            await coord._recover_venue_event_gaps(datetime.now(UTC))
+        assert "kraken.BTC-USD.live" not in coord._trusted_recovery_shards
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_execution_replay_registry_miss_and_probe_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Execution replay denies trust on probe failure or no registry.
+
+        Given: a live execution group whose accrual probe raises, and a
+            second run with a clean probe but no registered identity,
+        When: _recover_engine_state replays executions,
+        Then: neither run certifies the shard; the registry miss records
+            an (unattributable) failure.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-1",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t1",
+                    "exchange_order_id": "ex-1",
+                    "client_order_id": "c1",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.5,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                }
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_consumed_fill_venue_event_id = AsyncMock(side_effect=RuntimeError("db"))
+        mock_repo.shard_has_any_accruals = AsyncMock(side_effect=RuntimeError("db"))
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        await coord._recover_engine_state()
+        assert "kraken.BTC-USD.live" not in coord._trusted_recovery_shards
+        coord2 = _make_coord(monkeypatch)
+        mock_repo2 = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo2.get_all_checkpoints = AsyncMock(return_value=[])
+        mock_repo2.get_executions_for_recovery = mock_repo.get_executions_for_recovery
+        mock_repo2.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        mock_repo2.get_consumed_fill_venue_event_id = AsyncMock(return_value=None)
+        mock_repo2.shard_has_any_accruals = AsyncMock(return_value=False)
+        mock_repo2.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        _set_sqlalchemy_repo(coord2, mock_repo2)
+        await coord2._recover_engine_state()
+        assert "kraken.BTC-USD.live" not in coord2._trusted_recovery_shards
+        assert coord2._recovery_certification_failed is True

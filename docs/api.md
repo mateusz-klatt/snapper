@@ -1186,6 +1186,9 @@ GET /api/positions
             "average_price": 41500.0,
             "unrealized_pnl": 250.0,
             "realized_pnl": 100.0,
+            "mark_price": 41650.0,
+            "marked_at": "2026-01-18T11:59:30Z",
+            "source_venue_event_id": 4711,
             "mode": "live",
             "position_cycle_public_id": "019e1a2b-4d5e-7f6a-8b9c-0d1e2f3a4b5c"
         }
@@ -1196,6 +1199,17 @@ GET /api/positions
 
 The `position_cycle_public_id` field is `null` when no open position cycle exists
 for the position (e.g. flat positions or positions without cycle tracking).
+
+Truthful-valuation semantics (PnL Phase 2): rows are written by the trader's
+position projection and NULLs are honest, never zero-coerced. `average_price`
+is `null` when an aggregate of opposing paper strategy shards has no single
+truthful entry (or a component entry is unknown). `mark_price` / `marked_at`
+echo the active market snapshot verbatim — `marked_at` is the snapshot's own
+bus timestamp with NO freshness gate, so consumers judge staleness themselves;
+both are `null` together with `unrealized_pnl` when no usable mark exists.
+`source_venue_event_id` is the maximum durable venue-event watermark consumed
+into the row's state (a recovery watermark, not the exact causal fill), `null`
+when unknown.
 
 ### POST /api/execution-plans
 
@@ -1231,8 +1245,11 @@ At least one of `sl_price` or `tp_price` is required.
 
 **Response (200):** `ExecutionPlanResponse` wrapping the new armed bracket plan.
 
-**Errors:** 422 (invalid params, missing capability), 409 (cycle not open, duplicate),
-403 (wallet inaccessible), 503 (executor unavailable).
+**Errors:** 422 (invalid params, missing capability, no truthful live position for
+the cycle, position direction/exchange disagreeing with the cycle, ambiguous
+cycle link, or a position with an honest-NULL entry price — SL/TP sanity cannot
+be validated without one), 409 (cycle not open, duplicate), 403 (wallet
+inaccessible), 503 (executor unavailable).
 
 ### POST /api/execution-plans/{plan_public_id}/cancel
 
@@ -1283,7 +1300,9 @@ reduce_only market close on breach.
 
 **Response (409):** Cycle not open or duplicate trailing stop on same cycle.
 
-**Response (422):** Invalid params, missing capability, or no open position.
+**Response (422):** Invalid params, missing capability, no truthful live
+position for the cycle (the historical peak-quantity fallback was removed in
+PnL Phase 2), or a position without a usable entry price.
 
 ### POST /api/trailing-stops/{plan_public_id}/cancel
 

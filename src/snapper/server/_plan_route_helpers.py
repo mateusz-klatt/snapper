@@ -137,7 +137,7 @@ def resolve_average_price(
     position = find_matching_position(positions, cycle)
     if position is None:
         return None
-    average_price = cast(float | None, position.get("average_price"))
+    average_price = position.get("average_price")
     if average_price is None:
         return None
     average_value = float(average_price)
@@ -282,11 +282,6 @@ async def load_cycle_trading_context(
     )
     position = resolve_plan_position(positions, cycle)
     total_quantity = abs(position["quantity"])
-    if total_quantity <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="No open position found for this cycle",
-        )
     return CycleTradingContext(
         cycle=cycle,
         positions=positions,

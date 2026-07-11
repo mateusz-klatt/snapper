@@ -14,48 +14,74 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import AccrualLedger
 from snapper.data.models import Position
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PositionProjectionUpsertRow
+from snapper.data.repository_types import VenueEventInsertRow
 
 _INSTRUMENT = "00000000-0000-7000-8000-00000000000a"
 _WALLET = "00000000-0000-7000-8000-000000000001"
 
 
-def _row(bus_time: datetime, **overrides: Any) -> PositionProjectionUpsertRow:
+_UNSET = object()
+
+
+def _row(
+    bus_time: datetime,
+    *,
+    instrument_public_id: str = _INSTRUMENT,
+    wallet_public_id: str = _WALLET,
+    quantity: float = 0.5,
+    average_price: float | None = 50000.0,
+    unrealized_pnl: float | None = 25.0,
+    realized_pnl: float = 10.0,
+    mark_price: float | None = 50050.0,
+    marked_at: datetime | None | object = _UNSET,
+    source_venue_event_id: int | None = 42,
+) -> PositionProjectionUpsertRow:
     """Build a full-state projection upsert row with sane defaults.
 
     Args:
         bus_time: Bus time of the projecting event.
-        overrides: Field overrides applied on top of the defaults.
+        instrument_public_id: Instrument identity.
+        wallet_public_id: Wallet identity.
+        quantity: Aggregate quantity.
+        average_price: Entry price or honest NULL.
+        unrealized_pnl: Mark-based unrealized PnL or honest NULL.
+        realized_pnl: Cumulative realized PnL.
+        mark_price: Stale-visible mark or honest NULL.
+        marked_at: Mark timestamp; defaults to ``bus_time``.
+        source_venue_event_id: Durable watermark or honest NULL.
 
     Returns:
-        Complete upsert row for the test identity.
+        Complete TYPED upsert row for the test identity — fixture
+        drift against the TypedDict fails static checking.
     """
-    row: PositionProjectionUpsertRow = {
-        "instrument_public_id": _INSTRUMENT,
+    resolved_marked_at = bus_time if marked_at is _UNSET else marked_at
+    assert resolved_marked_at is None or isinstance(resolved_marked_at, datetime)
+    return {
+        "instrument_public_id": instrument_public_id,
         "mode": "paper",
-        "wallet_public_id": _WALLET,
-        "quantity": 0.5,
-        "average_price": 50000.0,
-        "unrealized_pnl": 25.0,
-        "realized_pnl": 10.0,
-        "mark_price": 50050.0,
-        "marked_at": bus_time,
-        "source_venue_event_id": 42,
+        "wallet_public_id": wallet_public_id,
+        "quantity": quantity,
+        "average_price": average_price,
+        "unrealized_pnl": unrealized_pnl,
+        "realized_pnl": realized_pnl,
+        "mark_price": mark_price,
+        "marked_at": resolved_marked_at,
+        "source_venue_event_id": source_venue_event_id,
         "session_id": "00000000-0000-7000-8000-0000000000aa",
         "sequence_id": 1,
         "bus_time": bus_time,
     }
-    row.update(overrides)
-    return row
 
 
 async def _make_repo(tmp_path: Path) -> SQLAlchemyRepository:
@@ -216,7 +242,7 @@ async def test_upsert_retries_lost_first_insert_race(tmp_path: Path) -> None:
     original = repo._position_projection_close_and_insert
     attempts: list[int] = []
 
-    async def flaky(s: Any, row: PositionProjectionUpsertRow) -> int:
+    async def flaky(s: AsyncSession, row: PositionProjectionUpsertRow) -> int:
         attempts.append(1)
         if len(attempts) == 1:
             await rival.upsert_position_projection(_row(t1, quantity=9.9))
@@ -395,7 +421,7 @@ async def test_watermark_matches_trade_id_only_and_exec_id_only_fills(tmp_path: 
         stuck on the first partial.
     """
     repo = await _make_repo(tmp_path)
-    base = {
+    base: VenueEventInsertRow = {
         "event_type": "fill_observed",
         "shard_key": "kraken.BTC-USD.live",
         "wallet_public_id": _WALLET,
@@ -435,3 +461,40 @@ async def test_watermark_matches_trade_id_only_and_exec_id_only_fills(tmp_path: 
     assert matched_exec == exec_only
     assert matched_trade == trade_only
     assert matched_trade > matched_exec
+
+
+async def test_shard_has_any_accruals_is_clock_free(tmp_path: Path) -> None:
+    """The certification accrual probe sees future-stamped rows.
+
+    Given: an accrual ledger row whose coordinator-clock timestamp sits
+        ten minutes in the FUTURE (a skewed writer's crash-window row),
+    When: shard_has_any_accruals probes the scope,
+    Then: the row is visible (a temporal window would hide it) and a
+        different scope stays clean.
+    """
+    repo = await _make_repo(tmp_path)
+    future = datetime.now(UTC) + timedelta(minutes=10)
+    async with repo.session() as s:
+        s.add(
+            AccrualLedger(
+                instrument_public_id=_INSTRUMENT,
+                wallet_public_id=_WALLET,
+                operator_public_id=None,
+                mode="live",
+                accrual_type="funding",
+                accrued_at=future,
+                amount=-1.25,
+                amount_asset="USD",
+                rate=0.0001,
+                notional=50000.0,
+                position_quantity_at_accrual=0.5,
+                exchange="kraken_futures",
+                timestamp=future,
+                session_id="s1",
+                sequence_id=1,
+            )
+        )
+        await s.commit()
+    assert await repo.shard_has_any_accruals(_WALLET, "kraken_futures", "live") is True
+    assert await repo.shard_has_any_accruals(_WALLET, "kraken_futures", "paper") is False
+    assert await repo.shard_has_any_accruals(_WALLET, "kraken", "live") is False

@@ -315,6 +315,7 @@ class TraderCoordinator(RegisterableProcess):
         self._trusted_recovery_shards: set[str] = set()
         self._recovery_baseline_shards: set[str] = set()
         self._failed_recovery_shard_prefixes: set[tuple[str, str, str, str]] = set()
+        self._failed_recovery_identities: set[tuple[str, str, str]] = set()
         self._recovery_certification_failed = False
         self._checkpoint_recovered_shard_keys: set[str] = set()
         self._rearm_retired_cids: OrderedDict[str, None] = OrderedDict()
@@ -1032,9 +1033,10 @@ class TraderCoordinator(RegisterableProcess):
             wallet_public_id=wallet_public_id,
             shard_key=shard_key,
         )
-        if accruals_certain:
+        certification_repository = self.repository
+        if accruals_certain and isinstance(certification_repository, SQLAlchemyRepository):
             try:
-                if await self.repository.shard_has_any_accruals(
+                if await certification_repository.shard_has_any_accruals(
                     wallet_public_id, exchange_str, mode_str
                 ):
                     logger.warning(
@@ -1801,8 +1803,11 @@ class TraderCoordinator(RegisterableProcess):
                 f"leaving UNCERTIFIED for the position projection"
             )
             return
+        lineage_repository = self.repository
         try:
-            shard_has_accruals = await self.repository.shard_has_any_accruals(
+            shard_has_accruals = not isinstance(
+                lineage_repository, SQLAlchemyRepository
+            ) or await lineage_repository.shard_has_any_accruals(
                 wallet_public_id, str(engine.exchange), str(engine.mode)
             )
         except Exception:
@@ -3711,7 +3716,8 @@ class TraderCoordinator(RegisterableProcess):
             Full wallet public id, or empty string for legacy
             wallet-less shards.
         """
-        identity = getattr(self, "_projection_identities", {}).get(shard_key)
+        identities: dict[str, tuple[str, str, str]] = getattr(self, "_projection_identities", {})
+        identity = identities.get(shard_key)
         if identity is not None:
             return identity[2]
         for engine in self.engines.values():
@@ -4099,7 +4105,9 @@ class TraderCoordinator(RegisterableProcess):
                 f"cannot be certified"
             )
             return
-        failed_prefixes = getattr(self, "_failed_recovery_shard_prefixes", set())
+        failed_prefixes: set[tuple[str, str, str, str]] = getattr(
+            self, "_failed_recovery_shard_prefixes", set()
+        )
         if failed_prefixes:
             for sk in components:
                 parsed = self._parse_shard_key(sk)
@@ -4110,8 +4118,8 @@ class TraderCoordinator(RegisterableProcess):
                         f"registration — the aggregate cannot be certified"
                     )
                     return
-        baseline = getattr(self, "_recovery_baseline_shards", set())
-        trusted = getattr(self, "_trusted_recovery_shards", set())
+        baseline: set[str] = getattr(self, "_recovery_baseline_shards", set())
+        trusted: set[str] = getattr(self, "_trusted_recovery_shards", set())
         if getattr(self, "_recovery_certification_failed", False):
             trusted = set()
         uncertified = [sk for sk in components if sk in baseline and sk not in trusted]

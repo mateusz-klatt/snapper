@@ -410,6 +410,7 @@ class TestPositionModel:
             session_id="test-session",
             sequence_id=1,
         )
+        assert position.average_price is not None
         market_value = position.quantity * position.average_price
         assert market_value == pytest.approx(45000.0)
 
@@ -430,6 +431,7 @@ class TestPositionModel:
             session_id="test-session",
             sequence_id=1,
         )
+        assert position.unrealized_pnl is not None
         total_pnl = position.unrealized_pnl + position.realized_pnl
         assert total_pnl == pytest.approx(2500.0)
 

@@ -112,9 +112,25 @@ def _validate_bracket_prices(
     side: str,
     average_price: float | None,
 ) -> None:
-    """Validate SL/TP thresholds against the inferred entry price."""
+    """Validate SL/TP thresholds against the inferred entry price.
+
+    PnL Phase 2: an aggregate of opposing paper strategy shards has NO
+    truthful single entry price — arming a bracket whose SL/TP sanity
+    cannot be checked would silently skip the wrong-side guards, so a
+    missing entry rejects instead (mirrors the trailing-stop route).
+
+    Raises:
+        HTTPException: 422 when the entry price is unavailable or a
+            threshold sits on the wrong side of it.
+    """
     if average_price is None:
-        return
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "Position has no truthful entry price — refusing to arm a "
+                "bracket whose SL/TP sanity cannot be validated"
+            ),
+        )
     body = command.payload
     if side == "buy":
         if body.sl_price is not None and body.sl_price >= average_price:
