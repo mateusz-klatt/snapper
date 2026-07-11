@@ -14,6 +14,7 @@ The coordinator:
 import asyncio
 import contextlib
 import json
+import math
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -86,6 +87,7 @@ from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import PositionCycleRow
+from snapper.data.repository_types import PositionProjectionUpsertRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import VenueEventRow
@@ -308,6 +310,8 @@ class TraderCoordinator(RegisterableProcess):
         self.guard_scanner: PairedExecutionGuardScanner | None = None
         self._order_shard_keys: dict[str, str] = {}
         self._consumed_venue_event_watermarks: dict[str, int] = {}
+        self._projection_identities: dict[str, tuple[str, str, str]] = {}
+        self._projection_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._checkpoint_recovered_shard_keys: set[str] = set()
         self._rearm_retired_cids: OrderedDict[str, None] = OrderedDict()
         self._wallet_short_to_id: dict[str, str] = {}
@@ -1372,6 +1376,54 @@ class TraderCoordinator(RegisterableProcess):
         current_pending = getattr(engine, "pending_client_order_id", None)
         if current_pending is not None:
             self._engines_by_pending_coid.setdefault(current_pending, engine)
+        self._register_projection_identity(engine)
+
+    def _register_projection_identity(self, engine: TradingEngineService) -> None:
+        """First-wins truthful-identity registration from engine IDs.
+
+        The projection registry maps ``shard_key`` to the STABLE
+        ``(instrument_public_id, mode, wallet_public_id)`` triple taken
+        from the engine's own resolved identifiers — never
+        reconstructed from native-symbol spellings or wallet-short
+        parsing, which a symbol rename or a cold wallet cache would
+        corrupt. Engines missing any component (partial test stubs,
+        specs without a resolved public id) are skipped silently here;
+        the projection path warns when an unregistered shard
+        checkpoints. A conflicting re-registration keeps the ORIGINAL
+        identity and logs the conflict.
+
+        Args:
+            engine: Engine being indexed for fill dispatch.
+        """
+        shard_key = getattr(engine, "_shard_key", None)
+        mode = getattr(engine, "mode", None)
+        wallet_public_id = getattr(engine, "wallet_public_id", None)
+        instrument = getattr(engine, "instrument", None)
+        specs = getattr(engine, "instrument_specs", None)
+        spec = (
+            specs.get(instrument, {})
+            if isinstance(specs, dict) and isinstance(instrument, str)
+            else {}
+        )
+        instrument_public_id = spec.get("public_id") if isinstance(spec, dict) else None
+        if not (
+            isinstance(shard_key, str)
+            and shard_key
+            and isinstance(mode, str)
+            and mode
+            and isinstance(wallet_public_id, str)
+            and wallet_public_id
+            and isinstance(instrument_public_id, str)
+            and instrument_public_id
+        ):
+            return
+        identity = (instrument_public_id, mode, wallet_public_id)
+        existing = self._projection_identities.setdefault(shard_key, identity)
+        if existing != identity:
+            logger.warning(
+                f"TraderCoordinator: conflicting projection identity for {shard_key}: "
+                f"kept {existing}, ignored {identity}"
+            )
 
     def _on_engine_pending_coid_change(
         self,
@@ -3421,6 +3473,34 @@ class TraderCoordinator(RegisterableProcess):
             resolved_id,
         )
 
+    def _resolve_checkpoint_wallet(self, shard_key: str) -> str:
+        """Resolve the shard's FULL wallet UUID for durable writes.
+
+        Precedence: the registered projection identity (engine-sourced,
+        stable), then a live engine's own ``wallet_public_id``, then the
+        legacy boot-time wallet-short cache. A wallet created after
+        boot is invisible to the short cache — resolving from the
+        engine keeps its checkpoints and projections truthful instead
+        of persisting an empty wallet id that PostgreSQL's native UUID
+        column rejects.
+
+        Args:
+            shard_key: Shard being checkpointed.
+
+        Returns:
+            Full wallet public id, or empty string for legacy
+            wallet-less shards.
+        """
+        identity = getattr(self, "_projection_identities", {}).get(shard_key)
+        if identity is not None:
+            return identity[2]
+        for engine in self.engines.values():
+            if getattr(engine, "_shard_key", None) == shard_key:
+                wallet = getattr(engine, "wallet_public_id", "") or ""
+                if isinstance(wallet, str) and wallet:
+                    return wallet
+        return self._checkpoint_wallet_public_id(shard_key)
+
     def _checkpoint_wallet_public_id(self, shard_key: str) -> str:
         """Given a shard key, when checkpointing, then resolve its wallet id.
 
@@ -3526,6 +3606,14 @@ class TraderCoordinator(RegisterableProcess):
         A conservative (never-over-claiming) watermark is safe because replay
         dedupes already-applied fills.
 
+        A COMMITTED checkpoint additionally triggers the truthful
+        position projection for the shard's identity (Phase 2) — both
+        the fill and funding callers flow through here, so the trigger
+        is centralized on the success path and never fires for a failed
+        checkpoint write. Recovery (S3) calls :meth:`_commit_checkpoint`
+        directly to refresh checkpoints WITHOUT emitting per-shard
+        partial aggregates, then rebuilds each identity once.
+
         Args:
             shard_key: Shard to checkpoint.
             consumed_fill: The fill just applied to the snapshot when this
@@ -3533,14 +3621,41 @@ class TraderCoordinator(RegisterableProcess):
                 the consumed watermark. ``None`` for non-fill checkpoints (e.g.
                 funding accrual), which must not advance the watermark.
         """
+        committed_at = await self._commit_checkpoint(shard_key, consumed_fill=consumed_fill)
+        if committed_at is None:
+            return
+        await self._persist_position_projection(shard_key, now=committed_at)
+
+    async def _commit_checkpoint(
+        self,
+        shard_key: str,
+        *,
+        consumed_fill: ExecutionData | None = None,
+    ) -> datetime | None:
+        """Commit the checkpoint row only, reporting the committed bus time.
+
+        Args:
+            shard_key: Shard to checkpoint.
+            consumed_fill: Fill advancing the consumed watermark, if any.
+
+        Returns:
+            The committed bus time, or None when nothing was written
+            (non-repository backend or a swallowed write failure).
+        """
         repository = self.repository
         if not isinstance(repository, SQLAlchemyRepository):
-            return
+            return None
         snap = self.trade_service.snapshot_for_checkpoint(shard_key)
         now = datetime.now(UTC)
-        await self._advance_checkpoint_watermark(repository, shard_key, consumed_fill)
+        try:
+            await self._advance_checkpoint_watermark(repository, shard_key, consumed_fill)
+        except Exception:
+            logger.warning(
+                f"TraderCoordinator: durable watermark resolution failed for "
+                f"{shard_key}; keeping the prior conservative watermark"
+            )
         watermark = self._consumed_venue_event_watermarks.get(shard_key, 0)
-        wallet_public_id = self._checkpoint_wallet_public_id(shard_key)
+        wallet_public_id = self._resolve_checkpoint_wallet(shard_key)
         operator_public_id = self._checkpoint_operator_public_id(shard_key)
         try:
             await repository.upsert_checkpoint(
@@ -3555,6 +3670,188 @@ class TraderCoordinator(RegisterableProcess):
             )
         except Exception:
             logger.exception(f"TraderCoordinator: Failed to persist checkpoint for {shard_key}")
+            return None
+        return now
+
+    async def _resolve_projection_mark(
+        self, instrument_public_id: str
+    ) -> tuple[float | None, datetime | None]:
+        """Resolve the stale-visible mark for a projection identity.
+
+        Echoes the active market snapshot verbatim — ``marked_at`` is
+        the snapshot's own bus timestamp and NO age gate is applied
+        (consumers judge freshness themselves). Paper instruments
+        resolve through their Phase-1 source mapping first; an unmapped
+        paper identity, any lookup failure, a missing snapshot, or a
+        non-finite/non-positive price all yield honest NULLs. A
+        previous mark is never carried forward.
+
+        Args:
+            instrument_public_id: Projection instrument identity.
+
+        Returns:
+            Tuple of (mark price, marked_at), both None when no usable
+            mark exists.
+        """
+        repository = self.repository
+        if not isinstance(repository, SQLAlchemyRepository):
+            return None, None
+        try:
+            resolution = await repository.resolve_source_instrument_public_id(instrument_public_id)
+            if resolution["is_paper"] and not resolution["mapped"]:
+                return None, None
+            quote = await repository.get_active_market_snapshot_price(
+                resolution["valuation_public_id"]
+            )
+        except Exception:
+            logger.warning(
+                f"TraderCoordinator: mark lookup failed for {instrument_public_id}; "
+                f"projecting NULL mark",
+            )
+            return None, None
+        if quote is None:
+            return None, None
+        price, marked_at = quote
+        if price is None or not math.isfinite(price) or price <= 0:
+            return None, None
+        return float(price), marked_at
+
+    async def _persist_position_projection(self, shard_key: str, *, now: datetime) -> None:
+        """Best-effort truthful position write after a COMMITTED checkpoint.
+
+        Runs only from the checkpoint success path (fill and funding
+        callers both flow through it), serialized per projection
+        identity with the aggregation recomputed under the lock. Every
+        failure is logged and swallowed: venue_events stay
+        authoritative and the recovery rebuild heals a lost write, so
+        the projection must never break the trading path.
+
+        Args:
+            shard_key: Shard whose checkpoint just committed.
+            now: The committed checkpoint's bus time.
+        """
+        try:
+            identity = self._projection_identities.get(shard_key)
+            if identity is None:
+                logger.warning(
+                    f"TraderCoordinator: position projection skipped for {shard_key}: "
+                    f"no registered identity (engine identifiers incomplete)"
+                )
+                return
+            ownership = getattr(self, "_ownership", None)
+            if identity[1] == "paper" and ownership is not None and ownership.instance_count > 1:
+                logger.warning(
+                    f"TraderCoordinator: position projection skipped for {shard_key}: "
+                    f"paper aggregation under coordinator_instance_count > 1 is "
+                    f"unsupported — competing partial aggregates would corrupt the "
+                    f"shared identity row"
+                )
+                return
+            lock = self._projection_locks.setdefault(identity, asyncio.Lock())
+            async with lock:
+                await self._write_position_projection_locked(identity, now=now)
+        except Exception:
+            logger.exception(
+                f"TraderCoordinator: failed to persist position projection for {shard_key}"
+            )
+
+    async def _write_position_projection_locked(
+        self, identity: tuple[str, str, str], *, now: datetime
+    ) -> None:
+        """Aggregate component shards and write one identity's truth.
+
+        Consensus D2 semantics: quantities, realized PnL, and per-shard
+        unrealized terms sum via ``math.fsum`` over the DISTINCT
+        registered component shards; ``average_price`` is the
+        absolute-quantity-weighted VWAP when every non-flat component
+        agrees on direction and knows its entry, otherwise honest NULL;
+        unrealized PnL requires a usable mark AND every non-flat entry.
+        The identity stays active while ANY component is non-flat (a
+        net-zero aggregate of opposing shards keeps its row); when all
+        components are flat the active row is closed without a
+        successor. ``source_venue_event_id`` is the max nonzero DURABLE
+        consumed watermark across components — never the in-memory
+        synthetic fill ids.
+
+        Component state is FROZEN into immutable snapshots before the
+        awaited mark lookup: a fill applied while the mark resolves
+        must not produce a row mixing pre-fill quantities with
+        post-fill unrealized terms (the fill's own trigger writes the
+        newer truth). The non-flat boundary is ``abs(qty) >= 1e-12``,
+        the exact complement of TradeService's ``< 1e-12`` zero-snap.
+        Components registered without materialized TradeService state
+        are refused — absence of state is NOT evidence of flatness.
+
+        Args:
+            identity: The (instrument_public_id, mode, wallet_public_id)
+                triple being projected.
+            now: Bus time of the triggering checkpoint.
+        """
+        repository = self.repository
+        if not isinstance(repository, SQLAlchemyRepository):
+            return
+        components = [sk for sk, ident in self._projection_identities.items() if ident == identity]
+        known = self.trade_service.known_shard_keys()
+        missing = [sk for sk in components if sk not in known]
+        if not components or missing:
+            logger.warning(
+                f"TraderCoordinator: position projection skipped for {identity}: "
+                f"components without materialized state {missing} — refusing to "
+                f"fabricate flatness"
+            )
+            return
+        frozen: list[tuple[str, float, float | None, float, int]] = [
+            (
+                sk,
+                pos.position_qty,
+                pos.entry_price,
+                pos.realized_pnl,
+                self._consumed_venue_event_watermarks.get(sk, 0),
+            )
+            for sk, pos in ((sk, self.trade_service.get_position(sk)) for sk in components)
+        ]
+        non_flat = [snap for snap in frozen if abs(snap[1]) >= 1e-12]
+        instrument_public_id, mode, wallet_public_id = identity
+        if not non_flat:
+            await repository.close_position_projection(
+                instrument_public_id, mode, wallet_public_id, now
+            )
+            return
+        quantity = math.fsum(snap[1] for snap in frozen)
+        realized_pnl = math.fsum(snap[3] for snap in frozen)
+        directions = {1 if snap[1] > 0 else -1 for snap in non_flat}
+        entries_known = all(snap[2] is not None for snap in non_flat)
+        average_price: float | None = None
+        if len(directions) == 1 and entries_known:
+            weight = math.fsum(abs(snap[1]) for snap in non_flat)
+            average_price = (
+                math.fsum(abs(snap[1]) * cast(float, snap[2]) for snap in non_flat) / weight
+            )
+        watermark = max((snap[4] for snap in frozen), default=0)
+        mark_price, marked_at = await self._resolve_projection_mark(instrument_public_id)
+        unrealized_pnl: float | None = None
+        if mark_price is not None and entries_known:
+            unrealized_pnl = math.fsum(
+                snap[1] * (mark_price - cast(float, snap[2])) for snap in non_flat
+            )
+        row: PositionProjectionUpsertRow = {
+            "instrument_public_id": instrument_public_id,
+            "mode": mode,
+            "wallet_public_id": wallet_public_id,
+            "quantity": quantity,
+            "average_price": average_price,
+            "unrealized_pnl": unrealized_pnl,
+            "realized_pnl": realized_pnl,
+            "mark_price": mark_price,
+            "marked_at": marked_at,
+            "source_venue_event_id": watermark or None,
+            "session_id": self._tracker.session_id,
+            "sequence_id": self._tracker.next_sequence(
+                f"position.{instrument_public_id}.{mode}.{wallet_public_id}"
+            ),
+            "bus_time": now,
+        }
+        await repository.upsert_position_projection(row)
 
     async def stop(self) -> None:
         """Stop the trader coordinator and cleanup resources.
