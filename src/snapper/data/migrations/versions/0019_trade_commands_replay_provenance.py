@@ -73,6 +73,32 @@ def _active_value() -> str | datetime:
     return datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 
 
+def _backlog_statement() -> sa.TextClause:
+    """Build the backlog UPDATE with a dialect-typed ``known_to`` bind.
+
+    PostgreSQL: the bind is EXPLICITLY typed ``DateTime(timezone=True)``
+    so asyncpg sends a timestamptz-OID parameter exactly like every ORM
+    query does — production carries LEGACY naive-``timestamp``
+    ``known_to`` columns on tables created before the 2026-05-16
+    native-types decision, and an UNTYPED text() parameter gets
+    described as naive ``timestamp`` by the server, which asyncpg then
+    refuses to encode an aware datetime into. A timestamptz-typed
+    parameter is coerced by the server for naive columns and matches
+    natively for tz columns; the caller pins the migration
+    transaction's session to UTC (``SET LOCAL TIME ZONE``) so that
+    cross-type coercion is deterministic regardless of the Alembic
+    engine's inherited timezone. SQLite keeps the raw string bind (the
+    storage format).
+
+    Returns:
+        The executable statement.
+    """
+    stmt = text(_BACKLOG_SQL)
+    if _is_sqlite():
+        return stmt
+    return stmt.bindparams(sa.bindparam("active", type_=sa.DateTime(timezone=True)))
+
+
 def upgrade() -> None:
     """Add origin + replay window columns and classify the backlog.
 
@@ -97,7 +123,9 @@ def upgrade() -> None:
         )
         op.add_column("trade_commands", sa.Column("replay_window_end", sa.DateTime(timezone=True)))
         op.create_check_constraint("ck_trade_commands_origin", "trade_commands", _CK_ORIGIN)
-    op.get_bind().execute(text(_BACKLOG_SQL), {"active": _active_value()})
+    if not _is_sqlite():
+        op.get_bind().execute(text("SET LOCAL TIME ZONE 'UTC'"))
+    op.get_bind().execute(_backlog_statement(), {"active": _active_value()})
 
 
 def downgrade() -> None:

@@ -39,6 +39,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import text
 
@@ -88,6 +89,31 @@ def _active_value() -> str | datetime:
     if op.get_bind().dialect.name == "sqlite":
         return _KNOWN_TO_ACTIVE_SQLITE
     return _KNOWN_TO_ACTIVE_DT
+
+
+def _typed_statement(sql: str) -> sa.TextClause:
+    """Build a statement whose ``:active`` bind is dialect-typed.
+
+    PostgreSQL: the bind is EXPLICITLY typed ``DateTime(timezone=True)``
+    so asyncpg sends a timestamptz-OID parameter exactly like every ORM
+    query does — deployments carrying LEGACY naive-``timestamp``
+    ``known_to`` columns (tables created before the 2026-05-16
+    native-types decision) would otherwise describe an untyped
+    parameter as naive ``timestamp``, which asyncpg refuses to encode
+    an aware datetime into. The upgrade pins the migration
+    transaction's session to UTC so cross-type coercion against naive
+    columns is deterministic. SQLite keeps the raw string bind.
+
+    Args:
+        sql: Raw SQL carrying a single ``:active`` parameter.
+
+    Returns:
+        The executable statement.
+    """
+    stmt = text(sql)
+    if op.get_bind().dialect.name == "sqlite":
+        return stmt
+    return stmt.bindparams(sa.bindparam("active", type_=sa.DateTime(timezone=True)))
 
 
 def _dedup_additive_and_legacy(
@@ -140,6 +166,8 @@ def upgrade() -> None:
         None.
     """
     connection = op.get_bind()
+    if connection.dialect.name != "sqlite":
+        connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
     active = _active_value()
     fills_by_identity: dict[tuple[str, str, str, str], list[Any]] = {}
     for row in connection.execute(text(_ALL_FILL_ROWS_SQL)).fetchall():
@@ -150,11 +178,11 @@ def upgrade() -> None:
     exec_sums = {
         public_id: (exec_sum, exec_notional)
         for public_id, exec_sum, exec_notional in connection.execute(
-            text(_EXEC_SUMS_SQL), {"active": active}
+            _typed_statement(_EXEC_SUMS_SQL), {"active": active}
         ).fetchall()
     }
     pending_updates: list[dict[str, Any]] = []
-    orders = connection.execute(text(_ORDERS_SQL), {"active": active}).fetchall()
+    orders = connection.execute(_typed_statement(_ORDERS_SQL), {"active": active}).fetchall()
     for order_id, public_id, cid, wallet, mode, order_xoid, exchange in orders:
         fill_rows = fills_by_identity.get((cid, wallet, mode, exchange), [])
         additive, legacy_cum = _dedup_additive_and_legacy(fill_rows, order_xoid)
