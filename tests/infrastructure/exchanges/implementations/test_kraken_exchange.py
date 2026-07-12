@@ -2720,7 +2720,7 @@ class TestWebsocketTimeoutPaths:
                 side_effect=wait_for_stub,
             ),
             patch(
-                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2765,7 +2765,7 @@ class TestWebsocketTimeoutPaths:
                 side_effect=wait_for_stub,
             ),
             patch(
-                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2810,7 +2810,7 @@ class TestWebsocketTimeoutPaths:
                 side_effect=wait_for_stub,
             ),
             patch(
-                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2855,7 +2855,7 @@ class TestWebsocketTimeoutPaths:
                 side_effect=wait_for_stub,
             ),
             patch(
-                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -2902,7 +2902,7 @@ class TestWebsocketTimeoutPaths:
                 side_effect=wait_for_stub,
             ),
             patch(
-                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -3173,7 +3173,10 @@ class TestRetryMaxRetriesExceeded:
             raise ccxt.RateLimitExceeded("Rate limit exceeded")
 
         with (
-            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
+                new_callable=AsyncMock,
+            ),
             pytest.raises(ccxt.RateLimitExceeded),
         ):
             await kraken_client._with_retry(failing_function)
@@ -3220,7 +3223,10 @@ class TestCreateOrderNetworkRetryExclusion:
         mock_client.create_order.side_effect = ccxt.RequestTimeout("request timed out")
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
-            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
+                new_callable=AsyncMock,
+            ),
             pytest.raises(AmbiguousOrderSubmitError) as exc_info,
         ):
             await kraken_client.create_order(
@@ -3290,7 +3296,10 @@ class TestCreateOrderNetworkRetryExclusion:
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
             patch.object(kraken_client, "_log_order_to_db", AsyncMock(return_value=None)),
-            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             order = await kraken_client.create_order(
                 ExchangeOrderRequest(
@@ -3321,7 +3330,10 @@ class TestCreateOrderNetworkRetryExclusion:
             raise ccxt.NetworkError("transient blip")
 
         with (
-            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
+                new_callable=AsyncMock,
+            ),
             pytest.raises(ccxt.NetworkError),
         ):
             await kraken_client._with_retry(failing_function)
@@ -3427,7 +3439,10 @@ class TestAmbiguousSubmitClassification:
         mock_client.create_order.side_effect = ccxt.RateLimitExceeded("rate limited")
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
-            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
+                new_callable=AsyncMock,
+            ),
             pytest.raises(ccxt.RateLimitExceeded),
         ):
             await kraken_client.create_order(self._request())
@@ -3788,12 +3803,12 @@ class TestWithRetryMaxRetries:
         kraken_client._circuit_open_until = 0
         with (
             patch(
-                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
                 new_callable=AsyncMock,
             ),
             pytest.raises(NetworkError),
         ):
-            await kraken_client._with_retry(mock_func, max_retries=3)
+            await kraken_client._with_retry(mock_func)
         assert kraken_client._circuit_open_until > 0
 
 
@@ -4890,7 +4905,10 @@ class TestKrakenAdditionalCoverage:
     ) -> None:
         """Verify with retry max retries exceeded."""
         mock_func = AsyncMock()
-        with patch("asyncio.sleep", new_callable=AsyncMock):
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
+            new_callable=AsyncMock,
+        ):
             mock_func.side_effect = ccxt.NetworkError("Connection failed")
             with pytest.raises(ccxt.NetworkError, match="Connection failed"):
                 await kraken_client._with_retry(mock_func)
@@ -5326,7 +5344,12 @@ class TestKrakenAdditionalCoverage:
         """Verify with retry opens circuit after network errors."""
         kraken_client._circuit_failures = 5
         failing_call = AsyncMock(side_effect=ccxt.NetworkError("offline"))
-        with patch("asyncio.sleep", AsyncMock()), pytest.raises(ccxt.NetworkError):
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep", AsyncMock()
+            ),
+            pytest.raises(ccxt.NetworkError),
+        ):
             await kraken_client._with_retry(failing_call)
         assert kraken_client._circuit_open_until > time.time()
 
@@ -7271,10 +7294,7 @@ class TestRawTickerCapture:
         mock_ws_client.__aexit__ = AsyncMock(return_value=None)
         with (
             patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock),
-            patch(
-                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
-                new_callable=AsyncMock,
-            ),
+            patch("asyncio.sleep", new_callable=AsyncMock),
             patch("snapper.infrastructure.exchanges.implementations.kraken.logger") as mock_logger,
         ):
             client._ws_client = mock_ws_client
@@ -7396,7 +7416,7 @@ class TestConnectRaceHardening:
         client._subscription_cache[second.key()] = second
         with (
             patch(
-                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
                 new_callable=AsyncMock,
             ),
             pytest.raises(RuntimeError, match="replaced during subscription replay"),
@@ -7562,7 +7582,10 @@ class TestFindOrderByClientId:
         mock_client.fetch_open_orders.side_effect = ccxt.NetworkError("down")
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
-            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken._retry_sleep",
+                new_callable=AsyncMock,
+            ),
             pytest.raises(ccxt.NetworkError),
         ):
             await kraken_client.find_order_by_client_id("cid-find-5", "BTC-USD")

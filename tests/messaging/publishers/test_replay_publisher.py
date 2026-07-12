@@ -19,6 +19,7 @@ from snapper.application.backtest.drain import BacktestReadinessTimeoutError
 from snapper.application.backtest.drain import DrainCoordinator
 from snapper.application.backtest.endpoints import allocate_replay_endpoints
 from snapper.messaging.infrastructure.broker import ZmqBrokerProcess
+from snapper.messaging.publishers import replay_publisher as rp
 from snapper.messaging.publishers.replay_publisher import WARMUP_PUBLIC_ID
 from snapper.messaging.publishers.replay_publisher import ReplayPublisher
 
@@ -177,19 +178,26 @@ class TestReplayPublisher:
                 drain=drain,
                 subscriber_ready=ready,
             )
-            harness = asyncio.create_task(
-                _strategy_harness(
-                    broker,
-                    topics=["market.kraken.BTC-USD.candles.1h"],
-                    drain=drain,
-                    subscriber_ready=ready,
-                    expected_real_candles=1,
-                    ack_after_retry=3,
+            original_warmup_timeout = rp.WARMUP_READY_TIMEOUT_S
+            rp.WARMUP_READY_TIMEOUT_S = 0.2
+            try:
+                harness = asyncio.create_task(
+                    _strategy_harness(
+                        broker,
+                        topics=["market.kraken.BTC-USD.candles.1h"],
+                        drain=drain,
+                        subscriber_ready=ready,
+                        expected_real_candles=1,
+                        ack_after_retry=3,
+                    )
                 )
-            )
-            await asyncio.wait_for(publisher.start(), timeout=10.0)
-            await asyncio.wait_for(harness, timeout=2.0)
-            assert drain.processed_count == 1
+                async with asyncio.timeout(3.0):
+                    await broker.wait_for_subscription(b"market.")
+                await asyncio.wait_for(publisher.start(), timeout=10.0)
+                await asyncio.wait_for(harness, timeout=2.0)
+                assert drain.processed_count == 1
+            finally:
+                rp.WARMUP_READY_TIMEOUT_S = original_warmup_timeout
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 
@@ -211,23 +219,28 @@ class TestReplayPublisher:
                 drain=drain,
                 subscriber_ready=ready,
             )
-            harness = asyncio.create_task(
-                _strategy_harness(
-                    broker,
-                    topics=["market.kraken.BTC-USD.candles.1h"],
-                    drain=drain,
-                    subscriber_ready=ready,
-                    expected_real_candles=1,
-                    never_ack=True,
+            original_warmup_timeout = rp.WARMUP_READY_TIMEOUT_S
+            rp.WARMUP_READY_TIMEOUT_S = 0.1
+            try:
+                harness = asyncio.create_task(
+                    _strategy_harness(
+                        broker,
+                        topics=["market.kraken.BTC-USD.candles.1h"],
+                        drain=drain,
+                        subscriber_ready=ready,
+                        expected_real_candles=1,
+                        never_ack=True,
+                    )
                 )
-            )
-            with pytest.raises(BacktestReadinessTimeoutError) as exc_info:
-                await asyncio.wait_for(publisher.start(), timeout=10.0)
-            assert "5 retries" in str(exc_info.value)
-            assert "market.kraken.BTC-USD.candles.1h" in str(exc_info.value)
-            harness.cancel()
-            with pytest.raises((asyncio.CancelledError, TimeoutError, BaseException)):
-                await asyncio.wait_for(harness, timeout=2.0)
+                with pytest.raises(BacktestReadinessTimeoutError) as exc_info:
+                    await asyncio.wait_for(publisher.start(), timeout=10.0)
+                assert "5 retries" in str(exc_info.value)
+                assert "market.kraken.BTC-USD.candles.1h" in str(exc_info.value)
+                harness.cancel()
+                with pytest.raises((asyncio.CancelledError, TimeoutError, BaseException)):
+                    await asyncio.wait_for(harness, timeout=2.0)
+            finally:
+                rp.WARMUP_READY_TIMEOUT_S = original_warmup_timeout
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 
@@ -297,18 +310,23 @@ class TestReplayPublisher:
                 drain=drain,
                 subscriber_ready=ready,
             )
-            with pytest.raises(BacktestReadinessTimeoutError):
-                await asyncio.wait_for(publisher.start(), timeout=10.0)
-            second_publisher = ReplayPublisher(
-                local_xsub=endpoints.xsub,
-                repository=repo,
-                config=config,
-                snapshot_as_of=NOW,
-                drain=DrainCoordinator(),
-                subscriber_ready=asyncio.Event(),
-            )
-            with pytest.raises(BacktestReadinessTimeoutError):
-                await asyncio.wait_for(second_publisher.start(), timeout=10.0)
+            original_warmup_timeout = rp.WARMUP_READY_TIMEOUT_S
+            rp.WARMUP_READY_TIMEOUT_S = 0.1
+            try:
+                with pytest.raises(BacktestReadinessTimeoutError):
+                    await asyncio.wait_for(publisher.start(), timeout=10.0)
+                second_publisher = ReplayPublisher(
+                    local_xsub=endpoints.xsub,
+                    repository=repo,
+                    config=config,
+                    snapshot_as_of=NOW,
+                    drain=DrainCoordinator(),
+                    subscriber_ready=asyncio.Event(),
+                )
+                with pytest.raises(BacktestReadinessTimeoutError):
+                    await asyncio.wait_for(second_publisher.start(), timeout=10.0)
+            finally:
+                rp.WARMUP_READY_TIMEOUT_S = original_warmup_timeout
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 

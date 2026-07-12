@@ -66,19 +66,15 @@ def _index_names(engine: sa.Engine, like: str) -> set[str]:
 
 
 @pytest.fixture
-def migrated_db(tmp_path: Path) -> Iterator[tuple[sa.Engine, Config]]:
+def migrated_db(migrated_db_path: Path) -> Iterator[tuple[sa.Engine, Config]]:
     """Provide a SQLite database upgraded through the latest migration.
 
-    Args:
-        tmp_path: Pytest-provided temporary directory.
-
-    Yields:
-        Tuple of engine bound to the migrated database and the config.
+    The schema comes from the worker's session-scoped Alembic template
+    (one real ``upgrade head`` per worker); the copy is private to this
+    test, so constraint probes and downgrades cannot leak across tests.
     """
-    db_path = tmp_path / "lineage_notional.db"
-    db_url = f"sqlite:///{db_path}"
+    db_url = f"sqlite:///{migrated_db_path}"
     cfg = _make_alembic_config(db_url)
-    command.upgrade(cfg, "head")
     engine = sa.create_engine(db_url, future=True)
     try:
         yield engine, cfg

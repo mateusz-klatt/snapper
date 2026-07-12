@@ -143,7 +143,7 @@ async def test_nudge_for_the_wrong_coordinator_is_rejected_and_times_out() -> No
     reconcile = AsyncMock()
     launcher = _coordinator_launcher(reconcile)
     listener = ProcessCommandListener(launcher)
-    registry = ProcessCommandAckRegistry(command_signing_key(_MASTER))
+    registry = ProcessCommandAckRegistry(command_signing_key(_MASTER), ack_timeout_s=0.05)
     launcher.message_publisher.send = AsyncMock()
 
     async def _api_publishes_command(_topic: str, command: object) -> None:

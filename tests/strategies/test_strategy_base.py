@@ -1905,7 +1905,7 @@ class TestLifecycle:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             strategy.__del__()
-            gc.collect()
+            gc.collect(0)
         runtime_warnings = [
             warning for warning in caught if issubclass(warning.category, RuntimeWarning)
         ]

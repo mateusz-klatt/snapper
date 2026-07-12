@@ -71,12 +71,15 @@ def _insert_run(
 
 
 @pytest.fixture
-def migrated_db(tmp_path: Path) -> Iterator[tuple[sa.Engine, Config]]:
-    """Provide a SQLite database upgraded through the latest migration."""
-    db_path = tmp_path / "single_running.db"
-    db_url = f"sqlite:///{db_path}"
+def migrated_db(migrated_db_path: Path) -> Iterator[tuple[sa.Engine, Config]]:
+    """Provide a SQLite database upgraded through the latest migration.
+
+    The schema comes from the worker's session-scoped Alembic template
+    (one real ``upgrade head`` per worker); the copy is private to this
+    test, so constraint probes and downgrades cannot leak across tests.
+    """
+    db_url = f"sqlite:///{migrated_db_path}"
     cfg = _make_alembic_config(db_url)
-    command.upgrade(cfg, "head")
     engine = sa.create_engine(db_url, future=True)
     try:
         yield engine, cfg

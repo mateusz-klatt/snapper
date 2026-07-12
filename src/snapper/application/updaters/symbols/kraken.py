@@ -70,7 +70,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
     Registered as one-shot task process with 6-hour update threshold.
     """
 
-    VERIFICATION_TIMEOUT_SECONDS = 30.0
+    VERIFICATION_TIMEOUT_SECONDS = 5.0
 
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
@@ -324,7 +324,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         logger.info("Verifying {} symbols against WebSocket v2 API", len(ws_symbols))
         verified_symbols: set[str] = set()
         ws_only_instruments: list[dict[str, str]] = []
-        max_snapshot_time = 5.0
+        max_snapshot_time = self.VERIFICATION_TIMEOUT_SECONDS
         client = self._create_exchange_client()
         try:
             verified_symbols, ws_only_instruments = await self._collect_verified_symbols(

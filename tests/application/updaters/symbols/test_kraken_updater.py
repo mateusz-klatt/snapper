@@ -1119,7 +1119,10 @@ class TestKrakenVerifyWebsocketSymbols:
         mock_client = MagicMock()
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = MagicMock()
-        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
+        with (
+            patch.object(updater, "VERIFICATION_TIMEOUT_SECONDS", 0.05),
+            patch.object(updater, "_create_exchange_client", return_value=mock_client),
+        ):
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert "BTC/USD" in verified
         assert len(verified) < len(ws_symbols)
@@ -1753,7 +1756,10 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
 
         mock_client = MagicMock(spec=["subscribe_instruments"])
         mock_client.subscribe_instruments = mock_subscribe
-        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
+        with (
+            patch.object(updater, "VERIFICATION_TIMEOUT_SECONDS", 0.05),
+            patch.object(updater, "_create_exchange_client", return_value=mock_client),
+        ):
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert "BTC/USD" in verified
         assert len(verified) < len(ws_symbols)
@@ -1778,7 +1784,10 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
         mock_client = MagicMock(spec=["subscribe_instruments", "disconnect_websocket"])
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = "not_a_callable_string"
-        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
+        with (
+            patch.object(updater, "VERIFICATION_TIMEOUT_SECONDS", 0.05),
+            patch.object(updater, "_create_exchange_client", return_value=mock_client),
+        ):
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert "BTC/USD" in verified
 

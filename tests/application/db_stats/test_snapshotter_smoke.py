@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import insert
+from sqlalchemy import text
 
 from snapper.application.db_stats.snapshotter import DbStatsSnapshotter
 from snapper.data.models import KNOWN_TO_MAX
@@ -25,28 +26,45 @@ def _bulk_insert_telemetry(
     seed_repo: DatabaseRepository,
     *,
     count: int,
-    batch_size: int = 5_000,
 ) -> None:
-    """Insert ``count`` telemetry rows via Core bulk insert (fast path)."""
+    """Insert ``count`` telemetry rows via a SQLite-native recursive CTE.
+
+    One template row (``sequence_id`` 0) goes through the SQLAlchemy insert
+    construct so every typed column (``timestamp``, ``known_to``) is stored
+    exactly as the ORM renders it; the remaining rows are cloned from that
+    template inside SQLite via ``INSERT ... SELECT`` over a recursive
+    sequence. This avoids materialising ``count`` Python dicts and pushing
+    them through the driver, which dominated the test's wall clock.
+    """
     now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
-    rows = [
-        {
-            "public_id": f"00000000-0000-7000-8000-{i:012d}",
-            "session_id": "perf",
-            "sequence_id": i,
-            "timestamp": now,
-            "known_to": KNOWN_TO_MAX,
-            "transport": "ws",
-            "direction": "in",
-            "message_type": "ping",
-            "payload": None,
-        }
-        for i in range(count)
-    ]
+    template = {
+        "public_id": f"00000000-0000-7000-8000-{0:012d}",
+        "session_id": "perf",
+        "sequence_id": 0,
+        "timestamp": now,
+        "known_to": KNOWN_TO_MAX,
+        "transport": "ws",
+        "direction": "in",
+        "message_type": "ping",
+        "payload": None,
+    }
+    clone_sql = text("""
+        WITH RECURSIVE seq(i) AS (
+            SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i + 1 < :count
+        )
+        INSERT INTO telemetry (
+            public_id, session_id, sequence_id, timestamp, known_to,
+            transport, direction, message_type, payload
+        )
+        SELECT printf('00000000-0000-7000-8000-%012d', i), t.session_id, i,
+               t.timestamp, t.known_to, t.transport, t.direction,
+               t.message_type, t.payload
+        FROM seq JOIN telemetry AS t ON t.sequence_id = 0
+        """)
     with seed_repo.get_session() as session:
-        for start in range(0, count, batch_size):
-            chunk = rows[start : start + batch_size]
-            session.execute(insert(Telemetry), chunk)
+        session.execute(insert(Telemetry), [template])
+        if count > 1:
+            session.execute(clone_sql, {"count": count})
         session.commit()
 
 
