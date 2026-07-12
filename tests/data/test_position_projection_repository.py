@@ -498,3 +498,58 @@ async def test_shard_has_any_accruals_is_clock_free(tmp_path: Path) -> None:
     assert await repo.shard_has_any_accruals(_WALLET, "kraken_futures", "live") is True
     assert await repo.shard_has_any_accruals(_WALLET, "kraken_futures", "paper") is False
     assert await repo.shard_has_any_accruals(_WALLET, "kraken", "live") is False
+
+
+async def test_fill_shard_lineage_maps_and_drops_ambiguity(tmp_path: Path) -> None:
+    """Durable fill lineage maps cids and drops disagreeing ones.
+
+    Given: one client order whose fills agree on a tagged paper shard
+        and another whose fills disagree between two shards,
+    When: get_fill_shard_keys_by_client_order_ids resolves them,
+    Then: the agreeing cid maps to its exact shard key and the
+        ambiguous cid is absent; empty input short-circuits.
+    """
+    repo = await _make_repo(tmp_path)
+    tagged = f"paper.BTC-USD.paper.w{_WALLET[-12:]}.strat_a"
+    base: VenueEventInsertRow = {
+        "event_type": "fill_observed",
+        "wallet_public_id": _WALLET,
+        "exchange": "paper",
+        "instrument": "BTC-USD",
+        "mode": "paper",
+        "side": "buy",
+        "status": "filled",
+        "fill_price": 50000.0,
+        "fill_size": 0.5,
+        "cum_fill_size": 0.5,
+        "session_id": "s1",
+        "sequence_id": 1,
+        "timestamp": datetime.now(UTC),
+        "received_at": datetime.now(UTC),
+    }
+    await repo.insert_venue_event(
+        {**base, "shard_key": tagged, "client_order_id": "cid-ok", "exec_id": "E-1"}
+    )
+    await repo.insert_venue_event(
+        {**base, "shard_key": tagged, "client_order_id": "cid-ok", "exec_id": "E-2"}
+    )
+    await repo.insert_venue_event(
+        {**base, "shard_key": tagged, "client_order_id": "cid-dup", "exec_id": "E-3"}
+    )
+    await repo.insert_venue_event(
+        {
+            **base,
+            "shard_key": "paper.BTC-USD.paper",
+            "client_order_id": "cid-dup",
+            "exec_id": "E-4",
+        }
+    )
+    await repo.insert_venue_event(
+        {**base, "shard_key": "", "client_order_id": "cid-empty", "exec_id": "E-5"}
+    )
+    resolved, ambiguous = await repo.get_fill_shard_keys_by_client_order_ids(
+        ["cid-ok", "cid-dup", "cid-x", "cid-empty"]
+    )
+    assert resolved == {"cid-ok": (tagged, _WALLET)}
+    assert ambiguous == {"cid-dup", "cid-empty"}
+    assert await repo.get_fill_shard_keys_by_client_order_ids([]) == ({}, set())

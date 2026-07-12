@@ -50,6 +50,7 @@ def _make_engine(
     exchange: str = "kraken",
     wallet_public_id: str = "",
     pending_client_order_id: str | None = None,
+    shard_key: str | None = None,
 ) -> TradingEngineService:
     """Create a minimal TradingEngineService stub for routing tests."""
     engine = TradingEngineService(
@@ -59,6 +60,8 @@ def _make_engine(
         wallet_public_id=wallet_public_id,
     )
     engine.pending_client_order_id = pending_client_order_id
+    if shard_key is not None:
+        engine._shard_key = shard_key
     return engine
 
 
@@ -87,17 +90,24 @@ class TestFindEngineForFill:
     """Tests for wallet-safe _find_engine_for_fill routing."""
 
     def test_exact_match_by_client_order_id(self) -> None:
-        """Fill matched by pending_client_order_id ignores wallet mismatch.
+        """Pending-CID match requires wallet agreement (PnL Phase 2 S5).
 
-        Given: engine with pending_client_order_id matching the fill,
-        When: _find_engine_for_fill is called,
-        Then: engine is returned (exact match takes priority).
+        Given: an engine whose pending_client_order_id matches the fill,
+        When: _find_engine_for_fill is called with the SAME wallet and
+            then with a DIFFERENT full wallet,
+        Then: the matching-wallet fill routes to the engine, while the
+            cross-wallet fill is dropped and the projection quarantined
+            — a fill must never mutate another wallet's shard.
         """
         coord = _make_coordinator()
         engine = _make_engine(wallet_public_id=WALLET_A, pending_client_order_id="cid-1")
         coord.engines = {"BTC-USD": engine}
-        fill = _make_fill(client_order_id="cid-1", wallet_public_id=WALLET_B)
-        assert coord._find_engine_for_fill(fill) is engine
+        same_wallet = _make_fill(client_order_id="cid-1", wallet_public_id=WALLET_A)
+        assert coord._find_engine_for_fill(same_wallet) is engine
+        assert coord._recovery_certification_failed is False
+        cross_wallet = _make_fill(client_order_id="cid-1", wallet_public_id=WALLET_B)
+        assert coord._find_engine_for_fill(cross_wallet) is None
+        assert coord._recovery_certification_failed is True
 
     def test_wallet_scoped_fallback_matches_correct_wallet(self) -> None:
         """Fill with wallet routes to engine with matching wallet.
@@ -224,3 +234,64 @@ class TestFindEngineForFillIndexed:
         assert coord._engines_by_scope_legacy.get(("kraken", "BTC-USD")) is engine
         fill = _make_fill(client_order_id="unknown", wallet_public_id="")
         assert coord._find_engine_by_fill_scope(fill) is engine
+
+    def test_mapped_shard_routes_exactly_or_quarantines(self) -> None:
+        """A dispatched CID routes by its EXACT shard, never scope guess.
+
+        Given: a fill whose client order id maps to a dispatched shard,
+        When: the exact engine exists and then when it does not,
+        Then: the exact engine wins over scope, and a missing exact
+            engine drops the fill with the projection quarantined.
+        """
+        coord = _make_coordinator()
+        alpha = _make_engine(wallet_public_id=WALLET_A, shard_key="kraken.BTC-USD.live.wa.alpha")
+        beta = _make_engine(wallet_public_id=WALLET_A, shard_key="kraken.BTC-USD.live.wa.beta")
+        coord.engines = {"alpha": alpha, "beta": beta}
+        coord._order_shard_keys["cid-beta"] = "kraken.BTC-USD.live.wa.beta"
+        fill = _make_fill(client_order_id="cid-beta", wallet_public_id=WALLET_A)
+        assert coord._find_engine_for_fill(fill) is beta
+        coord._order_shard_keys["cid-ghost"] = "kraken.BTC-USD.live.wa.ghost"
+        ghost = _make_fill(client_order_id="cid-ghost", wallet_public_id=WALLET_A)
+        assert coord._find_engine_for_fill(ghost) is None
+        assert coord._recovery_certification_failed is True
+
+    def test_scope_registration_indexes_exact_shards(self) -> None:
+        """Engine lookup registration records exact shard sets per scope.
+
+        Given: two engines with distinct exact shards under one
+            (exchange, instrument, wallet) scope registered via the
+            lookup indexer,
+        When: registration runs (including on a coordinator whose scope
+            map attribute is absent, exercising the lazy init),
+        Then: the scope's shard set carries both exact shards.
+        """
+        coord = _make_coordinator()
+        del coord._scope_shard_keys
+        alpha = _make_engine(wallet_public_id=WALLET_A, shard_key="kraken.BTC-USD.live.wa.alpha")
+        beta = _make_engine(wallet_public_id=WALLET_A, shard_key="kraken.BTC-USD.live.wa.beta")
+        coord._register_engine_for_lookup(alpha)
+        coord._register_engine_for_lookup(beta)
+        assert coord._scope_shard_keys[("kraken", "BTC-USD", WALLET_A)] == {
+            "kraken.BTC-USD.live.wa.alpha",
+            "kraken.BTC-USD.live.wa.beta",
+        }
+
+    def test_ambiguous_scope_refuses_fallback_routing(self) -> None:
+        """A scope serving multiple exact shards never guesses.
+
+        Given: two engines (strategy shards alpha/beta) registered under
+            one (exchange, instrument, wallet) scope,
+        When: a fill without a pending or dispatched mapping arrives,
+        Then: routing refuses and the projection quarantines instead of
+            silently netting the wrong shard's PnL.
+        """
+        coord = _make_coordinator()
+        alpha = _make_engine(wallet_public_id=WALLET_A, shard_key="kraken.BTC-USD.live.wa.alpha")
+        coord.engines["alpha"] = alpha
+        coord._scope_shard_keys[("kraken", "BTC-USD", WALLET_A)] = {
+            "kraken.BTC-USD.live.wa.alpha",
+            "kraken.BTC-USD.live.wa.beta",
+        }
+        fill = _make_fill(client_order_id="cid-unknown", wallet_public_id=WALLET_A)
+        assert coord._find_engine_for_fill(fill) is None
+        assert coord._recovery_certification_failed is True

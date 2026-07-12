@@ -962,3 +962,22 @@ async def test_recorder_without_repository_fails_certification() -> None:
     coord = _make_coord(MagicMock())
     await coord._record_recovery_shard_failure(f"kraken.BTC-USD.live.w{_SHORT}")
     assert coord._recovery_certification_failed is True
+
+
+async def test_certification_failure_blocks_even_live_born_shards() -> None:
+    """The global quarantine is unconditional in the shared writer.
+
+    Given: a boot whose certification failed with an EMPTY baseline
+        (the contradicted candidates never materialized state),
+    When: a later live fill materializes a fresh shard and triggers the
+        projection,
+    Then: nothing is written — ambiguity or contradiction quarantines
+        the whole projection surface for the process lifetime.
+    """
+    repo = _make_repo()
+    coord = _make_coord(repo)
+    _seed_shard(coord, _SHARD_A, 1.0, 50000.0, 0.0)
+    coord._recovery_certification_failed = True
+    await coord._persist_position_projection(_SHARD_A, now=_NOW)
+    repo.upsert_position_projection.assert_not_awaited()
+    repo.close_position_projection.assert_not_awaited()

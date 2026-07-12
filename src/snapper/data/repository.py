@@ -11233,6 +11233,7 @@ class SQLAlchemyRepository(Repository):
             "sequence_id": ve.sequence_id,
             "event_type": ve.event_type,
             "shard_key": ve.shard_key,
+            "wallet_public_id": ve.wallet_public_id,
             "command_public_id": ve.command_public_id,
             "exchange": ve.exchange,
             "instrument": ve.instrument,
@@ -11846,6 +11847,69 @@ class SQLAlchemyRepository(Repository):
             )
             await s.commit()
             return True
+
+    async def get_fill_shard_keys_by_client_order_ids(
+        self, client_order_ids: list[str]
+    ) -> tuple[dict[str, tuple[str, str]], set[str]]:
+        """Durable fill lineage: client order id -> venue-event shard key.
+
+        Execution rows carry no shard key, so execution-replay recovery
+        historically RECONSTRUCTED one (untagged, live) — minting a
+        phantom sibling for tagged paper shards that fails the
+        projection certification. The executor writes ``fill_observed``
+        venue events fail-closed with the EXACT shard key (mode and
+        strategy tag included) before publishing, so this map is the
+        durable lineage. Clock-free sentinel-less scan (venue events
+        are append-only); a client order id whose fill events disagree
+        on the shard key is DROPPED as ambiguous — the caller falls
+        back to reconstruction and the shard stays uncertified.
+
+        Args:
+            client_order_ids: Client order ids of the executions being
+                replayed.
+
+        Returns:
+            Tuple of (mapping of client_order_id to its single durable
+            (shard key, FULL wallet public id) pair, set of AMBIGUOUS
+            client order ids whose fill events disagree on the shard or
+            wallet, or carry an empty shard) — the caller must treat
+            ambiguity as a certification failure, never as absence of
+            evidence. The full wallet id rides along because shard keys
+            carry only a 48-bit wallet suffix and suffix collisions
+            must not certify fills under the wrong wallet.
+        """
+        if not client_order_ids:
+            return {}, set()
+        pairs: set[tuple[str, str, str]] = set()
+        async with self.session() as s:
+            for start in range(0, len(client_order_ids), _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE):
+                chunk = client_order_ids[start : start + _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE]
+                result = await s.execute(
+                    select(
+                        VenueEvent.client_order_id,
+                        VenueEvent.shard_key,
+                        VenueEvent.wallet_public_id,
+                    )
+                    .where(
+                        VenueEvent.event_type == "fill_observed",
+                        VenueEvent.client_order_id.in_(chunk),
+                    )
+                    .distinct()
+                )
+                for cid, shard_key, wallet_public_id in result.all():
+                    pairs.add((str(cid), str(shard_key or ""), str(wallet_public_id or "")))
+        by_cid: dict[str, set[tuple[str, str]]] = {}
+        for cid, shard_key, wallet_public_id in pairs:
+            by_cid.setdefault(cid, set()).add((shard_key, wallet_public_id))
+        resolved: dict[str, tuple[str, str]] = {}
+        ambiguous: set[str] = set()
+        for cid, lineages in by_cid.items():
+            only = next(iter(lineages)) if len(lineages) == 1 else None
+            if only is not None and only[0]:
+                resolved[cid] = only
+            else:
+                ambiguous.add(cid)
+        return resolved, ambiguous
 
     async def get_active_position_identities(self) -> list[tuple[str, str, str, str]]:
         """Clock-free scan of active position rows for recovery diagnostics.

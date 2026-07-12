@@ -544,6 +544,7 @@ class VenueEventRow(TypedDict):
     sequence_id: int
     event_type: str
     shard_key: str
+    wallet_public_id: NotRequired[str]
     command_public_id: str | None
     exchange: str
     instrument: str

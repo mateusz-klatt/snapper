@@ -18,6 +18,7 @@ from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import VenueEventRow
 
@@ -1726,3 +1727,560 @@ class TestRecoveryCertification:
         await coord2._recover_engine_state()
         assert "kraken.BTC-USD.live" not in coord2._trusted_recovery_shards
         assert coord2._recovery_certification_failed is True
+
+
+class TestDurableExecutionLineage:
+    """S5: execution replay follows durable venue-event shard keys."""
+
+    @pytest.mark.asyncio
+    async def test_tagged_paper_recovery_projects_without_phantom_twin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The prod regression: no untagged twin, identity projects.
+
+        Given: a TAGGED paper checkpoint shard plus execution rows whose
+            fills carry the SAME durable tagged shard key in
+            venue_events,
+        When: _recover_engine_state runs,
+        Then: the execution bucket collides with the checkpoint-recovered
+            engine key and is skipped (no phantom untagged sibling), the
+            tagged shard is certified, and the identity's truthful
+            position row is PROJECTED.
+        """
+        tagged = "paper.BTC-USD.paper.waabbccddeeff.heartbeat"
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": wallet}
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        checkpoint = _make_checkpoint(shard_key=tagged)
+        checkpoint["wallet_public_id"] = wallet
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[checkpoint])
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo.get_accruals = AsyncMock(return_value=[])
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-1",
+                    "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t1",
+                    "exchange_order_id": "ex-1",
+                    "client_order_id": "c-1",
+                    "instrument": "BTC-USD",
+                    "exchange": "paper",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.5,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 6, 1, tzinfo=UTC),
+                    "wallet_public_id": wallet,
+                    "operator_public_id": None,
+                }
+            ]
+        )
+        mock_repo.get_fill_shard_keys_by_client_order_ids = AsyncMock(
+            return_value=({"c-1": (tagged, wallet)}, set())
+        )
+        mock_repo.get_consumed_fill_venue_event_id = AsyncMock(return_value=42)
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_position_identities = AsyncMock(return_value=[])
+        mock_repo.upsert_position_projection = AsyncMock(return_value=1)
+        mock_repo.close_position_projection = AsyncMock(return_value=True)
+        mock_repo.resolve_source_instrument_public_id = AsyncMock(
+            return_value={"valuation_public_id": "src-pid", "is_paper": True, "mapped": True}
+        )
+        mock_repo.get_active_market_snapshot_price = AsyncMock(
+            return_value=(50100.0, datetime(2024, 6, 1, tzinfo=UTC))
+        )
+        _set_sqlalchemy_repo(coord, mock_repo)
+        coord._projection_identities[tagged] = ("inst-pid", "paper", wallet)
+
+        await coord._recover_engine_state()
+
+        assert tagged in coord._trusted_recovery_shards
+        untagged = "paper.BTC-USD.paper.waabbccddeeff"
+        assert untagged not in coord.trade_service.known_shard_keys()
+        mock_repo.upsert_position_projection.assert_awaited_once()
+        row = mock_repo.upsert_position_projection.await_args.args[0]
+        assert row["instrument_public_id"] == "inst-pid"
+        assert row["wallet_public_id"] == wallet
+        assert row["quantity"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_durable_paper_group_without_checkpoint_certifies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Durable-lineage paper execution replay is now certifiable.
+
+        Given: a paper execution bucket whose durable tagged lineage
+            resolved from venue events, no checkpoint, and a registered
+            identity,
+        When: _recover_execution_group replays it,
+        Then: the tagged shard is trusted (the round-5 paper denial
+            applies only to RECONSTRUCTED lineage).
+        """
+        tagged = "paper.ETH-USD.paper.waabbccddeeff.momo"
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-eth")
+        mock_repo.get_consumed_fill_venue_event_id = AsyncMock(return_value=7)
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        coord._projection_identities[tagged] = ("inst-eth", "paper", wallet)
+        await coord._recover_execution_group(
+            engine_key="ETH-USD@paper-momo",
+            fills=[
+                cast(
+                    ExecutionRow,
+                    {
+                        "public_id": "exe-2",
+                        "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
+                        "session_id": "s1",
+                        "sequence_id": 1,
+                        "trade_id": "t2",
+                        "exchange_order_id": None,
+                        "client_order_id": "c-2",
+                        "instrument": "ETH-USD",
+                        "exchange": "paper",
+                        "side": "buy",
+                        "size": 1.0,
+                        "price": 2000.0,
+                        "fee": 0.1,
+                        "fee_asset": "USD",
+                        "status": "filled",
+                        "executed_at": datetime(2024, 6, 1, tzinfo=UTC),
+                        "wallet_public_id": wallet,
+                        "operator_public_id": None,
+                    },
+                )
+            ],
+            wallet_public_id=wallet,
+            operator_public_id="",
+            strategy_tag="momo",
+            durable_lineage=True,
+            expected_shard_key=tagged,
+        )
+        assert tagged in coord._trusted_recovery_shards
+
+    @pytest.mark.asyncio
+    async def test_shard_buckets_are_injective_for_pathological_tags(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Buckets key on exact shard keys, never lossy engine keys.
+
+        Given: one row whose durable lineage carries a strategy tag
+            literally spelled "paper" and another row with no lineage
+            (reconstructed untagged live) for the same instrument and
+            wallet,
+        When: grouping runs,
+        Then: the rows land in two DISTINCT buckets keyed by their
+            exact shard keys with correct lineage flags — a lossy
+            engine key would have coalesced tag="paper" with
+            mode-labelled buckets and certified a falsely netted
+            aggregate.
+        """
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        tagged_paper = "paper.BTC-USD.paper.waabbccddeeff.paper"
+        coord = _make_coord(monkeypatch)
+        coord._ownership = None
+
+        def _row(cid: str) -> ExecutionRow:
+            return cast(
+                ExecutionRow,
+                {
+                    "public_id": f"exe-{cid}",
+                    "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": cid,
+                    "exchange_order_id": None,
+                    "client_order_id": cid,
+                    "instrument": "BTC-USD",
+                    "exchange": "paper",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.1,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 6, 1, tzinfo=UTC),
+                    "wallet_public_id": wallet,
+                    "operator_public_id": None,
+                },
+            )
+
+        fills, _wallets, _ops, lineage = coord._group_execution_recovery_rows(
+            [_row("cid-tagged"), _row("cid-bare")],
+            {"cid-tagged": (tagged_paper, wallet)},
+        )
+        assert set(fills) == {tagged_paper, f"paper.BTC-USD.live.w{wallet[-12:]}"}
+        assert lineage[tagged_paper][1] == "paper"
+        assert lineage[tagged_paper][2] is True
+        assert lineage[f"paper.BTC-USD.live.w{wallet[-12:]}"][2] is False
+        assert coord._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_engine_key_collision_never_skips_a_distinct_shard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Checkpoint skip matches EXACT shards, never lossy engine keys.
+
+        Given: a checkpoint-recovered UNTAGGED paper shard and an
+            execution bucket for a DISTINCT durable shard whose strategy
+            tag is literally "paper" — both collapse to the same lossy
+            engine key,
+        When: the execution pass runs,
+        Then: the tagged bucket is NOT skipped; its engine replays.
+        """
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        untagged = "paper.BTC-USD.paper.waabbccddeeff"
+        tagged = "paper.BTC-USD.paper.waabbccddeeff.paper"
+        coord = _make_coord(monkeypatch)
+        coord._ownership = None
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo.get_consumed_fill_venue_event_id = AsyncMock(return_value=9)
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-9",
+                    "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t9",
+                    "exchange_order_id": None,
+                    "client_order_id": "c-9",
+                    "instrument": "BTC-USD",
+                    "exchange": "paper",
+                    "side": "buy",
+                    "size": 0.25,
+                    "price": 50000.0,
+                    "fee": 0.1,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 6, 1, tzinfo=UTC),
+                    "wallet_public_id": wallet,
+                    "operator_public_id": None,
+                }
+            ]
+        )
+        mock_repo.get_fill_shard_keys_by_client_order_ids = AsyncMock(
+            return_value=({"c-9": (tagged, wallet)}, set())
+        )
+        _set_sqlalchemy_repo(coord, mock_repo)
+        coord._checkpoint_recovered_shard_keys.add(untagged)
+        with patch.object(coord, "_recover_execution_group", new_callable=AsyncMock) as group:
+            await coord._recover_from_executions(datetime.now(UTC), {"BTC-USD@paper-paper"})
+        group.assert_awaited_once()
+        assert group.await_args is not None
+        assert group.await_args.kwargs["expected_shard_key"] == tagged
+
+    @pytest.mark.asyncio
+    async def test_lineage_failure_modes_deny_certification(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every lineage failure mode denies, never launders.
+
+        Given: (1) a lineage lookup that raises, (2) an ambiguous cid,
+            (3) a durable wallet contradicting the execution row, and
+            (4) an intra-bucket full-wallet disagreement,
+        When: the execution recovery entry and grouping run,
+        Then: (1) falls back with NO flag, while (2)-(4) each trip the
+            global certification flag.
+        """
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        other_wallet = "00000000-0000-7000-8000-ffffaabbccdd"
+
+        def _exe(cid: str, w: str) -> ExecutionRow:
+            row = {
+                "public_id": f"exe-{cid}",
+                "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
+                "session_id": "s1",
+                "sequence_id": 1,
+                "trade_id": cid,
+                "exchange_order_id": None,
+                "client_order_id": cid,
+                "instrument": "BTC-USD",
+                "exchange": "kraken",
+                "side": "buy",
+                "size": 0.5,
+                "price": 50000.0,
+                "fee": 0.1,
+                "fee_asset": "USD",
+                "status": "filled",
+                "executed_at": datetime(2024, 6, 1, tzinfo=UTC),
+                "wallet_public_id": w,
+                "operator_public_id": None,
+            }
+            return cast(ExecutionRow, row)
+
+        coord = _make_coord(monkeypatch)
+        coord._ownership = None
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[_exe("c-1", wallet)])
+        mock_repo.get_fill_shard_keys_by_client_order_ids = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        _set_sqlalchemy_repo(coord, mock_repo)
+        with patch.object(coord, "_recover_execution_group", new_callable=AsyncMock):
+            await coord._recover_from_executions(datetime.now(UTC), set())
+        assert coord._recovery_certification_failed is False
+
+        coord2 = _make_coord(monkeypatch)
+        coord2._ownership = None
+        mock_repo.get_fill_shard_keys_by_client_order_ids = AsyncMock(return_value=({}, {"c-1"}))
+        _set_sqlalchemy_repo(coord2, mock_repo)
+        with patch.object(coord2, "_recover_execution_group", new_callable=AsyncMock):
+            await coord2._recover_from_executions(datetime.now(UTC), set())
+        assert coord2._recovery_certification_failed is True
+
+        coord3 = _make_coord(monkeypatch)
+        coord3._ownership = None
+        result3 = coord3._classify_execution_recovery_row(
+            _exe("c-3", wallet),
+            ("kraken.BTC-USD.live.wffffaabbccdd", other_wallet),
+        )
+        assert result3 is None
+        assert coord3._recovery_certification_failed is True
+
+        coord4 = _make_coord(monkeypatch)
+        coord4._ownership = None
+        shard = "kraken.BTC-USD.live.waabbccddeeff"
+        suffix_twin = "11111111-1111-7111-8111-aabbccddeeff"
+        coord4._group_execution_recovery_rows(
+            [
+                _exe("c-4", wallet),
+                _exe("c-5", suffix_twin),
+            ],
+            {"c-4": (shard, wallet), "c-5": (shard, suffix_twin)},
+        )
+        assert coord4._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_engine_divergence_records_both_and_skips_replay(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A recreated engine diverging from its bucket never replays.
+
+        Given: an execution bucket whose expected shard key the
+            recreated engine does not reproduce,
+        When: _recover_execution_group runs,
+        Then: BOTH identities are recorded as failed, no replay state
+            materializes, and nothing is certified.
+        """
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        expected = "kraken.BTC-USD.live.waabbccddeeff.ghost"
+        coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": wallet}
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        _set_sqlalchemy_repo(coord, mock_repo)
+        await coord._recover_execution_group(
+            engine_key="BTC-USD@kraken-ghost",
+            fills=[
+                cast(
+                    ExecutionRow,
+                    {
+                        "public_id": "exe-d",
+                        "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
+                        "session_id": "s1",
+                        "sequence_id": 1,
+                        "trade_id": "t-d",
+                        "exchange_order_id": None,
+                        "client_order_id": "c-d",
+                        "instrument": "BTC-USD",
+                        "exchange": "kraken",
+                        "side": "buy",
+                        "size": 0.5,
+                        "price": 50000.0,
+                        "fee": 0.1,
+                        "fee_asset": "USD",
+                        "status": "filled",
+                        "executed_at": datetime(2024, 6, 1, tzinfo=UTC),
+                        "wallet_public_id": wallet,
+                        "operator_public_id": None,
+                    },
+                )
+            ],
+            wallet_public_id=wallet,
+            operator_public_id="",
+            strategy_tag=None,
+            durable_lineage=True,
+            expected_shard_key=expected,
+        )
+        assert expected not in coord._trusted_recovery_shards
+        assert "kraken.BTC-USD.live.waabbccddeeff" not in coord._trusted_recovery_shards
+        assert ("inst-pid", "live", wallet) in coord._failed_recovery_identities
+        assert "kraken.BTC-USD.live.waabbccddeeff" not in coord.trade_service.known_shard_keys()
+
+    @pytest.mark.asyncio
+    async def test_engine_key_collision_quarantines_instead_of_overwriting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A registry-key collision across shards fails certification.
+
+        Given: an incumbent engine serving one exact shard and a
+            recovered engine for a DIFFERENT shard colliding on the same
+            registry key,
+        When: registration runs,
+        Then: the incumbent is kept and the global flag trips — silent
+            overwrite would mis-route later fills into the wrong shard.
+        """
+        coord = _make_coord(monkeypatch)
+        incumbent = MagicMock()
+        incumbent._shard_key = "paper.BTC-USD.paper.waabbccddeeff"
+        coord.engines["BTC-USD@paper-paper"] = incumbent
+        newcomer = MagicMock()
+        newcomer._shard_key = "paper.BTC-USD.paper.waabbccddeeff.paper"
+        coord._register_recovered_engine("BTC-USD@paper-paper", newcomer)
+        assert coord.engines["BTC-USD@paper-paper"] is incumbent
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_suffix_twin_wallet_guards_fail_certification(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Suffix-twin wallet collisions on shard strings never certify.
+
+        Given: (1) a checkpoint-recovered shard whose execution lineage
+            belongs to a DIFFERENT full wallet with the same 48-bit
+            suffix, (2) a checkpoint whose delta replay carries a
+            foreign wallet's events, and (3) a checkpoint whose durable
+            wallet disagrees with the shard's embedded segment,
+        When: recovery runs each case,
+        Then: every case trips the global certification flag.
+        """
+        wallet_a = "00000000-0000-7000-8000-aabbccddeeff"
+        wallet_b = "11111111-1111-7111-8111-aabbccddeeff"
+        shard = "paper.BTC-USD.paper.waabbccddeeff"
+        coord = _make_coord(monkeypatch)
+        coord._ownership = None
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-t",
+                    "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t-t",
+                    "exchange_order_id": None,
+                    "client_order_id": "c-t",
+                    "instrument": "BTC-USD",
+                    "exchange": "paper",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.1,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 6, 1, tzinfo=UTC),
+                    "wallet_public_id": wallet_b,
+                    "operator_public_id": None,
+                }
+            ]
+        )
+        mock_repo.get_fill_shard_keys_by_client_order_ids = AsyncMock(
+            return_value=({"c-t": (shard, wallet_b)}, set())
+        )
+        _set_sqlalchemy_repo(coord, mock_repo)
+        coord._checkpoint_recovered_shard_keys.add(shard)
+        coord._checkpoint_recovered_shard_wallets[shard] = wallet_a
+        await coord._recover_from_executions(datetime.now(UTC), set())
+        assert coord._recovery_certification_failed is True
+
+        coord2 = _make_coord(monkeypatch)
+        coord2._wallet_short_to_id = {"aabbccddeeff": wallet_a}
+        mock_repo2 = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo2.get_venue_events_after = AsyncMock(
+            return_value=[_make_venue_event(shard_key=shard) | {"wallet_public_id": wallet_b}]
+        )
+        mock_repo2.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo2.get_accruals = AsyncMock(return_value=[])
+        mock_repo2.shard_has_any_accruals = AsyncMock(return_value=False)
+        _set_sqlalchemy_repo(coord2, mock_repo2)
+        checkpoint = _make_checkpoint(shard_key=shard)
+        checkpoint["wallet_public_id"] = wallet_a
+        await coord2._recover_checkpoint_row(checkpoint, datetime.now(UTC))
+        assert coord2._recovery_certification_failed is True
+
+        coord3 = _make_coord(monkeypatch)
+        coord3._wallet_short_to_id = {}
+        mock_repo3 = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo3.get_venue_events_after = AsyncMock(return_value=[])
+        mock_repo3.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        mock_repo3.get_accruals = AsyncMock(return_value=[])
+        mock_repo3.shard_has_any_accruals = AsyncMock(return_value=False)
+        _set_sqlalchemy_repo(coord3, mock_repo3)
+        mismatched = _make_checkpoint(shard_key=shard)
+        mismatched["wallet_public_id"] = "22222222-2222-7222-8222-ffffffffffff"
+        await coord3._recover_checkpoint_row(mismatched, datetime.now(UTC))
+        assert coord3._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_gap_replay_and_rebuild_reject_foreign_wallet_history(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Full-history replays never mix suffix-twin wallets.
+
+        Given: (1) a checkpoint gap correction whose full-history events
+            include a foreign wallet's fill, (2) a venue-only rebuild
+            whose events span two wallets, and (3) an active-order
+            engine reuse across wallets,
+        When: each path runs,
+        Then: every case trips the global flag without mutating state.
+        """
+        wallet_a = "00000000-0000-7000-8000-aabbccddeeff"
+        wallet_b = "11111111-1111-7111-8111-aabbccddeeff"
+        shard = "kraken.BTC-USD.live.waabbccddeeff"
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo.shard_has_accruals = AsyncMock(return_value=False)
+        mock_repo.get_venue_events_after = AsyncMock(
+            return_value=[_make_venue_event(shard_key=shard) | {"wallet_public_id": wallet_b}]
+        )
+        certain = await coord._correct_checkpoint_fill_gap(
+            shard, wallet_a, "kraken", "live", datetime.now(UTC)
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is True
+
+        coord2 = _make_coord(monkeypatch)
+        coord2._wallet_short_to_id = {"aabbccddeeff": wallet_a}
+        mock_repo2 = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord2, mock_repo2)
+        mock_repo2.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo2.shard_has_accruals = AsyncMock(return_value=False)
+        mock_repo2.get_venue_events_after = AsyncMock(
+            return_value=[
+                _make_venue_event(event_id=1, shard_key=shard) | {"wallet_public_id": wallet_a},
+                _make_venue_event(event_id=2, shard_key=shard) | {"wallet_public_id": wallet_b},
+            ]
+        )
+        rebuilt = await coord2._rebuild_shard_if_gapped(shard, datetime.now(UTC))
+        assert rebuilt is False
+        assert coord2._recovery_certification_failed is True
+        assert shard not in coord2.trade_service.known_shard_keys()
+
+        coord3 = _make_coord(monkeypatch)
+        incumbent = MagicMock()
+        incumbent.wallet_public_id = wallet_a
+        coord3.engines["BTC-USD@kraken-live"] = incumbent
+        reused = await coord3._get_or_create_active_order_engine(
+            engine_key="BTC-USD@kraken-live",
+            db_order=cast(Any, {"instrument": "BTC-USD", "exchange": "kraken"}),
+            wallet_public_id=wallet_b,
+            operator_public_id="",
+        )
+        assert reused is None
+        assert coord3._recovery_certification_failed is True
