@@ -69,6 +69,7 @@ from uuid import uuid7
 from loguru import logger
 from sqlalchemy import ColumnElement
 from sqlalchemy import Select
+from sqlalchemy import Text
 from sqlalchemy import and_
 from sqlalchemy import case
 from sqlalchemy import create_engine as create_sync_engine
@@ -571,6 +572,28 @@ def where_active_now(model: type[Any]) -> tuple[Any, Any]:
         Tuple of two filter clauses: (timestamp <= now, known_to > now).
     """
     return where_active(model, datetime.now(UTC))
+
+
+def venue_event_fill_identity() -> ColumnElement[str]:
+    """Return the venue-event fill dedup identity, cast to one SQL type.
+
+    Fills dedup by ``exec_id``, else ``trade_id``, else the row's unique
+    ``public_id`` so id-less rows never collapse. Every operand is cast to
+    ``TEXT`` because ``public_id`` is a native ``uuid`` on PostgreSQL while
+    the venue ids are ``varchar`` — a mixed-type ``COALESCE`` raises
+    ``DatatypeMismatchError`` (42804) there, while the SQLite test backend
+    stores UUIDs as ``String(36)`` and cannot surface the mismatch. The
+    casts are semantics-neutral on both backends: ``CAST(NULL AS TEXT)``
+    stays ``NULL``, so coalesce precedence and grouping are unchanged.
+
+    Returns:
+        ``COALESCE`` over the three identity columns, each cast to ``TEXT``.
+    """
+    return func.coalesce(
+        VenueEvent.exec_id.cast(Text),
+        VenueEvent.trade_id.cast(Text),
+        VenueEvent.public_id.cast(Text),
+    )
 
 
 async def close_and_insert(
@@ -11454,9 +11477,7 @@ class SQLAlchemyRepository(Repository):
                     VenueEvent.event_type == "fill_observed",
                     VenueEvent.fill_size.isnot(None),
                 )
-                .group_by(
-                    func.coalesce(VenueEvent.exec_id, VenueEvent.trade_id, VenueEvent.public_id)
-                )
+                .group_by(venue_event_fill_identity())
                 .subquery()
             )
             recorded_result = await s.execute(

@@ -23,6 +23,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import Select
+from sqlalchemy import event as _sa_event
 from sqlalchemy import select as _sa_select
 from sqlalchemy import text
 from sqlalchemy import update as sqlalchemy_update
@@ -60,6 +61,7 @@ from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
+from snapper.data.repository import venue_event_fill_identity
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
 from snapper.data.repository_types import AccrualLedgerInsertRow
@@ -11260,6 +11262,87 @@ async def test_shard_has_fill_gap_unresolved_client_order_id_counts_zero(
         )
     )
     assert await r.shard_has_fill_gap(shard, now) is True
+
+
+def test_venue_event_fill_identity_casts_all_operands_to_text_on_postgresql() -> None:
+    """The fill dedup identity is type-unified for the PostgreSQL backend.
+
+    Given: the venue-event fill dedup identity expression,
+    When: it is compiled with the PostgreSQL dialect,
+    Then: it is a single COALESCE whose three operands (exec_id, trade_id,
+        public_id) are each CAST AS TEXT, because ``public_id`` is a native
+        ``uuid`` on PostgreSQL while the venue ids are ``varchar`` and a
+        mixed-type COALESCE raises DatatypeMismatchError (42804) there —
+        the SQLite test backend stores UUIDs as strings and cannot catch it.
+    """
+    sql = str(venue_event_fill_identity().compile(dialect=postgresql.dialect()))
+    assert sql.lower().startswith("coalesce(")
+    assert sql.count("CAST(") == 3
+    assert sql.count("AS TEXT)") == 3
+    assert "venue_events.exec_id" in sql
+    assert "venue_events.trade_id" in sql
+    assert "venue_events.public_id" in sql
+
+
+@pytest.mark.asyncio
+async def test_shard_has_fill_gap_emits_text_cast_identity_grouping(tmp_path: Path) -> None:
+    """The gap query itself groups by the cast-unified fill identity.
+
+    Given: a shard with one recorded venue fill and a statement-capture hook
+        on the repository engine,
+    When: shard_has_fill_gap executes,
+    Then: every emitted venue-event GROUP BY statement groups by the COALESCE
+        of the three identity columns each CAST AS TEXT — pinning that the
+        method routes through venue_event_fill_identity, since the un-cast
+        column mix raises DatatypeMismatchError (42804) on PostgreSQL.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    await _insert_gap_order(r, inst_pid, "c-cast")
+    shard = "kraken.BTC-USD.live"
+    await r.insert_venue_event(
+        _gap_venue_row(
+            shard_key=shard,
+            client_order_id="c-cast",
+            fill_size=10.0,
+            cum_fill_size=10.0,
+            exec_id="eB",
+            trade_id="eB",
+        )
+    )
+    captured: list[str] = []
+
+    def _capture(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        """Record every SQL statement the engine emits during the gap check.
+
+        Args:
+            conn: DBAPI connection (unused).
+            cursor: DBAPI cursor (unused).
+            statement: The SQL string about to execute.
+            parameters: Bound parameters (unused).
+            context: Execution context (unused).
+            executemany: Whether this is an executemany call (unused).
+        """
+        captured.append(statement)
+
+    _sa_event.listen(r.engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        assert await r.shard_has_fill_gap(shard, now) is True
+    finally:
+        _sa_event.remove(r.engine.sync_engine, "before_cursor_execute", _capture)
+    grouped = [s for s in captured if "GROUP BY" in s and "venue_events" in s]
+    assert grouped
+    assert all(
+        s.count("CAST(") >= 3 and s.count("AS TEXT)") >= 3 and "coalesce" in s.lower()
+        for s in grouped
+    )
 
 
 @pytest.mark.asyncio
