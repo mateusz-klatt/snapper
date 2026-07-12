@@ -5689,6 +5689,20 @@ class TestAdoptedRearmRouting:
         engine.rearm_pending_intent.assert_not_called()
         engine.clear_pending_intent.assert_not_called()
 
+    async def test_poisoned_cid_never_rearms(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An adopted frame for a poisoned cid never re-arms its engine.
+
+        Given: a released engine whose cid was tombstoned by a prior
+            owner conflict,
+        When: an adopted accepted frame for that cid arrives,
+        Then: rearm_pending_intent is never called — a poisoned cid must
+            not resurrect in-flight state (S5.4 P0-3 review hardening).
+        """
+        coord, engine = self._make_released_engine(monkeypatch)
+        coord._poisoned_cids().add("order-123")
+        await self._dispatch_accepted(coord, reason="adopted")
+        engine.rearm_pending_intent.assert_not_called()
+
     async def test_wallet_scoped_routing_picks_matching_wallet(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

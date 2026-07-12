@@ -7726,6 +7726,107 @@ class TestFillDedupe:
         assert ex._publish_execution.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_malformed_real_fill_aborts_whole_booking(self) -> None:
+        """A real fill with a zero price is dropped entirely, never booked.
+
+        Given: a real fill frame (positive durable size) whose price is
+            zero (the production poison shape),
+        When: the fill is processed,
+        Then: the writer bulwark (S5.4 P0-4) aborts the whole booking —
+            no durable venue row is written AND nothing is published to
+            the engine, so neither the durable plane nor the live
+            position is poisoned; the order stays pending for
+            reconciliation.
+        """
+        ex, order = self._executor()
+        await ex._process_execution(self._fill("a1", 0.5, 0.5, last_price=0.0))
+        assert ex._record_venue_event.await_count == 0
+        assert ex._publish_execution.await_count == 0
+        assert order.client_order_id in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_negative_delta_fill_aborts_before_publish(self) -> None:
+        """A negative published delta never reaches the engine's fold.
+
+        Given: a delta-only fill frame whose last_qty is negative (a
+            futures bust / correction shape),
+        When: the fill is processed,
+        Then: the booking aborts before both the durable write AND the
+            publish — a negative delta would spuriously reduce the live
+            position with no economics guard on the engine side (S5.4
+            review MAJOR: the abort must cover the non-positive quadrant,
+            not only durable_size > 0).
+        """
+        ex, order = self._executor()
+        await ex._process_execution(self._fill("a1", -0.5, None))
+        assert ex._record_venue_event.await_count == 0
+        assert ex._publish_execution.await_count == 0
+        assert order.client_order_id in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_nonfinite_cumulative_fill_aborts_before_publish(self) -> None:
+        """A NaN cumulative resolves to a NaN published delta and is aborted.
+
+        Given: a cum-carrying fill frame whose cum_qty is NaN,
+        When: the fill is processed,
+        Then: the booking aborts before the publish — a NaN published
+            delta would fold the live position to NaN for the process
+            lifetime.
+        """
+        ex, order = self._executor()
+        await ex._process_execution(self._fill("a1", None, float("nan")))
+        assert ex._record_venue_event.await_count == 0
+        assert ex._publish_execution.await_count == 0
+        assert order.client_order_id in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_status_only_frame_writes_no_zero_size_row(self) -> None:
+        """A status-only frame publishes but never writes a zero-size fill row.
+
+        Given: a real fill followed by a status-only frame (no last_qty,
+            no cum_qty — zero durable size),
+        When: both are processed,
+        Then: both publish (status reaches the engine) but only the real
+            fill writes a durable row — the zero-size status frame is
+            suppressed so recovery never sees a malformed zero-size fill
+            (S5.4 P0-4 Guard 2).
+        """
+        ex, _order = self._executor()
+        await ex._process_execution(self._fill("a1", 0.5, 0.5))
+        await ex._process_execution(self._fill("a1", None, None))
+        assert ex._publish_execution.await_count == 2
+        assert ex._record_venue_event.await_count == 1
+
+    def test_fill_economics_sound_branches(self) -> None:
+        """The writer soundness helper rejects each malformed shape."""
+        sound = base_module.ExchangeExecutorService._fill_economics_sound
+        assert sound(0.5, 100.0, "buy") is True
+        assert sound(0.5, 100.0, "SELL") is True
+        assert sound(0.0, 100.0, "buy") is False
+        assert sound(-1.0, 100.0, "buy") is False
+        assert sound(0.5, 0.0, "buy") is False
+        assert sound(0.5, -1.0, "buy") is False
+        assert sound(0.5, float("nan"), "buy") is False
+        assert sound(float("inf"), 100.0, "buy") is False
+        assert sound(0.5, 100.0, "long") is False
+        assert sound(0.5, 100.0, "") is False
+
+    def test_published_fill_harmful_branches(self) -> None:
+        """The published-delta harm check gates each publish-side shape."""
+        ex = self._executor()[0]
+
+        def fill(last_size: float, last_price: float = 100.0, side: str = "buy") -> Any:
+            return SimpleNamespace(last_size=last_size, last_price=last_price, side=side)
+
+        assert ex._published_fill_harmful(fill(0.5)) is False
+        assert ex._published_fill_harmful(fill(0.0, last_price=0.0)) is False
+        assert ex._published_fill_harmful(fill(-0.5)) is True
+        assert ex._published_fill_harmful(fill(float("nan"))) is True
+        assert ex._published_fill_harmful(fill(float("inf"))) is True
+        assert ex._published_fill_harmful(fill(0.5, last_price=0.0)) is True
+        assert ex._published_fill_harmful(fill(0.5, side="long")) is True
+
+    @pytest.mark.asyncio
     async def test_failed_publish_keeps_redelivery_alive(self) -> None:
         """Neither dedupe key survives a publisher send failure.
 
@@ -7734,8 +7835,11 @@ class TestFillDedupe:
         When: The venue redelivers the same fill,
         Then: Nothing was committed (publish watermark unmoved, exec id
             unregistered), so the redelivery is processed and published
-            instead of being mistaken for a replay; its durable row
-            carries a zero gap because the first row already persisted.
+            instead of being mistaken for a replay; the redelivery's
+            durable gap is zero, and the writer bulwark (S5.4 P0-4)
+            SUPPRESSES that zero-size durable row rather than persisting a
+            malformed fill that recovery would later quarantine — so only
+            the first, non-zero row reaches the durable plane.
         """
         ex, order = self._executor()
         del ex._publish_execution
@@ -7750,7 +7854,7 @@ class TestFillDedupe:
         assert "a1" in ex._seen_exec_ids
         assert ex.pending_orders[order.client_order_id].last_seen_cum_qty == 0.5
         durable_sizes = [c.args[0]["fill_size"] for c in ex._record_venue_event.await_args_list]
-        assert durable_sizes == [pytest.approx(0.5), pytest.approx(0.0)]
+        assert durable_sizes == [pytest.approx(0.5)]
         assert sum(durable_sizes) == pytest.approx(0.5)
 
     @pytest.mark.asyncio

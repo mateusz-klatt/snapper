@@ -466,6 +466,39 @@ class TestFindEngineForFillIndexed:
         assert "cid-1" not in coord._order_shard_keys
         assert "cid-1" not in coord._order_shard_wallets
         assert coord._recovery_certification_failed is True
+        assert "cid-1" in coord._poisoned_cids()
+
+    def test_poisoned_cid_releases_pending_and_drops_fills(self) -> None:
+        """A CID conflict tombstones the cid, releases its route, drops its fills.
+
+        Given: an engine holding cid-1 in-flight (pending-coid index
+            populated) and a conflicting re-registration of cid-1 under a
+            different shard,
+        When: the conflict fires and then a walletless fill for cid-1
+            arrives and a later re-registration is attempted,
+        Then: the pending engine is released (no in-flight leak), the cid
+            is tombstoned, the fill is dropped (never routes to the
+            survivor), and re-registration is refused — closing the S5.4
+            P0-3 hole where the surviving pending index kept routing.
+        """
+        coord = _make_coordinator()
+        engine = _make_engine(wallet_public_id=WALLET_A, shard_key="kraken.BTC-USD.live.wa.alpha")
+        coord.engines = {"engine": engine}
+        assert coord._mark_order_in_flight(engine, "cid-1") is True
+        assert engine.order_in_flight is True
+        coord._engines_by_pending_coid["cid-1"] = engine
+        assert coord._register_order_shard_key("cid-1", "kraken.BTC-USD.live.wa.beta") is False
+        assert "cid-1" in coord._poisoned_cids()
+        assert engine.order_in_flight is False
+        assert engine.pending_client_order_id is None
+        coord._recovery_certification_failed = False
+        fill = _make_fill(client_order_id="cid-1", wallet_public_id="")
+        assert coord._find_engine_for_fill(fill) is None
+        assert coord._recovery_certification_failed is True
+        coord._recovery_certification_failed = False
+        assert coord._register_order_shard_key("cid-1", "kraken.BTC-USD.live.wa.alpha") is False
+        assert "cid-1" not in coord._order_shard_keys
+        assert coord._recovery_certification_failed is True
 
     def test_walleted_linear_scan_multi_shard_scope_refuses(self) -> None:
         """Linear-scan walleted fallback refuses tag-sibling ambiguity.

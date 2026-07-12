@@ -1959,7 +1959,13 @@ class TestFeeWatermark:
     """Cumulative-commission deltas via the executor fee watermark."""
 
     def _execution(self, cum_fee: float | None, cum_qty: float = 0.5) -> ExecutionUpdate:
-        """Build a cum-carrying execution with optional cumulative fee."""
+        """Build a cum-carrying execution with optional cumulative fee.
+
+        Carries a positive ``average_price`` so the durable fill row is
+        economically sound — the writer bulwark (S5.4 P0-4) aborts a real
+        fill with a zero/non-finite price, which these fee-watermark
+        tests do not intend to exercise.
+        """
         return ExecutionUpdate(
             order_id="ex-1",
             exec_type="trade",
@@ -1969,6 +1975,7 @@ class TestFeeWatermark:
             order_status=ExchangeOrderStatusEnum.PARTIALLY_FILLED,
             timestamp=datetime.now(UTC),
             cum_qty=cum_qty,
+            average_price=100.0,
             exec_id=f"wal-ex-1-c{int(cum_qty * 1e8)}",
             cum_fee=cum_fee,
             cum_fee_currency="EUR" if cum_fee is not None else None,

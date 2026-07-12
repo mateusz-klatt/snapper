@@ -840,11 +840,15 @@ class TestCheckpointRecovery:
 
     @pytest.mark.asyncio
     async def test_invalid_shard_key_format_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Checkpoint with malformed shard_key (fewer than 3 dot-segments) is skipped.
+        """An OWNED checkpoint with an unparsable shard_key fails closed globally.
 
-        Given: checkpoint with shard_key="bad.key",
+        Given: checkpoint with shard_key="bad.key" (fewer than 3
+            dot-segments, so _parse_shard_key returns None),
         When: _recover_from_checkpoints runs,
-        Then: shard is not recovered, no crash.
+        Then: the shard is not recovered AND the whole projection
+            certification fails — an unparsable key is an unattributable
+            identity whose blast radius recovery cannot bound (S5.4 P0-2:
+            previously this owned shard was silently dropped).
         """
         coord = _make_coord(monkeypatch)
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)
@@ -858,6 +862,7 @@ class TestCheckpointRecovery:
         await coord._recover_engine_state()
 
         assert len(coord.engines) == 0
+        assert coord._recovery_certification_failed is True
 
     @pytest.mark.asyncio
     async def test_checkpoint_with_unknown_wallet_short_logs_warning(
@@ -1092,40 +1097,70 @@ class TestR9GapRecovery:
     ) -> None:
         """A checkpoint shard with a recorded>consumed gap is corrected by overlay.
 
-        Given: a checkpoint at watermark 10 with empty delta (so checkpoint+delta
-            position is 0.5), a recorded>consumed fill gap, no funding, and a full
-            venue history summing to 0.9,
+        Given: a wallet-bearing checkpoint at watermark 10 with empty delta (so
+            checkpoint+delta position is 0.5), a recorded>consumed fill gap, no
+            funding, and a full venue history — attributed to the checkpoint's
+            own full wallet — summing to 0.9,
         When: recovery runs,
         Then: the shard position is overlaid to the venue-replay value 0.9 while
-            the checkpoint peak_equity is preserved.
+            the checkpoint peak_equity is preserved (the overlay requires full
+            wallet attribution, so the events must carry the shard's wallet).
         """
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        shard_key = "kraken.BTC-USD.live.waabbccddeeff"
         coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": wallet}
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)
-        mock_repo.get_all_checkpoints = AsyncMock(
-            return_value=[_make_checkpoint(position_qty=0.5, peak_equity=10000.0)]
-        )
+        checkpoint = _make_checkpoint(shard_key=shard_key, position_qty=0.5, peak_equity=10000.0)
+        checkpoint["wallet_public_id"] = wallet
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[checkpoint])
 
         def venue_events(shard_key: str, after_id: int) -> list[VenueEventRow]:
             if after_id == 0:
                 return [
-                    _make_venue_event(event_id=5, fill_size=0.5, exec_id="a", trade_id="a"),
-                    _make_venue_event(event_id=8, fill_size=0.4, exec_id="b", trade_id="b"),
+                    cast(
+                        VenueEventRow,
+                        dict(
+                            _make_venue_event(
+                                event_id=5,
+                                shard_key=shard_key,
+                                fill_size=0.5,
+                                exec_id="a",
+                                trade_id="a",
+                            )
+                        )
+                        | {"wallet_public_id": wallet},
+                    ),
+                    cast(
+                        VenueEventRow,
+                        dict(
+                            _make_venue_event(
+                                event_id=8,
+                                shard_key=shard_key,
+                                fill_size=0.4,
+                                exec_id="b",
+                                trade_id="b",
+                            )
+                        )
+                        | {"wallet_public_id": wallet},
+                    ),
                 ]
             return []
 
         mock_repo.get_venue_events_after = AsyncMock(side_effect=venue_events)
         mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
         mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
         _set_sqlalchemy_repo(coord, mock_repo)
         mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
         mock_repo.shard_has_accruals = AsyncMock(return_value=False)
 
         await coord._recover_engine_state()
 
-        shard = coord.trade_service._shards["kraken.BTC-USD.live"]
+        shard = coord.trade_service._shards[shard_key]
         assert shard.position.position_qty == pytest.approx(0.9)
         assert shard.peak_equity == pytest.approx(10000.0)
-        assert coord._consumed_venue_event_watermarks["kraken.BTC-USD.live"] == 8
+        assert coord._consumed_venue_event_watermarks[shard_key] == 8
 
     @pytest.mark.asyncio
     async def test_checkpoint_gap_skipped_when_funding(
@@ -1960,6 +1995,131 @@ class TestDurableExecutionLineage:
             expected_shard_key=tagged,
         )
         assert tagged in coord._trusted_recovery_shards
+
+    @pytest.mark.asyncio
+    async def test_execution_replay_malformed_economics_never_certifies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A poisoned execution row folds into nothing and never certifies.
+
+        Given: a durable-lineage paper execution bucket whose row carries
+            a zero fill price (the production repro: 0.01 @ 0.0 — an
+            execution row folds DIRECTLY into position/turnover with no
+            checkpoint gate),
+        When: _recover_execution_group replays it,
+        Then: the bucket is refused before any fold, the shard is NOT
+            trusted, the TradeService shard is left untouched, and the
+            identity is quarantined SCOPED (no global flag) — an
+            attributable malformed row blocks only its own identity
+            (S5.4 P0-1 + P0-5).
+        """
+        tagged = "paper.ETH-USD.paper.waabbccddeeff.momo"
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": wallet}
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-eth")
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        coord._projection_identities[tagged] = ("inst-eth", "paper", wallet)
+        await coord._recover_execution_group(
+            engine_key="ETH-USD@paper-momo",
+            fills=[
+                cast(
+                    ExecutionRow,
+                    {
+                        "public_id": "exe-bad",
+                        "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
+                        "session_id": "s1",
+                        "sequence_id": 1,
+                        "trade_id": "t-bad",
+                        "exchange_order_id": None,
+                        "client_order_id": "c-bad",
+                        "instrument": "ETH-USD",
+                        "exchange": "paper",
+                        "side": "buy",
+                        "size": 0.01,
+                        "price": 0.0,
+                        "fee": 0.0,
+                        "fee_asset": "USD",
+                        "status": "filled",
+                        "executed_at": datetime(2024, 6, 1, tzinfo=UTC),
+                        "wallet_public_id": wallet,
+                        "operator_public_id": None,
+                    },
+                )
+            ],
+            wallet_public_id=wallet,
+            operator_public_id="",
+            strategy_tag="momo",
+            durable_lineage=True,
+            expected_shard_key=tagged,
+        )
+        assert tagged not in coord._trusted_recovery_shards
+        assert coord.trade_service._shards[tagged].position.position_qty == pytest.approx(0.0)
+        assert ("inst-eth", "paper", wallet) in coord._failed_recovery_identities
+        assert coord._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_execution_replay_null_side_never_certifies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A NULL-side execution row folds to phantom-flat and never certifies.
+
+        Given: a durable-lineage bucket whose row has a NULL side (the
+            fold would skip position/cash but still book turnover,
+            folding to a self-consistent phantom-flat the digest would
+            certify),
+        When: _recover_execution_group replays it,
+        Then: the malformed side is refused before any fold; the shard is
+            not trusted and its identity is quarantined scoped.
+        """
+        tagged = "paper.ETH-USD.paper.waabbccddeeff.momo"
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": wallet}
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-eth")
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        coord._projection_identities[tagged] = ("inst-eth", "paper", wallet)
+        await coord._recover_execution_group(
+            engine_key="ETH-USD@paper-momo",
+            fills=[
+                cast(
+                    ExecutionRow,
+                    {
+                        "public_id": "exe-ns",
+                        "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
+                        "session_id": "s1",
+                        "sequence_id": 1,
+                        "trade_id": "t-ns",
+                        "exchange_order_id": None,
+                        "client_order_id": "c-ns",
+                        "instrument": "ETH-USD",
+                        "exchange": "paper",
+                        "side": None,
+                        "size": 1.0,
+                        "price": 2000.0,
+                        "fee": 0.0,
+                        "fee_asset": "USD",
+                        "status": "filled",
+                        "executed_at": datetime(2024, 6, 1, tzinfo=UTC),
+                        "wallet_public_id": wallet,
+                        "operator_public_id": None,
+                    },
+                )
+            ],
+            wallet_public_id=wallet,
+            operator_public_id="",
+            strategy_tag="momo",
+            durable_lineage=True,
+            expected_shard_key=tagged,
+        )
+        assert tagged not in coord._trusted_recovery_shards
+        assert coord.trade_service._shards[tagged].position.position_qty == pytest.approx(0.0)
+        assert ("inst-eth", "paper", wallet) in coord._failed_recovery_identities
+        assert coord._recovery_certification_failed is False
 
     @pytest.mark.asyncio
     async def test_shard_buckets_are_injective_for_pathological_tags(
@@ -3254,11 +3414,18 @@ class TestRoundThreeFailClosed:
     def _coord_with_events(
         self, monkeypatch: pytest.MonkeyPatch, events: list[VenueEventRow]
     ) -> TraderCoordinator:
-        """Coordinator whose repo reports no gap and the given history."""
+        """Coordinator whose repo reports no gap and the given history.
+
+        Wires the instrument resolver and wallet-short cache so a scoped
+        (identity-level) recovery failure resolves to a canonical
+        identity rather than escalating to the global flag.
+        """
         coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": self._WALLET}
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)
         _set_sqlalchemy_repo(coord, mock_repo)
         mock_repo.get_venue_events_after = AsyncMock(return_value=events)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
         return coord
 
     def _fill(
@@ -3283,6 +3450,54 @@ class TestRoundThreeFailClosed:
         event["exchange"] = "paper"
         event["mode"] = "paper"
         return cast(VenueEventRow, event)
+
+    @pytest.mark.asyncio
+    async def test_gap_overlay_malformed_fills_scoped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gap-overlay branch scopes a malformed fill to its identity.
+
+        Given: a shard with a recorded>consumed gap whose full history
+            carries a zero-price fill,
+        When: _correct_checkpoint_fill_gap runs the gap-overlay branch,
+        Then: the malformed fill leaves the identity UNCERTIFIED and
+            records its canonical failed identity WITHOUT the global flag
+            (S5.4 P0-5 split of the gap-overlay path).
+        """
+        coord = self._coord_with_events(monkeypatch, [self._fill(fill_price=0.0)])
+        mock_repo = cast(AsyncMock, coord.repository)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo.shard_has_accruals = AsyncMock(return_value=False)
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), _make_checkpoint()
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is False
+        assert ("inst-pid", "paper", self._WALLET) in coord._failed_recovery_identities
+
+    @pytest.mark.asyncio
+    async def test_gap_overlay_unattributed_fills_uncertified(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gap-overlay branch refuses to overlay unattributed fills.
+
+        Given: a shard with a recorded>consumed gap whose full history
+            carries a fill with NO wallet attribution,
+        When: _correct_checkpoint_fill_gap runs the gap-overlay branch,
+        Then: it leaves the shard UNCERTIFIED without the global flag —
+            an unattributed overlay must not adopt evidence by topology
+            (S5.4 P0-1 gap-overlay attribution gate).
+        """
+        unattributed = cast(VenueEventRow, dict(self._fill()) | {"wallet_public_id": ""})
+        coord = self._coord_with_events(monkeypatch, [unattributed])
+        mock_repo = cast(AsyncMock, coord.repository)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo.shard_has_accruals = AsyncMock(return_value=False)
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), _make_checkpoint()
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is False
 
     @pytest.mark.asyncio
     async def test_corrupted_flat_checkpoint_cannot_close_real_position(
@@ -3342,7 +3557,10 @@ class TestRoundThreeFailClosed:
         Given: two durable rows with ONE exec id but different prices
             (replay dedup would silently keep the first),
         When: the no-gap evidence path evaluates them,
-        Then: the payload conflict fails the WHOLE certification.
+        Then: the payload conflict leaves the identity UNCERTIFIED and
+            records its canonical failed identity WITHOUT tripping the
+            global flag — an attributable malformed row quarantines only
+            its own identity (S5.4 P0-5).
         """
         coord = self._coord_with_events(
             monkeypatch,
@@ -3355,7 +3573,8 @@ class TestRoundThreeFailClosed:
             self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), _make_checkpoint()
         )
         assert certain is False
-        assert coord._recovery_certification_failed is True
+        assert coord._recovery_certification_failed is False
+        assert ("inst-pid", "paper", self._WALLET) in coord._failed_recovery_identities
 
     @pytest.mark.asyncio
     async def test_delta_replay_validates_identity_and_payload(
@@ -3408,6 +3627,12 @@ class TestRoundThreeFailClosed:
         assert TraderCoordinator._fill_events_sound([sound, conflicting]) is False
         keyless = cast(VenueEventRow, dict(sound) | {"exec_id": None, "trade_id": None})
         assert TraderCoordinator._fill_events_sound([keyless, keyless]) is True
+        null_side = cast(VenueEventRow, dict(sound) | {"side": None})
+        assert TraderCoordinator._fill_events_sound([null_side]) is False
+        unknown_side = cast(VenueEventRow, dict(sound) | {"side": "long"})
+        assert TraderCoordinator._fill_events_sound([unknown_side]) is False
+        upper_side = cast(VenueEventRow, dict(sound) | {"side": "BUY"})
+        assert TraderCoordinator._fill_events_sound([upper_side]) is True
 
     def test_digest_exactness_branches(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The digest is exact and complete.
@@ -3530,7 +3755,9 @@ class TestRoundThreeFailClosed:
         Given: a gapped shard whose durable history carries two rows
             under ONE exec id with different prices,
         When: _rebuild_shard_if_gapped runs,
-        Then: the rebuild is refused and the certification fails.
+        Then: the rebuild is refused and the identity is quarantined
+            (scoped) WITHOUT the global flag — an attributable malformed
+            row quarantines only its own identity (S5.4 P0-5).
         """
         wallet = "00000000-0000-7000-8000-aabbccddeeff"
         shard = "kraken.BTC-USD.live.waabbccddeeff"
@@ -3554,7 +3781,9 @@ class TestRoundThreeFailClosed:
         mock_repo.get_venue_events_after = AsyncMock(return_value=rows)
         _set_sqlalchemy_repo(coord, mock_repo)
         mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
         rebuilt = await coord._rebuild_shard_if_gapped(shard, datetime.now(UTC))
         assert rebuilt is False
-        assert coord._recovery_certification_failed is True
+        assert coord._recovery_certification_failed is False
+        assert ("inst-pid", "live", wallet) in coord._failed_recovery_identities
         assert shard not in coord.trade_service.known_shard_keys()

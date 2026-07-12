@@ -5,6 +5,7 @@ that handle order placement and fill reporting.
 """
 
 import asyncio
+import math
 import random
 import time
 from abc import ABC
@@ -53,6 +54,7 @@ from snapper.core.types import OrderExchange
 from snapper.core.types import ReplaceEventType
 from snapper.core.types import StreamTerminalEventType
 from snapper.core.types import TradeCommandStatusEnum
+from snapper.core.types import TradeSideEnum
 from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
@@ -5295,6 +5297,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         durable_holder = self.pending_orders.get(client_order_id)
         accounting = self._resolve_fill_accounting(execution, fill, durable_holder)
+        if accounting.is_fill_frame and self._published_fill_harmful(fill):
+            logger.error(
+                f"ExchangeExecutorService: refusing to book a malformed fill frame for "
+                f"{client_order_id} (published last_size={fill.last_size}, "
+                f"price={fill.last_price}, side={fill.side}) — dropping the fill "
+                f"entirely rather than writing poison to the durable plane or "
+                f"publishing a corrupt economics delta to the engine; reconciliation "
+                f"recovers a lost fill, a mis-booked one corrupts a position"
+            )
+            return
         await self._record_correlated_fill_event(
             execution, fill, accounting, exchange_order_id, original_order, exchange_name
         )
@@ -5305,6 +5317,56 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._register_fill_exec_id(execution, accounting)
         await self._persist_correlated_fill(execution, fill, client_order_id, self.wallet_public_id)
         self._remove_filled_order(fill, client_order_id, exchange_order_id, exchange_name)
+
+    @staticmethod
+    def _fill_economics_sound(size: float, price: float, side: str) -> bool:
+        """Return True when a POSITIVE-quantity fill's economics are sound.
+
+        Defense-in-depth bulwark mirroring the recovery-side verifier
+        (``TraderCoordinator._fill_events_sound``): the durable
+        ``fill_observed`` plane and the engine's live fill path both
+        trust these three values, so a positive fill must carry a finite
+        positive price and a ``buy``/``sell`` side. Size is required
+        positive here; the zero and negative cases are decided by the
+        callers (``_published_fill_harmful`` for the publish side,
+        ``_record_correlated_fill_event`` for the durable write), because
+        a zero-quantity frame is a legitimate no-op terminal-status
+        publish while a negative quantity is always corruption.
+        """
+        return (
+            isinstance(size, int | float)
+            and isinstance(price, int | float)
+            and math.isfinite(size)
+            and math.isfinite(price)
+            and size > 0
+            and price > 0
+            and str(side or "").lower() in (TradeSideEnum.BUY, TradeSideEnum.SELL)
+        )
+
+    def _published_fill_harmful(self, fill: ExecutionData) -> bool:
+        """Return True when publishing this fill would corrupt the engine.
+
+        The engine's live fill path (``apply_fill``) folds the PUBLISHED
+        delta (``fill.last_size`` at ``fill.last_price``) with no
+        economics guard of its own, so a corrupt published delta poisons
+        the live position, cash, turnover, and the persisted checkpoint
+        for the process lifetime (the next-restart digest then
+        fail-closed quarantines it, but the intra-process corruption is
+        real). A published delta is harmful when its size is non-finite
+        or negative (a spurious reduction, e.g. a futures bust or a
+        cumulative regressing after a NaN poll), or when a POSITIVE size
+        carries an unsound price or side. A published size of exactly
+        zero is a legitimate no-op: terminal-status frames (and the
+        walutomat ``-t`` zero-delta upgrade) publish a zero delta to
+        carry FILLED status without moving the position, so they must
+        NOT be aborted regardless of the (unused) price.
+        """
+        size = fill.last_size
+        if not isinstance(size, int | float) or not math.isfinite(size) or size < 0:
+            return True
+        if size == 0:
+            return False
+        return not self._fill_economics_sound(size, fill.last_price, fill.side)
 
     def _resolve_fill_accounting(
         self,
@@ -5345,7 +5407,25 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         original_order: OrderRequestData,
         exchange_name: OrderExchange,
     ) -> None:
-        """Persist the venue-event row for one correlated fill."""
+        """Persist the venue-event row for one correlated fill.
+
+        A zero (or non-finite) durable size carries no fill accounting —
+        status-only frames and the zero-delta terminal upgrade
+        (walutomat ``-t``) reach here to let the publish carry terminal
+        STATUS to the engine, but must NOT write a zero-size
+        ``fill_observed`` row: the recovery-side verifier rejects a
+        zero-size fill as malformed, so persisting one would quarantine
+        the whole shard on the next restart. The publish still runs in
+        the caller; only the durable fill row is suppressed. A malformed
+        REAL fill (positive size, bad price/side) never reaches here —
+        :meth:`_book_correlated_fill` aborts the whole booking first.
+        """
+        if not (
+            isinstance(accounting.durable_size, int | float)
+            and math.isfinite(accounting.durable_size)
+            and accounting.durable_size > 0
+        ):
+            return
         raw_tid = getattr(execution, "trade_id", None)
         await self._record_venue_event(
             {
