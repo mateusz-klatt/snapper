@@ -15,10 +15,12 @@ import pytest
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.portfolio.models import PositionStateModel
+from snapper.application.trade.trade_service import FillProjection
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ExecutionRow
+from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import VenueEventRow
 
@@ -230,7 +232,7 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        mock_repo.get_venue_events_after.assert_called_once_with(
+        mock_repo.get_venue_events_after.assert_any_call(
             shard_key="kraken.BTC-USD.live", after_id=10
         )
         shard = coord.trade_service._shards.get("kraken.BTC-USD.live")
@@ -1174,24 +1176,37 @@ class TestR9GapRecovery:
             position to 0.5.
         """
         coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": "00000000-0000-7000-8000-aabbccddeeff"}
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)
         mock_repo.get_all_checkpoints = AsyncMock(return_value=[])
         mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
         mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        orphan_fill = dict(
+            _make_venue_event(
+                event_id=5,
+                shard_key="kraken.BTC-USD.live.waabbccddeeff",
+                fill_size=0.5,
+                exec_id="a",
+                trade_id="a",
+            )
+        )
+        orphan_fill["wallet_public_id"] = "00000000-0000-7000-8000-aabbccddeeff"
         mock_repo.get_venue_events_after = AsyncMock(
-            return_value=[_make_venue_event(event_id=5, fill_size=0.5, exec_id="a", trade_id="a")]
+            return_value=[cast(VenueEventRow, orphan_fill)]
         )
         _set_sqlalchemy_repo(coord, mock_repo)
-        mock_repo.get_shard_keys_with_fills = AsyncMock(return_value=["kraken.BTC-USD.live"])
+        mock_repo.get_shard_keys_with_fills = AsyncMock(
+            return_value=["kraken.BTC-USD.live.waabbccddeeff"]
+        )
         mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
         mock_repo.shard_has_accruals = AsyncMock(return_value=False)
 
         await coord._recover_engine_state()
 
-        assert "BTC-USD@kraken-live" in coord.engines
-        engine = coord.engines["BTC-USD@kraken-live"]
+        assert "BTC-USD@kraken-live-waabbccddeeff" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live-waabbccddeeff"]
         assert engine.position_qty == pytest.approx(0.5)
-        assert coord._consumed_venue_event_watermarks["kraken.BTC-USD.live"] == 5
+        assert coord._consumed_venue_event_watermarks["kraken.BTC-USD.live.waabbccddeeff"] == 5
 
     @pytest.mark.asyncio
     async def test_pass3_skips_funding_shard(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1206,15 +1221,29 @@ class TestR9GapRecovery:
         mock_repo.get_all_checkpoints = AsyncMock(return_value=[])
         mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
         mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
-        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        funding_fill = dict(
+            _make_venue_event(
+                event_id=5,
+                shard_key="kraken.BTC-USD.live.waabbccddeeff",
+                fill_size=0.5,
+                exec_id="a",
+                trade_id="a",
+            )
+        )
+        funding_fill["wallet_public_id"] = "00000000-0000-7000-8000-aabbccddeeff"
+        mock_repo.get_venue_events_after = AsyncMock(
+            return_value=[cast(VenueEventRow, funding_fill)]
+        )
         _set_sqlalchemy_repo(coord, mock_repo)
-        mock_repo.get_shard_keys_with_fills = AsyncMock(return_value=["kraken.BTC-USD.live"])
+        mock_repo.get_shard_keys_with_fills = AsyncMock(
+            return_value=["kraken.BTC-USD.live.waabbccddeeff"]
+        )
         mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
         mock_repo.shard_has_accruals = AsyncMock(return_value=True)
 
         await coord._recover_engine_state()
 
-        assert "BTC-USD@kraken-live" not in coord.engines
+        assert "BTC-USD@kraken-live-waabbccddeeff" not in coord.engines
 
     @pytest.mark.asyncio
     async def test_pass3_skips_checkpoint_recovered_shard(
@@ -1347,19 +1376,29 @@ class TestR9GapRecovery:
     ) -> None:
         """When no engine can be created (invalid scope) the shard is skipped.
 
-        Given: a gapped, non-funding shard but engine creation returns None,
+        Given: a gapped, non-funding shard with attributed durable
+            fills but engine creation returns None,
         When: _rebuild_shard_if_gapped runs,
         Then: it skips before resetting the shard.
         """
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        shard = "kraken.BTC-USD.live.waabbccddeeff"
         coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": wallet}
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        skipped_fill = dict(
+            _make_venue_event(event_id=5, shard_key=shard, fill_size=0.5, exec_id="a", trade_id="a")
+        )
+        skipped_fill["wallet_public_id"] = wallet
+        mock_repo.get_venue_events_after = AsyncMock(
+            return_value=[cast(VenueEventRow, skipped_fill)]
+        )
         _set_sqlalchemy_repo(coord, mock_repo)
         mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
         coord._create_engine_for_recovery = AsyncMock(return_value=None)
-        await coord._rebuild_shard_if_gapped(
-            "kraken.BTC-USD.live", datetime(2024, 6, 1, tzinfo=UTC)
-        )
-        assert "kraken.BTC-USD.live" not in coord.trade_service._shards
+        await coord._rebuild_shard_if_gapped(shard, datetime(2024, 6, 1, tzinfo=UTC))
+        assert shard not in coord.trade_service._shards
 
     @pytest.mark.asyncio
     async def test_rebuild_shard_if_gapped_reuses_existing_engine(
@@ -1374,23 +1413,36 @@ class TestR9GapRecovery:
             and no second engine is created.
         """
         coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": "00000000-0000-7000-8000-aabbccddeeff"}
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)
-        mock_repo.get_venue_events_after = AsyncMock(
-            return_value=[_make_venue_event(event_id=5, fill_size=0.5, exec_id="a", trade_id="a")]
+        reuse_fill = dict(
+            _make_venue_event(
+                event_id=5,
+                shard_key="kraken.BTC-USD.live.waabbccddeeff",
+                fill_size=0.5,
+                exec_id="a",
+                trade_id="a",
+            )
         )
+        reuse_fill["wallet_public_id"] = "00000000-0000-7000-8000-aabbccddeeff"
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[cast(VenueEventRow, reuse_fill)])
         _set_sqlalchemy_repo(coord, mock_repo)
         mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
         existing = await coord._create_engine_for_recovery(
-            "BTC-USD", "kraken", strategy_tag=None, wallet_public_id="", operator_public_id=""
+            "BTC-USD",
+            "kraken",
+            strategy_tag=None,
+            wallet_public_id="00000000-0000-7000-8000-aabbccddeeff",
+            operator_public_id="",
         )
         assert existing is not None
-        coord._register_recovered_engine("BTC-USD@kraken-live", existing)
+        coord._register_recovered_engine("BTC-USD@kraken-live-waabbccddeeff", existing)
         coord._create_engine_for_recovery = AsyncMock()
         await coord._rebuild_shard_if_gapped(
-            "kraken.BTC-USD.live", datetime(2024, 6, 1, tzinfo=UTC)
+            "kraken.BTC-USD.live.waabbccddeeff", datetime(2024, 6, 1, tzinfo=UTC)
         )
         coord._create_engine_for_recovery.assert_not_called()
-        assert coord.engines["BTC-USD@kraken-live"] is existing
+        assert coord.engines["BTC-USD@kraken-live-waabbccddeeff"] is existing
         assert existing.position_qty == pytest.approx(0.5)
 
     @pytest.mark.asyncio
@@ -1444,43 +1496,44 @@ class TestR9GapRecovery:
             later live fill cannot book from a stale quantity/price.
         """
         coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": "00000000-0000-7000-8000-aabbccddeeff"}
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)
-        mock_repo.get_venue_events_after = AsyncMock(
-            return_value=[
+        flat_events = []
+        for event_id, side, price, exec_id in ((5, "buy", 100.0, "a"), (6, "sell", 110.0, "b")):
+            flat_event = dict(
                 _make_venue_event(
-                    event_id=5,
-                    side="buy",
-                    fill_price=100.0,
+                    event_id=event_id,
+                    shard_key="kraken.BTC-USD.live.waabbccddeeff",
+                    side=side,
+                    fill_price=price,
                     fill_size=0.5,
-                    exec_id="a",
-                    trade_id="a",
-                ),
-                _make_venue_event(
-                    event_id=6,
-                    side="sell",
-                    fill_price=110.0,
-                    fill_size=0.5,
-                    exec_id="b",
-                    trade_id="b",
-                ),
-            ]
-        )
+                    exec_id=exec_id,
+                    trade_id=exec_id,
+                )
+            )
+            flat_event["wallet_public_id"] = "00000000-0000-7000-8000-aabbccddeeff"
+            flat_events.append(cast(VenueEventRow, flat_event))
+        mock_repo.get_venue_events_after = AsyncMock(return_value=flat_events)
         _set_sqlalchemy_repo(coord, mock_repo)
         mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
         existing = await coord._create_engine_for_recovery(
-            "BTC-USD", "kraken", strategy_tag=None, wallet_public_id="", operator_public_id=""
+            "BTC-USD",
+            "kraken",
+            strategy_tag=None,
+            wallet_public_id="00000000-0000-7000-8000-aabbccddeeff",
+            operator_public_id="",
         )
         assert existing is not None
         existing.portfolio.positions["BTC-USD"] = PositionStateModel(
             quantity=0.5, average_price=100.0, realized_pnl=0.0
         )
-        coord._register_recovered_engine("BTC-USD@kraken-live", existing)
+        coord._register_recovered_engine("BTC-USD@kraken-live-waabbccddeeff", existing)
 
         await coord._rebuild_shard_if_gapped(
-            "kraken.BTC-USD.live", datetime(2024, 6, 1, tzinfo=UTC)
+            "kraken.BTC-USD.live.waabbccddeeff", datetime(2024, 6, 1, tzinfo=UTC)
         )
 
-        assert coord.engines["BTC-USD@kraken-live"] is existing
+        assert coord.engines["BTC-USD@kraken-live-waabbccddeeff"] is existing
         assert existing.position_qty == pytest.approx(0.0)
         assert "BTC-USD" not in existing.portfolio.positions
 
@@ -1523,20 +1576,37 @@ class TestRecoveryCertification:
     ) -> None:
         """A fully certain checkpoint recovery certifies its shard.
 
-        Given: a checkpoint shard with no fill gap, certain accruals,
-            no accrual-ledger rows, and a registered identity,
+        Given: a checkpoint shard with no fill gap, wallet-attributed
+            durable fill evidence, certain accruals, no accrual-ledger
+            rows, and a registered identity,
         When: _recover_checkpoint_row completes,
         Then: the shard joins the trusted set.
         """
         coord = _make_coord(monkeypatch)
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)
-        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        evidence = dict(
+            _make_venue_event(
+                event_id=1, fill_size=0.5, fill_price=50000.0, exec_id="E-1", trade_id="E-1"
+            )
+        )
+        evidence["wallet_public_id"] = "w-1"
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[cast(VenueEventRow, evidence)])
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
         mock_repo.get_accruals = AsyncMock(return_value=[])
         mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
         _set_sqlalchemy_repo(coord, mock_repo)
         coord._projection_identities["kraken.BTC-USD.live"] = ("inst-pid", "live", "w-1")
-        engine_key = await coord._recover_checkpoint_row(_make_checkpoint(), datetime.now(UTC))
+        checkpoint = _make_checkpoint(
+            position_qty=0.5,
+            entry_price=50000.0,
+            position_opened_at=datetime(2024, 6, 1, 1, tzinfo=UTC),
+            realized_pnl=0.0,
+            turnover=25000.0,
+            last_venue_event_id=1,
+            seen_exec_ids='["E-1"]',
+        )
+        checkpoint["wallet_public_id"] = "w-1"
+        engine_key = await coord._recover_checkpoint_row(checkpoint, datetime.now(UTC))
         assert engine_key is not None
         assert "kraken.BTC-USD.live" in coord._trusted_recovery_shards
 
@@ -1752,10 +1822,32 @@ class TestDurableExecutionLineage:
         coord = _make_coord(monkeypatch)
         coord._wallet_short_to_id = {"aabbccddeeff": wallet}
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)
-        checkpoint = _make_checkpoint(shard_key=tagged)
+        checkpoint = _make_checkpoint(
+            shard_key=tagged,
+            position_qty=0.5,
+            entry_price=50000.0,
+            position_opened_at=datetime(2024, 6, 1, 1, tzinfo=UTC),
+            realized_pnl=0.0,
+            turnover=25000.0,
+            last_venue_event_id=1,
+            seen_exec_ids='["E-1"]',
+        )
         checkpoint["wallet_public_id"] = wallet
         mock_repo.get_all_checkpoints = AsyncMock(return_value=[checkpoint])
-        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        evidence = dict(
+            _make_venue_event(
+                event_id=1,
+                shard_key=tagged,
+                fill_size=0.5,
+                fill_price=50000.0,
+                exec_id="E-1",
+                trade_id="E-1",
+            )
+        )
+        evidence["wallet_public_id"] = wallet
+        evidence["exchange"] = "paper"
+        evidence["mode"] = "paper"
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[cast(VenueEventRow, evidence)])
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
         mock_repo.get_accruals = AsyncMock(return_value=[])
         mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
@@ -1786,6 +1878,7 @@ class TestDurableExecutionLineage:
         mock_repo.get_fill_shard_keys_by_client_order_ids = AsyncMock(
             return_value=({"c-1": (tagged, wallet)}, set())
         )
+        mock_repo.get_fill_event_wallets = AsyncMock(return_value=[wallet])
         mock_repo.get_consumed_fill_venue_event_id = AsyncMock(return_value=42)
         mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
         mock_repo.get_active_position_identities = AsyncMock(return_value=[])
@@ -2278,9 +2371,1190 @@ class TestDurableExecutionLineage:
         coord3.engines["BTC-USD@kraken-live"] = incumbent
         reused = await coord3._get_or_create_active_order_engine(
             engine_key="BTC-USD@kraken-live",
-            db_order=cast(Any, {"instrument": "BTC-USD", "exchange": "kraken"}),
+            db_order=cast(OrderRow, {"instrument": "BTC-USD", "exchange": "kraken"}),
             wallet_public_id=wallet_b,
             operator_public_id="",
         )
         assert reused is None
         assert coord3._recovery_certification_failed is True
+
+
+def _active_order_row(
+    client_order_id: str = "c-1",
+    instrument: str = "BTC-USD",
+    exchange: str = "paper",
+    mode: str = "paper",
+    wallet_public_id: str = "00000000-0000-7000-8000-aabbccddeeff",
+) -> OrderRow:
+    """Build an active order row for durable-lineage recovery tests."""
+    return cast(
+        OrderRow,
+        {
+            "public_id": f"ord-{client_order_id}",
+            "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
+            "session_id": "s-test",
+            "sequence_id": 1,
+            "instrument": instrument,
+            "exchange": exchange,
+            "mode": mode,
+            "client_order_id": client_order_id,
+            "exchange_order_id": None,
+            "created_at": datetime(2024, 6, 1, tzinfo=UTC),
+            "updated_at": None,
+            "side": "buy",
+            "order_type": "market",
+            "price": None,
+            "size": 0.5,
+            "filled_size": 0.0,
+            "average_price": None,
+            "status": "open",
+            "time_in_force": None,
+            "error": None,
+            "leverage": None,
+            "wallet_public_id": wallet_public_id,
+            "operator_public_id": None,
+        },
+    )
+
+
+class TestActiveOrderDurableLineage:
+    """S5.1 F1: active-order recovery follows durable command lineage."""
+
+    _WALLET = "00000000-0000-7000-8000-aabbccddeeff"
+    _TAGGED = "paper.BTC-USD.paper.waabbccddeeff.heartbeat"
+
+    @pytest.mark.asyncio
+    async def test_tagged_paper_active_order_recovers_exact_shard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The F1 repro: the pending route lands on the true tagged shard.
+
+        Given: a tagged paper active order whose trade_commands lineage
+            resolves to its exact tagged shard and full wallet,
+        When: _recover_active_orders runs,
+        Then: the engine is recovered under the TAGGED identity, the
+            CID maps to the tagged shard (not an untagged phantom), and
+            the certification stays intact.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[_active_order_row()])
+        mock_repo.get_command_shard_keys_by_client_order_ids = AsyncMock(
+            return_value=({"c-1": (self._TAGGED, self._WALLET)}, set())
+        )
+        await coord._recover_active_orders(datetime.now(UTC))
+        engine_key = "BTC-USD@paper-heartbeat-waabbccddeeff"
+        assert engine_key in coord.engines
+        engine = coord.engines[engine_key]
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id == "c-1"
+        assert engine._shard_key == self._TAGGED
+        assert coord._order_shard_keys["c-1"] == self._TAGGED
+        assert "BTC-USD@paper-paper-waabbccddeeff" not in coord.engines
+        assert coord._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_paper_active_order_without_lineage_quarantines(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A paper order with no durable lineage must not reconstruct.
+
+        Given: a paper active order whose cid resolves to NO command
+            lineage,
+        When: _recover_active_orders runs,
+        Then: no engine and no pending route are installed and the
+            order's CANONICAL identity is quarantined — scoped to its
+            (instrument, mode, wallet), not the whole node, because a
+            missing lineage is absence of evidence, not corruption.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[_active_order_row()])
+        mock_repo.get_command_shard_keys_by_client_order_ids = AsyncMock(return_value=({}, set()))
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        await coord._recover_active_orders(datetime.now(UTC))
+        assert dict(coord.engines) == {}
+        assert "c-1" not in coord._order_shard_keys
+        assert ("inst-pid", "paper", self._WALLET) in coord._failed_recovery_identities
+        assert coord._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_command_lineage_quarantines(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Contradictory command lineage fails the certification.
+
+        Given: an active order whose command rows disagree on the shard,
+        When: _recover_active_orders runs,
+        Then: the row is skipped, nothing is installed, and the global
+            certification flag is set by the lineage lookup.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[_active_order_row()])
+        mock_repo.get_command_shard_keys_by_client_order_ids = AsyncMock(return_value=({}, {"c-1"}))
+        await coord._recover_active_orders(datetime.now(UTC))
+        assert dict(coord.engines) == {}
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_contradictory_lineage_wallet_quarantines(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A lineage wallet disagreement is a contradiction, not evidence.
+
+        Given: resolved lineage whose full wallet DISAGREES with the
+            order row's wallet,
+        When: _recover_active_orders runs,
+        Then: the row is skipped and the whole certification fails.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[_active_order_row()])
+        mock_repo.get_command_shard_keys_by_client_order_ids = AsyncMock(
+            return_value=(
+                {"c-1": (self._TAGGED, "00000000-0000-7000-8000-000000000002")},
+                set(),
+            )
+        )
+        await coord._recover_active_orders(datetime.now(UTC))
+        assert dict(coord.engines) == {}
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_live_active_order_reconstructs_without_lineage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live order may reconstruct: live shard keys carry no tag.
+
+        Given: a live kraken active order and a lineage lookup that
+            yields a non-tuple shape (unconfigured mock — exercising the
+            defensive guard),
+        When: _recover_active_orders runs,
+        Then: the untagged live reconstruction recovers the engine and
+            pending route exactly as before, with certification intact.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[_active_order_row(exchange="kraken", mode="live")]
+        )
+        await coord._recover_active_orders(datetime.now(UTC))
+        engine_key = "BTC-USD@kraken-live-waabbccddeeff"
+        assert engine_key in coord.engines
+        engine = coord.engines[engine_key]
+        assert engine.order_in_flight is True
+        assert coord._order_shard_keys["c-1"] == "kraken.BTC-USD.live.waabbccddeeff"
+        assert coord._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_lineage_lookup_failure_quarantines_paper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed lineage lookup leaves paper orders unresolved.
+
+        Given: a paper active order and a lineage lookup that raises,
+        When: _recover_active_orders runs,
+        Then: the paper order quarantines its canonical identity (no
+            engine, no route) — a transient lookup error must not
+            degrade into an untagged reconstruction, and must not
+            poison the whole node either.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[_active_order_row()])
+        mock_repo.get_command_shard_keys_by_client_order_ids = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        await coord._recover_active_orders(datetime.now(UTC))
+        assert dict(coord.engines) == {}
+        assert ("inst-pid", "paper", self._WALLET) in coord._failed_recovery_identities
+        assert coord._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_unattributable_paper_order_escalates_globally(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unattributable lineage-less paper order fails everything.
+
+        Given: a paper active order with no lineage whose instrument
+            cannot be resolved to a canonical identity,
+        When: _recover_active_orders runs,
+        Then: the recorder escalates to the GLOBAL certification flag —
+            an unattributable failure must block everything.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[_active_order_row()])
+        mock_repo.get_command_shard_keys_by_client_order_ids = AsyncMock(return_value=({}, set()))
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        await coord._recover_active_orders(datetime.now(UTC))
+        assert dict(coord.engines) == {}
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_divergent_engine_shard_records_both_identities(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A recreated engine that diverges from lineage never routes.
+
+        Given: resolved lineage whose shard string embeds a DIFFERENT
+            wallet segment than the engine will compute (full wallets
+            agree, so classification passes; the recreated engine's
+            shard key then diverges),
+        When: _recover_active_orders runs,
+        Then: BOTH identities are recorded as failed via the DURABLE
+            full wallet (the wallet-short cache is empty — proving the
+            attribution does not depend on it), no pending route is
+            installed, and no global flag is needed.
+        """
+        coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {}
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        divergent = "paper.BTC-USD.paper.w000000000000.heartbeat"
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[_active_order_row()])
+        mock_repo.get_command_shard_keys_by_client_order_ids = AsyncMock(
+            return_value=({"c-1": (divergent, self._WALLET)}, set())
+        )
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        await coord._recover_active_orders(datetime.now(UTC))
+        assert ("inst-pid", "paper", self._WALLET) in coord._failed_recovery_identities
+        assert "c-1" not in coord._order_shard_keys
+        engine = coord.engines["BTC-USD@paper-heartbeat-waabbccddeeff"]
+        assert engine.order_in_flight is False
+        assert coord._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_conflicting_cid_registration_refuses_pending(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A CID route conflict never leaves a half-installed pending engine.
+
+        Given: a live active order whose cid is ALREADY mapped to a
+            different shard,
+        When: _recover_active_orders runs,
+        Then: the mapping is dropped, the engine stays out of flight,
+            and the whole certification fails.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        coord._order_shard_keys["c-1"] = "kraken.ETH-USD.live"
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[_active_order_row(exchange="kraken", mode="live")]
+        )
+        mock_repo.get_command_shard_keys_by_client_order_ids = AsyncMock(return_value=({}, set()))
+        await coord._recover_active_orders(datetime.now(UTC))
+        engine = coord.engines["BTC-USD@kraken-live-waabbccddeeff"]
+        assert engine.order_in_flight is False
+        assert "c-1" not in coord._order_shard_keys
+        assert coord._recovery_certification_failed is True
+
+
+class TestNoGapFillEvidence:
+    """S5.1 F2: the no-gap branch demands attributable durable evidence."""
+
+    _WALLET = "00000000-0000-7000-8000-aabbccddeeff"
+    _SHARD = "paper.BTC-USD.paper.waabbccddeeff.heartbeat"
+
+    def _coord_with_repo(
+        self, monkeypatch: pytest.MonkeyPatch, events: object
+    ) -> TraderCoordinator:
+        """Build a coordinator whose repo reports no gap and given events."""
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_venue_events_after = AsyncMock(return_value=events)
+        return coord
+
+    def _evidence_event(
+        self,
+        event_id: int,
+        wallet: str,
+        exec_id: str,
+        fill_size: float = 0.5,
+        fill_price: float = 50000.0,
+    ) -> VenueEventRow:
+        """Build one exact-shard fill event attributed to ``wallet``."""
+        event = _make_venue_event(
+            event_id=event_id,
+            shard_key=self._SHARD,
+            fill_size=fill_size,
+            fill_price=fill_price,
+            exec_id=exec_id,
+            trade_id=exec_id,
+        )
+        return cast(
+            VenueEventRow,
+            dict(event) | {"wallet_public_id": wallet, "exchange": "paper", "mode": "paper"},
+        )
+
+    def _matching_checkpoint(self) -> TradeProjectionCheckpointRow:
+        """Checkpoint whose fill fold equals one 0.5@50000 buy (id E-1).
+
+        The digest is EXACT, so the opening timestamp and venue-event
+        watermark must equal the replay's (the fill event's timestamp
+        and id).
+        """
+        return _make_checkpoint(
+            shard_key=self._SHARD,
+            position_qty=0.5,
+            entry_price=50000.0,
+            position_opened_at=datetime(2024, 6, 1, 1, tzinfo=UTC),
+            realized_pnl=0.0,
+            turnover=25000.0,
+            last_venue_event_id=1,
+            seen_exec_ids='["E-1"]',
+        )
+
+    @pytest.mark.asyncio
+    async def test_fill_bearing_checkpoint_without_evidence_uncertified(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fill state with zero exact-shard events must not certify.
+
+        Given: a fill-bearing checkpoint whose shard reads "no gap"
+            because it has NO recorded fill events at all,
+        When: _correct_checkpoint_fill_gap evaluates it,
+        Then: the shard stays uncertain (the F2 poisoned-phantom repro:
+            certifying it would double count against the true shard).
+        """
+        coord = self._coord_with_repo(monkeypatch, [])
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), _make_checkpoint()
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_matching_evidence_and_digest_certifies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Wallet-attributed evidence whose replay matches certifies.
+
+        Given: a restored checkpoint whose fill state equals the full
+            chronological replay of its exact-shard events (one
+            0.5@50000 buy under the checkpoint wallet),
+        When: _correct_checkpoint_fill_gap evaluates the no-gap branch,
+        Then: the shard is certain — the warm-restart path stays intact.
+        """
+        coord = self._coord_with_repo(monkeypatch, [self._evidence_event(1, self._WALLET, "E-1")])
+        checkpoint = self._matching_checkpoint()
+        coord._restore_trade_service_from_checkpoint(checkpoint, self._SHARD, [])
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), checkpoint
+        )
+        assert certain is True
+        assert coord._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_digest_mismatch_quarantines(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A restored state exceeding the durable replay is poison.
+
+        Given: a checkpoint restored with quantity 1.5 while the exact
+            shard's durable events only fold to 1.0 (the partial-poison
+            repro: one legitimate same-wallet fill must not certify the
+            rest of the state),
+        When: _correct_checkpoint_fill_gap evaluates the no-gap branch,
+        Then: the digest mismatch fails the WHOLE projection
+            certification.
+        """
+        coord = self._coord_with_repo(
+            monkeypatch, [self._evidence_event(1, self._WALLET, "E-1", fill_size=1.0)]
+        )
+        poisoned = _make_checkpoint(
+            shard_key=self._SHARD,
+            position_qty=1.5,
+            entry_price=50000.0,
+            realized_pnl=0.0,
+            turnover=75000.0,
+            seen_exec_ids='["E-1"]',
+        )
+        coord._restore_trade_service_from_checkpoint(poisoned, self._SHARD, [])
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), poisoned
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_identity_digest_mismatch_quarantines(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fill identities are part of the digest below the dedup cap.
+
+        Given: a restored checkpoint whose numerics match the replay but
+            whose recorded fill identity set differs from the durable
+            evidence,
+        When: _correct_checkpoint_fill_gap evaluates the no-gap branch,
+        Then: the identity mismatch fails the certification.
+        """
+        coord = self._coord_with_repo(monkeypatch, [self._evidence_event(1, self._WALLET, "E-9")])
+        checkpoint = self._matching_checkpoint()
+        coord._restore_trade_service_from_checkpoint(checkpoint, self._SHARD, [])
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), checkpoint
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_foreign_or_mixed_evidence_quarantines(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Foreign and mixed wallet evidence contradict the checkpoint.
+
+        Given: fill evidence from a different wallet, then from a mix of
+            the checkpoint's and a foreign wallet,
+        When: _correct_checkpoint_fill_gap evaluates each,
+        Then: both fail the WHOLE projection certification — suffix-twin
+            evidence must never certify under the wrong wallet.
+        """
+        other = "00000000-0000-7000-8000-000000000002"
+        coord = self._coord_with_repo(monkeypatch, [self._evidence_event(1, other, "E-1")])
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), _make_checkpoint()
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is True
+        coord2 = self._coord_with_repo(
+            monkeypatch,
+            [
+                self._evidence_event(1, self._WALLET, "E-1"),
+                self._evidence_event(2, other, "E-2"),
+            ],
+        )
+        certain2 = await coord2._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), _make_checkpoint()
+        )
+        assert certain2 is False
+        assert coord2._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_unattributed_evidence_uncertified_without_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unattributed rows are absence of knowledge, not contradiction.
+
+        Given: fill evidence where one row lacks wallet attribution, and
+            separately a checkpoint whose own wallet is unresolved,
+        When: _correct_checkpoint_fill_gap evaluates each,
+        Then: both stay uncertified WITHOUT the global flag.
+        """
+        coord = self._coord_with_repo(
+            monkeypatch,
+            [
+                self._evidence_event(1, "", "E-1"),
+                self._evidence_event(2, self._WALLET, "E-2"),
+            ],
+        )
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), _make_checkpoint()
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is False
+        coord2 = self._coord_with_repo(monkeypatch, [self._evidence_event(1, self._WALLET, "E-1")])
+        certain2 = await coord2._correct_checkpoint_fill_gap(
+            self._SHARD, "", "paper", "paper", datetime.now(UTC), _make_checkpoint()
+        )
+        assert certain2 is False
+        assert coord2._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_flat_checkpoint_needs_no_evidence(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A checkpoint without fill state certifies with no evidence scan.
+
+        Given: an all-zero (never-filled) checkpoint on the no-gap path
+            with no durable fill events,
+        When: _correct_checkpoint_fill_gap evaluates it,
+        Then: it is certain — absence of fills matches absence of state.
+        """
+        coord = self._coord_with_repo(monkeypatch, [])
+        flat = _make_checkpoint(
+            position_qty=0.0, realized_pnl=0.0, turnover=0.0, last_venue_event_id=0
+        )
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), flat
+        )
+        assert certain is True
+
+    @pytest.mark.asyncio
+    async def test_malformed_evidence_shape_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-list evidence result must never certify.
+
+        Given: a repository whose evidence query returns a non-list
+            shape,
+        When: _correct_checkpoint_fill_gap evaluates a fill-bearing
+            checkpoint,
+        Then: the shard stays uncertified — a certification input fails
+            closed, never open.
+        """
+        coord = self._coord_with_repo(monkeypatch, object())
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), _make_checkpoint()
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is False
+
+    @pytest.mark.asyncio
+    async def test_order_only_watermark_needs_no_fill_evidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An order-only shard (acks bumped the watermark) stays certain.
+
+        Given: a checkpoint whose fill-derived fields are all zero but
+            whose venue-event watermark advanced (submits/rejects also
+            bump it),
+        When: _correct_checkpoint_fill_gap evaluates the no-gap branch,
+        Then: it is certain — an honest never-filled shard must not be
+            permanently uncertified by watermark motion alone.
+        """
+        coord = self._coord_with_repo(monkeypatch, [])
+        order_only = _make_checkpoint(
+            position_qty=0.0, realized_pnl=0.0, turnover=0.0, last_venue_event_id=10
+        )
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), order_only
+        )
+        assert certain is True
+
+    @pytest.mark.asyncio
+    async def test_no_checkpoint_no_gap_stays_certain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A checkpoint-less no-gap evaluation keeps the legacy outcome.
+
+        Given: a no-gap shard evaluated WITHOUT a checkpoint row (legacy
+            call shape),
+        When: _correct_checkpoint_fill_gap runs,
+        Then: it is certain — there is no fill state to demand evidence
+            for.
+        """
+        coord = self._coord_with_repo(monkeypatch, [])
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC)
+        )
+        assert certain is True
+
+    @pytest.mark.asyncio
+    async def test_evidence_helper_tolerates_plain_repository(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The evidence helper is a no-op without a SQLAlchemy repository.
+
+        Given: a coordinator with a plain (non-SQLAlchemy) repository,
+        When: _checkpoint_fill_evidence_certain runs on a fill-bearing
+            checkpoint,
+        Then: it returns certain — evidence validation is only defined
+            over the durable venue-event plane.
+        """
+        coord = _make_coord(monkeypatch)
+        coord.repository = AsyncMock()
+        certain = await coord._checkpoint_fill_evidence_certain(
+            self._SHARD, self._WALLET, _make_checkpoint()
+        )
+        assert certain is True
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_failure_attribution_uses_durable_wallet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """S5.1 F4: the identity-miss site attributes via the durable wallet.
+
+        Given: a checkpoint shard whose projection identity is missing
+            (instrument lookup yields no public id) and whose
+            wallet-short cache is EMPTY (renames/collisions can poison
+            it), with the checkpoint carrying its durable full wallet,
+        When: _recover_checkpoint_row records the recovery failure,
+        Then: the recorder is invoked with the checkpoint's durable full
+            wallet and its temporal anchor — never the cache.
+        """
+        coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {}
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        mock_repo.get_fill_event_wallets = AsyncMock(return_value=[self._WALLET])
+        mock_repo.get_accruals = AsyncMock(return_value=[])
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        checkpoint = _make_checkpoint(shard_key=self._SHARD)
+        checkpoint["wallet_public_id"] = self._WALLET
+        recorder = AsyncMock()
+        with patch.object(coord, "_record_recovery_shard_failure", recorder):
+            engine_key = await coord._recover_checkpoint_row(checkpoint, datetime.now(UTC))
+        assert engine_key == "BTC-USD@paper-heartbeat-waabbccddeeff"
+        recorder.assert_awaited_once_with(
+            self._SHARD,
+            durable_wallet_public_id=self._WALLET,
+            anchor=checkpoint["checkpoint_at"],
+        )
+
+
+class TestRebuildWalletAgreement:
+    """S5.2 C2: the venue-only rebuild never mutates a foreign-wallet engine."""
+
+    _WALLET_A = "00000000-0000-7000-8000-aabbccddeeff"
+    _WALLET_B = "11111111-0000-7000-8000-aabbccddeeff"
+    _SHARD = "kraken.BTC-USD.live.waabbccddeeff"
+
+    def _coord(
+        self, monkeypatch: pytest.MonkeyPatch, events: list[VenueEventRow]
+    ) -> TraderCoordinator:
+        """Build a coordinator with a gapped shard and given durable events."""
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_venue_events_after = AsyncMock(return_value=events)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        return coord
+
+    def _event(self, wallet: str, exec_id: str = "E-1") -> VenueEventRow:
+        """Build one gapped-shard fill event owned by ``wallet``."""
+        event = dict(
+            _make_venue_event(
+                event_id=1, shard_key=self._SHARD, fill_size=0.1, exec_id=exec_id, trade_id=exec_id
+            )
+        )
+        event["wallet_public_id"] = wallet
+        return cast(VenueEventRow, event)
+
+    @pytest.mark.asyncio
+    async def test_rebuild_refuses_foreign_wallet_incumbent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Wallet A's events never replay into twin B's engine.
+
+        Given: a gapped shard whose durable events belong to wallet A
+            while the ONLY engine serving that shard STRING carries
+            suffix-twin wallet B,
+        When: _rebuild_shard_if_gapped runs,
+        Then: the rebuild refuses, the certification fails, and twin
+            B's engine state is untouched (the C2 repro replaced B's
+            0.2 with A's 0.1 while staying trusted).
+        """
+        coord = self._coord(monkeypatch, [self._event(self._WALLET_A)])
+        coord._wallet_short_to_id = {"aabbccddeeff": self._WALLET_A}
+        twin_b = MagicMock()
+        twin_b._shard_key = self._SHARD
+        twin_b.wallet_public_id = self._WALLET_B
+        coord.engines["BTC-USD@kraken-live-twinb"] = twin_b
+        rebuilt = await coord._rebuild_shard_if_gapped(self._SHARD, datetime.now(UTC))
+        assert rebuilt is False
+        assert coord._recovery_certification_failed is True
+        assert self._SHARD not in coord.trade_service.known_shard_keys()
+
+    @pytest.mark.asyncio
+    async def test_rebuild_refuses_twin_incumbent_ambiguity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two incumbents on one shard string cannot be rebuilt into.
+
+        Given: a gapped shard served by TWO engines (suffix twins), one
+            of which contradicts the durable evidence wallet,
+        When: _rebuild_shard_if_gapped runs,
+        Then: the rebuild refuses and the certification fails.
+        """
+        coord = self._coord(monkeypatch, [self._event(self._WALLET_A)])
+        coord._wallet_short_to_id = {}
+        twin_a = MagicMock()
+        twin_a._shard_key = self._SHARD
+        twin_a.wallet_public_id = self._WALLET_A
+        twin_b = MagicMock()
+        twin_b._shard_key = self._SHARD
+        twin_b.wallet_public_id = self._WALLET_B
+        coord.engines["twin-a"] = twin_a
+        coord.engines["twin-b"] = twin_b
+        rebuilt = await coord._rebuild_shard_if_gapped(self._SHARD, datetime.now(UTC))
+        assert rebuilt is False
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_rebuild_refuses_identity_contradicting_events(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Events contradicting the shard identity never replay.
+
+        Given: a gapped shard whose durable events carry a DIFFERENT
+            instrument than the shard key names,
+        When: _rebuild_shard_if_gapped runs,
+        Then: the rebuild refuses and the certification fails — a
+            replay would launder a foreign identity into the shard.
+        """
+        foreign = dict(self._event(self._WALLET_A))
+        foreign["instrument"] = "ETH-USD"
+        coord = self._coord(monkeypatch, [cast(VenueEventRow, foreign)])
+        coord._wallet_short_to_id = {"aabbccddeeff": self._WALLET_A}
+        rebuilt = await coord._rebuild_shard_if_gapped(self._SHARD, datetime.now(UTC))
+        assert rebuilt is False
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_rebuild_adopts_evidence_wallet_when_unresolved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unresolved wallet short adopts the unique durable wallet.
+
+        Given: a gapped shard whose wallet short no longer resolves but
+            whose durable events all carry ONE full wallet,
+        When: _rebuild_shard_if_gapped runs,
+        Then: the rebuild proceeds under the durable evidence wallet and
+            the created engine carries it.
+        """
+        coord = self._coord(monkeypatch, [self._event(self._WALLET_A)])
+        coord._wallet_short_to_id = {}
+        rebuilt = await coord._rebuild_shard_if_gapped(self._SHARD, datetime.now(UTC))
+        assert rebuilt is True
+        engine = coord.engines["BTC-USD@kraken-live-waabbccddeeff"]
+        assert engine.wallet_public_id == self._WALLET_A
+        assert coord._recovery_certification_failed is False
+
+
+class TestOwnerKeyedAmbiguity:
+    """S5.2 C4: ambiguity counts (shard, FULL wallet) owners, not strings."""
+
+    _WALLET_A = "00000000-0000-7000-8000-aabbccddeeff"
+    _WALLET_B = "11111111-0000-7000-8000-aabbccddeeff"
+    _SHARD = "kraken.BTC-USD.live.waabbccddeeff"
+
+    def test_legacy_scope_counts_twin_owners_of_one_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Suffix twins sharing ONE shard string still refuse walletless routing.
+
+        Given: two engines whose shard keys are the SAME string but
+            whose FULL wallets differ, registered via the registry,
+        When: the legacy-scope shard set is inspected,
+        Then: it holds two (shard, wallet) owners — a string-keyed set
+            would collapse them to one and let first-wins routing feed
+            the wrong twin.
+        """
+        coord = _make_coord(monkeypatch)
+        twin_a = MagicMock()
+        twin_a.exchange = "kraken"
+        twin_a.instrument = "BTC-USD"
+        twin_a.wallet_public_id = self._WALLET_A
+        twin_a._shard_key = self._SHARD
+        twin_a.pending_client_order_id = None
+        twin_b = MagicMock()
+        twin_b.exchange = "kraken"
+        twin_b.instrument = "BTC-USD"
+        twin_b.wallet_public_id = self._WALLET_B
+        twin_b._shard_key = self._SHARD
+        twin_b.pending_client_order_id = None
+        coord._register_engine_for_lookup(twin_a)
+        coord._register_engine_for_lookup(twin_b)
+        assert coord._legacy_scope_shard_keys[("kraken", "BTC-USD")] == {
+            (self._SHARD, self._WALLET_A),
+            (self._SHARD, self._WALLET_B),
+        }
+
+    def test_identity_conflict_quarantines(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A second identity claiming one shard string fails certification.
+
+        Given: a shard string already registered to wallet A's identity,
+        When: suffix-twin wallet B's engine registers the same string,
+        Then: the original identity is kept and the WHOLE projection
+            certification fails — both cannot be truth.
+        """
+        coord = _make_coord(monkeypatch)
+        coord._projection_identities[self._SHARD] = ("inst-pid", "live", self._WALLET_A)
+        twin_b = MagicMock()
+        twin_b._shard_key = self._SHARD
+        twin_b.mode = "live"
+        twin_b.wallet_public_id = self._WALLET_B
+        twin_b.instrument = "BTC-USD"
+        twin_b.instrument_specs = {"BTC-USD": {"public_id": "inst-pid"}}
+        coord._register_projection_identity(twin_b)
+        assert coord._projection_identities[self._SHARD] == ("inst-pid", "live", self._WALLET_A)
+        assert coord._recovery_certification_failed is True
+
+
+class TestFillDigestBranches:
+    """Edge branches of the replay-digest and event-identity validators."""
+
+    def test_fill_digest_edge_branches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-finite, None-mismatched, and drifted entries never match.
+
+        Given: a restored shard and replay projections that disagree in
+            each edge dimension (NaN numerics, entry None-mismatch, NaN
+            entries, entry drift) plus one fully agreeing flat pair,
+        When: _fill_digest_matches compares them,
+        Then: only the agreeing pair matches — corruption never does.
+        """
+        coord = _make_coord(monkeypatch)
+        shard = coord.trade_service._get_or_create_shard("digest-test")
+
+        def projection(
+            qty: float = 0.0,
+            entry: float | None = None,
+            realized: float = 0.0,
+            turnover: float = 0.0,
+        ) -> FillProjection:
+            return {
+                "position_qty": qty,
+                "entry_price": entry,
+                "position_opened_at": None,
+                "realized_pnl": realized,
+                "cash": 0.0,
+                "turnover": turnover,
+                "seen_exec_ids": OrderedDict(),
+                "last_venue_event_id": 0,
+            }
+
+        assert coord._fill_digest_matches(shard, projection()) is True
+        assert coord._fill_digest_matches(shard, projection(qty=float("nan"))) is False
+        assert coord._fill_digest_matches(shard, projection(entry=50000.0)) is False
+        shard.position.entry_price = float("nan")
+        assert coord._fill_digest_matches(shard, projection(entry=float("nan"))) is False
+        shard.position.entry_price = 50000.0
+        assert coord._fill_digest_matches(shard, projection(entry=50001.0)) is False
+        assert coord._fill_digest_matches(shard, projection(entry=50000.0)) is True
+
+    def test_event_identity_validation_branches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Each present-but-disagreeing identity field is a contradiction.
+
+        Given: exact-shard events whose exchange, then mode, disagree
+            with the parsed shard identity, plus one legacy event with
+            EMPTY identity fields,
+        When: _venue_events_match_shard validates them,
+        Then: the disagreeing events fail and the empty-field legacy
+            event is tolerated (absence is not contradiction).
+        """
+        coord = _make_coord(monkeypatch)
+        base = _make_venue_event(event_id=1)
+        assert coord._venue_events_match_shard([base], "kraken", "BTC-USD", "live") is True
+        wrong_exchange = cast(VenueEventRow, dict(base) | {"exchange": "binance"})
+        assert (
+            coord._venue_events_match_shard([wrong_exchange], "kraken", "BTC-USD", "live") is False
+        )
+        wrong_mode = cast(VenueEventRow, dict(base) | {"mode": "paper"})
+        assert coord._venue_events_match_shard([wrong_mode], "kraken", "BTC-USD", "live") is False
+        legacy = cast(VenueEventRow, dict(base) | {"exchange": "", "instrument": "", "mode": ""})
+        assert coord._venue_events_match_shard([legacy], "kraken", "BTC-USD", "live") is True
+
+
+class TestRoundThreeFailClosed:
+    """S5.3: flat-bypass, event validation, adoption, and digest exactness."""
+
+    _WALLET = "00000000-0000-7000-8000-aabbccddeeff"
+    _SHARD = "paper.BTC-USD.paper.waabbccddeeff.heartbeat"
+
+    def _coord_with_events(
+        self, monkeypatch: pytest.MonkeyPatch, events: list[VenueEventRow]
+    ) -> TraderCoordinator:
+        """Coordinator whose repo reports no gap and the given history."""
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_venue_events_after = AsyncMock(return_value=events)
+        return coord
+
+    def _fill(
+        self,
+        event_id: int = 1,
+        exec_id: str = "E-1",
+        fill_size: float = 0.5,
+        fill_price: float = 50000.0,
+    ) -> VenueEventRow:
+        """One sound exact-shard fill attributed to the checkpoint wallet."""
+        event = dict(
+            _make_venue_event(
+                event_id=event_id,
+                shard_key=self._SHARD,
+                fill_size=fill_size,
+                fill_price=fill_price,
+                exec_id=exec_id,
+                trade_id=exec_id,
+            )
+        )
+        event["wallet_public_id"] = self._WALLET
+        event["exchange"] = "paper"
+        event["mode"] = "paper"
+        return cast(VenueEventRow, event)
+
+    @pytest.mark.asyncio
+    async def test_corrupted_flat_checkpoint_cannot_close_real_position(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A flat checkpoint gets no evidence bypass.
+
+        Given: a FLAT (all-zero) checkpoint while the exact shard holds
+            a durable consumed 0.5 fill (the round-3 repro: trusting
+            the flat row would close the real position),
+        When: _correct_checkpoint_fill_gap evaluates the no-gap branch,
+        Then: the digest mismatch fails the WHOLE certification.
+        """
+        coord = self._coord_with_events(monkeypatch, [self._fill()])
+        flat = _make_checkpoint(
+            shard_key=self._SHARD,
+            position_qty=0.0,
+            entry_price=None,
+            realized_pnl=0.0,
+            turnover=0.0,
+            last_venue_event_id=0,
+            seen_exec_ids="[]",
+        )
+        coord._restore_trade_service_from_checkpoint(flat, self._SHARD, [])
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), flat
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_identity_contradicting_evidence_quarantines(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Evidence whose instrument contradicts the shard never certifies.
+
+        Given: exact-shard history containing an ETH-USD fill under the
+            BTC shard (the round-3 repro),
+        When: the no-gap evidence path evaluates it,
+        Then: the identity contradiction fails the WHOLE certification.
+        """
+        foreign = dict(self._fill())
+        foreign["instrument"] = "ETH-USD"
+        coord = self._coord_with_events(monkeypatch, [cast(VenueEventRow, foreign)])
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), _make_checkpoint()
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_conflicting_duplicate_payloads_quarantine(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rows sharing an exec id must agree on their payload.
+
+        Given: two durable rows with ONE exec id but different prices
+            (replay dedup would silently keep the first),
+        When: the no-gap evidence path evaluates them,
+        Then: the payload conflict fails the WHOLE certification.
+        """
+        coord = self._coord_with_events(
+            monkeypatch,
+            [
+                self._fill(event_id=1, exec_id="E-1", fill_price=50000.0),
+                self._fill(event_id=2, exec_id="E-1", fill_price=51000.0),
+            ],
+        )
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), _make_checkpoint()
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_delta_replay_validates_identity_and_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Delta events are validated before the restore consumes them.
+
+        Given: a checkpoint whose delta replay carries a fill from a
+            DIFFERENT instrument and a zero-size fill,
+        When: _recover_checkpoint_row runs,
+        Then: the certification fails on both grounds.
+        """
+        coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": self._WALLET}
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.get_accruals = AsyncMock(return_value=[])
+        mock_repo.shard_has_any_accruals = AsyncMock(return_value=False)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        bad_delta = dict(self._fill(event_id=11, exec_id="E-11"))
+        bad_delta["instrument"] = "ETH-USD"
+        bad_delta["fill_size"] = 0.0
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[cast(VenueEventRow, bad_delta)])
+        checkpoint = _make_checkpoint(shard_key=self._SHARD)
+        checkpoint["wallet_public_id"] = self._WALLET
+        await coord._recover_checkpoint_row(checkpoint, datetime.now(UTC))
+        assert coord._recovery_certification_failed is True
+
+    def test_fill_events_sound_branches(self) -> None:
+        """Payload soundness rejects each malformed shape.
+
+        Given: fills with missing, non-finite, zero, and negative
+            economics, agreeing and conflicting duplicates, and id-less
+            rows,
+        When: _fill_events_sound validates each set,
+        Then: only sound, agreeing payloads pass.
+        """
+        sound = self._fill()
+        assert TraderCoordinator._fill_events_sound([sound]) is True
+        assert TraderCoordinator._fill_events_sound([sound, sound]) is True
+        missing = cast(VenueEventRow, dict(sound) | {"fill_size": None})
+        assert TraderCoordinator._fill_events_sound([missing]) is False
+        nan_price = cast(VenueEventRow, dict(sound) | {"fill_price": float("nan")})
+        assert TraderCoordinator._fill_events_sound([nan_price]) is False
+        zero_size = cast(VenueEventRow, dict(sound) | {"fill_size": 0.0})
+        assert TraderCoordinator._fill_events_sound([zero_size]) is False
+        negative_price = cast(VenueEventRow, dict(sound) | {"fill_price": -1.0})
+        assert TraderCoordinator._fill_events_sound([negative_price]) is False
+        conflicting = cast(VenueEventRow, dict(sound) | {"fill_price": 51000.0})
+        assert TraderCoordinator._fill_events_sound([sound, conflicting]) is False
+        keyless = cast(VenueEventRow, dict(sound) | {"exec_id": None, "trade_id": None})
+        assert TraderCoordinator._fill_events_sound([keyless, keyless]) is True
+
+    def test_digest_exactness_branches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The digest is exact and complete.
+
+        Given: replay projections that drift by 5e-10, disagree on the
+            opening timestamp, disagree on the watermark, or saturate
+            the identity cap,
+        When: _fill_digest_matches compares them,
+        Then: every one of them fails to match.
+        """
+        coord = _make_coord(monkeypatch)
+        shard = coord.trade_service._get_or_create_shard("digest-exact")
+
+        def projection(
+            qty: float = 0.0,
+            opened_at: datetime | None = None,
+            watermark: int = 0,
+            seen: OrderedDict[str, None] | None = None,
+        ) -> FillProjection:
+            return {
+                "position_qty": qty,
+                "entry_price": None,
+                "position_opened_at": opened_at,
+                "realized_pnl": 0.0,
+                "cash": 0.0,
+                "turnover": 0.0,
+                "seen_exec_ids": seen if seen is not None else OrderedDict(),
+                "last_venue_event_id": watermark,
+            }
+
+        assert coord._fill_digest_matches(shard, projection()) is True
+        assert coord._fill_digest_matches(shard, projection(qty=5e-10)) is False
+        assert (
+            coord._fill_digest_matches(
+                shard, projection(opened_at=datetime(2024, 6, 1, tzinfo=UTC))
+            )
+            is False
+        )
+        assert coord._fill_digest_matches(shard, projection(watermark=7)) is False
+        saturated: OrderedDict[str, None] = OrderedDict(
+            (f"id-{index}", None) for index in range(10_000)
+        )
+        shard.seen_exec_ids = saturated
+        assert coord._fill_digest_matches(shard, projection(seen=saturated.copy())) is False
+
+    @pytest.mark.asyncio
+    async def test_rebuild_unattributed_fills_stay_uncertified(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unattributed durable fills never rebuild by topology.
+
+        Given: a gapped shard whose durable fills carry NO wallet
+            attribution (only the boot cache knows the short),
+        When: _rebuild_shard_if_gapped runs,
+        Then: nothing is rebuilt and the shard's canonical identity is
+            recorded as failed WITHOUT the global flag — absence of
+            durable attribution is not corruption, but it must never
+            certify or adopt a wallet by topology either.
+        """
+        coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": self._WALLET}
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        unattributed = dict(
+            _make_venue_event(
+                event_id=5,
+                shard_key="kraken.BTC-USD.live.waabbccddeeff",
+                fill_size=0.5,
+                exec_id="a",
+                trade_id="a",
+            )
+        )
+        mock_repo.get_venue_events_after = AsyncMock(
+            return_value=[cast(VenueEventRow, unattributed)]
+        )
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-pid")
+        rebuilt = await coord._rebuild_shard_if_gapped(
+            "kraken.BTC-USD.live.waabbccddeeff", datetime.now(UTC)
+        )
+        assert rebuilt is False
+        assert dict(coord.engines) == {}
+        assert ("inst-pid", "live", self._WALLET) in coord._failed_recovery_identities
+        assert coord._recovery_certification_failed is False
+        assert "kraken.BTC-USD.live.waabbccddeeff" not in coord.trade_service.known_shard_keys()
+
+    @pytest.mark.asyncio
+    async def test_gap_overlay_validates_identity_and_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gap-overlay branch refuses contradicting durable events.
+
+        Given: a gapped checkpoint shard whose full history carries a
+            fill from a DIFFERENT instrument,
+        When: _correct_checkpoint_fill_gap runs the overlay branch,
+        Then: the overlay is refused and the certification fails —
+            replaying it would launder a foreign identity into the
+            restored state.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        foreign = dict(self._fill())
+        foreign["instrument"] = "ETH-USD"
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[cast(VenueEventRow, foreign)])
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        mock_repo.shard_has_accruals = AsyncMock(return_value=False)
+        certain = await coord._correct_checkpoint_fill_gap(
+            self._SHARD, self._WALLET, "paper", "paper", datetime.now(UTC), _make_checkpoint()
+        )
+        assert certain is False
+        assert coord._recovery_certification_failed is True
+
+    @pytest.mark.asyncio
+    async def test_rebuild_refuses_conflicting_payloads(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The venue-only rebuild refuses conflicting duplicate payloads.
+
+        Given: a gapped shard whose durable history carries two rows
+            under ONE exec id with different prices,
+        When: _rebuild_shard_if_gapped runs,
+        Then: the rebuild is refused and the certification fails.
+        """
+        wallet = "00000000-0000-7000-8000-aabbccddeeff"
+        shard = "kraken.BTC-USD.live.waabbccddeeff"
+        coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"aabbccddeeff": wallet}
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        rows = []
+        for event_id, price in ((5, 100.0), (6, 110.0)):
+            row = dict(
+                _make_venue_event(
+                    event_id=event_id,
+                    shard_key=shard,
+                    fill_size=0.5,
+                    fill_price=price,
+                    exec_id="dup",
+                    trade_id="dup",
+                )
+            )
+            row["wallet_public_id"] = wallet
+            rows.append(cast(VenueEventRow, row))
+        mock_repo.get_venue_events_after = AsyncMock(return_value=rows)
+        _set_sqlalchemy_repo(coord, mock_repo)
+        mock_repo.shard_has_fill_gap = AsyncMock(return_value=True)
+        rebuilt = await coord._rebuild_shard_if_gapped(shard, datetime.now(UTC))
+        assert rebuilt is False
+        assert coord._recovery_certification_failed is True
+        assert shard not in coord.trade_service.known_shard_keys()

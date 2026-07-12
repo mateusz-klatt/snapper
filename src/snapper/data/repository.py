@@ -7523,7 +7523,18 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         wallet_public_id: str = "",
     ) -> list[OrderRow]:
-        """Retrieve non-terminal orders for startup recovery."""
+        """Retrieve non-terminal orders for startup recovery.
+
+        Clock-free: rows are selected by the current-version sentinel,
+        never by a caller-clock temporal window — an order stamped by a
+        skewed writer AHEAD of the recovery clock is still an open
+        order whose fills must route exactly, so hiding it behind
+        ``where_active(..., as_of=now)`` would silently uninstall its
+        pending route and let a later fill scope-route into a sibling
+        (the Phase-0 clock-skew bug class). ``as_of`` is kept for
+        interface compatibility and deliberately unused.
+        """
+        del as_of
         async with self.session() as s:
             query = (
                 select(Order, Instrument, Symbol)
@@ -7531,18 +7542,18 @@ class SQLAlchemyRepository(Repository):
                     Instrument,
                     and_(
                         Order.instrument_public_id == Instrument.public_id,
-                        *where_active(Instrument, as_of),
+                        Instrument.known_to == KNOWN_TO_MAX,
                     ),
                 )
                 .join(
                     Symbol,
                     and_(
                         Instrument.symbol_public_id == Symbol.public_id,
-                        *where_active(Symbol, as_of),
+                        Symbol.known_to == KNOWN_TO_MAX,
                     ),
                 )
                 .where(
-                    *where_active(Order, as_of),
+                    Order.known_to == KNOWN_TO_MAX,
                     Order.status.in_(self._ACTIVE_ORDER_STATUSES),
                 )
                 .order_by(Order.created_at)
@@ -11438,7 +11449,15 @@ class SQLAlchemyRepository(Repository):
         ``recorded`` sums ``fill_size`` over fills deduped by identity
         (``exec_id``, else ``trade_id``, else the row's unique ``public_id``
         so id-less rows are never collapsed); duplicate redelivered rows share
-        an identity and collapse via ``MAX``. ``consumed`` sums
+        an identity and collapse via ``MAX``. The identity is additionally
+        scoped by the row's FULL ``wallet_public_id``: venue execution ids
+        are only unique per venue account, so suffix-twin wallets sharing a
+        shard string can legally carry the same ``exec_id`` for two DIFFERENT
+        fills — collapsing them would under-count recorded quantity and hide
+        a real gap (the one direction this detector must never miss). Mixed
+        wallets then read recorded > consumed (consumed is scoped to the one
+        sampled wallet), forcing the rebuild path whose foreign-wallet check
+        fails the certification. ``consumed`` sums
         ``executions.size`` for the shard's orders, resolved
         ``client_order_id`` -> current SCD2 ``orders.public_id`` and further
         scoped to the shard's own ``wallet_public_id`` and ``mode`` (read from
@@ -11478,7 +11497,7 @@ class SQLAlchemyRepository(Repository):
                     VenueEvent.event_type == "fill_observed",
                     VenueEvent.fill_size.isnot(None),
                 )
-                .group_by(venue_event_fill_identity())
+                .group_by(VenueEvent.wallet_public_id, venue_event_fill_identity())
                 .subquery()
             )
             recorded_result = await s.execute(
@@ -11894,6 +11913,67 @@ class SQLAlchemyRepository(Repository):
                         VenueEvent.event_type == "fill_observed",
                         VenueEvent.client_order_id.in_(chunk),
                     )
+                    .distinct()
+                )
+                for cid, shard_key, wallet_public_id in result.all():
+                    pairs.add((str(cid), str(shard_key or ""), str(wallet_public_id or "")))
+        by_cid: dict[str, set[tuple[str, str]]] = {}
+        for cid, shard_key, wallet_public_id in pairs:
+            by_cid.setdefault(cid, set()).add((shard_key, wallet_public_id))
+        resolved: dict[str, tuple[str, str]] = {}
+        ambiguous: set[str] = set()
+        for cid, lineages in by_cid.items():
+            only = next(iter(lineages)) if len(lineages) == 1 else None
+            if only is not None and only[0]:
+                resolved[cid] = only
+            else:
+                ambiguous.add(cid)
+        return resolved, ambiguous
+
+    async def get_command_shard_keys_by_client_order_ids(
+        self, client_order_ids: list[str]
+    ) -> tuple[dict[str, tuple[str, str]], set[str]]:
+        """Durable command lineage: client order id -> trade-command shard key.
+
+        Active-order recovery historically RECONSTRUCTED an untagged,
+        live-mode shard key from the order row — minting a phantom
+        sibling engine (and a phantom pending-CID route) for tagged
+        paper shards. Order dispatch persists the ``trade_commands``
+        row fail-closed with the EXACT shard key (mode and strategy tag
+        included) BEFORE publishing, so this map is the durable lineage
+        for orders that have no fills yet. Clock-free scan across all
+        SCD2 versions (a command's shard key and wallet never legally
+        change across versions); a client order id whose command rows
+        disagree on the shard key or wallet is returned as ambiguous —
+        the caller must treat ambiguity as a certification failure,
+        never as absence of evidence.
+
+        Args:
+            client_order_ids: Client order ids of the active orders
+                being recovered.
+
+        Returns:
+            Tuple of (mapping of client_order_id to its single durable
+            (shard key, FULL wallet public id) pair, set of AMBIGUOUS
+            client order ids whose command rows disagree on the shard
+            or wallet, or carry an empty shard). The full wallet id
+            rides along because shard keys carry only a 48-bit wallet
+            suffix and suffix collisions must not install a pending
+            route under the wrong wallet.
+        """
+        if not client_order_ids:
+            return {}, set()
+        pairs: set[tuple[str, str, str]] = set()
+        async with self.session() as s:
+            for start in range(0, len(client_order_ids), _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE):
+                chunk = client_order_ids[start : start + _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE]
+                result = await s.execute(
+                    select(
+                        TradeCommand.client_order_id,
+                        TradeCommand.shard_key,
+                        TradeCommand.wallet_public_id,
+                    )
+                    .where(TradeCommand.client_order_id.in_(chunk))
                     .distinct()
                 )
                 for cid, shard_key, wallet_public_id in result.all():

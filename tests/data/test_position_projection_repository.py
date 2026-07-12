@@ -25,6 +25,7 @@ from snapper.data.models import Position
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PositionProjectionUpsertRow
+from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import VenueEventInsertRow
 
 _INSTRUMENT = "00000000-0000-7000-8000-00000000000a"
@@ -553,3 +554,77 @@ async def test_fill_shard_lineage_maps_and_drops_ambiguity(tmp_path: Path) -> No
     assert resolved == {"cid-ok": (tagged, _WALLET)}
     assert ambiguous == {"cid-dup", "cid-empty"}
     assert await repo.get_fill_shard_keys_by_client_order_ids([]) == ({}, set())
+
+
+def _command_row(
+    client_order_id: str,
+    shard_key: str,
+    wallet_public_id: str = _WALLET,
+    command_type: str = "create",
+) -> TradeCommandInsertRow:
+    """Build a minimal trade-command insert row for lineage tests.
+
+    Args:
+        client_order_id: Venue client order id under test.
+        shard_key: Exact dispatched shard key (empty for the
+            missing-shard ambiguity case).
+        wallet_public_id: Full owning wallet.
+        command_type: Command type (a later cancel legally shares the
+            create's shard and wallet).
+
+    Returns:
+        Typed insert row accepted by ``insert_trade_command``.
+    """
+    now = datetime.now(UTC)
+    return {
+        "command_type": command_type,
+        "shard_key": shard_key,
+        "exchange": "paper",
+        "instrument": "BTC-USD",
+        "mode": "paper",
+        "strategy_id": "strat_a",
+        "client_order_id": client_order_id,
+        "venue_client_id": client_order_id,
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 0.5,
+        "price": None,
+        "status": "created",
+        "created_at": now,
+        "session_id": "s1",
+        "sequence_id": 1,
+        "timestamp": now,
+        "wallet_public_id": wallet_public_id,
+    }
+
+
+async def test_command_shard_lineage_maps_and_drops_ambiguity(tmp_path: Path) -> None:
+    """Durable command lineage maps cids and drops disagreeing ones.
+
+    Given: one client order whose create and cancel commands agree on a
+        tagged paper shard, one whose commands disagree between two
+        shards, one whose commands disagree on the full wallet, and one
+        whose command carries an empty shard,
+    When: get_command_shard_keys_by_client_order_ids resolves them,
+    Then: the agreeing cid maps to its exact (shard, wallet) pair and
+        every disagreeing or shard-less cid is ambiguous; empty input
+        short-circuits.
+    """
+    repo = await _make_repo(tmp_path)
+    tagged = f"paper.BTC-USD.paper.w{_WALLET[-12:]}.strat_a"
+    other_wallet = "00000000-0000-7000-8000-000000000002"
+    await repo.insert_trade_command(_command_row("cid-ok", tagged))
+    await repo.insert_trade_command(_command_row("cid-ok", tagged, command_type="cancel"))
+    await repo.insert_trade_command(_command_row("cid-dup", tagged))
+    await repo.insert_trade_command(_command_row("cid-dup", "paper.BTC-USD.paper"))
+    await repo.insert_trade_command(_command_row("cid-wallet", tagged))
+    await repo.insert_trade_command(
+        _command_row("cid-wallet", tagged, wallet_public_id=other_wallet)
+    )
+    await repo.insert_trade_command(_command_row("cid-empty", ""))
+    resolved, ambiguous = await repo.get_command_shard_keys_by_client_order_ids(
+        ["cid-ok", "cid-dup", "cid-wallet", "cid-x", "cid-empty"]
+    )
+    assert resolved == {"cid-ok": (tagged, _WALLET)}
+    assert ambiguous == {"cid-dup", "cid-wallet", "cid-empty"}
+    assert await repo.get_command_shard_keys_by_client_order_ids([]) == ({}, set())

@@ -3696,6 +3696,40 @@ async def test_get_active_orders_for_recovery(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_active_orders_for_recovery_is_clock_free(tmp_path: Path) -> None:
+    """A skew-stamped open order is still discovered at recovery.
+
+    Given: an open order whose row timestamp sits five minutes AHEAD of
+        the recovery clock (a skewed writer — the Phase-0 bug class),
+    When: get_active_orders_for_recovery runs with the earlier clock,
+    Then: the order is returned — recovery reads the current-version
+        sentinel, never a caller-clock temporal window, because hiding
+        an open order would uninstall its pending route and let its
+        later fill scope-route into a sibling shard.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    ahead = now + timedelta(minutes=5)
+    await r.insert_order(
+        instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
+        client_order_id="c-skewed",
+        exchange_order_id="e-skewed",
+        created_at=ahead,
+        side="buy",
+        order_type="market",
+        price=None,
+        size=1.0,
+        status="open",
+        session_id="s1",
+        sequence_id=30,
+        timestamp=ahead,
+    )
+    result = await r.get_active_orders_for_recovery(exchange="kraken", as_of=now)
+    assert [row["client_order_id"] for row in result] == ["c-skewed"]
+
+
+@pytest.mark.asyncio
 async def test_get_executions_for_recovery(tmp_path: Path) -> None:
     """Verify get_executions_for_recovery returns all executions in ASC order.
 
@@ -11236,6 +11270,51 @@ async def test_shard_has_fill_gap_dedups_redelivered_rows(tmp_path: Path) -> Non
             )
         )
     assert await r.shard_has_fill_gap(shard, now) is False
+
+
+@pytest.mark.asyncio
+async def test_shard_has_fill_gap_same_exec_id_across_wallets_not_collapsed(
+    tmp_path: Path,
+) -> None:
+    """Suffix-twin fills sharing a venue exec_id both count as recorded.
+
+    Given: two fills with the SAME exec_id on one shard string but
+        DIFFERENT full wallets (venue execution ids are only unique per
+        venue account), and one consumed execution matching the sampled
+        wallet's fill,
+    When: shard_has_fill_gap runs,
+    Then: it returns True — the identity dedup is wallet-scoped, so the
+        twin wallet's unconsumed quantity is not collapsed away (a
+        wallet-blind MAX would read 10 == 10 and hide the dropped fill).
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    opid = await _insert_gap_order(r, inst_pid, "c-twin")
+    await _insert_gap_execution(r, opid, 10.0, "eT")
+    shard = "kraken.BTC-USD.live"
+    await r.insert_venue_event(
+        _gap_venue_row(
+            shard_key=shard,
+            client_order_id="c-twin",
+            fill_size=10.0,
+            cum_fill_size=10.0,
+            exec_id="eT",
+            trade_id="eT",
+        )
+    )
+    twin_row = dict(
+        _gap_venue_row(
+            shard_key=shard,
+            client_order_id="c-twin",
+            fill_size=10.0,
+            cum_fill_size=10.0,
+            exec_id="eT",
+            trade_id="eT",
+        )
+    )
+    twin_row["wallet_public_id"] = "00000000-0000-7000-8000-000000000002"
+    await r.insert_venue_event(cast(VenueEventInsertRow, twin_row))
+    assert await r.shard_has_fill_gap(shard, now) is True
 
 
 @pytest.mark.asyncio

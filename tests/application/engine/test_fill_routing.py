@@ -149,20 +149,24 @@ class TestFindEngineForFill:
         fill = _make_fill(client_order_id="unknown", wallet_public_id="")
         assert coord._find_engine_for_fill(fill) is engine
 
-    def test_legacy_fallback_returns_first_instrument_match(self) -> None:
-        """Legacy path with no wallet returns first instrument match.
+    def test_legacy_fallback_multi_shard_scope_refuses(self) -> None:
+        """Legacy path with no wallet refuses a multi-shard scope.
 
-        Given: two engines for different wallets on same instrument,
-        When: legacy fill (no wallet) arrives,
-        Then: first matching engine is returned (legacy behavior).
+        Given: two engines for different wallets (different exact shard
+            keys) on the same instrument and exchange,
+        When: a legacy fill (no wallet) arrives,
+        Then: routing refuses instead of first-wins — a wallet-less
+            frame cannot name which shard truthfully owns the fill, so
+            the projection quarantines (S5.1 F3: first-wins routing fed
+            wallet B's fill to wallet A's engine).
         """
         coord = _make_coordinator()
         engine_a = _make_engine(wallet_public_id=WALLET_A)
         engine_b = _make_engine(wallet_public_id=WALLET_B)
         coord.engines = {"BTC-USD.A": engine_a, "BTC-USD.B": engine_b}
         fill = _make_fill(client_order_id="unknown", wallet_public_id="")
-        result = coord._find_engine_for_fill(fill)
-        assert result in (engine_a, engine_b)
+        assert coord._find_engine_for_fill(fill) is None
+        assert coord._recovery_certification_failed is True
 
     def test_no_engine_returns_none(self) -> None:
         """Fill for untracked instrument returns None.
@@ -255,6 +259,263 @@ class TestFindEngineForFillIndexed:
         assert coord._find_engine_for_fill(ghost) is None
         assert coord._recovery_certification_failed is True
 
+    def test_mapped_shard_selects_by_full_wallet_among_suffix_twins(self) -> None:
+        """Mapped-shard routing picks the engine whose FULL wallet matches.
+
+        Given: two suffix-twin engines legally sharing one shard STRING
+            but owned by different full wallets,
+        When: a walleted fill arrives whose CID maps to that shard,
+        Then: the fill routes to the twin with the agreeing full wallet
+            (S5.1 F3: shard-text-only matching returned the first twin,
+            silently applying wallet B's fill to wallet A's position).
+        """
+        coord = _make_coordinator()
+        twin_shard = "kraken.BTC-USD.live.wsame48bit"
+        twin_a = _make_engine(wallet_public_id=WALLET_A, shard_key=twin_shard)
+        twin_b = _make_engine(wallet_public_id=WALLET_B, shard_key=twin_shard)
+        coord.engines = {"twin-a": twin_a, "twin-b": twin_b}
+        coord._order_shard_keys["cid-b"] = twin_shard
+        fill = _make_fill(client_order_id="cid-b", wallet_public_id=WALLET_B)
+        assert coord._find_engine_for_fill(fill) is twin_b
+        assert coord._recovery_certification_failed is False
+
+    def test_mapped_shard_foreign_wallet_quarantines(self) -> None:
+        """A walleted fill with no full-wallet twin drops fail-closed.
+
+        Given: suffix-twin engines on one shard string for wallets A and B,
+        When: a fill arrives for that shard with a THIRD full wallet,
+        Then: routing refuses and quarantines — zero full-wallet
+            agreement must never fall back to shard-text guesswork.
+        """
+        coord = _make_coordinator()
+        twin_shard = "kraken.BTC-USD.live.wsame48bit"
+        twin_a = _make_engine(wallet_public_id=WALLET_A, shard_key=twin_shard)
+        twin_b = _make_engine(wallet_public_id=WALLET_B, shard_key=twin_shard)
+        coord.engines = {"twin-a": twin_a, "twin-b": twin_b}
+        coord._order_shard_keys["cid-c"] = twin_shard
+        fill = _make_fill(
+            client_order_id="cid-c",
+            wallet_public_id="03989c5d-9e6f-9021-ac3d-4e5f6a7b8c9d",
+        )
+        assert coord._find_engine_for_fill(fill) is None
+        assert coord._recovery_certification_failed is True
+
+    def test_mapped_shard_walletless_fill_with_twins_quarantines(self) -> None:
+        """A wallet-less fill cannot disambiguate suffix twins.
+
+        Given: two suffix-twin engines on one mapped shard string,
+        When: a fill WITHOUT wallet attribution maps to that shard,
+        Then: routing refuses and quarantines — the twins are
+            indistinguishable without the full wallet.
+        """
+        coord = _make_coordinator()
+        twin_shard = "kraken.BTC-USD.live.wsame48bit"
+        twin_a = _make_engine(wallet_public_id=WALLET_A, shard_key=twin_shard)
+        twin_b = _make_engine(wallet_public_id=WALLET_B, shard_key=twin_shard)
+        coord.engines = {"twin-a": twin_a, "twin-b": twin_b}
+        coord._order_shard_keys["cid-x"] = twin_shard
+        fill = _make_fill(client_order_id="cid-x", wallet_public_id="")
+        assert coord._find_engine_for_fill(fill) is None
+        assert coord._recovery_certification_failed is True
+
+    def test_mapped_shard_walletless_fill_single_engine_routes(self) -> None:
+        """A wallet-less fill routes when the mapped shard has one owner.
+
+        Given: exactly one engine serving the mapped shard,
+        When: a legacy wallet-less fill maps to that shard,
+        Then: the single owner receives the fill (no ambiguity exists).
+        """
+        coord = _make_coordinator()
+        only = _make_engine(wallet_public_id=WALLET_A, shard_key="kraken.BTC-USD.live.wa")
+        coord.engines = {"only": only}
+        coord._order_shard_keys["cid-1"] = "kraken.BTC-USD.live.wa"
+        fill = _make_fill(client_order_id="cid-1", wallet_public_id="")
+        assert coord._find_engine_for_fill(fill) is only
+        assert coord._recovery_certification_failed is False
+
+    def test_pending_match_disagreeing_dispatch_mapping_quarantines(self) -> None:
+        """The pending engine must serve the shard the order dispatched for.
+
+        Given: an engine whose pending CID matches the fill but whose
+            shard key DISAGREES with the order's dispatched shard mapping,
+        When: the fill arrives,
+        Then: routing refuses and quarantines; with an AGREEING mapping
+            the same fill routes to the pending engine.
+        """
+        coord = _make_coordinator()
+        engine = _make_engine(
+            wallet_public_id=WALLET_A,
+            pending_client_order_id="cid-1",
+            shard_key="kraken.BTC-USD.live.wa.alpha",
+        )
+        coord.engines = {"engine": engine}
+        coord._order_shard_keys["cid-1"] = "kraken.BTC-USD.live.wa.beta"
+        fill = _make_fill(client_order_id="cid-1", wallet_public_id=WALLET_A)
+        assert coord._find_engine_for_fill(fill) is None
+        assert coord._recovery_certification_failed is True
+        coord._recovery_certification_failed = False
+        coord._order_shard_keys["cid-1"] = "kraken.BTC-USD.live.wa.alpha"
+        assert coord._find_engine_for_fill(fill) is engine
+        assert coord._recovery_certification_failed is False
+
+    def test_walletless_fill_routes_by_dispatch_wallet(self) -> None:
+        """The wallet recorded at dispatch owns a wallet-less fill.
+
+        Given: suffix-twin engines on one shard string and a CID
+            mapping that recorded twin B's FULL wallet at dispatch,
+        When: a wallet-less legacy fill for that CID arrives,
+        Then: it routes to twin B by the recorded owner — process
+            topology (which twins happen to run) never decides.
+        """
+        coord = _make_coordinator()
+        twin_shard = "kraken.BTC-USD.live.wsame48bit"
+        twin_a = _make_engine(wallet_public_id=WALLET_A, shard_key=twin_shard)
+        twin_b = _make_engine(wallet_public_id=WALLET_B, shard_key=twin_shard)
+        coord.engines = {"twin-a": twin_a, "twin-b": twin_b}
+        coord._order_shard_keys["cid-b"] = twin_shard
+        coord._order_shard_wallets["cid-b"] = WALLET_B
+        fill = _make_fill(client_order_id="cid-b", wallet_public_id="")
+        assert coord._find_engine_for_fill(fill) is twin_b
+        assert coord._recovery_certification_failed is False
+
+    def test_walletless_fill_for_offline_owner_quarantines(self) -> None:
+        """A sole running twin never inherits the offline owner's fill.
+
+        Given: a CID mapping recorded for wallet A at dispatch while
+            ONLY the suffix twin of wallet B is running on that shard
+            string,
+        When: a wallet-less fill for that CID arrives,
+        Then: routing refuses and quarantines — the single running
+            candidate is topology, not the recorded owner.
+        """
+        coord = _make_coordinator()
+        twin_shard = "kraken.BTC-USD.live.wsame48bit"
+        twin_b = _make_engine(wallet_public_id=WALLET_B, shard_key=twin_shard)
+        coord.engines = {"twin-b": twin_b}
+        coord._order_shard_keys["cid-a"] = twin_shard
+        coord._order_shard_wallets["cid-a"] = WALLET_A
+        fill = _make_fill(client_order_id="cid-a", wallet_public_id="")
+        assert coord._find_engine_for_fill(fill) is None
+        assert coord._recovery_certification_failed is True
+
+    def test_fill_wallet_disagreeing_with_dispatch_wallet_quarantines(self) -> None:
+        """A fill wallet contradicting the dispatch record never routes.
+
+        Given: a CID mapping recorded for wallet A at dispatch,
+        When: a fill for that CID arrives claiming wallet B,
+        Then: routing refuses and quarantines before any candidate
+            matching — contradictory owner evidence must never route.
+        """
+        coord = _make_coordinator()
+        shard = "kraken.BTC-USD.live.wa"
+        engine = _make_engine(wallet_public_id=WALLET_A, shard_key=shard)
+        coord.engines = {"engine": engine}
+        coord._order_shard_keys["cid-1"] = shard
+        coord._order_shard_wallets["cid-1"] = WALLET_A
+        fill = _make_fill(client_order_id="cid-1", wallet_public_id=WALLET_B)
+        assert coord._find_engine_for_fill(fill) is None
+        assert coord._recovery_certification_failed is True
+
+    def test_pending_engine_disagreeing_with_dispatch_wallet_quarantines(self) -> None:
+        """The pending engine must serve the wallet the order dispatched for.
+
+        Given: an engine whose pending CID matches the fill and whose
+            shard agrees with the mapping, but whose FULL wallet
+            disagrees with the wallet recorded at dispatch,
+        When: a wallet-less fill arrives,
+        Then: routing refuses and quarantines; with an agreeing
+            dispatch wallet the same fill routes.
+        """
+        coord = _make_coordinator()
+        shard = "kraken.BTC-USD.live.wsame48bit"
+        engine = _make_engine(
+            wallet_public_id=WALLET_B,
+            pending_client_order_id="cid-1",
+            shard_key=shard,
+        )
+        coord.engines = {"engine": engine}
+        coord._order_shard_keys["cid-1"] = shard
+        coord._order_shard_wallets["cid-1"] = WALLET_A
+        fill = _make_fill(client_order_id="cid-1", wallet_public_id="")
+        assert coord._find_engine_for_fill(fill) is None
+        assert coord._recovery_certification_failed is True
+        coord._recovery_certification_failed = False
+        coord._order_shard_wallets["cid-1"] = WALLET_B
+        assert coord._find_engine_for_fill(fill) is engine
+        assert coord._recovery_certification_failed is False
+
+    def test_registration_records_and_guards_dispatch_wallet(self) -> None:
+        """CID registration stores, backfills, and guards the owner wallet.
+
+        Given: a wallet-less registration followed by a walleted
+            backfill, an idempotent re-registration, and a conflicting
+            re-registration under a DIFFERENT full wallet,
+        When: _register_order_shard_key runs for each,
+        Then: the wallet backfills and survives idempotent calls, and
+            the wallet conflict drops the whole mapping and fails the
+            certification.
+        """
+        coord = _make_coordinator()
+        shard = "kraken.BTC-USD.live.wsame48bit"
+        assert coord._register_order_shard_key("cid-1", shard) is True
+        assert "cid-1" not in coord._order_shard_wallets
+        assert coord._register_order_shard_key("cid-1", shard, WALLET_A) is True
+        assert coord._order_shard_wallets["cid-1"] == WALLET_A
+        assert coord._register_order_shard_key("cid-1", shard, WALLET_A) is True
+        assert coord._register_order_shard_key("cid-1", shard, WALLET_B) is False
+        assert "cid-1" not in coord._order_shard_keys
+        assert "cid-1" not in coord._order_shard_wallets
+        assert coord._recovery_certification_failed is True
+
+    def test_walleted_linear_scan_multi_shard_scope_refuses(self) -> None:
+        """Linear-scan walleted fallback refuses tag-sibling ambiguity.
+
+        Given: two strategy-tag sibling engines (same instrument,
+            exchange, and FULL wallet; different exact shard keys) in a
+            plain-dict engine map,
+        When: a walleted fill with no pending or dispatched mapping
+            arrives,
+        Then: routing refuses and quarantines instead of first-wins
+            feeding an arbitrary sibling.
+        """
+        coord = _make_coordinator()
+        alpha = _make_engine(wallet_public_id=WALLET_A, shard_key="paper.BTC-USD.paper.wa.alpha")
+        beta = _make_engine(wallet_public_id=WALLET_A, shard_key="paper.BTC-USD.paper.wa.beta")
+        coord.engines = {"alpha": alpha, "beta": beta}
+        fill = _make_fill(client_order_id="unknown", wallet_public_id=WALLET_A)
+        assert coord._find_engine_for_fill(fill) is None
+        assert coord._recovery_certification_failed is True
+
+    def test_registry_legacy_scope_multi_shard_refuses(self) -> None:
+        """Registry-indexed legacy scope refuses a multi-shard scope.
+
+        Given: two engines with different exact shards registered under
+            one (exchange, instrument) legacy scope via the registry
+            (including the lazy index init path),
+        When: a wallet-less fill with no mapping arrives,
+        Then: legacy routing refuses and quarantines; a single-shard
+            legacy scope still routes.
+        """
+        coord = _make_coordinator()
+        del coord._legacy_scope_shard_keys
+        solo = _make_engine(
+            instrument="ETH-USD", wallet_public_id="", shard_key="kraken.ETH-USD.live"
+        )
+        coord.engines["solo"] = solo
+        fill_solo = _make_fill(instrument="ETH-USD", client_order_id="unknown")
+        assert coord._find_engine_for_fill(fill_solo) is solo
+        twin_a = _make_engine(wallet_public_id=WALLET_A, shard_key="kraken.BTC-USD.live.wa")
+        twin_b = _make_engine(wallet_public_id=WALLET_B, shard_key="kraken.BTC-USD.live.wb")
+        coord.engines["twin-a"] = twin_a
+        coord.engines["twin-b"] = twin_b
+        assert coord._legacy_scope_shard_keys[("kraken", "BTC-USD")] == {
+            ("kraken.BTC-USD.live.wa", WALLET_A),
+            ("kraken.BTC-USD.live.wb", WALLET_B),
+        }
+        fill = _make_fill(client_order_id="unknown", wallet_public_id="")
+        assert coord._find_engine_for_fill(fill) is None
+        assert coord._recovery_certification_failed is True
+
     def test_scope_registration_indexes_exact_shards(self) -> None:
         """Engine lookup registration records exact shard sets per scope.
 
@@ -272,8 +533,8 @@ class TestFindEngineForFillIndexed:
         coord._register_engine_for_lookup(alpha)
         coord._register_engine_for_lookup(beta)
         assert coord._scope_shard_keys[("kraken", "BTC-USD", WALLET_A)] == {
-            "kraken.BTC-USD.live.wa.alpha",
-            "kraken.BTC-USD.live.wa.beta",
+            ("kraken.BTC-USD.live.wa.alpha", WALLET_A),
+            ("kraken.BTC-USD.live.wa.beta", WALLET_A),
         }
 
     def test_ambiguous_scope_refuses_fallback_routing(self) -> None:

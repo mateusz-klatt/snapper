@@ -3917,7 +3917,9 @@ class TestRecovery:
 
         Given: Executions exist but get_active_orders_for_recovery raises,
         When: _recover_engine_state runs,
-        Then: Engines are created from executions, in-flight not set.
+        Then: Engines are created from executions, in-flight not set, and
+            the WHOLE projection certification fails — an undiscovered
+            in-flight order must not certify by omission (S5.2 C3).
         """
         _configure_settings(monkeypatch)
         coord = TraderCoordinator()
@@ -3955,6 +3957,7 @@ class TestRecovery:
         assert "BTC-USD@kraken-live" in coord.engines
         engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.order_in_flight is False
+        assert coord._recovery_certification_failed is True
 
 
 def test_build_engine_key_flat_when_wallet_empty() -> None:
