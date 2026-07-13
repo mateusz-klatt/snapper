@@ -2554,10 +2554,18 @@ class MockRepository:
     Accepts ORM-like mock tuples and converts them to dicts.
     """
 
-    def __init__(self, session_result: Any = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        session_result: Any = None,
+        error: Exception | None = None,
+        account_state_rows: list[dict[str, Any]] | None = None,
+        accessible_wallet_ids: list[str] | None = None,
+    ) -> None:
         """Initialize the instance."""
         self._session_result = session_result or []
         self._error = error
+        self._account_state_rows = account_state_rows or []
+        self._accessible_wallet_ids = accessible_wallet_ids or []
 
     def session(self) -> MockSession:
         """Return mock session with configured result or error."""
@@ -2679,6 +2687,29 @@ class MockRepository:
                 "position_cycle_public_id": None,
             }
             for pos, inst, sym in self._session_result
+        ]
+
+    async def list_accessible_wallets_for_operators(
+        self, operator_public_ids: list[str], as_of: Any
+    ) -> list[dict[str, Any]]:
+        """Return mock accessible-wallet rows for the given operators."""
+        self._raise_if_error()
+        return [{"public_id": wid} for wid in self._accessible_wallet_ids]
+
+    async def get_venue_account_states(
+        self, wallet_public_ids: list[str] | None
+    ) -> list[dict[str, Any]]:
+        """Return mock venue account-state rows, wallet-scoped when filtered.
+
+        Mirrors the real repository contract: ``None`` (ADMIN, unscoped)
+        returns every configured row, a wallet list narrows to matching
+        rows only.
+        """
+        self._raise_if_error()
+        if wallet_public_ids is None:
+            return list(self._account_state_rows)
+        return [
+            row for row in self._account_state_rows if row["wallet_public_id"] in wallet_public_ids
         ]
 
     async def get_candles(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
@@ -4618,3 +4649,189 @@ class TestResolveCandleSingleSource:
         Then: it falls back to False rather than 500ing the candle route.
         """
         assert _resolve_candle_single_source(_request_with_settings(_RaisingSettings())) is False
+
+
+def _account_state_row(**overrides: Any) -> dict[str, Any]:
+    """Build a venue account-state row dict with fail-closed defaults.
+
+    Args:
+        **overrides: Fields to override on the default observed row.
+
+    Returns:
+        A row dict shaped like ``VenueAccountStateRow`` for the read map.
+    """
+    base: dict[str, Any] = {
+        "wallet_public_id": "w-1",
+        "exchange": "kraken",
+        "mode": "live",
+        "sync_status": "observed",
+        "balance_status": "observed",
+        "position_status": "not_applicable",
+        "valuation_status": "native_only",
+        "balances_json": '[{"currency": "USD", "total": 100.0, "free": 100.0, "used": 0.0}]',
+        "open_positions_json": None,
+        "balance_observed_at": datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+        "position_observed_at": None,
+        "current_attempt_observation_id": 1,
+        "balance_payload_source_observation_id": 1,
+        "position_payload_source_observation_id": None,
+        "authoritative_until": datetime(2099, 1, 1, tzinfo=UTC),
+        "error": None,
+        "public_id": "acct-1",
+        "timestamp": datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+        "session_id": "sess-1",
+        "sequence_id": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+def _account_state_client(
+    role: UserRole,
+    repo: MockRepository,
+    operator_ids: list[str] | None = None,
+) -> TestClient:
+    """Build a client scoped to a role/operator set with the given repo.
+
+    Args:
+        role: The principal role to authenticate as.
+        repo: The repository override backing the request.
+        operator_ids: The caller's operator membership set.
+
+    Returns:
+        A test client wired with CSRF, auth, and repository overrides.
+    """
+    app = create_app()
+    app.router.lifespan_context = _noop_lifespan
+
+    def skip_csrf() -> None:
+        return None
+
+    def scoped_auth() -> AuthPrincipal:
+        return AuthPrincipal(
+            username="acct_user",
+            role=role,
+            operator_public_ids=operator_ids or [],
+        )
+
+    app.dependency_overrides[validate_csrf_token] = skip_csrf
+    app.dependency_overrides[require_authentication] = scoped_auth
+    app.dependency_overrides[get_repository_dependency] = lambda: repo
+    return _track_test_client(TestClient(app))
+
+
+class TestPortfolioAccountsEndpoint:
+    """Tests for GET /api/portfolio/accounts (PnL Phase 3 venue account truth)."""
+
+    def test_ai_delegate_forbidden(self) -> None:
+        """AI_DELEGATE lacks READ_ACCOUNT_STATE and is denied.
+
+        Given: an AI_DELEGATE principal (no read:account_state grant),
+        When: GET /portfolio/accounts is called,
+        Then: the response is 403 before the route body runs.
+        """
+        client = _account_state_client(UserRole.AI_DELEGATE, MockRepository())
+        response = client.get("/api/portfolio/accounts")
+        assert response.status_code == 403
+
+    def test_returns_mapped_states_with_provenance(self) -> None:
+        """Effective status and authority flags propagate through the map.
+
+        Given: a stale observed row and a fresh observed row,
+        When: an ADMIN calls GET /portfolio/accounts,
+        Then: the stale row maps to effective_status=stale/is_authoritative
+            False and the fresh row to observed/True, and the provenance
+            envelope is present.
+        """
+        past = datetime(2026, 7, 13, 11, 0, tzinfo=UTC)
+        future = datetime(2099, 1, 1, tzinfo=UTC)
+        stale = _account_state_row(
+            public_id="acct-stale",
+            sync_status="observed",
+            authoritative_until=past,
+        )
+        fresh = _account_state_row(
+            public_id="acct-fresh",
+            sync_status="observed",
+            authoritative_until=future,
+            balances_json=json.dumps(
+                [{"currency": "USD", "total": 1000.0, "free": 900.0, "used": 100.0}]
+            ),
+        )
+        repo = MockRepository(account_state_rows=[stale, fresh])
+        client = _account_state_client(UserRole.ADMIN, repo)
+        response = client.get("/api/portfolio/accounts")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["type"] == "portfolio_account_state_list"
+        assert data["count"] == 2
+        by_id = {item["public_id"]: item for item in data["payload"]}
+        assert by_id["acct-stale"]["effective_status"] == "stale"
+        assert by_id["acct-stale"]["is_authoritative"] is False
+        assert by_id["acct-fresh"]["effective_status"] == "observed"
+        assert by_id["acct-fresh"]["is_authoritative"] is True
+        assert by_id["acct-fresh"]["balances"][0]["currency"] == "USD"
+        assert data["session_id"]
+        assert data["sequence_id"] >= 1
+        assert data["public_id"]
+        assert data["timestamp"]
+
+    def test_wallet_scoping_returns_only_accessible_rows(self) -> None:
+        """resolve_target_wallets narrows results to the accessible set.
+
+        Given: an OPERATOR whose accessible set is only ``w-visible`` and a
+            repo holding rows for ``w-visible`` and ``w-hidden``,
+        When: GET /portfolio/accounts is called,
+        Then: only the accessible wallet's row is returned.
+        """
+        visible = _account_state_row(public_id="acct-visible", wallet_public_id="w-visible")
+        hidden = _account_state_row(public_id="acct-hidden", wallet_public_id="w-hidden")
+        repo = MockRepository(
+            account_state_rows=[visible, hidden],
+            accessible_wallet_ids=["w-visible"],
+        )
+        client = _account_state_client(UserRole.OPERATOR, repo, operator_ids=["op-1"])
+        response = client.get("/api/portfolio/accounts")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 1
+        assert data["payload"][0]["public_id"] == "acct-visible"
+        assert data["payload"][0]["wallet_public_id"] == "w-visible"
+
+    def test_empty_returns_empty_list(self) -> None:
+        """No rows yields an empty payload with count 0.
+
+        Given: a repo with no account-state rows,
+        When: an ADMIN calls GET /portfolio/accounts,
+        Then: the response is 200 with an empty payload and count 0.
+        """
+        client = _account_state_client(UserRole.ADMIN, MockRepository())
+        response = client.get("/api/portfolio/accounts")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["payload"] == []
+        assert data["count"] == 0
+
+    def test_foreign_operator_scope_403_propagates(self) -> None:
+        """A 403 from resolve_target_wallets is not remapped to 500.
+
+        Given: an OPERATOR scoped to ``op-1`` querying a foreign operator,
+        When: GET /portfolio/accounts?operator_public_id=op-foreign is called,
+        Then: the 403 propagates through the ``except HTTPException`` guard.
+        """
+        client = _account_state_client(UserRole.OPERATOR, MockRepository(), operator_ids=["op-1"])
+        response = client.get("/api/portfolio/accounts?operator_public_id=op-foreign")
+        assert response.status_code == 403
+
+    def test_database_error_returns_500(self) -> None:
+        """A repository failure surfaces as a 500 with a stable detail.
+
+        Given: a repository whose reads raise,
+        When: an ADMIN calls GET /portfolio/accounts,
+        Then: the response is 500 with the account-fetch error detail.
+        """
+        repo = MockRepository(error=Exception("account query failed"))
+        client = _account_state_client(UserRole.ADMIN, repo)
+        response = client.get("/api/portfolio/accounts")
+        assert response.status_code == 500
+        assert "Failed to fetch portfolio accounts" in response.json()["detail"]

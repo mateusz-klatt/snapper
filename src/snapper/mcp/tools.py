@@ -9,6 +9,7 @@ matches the action:
 - ``READ_MARKET_DATA`` for ``list_instruments`` and ``get_ohlcv``.
 - ``READ_ORDERS`` for ``list_orders`` and ``get_order_status``.
 - ``READ_POSITIONS`` for ``list_positions`` and ``get_position_cycle``.
+- ``READ_ACCOUNT_STATE`` for ``list_venue_account_states``.
 - ``READ_SIGNALS`` for ``list_recent_signals``.
 - ``CREATE_ORDERS`` for ``submit_manual_order`` and
   ``submit_ai_review_decision``.
@@ -50,6 +51,7 @@ from snapper.application.plans.cancel_service import PlanNotFoundError
 from snapper.application.plans.cancel_service import PlansCancelService
 from snapper.application.plans.cancel_service import PlanScopeError
 from snapper.application.plans.manual_once import ManualOnceEvaluator
+from snapper.application.portfolio.account_view import build_portfolio_account_state
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -1287,6 +1289,51 @@ async def _list_positions_tool(
     )
 
 
+async def _list_venue_account_states_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+    wallet_public_id: str | None,
+    exchange: str | None,
+) -> CallToolResult:
+    """Run the list-venue-account-states MCP read path (PnL Phase 3)."""
+    access = _get_tool_access_or_envelope(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.READ_ACCOUNT_STATE,
+    )
+    if isinstance(access, CallToolResult):
+        return access
+    now = datetime.now(UTC)
+    wallet_ids, scope_envelope = await _resolve_wallet_ids_or_envelope(
+        claims=access.claims,
+        repo=access.repo,
+        wallet_public_id=wallet_public_id,
+        as_of=now,
+        error_code="account_state_not_found",
+        message="No venue account states found for the given filters.",
+    )
+    if scope_envelope is not None:
+        return scope_envelope
+    rows = await access.repo.get_venue_account_states(wallet_ids)
+    states = [
+        build_portfolio_account_state(row, now)
+        for row in rows
+        if exchange is None or row["exchange"] == exchange
+    ]
+    return to_call_tool_result(
+        success=True,
+        error_code=None,
+        message=f"Returned {len(states)} venue account states.",
+        details=sanitize_output(
+            {
+                "account_states": [state.model_dump(mode="json") for state in states],
+                "count": len(states),
+            }
+        ),
+    )
+
+
 async def _get_position_cycle_tool(
     *,
     repository_getter: Callable[[], Repository | None],
@@ -1877,6 +1924,46 @@ def register_mcp_tools(
             wallet_public_id=wallet_public_id,
             exchange=exchange,
             instrument=instrument,
+        )
+
+    @mcp_server.tool()
+    async def list_venue_account_states(
+        wallet_public_id: str | None = None,
+        exchange: str | None = None,
+    ) -> CallToolResult:
+        """List truthful venue account states (PnL Phase 3).
+
+        Returns the active per-venue account-truth rows for the
+        accessible wallets, each mapped through the fail-closed read
+        surface (the EFFECTIVE status is derived over the stored value
+        and ``is_authoritative`` is set only when it is exactly
+        ``observed``). Requires ``READ_ACCOUNT_STATE``; AI delegates do
+        NOT hold it by default, so a delegate call returns
+        ``error_code="permission_denied"``.
+
+        Args:
+            wallet_public_id: Filter to one wallet. Caller must have
+                scope; a mismatch returns an empty result with
+                ``error_code="account_state_not_found"``
+                (anti-enumeration: a caller cannot tell whether the
+                wallet exists or simply isn't theirs). ``None`` returns
+                states across every wallet the caller can see; an ADMIN
+                with no wallet filter (and any caller with no accessible
+                wallet) resolves to an empty result — a venue account
+                state is never served by an unfiltered scan.
+            exchange: Optional native exchange filter, applied post-fetch.
+
+        Returns:
+            Canonical envelope. ``details`` carries ``account_states``
+            (list of ``PortfolioAccountState`` dicts) and ``count``.
+            Consumers must trust ``effective_status`` (and
+            ``is_authoritative``), NOT the raw stored ``sync_status``.
+        """
+        return await _list_venue_account_states_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
+            wallet_public_id=wallet_public_id,
+            exchange=exchange,
         )
 
     @mcp_server.tool()

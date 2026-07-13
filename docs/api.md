@@ -1211,6 +1211,99 @@ both are `null` together with `unrealized_pnl` when no usable mark exists.
 into the row's state (a recovery watermark, not the exact causal fill), `null`
 when unknown.
 
+### GET /api/portfolio/accounts
+
+Fetch truthful venue account state per (wallet, exchange, mode) — the venue's own
+balance/position observation, distinct from the fill-derived position projection
+(PnL Phase 3). Requires `read:account_state` permission. AI delegates are denied.
+There is no `as_of` parameter: a venue account state has no truthful historical
+projection, only its current observation.
+
+**Request:**
+
+```http
+GET /api/portfolio/accounts
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `operator_public_id` | string | no | Scope to a single operator (403 if foreign) |
+| `wallet_public_id` | string | no | Scope to a single wallet (403 if inaccessible) |
+
+**Response (200):**
+
+```json
+{
+    "type": "portfolio_account_state_list",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": [
+        {
+            "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+            "type": "portfolio_account_state",
+            "timestamp": "2026-01-18T12:00:00Z",
+            "wallet_public_id": "019e1a2b-1111-7000-8000-000000000001",
+            "exchange": "kraken",
+            "mode": "live",
+            "sync_status": "observed",
+            "effective_status": "observed",
+            "is_authoritative": true,
+            "balance_status": "observed",
+            "position_status": "observed",
+            "valuation_status": "native_only",
+            "balances": [
+                {
+                    "currency": "USD",
+                    "total": 10000.0,
+                    "free": 9000.0,
+                    "used": 1000.0
+                }
+            ],
+            "open_positions": [
+                {
+                    "symbol": "PF_XBTUSD",
+                    "side": "buy",
+                    "size": 0.5,
+                    "entry_price": 41500.0,
+                    "mark_price": 41650.0,
+                    "unrealized_pnl": 75.0,
+                    "unrealized_funding": -1.25,
+                    "timestamp": "2026-01-18T11:59:30Z"
+                }
+            ],
+            "balance_observed_at": "2026-01-18T11:59:30Z",
+            "position_observed_at": "2026-01-18T11:59:30Z",
+            "authoritative_until": "2026-01-18T12:05:00Z",
+            "current_attempt_observation_id": 4711,
+            "balance_payload_source_observation_id": 4711,
+            "position_payload_source_observation_id": 4711,
+            "error": null
+        }
+    ],
+    "count": 1
+}
+```
+
+Fail-closed read semantics (PnL Phase 3): `sync_status` is the raw stored
+outcome of the last observation attempt (`observed` / `simulated` /
+`unsupported` / `error`), while `effective_status` is DERIVED at read time and
+is the one consumers must trust. It demotes an `observed` row to `stale` once
+its `authoritative_until` window has elapsed (or is missing), to `clock_error`
+on a future-dated observation clock, and to `corrupt` when a stored payload
+fails to revalidate. `is_authoritative` is `true` ONLY when `effective_status`
+is exactly `observed`; `simulated` (paper), `unsupported` (market-data-only),
+`error`, `stale`, `clock_error`, and `corrupt` are never authoritative.
+`balances` and `open_positions` are honest NULLs — never fabricated, cleared
+when the state is not fresh or is corrupt. Balance and positions are
+independent reads, each carrying its own `*_observed_at` timestamp and
+`*_payload_source_observation_id` provenance. Values are venue-native only
+(`valuation_status` = `native_only`); USD valuation is Phase 5.
+
 ### POST /api/execution-plans
 
 Create a bracket (SL/TP) execution plan on an open position cycle. Requires

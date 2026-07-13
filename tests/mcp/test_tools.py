@@ -16,6 +16,7 @@ import json
 from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
@@ -1678,6 +1679,45 @@ _POSITION_ROW_FIXTURE: dict[str, Any] = {
 }
 
 
+def _venue_account_state_row(
+    *,
+    public_id: str = "acct-1",
+    exchange: str = "kraken",
+    wallet_public_id: str = "wallet-1",
+) -> dict[str, Any]:
+    """Build a fresh, authoritative ``VenueAccountStateRow`` fixture.
+
+    Observation timestamps sit in the past and ``authoritative_until`` in
+    the future so :func:`build_portfolio_account_state` derives
+    ``effective_status="observed"`` (``is_authoritative=True``).
+    """
+    now = datetime.now(UTC)
+    return {
+        "wallet_public_id": wallet_public_id,
+        "exchange": exchange,
+        "mode": "live",
+        "sync_status": "observed",
+        "balance_status": "observed",
+        "position_status": "observed",
+        "valuation_status": "native_only",
+        "balances_json": json.dumps(
+            [{"currency": "USD", "total": 1000.0, "free": 900.0, "used": 100.0}]
+        ),
+        "open_positions_json": json.dumps([]),
+        "balance_observed_at": now - timedelta(minutes=1),
+        "position_observed_at": now - timedelta(minutes=1),
+        "current_attempt_observation_id": 1,
+        "balance_payload_source_observation_id": 1,
+        "position_payload_source_observation_id": 1,
+        "authoritative_until": now + timedelta(hours=1),
+        "error": None,
+        "public_id": public_id,
+        "timestamp": now,
+        "session_id": "s",
+        "sequence_id": 5,
+    }
+
+
 _POSITION_CYCLE_ROW_FIXTURE: dict[str, Any] = {
     "public_id": "cycle-1",
     "timestamp": datetime.now(UTC),
@@ -1833,6 +1873,97 @@ class TestListPositionsTool:
         await server._tool_manager.call_tool("list_positions", {"wallet_public_id": "wallet-1"})
         kwargs = repo.get_positions.await_args.kwargs
         assert kwargs["wallet_public_ids"] == ["wallet-1"]
+
+
+class TestListVenueAccountStatesTool:
+    """Coverage for the ``list_venue_account_states`` MCP tool (PnL Phase 3)."""
+
+    @staticmethod
+    def _build_repo(
+        rows: list[dict[str, Any]],
+        accessible_wallets: list[str] | None = None,
+    ) -> Any:
+        """Build an AsyncMock repo wired for the venue-account-state read path."""
+        repo = AsyncMock()
+        repo.get_venue_account_states = AsyncMock(return_value=rows)
+        if accessible_wallets is None:
+            accessible_wallets = ["wallet-1"]
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": w} for w in accessible_wallets]
+        )
+        return repo
+
+    @pytest.mark.asyncio
+    async def test_ai_delegate_without_permission_returns_permission_denied(self) -> None:
+        """AI_DELEGATE lacks READ_ACCOUNT_STATE → permission_denied envelope."""
+        repo = self._build_repo([_venue_account_state_row()])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool("list_venue_account_states", {})
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "permission_denied"
+        repo.get_venue_account_states.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_operator_happy_path_returns_mapped_states(self) -> None:
+        """OPERATOR caller → success with fail-closed-mapped account states."""
+        repo = self._build_repo([_venue_account_state_row()])
+        server = _build_server(repository=repo, claims=_make_claims(role=UserRole.OPERATOR))
+        result = await server._tool_manager.call_tool("list_venue_account_states", {})
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["count"] == 1
+        state = envelope["details"]["account_states"][0]
+        assert state["public_id"] == "acct-1"
+        assert state["effective_status"] == "observed"
+        assert state["is_authoritative"] is True
+        assert state["sync_status"] == "observed"
+
+    @pytest.mark.asyncio
+    async def test_wallet_outside_scope_returns_account_state_not_found(self) -> None:
+        """Inaccessible wallet → account_state_not_found (anti-enumeration)."""
+        repo = self._build_repo([], accessible_wallets=["wallet-1"])
+        server = _build_server(repository=repo, claims=_make_claims(role=UserRole.OPERATOR))
+        result = await server._tool_manager.call_tool(
+            "list_venue_account_states", {"wallet_public_id": "wallet-99"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "account_state_not_found"
+        repo.get_venue_account_states.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_result_returns_success_with_empty_list(self) -> None:
+        """No rows → success with an empty account-state list."""
+        repo = self._build_repo([], accessible_wallets=["wallet-1"])
+        server = _build_server(repository=repo, claims=_make_claims(role=UserRole.OPERATOR))
+        result = await server._tool_manager.call_tool("list_venue_account_states", {})
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["count"] == 0
+        assert envelope["details"]["account_states"] == []
+
+    @pytest.mark.asyncio
+    async def test_post_fetch_exchange_filter(self) -> None:
+        """``exchange`` filter prunes rows post-fetch (repo has no native filter)."""
+        kraken = _venue_account_state_row(public_id="acct-kraken", exchange="kraken")
+        futures = _venue_account_state_row(public_id="acct-futures", exchange="kraken_futures")
+        repo = self._build_repo([kraken, futures], accessible_wallets=["wallet-1"])
+        server = _build_server(repository=repo, claims=_make_claims(role=UserRole.OPERATOR))
+        result = await server._tool_manager.call_tool(
+            "list_venue_account_states", {"exchange": "kraken_futures"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["details"]["count"] == 1
+        assert envelope["details"]["account_states"][0]["exchange"] == "kraken_futures"
+
+    @pytest.mark.asyncio
+    async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
+        """Pre-lifespan repository surfaces a structured envelope for an authorized role."""
+        server = _build_server(repository=None, claims=_make_claims(role=UserRole.OPERATOR))
+        result = await server._tool_manager.call_tool("list_venue_account_states", {})
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "service_unavailable"
 
 
 class TestGetPositionCycleTool:

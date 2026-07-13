@@ -30,6 +30,7 @@ class Permission(StrEnum):
     CANCEL_ORDERS = "cancel:orders"
     READ_POSITIONS = "read:positions"
     MANAGE_POSITIONS = "manage:positions"
+    READ_ACCOUNT_STATE = "read:account_state"
     READ_STRATEGIES = "read:strategies"
     READ_SIGNALS = "read:signals"
     START_STRATEGIES = "start:strategies"
@@ -85,6 +86,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_MARKET_DATA,
         Permission.READ_ORDERS,
         Permission.READ_POSITIONS,
+        Permission.READ_ACCOUNT_STATE,
         Permission.READ_STRATEGIES,
         Permission.READ_SYSTEM_STATUS,
         Permission.READ_BACKTESTS,
@@ -98,6 +100,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.CANCEL_ORDERS,
         Permission.READ_POSITIONS,
         Permission.MANAGE_POSITIONS,
+        Permission.READ_ACCOUNT_STATE,
         Permission.READ_STRATEGIES,
         Permission.START_STRATEGIES,
         Permission.STOP_STRATEGIES,

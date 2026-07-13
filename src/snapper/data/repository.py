@@ -1627,6 +1627,25 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_venue_account_states(
+        self, wallet_public_ids: list[str] | None = None
+    ) -> list[VenueAccountStateRow]:
+        """Return the active venue account-truth rows, optionally scoped (Phase 3).
+
+        Sentinel-active read (no caller-clock ``as_of``): a venue account state
+        has no truthful historical projection, only its current observation.
+
+        Args:
+            wallet_public_ids: Wallet identities to include, or ``None`` for no
+                wallet filter (the admin-unscoped view, mirroring
+                ``get_positions``). An empty list yields an empty result.
+
+        Returns:
+            Active account-state rows, ordered by exchange then mode.
+        """
+        ...
+
+    @abstractmethod
     async def get_settings(self, as_of: datetime, category: str | None = None) -> list[SettingRow]:
         """Retrieve active settings, optionally filtered by category.
 
@@ -12120,40 +12139,35 @@ class SQLAlchemyRepository(Repository):
         }
 
     async def get_venue_account_states(
-        self, wallet_public_ids: list[str]
+        self, wallet_public_ids: list[str] | None = None
     ) -> list[VenueAccountStateRow]:
-        """Return the active venue account-truth rows for the given wallets.
+        """Return the active venue account-truth rows, optionally wallet-scoped.
 
         Sentinel-active read (``known_to == KNOWN_TO_MAX``), never a
         caller-clock ``as_of`` scan — a venue account state has no truthful
         historical projection, only its current observation. The partial
         unique index guarantees at most one active row per identity, so no
-        read-time duplicate collapse is needed. An empty wallet list returns
-        an empty list (never an unfiltered scan).
+        read-time duplicate collapse is needed. ``None`` applies NO wallet
+        filter (the ADMIN-unscoped view, mirroring ``get_positions``); a
+        non-empty list scopes to those wallets; an EMPTY list scopes to
+        nothing (a caller with no accessible wallets — never an unfiltered
+        scan, since ``resolve_target_wallets`` returns ``None`` only for an
+        admin with no explicit scope).
 
         Args:
-            wallet_public_ids: Full wallet identities to include.
+            wallet_public_ids: Full wallet identities to include, or ``None``
+                for no wallet filter (admin-unscoped). An empty list yields an
+                empty result.
 
         Returns:
             Active account-state rows, ordered by exchange then mode.
         """
-        if not wallet_public_ids:
-            return []
         async with self.session() as s:
-            rows = (
-                (
-                    await s.execute(
-                        select(VenueAccountState)
-                        .where(
-                            VenueAccountState.known_to == KNOWN_TO_MAX,
-                            VenueAccountState.wallet_public_id.in_(wallet_public_ids),
-                        )
-                        .order_by(VenueAccountState.exchange, VenueAccountState.mode)
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            query = select(VenueAccountState).where(VenueAccountState.known_to == KNOWN_TO_MAX)
+            if wallet_public_ids is not None:
+                query = query.where(VenueAccountState.wallet_public_id.in_(wallet_public_ids))
+            query = query.order_by(VenueAccountState.exchange, VenueAccountState.mode)
+            rows = (await s.execute(query)).scalars().all()
             return [self._venue_account_state_to_row(r) for r in rows]
 
     async def get_fill_shard_keys_by_client_order_ids(

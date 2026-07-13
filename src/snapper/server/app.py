@@ -78,6 +78,7 @@ from snapper.api.schemas.data_responses import InstrumentCapabilityListResponse
 from snapper.api.schemas.data_responses import InstrumentDetailListResponse
 from snapper.api.schemas.data_responses import InstrumentListResponse
 from snapper.api.schemas.data_responses import OrderListResponse
+from snapper.api.schemas.data_responses import PortfolioAccountStateListResponse
 from snapper.api.schemas.data_responses import PositionListResponse
 from snapper.api.schemas.data_responses import RelatedInstrumentsResponse
 from snapper.api.schemas.data_responses import SignalListResponse
@@ -118,6 +119,7 @@ from snapper.application.db_stats.snapshotter import (
     resolve_disabled as _resolve_db_metrics_disabled,
 )
 from snapper.application.market_data_watchdog.watchdog import MarketDataWatchdog
+from snapper.application.portfolio.account_view import build_portfolio_account_state
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.retention.scheduler import RetentionScheduler
@@ -2438,6 +2440,67 @@ def _create_orders_executions_router() -> APIRouter:
         except Exception as exc:
             logger.error(f"Failed to fetch positions: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch positions") from exc
+
+    @router.get(
+        "/portfolio/accounts",
+        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
+    )
+    async def get_portfolio_accounts(
+        request: Request,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_ACCOUNT_STATE))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        operator_public_id: Annotated[str | None, Query(description="Scope to operator")] = None,
+        wallet_public_id: Annotated[str | None, Query(description="Scope to wallet")] = None,
+    ) -> PortfolioAccountStateListResponse:
+        """Fetch venue account-truth states (PnL Phase 3).
+
+        Returns the active per-venue account-state rows for the accessible
+        wallets, each mapped through the fail-closed read surface: the
+        EFFECTIVE status is derived over the stored value (stale/clock_error),
+        payloads are revalidated (a parse failure marks the state corrupt),
+        and ``is_authoritative`` is set only when the effective status is
+        exactly ``observed``. Account state has no historical projection, so
+        there is no ``as_of`` parameter.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            _auth: Authenticated user with READ_ACCOUNT_STATE permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            operator_public_id: Optional operator scope (403 if foreign).
+            wallet_public_id: Optional wallet scope (403 if inaccessible).
+
+        Returns:
+            PortfolioAccountStateListResponse wrapping the account-state data.
+        """
+        now = datetime.now(UTC)
+        try:
+            target_wallets = await resolve_target_wallets(
+                _auth, repo, operator_public_id, wallet_public_id
+            )
+            rows = await repo.get_venue_account_states(target_wallets)
+            items = [build_portfolio_account_state(r, now) for r in rows]
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return PortfolioAccountStateListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"Failed to fetch portfolio accounts: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Failed to fetch portfolio accounts"
+            ) from exc
 
     return router
 

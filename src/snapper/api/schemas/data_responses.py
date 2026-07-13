@@ -19,6 +19,7 @@ from snapper.messaging.schemas.data import FrontMonthData
 from snapper.messaging.schemas.data import InstrumentCapabilityData
 from snapper.messaging.schemas.data import InstrumentDetailData
 from snapper.messaging.schemas.data import OrderData
+from snapper.messaging.schemas.data import PortfolioAccountState
 from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import RelatedInstrumentsPayloadData
 from snapper.messaging.schemas.data import SignalData
@@ -95,6 +96,22 @@ class PositionListResponse(PayloadListResponse[Literal["position_list"], Positio
     """
 
     type: Literal["position_list"] = "position_list"
+
+
+class PortfolioAccountStateListResponse(
+    PayloadListResponse[Literal["portfolio_account_state_list"], PortfolioAccountState]
+):
+    """Venue account-state list response wrapper (PnL Phase 3).
+
+    Wraps a list of PortfolioAccountState items with a count.
+
+    Attributes:
+        type: Payload item type discriminator.
+        payload: List of venue account-state items.
+        count: Total number of account states in the response.
+    """
+
+    type: Literal["portfolio_account_state_list"] = "portfolio_account_state_list"
 
 
 class ExchangeListResponse(PayloadListResponse[Literal["exchange_list"], str]):

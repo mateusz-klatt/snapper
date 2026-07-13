@@ -443,6 +443,123 @@ class PositionData(StrictDataSchema[Literal["position"]]):
     wallet_public_id: str = ""
 
 
+class AccountBalanceEntry(StrictBody):
+    """One venue-native per-currency balance in a portfolio account snapshot.
+
+    PnL Phase 3. ``free``/``used`` are honest NULLs: some venues (Kraken
+    Futures coin-margin) expose only a per-currency total, and a
+    ``*_collateral_value`` label carries a flex/cash basket's venue-reported
+    valuation verbatim (never a fabricated split). Values are native (no USD
+    conversion in Phase 3).
+
+    Attributes:
+        currency: Native currency code, or a ``*_collateral_value`` valuation
+            label for a multi-collateral futures basket.
+        total: Native total for the currency (or the basket valuation).
+        free: Available portion — NULL when the venue exposes no faithful split.
+        used: Reserved/margin portion — NULL when no faithful split exists.
+    """
+
+    currency: str
+    total: float
+    free: float | None = None
+    used: float | None = None
+
+
+class AccountPositionEntry(StrictBody):
+    """One venue-native open position in a portfolio account snapshot.
+
+    PnL Phase 3 — an independent VENUE observation, distinct from the
+    fill-derived ``PositionData`` projection (reconciling the two is Phase 4).
+    Native units, no USD conversion.
+
+    Attributes:
+        symbol: Native instrument symbol.
+        side: Position side (``buy``/``sell``).
+        size: Position size in native contracts/units.
+        entry_price: Venue-reported average entry price.
+        mark_price: Venue-reported mark price.
+        unrealized_pnl: Venue-reported unrealized PnL (native).
+        unrealized_funding: Venue-reported unrealized funding (native).
+        timestamp: When the venue reported the position.
+    """
+
+    symbol: str
+    side: str
+    size: float
+    entry_price: float
+    mark_price: float
+    unrealized_pnl: float
+    unrealized_funding: float
+    timestamp: datetime
+
+
+class PortfolioAccountState(StrictDataSchema[Literal["portfolio_account_state"]]):
+    """Truthful venue account state per (wallet, exchange, mode) — PnL Phase 3.
+
+    A read surface over the ``venue_account_states`` truth plane, fail-closed:
+    ``sync_status`` is the raw stored attempt outcome, while
+    ``effective_status`` is DERIVED at read time and is the one consumers must
+    trust — it demotes an observed row to ``stale`` past its
+    ``authoritative_until`` (or when that window is missing), to ``clock_error``
+    on a future-dated observation clock, and to ``corrupt`` when a stored JSON
+    payload fails to revalidate. ``is_authoritative`` is True ONLY when
+    ``effective_status`` is exactly ``observed``; ``simulated`` (paper),
+    ``unsupported`` (market-data-only), ``error``, ``stale``, ``clock_error``,
+    and ``corrupt`` are never authoritative. Balances/positions are honest
+    NULLs (never fabricated); they are cleared ONLY when the state is
+    ``corrupt`` (a stored payload failed revalidation). A ``stale`` or
+    ``clock_error`` row KEEPS its last-known payloads, labeled
+    non-authoritative (``is_authoritative`` False) so clients show them as
+    stale rather than blanking the surface. Balance and positions are
+    independent reads, so each carries its own observation timestamp and
+    payload-source provenance. Native units only (``valuation_status`` =
+    ``native_only``); USD is Phase 5.
+
+    Attributes:
+        wallet_public_id: Owning wallet UUID7.
+        exchange: Venue the account is held on.
+        mode: Trading mode (live/paper).
+        sync_status: Raw stored roll-up (observed/simulated/unsupported/error).
+        effective_status: Read-time status consumers must trust — adds
+            stale/clock_error/corrupt over the stored value.
+        is_authoritative: True only when effective_status is ``observed``.
+        balance_status: Per-component balance outcome.
+        position_status: Per-component positions outcome.
+        valuation_status: ``native_only`` in Phase 3 (no USD math).
+        balances: Native per-currency balances, or NULL when not fresh/corrupt.
+        open_positions: Native venue positions, or NULL when not fresh/corrupt.
+        balance_observed_at: When the balance was last observed; NULL if never.
+        position_observed_at: When positions were last observed; NULL if never.
+        authoritative_until: Instant past which an observed row is stale.
+        current_attempt_observation_id: The latest observation attempt id.
+        balance_payload_source_observation_id: Observation whose balances are
+            shown (own on a fresh read, an earlier one when retained).
+        position_payload_source_observation_id: Same, for positions.
+        error: Last error detail (transient read failure), or NULL.
+    """
+
+    type: Literal["portfolio_account_state"] = "portfolio_account_state"
+    wallet_public_id: str = ""
+    exchange: OrderExchange
+    mode: ExecutionMode = ExecutionModeEnum.LIVE
+    sync_status: str
+    effective_status: str
+    is_authoritative: bool
+    balance_status: str
+    position_status: str
+    valuation_status: str
+    balances: list[AccountBalanceEntry] | None = None
+    open_positions: list[AccountPositionEntry] | None = None
+    balance_observed_at: datetime | None = None
+    position_observed_at: datetime | None = None
+    authoritative_until: datetime | None = None
+    current_attempt_observation_id: int | None = None
+    balance_payload_source_observation_id: int | None = None
+    position_payload_source_observation_id: int | None = None
+    error: str | None = None
+
+
 class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
     """Order request from strategy to executor.
 

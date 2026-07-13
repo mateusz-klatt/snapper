@@ -28,9 +28,10 @@ the repository — never the caller — owns coherence and provenance:
 * A lagging bus clock is clamped to ``max(bus_time, existing.timestamp)`` so a
   successor never travels back in time, and a lost first-insert unique race is
   retried exactly once against the real partial-unique index.
-* :meth:`SQLAlchemyRepository.get_venue_account_states` short-circuits an empty
-  wallet list, returns only sentinel-active rows ordered by ``(exchange,
-  mode)``, excludes closed rows, and is wallet-scoped.
+* :meth:`SQLAlchemyRepository.get_venue_account_states` scopes an empty wallet
+  list to nothing and a ``None`` filter to every wallet (admin-unscoped),
+  returns only sentinel-active rows ordered by ``(exchange, mode)``, excludes
+  closed rows, and is wallet-scoped.
 * The model DB CHECK constraints reject an ``observed`` roll-up whose balance,
   positions, or authority window do not back it, an observed/simulated balance
   or observed positions with a NULL JSON payload (or a positions read missing
@@ -781,16 +782,36 @@ async def test_snapshot_retries_lost_first_insert_race(tmp_path: Path) -> None:
     assert successor.balances_json == '{"USD": 1.0}'
 
 
-async def test_get_states_empty_wallet_list_short_circuits(tmp_path: Path) -> None:
-    """An empty wallet list returns an empty list without a query.
+async def test_get_states_empty_wallet_list_scopes_to_nothing(tmp_path: Path) -> None:
+    """An empty wallet list returns an empty list (scoped to nothing).
 
     Given: a database that DOES hold an active state,
     When: get_venue_account_states runs with an empty wallet list,
-    Then: it returns [] — never an unfiltered scan that could leak rows.
+    Then: it returns [] — the ``.in_([])`` filter matches no wallet, never an
+        unfiltered scan that could leak rows.
     """
     repo = await _make_repo(tmp_path)
     await repo.record_venue_account_snapshot(_attempt_row(_T0))
     assert await repo.get_venue_account_states([]) == []
+
+
+async def test_get_states_none_returns_all_unscoped(tmp_path: Path) -> None:
+    """A ``None`` wallet filter returns every active state (admin-unscoped).
+
+    Given: active states for two different wallets,
+    When: get_venue_account_states runs with ``None`` (no wallet filter),
+    Then: rows for BOTH wallets come back — mirroring get_positions, the
+        admin-unscoped view is the only path that reaches an unfiltered read
+        (resolve_target_wallets returns None only for an admin with no scope).
+    """
+    repo = await _make_repo(tmp_path)
+    other_wallet = "019e873c-d060-762d-8cee-5fde40095131"
+    await repo.record_venue_account_snapshot(_attempt_row(_T0))
+    await repo.record_venue_account_snapshot(_attempt_row(_T0, wallet_public_id=other_wallet))
+    rows = await repo.get_venue_account_states(None)
+    wallets = {r["wallet_public_id"] for r in rows}
+    assert _WALLET in wallets
+    assert other_wallet in wallets
 
 
 async def test_get_states_returns_active_rows_ordered_by_exchange_then_mode(

@@ -1353,7 +1353,7 @@ class TestGenerateIosPermissions:
         assert "manage:users" in content
         captured = capsys.readouterr()
         assert "Generated" in captured.out
-        assert "24 permissions" in captured.out
+        assert "25 permissions" in captured.out
         assert "4 roles" in captured.out
         assert "14 resources" in captured.out
 
@@ -2481,7 +2481,7 @@ class TestGeneratePermissions:
         assert "manage:users" in content
         captured = capsys.readouterr()
         assert "Generated" in captured.out
-        assert "24 permissions" in captured.out
+        assert "25 permissions" in captured.out
         assert "4 roles" in captured.out
         assert "14 resources" in captured.out
 
