@@ -12,14 +12,19 @@ import pytest
 import snapper.indicators.ta_lib_adapter
 from snapper.indicators.ta_lib_adapter import atr
 from snapper.indicators.ta_lib_adapter import bollinger
+from snapper.indicators.ta_lib_adapter import cci
 from snapper.indicators.ta_lib_adapter import ema
 from snapper.indicators.ta_lib_adapter import get_backend
 from snapper.indicators.ta_lib_adapter import is_talib_available
+from snapper.indicators.ta_lib_adapter import keltner
 from snapper.indicators.ta_lib_adapter import macd
+from snapper.indicators.ta_lib_adapter import mfi
 from snapper.indicators.ta_lib_adapter import obv
+from snapper.indicators.ta_lib_adapter import roc
 from snapper.indicators.ta_lib_adapter import rsi
 from snapper.indicators.ta_lib_adapter import sma
 from snapper.indicators.ta_lib_adapter import stochastic
+from snapper.indicators.ta_lib_adapter import vwap
 
 
 class TestTALibAdapter:
@@ -597,3 +602,93 @@ class TestNewIndicatorsTALib:
         volume = pd.Series([100.0] * 19)
         result = obv(close, volume)
         assert len(result) == 19
+
+
+class TestPhase2Fallback:
+    """Python-fallback coverage for the Phase-2 indicator set."""
+
+    @pytest.fixture(autouse=True)
+    def setup_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Disable TA-Lib so the adapter dispatches to the Python fallback."""
+        monkeypatch.setattr(snapper.indicators.ta_lib_adapter, "_talib_available", False)
+
+    def test_roc_fallback(self) -> None:
+        """Given fallback mode, When roc, Then the percent change is returned."""
+        result = roc(pd.Series([100.0, 110.0, 121.0]), period=1)
+        assert result.iloc[1] == pytest.approx(10.0)
+
+    def test_cci_fallback(self) -> None:
+        """Given fallback mode, When cci, Then it returns a full-length series."""
+        high = pd.Series([float(x) + 1.0 for x in range(1, 11)])
+        low = pd.Series([float(x) - 1.0 for x in range(1, 11)])
+        close = pd.Series([float(x) for x in range(1, 11)])
+        result = cci(high, low, close, period=3)
+        assert len(result) == 10
+
+    def test_mfi_fallback(self) -> None:
+        """Given fallback mode, When mfi, Then values stay within [0, 100]."""
+        close = pd.Series([10.0, 11.0, 10.5, 11.5, 10.0, 12.0])
+        high = close + 0.5
+        low = close - 0.5
+        volume = pd.Series([100.0] * 6)
+        result = mfi(high, low, close, volume, period=3)
+        valid = result.dropna()
+        assert (valid >= 0).all()
+        assert (valid <= 100).all()
+
+
+class TestPhase2TALib:
+    """Active-backend coverage for the Phase-2 indicator set."""
+
+    def test_roc_empty_and_basic(self) -> None:
+        """Given empty then basic input, When roc, Then handles both shapes."""
+        assert roc(pd.Series([], dtype=float)).empty
+        result = roc(pd.Series([float(x) for x in range(1, 30)]), period=5)
+        assert len(result) == 29
+
+    def test_cci_empty_and_basic(self) -> None:
+        """Given empty then basic OHLC, When cci, Then handles both shapes."""
+        empty = pd.Series([], dtype=float)
+        assert cci(empty, empty, empty).empty
+        n = 30
+        high = pd.Series([10.0 + (i % 5) for i in range(n)])
+        low = pd.Series([9.0 + (i % 5) for i in range(n)])
+        close = pd.Series([9.5 + (i % 5) for i in range(n)])
+        result = cci(high, low, close, period=20)
+        assert len(result) == n
+
+    def test_mfi_empty_and_basic(self) -> None:
+        """Given empty then basic OHLCV, When mfi, Then values in [0, 100]."""
+        empty = pd.Series([], dtype=float)
+        assert mfi(empty, empty, empty, empty).empty
+        n = 30
+        close = pd.Series([10.0 + (i % 5) for i in range(n)])
+        high = close + 0.5
+        low = close - 0.5
+        volume = pd.Series([100.0 + (i % 3) * 10 for i in range(n)])
+        result = mfi(high, low, close, volume, period=14)
+        valid = result.dropna()
+        assert (valid >= 0).all()
+        assert (valid <= 100).all()
+
+    def test_keltner_empty_and_basic(self) -> None:
+        """Given empty then basic OHLC, When keltner, Then returns 3 columns."""
+        empty = pd.Series([], dtype=float)
+        assert keltner(empty, empty, empty)["upper"].empty
+        close = pd.Series([float(x) for x in range(1, 40)])
+        high = close + 1.0
+        low = close - 1.0
+        bands = keltner(high, low, close, period=20, atr_period=10)
+        assert list(bands.columns) == ["upper", "middle", "lower"]
+
+    def test_vwap_empty_and_basic(self) -> None:
+        """Given empty then basic OHLCV, When vwap, Then handles both shapes."""
+        empty = pd.Series([], dtype=float)
+        assert vwap(empty, empty, empty, empty).empty
+        n = 30
+        close = pd.Series([float(x) for x in range(1, n + 1)])
+        high = close + 0.5
+        low = close - 0.5
+        volume = pd.Series([100.0] * n)
+        result = vwap(high, low, close, volume, period=14)
+        assert len(result) == n
