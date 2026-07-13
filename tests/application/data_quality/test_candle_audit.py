@@ -144,6 +144,20 @@ def test_daily_alignment_is_not_checked() -> None:
     assert CandleAnomalyType.MISALIGNED_OPEN_AT not in _types(audit_candle_series(candles, "1d"))
 
 
+def test_anchor_offset_aligns_venue_bars() -> None:
+    """A venue-anchored bar aligns under an anchor offset.
+
+    Given: a 1h bar opening at 30 minutes past the hour,
+    When: audit_candle_series is called with anchor_offset_seconds=1800,
+    Then: no misalignment is reported, but it is reported without the offset.
+    """
+    candle = [_candle(datetime(2026, 1, 1, 14, 30, 0, tzinfo=UTC))]
+    aligned = audit_candle_series(candle, "1h", anchor_offset_seconds=1800)
+    assert CandleAnomalyType.MISALIGNED_OPEN_AT not in _types(aligned)
+    unaligned = audit_candle_series(candle, "1h")
+    assert CandleAnomalyType.MISALIGNED_OPEN_AT in _types(unaligned)
+
+
 def test_duplicate_open_at() -> None:
     """Two bars sharing an open_at are flagged.
 

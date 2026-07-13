@@ -18,7 +18,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
-from datetime import timedelta
 from enum import Enum
 from math import isfinite
 
@@ -84,34 +83,43 @@ def _timeframe_to_seconds(timeframe: str) -> int:
 
 
 def _as_utc(moment: datetime) -> datetime:
-    """Coerce a datetime to UTC; a naive value is assumed to be UTC already."""
-    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+    """Return ``moment`` in UTC; a naive value is assumed to already be UTC."""
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
 
 
-def _is_on_grid(open_at: datetime, interval_seconds: int) -> bool:
-    """Return whether ``open_at`` lands on the interval grid from the epoch.
+def _is_on_grid(open_at: datetime, interval_seconds: int, anchor_offset_seconds: int) -> bool:
+    """Return whether ``open_at`` lands on the interval grid.
 
-    Uses integer microseconds so float residue never causes a false misalignment.
+    Uses integer microseconds so float residue never causes a false
+    misalignment. ``anchor_offset_seconds`` shifts the grid origin off the UNIX
+    epoch so venue-anchored bars (e.g. a session opening at :30 past the hour)
+    can be aligned by a caller that knows the schedule.
 
     Args:
         open_at: The aware bar open time.
         interval_seconds: The timeframe interval in seconds.
+        anchor_offset_seconds: Grid-origin offset from the epoch, in seconds.
 
     Returns:
         True when the bar is aligned to the grid.
     """
     delta = open_at - _EPOCH
     total_micros = (delta.days * _ONE_DAY_SECONDS + delta.seconds) * _MICROS_PER_SECOND
-    total_micros += delta.microseconds
+    total_micros += delta.microseconds - anchor_offset_seconds * _MICROS_PER_SECOND
     return total_micros % (interval_seconds * _MICROS_PER_SECOND) == 0
 
 
-def _row_anomalies(row: CandleRow, interval_seconds: int) -> list[CandleAnomaly]:
+def _row_anomalies(
+    row: CandleRow, interval_seconds: int, anchor_offset_seconds: int
+) -> list[CandleAnomaly]:
     """Return the row-level anomalies for a single candle.
 
     Args:
         row: The candle row dict.
         interval_seconds: The timeframe interval in seconds.
+        anchor_offset_seconds: Grid-origin offset for the alignment check.
 
     Returns:
         Any OHLC-invariant, non-positive-price, negative-volume or
@@ -151,7 +159,9 @@ def _row_anomalies(row: CandleRow, interval_seconds: int) -> list[CandleAnomaly]
         anomalies.append(
             CandleAnomaly(CandleAnomalyType.NEGATIVE_VOLUME, open_at, f"volume={volume}")
         )
-    if interval_seconds < _ONE_DAY_SECONDS and not _is_on_grid(open_at, interval_seconds):
+    if interval_seconds < _ONE_DAY_SECONDS and not _is_on_grid(
+        open_at, interval_seconds, anchor_offset_seconds
+    ):
         anomalies.append(
             CandleAnomaly(
                 CandleAnomalyType.MISALIGNED_OPEN_AT,
@@ -167,6 +177,7 @@ def audit_candle_series(
     timeframe: str,
     *,
     split_threshold: float = 0.30,
+    anchor_offset_seconds: int = 0,
     expected_gap: Callable[[datetime, datetime], bool] | None = None,
 ) -> list[CandleAnomaly]:
     """Audit one instrument's candle series for one timeframe.
@@ -175,7 +186,13 @@ def audit_candle_series(
         candles: Candle rows, expected in ascending ``open_at`` order.
         timeframe: The bars' timeframe (``1m``/``5m``/``15m``/``1h``/``4h``/``1d``).
         split_threshold: Fractional close-to-close move above which a bar is
-            flagged as a split suspect. Default 0.30 (30%).
+            flagged as a split suspect. Default 0.30 (30%). This is a heuristic
+            best suited to instruments that actually split (equities); on highly
+            volatile or micro-priced assets (crypto) it flags normal moves, so
+            tune or ignore SPLIT_SUSPECT there.
+        anchor_offset_seconds: Grid-origin offset from the UNIX epoch used by the
+            intraday alignment check. Default 0 aligns to the epoch (correct for
+            24/7 venues); pass a session offset for venue-anchored bars.
         expected_gap: Optional predicate ``(prev_open, next_open) -> bool``; when
             it returns True the gap between those bars is treated as expected
             (e.g. a market closure) and not reported.
@@ -187,11 +204,10 @@ def audit_candle_series(
         ValueError: If the timeframe is not supported.
     """
     interval_seconds = _timeframe_to_seconds(timeframe)
-    interval = timedelta(seconds=interval_seconds)
     anomalies: list[CandleAnomaly] = []
     previous: CandleRow | None = None
     for row in candles:
-        anomalies.extend(_row_anomalies(row, interval_seconds))
+        anomalies.extend(_row_anomalies(row, interval_seconds, anchor_offset_seconds))
         if previous is not None:
             previous_open = _as_utc(previous["open_at"])
             current_open = _as_utc(row["open_at"])
@@ -213,10 +229,10 @@ def audit_candle_series(
                 )
             else:
                 gap = current_open - previous_open
-                if gap > interval and (
+                missing = round(gap.total_seconds() / interval_seconds) - 1
+                if missing > 0 and (
                     expected_gap is None or not expected_gap(previous_open, current_open)
                 ):
-                    missing = round(gap.total_seconds() / interval_seconds) - 1
                     anomalies.append(
                         CandleAnomaly(
                             CandleAnomalyType.GAP,
