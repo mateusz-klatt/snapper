@@ -58,6 +58,7 @@ from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_krake
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
@@ -65,6 +66,7 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
+from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderFillSummary
@@ -270,6 +272,16 @@ def _map_kraken_side(raw: str) -> OrderSideEnum:
     return _SIDE_MAP.get(raw, OrderSideEnum.BUY)
 
 
+_MALFORMED_WALLETS_MSG = "Kraken Futures get_wallets returned a malformed accounts envelope"
+_MALFORMED_POSITIONS_MSG = (
+    "Kraken Futures get_open_positions returned a malformed openPositions envelope"
+)
+_NON_FINITE_BALANCE_MSG = "Kraken Futures balance amount is not finite"
+_MISSING_POSITION_FIELD_MSG = "Kraken Futures position is missing a required numeric field"
+_NON_FINITE_POSITION_MSG = "Kraken Futures position field is not finite"
+_UNKNOWN_POSITION_SIDE_MSG = "Kraken Futures position has a missing or unknown side"
+
+
 class KrakenFuturesExchangeClient(ExchangeClientBase):
     """Kraken Futures exchange client.
 
@@ -283,6 +295,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
     """
 
     supports_websocket_executions: bool = False
+    balance_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
+    position_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
 
     def __init__(
         self,
@@ -1677,6 +1691,223 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 ),
             )
         return positions
+
+    @staticmethod
+    def _read_native_coin_margin(acct_data: dict[str, Any]) -> list[NativeBalanceEntry]:
+        """Faithful per-currency totals from a coin-margin account (no fabrication).
+
+        Reports the RAW per-currency balance as the total with NULL free/used —
+        Kraken Futures coin-margin exposes only per-currency totals plus an
+        account-level aggregate margin, never a faithful per-currency free/used
+        split (``get_balance`` fabricates that split; this reader must not).
+        Zero balances are skipped.
+
+        Args:
+            acct_data: Raw coin-margin account dict from get_wallets.
+
+        Returns:
+            Faithful native per-currency balance entries.
+
+        Raises:
+            ValueError: On a malformed balances map or a non-finite amount.
+        """
+        acct_balances = acct_data.get("balances", {})
+        if not isinstance(acct_balances, dict):
+            raise ValueError(_MALFORMED_WALLETS_MSG)
+        entries: list[NativeBalanceEntry] = []
+        for curr, amount in acct_balances.items():
+            if not isinstance(curr, str) or not curr:
+                raise ValueError(_MALFORMED_WALLETS_MSG)
+            try:
+                total = float(amount)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(_MALFORMED_WALLETS_MSG) from exc
+            if not math.isfinite(total):
+                raise ValueError(_NON_FINITE_BALANCE_MSG)
+            if total == 0:
+                continue
+            entries.append(NativeBalanceEntry(currency=curr, total=total, free=None, used=None))
+        return entries
+
+    @staticmethod
+    def _read_native_flex(acct_name: str, acct_data: dict[str, Any]) -> NativeBalanceEntry | None:
+        """Faithful flex/cash collateral value — the venue's ``balanceValue`` verbatim.
+
+        A flex/cash account is a multi-collateral basket whose only
+        venue-reported scalar is ``balanceValue`` (a valuation with no native
+        per-collateral breakdown). Phase 3 stores it VERBATIM under an explicit
+        ``{name}_collateral_value`` label with NULL free/used — it is OBSERVED,
+        never recomputed (directive: no USD math), and its non-currency label
+        keeps it from being mistaken for a spot balance. Zero → None.
+
+        Args:
+            acct_name: Account name (``flex`` or ``cash``).
+            acct_data: Raw flex/cash account dict from get_wallets.
+
+        Returns:
+            The collateral-value entry, or None when the value is zero.
+
+        Raises:
+            ValueError: On a missing, non-numeric, or non-finite balanceValue.
+        """
+        if "balanceValue" not in acct_data:
+            raise ValueError(_MALFORMED_WALLETS_MSG)
+        try:
+            balance_value = float(acct_data["balanceValue"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(_MALFORMED_WALLETS_MSG) from exc
+        if not math.isfinite(balance_value):
+            raise ValueError(_NON_FINITE_BALANCE_MSG)
+        if balance_value == 0:
+            return None
+        return NativeBalanceEntry(
+            currency=f"{acct_name}_collateral_value",
+            total=balance_value,
+            free=None,
+            used=None,
+        )
+
+    async def read_native_balances(self) -> list[NativeBalanceEntry]:
+        """Read faithful native futures balances (PnL Phase 3, fail-closed).
+
+        Unlike ``get_balance`` (consumed by the order-recon plane, which
+        fabricates a per-currency free/used split from an account-level margin
+        aggregate and synthesizes a ``_usd`` currency for flex/cash), this
+        reader reports ONLY what the venue faithfully exposes: coin-margin raw
+        per-currency totals (free/used NULL) and a flex/cash account's
+        ``balanceValue`` verbatim under a ``_collateral_value`` label. A
+        malformed wallets envelope or any non-finite number RAISES rather than
+        degrading into an authoritative empty/zero balance.
+
+        Returns:
+            Faithful native balance entries (empty only when the venue holds
+            nothing).
+
+        Raises:
+            RuntimeError: When API credentials are missing.
+            ValueError: On a malformed envelope or a non-finite amount.
+        """
+        self._require_authenticated()
+        self._record_rest_call()
+        user_client = cast(User, self._user_client)
+        result = await self._dispatch_routed_rest(
+            operation="get_wallets",
+            kind="private_idempotent_read",
+            target=futures_sdk_proxy_target(user_client),
+            sync_call=user_client.get_wallets,
+        )
+        accounts = result.get("accounts")
+        if not isinstance(accounts, dict):
+            raise ValueError(_MALFORMED_WALLETS_MSG)
+        entries: list[NativeBalanceEntry] = []
+        for acct_name, acct_data in accounts.items():
+            if not isinstance(acct_data, dict):
+                raise ValueError(_MALFORMED_WALLETS_MSG)
+            if "balances" in acct_data:
+                entries.extend(self._read_native_coin_margin(acct_data))
+            elif acct_name in ("flex", "cash"):
+                flex_entry = self._read_native_flex(str(acct_name), acct_data)
+                if flex_entry is not None:
+                    entries.append(flex_entry)
+            else:
+                raise ValueError(_MALFORMED_WALLETS_MSG)
+        return entries
+
+    @staticmethod
+    def _require_finite_position_field(pos: dict[str, Any], key: str) -> float:
+        """Extract a REQUIRED finite float position field or raise.
+
+        Args:
+            pos: Raw position dict.
+            key: Field name.
+
+        Returns:
+            The finite float value.
+
+        Raises:
+            ValueError: When the field is missing, non-numeric, or non-finite.
+        """
+        if key not in pos:
+            raise ValueError(_MISSING_POSITION_FIELD_MSG)
+        try:
+            value = float(pos[key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(_MISSING_POSITION_FIELD_MSG) from exc
+        if not math.isfinite(value):
+            raise ValueError(_NON_FINITE_POSITION_MSG)
+        return value
+
+    @classmethod
+    def _read_native_position(cls, pos: dict[str, Any]) -> OpenPositionSnapshot:
+        """Strictly validate one raw futures position — no coercion (Phase 3).
+
+        Rejects (raises) a non-dict entry, an unresolvable symbol, a
+        missing/unknown side, or any missing/non-finite numeric field, rather
+        than the ``get_open_positions`` behaviour of defaulting a missing side
+        to ``long`` and missing numbers to zero.
+
+        Args:
+            pos: Raw position dict from the openPositions envelope.
+
+        Returns:
+            A fully validated open-position snapshot.
+
+        Raises:
+            ValueError: On any malformed or missing field.
+        """
+        if not isinstance(pos, dict):
+            raise ValueError(_MALFORMED_POSITIONS_MSG)
+        symbol_raw = pos.get("symbol")
+        if not isinstance(symbol_raw, str):
+            raise ValueError(_MALFORMED_POSITIONS_MSG)
+        native_symbol = kraken_futures_ws_to_native(symbol_raw.upper())
+        side_str = pos.get("side")
+        if side_str == "long":
+            side = OrderSideEnum.BUY
+        elif side_str == "short":
+            side = OrderSideEnum.SELL
+        else:
+            raise ValueError(_UNKNOWN_POSITION_SIDE_MSG)
+        return OpenPositionSnapshot(
+            symbol=native_symbol,
+            side=side,
+            size=cls._require_finite_position_field(pos, "size"),
+            entry_price=cls._require_finite_position_field(pos, "price"),
+            mark_price=cls._require_finite_position_field(pos, "markPrice"),
+            unrealized_pnl=cls._require_finite_position_field(pos, "unrealizedPnl"),
+            unrealized_funding=cls._require_finite_position_field(pos, "unrealizedFunding"),
+            timestamp=datetime.now(UTC),
+        )
+
+    async def read_native_positions(self) -> list[OpenPositionSnapshot]:
+        """Read faithful native open positions with strict validation (Phase 3).
+
+        Unlike ``get_open_positions`` (which coerces a missing envelope into an
+        empty list, a missing side into ``long``, and missing numbers into
+        zero), this reader RAISES on a malformed envelope or any invalid
+        position; an empty list is authoritative ONLY when the venue genuinely
+        reports zero open positions.
+
+        Returns:
+            Faithful open-position snapshots.
+
+        Raises:
+            RuntimeError: When API credentials are missing.
+            ValueError: On a malformed envelope or an invalid position.
+        """
+        self._require_authenticated()
+        self._record_rest_call()
+        user_client = cast(User, self._user_client)
+        result = await self._dispatch_routed_rest(
+            operation="get_open_positions",
+            kind="private_idempotent_read",
+            target=futures_sdk_proxy_target(user_client),
+            sync_call=user_client.get_open_positions,
+        )
+        raw_positions = result.get("openPositions")
+        if not isinstance(raw_positions, list):
+            raise ValueError(_MALFORMED_POSITIONS_MSG)
+        return [self._read_native_position(pos) for pos in raw_positions]
 
     async def get_historical_funding_rates(
         self,

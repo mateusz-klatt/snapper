@@ -680,6 +680,22 @@ async def test_wait_for_rate_limit_waits_when_limit_exceeded(
     assert sleep_calls[0] > 0
 
 
+@pytest.mark.asyncio()
+async def test_read_native_balances_default_raises(
+    stubbed_client: PolygonExchangeClient,
+) -> None:
+    """Verify the inherited native-balance reader fail-closes.
+
+    Given: A market-data-only Polygon client that does not override
+        ``read_native_balances``,
+    When: The account observer calls ``read_native_balances``,
+    Then: The base-class default raises ``NotImplementedError`` rather
+        than returning a silently-empty account.
+    """
+    with pytest.raises(NotImplementedError):
+        await stubbed_client.read_native_balances()
+
+
 class TestListSplits:
     """Split-event fetch used by the split-repair tooling."""
 

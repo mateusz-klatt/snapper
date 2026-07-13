@@ -41,11 +41,14 @@ from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.contracts import EXCHANGE_TO_CORE_ORDER_TYPE
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
+from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
@@ -71,6 +74,9 @@ of ITS OWN pool and none of any other client's or of the event loop's
 shared default executor.
 """
 
+_NATIVE_BALANCES_UNSUPPORTED_MSG = "This exchange client does not support native balance reads"
+_NATIVE_POSITIONS_UNSUPPORTED_MSG = "This exchange client does not support native position reads"
+
 
 class ExchangeClientBase(ABC):
     """Abstract base class defining the interface for exchange clients.
@@ -88,6 +94,8 @@ class ExchangeClientBase(ABC):
     """
 
     supports_websocket_executions: bool = True
+    balance_capability: CapabilityStatus = CapabilityStatus.UNSUPPORTED
+    position_capability: CapabilityStatus = CapabilityStatus.UNSUPPORTED
 
     def __init__(
         self, repository: Repository | None = None, exchange_name: str = "unknown"
@@ -862,6 +870,45 @@ class ExchangeClientBase(ABC):
         """
         await asyncio.sleep(0)
         return None
+
+    async def read_native_balances(self) -> list[NativeBalanceEntry]:
+        """Read faithful native per-currency balances for the account observer.
+
+        The account observer calls this ONLY when ``balance_capability`` is not
+        ``UNSUPPORTED``; the default therefore fail-closes by raising, so a
+        client that advertises balance capability without a faithful reader is a
+        loud bug, never a silent empty account. Unlike ``get_balance`` (consumed
+        by the order-reconciliation plane, which may aggregate across
+        currencies), this reader must return ONLY venue-reported native values —
+        ``free``/``used`` NULL where the venue exposes no faithful split — or
+        raise; it must never fabricate a split.
+
+        Returns:
+            Faithful native per-currency balance entries.
+
+        Raises:
+            NotImplementedError: When the client declares no balance capability.
+        """
+        await asyncio.sleep(0)
+        raise NotImplementedError(_NATIVE_BALANCES_UNSUPPORTED_MSG)
+
+    async def read_native_positions(self) -> list[OpenPositionSnapshot]:
+        """Read faithful native open positions for the account observer.
+
+        Called ONLY when ``position_capability`` is ``SUPPORTED``; the default
+        fail-closes by raising. Implementations must STRICTLY validate the venue
+        envelope — reject a missing positions collection, missing/unknown side,
+        an unresolvable symbol, or any non-finite number — rather than coerce
+        them into a zero/default position that would read as authoritative.
+
+        Returns:
+            Faithful open-position snapshots.
+
+        Raises:
+            NotImplementedError: When the client declares no position capability.
+        """
+        await asyncio.sleep(0)
+        raise NotImplementedError(_NATIVE_POSITIONS_UNSUPPORTED_MSG)
 
     @abstractmethod
     async def get_balance(self, currency: str | None = None) -> dict[str, AccountBalance]:

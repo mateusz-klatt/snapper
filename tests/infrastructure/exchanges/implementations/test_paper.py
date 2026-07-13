@@ -17,11 +17,13 @@ from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
@@ -952,6 +954,75 @@ class TestPaperBalanceManagement:
         assert "USD" in balances
         assert "BTC" in balances
         assert balances["USD"].total == pytest.approx(10000.0)
+
+    def test_capability_flags_are_simulated_and_not_applicable(
+        self, paper_client: PaperExchangeClient
+    ) -> None:
+        """Verify the paper client advertises simulated balance capability.
+
+        Given: A paper exchange client,
+        When: Its capability class attributes are inspected,
+        Then: balance_capability is SIMULATED and position_capability is
+            NOT_APPLICABLE, so the account observer records balances as
+            simulated and never probes for positions.
+        """
+        assert paper_client.balance_capability is CapabilityStatus.SIMULATED
+        assert paper_client.position_capability is CapabilityStatus.NOT_APPLICABLE
+
+    @pytest.mark.asyncio
+    async def test_read_native_balances_returns_simulated_entries(
+        self, paper_client: PaperExchangeClient
+    ) -> None:
+        """Verify read_native_balances converts seeded balances to entries.
+
+        Given: A connected paper exchange client with seeded balances,
+        When: read_native_balances() is called,
+        Then: One NativeBalanceEntry per currency is returned, each with
+            the faithful free/used split from its AccountBalance.
+        """
+        await paper_client.connect()
+        entries = await paper_client.read_native_balances()
+        assert len(entries) == 5
+        by_currency = {entry.currency: entry for entry in entries}
+        assert set(by_currency) == {"USD", "EUR", "PLN", "BTC", "ETH"}
+        usd = by_currency["USD"]
+        assert isinstance(usd, NativeBalanceEntry)
+        assert usd.total == pytest.approx(10000.0)
+        assert usd.free == pytest.approx(10000.0)
+        assert usd.used == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_read_native_balances_empty_before_connect(
+        self, paper_client: PaperExchangeClient
+    ) -> None:
+        """Verify read_native_balances returns [] with no seeded balances.
+
+        Given: A paper exchange client that has not connected,
+        When: read_native_balances() is called,
+        Then: An empty list is returned.
+        """
+        entries = await paper_client.read_native_balances()
+        assert entries == []
+
+    @pytest.mark.asyncio
+    async def test_read_native_balances_rejects_non_finite(
+        self, paper_client: PaperExchangeClient
+    ) -> None:
+        """Verify read_native_balances rejects a non-finite balance.
+
+        Given: A connected client whose USD balance was corrupted to NaN,
+        When: read_native_balances() is called,
+        Then: ValueError is raised rather than recording a poisoned value.
+        """
+        await paper_client.connect()
+        paper_client._balances["USD"] = AccountBalance(
+            currency="USD",
+            free=float("nan"),
+            used=0.0,
+            total=10000.0,
+        )
+        with pytest.raises(ValueError, match="non-finite"):
+            await paper_client.read_native_balances()
 
 
 class TestPaperDisconnection:

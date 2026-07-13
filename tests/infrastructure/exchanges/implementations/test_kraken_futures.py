@@ -24,12 +24,14 @@ import snapper.infrastructure.exchanges.implementations.kraken_futures as mod
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
+from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
@@ -6396,3 +6398,725 @@ class TestGetOrderFillSummary:
         client = KrakenFuturesExchangeClient(sandbox=True)
         with pytest.raises(RuntimeError):
             await client.get_order_fill_summary("fut-1")
+
+
+_WS_TO_NATIVE_PATH = (
+    "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native"
+)
+
+
+class TestNativeReaderCapabilities:
+    """Capability class attributes advertise faithful account reading (Phase 3)."""
+
+    def test_balance_capability_supported(self) -> None:
+        """balance_capability advertises SUPPORTED.
+
+        Given: the KrakenFuturesExchangeClient class,
+        When: its balance_capability class attribute is read,
+        Then: it advertises faithful native balance reading.
+        """
+        assert KrakenFuturesExchangeClient.balance_capability is CapabilityStatus.SUPPORTED
+
+    def test_position_capability_supported(self) -> None:
+        """position_capability advertises SUPPORTED.
+
+        Given: the KrakenFuturesExchangeClient class,
+        When: its position_capability class attribute is read,
+        Then: it advertises faithful native position reading.
+        """
+        assert KrakenFuturesExchangeClient.position_capability is CapabilityStatus.SUPPORTED
+
+
+class TestReadNativeBalances:
+    """Adversarial tests for read_native_balances (PnL Phase 3, fail-closed)."""
+
+    @pytest.mark.asyncio
+    async def test_coin_margin_faithful_per_currency(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Coin-margin totals are reported verbatim with NULL free/used.
+
+        Given: a coin-margin account exposing per-currency balances,
+        When: read_native_balances runs,
+        Then: each currency yields one entry whose total equals the raw amount
+            and whose free/used are both None (no fabricated split).
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={
+                "accounts": {
+                    "cross": {
+                        "type": "marginAccount",
+                        "balances": {"XBT": 1.5, "ETH": 3.0},
+                    }
+                }
+            }
+        )
+        result = await auth_client.read_native_balances()
+        by_currency = {entry.currency: entry for entry in result}
+        assert set(by_currency) == {"XBT", "ETH"}
+        assert by_currency["XBT"].total == pytest.approx(1.5)
+        assert by_currency["ETH"].total == pytest.approx(3.0)
+        for entry in result:
+            assert isinstance(entry, NativeBalanceEntry)
+            assert entry.free is None
+            assert entry.used is None
+
+    @pytest.mark.asyncio
+    async def test_coin_margin_zero_amount_skipped(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A zero coin-margin amount is skipped while non-zero is retained.
+
+        Given: a coin-margin account with one zero and one non-zero balance,
+        When: read_native_balances runs,
+        Then: only the non-zero currency yields an entry.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"cross": {"balances": {"XBT": 0.0, "ETH": 2.0}}}}
+        )
+        result = await auth_client.read_native_balances()
+        assert [entry.currency for entry in result] == ["ETH"]
+        assert result[0].total == pytest.approx(2.0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_key", [None, ""])
+    async def test_coin_margin_invalid_currency_key_raises(
+        self, auth_client: KrakenFuturesExchangeClient, bad_key: str | None
+    ) -> None:
+        """A non-string or empty coin-margin currency key raises before parsing.
+
+        Given: a coin-margin balances map keyed by a None or empty-string
+            currency,
+        When: read_native_balances runs,
+        Then: the key guard raises rather than coercing the key into an observed
+            entry with a bogus currency (None exercises the non-string operand,
+            "" exercises the falsy-string operand).
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"xbt": {"balances": {bad_key: 1.0}}}}
+        )
+        with pytest.raises(ValueError, match="malformed accounts envelope"):
+            await auth_client.read_native_balances()
+
+    @pytest.mark.asyncio
+    async def test_flex_account_collateral_value(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A flex account yields one verbatim collateral-value entry.
+
+        Given: a flex multi-collateral account exposing balanceValue,
+        When: read_native_balances runs,
+        Then: a single entry labelled flex_collateral_value carries the value
+            verbatim with NULL free/used.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"flex": {"balanceValue": 12345.67}}}
+        )
+        result = await auth_client.read_native_balances()
+        assert len(result) == 1
+        assert result[0].currency == "flex_collateral_value"
+        assert result[0].total == pytest.approx(12345.67)
+        assert result[0].free is None
+        assert result[0].used is None
+
+    @pytest.mark.asyncio
+    async def test_cash_account_collateral_value(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A cash account yields one verbatim collateral-value entry.
+
+        Given: a cash multi-collateral account exposing balanceValue,
+        When: read_native_balances runs,
+        Then: a single entry labelled cash_collateral_value carries the value
+            verbatim with NULL free/used.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"cash": {"balanceValue": 500.0}}}
+        )
+        result = await auth_client.read_native_balances()
+        assert len(result) == 1
+        assert result[0].currency == "cash_collateral_value"
+        assert result[0].total == pytest.approx(500.0)
+        assert result[0].free is None
+        assert result[0].used is None
+
+    @pytest.mark.asyncio
+    async def test_flex_zero_balance_value_skipped(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A zero flex balanceValue yields no entry.
+
+        Given: a flex account whose balanceValue is zero,
+        When: read_native_balances runs,
+        Then: no collateral-value entry is produced.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"flex": {"balanceValue": 0.0}}}
+        )
+        result = await auth_client.read_native_balances()
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_unknown_account_type_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """An account that is neither coin-margin nor flex/cash raises.
+
+        Given: an account with no balances key and a name outside flex/cash,
+        When: read_native_balances runs,
+        Then: the loop's else branch raises rather than silently skipping an
+            unrecognised account shape.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"weird": {"foo": 1}}}
+        )
+        with pytest.raises(ValueError, match="malformed accounts envelope"):
+            await auth_client.read_native_balances()
+
+    @pytest.mark.asyncio
+    async def test_coin_margin_present_empty_balances_yields_nothing(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A present-but-empty balances map routes to coin-margin and adds nothing.
+
+        Given: an account carrying an empty balances dict,
+        When: read_native_balances runs,
+        Then: presence-based routing sends it to the coin-margin reader, which
+            yields no entries (and the account is not misrouted to the else
+            branch).
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"xbt": {"balances": {}}}}
+        )
+        result = await auth_client.read_native_balances()
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_empty_accounts_returns_empty(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A genuinely empty accounts map returns an empty list.
+
+        Given: an envelope whose accounts map is empty,
+        When: read_native_balances runs,
+        Then: it returns an authoritative empty list.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(return_value={"accounts": {}})
+        result = await auth_client.read_native_balances()
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_accounts_missing_raises(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """A missing accounts key raises rather than degrading to empty.
+
+        Given: an envelope with no accounts key,
+        When: read_native_balances runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(return_value={})
+        with pytest.raises(ValueError, match="malformed accounts envelope"):
+            await auth_client.read_native_balances()
+
+    @pytest.mark.asyncio
+    async def test_accounts_not_dict_raises(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """A non-dict accounts value raises rather than degrading to empty.
+
+        Given: an envelope whose accounts value is a list,
+        When: read_native_balances runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(return_value={"accounts": []})
+        with pytest.raises(ValueError, match="malformed accounts envelope"):
+            await auth_client.read_native_balances()
+
+    @pytest.mark.asyncio
+    async def test_non_dict_account_value_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A non-dict account value raises rather than being skipped.
+
+        Given: an accounts map whose value is not a dict,
+        When: read_native_balances runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"flex": ["not", "a", "dict"]}}
+        )
+        with pytest.raises(ValueError, match="malformed accounts envelope"):
+            await auth_client.read_native_balances()
+
+    @pytest.mark.asyncio
+    async def test_non_finite_coin_margin_amount_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A non-finite coin-margin amount raises rather than being stored.
+
+        Given: a coin-margin balance whose amount is infinite,
+        When: read_native_balances runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"cross": {"balances": {"XBT": float("inf")}}}}
+        )
+        with pytest.raises(ValueError, match="balance amount is not finite"):
+            await auth_client.read_native_balances()
+
+    @pytest.mark.asyncio
+    async def test_non_dict_balances_raises(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """A present but non-dict balances value raises.
+
+        Given: an account whose balances value is a (non-dict) empty list,
+        When: read_native_balances runs,
+        Then: presence-based routing sends it to the coin-margin reader, which
+            rejects the non-dict balances with ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"cross": {"balances": []}}}
+        )
+        with pytest.raises(ValueError, match="malformed accounts envelope"):
+            await auth_client.read_native_balances()
+
+    @pytest.mark.asyncio
+    async def test_non_finite_flex_balance_value_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A non-finite flex balanceValue raises rather than being stored.
+
+        Given: a flex account whose balanceValue is infinite,
+        When: read_native_balances runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"flex": {"balanceValue": float("inf")}}}
+        )
+        with pytest.raises(ValueError, match="balance amount is not finite"):
+            await auth_client.read_native_balances()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("acct_name", ["flex", "cash"])
+    async def test_flex_missing_balance_value_raises(
+        self, auth_client: KrakenFuturesExchangeClient, acct_name: str
+    ) -> None:
+        """A flex/cash account with no balanceValue raises rather than defaulting.
+
+        Given: a flex or cash account that carries neither balances nor a
+            balanceValue,
+        When: read_native_balances runs,
+        Then: the required-balanceValue guard raises rather than coercing the
+            missing value to zero.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(return_value={"accounts": {acct_name: {}}})
+        with pytest.raises(ValueError, match="malformed accounts envelope"):
+            await auth_client.read_native_balances()
+
+    @pytest.mark.asyncio
+    async def test_non_numeric_coin_margin_amount_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A non-numeric coin-margin amount raises a controlled ValueError.
+
+        Given: a coin-margin balance whose amount is a non-numeric string,
+        When: read_native_balances runs,
+        Then: the float coercion failure is re-raised as the malformed envelope
+            ValueError rather than a raw conversion error.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"cross": {"balances": {"XBT": "abc"}}}}
+        )
+        with pytest.raises(ValueError, match="malformed accounts envelope"):
+            await auth_client.read_native_balances()
+
+    @pytest.mark.asyncio
+    async def test_non_numeric_flex_balance_value_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A non-numeric flex balanceValue raises a controlled ValueError.
+
+        Given: a flex account whose balanceValue is a non-numeric string,
+        When: read_native_balances runs,
+        Then: the float coercion failure is re-raised as the malformed envelope
+            ValueError rather than a raw conversion error.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={"accounts": {"flex": {"balanceValue": "abc"}}}
+        )
+        with pytest.raises(ValueError, match="malformed accounts envelope"):
+            await auth_client.read_native_balances()
+
+    @pytest.mark.asyncio
+    async def test_requires_authentication(self, client: KrakenFuturesExchangeClient) -> None:
+        """An unauthenticated client refuses to read balances.
+
+        Given: a client constructed without API credentials,
+        When: read_native_balances runs,
+        Then: it raises RuntimeError before any network call.
+        """
+        with pytest.raises(RuntimeError, match="API credentials required"):
+            await client.read_native_balances()
+
+
+class TestReadNativePositions:
+    """Adversarial tests for read_native_positions (PnL Phase 3, strict)."""
+
+    @pytest.mark.asyncio
+    async def test_faithful_positions(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Long and short positions are validated and reported faithfully.
+
+        Given: a long and a short position with resolvable symbols and finite
+            numeric fields,
+        When: read_native_positions runs,
+        Then: both are returned with resolved symbol, correct side, and all
+            five numeric fields preserved.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(
+            return_value={
+                "openPositions": [
+                    {
+                        "symbol": "PF_XBTUSD",
+                        "side": "long",
+                        "size": 5.0,
+                        "price": 65000.0,
+                        "markPrice": 65500.0,
+                        "unrealizedPnl": 250.0,
+                        "unrealizedFunding": -10.0,
+                    },
+                    {
+                        "symbol": "PF_ETHUSD",
+                        "side": "short",
+                        "size": 10.0,
+                        "price": 3500.0,
+                        "markPrice": 3450.0,
+                        "unrealizedPnl": 500.0,
+                        "unrealizedFunding": 5.0,
+                    },
+                ]
+            }
+        )
+        with patch(
+            _WS_TO_NATIVE_PATH,
+            side_effect=lambda s: {"PF_XBTUSD": "BTC-USD-PERP", "PF_ETHUSD": "ETH-USD-PERP"}[s],
+        ):
+            result = await auth_client.read_native_positions()
+        assert len(result) == 2
+        assert isinstance(result[0], OpenPositionSnapshot)
+        assert result[0].symbol == "BTC-USD-PERP"
+        assert result[0].side == OrderSideEnum.BUY
+        assert result[0].size == pytest.approx(5.0)
+        assert result[0].entry_price == pytest.approx(65000.0)
+        assert result[0].mark_price == pytest.approx(65500.0)
+        assert result[0].unrealized_pnl == pytest.approx(250.0)
+        assert result[0].unrealized_funding == pytest.approx(-10.0)
+        assert result[1].symbol == "ETH-USD-PERP"
+        assert result[1].side == OrderSideEnum.SELL
+        assert result[1].size == pytest.approx(10.0)
+
+    @pytest.mark.asyncio
+    async def test_empty_open_positions_returns_empty(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A present-but-empty openPositions list is authoritative empty.
+
+        Given: an envelope whose openPositions list is empty,
+        When: read_native_positions runs,
+        Then: it returns an empty list.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(return_value={"openPositions": []})
+        result = await auth_client.read_native_positions()
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_open_positions_missing_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A missing openPositions key raises rather than degrading to empty.
+
+        Given: an envelope with no openPositions key,
+        When: read_native_positions runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(return_value={})
+        with pytest.raises(ValueError, match="malformed openPositions envelope"):
+            await auth_client.read_native_positions()
+
+    @pytest.mark.asyncio
+    async def test_open_positions_not_list_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A non-list openPositions value raises rather than degrading to empty.
+
+        Given: an envelope whose openPositions value is a dict,
+        When: read_native_positions runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(return_value={"openPositions": {}})
+        with pytest.raises(ValueError, match="malformed openPositions envelope"):
+            await auth_client.read_native_positions()
+
+    @pytest.mark.asyncio
+    async def test_non_dict_position_raises(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """A non-dict position entry raises.
+
+        Given: an openPositions list containing a non-dict element,
+        When: read_native_positions runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(
+            return_value={"openPositions": [123]}
+        )
+        with pytest.raises(ValueError, match="malformed openPositions envelope"):
+            await auth_client.read_native_positions()
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_symbol_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A string symbol the resolver rejects raises rather than falling back.
+
+        Given: a position with a string symbol that the resolver cannot map,
+        When: read_native_positions runs,
+        Then: the resolver's ValueError propagates (the isinstance guard passes
+            because the symbol is a string).
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(
+            return_value={
+                "openPositions": [
+                    {
+                        "symbol": "PF_UNKNOWN",
+                        "side": "long",
+                        "size": 1.0,
+                        "price": 1.0,
+                        "markPrice": 1.0,
+                        "unrealizedPnl": 0.0,
+                        "unrealizedFunding": 0.0,
+                    }
+                ]
+            }
+        )
+        with (
+            patch(_WS_TO_NATIVE_PATH, side_effect=ValueError("unknown symbol")),
+            pytest.raises(ValueError, match="unknown symbol"),
+        ):
+            await auth_client.read_native_positions()
+
+    @pytest.mark.asyncio
+    async def test_non_string_symbol_raises(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """A non-string symbol raises before the resolver is ever consulted.
+
+        Given: a position whose symbol is a non-string value,
+        When: read_native_positions runs,
+        Then: the isinstance guard raises the malformed envelope ValueError and
+            the resolver is never called.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(
+            return_value={
+                "openPositions": [
+                    {
+                        "symbol": 123,
+                        "side": "long",
+                        "size": 1.0,
+                        "price": 1.0,
+                        "markPrice": 1.0,
+                        "unrealizedPnl": 0.0,
+                        "unrealizedFunding": 0.0,
+                    }
+                ]
+            }
+        )
+        resolver = MagicMock()
+        with (
+            patch(_WS_TO_NATIVE_PATH, resolver),
+            pytest.raises(ValueError, match="malformed openPositions envelope"),
+        ):
+            await auth_client.read_native_positions()
+        resolver.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_side_raises(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """A position with no side raises rather than defaulting to long.
+
+        Given: a position missing the side field,
+        When: read_native_positions runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(
+            return_value={
+                "openPositions": [
+                    {
+                        "symbol": "PF_XBTUSD",
+                        "size": 1.0,
+                        "price": 1.0,
+                        "markPrice": 1.0,
+                        "unrealizedPnl": 0.0,
+                        "unrealizedFunding": 0.0,
+                    }
+                ]
+            }
+        )
+        with (
+            patch(_WS_TO_NATIVE_PATH, side_effect=lambda s: "BTC-USD-PERP"),
+            pytest.raises(ValueError, match="missing or unknown side"),
+        ):
+            await auth_client.read_native_positions()
+
+    @pytest.mark.asyncio
+    async def test_unknown_side_raises(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """An unrecognised side value raises.
+
+        Given: a position whose side is neither long nor short,
+        When: read_native_positions runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(
+            return_value={
+                "openPositions": [
+                    {
+                        "symbol": "PF_XBTUSD",
+                        "side": "flat",
+                        "size": 1.0,
+                        "price": 1.0,
+                        "markPrice": 1.0,
+                        "unrealizedPnl": 0.0,
+                        "unrealizedFunding": 0.0,
+                    }
+                ]
+            }
+        )
+        with (
+            patch(_WS_TO_NATIVE_PATH, side_effect=lambda s: "BTC-USD-PERP"),
+            pytest.raises(ValueError, match="missing or unknown side"),
+        ):
+            await auth_client.read_native_positions()
+
+    @pytest.mark.asyncio
+    async def test_missing_numeric_field_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A missing required numeric field raises rather than defaulting to zero.
+
+        Given: a position missing the unrealizedFunding field,
+        When: read_native_positions runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(
+            return_value={
+                "openPositions": [
+                    {
+                        "symbol": "PF_XBTUSD",
+                        "side": "long",
+                        "size": 1.0,
+                        "price": 1.0,
+                        "markPrice": 1.0,
+                        "unrealizedPnl": 0.0,
+                    }
+                ]
+            }
+        )
+        with (
+            patch(_WS_TO_NATIVE_PATH, side_effect=lambda s: "BTC-USD-PERP"),
+            pytest.raises(ValueError, match="missing a required numeric field"),
+        ):
+            await auth_client.read_native_positions()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+    async def test_non_finite_numeric_field_raises(
+        self, auth_client: KrakenFuturesExchangeClient, bad_value: float
+    ) -> None:
+        """A non-finite numeric field raises rather than being stored.
+
+        Given: a position whose unrealizedPnl is nan or infinite,
+        When: read_native_positions runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(
+            return_value={
+                "openPositions": [
+                    {
+                        "symbol": "PF_XBTUSD",
+                        "side": "long",
+                        "size": 1.0,
+                        "price": 1.0,
+                        "markPrice": 1.0,
+                        "unrealizedPnl": bad_value,
+                        "unrealizedFunding": 0.0,
+                    }
+                ]
+            }
+        )
+        with (
+            patch(_WS_TO_NATIVE_PATH, side_effect=lambda s: "BTC-USD-PERP"),
+            pytest.raises(ValueError, match="field is not finite"),
+        ):
+            await auth_client.read_native_positions()
+
+    @pytest.mark.asyncio
+    async def test_non_numeric_string_field_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A non-numeric string field raises rather than being coerced.
+
+        Given: a position whose size is a non-numeric string,
+        When: read_native_positions runs,
+        Then: it raises ValueError.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(
+            return_value={
+                "openPositions": [
+                    {
+                        "symbol": "PF_XBTUSD",
+                        "side": "long",
+                        "size": "abc",
+                        "price": 1.0,
+                        "markPrice": 1.0,
+                        "unrealizedPnl": 0.0,
+                        "unrealizedFunding": 0.0,
+                    }
+                ]
+            }
+        )
+        with (
+            patch(_WS_TO_NATIVE_PATH, side_effect=lambda s: "BTC-USD-PERP"),
+            pytest.raises(ValueError, match="missing a required numeric field"),
+        ):
+            await auth_client.read_native_positions()
+
+    @pytest.mark.asyncio
+    async def test_requires_authentication(self, client: KrakenFuturesExchangeClient) -> None:
+        """An unauthenticated client refuses to read positions.
+
+        Given: a client constructed without API credentials,
+        When: read_native_positions runs,
+        Then: it raises RuntimeError before any network call.
+        """
+        with pytest.raises(RuntimeError, match="API credentials required"):
+            await client.read_native_positions()

@@ -29,11 +29,13 @@ from snapper.infrastructure.exchanges._subscription_request import SubscriptionR
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
+from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -297,6 +299,183 @@ async def test_get_balance_filters_and_returns_currency() -> None:
     eur_only = await client.get_balance("EUR")
     assert set(eur_only.keys()) == {"EUR"}
     assert eur_only["EUR"].total == pytest.approx(0.0)
+
+
+def test_kraken_declares_native_account_capabilities() -> None:
+    """Kraken spot advertises balance-supported, positions-not-applicable.
+
+    Given the KrakenExchangeClient class,
+    When its account-reading capability attributes are inspected,
+    Then balance is SUPPORTED and positions are NOT_APPLICABLE (spot has no
+        derivatives positions).
+    """
+    assert KrakenExchangeClient.balance_capability is CapabilityStatus.SUPPORTED
+    assert KrakenExchangeClient.position_capability is CapabilityStatus.NOT_APPLICABLE
+
+
+@pytest.mark.asyncio
+async def test_read_native_balances_faithful_multi_currency() -> None:
+    """Native balance read returns one faithful entry per currency.
+
+    Given a balance envelope carrying every aggregate metadata key plus two real
+        currencies each with finite total/free/used,
+    When read_native_balances is called,
+    Then only the two currencies yield NativeBalanceEntry values with their
+        venue-reported total/free/used, and the aggregate metadata keys are
+        skipped.
+    """
+    client = _client()
+
+    async def _fake_balance() -> dict[str, Any]:
+        return {
+            "free": {"BTC": 1.5, "USD": 10000.0},
+            "used": {"BTC": 0.5, "USD": 2000.0},
+            "total": {"BTC": 2.0, "USD": 12000.0},
+            "info": {},
+            "timestamp": 1,
+            "datetime": "2022-01-01T00:00:00.000Z",
+            "BTC": {"free": 1.5, "used": 0.5, "total": 2.0},
+            "USD": {"free": 10000.0, "used": 2000.0, "total": 12000.0},
+        }
+
+    client._ccxt_client = SimpleNamespace(fetch_balance=_fake_balance)
+    entries = await client.read_native_balances()
+    assert entries == [
+        NativeBalanceEntry(currency="BTC", total=2.0, free=1.5, used=0.5),
+        NativeBalanceEntry(currency="USD", total=12000.0, free=10000.0, used=2000.0),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_row", [None, 0.0, 5, "not-a-dict", ["total"]])
+async def test_read_native_balances_rejects_non_dict_currency_row(bad_row: object) -> None:
+    """A non-aggregate currency row that is not a mapping raises ValueError.
+
+    Given a balance envelope with a valid currency plus a non-aggregate currency
+        key whose value is null or a scalar rather than a mapping,
+    When read_native_balances is called,
+    Then it raises ValueError instead of silently dropping the malformed row into
+        an authoritative observed-empty reading.
+    """
+    client = _client()
+
+    async def _fake_balance() -> dict[str, Any]:
+        return {
+            "BTC": {"free": 1.5, "used": 0.5, "total": 2.0},
+            "USD": bad_row,
+        }
+
+    client._ccxt_client = SimpleNamespace(fetch_balance=_fake_balance)
+    with pytest.raises(ValueError, match="not a mapping"):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_key", [None, ""])
+async def test_read_native_balances_rejects_invalid_currency_key(bad_key: object) -> None:
+    """A non-aggregate key that is not a non-empty string raises ValueError.
+
+    Given a balance envelope with a valid currency plus a non-aggregate key that
+        is either None (not a string) or an empty string (falsy),
+    When read_native_balances is called,
+    Then it raises ValueError rather than emitting an entry labelled with a
+        garbage currency.
+    """
+    client = _client()
+
+    async def _fake_balance() -> dict[object, Any]:
+        return {
+            "BTC": {"free": 1.5, "used": 0.5, "total": 2.0},
+            bad_key: {"free": 1.0, "used": 0.0, "total": 1.0},
+        }
+
+    client._ccxt_client = SimpleNamespace(fetch_balance=_fake_balance)
+    with pytest.raises(ValueError, match="not a mapping"):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio
+async def test_read_native_balances_empty_returns_empty_list() -> None:
+    """An observed-empty balance yields an empty list, never a zero entry.
+
+    Given a balance envelope with only aggregate keys and no currencies,
+    When read_native_balances is called,
+    Then it returns an empty list rather than a fabricated zero-balance entry.
+    """
+    client = _client()
+
+    async def _fake_balance() -> dict[str, Any]:
+        return {"free": {}, "used": {}, "total": {}, "info": {}}
+
+    client._ccxt_client = SimpleNamespace(fetch_balance=_fake_balance)
+    assert await client.read_native_balances() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+async def test_read_native_balances_rejects_non_finite(bad_value: float) -> None:
+    """A non-finite sub-field is a corrupt envelope and raises ValueError.
+
+    Given a currency whose total is NaN or infinite,
+    When read_native_balances is called,
+    Then it raises ValueError instead of emitting a poisoned entry.
+    """
+    client = _client()
+
+    async def _fake_balance() -> dict[str, Any]:
+        return {"BTC": {"free": 1.0, "used": 0.0, "total": bad_value}}
+
+    client._ccxt_client = SimpleNamespace(fetch_balance=_fake_balance)
+    with pytest.raises(ValueError, match="non-finite"):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio
+async def test_read_native_balances_rejects_missing_subfield() -> None:
+    """A missing total/free/used sub-field raises instead of coercing to zero.
+
+    Given a currency whose used sub-field is absent,
+    When read_native_balances is called,
+    Then it raises ValueError rather than defaulting the missing field to zero.
+    """
+    client = _client()
+
+    async def _fake_balance() -> dict[str, Any]:
+        return {"BTC": {"free": 1.0, "total": 1.0}}
+
+    client._ccxt_client = SimpleNamespace(fetch_balance=_fake_balance)
+    with pytest.raises(ValueError, match="missing 'used'"):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio
+async def test_read_native_balances_requires_credentials() -> None:
+    """Missing API credentials fail closed before any venue call.
+
+    Given a client with no API key or secret,
+    When read_native_balances is called,
+    Then it raises RuntimeError without reaching the ccxt fetch path.
+    """
+    client = _client()
+    client.api_key = None
+    client.api_secret = None
+    with pytest.raises(RuntimeError, match="API credentials required"):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio
+async def test_read_native_positions_default_raises() -> None:
+    """The Spot client inherits the fail-closed native-position default.
+
+    Given a Spot KrakenExchangeClient that declares no position capability
+        and does not override ``read_native_positions``,
+    When read_native_positions is called,
+    Then the base-class default raises NotImplementedError rather than
+        returning a fabricated empty position set.
+    """
+    client = _client()
+    with pytest.raises(NotImplementedError):
+        await client.read_native_positions()
 
 
 @pytest.mark.asyncio

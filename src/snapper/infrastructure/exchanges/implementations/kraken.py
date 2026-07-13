@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import math
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -69,12 +70,14 @@ from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_trade_
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
+from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
@@ -109,6 +112,13 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 apply_kraken_ws_teardown_hardening()
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
+_NATIVE_BALANCE_CREDENTIALS_MSG = "API credentials required for balance"
+_NATIVE_BALANCE_MALFORMED_ROW_MSG = (
+    "Kraken spot balance currency row is not a mapping (malformed envelope)"
+)
+_NATIVE_BALANCE_AGGREGATE_KEYS: Final = frozenset(
+    {"free", "used", "total", "info", "timestamp", "datetime"}
+)
 _STOP_ORDER_TYPES = frozenset(
     {ExchangeOrderTypeEnum.STOP_LOSS, ExchangeOrderTypeEnum.STOP_LOSS_LIMIT}
 )
@@ -464,6 +474,34 @@ def _resolve_kraken_user_fee_currency(
     return _native_fee_currency(native_symbol, oflags)
 
 
+def _strict_native_balance_field(currency: str, data: dict[str, Any], field: str) -> float:
+    """Extract one required finite native-balance sub-field, or raise.
+
+    The account-truth reader (:meth:`KrakenExchangeClient.read_native_balances`)
+    must never invent a value: unlike ``get_balance`` (which coerces a missing
+    sub-field to ``0`` for the order-reconciliation plane), a missing or
+    non-finite ``total``/``free``/``used`` here is a corrupt venue envelope and
+    is rejected loudly so a fabricated split can never read as authoritative.
+
+    Args:
+        currency: Currency code the sub-field belongs to, for diagnostics.
+        data: Per-currency balance mapping from ccxt ``fetch_balance``.
+        field: Sub-field name to read (``total``, ``free`` or ``used``).
+
+    Returns:
+        The finite float value of the requested sub-field.
+
+    Raises:
+        ValueError: When the sub-field is absent or not finite.
+    """
+    if field not in data:
+        raise ValueError(f"Kraken native balance for {currency} is missing '{field}'")
+    value = float(data[field])
+    if not math.isfinite(value):
+        raise ValueError(f"Kraken native balance for {currency} has non-finite '{field}'")
+    return value
+
+
 class KrakenExchangeClient(ExchangeClientBase):
     """Kraken exchange client with REST and WebSocket support.
 
@@ -480,6 +518,9 @@ class KrakenExchangeClient(ExchangeClientBase):
         api_secret: Kraken API secret for request signing.
         sandbox: Whether to use sandbox/demo environment.
     """
+
+    balance_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
+    position_capability: CapabilityStatus = CapabilityStatus.NOT_APPLICABLE
 
     def __init__(
         self,
@@ -1528,6 +1569,56 @@ class KrakenExchangeClient(ExchangeClientBase):
         except Exception as e:
             logger.error(f"Failed to get balance: {e}")
             raise
+
+    async def read_native_balances(self) -> list[NativeBalanceEntry]:
+        """Read faithful native per-currency balances (PnL Phase 3).
+
+        Uses the SAME ccxt ``fetch_balance`` egress path as ``get_balance`` but
+        applies account-truth STRICTNESS: every currency entry MUST carry finite
+        ``total``/``free``/``used`` sub-fields. A missing or non-finite sub-field
+        is a corrupt venue envelope and raises ``ValueError`` rather than being
+        coerced to ``0`` (which ``get_balance`` does for the order-reconciliation
+        plane). Aggregate metadata keys are skipped, but a currency row whose
+        value is not a mapping is a corrupt envelope and RAISES (never silently
+        dropped into an authoritative observed-empty). A genuinely empty balance
+        mapping yields an empty list (observed-empty), never a fabricated zero
+        entry. Kraken spot always exposes a faithful free/used split, so no
+        entry carries a null sub-field.
+
+        Returns:
+            One faithful ``NativeBalanceEntry`` per venue-reported currency.
+
+        Raises:
+            RuntimeError: When API credentials are not configured.
+            ValueError: When any currency entry omits or reports a non-finite
+                ``total``/``free``/``used`` sub-field.
+        """
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError(_NATIVE_BALANCE_CREDENTIALS_MSG)
+        balance_data = await self._with_retry(
+            self._ccxt_client.fetch_balance,
+            retry_network_errors=False,
+            egress_kind="private_idempotent_read",
+            egress_operation="fetch_balance",
+            egress_target=ccxt_proxy_target(self._ccxt_client),
+        )
+        entries: list[NativeBalanceEntry] = []
+        for currency, data in balance_data.items():
+            if currency in _NATIVE_BALANCE_AGGREGATE_KEYS:
+                continue
+            if not isinstance(currency, str) or not currency:
+                raise ValueError(_NATIVE_BALANCE_MALFORMED_ROW_MSG)
+            if not isinstance(data, dict):
+                raise ValueError(_NATIVE_BALANCE_MALFORMED_ROW_MSG)
+            entries.append(
+                NativeBalanceEntry(
+                    currency=currency,
+                    total=_strict_native_balance_field(currency, data, "total"),
+                    free=_strict_native_balance_field(currency, data, "free"),
+                    used=_strict_native_balance_field(currency, data, "used"),
+                )
+            )
+        return entries
 
     def subscribe_ticks(
         self, symbols: list[str], *, req_id: int | None = None

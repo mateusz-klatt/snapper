@@ -48,11 +48,13 @@ from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
@@ -169,6 +171,63 @@ async def _wait_for_wakeup(event: asyncio.Event) -> None:
     await event.wait()
 
 
+def _require_finite_balance_amount(balance_data: dict[str, Any], field: str) -> float:
+    """Extract a present, finite amount from one Walutomat balances row.
+
+    The native balance reader is a faithfulness boundary: an absent field
+    or a non-finite value is a venue/data fault that must surface, never be
+    coerced to ``0`` (a fabricated zero would read downstream as an
+    authoritative empty balance).
+
+    Args:
+        balance_data: One ``account/balances`` result row.
+        field: Amount field to read (``balanceTotal``, ``balanceAvailable``
+            or ``balanceReserved``).
+
+    Returns:
+        The parsed finite amount.
+
+    Raises:
+        ValueError: If the field is absent or the parsed value is not finite.
+    """
+    if field not in balance_data:
+        raise ValueError(f"Walutomat balance row missing '{field}': {balance_data}")
+    amount = float(balance_data[field])
+    if not math.isfinite(amount):
+        raise ValueError(f"Walutomat balance '{field}' is not finite: {balance_data}")
+    return amount
+
+
+def _parse_native_balance(balance_data: dict[str, Any]) -> NativeBalanceEntry:
+    """Strictly parse one Walutomat balances row into a native entry.
+
+    Walutomat is an FX cash venue that always reports a faithful
+    available/reserved/total split, so every amount populates the entry.
+    The currency and each amount must be present and finite; anything
+    missing or non-finite RAISES rather than degrading to a fabricated
+    zero balance.
+
+    Args:
+        balance_data: One ``account/balances`` result row.
+
+    Returns:
+        The faithful native per-currency balance entry.
+
+    Raises:
+        ValueError: If the currency key is absent, an amount key is absent,
+            or a parsed amount is not finite.
+    """
+    currency = balance_data.get("currency")
+    if not isinstance(currency, str) or not currency:
+        raise ValueError("Walutomat balance row has a missing or invalid currency")
+    return NativeBalanceEntry(
+        currency=currency,
+        total=_require_finite_balance_amount(balance_data, "balanceTotal"),
+        free=_require_finite_balance_amount(balance_data, "balanceAvailable"),
+        used=_require_finite_balance_amount(balance_data, "balanceReserved"),
+    )
+
+
 class WalutomatExchangeClient(ExchangeClientBase):
     """Walutomat FX exchange client with REST API support.
 
@@ -185,6 +244,11 @@ class WalutomatExchangeClient(ExchangeClientBase):
         polling_interval: Interval between market data polls in seconds.
         timeout: HTTP request timeout in seconds.
     """
+
+    balance_capability = CapabilityStatus.SUPPORTED
+    """Walutomat reports faithful FX cash balances via ``account/balances``."""
+    position_capability = CapabilityStatus.NOT_APPLICABLE
+    """FX spot venue: there are no derivatives positions to track."""
 
     def __init__(
         self,
@@ -867,8 +931,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             except httpx.HTTPError as exc:
                 first_poll = False
                 logger.warning(
-                    "Walutomat execution poll transient HTTP error — will retry "
-                    "on next cycle: {}",
+                    "Walutomat execution poll transient HTTP error — will retry on next cycle: {}",
                     exc,
                 )
             except Exception:
@@ -1165,7 +1228,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         await self._acquire_rest_slot()
         try:
             response = await client.post(url, content=body, headers=headers)
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError):
+        except httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError:
             raise
         except httpx.TransportError as e:
             raise AmbiguousOrderSubmitError(
@@ -1455,6 +1518,48 @@ class WalutomatExchangeClient(ExchangeClientBase):
             )
             balances[curr] = balance
         return balances
+
+    async def read_native_balances(self) -> list[NativeBalanceEntry]:
+        """Read faithful native per-currency FX cash balances (PnL Phase 3).
+
+        Mirrors :meth:`get_balance`'s authenticated ``GET /account/balances``
+        call but returns strict native entries for the account observer: it
+        RAISES on a non-success envelope and on any row whose currency or
+        amount is missing or non-finite, never coercing an absent amount to
+        zero. Walutomat always reports a faithful available/reserved/total
+        split, so ``free``/``used`` are always populated. An empty balances
+        list yields ``[]``.
+
+        Returns:
+            Faithful native per-currency balance entries.
+
+        Raises:
+            RuntimeError: If not connected, missing API credentials, or the
+                venue returns a non-success envelope.
+            ValueError: If a balance row is missing its currency or an amount,
+                or reports a non-finite amount.
+        """
+        client = self._require_connected()
+        if not self._api_key:
+            raise RuntimeError("Trading requires authentication - provide api_key")
+        endpoint = "/api/v2.0.0/account/balances"
+        headers = self._get_auth_headers(endpoint, "")
+        url = f"{self.api_base_url}/account/balances"
+        await self._acquire_rest_slot()
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        result = response.json()
+        if result.get("success") is not True:
+            raise RuntimeError("Walutomat balances envelope did not report success")
+        rows = result.get("result")
+        if not isinstance(rows, list):
+            raise ValueError("Walutomat balances result is not a list")
+        entries: list[NativeBalanceEntry] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("Walutomat balance row is not a dict")
+            entries.append(_parse_native_balance(row))
+        return entries
 
     def get_supported_pairs(self) -> list[str]:
         """Get list of available trading pairs.

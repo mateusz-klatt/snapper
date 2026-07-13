@@ -52,11 +52,13 @@ from snapper.data.repository_types import MarketSnapshotRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
@@ -121,6 +123,19 @@ class PaperExchangeClient(ExchangeClientBase):
         initial_balance: Starting balance for each currency.
         start_time: Optional start timestamp for backtesting window.
         end_time: Optional end timestamp for backtesting window.
+    """
+
+    balance_capability: CapabilityStatus = CapabilityStatus.SIMULATED
+    """Paper balances are a modeled fiction seeded at connect (~10k per
+    currency) and never reconciled against a real venue, so the account
+    observer must record every reading as ``simulated``, never
+    ``observed`` — the SIMULATED flag is how that provenance is signalled.
+    """
+
+    position_capability: CapabilityStatus = CapabilityStatus.NOT_APPLICABLE
+    """The paper venue models spot/FX cash balances only and holds no
+    derivatives positions, so its position component is a benign
+    structural absence rather than a fail-closed UNSUPPORTED gap.
     """
 
     def __init__(
@@ -585,6 +600,56 @@ class PaperExchangeClient(ExchangeClientBase):
                 )
             }
         return self._balances.copy()
+
+    async def read_native_balances(self) -> list[NativeBalanceEntry]:
+        """Convert the simulated in-memory balances to native balance entries.
+
+        The account observer consults ``balance_capability`` (SIMULATED)
+        before calling this and records every entry as ``simulated``,
+        never ``observed``: paper balances are a modeled constant seeded
+        at connect (~10k per currency) and are never reconciled against a
+        real venue. Each ``AccountBalance`` maps one-to-one to a
+        ``NativeBalanceEntry`` carrying its faithful ``free``/``used``
+        split — the paper model always tracks both, so neither is ever the
+        null "unknown" some real venues report. Before ``connect`` (or
+        after ``disconnect`` clears no state — balances persist) the empty
+        balance map yields an empty list.
+
+        Every numeric field is defensively validated for finiteness even
+        though the simulated constant is always finite: a fabricated or
+        corrupted non-finite balance would poison the observer's equity
+        math downstream, so it is rejected loudly here rather than recorded
+        as authoritative.
+
+        Returns:
+            One ``NativeBalanceEntry`` per simulated currency balance, or
+            an empty list when no balances are seeded.
+
+        Raises:
+            ValueError: If any balance carries a non-finite total, free, or
+                used amount.
+        """
+        entries: list[NativeBalanceEntry] = []
+        for balance in self._balances.values():
+            for label, value in (
+                ("total", balance.total),
+                ("free", balance.free),
+                ("used", balance.used),
+            ):
+                if not math.isfinite(value):
+                    raise ValueError(
+                        f"Paper native balance for {balance.currency} carries a "
+                        f"non-finite {label}: {value!r}"
+                    )
+            entries.append(
+                NativeBalanceEntry(
+                    currency=balance.currency,
+                    total=balance.total,
+                    free=balance.free,
+                    used=balance.used,
+                )
+            )
+        return entries
 
     def subscribe_executions(self) -> AsyncIterator[ExecutionUpdate]:
         """Subscribe to simulated execution updates.

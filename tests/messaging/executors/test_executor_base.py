@@ -29,6 +29,7 @@ import snapper.messaging.executors.base as base_module
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
@@ -2294,6 +2295,52 @@ class TestStartWithAsyncContextManager:
             await service.start()
         assert call_count == 1
         assert mock_client._entered is False
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_start_registers_account_observer_for_capable_client(
+        self, mock_get_settings: MagicMock
+    ) -> None:
+        """Verify start supervises the account observer for a capable client.
+
+        Given: An exchange client that is an ExchangeClientBase and advertises
+            a non-UNSUPPORTED balance capability,
+        When: start() spawns its supervised loops,
+        Then: the account_observer loop is registered alongside the others via
+            _supervise_loop with the account-observer handler.
+        """
+        mock_settings = self._create_mock_settings()
+        mock_get_settings.return_value = mock_settings
+        mock_client = MagicMock(spec=ExchangeClientBase)
+        mock_client.supports_websocket_executions = False
+        mock_client.balance_capability = CapabilityStatus.SUPPORTED
+        mock_client.position_capability = CapabilityStatus.UNSUPPORTED
+        mock_client.set_tracker = MagicMock()
+        mock_client.get_orders = AsyncMock(return_value=[])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        service = ConcreteTestExecutor(mock_client)
+        supervise_mock = AsyncMock(return_value=None)
+
+        with (
+            patch.object(service, "_supervise_loop", new=supervise_mock),
+            patch(
+                "snapper.messaging.executors.base.get_repository",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "snapper.messaging.executors.base.get_settings_service",
+                new=AsyncMock(return_value=MagicMock()),
+            ),
+            patch(
+                "snapper.messaging.executors.base.get_settings_with_service",
+                return_value=mock_settings,
+            ),
+            patch("zmq.asyncio.Context"),
+        ):
+            await service.start()
+
+        supervise_mock.assert_any_call("account_observer", service._account_observer_handler)
 
 
 class TestOrderHandlerWrongExchange:

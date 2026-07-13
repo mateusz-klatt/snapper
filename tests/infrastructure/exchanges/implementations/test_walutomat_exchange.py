@@ -19,11 +19,13 @@ from loguru import logger
 
 import snapper.infrastructure.exchanges.implementations.walutomat as walutomat_mod
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
@@ -518,6 +520,338 @@ async def test_get_balance_filters(monkeypatch: pytest.MonkeyPatch) -> None:
     client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
     balances = await client.get_balance(currency="USD")
     assert list(balances) == ["USD"]
+
+
+def test_read_native_balances_capabilities() -> None:
+    """Verify Walutomat declares its native account-reading capabilities.
+
+    Given: The WalutomatExchangeClient class,
+    When: Its capability attributes are inspected,
+    Then: Balances are SUPPORTED and positions are NOT_APPLICABLE (FX spot).
+    """
+    assert WalutomatExchangeClient.balance_capability is CapabilityStatus.SUPPORTED
+    assert WalutomatExchangeClient.position_capability is CapabilityStatus.NOT_APPLICABLE
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_reads_multi_currency() -> None:
+    """Verify read_native_balances faithfully reads every currency row.
+
+    Given: A connected, authenticated client returning two currencies,
+    When: read_native_balances() is called,
+    Then: Each row maps to a NativeBalanceEntry with the exact venue
+        available/reserved/total amounts and no fabricated values.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [
+                {
+                    "currency": "EUR",
+                    "balanceAvailable": "60",
+                    "balanceReserved": "40",
+                    "balanceTotal": "100",
+                },
+                {
+                    "currency": "USD",
+                    "balanceAvailable": "2",
+                    "balanceReserved": "0.5",
+                    "balanceTotal": "2.5",
+                },
+            ],
+        }
+    )
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    entries = await client.read_native_balances()
+    assert [entry.currency for entry in entries] == ["EUR", "USD"]
+    assert isinstance(entries[0], NativeBalanceEntry)
+    assert entries[0].total == 100.0
+    assert entries[0].free == 60.0
+    assert entries[0].used == 40.0
+    assert entries[1].total == 2.5
+    assert entries[1].free == 2.0
+    assert entries[1].used == 0.5
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_empty_returns_empty_list() -> None:
+    """Verify read_native_balances returns an empty list for no balances.
+
+    Given: A connected, authenticated client with an empty result list,
+    When: read_native_balances() is called,
+    Then: An empty list is returned rather than raising.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": True, "result": []})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    entries = await client.read_native_balances()
+    assert entries == []
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_non_success_envelope_raises() -> None:
+    """Verify read_native_balances raises on a non-success envelope.
+
+    Given: A connected, authenticated client whose response reports failure,
+    When: read_native_balances() is called,
+    Then: A RuntimeError is raised instead of returning partial data.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": False, "result": []})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(RuntimeError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_non_finite_amount_raises() -> None:
+    """Verify read_native_balances rejects a non-finite amount.
+
+    Given: A connected, authenticated client whose row has an infinite total,
+    When: read_native_balances() is called,
+    Then: A ValueError is raised rather than coercing to a finite value.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [
+                {
+                    "currency": "EUR",
+                    "balanceAvailable": "1",
+                    "balanceReserved": "0",
+                    "balanceTotal": float("inf"),
+                }
+            ],
+        }
+    )
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(ValueError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_missing_amount_raises() -> None:
+    """Verify read_native_balances rejects a row missing an amount.
+
+    Given: A connected, authenticated client whose row omits balanceReserved,
+    When: read_native_balances() is called,
+    Then: A ValueError is raised rather than defaulting the amount to zero.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [
+                {
+                    "currency": "EUR",
+                    "balanceAvailable": "1",
+                    "balanceTotal": "1",
+                }
+            ],
+        }
+    )
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(ValueError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_missing_currency_raises() -> None:
+    """Verify read_native_balances rejects a row missing its currency.
+
+    Given: A connected, authenticated client whose row omits currency,
+    When: read_native_balances() is called,
+    Then: A ValueError is raised rather than emitting an unlabeled balance.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [
+                {
+                    "balanceAvailable": "1",
+                    "balanceReserved": "0",
+                    "balanceTotal": "1",
+                }
+            ],
+        }
+    )
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(ValueError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_requires_credentials() -> None:
+    """Verify read_native_balances requires API credentials.
+
+    Given: A connected client with no API key configured,
+    When: read_native_balances() is called,
+    Then: A RuntimeError is raised before any request is issued.
+    """
+    client = WalutomatExchangeClient()
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient())
+    with pytest.raises(RuntimeError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_truthy_non_true_success_raises() -> None:
+    """Verify a truthy-but-non-True success envelope still raises.
+
+    Given: A connected, authenticated client whose success flag is the
+        truthy string "false",
+    When: read_native_balances() is called,
+    Then: A RuntimeError is raised because the check is strict ``is not True``.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": "false", "result": []})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(RuntimeError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_missing_success_raises() -> None:
+    """Verify a missing success key raises.
+
+    Given: A connected, authenticated client whose envelope omits success,
+    When: read_native_balances() is called,
+    Then: A RuntimeError is raised because absent success is not True.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"result": []})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(RuntimeError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_result_not_a_list_raises() -> None:
+    """Verify a non-list result raises.
+
+    Given: A connected, authenticated client whose result is a dict,
+    When: read_native_balances() is called,
+    Then: A ValueError is raised because result must be a list.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": True, "result": {"currency": "EUR"}})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(ValueError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_missing_result_raises() -> None:
+    """Verify a missing result key raises.
+
+    Given: A connected, authenticated client whose envelope omits result,
+    When: read_native_balances() is called,
+    Then: A ValueError is raised because absent result is not a list.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": True})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(ValueError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_non_dict_row_raises() -> None:
+    """Verify a non-dict row raises.
+
+    Given: A connected, authenticated client whose result list holds a string,
+    When: read_native_balances() is called,
+    Then: A ValueError is raised because each row must be a dict.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": True, "result": ["not-a-dict"]})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(ValueError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_null_currency_raises() -> None:
+    """Verify a null currency raises.
+
+    Given: A connected, authenticated client whose row currency is None,
+    When: read_native_balances() is called,
+    Then: A ValueError is raised because currency must be a non-empty string.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [
+                {
+                    "currency": None,
+                    "balanceAvailable": "1",
+                    "balanceReserved": "0",
+                    "balanceTotal": "1",
+                }
+            ],
+        }
+    )
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(ValueError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_empty_currency_raises() -> None:
+    """Verify an empty-string currency raises.
+
+    Given: A connected, authenticated client whose row currency is "",
+    When: read_native_balances() is called,
+    Then: A ValueError is raised because currency must be a non-empty string.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [
+                {
+                    "currency": "",
+                    "balanceAvailable": "1",
+                    "balanceReserved": "0",
+                    "balanceTotal": "1",
+                }
+            ],
+        }
+    )
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(ValueError):
+        await client.read_native_balances()
+
+
+@pytest.mark.asyncio()
+async def test_read_native_balances_non_string_currency_raises() -> None:
+    """Verify a non-string currency raises.
+
+    Given: A connected, authenticated client whose row currency is an int,
+    When: read_native_balances() is called,
+    Then: A ValueError is raised because currency must be a string.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [
+                {
+                    "currency": 123,
+                    "balanceAvailable": "1",
+                    "balanceReserved": "0",
+                    "balanceTotal": "1",
+                }
+            ],
+        }
+    )
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(ValueError):
+        await client.read_native_balances()
 
 
 @pytest.mark.asyncio()

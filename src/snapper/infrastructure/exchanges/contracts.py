@@ -172,6 +172,46 @@ class AccountBalance:
     total: float
 
 
+class CapabilityStatus(StrEnum):
+    """Structural account-reading capability of an exchange client (PnL Phase 3).
+
+    Declares — WITHOUT connecting — whether a client can faithfully report a
+    given account component. It is the fail-closed gate the account observer
+    consults before ever calling a reader, so a venue that cannot be
+    account-tracked is never mistaken for one that returned empty data.
+
+    - ``SUPPORTED``: the client reads faithful native data for this component.
+    - ``SIMULATED``: the client returns a modeled fiction (paper) — recorded as
+      ``simulated``, never ``observed``.
+    - ``NOT_APPLICABLE``: the component does not exist for this venue (e.g. spot
+      or FX has no derivatives positions) — a benign structural absence.
+    - ``UNSUPPORTED``: the venue cannot be account-tracked for this component
+      (market-data-only) — the fail-closed default.
+    """
+
+    SUPPORTED = "supported"
+    SIMULATED = "simulated"
+    NOT_APPLICABLE = "not_applicable"
+    UNSUPPORTED = "unsupported"
+
+
+@dataclass
+class NativeBalanceEntry:
+    """One faithful native per-currency balance reading (PnL Phase 3).
+
+    Distinct from ``AccountBalance``: ``free`` and ``used`` are NULLABLE because
+    some venues (Kraken Futures coin-margin) expose only a per-currency total
+    and an account-level aggregate margin, never a faithful per-currency
+    free/used split. The account observer stores exactly what the venue
+    reported — a null free/used is honest "unknown", never a fabricated split.
+    """
+
+    currency: str
+    total: float
+    free: float | None
+    used: float | None
+
+
 @dataclass
 class ExchangeOrderRequest:
     """Request parameters for placing an order on an exchange."""

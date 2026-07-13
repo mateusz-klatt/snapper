@@ -5,6 +5,7 @@ that handle order placement and fill reporting.
 """
 
 import asyncio
+import json
 import math
 import random
 import time
@@ -63,9 +64,11 @@ from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import RecordVenueEventParams
 from snapper.data.repository_types import TradeCommandRow
+from snapper.data.repository_types import VenueAccountAttemptRow
 from snapper.data.repository_types import VenueEventRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import CORE_TO_EXCHANGE_ORDER_TYPE
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
@@ -73,6 +76,8 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecType
 from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
+from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import to_fill_status
@@ -329,6 +334,27 @@ bounded far lower by the venue clients' own timeouts, and a cancelled
 cycle is safely recomputed next period (correctives carry stable
 synthetic ids)."""
 
+_ACCOUNT_OBSERVE_INTERVAL_S = 240.0
+"""Cadence of the venue account-truth observer (PnL Phase 3).
+
+Account state changes slowly; ~4 min keeps every state comfortably inside its
+``_ACCOUNT_FRESHNESS_CEILING_S`` window while staying well under Kraken's REST
+pressure. Independent of the 60s order-reconciliation cycle."""
+_ACCOUNT_FRESHNESS_CEILING_S = 300.0
+"""Authority window stamped on a freshly observed account balance. Past this
+the read layer demotes an ``observed`` row to ``stale`` rather than serving it
+as live truth."""
+_ACCOUNT_FETCH_TIMEOUT_S = 15.0
+"""Per-call bound on a native balance/position read. A wedged venue call is
+recorded as an ``error`` observation (last-good retained, stale-visible) and
+never blocks the observer loop or the order-reconciliation cycle."""
+_ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG = (
+    "balance reader returned data under a non-observable capability"
+)
+_ACCOUNT_UNEXPECTED_POSITION_CAPABILITY_MSG = (
+    "position reader returned data under a non-observable capability"
+)
+
 _TASK_DEATH_ESCALATION_CEILING_S = 1500.0
 """Death-streak ceiling after which a supervised loop escalates.
 
@@ -573,6 +599,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._task_deaths_in_streak: dict[str, int] = {}
         self._venue_recon_failure_count = 0
         self._last_venue_recon_error = ""
+        self._account_observer_failure_count = 0
         self._order_inflight_started: float | None = None
         self._ambiguous_rotation_offset: int = 0
         self._dispatched_rotation_offset: int = 0
@@ -1197,8 +1224,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 exec_fees = self._sum_execution_fees(execs)
             except Exception as e:
                 logger.warning(
-                    f"[{exchange_name}] Recovery: executions unreadable for "
-                    f"{client_order_id}: {e}"
+                    f"[{exchange_name}] Recovery: executions unreadable for {client_order_id}: {e}"
                 )
                 exec_sum = 0.0
                 exec_fees = {}
@@ -1207,8 +1233,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             fill_rows = await repository.get_fill_venue_events_for_order(client_order_id)
         except Exception as e:
             logger.error(
-                f"[{exchange_name}] Recovery: venue_events unreadable for "
-                f"{client_order_id}: {e}"
+                f"[{exchange_name}] Recovery: venue_events unreadable for {client_order_id}: {e}"
             )
             return None
         durable_max = 0.0
@@ -1404,6 +1429,19 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                                 self._supervise_loop("reconciliation", self._reconciliation_handler)
                             )
                         )
+                        if isinstance(self.exchange_client, ExchangeClientBase) and (
+                            self.exchange_client.balance_capability
+                            is not CapabilityStatus.UNSUPPORTED
+                            or self.exchange_client.position_capability
+                            is CapabilityStatus.SUPPORTED
+                        ):
+                            tasks.append(
+                                asyncio.create_task(
+                                    self._supervise_loop(
+                                        "account_observer", self._account_observer_handler
+                                    )
+                                )
+                            )
                         try:
                             await asyncio.gather(*tasks)
                         except asyncio.CancelledError:
@@ -1872,7 +1910,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         try:
             return float(self.settings.trade_command_dispatch_ttl_s)
-        except (AttributeError, TypeError, ValueError):
+        except AttributeError, TypeError, ValueError:
             return 0.0
 
     async def _reject_if_replay_origin(self, order: OrderRequestData) -> bool:
@@ -2940,8 +2978,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
             await self.msg_publisher.send(topic, payload)
             logger.info(
-                f"[{exchange_name}] Published stream terminal event: "
-                f"{client_order_id} - {event}"
+                f"[{exchange_name}] Published stream terminal event: {client_order_id} - {event}"
             )
         except Exception as e:
             logger.warning(
@@ -3153,8 +3190,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             except httpx.HTTPError as exc:
                 self._record_venue_recon_failure(exc)
                 logger.warning(
-                    "[{}] Reconciliation cycle transient HTTP error — will retry "
-                    "on next cycle: {}",
+                    "[{}] Reconciliation cycle transient HTTP error — will retry on next cycle: {}",
                     exchange_name,
                     exc,
                 )
@@ -3166,6 +3202,189 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """Record a venue REST reconciliation failure for heartbeat consumers."""
         self._venue_recon_failure_count += 1
         self._last_venue_recon_error = str(exc) or exc.__class__.__name__
+
+    async def _account_observer_handler(self) -> None:
+        """Supervised loop that observes and persists venue account truth (Phase 3).
+
+        Fully INDEPENDENT of order reconciliation: it runs on its own cadence,
+        its per-call fetches are separately bounded, and its failures increment
+        only ``_account_observer_failure_count`` — never the order-recon
+        counter and never the order-healing path. Observes once immediately on
+        start, then every ``_ACCOUNT_OBSERVE_INTERVAL_S``. Each cycle records a
+        snapshot regardless of outcome (a failed read is persisted as an
+        ``error`` observation so the last-good state stays visibly stale rather
+        than vanishing).
+        """
+        exchange_name = self._get_exchange_name()
+        while self.running:
+            try:
+                await self._observe_account_once()
+                self._task_last_pass["account_observer"] = time.monotonic()
+            except Exception as exc:
+                self._account_observer_failure_count += 1
+                logger.exception(f"[{exchange_name}] account observation cycle failed: {exc}")
+            await asyncio.sleep(_ACCOUNT_OBSERVE_INTERVAL_S)
+
+    async def _observe_account_once(self) -> None:
+        """Observe balances + positions once and persist the account snapshot.
+
+        Balance and positions are SEPARATE venue reads with independent
+        statuses and timestamps (not an atomic snapshot). The stored roll-up,
+        retention, and provenance are all owned by the repository; this method
+        only supplies the raw attempt. Persists nothing when no durable
+        repository is attached.
+        """
+        client = self.exchange_client
+        repository = self.repository
+        if client is None or not isinstance(repository, SQLAlchemyRepository):
+            return
+        now = datetime.now(UTC)
+        (
+            balance_status,
+            balances_json,
+            balance_observed_at,
+            balance_error,
+        ) = await self._read_account_balances(client, now)
+        (
+            position_status,
+            open_positions_json,
+            position_observed_at,
+            position_error,
+        ) = await self._read_account_positions(client, now)
+        authoritative_until: datetime | None = None
+        if balance_status in ("observed", "simulated") and balance_observed_at is not None:
+            authoritative_until = balance_observed_at + timedelta(
+                seconds=_ACCOUNT_FRESHNESS_CEILING_S
+            )
+        exchange_name = self._get_exchange_name()
+        attempt: VenueAccountAttemptRow = {
+            "wallet_public_id": self.wallet_public_id,
+            "exchange": exchange_name,
+            "mode": self._account_mode(),
+            "balance_status": balance_status,
+            "position_status": position_status,
+            "valuation_status": "native_only",
+            "balances_json": balances_json,
+            "open_positions_json": open_positions_json,
+            "balance_observed_at": balance_observed_at,
+            "position_observed_at": position_observed_at,
+            "authoritative_until": authoritative_until,
+            "error": balance_error or position_error,
+            "session_id": self._tracker.session_id,
+            "sequence_id": self._tracker.next_sequence(
+                f"account.{exchange_name}.{self.wallet_public_id}"
+            ),
+            "bus_time": now,
+        }
+        await repository.record_venue_account_snapshot(attempt)
+
+    def _account_mode(self) -> str:
+        """Return the account-truth mode for this executor (paper venue → paper)."""
+        if self._get_exchange_name() == ExchangeEnum.PAPER:
+            return "paper"
+        return "live"
+
+    async def _read_account_balances(
+        self, client: ExchangeClientBase, now: datetime
+    ) -> tuple[str, str | None, datetime | None, str | None]:
+        """Read native balances, mapping capability/outcome to a fail-closed status.
+
+        Returns ``(balance_status, balances_json, balance_observed_at, error)``.
+        An ``unsupported`` venue never calls the reader; a structural
+        ``NotImplementedError`` is ``unsupported``; any other failure (incl.
+        timeout) is ``error`` with the payload/timestamp left NULL so the
+        repository retains the last-good balance stale-visible. A successful
+        read is ``observed`` (or ``simulated`` for paper) with the serialized
+        native balances (an empty account serializes to ``[]``, never NULL).
+
+        Args:
+            client: The executor's authenticated venue client.
+            now: The observation instant.
+
+        Returns:
+            The balance status tuple.
+        """
+        capability = client.balance_capability
+        if capability is CapabilityStatus.UNSUPPORTED:
+            return "unsupported", None, None, None
+        try:
+            async with asyncio.timeout(_ACCOUNT_FETCH_TIMEOUT_S):
+                entries = await client.read_native_balances()
+        except NotImplementedError:
+            return "unsupported", None, None, None
+        except Exception as exc:
+            logger.warning(f"[{self._get_exchange_name()}] native balance read failed: {exc}")
+            return "error", None, None, (str(exc) or exc.__class__.__name__)[:512]
+        if capability is CapabilityStatus.SUPPORTED:
+            return "observed", self._serialize_native_balances(entries), now, None
+        if capability is CapabilityStatus.SIMULATED:
+            return "simulated", self._serialize_native_balances(entries), now, None
+        return "error", None, None, _ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG
+
+    async def _read_account_positions(
+        self, client: ExchangeClientBase, now: datetime
+    ) -> tuple[str, str | None, datetime | None, str | None]:
+        """Read native positions, mapping capability/outcome to a fail-closed status.
+
+        Returns ``(position_status, open_positions_json, position_observed_at,
+        error)``. ``not_applicable`` (venue has no positions) and
+        ``unsupported`` never call the reader and clear the component; a
+        structural ``NotImplementedError`` is ``unsupported``; any other
+        failure is ``error``. A successful read is ``observed`` with the
+        serialized positions (empty book → ``[]``, never NULL).
+
+        Args:
+            client: The executor's authenticated venue client.
+            now: The observation instant.
+
+        Returns:
+            The position status tuple.
+        """
+        capability = client.position_capability
+        if capability is CapabilityStatus.NOT_APPLICABLE:
+            return "not_applicable", None, None, None
+        if capability is CapabilityStatus.UNSUPPORTED:
+            return "unsupported", None, None, None
+        try:
+            async with asyncio.timeout(_ACCOUNT_FETCH_TIMEOUT_S):
+                positions = await client.read_native_positions()
+        except NotImplementedError:
+            return "unsupported", None, None, None
+        except Exception as exc:
+            logger.warning(f"[{self._get_exchange_name()}] native position read failed: {exc}")
+            return "error", None, None, (str(exc) or exc.__class__.__name__)[:512]
+        if capability is CapabilityStatus.SUPPORTED:
+            return "observed", self._serialize_open_positions(positions), now, None
+        return "error", None, None, _ACCOUNT_UNEXPECTED_POSITION_CAPABILITY_MSG
+
+    @staticmethod
+    def _serialize_native_balances(entries: list[NativeBalanceEntry]) -> str:
+        """Serialize native balance entries to a stable JSON array (Phase 3)."""
+        return json.dumps(
+            [
+                {"currency": e.currency, "total": e.total, "free": e.free, "used": e.used}
+                for e in entries
+            ]
+        )
+
+    @staticmethod
+    def _serialize_open_positions(positions: list[OpenPositionSnapshot]) -> str:
+        """Serialize open positions to a stable JSON array (Phase 3)."""
+        return json.dumps(
+            [
+                {
+                    "symbol": p.symbol,
+                    "side": p.side.value,
+                    "size": p.size,
+                    "entry_price": p.entry_price,
+                    "mark_price": p.mark_price,
+                    "unrealized_pnl": p.unrealized_pnl,
+                    "unrealized_funding": p.unrealized_funding,
+                    "timestamp": p.timestamp.isoformat(),
+                }
+                for p in positions
+            ]
+        )
 
     async def _reconcile_with_exchange(self) -> None:
         """Run one reconciliation cycle, serialized on ``_recon_lock``.
@@ -3362,8 +3581,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
         if await self._verify_ambiguous_submit(order, pending):
             logger.info(
-                f"[{exchange_name}] Recon resolved parked ambiguous order "
-                f"{order.client_order_id}"
+                f"[{exchange_name}] Recon resolved parked ambiguous order {order.client_order_id}"
             )
             return
         if not pending.unknown_published:
@@ -4068,8 +4286,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             snapshot = await exchange_client.get_order(exchange_oid, pending.request.instrument)
         except Exception:
             logger.warning(
-                f"[{exchange_name}] Recon: get_order failed for {exchange_oid}, "
-                f"skipping this cycle"
+                f"[{exchange_name}] Recon: get_order failed for {exchange_oid}, skipping this cycle"
             )
             return
 
@@ -4642,8 +4859,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         client = self.exchange_client
         if client is None or not client.supports_websocket_executions:
             logger.warning(
-                f"[{exchange_name}] Execution stream unavailable on this venue - "
-                f"supervisor exiting"
+                f"[{exchange_name}] Execution stream unavailable on this venue - supervisor exiting"
             )
             return False
         return True
