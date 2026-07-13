@@ -341,6 +341,132 @@ _CK_VENUE_ACCOUNT_POSITION_FRESH_SOURCE = (
 )
 """A freshly observed positions component's payload source MUST be this very
 attempt."""
+_CK_RECONCILIATION_METHOD = "method IN ('futures_position', 'spot_execution_replay')"
+_CK_RECONCILIATION_EVALUATION_STATUS = (
+    "evaluation_status IN ('matched', 'mismatched', 'incomplete', 'unsupported', 'error')"
+)
+_CK_RECONCILIATION_CURRENT_STATUS = (
+    "current_evaluation_status IN "
+    "('matched', 'mismatched', 'incomplete', 'unsupported', 'error')"
+)
+_CK_RECONCILIATION_LAST_OUTCOME = (
+    "last_full_outcome IS NULL OR last_full_outcome IN ('matched', 'mismatched')"
+)
+_CK_RECONCILIATION_WATERMARK_PAIR = (
+    "(source_watermark IS NULL AND source_watermark_kind IS NULL) OR "
+    "(source_watermark IS NOT NULL AND source_watermark_kind IS NOT NULL)"
+)
+_CK_RECONCILIATION_OBSERVATION_FULL_EVIDENCE = (
+    "evaluation_status NOT IN ('matched', 'mismatched') OR "
+    "(venue_account_state_public_id IS NOT NULL AND "
+    "venue_account_observation_id IS NOT NULL AND "
+    "account_authoritative_until IS NOT NULL AND source_watermark IS NOT NULL AND "
+    "source_watermark_kind IS NOT NULL AND expected_json IS NOT NULL AND "
+    "actual_json IS NOT NULL AND difference_json IS NOT NULL AND tolerance_json IS NOT NULL)"
+)
+_CK_RECONCILIATION_OBSERVATION_MATCHED = (
+    "evaluation_status != 'matched' OR "
+    "(resulting_full_mismatch_count = 0 AND drift_episode_public_id IS NULL AND error IS NULL)"
+)
+_CK_RECONCILIATION_OBSERVATION_MISMATCHED = (
+    "evaluation_status != 'mismatched' OR resulting_full_mismatch_count >= 1"
+)
+_CK_RECONCILIATION_EPISODE_THRESHOLD = (
+    "(resulting_full_mismatch_count < 3 AND drift_episode_public_id IS NULL) OR "
+    "(resulting_full_mismatch_count >= 3 AND drift_episode_public_id IS NOT NULL)"
+)
+_CK_RECONCILIATION_SPOT_ANCHOR = (
+    "method != 'spot_execution_replay' OR "
+    "evaluation_status NOT IN ('matched', 'mismatched') OR anchor_public_id IS NOT NULL"
+)
+_CK_RECONCILIATION_ERROR_TEXT = (
+    "evaluation_status != 'error' OR (error IS NOT NULL AND LENGTH(TRIM(error)) > 0)"
+)
+_CK_RECONCILIATION_STATE_ERROR_TEXT = (
+    "current_evaluation_status != 'error' OR (error IS NOT NULL AND LENGTH(TRIM(error)) > 0)"
+)
+_CK_RECONCILIATION_ERROR_LENGTH = "error IS NULL OR LENGTH(error) <= 512"
+_CK_RECONCILIATION_STATE_DETAIL = (
+    "(detail_source_observation_id IS NULL AND last_full_observation_id IS NULL AND "
+    "last_full_outcome IS NULL AND venue_account_state_public_id IS NULL AND "
+    "venue_account_observation_id IS NULL AND anchor_public_id IS NULL AND "
+    "source_watermark_kind IS NULL AND "
+    "source_watermark IS NULL AND expected_json IS NULL AND actual_json IS NULL AND "
+    "difference_json IS NULL AND tolerance_json IS NULL AND reconciled_at IS NULL AND "
+    "authoritative_until IS NULL) OR "
+    "(detail_source_observation_id IS NOT NULL AND "
+    "last_full_observation_id IS NOT NULL AND "
+    "detail_source_observation_id = last_full_observation_id AND "
+    "last_full_outcome IS NOT NULL AND venue_account_state_public_id IS NOT NULL AND "
+    "venue_account_observation_id IS NOT NULL AND source_watermark_kind IS NOT NULL AND "
+    "source_watermark IS NOT NULL AND expected_json IS NOT NULL AND actual_json IS NOT NULL AND "
+    "difference_json IS NOT NULL AND tolerance_json IS NOT NULL AND reconciled_at IS NOT NULL AND "
+    "authoritative_until IS NOT NULL)"
+)
+_CK_RECONCILIATION_STATE_CURRENT_FULL = (
+    "current_evaluation_status NOT IN ('matched', 'mismatched') OR "
+    "(last_full_observation_id IS NOT NULL AND "
+    "detail_source_observation_id IS NOT NULL AND "
+    "current_observation_id = last_full_observation_id AND "
+    "current_observation_id = detail_source_observation_id AND "
+    "last_full_outcome IS NOT NULL AND current_evaluation_status = last_full_outcome AND "
+    "venue_account_state_public_id IS NOT NULL AND "
+    "venue_account_observation_id IS NOT NULL AND "
+    "source_watermark_kind IS NOT NULL AND source_watermark IS NOT NULL AND "
+    "expected_json IS NOT NULL AND actual_json IS NOT NULL AND "
+    "difference_json IS NOT NULL AND tolerance_json IS NOT NULL)"
+)
+_CK_RECONCILIATION_STATE_MATCHED = (
+    "(last_full_outcome IS NULL OR last_full_outcome != 'matched' OR "
+    "(consecutive_full_mismatches = 0 AND open_drift_episode_public_id IS NULL)) AND "
+    "(current_evaluation_status != 'matched' OR error IS NULL)"
+)
+_CK_RECONCILIATION_STATE_MISMATCHED = (
+    "last_full_outcome IS NULL OR last_full_outcome != 'mismatched' OR "
+    "consecutive_full_mismatches >= 1"
+)
+_CK_RECONCILIATION_STATE_NO_FULL = (
+    "last_full_outcome IS NOT NULL OR "
+    "(consecutive_full_mismatches = 0 AND open_drift_episode_public_id IS NULL)"
+)
+_CK_RECONCILIATION_STATE_EPISODE = (
+    "(open_drift_episode_public_id IS NULL AND "
+    "(last_full_outcome IS NULL OR last_full_outcome = 'matched' OR "
+    "(last_full_outcome = 'mismatched' AND consecutive_full_mismatches < 3))) OR "
+    "(open_drift_episode_public_id IS NOT NULL AND last_full_outcome IS NOT NULL AND "
+    "last_full_outcome = 'mismatched' AND "
+    "consecutive_full_mismatches >= 3)"
+)
+_CK_RECONCILIATION_STATE_SPOT_ANCHOR = (
+    "method != 'spot_execution_replay' OR "
+    "current_evaluation_status NOT IN ('matched', 'mismatched') OR anchor_public_id IS NOT NULL"
+)
+_CK_DRIFT_EPISODE_STATUS = "status IN ('open', 'resolved', 'rebased')"
+_CK_DRIFT_EPISODE_OBSERVATION_ORDER = "last_observation_id >= trigger_observation_id"
+_CK_DRIFT_EPISODE_DETAIL_ORDER = (
+    "details_source_observation_id >= trigger_observation_id AND "
+    "details_source_observation_id <= last_observation_id"
+)
+_CK_DRIFT_EPISODE_CLOSED_ORDER = "closed_at IS NULL OR closed_at >= opened_at"
+_CK_DRIFT_EPISODE_MISMATCH_COUNT = "latest_full_mismatch_count >= 3"
+_CK_DRIFT_EPISODE_OPEN = (
+    "status != 'open' OR (closed_at IS NULL AND resolution_reason IS NULL AND "
+    "closed_by_user_public_id IS NULL AND closed_by_operator_public_id IS NULL AND "
+    "rebase_anchor_public_id IS NULL)"
+)
+_CK_DRIFT_EPISODE_RESOLVED = (
+    "status != 'resolved' OR (closed_at IS NOT NULL AND resolution_reason IS NOT NULL AND "
+    "resolution_reason = 'matched' AND "
+    "closed_by_user_public_id IS NULL AND closed_by_operator_public_id IS NULL AND "
+    "rebase_anchor_public_id IS NULL)"
+)
+_CK_DRIFT_EPISODE_REBASED = (
+    "status != 'rebased' OR (closed_at IS NOT NULL AND "
+    "resolution_reason IS NOT NULL AND resolution_reason = 'operator_rebase' AND "
+    "((closed_by_user_public_id IS NOT NULL AND closed_by_operator_public_id IS NULL) OR "
+    "(closed_by_user_public_id IS NULL AND closed_by_operator_public_id IS NOT NULL)) AND "
+    "rebase_anchor_public_id IS NOT NULL)"
+)
 
 
 class Base(DeclarativeBase):
@@ -1002,6 +1128,263 @@ class VenueAccountState(TemporalMixin, Base):
     )
     authoritative_until: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class PortfolioReconciliationObservation(TemporalMixin, Base):
+    """Append-only reconciliation evaluation evidence (PnL Phase 4)."""
+
+    __tablename__ = "portfolio_reconciliation_observations"
+    __table_args__ = (
+        Index(
+            "ix_portfolio_reconciliation_observations_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_portfolio_reconciliation_observations_identity",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+        ),
+        Index(
+            "uq_portfolio_reconciliation_observations_evaluation",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            "session_id",
+            "sequence_id",
+            unique=True,
+        ),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_portfolio_recon_obs_exchange_lower"),
+        CheckConstraint("mode = 'live'", name="ck_portfolio_recon_obs_mode"),
+        CheckConstraint(_CK_RECONCILIATION_METHOD, name="ck_portfolio_recon_obs_method"),
+        CheckConstraint(
+            _CK_RECONCILIATION_EVALUATION_STATUS,
+            name="ck_portfolio_recon_obs_evaluation_status",
+        ),
+        CheckConstraint(
+            "resulting_full_mismatch_count >= 0",
+            name="ck_portfolio_recon_obs_mismatch_count",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_OBSERVATION_FULL_EVIDENCE,
+            name="ck_portfolio_recon_obs_full_evidence",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_OBSERVATION_MATCHED,
+            name="ck_portfolio_recon_obs_matched",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_OBSERVATION_MISMATCHED,
+            name="ck_portfolio_recon_obs_mismatched",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_EPISODE_THRESHOLD,
+            name="ck_portfolio_recon_obs_episode_threshold",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_SPOT_ANCHOR,
+            name="ck_portfolio_recon_obs_spot_anchor",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_WATERMARK_PAIR,
+            name="ck_portfolio_recon_obs_watermark_pair",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_ERROR_TEXT,
+            name="ck_portfolio_recon_obs_error_text",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_ERROR_LENGTH,
+            name="ck_portfolio_recon_obs_error_length",
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
+    method: Mapped[str] = mapped_column(String(32), nullable=False)
+    evaluation_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    venue_account_state_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    venue_account_observation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    account_authoritative_until: Mapped[datetime | None] = mapped_column(
+        TZDateTime(), nullable=True
+    )
+    source_watermark_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_watermark: Mapped[int | None] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), nullable=True
+    )
+    anchor_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    expected_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actual_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    difference_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tolerance_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resulting_full_mismatch_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    drift_episode_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class PortfolioReconciliationState(TemporalMixin, Base):
+    """Current reconciliation truth per live venue account as SCD2 state."""
+
+    __tablename__ = "portfolio_reconciliation_states"
+    __table_args__ = (
+        Index(
+            "uq_portfolio_reconciliation_states_identity",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_portfolio_reconciliation_states_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index("ix_portfolio_reconciliation_states_wallet", "wallet_public_id"),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_portfolio_recon_states_exchange_lower"),
+        CheckConstraint("mode = 'live'", name="ck_portfolio_recon_states_mode"),
+        CheckConstraint(_CK_RECONCILIATION_METHOD, name="ck_portfolio_recon_states_method"),
+        CheckConstraint(
+            _CK_RECONCILIATION_CURRENT_STATUS,
+            name="ck_portfolio_recon_states_current_status",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_LAST_OUTCOME,
+            name="ck_portfolio_recon_states_last_outcome",
+        ),
+        CheckConstraint(
+            "consecutive_full_mismatches >= 0",
+            name="ck_portfolio_recon_states_mismatch_count",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_STATE_DETAIL,
+            name="ck_portfolio_recon_states_detail",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_STATE_CURRENT_FULL,
+            name="ck_portfolio_recon_states_current_full",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_STATE_MATCHED,
+            name="ck_portfolio_recon_states_matched",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_STATE_MISMATCHED,
+            name="ck_portfolio_recon_states_mismatched",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_STATE_NO_FULL,
+            name="ck_portfolio_recon_states_no_full",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_STATE_EPISODE,
+            name="ck_portfolio_recon_states_episode",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_STATE_SPOT_ANCHOR,
+            name="ck_portfolio_recon_states_spot_anchor",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_STATE_ERROR_TEXT,
+            name="ck_portfolio_recon_states_error_text",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_ERROR_LENGTH,
+            name="ck_portfolio_recon_states_error_length",
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
+    method: Mapped[str] = mapped_column(String(32), nullable=False)
+    current_evaluation_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    current_observation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_full_observation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_full_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    detail_source_observation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    consecutive_full_mismatches: Mapped[int] = mapped_column(Integer, nullable=False)
+    open_drift_episode_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    anchor_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    venue_account_state_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    venue_account_observation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_watermark_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_watermark: Mapped[int | None] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), nullable=True
+    )
+    expected_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actual_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    difference_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tolerance_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reconciled_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    authoritative_until: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class PortfolioDriftEpisode(TemporalMixin, Base):
+    """SCD2 lifecycle evidence for a sustained reconciliation mismatch."""
+
+    __tablename__ = "portfolio_drift_episodes"
+    __table_args__ = (
+        Index(
+            "uq_portfolio_drift_episodes_open_identity",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            unique=True,
+            sqlite_where=text("status = 'open' AND known_to = '9999-12-31 23:59:59.000000'"),
+            postgresql_where=text("status = 'open' AND known_to = '9999-12-31T23:59:59+00:00'"),
+        ),
+        Index(
+            "ix_portfolio_drift_episodes_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index("ix_portfolio_drift_episodes_status_opened", "status", "opened_at"),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_portfolio_drift_exchange_lower"),
+        CheckConstraint("mode = 'live'", name="ck_portfolio_drift_mode"),
+        CheckConstraint(_CK_DRIFT_EPISODE_STATUS, name="ck_portfolio_drift_status"),
+        CheckConstraint(
+            _CK_DRIFT_EPISODE_OBSERVATION_ORDER,
+            name="ck_portfolio_drift_observation_order",
+        ),
+        CheckConstraint(
+            _CK_DRIFT_EPISODE_DETAIL_ORDER,
+            name="ck_portfolio_drift_detail_order",
+        ),
+        CheckConstraint(
+            _CK_DRIFT_EPISODE_CLOSED_ORDER,
+            name="ck_portfolio_drift_closed_order",
+        ),
+        CheckConstraint(
+            _CK_DRIFT_EPISODE_MISMATCH_COUNT,
+            name="ck_portfolio_drift_mismatch_count",
+        ),
+        CheckConstraint(_CK_DRIFT_EPISODE_OPEN, name="ck_portfolio_drift_open"),
+        CheckConstraint(_CK_DRIFT_EPISODE_RESOLVED, name="ck_portfolio_drift_resolved"),
+        CheckConstraint(_CK_DRIFT_EPISODE_REBASED, name="ck_portfolio_drift_rebased"),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    trigger_observation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_observation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    details_source_observation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    latest_full_mismatch_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolution_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    closed_by_user_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    closed_by_operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    rebase_anchor_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
 
 
 class Signal(TemporalMixin, Base):

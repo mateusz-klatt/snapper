@@ -91,6 +91,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.engine import Engine as SyncEngine
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -149,6 +150,9 @@ from snapper.data.models import Order
 from snapper.data.models import PairedExecutionGroup
 from snapper.data.models import PairedExecutionHalt
 from snapper.data.models import PairedExecutionLeg
+from snapper.data.models import PortfolioDriftEpisode
+from snapper.data.models import PortfolioReconciliationObservation
+from snapper.data.models import PortfolioReconciliationState
 from snapper.data.models import Position
 from snapper.data.models import PositionCycle
 from snapper.data.models import Setting
@@ -233,6 +237,8 @@ from snapper.data.repository_types import PairedExecutionLegFieldUpdate
 from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
+from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
+from snapper.data.repository_types import PortfolioReconciliationStateRow
 from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import PositionProjectionUpsertRow
@@ -1642,6 +1648,35 @@ class Repository(ABC):
 
         Returns:
             Active account-state rows, ordered by exchange then mode.
+        """
+        ...
+
+    @abstractmethod
+    async def record_portfolio_reconciliation(
+        self, evaluation: PortfolioReconciliationEvaluationRow
+    ) -> int:
+        """Atomically record reconciliation evidence and derived SCD2 state.
+
+        Args:
+            evaluation: Raw evaluation evidence and outcome.
+
+        Returns:
+            The new active reconciliation-state row id.
+        """
+        ...
+
+    @abstractmethod
+    async def get_portfolio_reconciliation_states(
+        self, wallet_public_ids: list[str] | None = None
+    ) -> list[PortfolioReconciliationStateRow]:
+        """Return active reconciliation states, optionally wallet-scoped.
+
+        Args:
+            wallet_public_ids: Wallet identities to include, or ``None`` for
+                no wallet filter. An empty list yields an empty result.
+
+        Returns:
+            Active reconciliation states ordered by exchange then mode.
         """
         ...
 
@@ -5118,6 +5153,7 @@ class SQLAlchemyRepository(Repository):
         self.session_factory = async_sessionmaker(
             self.engine, expire_on_commit=False, class_=AsyncSession
         )
+        self._portfolio_reconciliation_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         _live_sqlalchemy_repositories.add(self)
         with suppress(TypeError):
             _live_sqlalchemy_engines.add(self.engine)
@@ -12169,6 +12205,954 @@ class SQLAlchemyRepository(Repository):
             query = query.order_by(VenueAccountState.exchange, VenueAccountState.mode)
             rows = (await s.execute(query)).scalars().all()
             return [self._venue_account_state_to_row(r) for r in rows]
+
+    @staticmethod
+    def _portfolio_reconciliation_identity_filters(
+        wallet_public_id: str, exchange: str, mode: str
+    ) -> list[ColumnElement[bool]]:
+        """Build the identity predicate for one reconciliation state.
+
+        Args:
+            wallet_public_id: Full wallet identity.
+            exchange: Lowercase venue name.
+            mode: Live trading mode.
+
+        Returns:
+            Filters matching the wallet, exchange, and mode identity.
+        """
+        return [
+            PortfolioReconciliationState.wallet_public_id == wallet_public_id,
+            PortfolioReconciliationState.exchange == exchange,
+            PortfolioReconciliationState.mode == mode,
+        ]
+
+    @staticmethod
+    def _portfolio_reconciliation_observation_is_full_mismatch(
+        observation: PortfolioReconciliationObservation,
+    ) -> bool:
+        """Return whether an observation is a complete full mismatch.
+
+        Args:
+            observation: Stored reconciliation evidence to validate.
+
+        Returns:
+            Whether the observation carries a mismatched outcome and every
+            required account-provenance, authority, and comparison field.
+        """
+        required_evidence = (
+            observation.venue_account_state_public_id,
+            observation.venue_account_observation_id,
+            observation.account_authoritative_until,
+            observation.source_watermark_kind,
+            observation.source_watermark,
+            observation.expected_json,
+            observation.actual_json,
+            observation.difference_json,
+            observation.tolerance_json,
+        )
+        return (observation.evaluation_status, None in required_evidence) == (
+            "mismatched",
+            False,
+        )
+
+    @classmethod
+    def _portfolio_reconciliation_episode_observation_is_consistent(
+        cls,
+        observation: PortfolioReconciliationObservation,
+        episode: PortfolioDriftEpisode,
+        mismatch_count: int,
+    ) -> bool:
+        """Return whether full mismatch evidence belongs to an episode.
+
+        Args:
+            observation: Stored episode-lineage observation.
+            episode: Episode expected to own the observation.
+            mismatch_count: Required resulting mismatch count.
+
+        Returns:
+            Whether identity, episode lineage, count, and full evidence agree.
+        """
+        return (
+            observation.wallet_public_id,
+            observation.exchange,
+            observation.mode,
+            observation.drift_episode_public_id,
+            observation.resulting_full_mismatch_count,
+            cls._portfolio_reconciliation_observation_is_full_mismatch(observation),
+        ) == (
+            episode.wallet_public_id,
+            episode.exchange,
+            episode.mode,
+            episode.public_id,
+            mismatch_count,
+            True,
+        )
+
+    @staticmethod
+    def _validate_portfolio_reconciliation_episode_state_consistency(
+        episode: PortfolioDriftEpisode,
+        state: PortfolioReconciliationState,
+    ) -> None:
+        """Validate that active episode lineage equals its owning state.
+
+        Args:
+            episode: Active open drift episode.
+            state: Active reconciliation state naming the episode.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If the episode identity, mismatch count, last full
+                observation, or retained detail source disagrees with state.
+        """
+        if (
+            episode.public_id,
+            episode.latest_full_mismatch_count,
+            episode.last_observation_id,
+            episode.details_source_observation_id,
+        ) != (
+            state.open_drift_episode_public_id,
+            state.consecutive_full_mismatches,
+            state.last_full_observation_id,
+            state.detail_source_observation_id,
+        ):
+            raise RuntimeError("active drift episode lineage does not match reconciliation state")
+
+    async def _validate_portfolio_reconciliation_episode_opened_at(
+        self,
+        s: AsyncSession,
+        episode: PortfolioDriftEpisode,
+        trigger: PortfolioReconciliationObservation,
+    ) -> None:
+        """Validate the episode opening time against its trigger evidence.
+
+        Args:
+            s: Open transaction session.
+            episode: Episode whose opening time is being validated.
+            trigger: Genuine third-mismatch trigger observation.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If the opening time differs from the clock-clamped
+                observation time at the trigger's monotonic evaluation key.
+        """
+        expected_opened_at = (
+            (
+                await s.execute(
+                    select(PortfolioReconciliationObservation.timestamp)
+                    .where(
+                        PortfolioReconciliationObservation.wallet_public_id
+                        == episode.wallet_public_id,
+                        PortfolioReconciliationObservation.exchange == episode.exchange,
+                        PortfolioReconciliationObservation.mode == episode.mode,
+                        or_(
+                            PortfolioReconciliationObservation.session_id < trigger.session_id,
+                            and_(
+                                PortfolioReconciliationObservation.session_id == trigger.session_id,
+                                PortfolioReconciliationObservation.sequence_id
+                                <= trigger.sequence_id,
+                            ),
+                        ),
+                    )
+                    .order_by(
+                        PortfolioReconciliationObservation.timestamp.desc(),
+                        PortfolioReconciliationObservation.id.desc(),
+                    )
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        if episode.opened_at != expected_opened_at:
+            raise RuntimeError("active drift episode opened_at is inconsistent")
+
+    async def _validate_portfolio_reconciliation_episode_trigger(
+        self,
+        s: AsyncSession,
+        episode: PortfolioDriftEpisode,
+        trigger: PortfolioReconciliationObservation,
+    ) -> None:
+        """Validate an episode's trigger identity, evidence, and opening time.
+
+        Args:
+            s: Open transaction session.
+            episode: Episode whose trigger is being validated.
+            trigger: Referenced trigger observation.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If trigger evidence or opening time is inconsistent.
+        """
+        if not self._portfolio_reconciliation_episode_observation_is_consistent(
+            trigger, episode, 3
+        ):
+            raise RuntimeError("active drift episode trigger observation is inconsistent")
+        await self._validate_portfolio_reconciliation_episode_opened_at(s, episode, trigger)
+
+    async def _lock_active_drift_episode(
+        self,
+        s: AsyncSession,
+        public_id: str | None,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        state: PortfolioReconciliationState,
+    ) -> PortfolioDriftEpisode | None:
+        """Lock and return the sentinel-active drift episode when identified.
+
+        Args:
+            s: Open transaction session.
+            public_id: Stable episode identity, or ``None``.
+            wallet_public_id: Expected full wallet identity.
+            exchange: Expected venue identity.
+            mode: Expected trading mode.
+            state: Active reconciliation state naming the episode.
+
+        Returns:
+            The locked active episode or ``None``.
+        """
+        if public_id is None:
+            return None
+        episode = (
+            (
+                await s.execute(
+                    select(PortfolioDriftEpisode)
+                    .where(
+                        PortfolioDriftEpisode.public_id == public_id,
+                        PortfolioDriftEpisode.known_to == KNOWN_TO_MAX,
+                    )
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if episode is not None and (
+            episode.wallet_public_id != wallet_public_id
+            or episode.exchange != exchange
+            or episode.mode != mode
+        ):
+            raise RuntimeError("active drift episode identity does not match reconciliation state")
+        if episode is not None:
+            observation_ids = {
+                episode.trigger_observation_id,
+                episode.last_observation_id,
+                episode.details_source_observation_id,
+            }
+            observations = (
+                (
+                    await s.execute(
+                        select(PortfolioReconciliationObservation).where(
+                            PortfolioReconciliationObservation.id.in_(observation_ids)
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            observations_by_id = {int(observation.id): observation for observation in observations}
+            if set(observations_by_id) != observation_ids:
+                raise RuntimeError("active drift episode references a missing observation")
+            for observation in observations:
+                if (
+                    observation.wallet_public_id != wallet_public_id
+                    or observation.exchange != exchange
+                    or observation.mode != mode
+                ):
+                    raise RuntimeError("active drift episode references a foreign observation")
+            detail = observations_by_id[episode.details_source_observation_id]
+            if not self._portfolio_reconciliation_episode_observation_is_consistent(
+                detail, episode, episode.latest_full_mismatch_count
+            ):
+                raise RuntimeError("active drift episode detail observation is inconsistent")
+            trigger = observations_by_id[episode.trigger_observation_id]
+            await self._validate_portfolio_reconciliation_episode_trigger(s, episode, trigger)
+            last = observations_by_id[episode.last_observation_id]
+            if not self._portfolio_reconciliation_episode_observation_is_consistent(
+                last, episode, episode.latest_full_mismatch_count
+            ):
+                raise RuntimeError("active drift episode last observation is inconsistent")
+            self._validate_portfolio_reconciliation_episode_state_consistency(episode, state)
+        return episode
+
+    @staticmethod
+    def _portfolio_reconciliation_replay_matches(
+        observation: PortfolioReconciliationObservation,
+        evaluation: PortfolioReconciliationEvaluationRow,
+    ) -> bool:
+        """Return whether stored evidence exactly matches a replayed evaluation.
+
+        Args:
+            observation: Existing observation with the same evaluation key.
+            evaluation: Incoming raw evaluation.
+
+        Returns:
+            Whether every caller-supplied evidence field is identical.
+        """
+        return (
+            observation.method == evaluation["method"]
+            and observation.evaluation_status == evaluation["evaluation_status"]
+            and observation.venue_account_state_public_id
+            == evaluation["venue_account_state_public_id"]
+            and observation.venue_account_observation_id
+            == evaluation["venue_account_observation_id"]
+            and observation.account_authoritative_until == evaluation["account_authoritative_until"]
+            and observation.source_watermark_kind == evaluation["source_watermark_kind"]
+            and observation.source_watermark == evaluation["source_watermark"]
+            and observation.anchor_public_id == evaluation["anchor_public_id"]
+            and observation.expected_json == evaluation["expected_json"]
+            and observation.actual_json == evaluation["actual_json"]
+            and observation.difference_json == evaluation["difference_json"]
+            and observation.tolerance_json == evaluation["tolerance_json"]
+            and observation.error == evaluation["error"]
+            and observation.timestamp == evaluation["bus_time"]
+        )
+
+    async def _validate_portfolio_reconciliation_lineage(
+        self,
+        s: AsyncSession,
+        existing: PortfolioReconciliationState,
+    ) -> None:
+        """Validate every predecessor observation reference and its identity.
+
+        Args:
+            s: Open transaction session.
+            existing: Locked sentinel-active reconciliation state.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If any referenced observation is missing, foreign,
+                or inconsistent with the predecessor's current metadata.
+        """
+        observation_ids = {
+            observation_id
+            for observation_id in (
+                existing.current_observation_id,
+                existing.last_full_observation_id,
+                existing.detail_source_observation_id,
+            )
+            if observation_id is not None
+        }
+        observations = (
+            (
+                await s.execute(
+                    select(PortfolioReconciliationObservation).where(
+                        PortfolioReconciliationObservation.id.in_(observation_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        observations_by_id = {int(observation.id): observation for observation in observations}
+        if set(observations_by_id) != observation_ids:
+            raise RuntimeError("reconciliation state references a missing observation")
+        for observation in observations:
+            if (
+                observation.wallet_public_id != existing.wallet_public_id
+                or observation.exchange != existing.exchange
+                or observation.mode != existing.mode
+            ):
+                raise RuntimeError("reconciliation state references a foreign observation")
+        current = observations_by_id[existing.current_observation_id]
+        if (
+            current.method != existing.method
+            or current.evaluation_status != existing.current_evaluation_status
+            or current.resulting_full_mismatch_count != existing.consecutive_full_mismatches
+            or current.drift_episode_public_id != existing.open_drift_episode_public_id
+            or current.error != existing.error
+            or current.session_id != existing.session_id
+            or current.sequence_id != existing.sequence_id
+        ):
+            raise RuntimeError("reconciliation state current observation metadata is inconsistent")
+        if existing.last_full_observation_id is not None:
+            last_full = observations_by_id[existing.last_full_observation_id]
+            if (
+                last_full.evaluation_status != existing.last_full_outcome
+                or last_full.resulting_full_mismatch_count != existing.consecutive_full_mismatches
+                or last_full.drift_episode_public_id != existing.open_drift_episode_public_id
+            ):
+                raise RuntimeError("reconciliation state last-full observation is inconsistent")
+        if existing.detail_source_observation_id is not None:
+            detail = observations_by_id[existing.detail_source_observation_id]
+            if (
+                detail.resulting_full_mismatch_count != existing.consecutive_full_mismatches
+                or detail.drift_episode_public_id != existing.open_drift_episode_public_id
+                or detail.venue_account_state_public_id != existing.venue_account_state_public_id
+                or detail.venue_account_observation_id != existing.venue_account_observation_id
+                or detail.source_watermark_kind != existing.source_watermark_kind
+                or detail.source_watermark != existing.source_watermark
+                or detail.anchor_public_id != existing.anchor_public_id
+                or detail.expected_json != existing.expected_json
+                or detail.actual_json != existing.actual_json
+                or detail.difference_json != existing.difference_json
+                or detail.tolerance_json != existing.tolerance_json
+                or detail.timestamp != existing.reconciled_at
+                or detail.account_authoritative_until != existing.authoritative_until
+            ):
+                raise RuntimeError("reconciliation state detail observation is inconsistent")
+        latest_ordered_observation_id = await s.scalar(
+            select(PortfolioReconciliationObservation.id)
+            .where(
+                PortfolioReconciliationObservation.wallet_public_id == existing.wallet_public_id,
+                PortfolioReconciliationObservation.exchange == existing.exchange,
+                PortfolioReconciliationObservation.mode == existing.mode,
+            )
+            .order_by(
+                PortfolioReconciliationObservation.session_id.desc(),
+                PortfolioReconciliationObservation.sequence_id.desc(),
+                PortfolioReconciliationObservation.id.desc(),
+            )
+            .limit(1)
+        )
+        latest_appended_observation_id = await s.scalar(
+            select(func.max(PortfolioReconciliationObservation.id)).where(
+                PortfolioReconciliationObservation.wallet_public_id == existing.wallet_public_id,
+                PortfolioReconciliationObservation.exchange == existing.exchange,
+                PortfolioReconciliationObservation.mode == existing.mode,
+            )
+        )
+        if (
+            existing.current_observation_id != latest_ordered_observation_id
+            or existing.current_observation_id != latest_appended_observation_id
+        ):
+            raise RuntimeError("reconciliation state does not reference the latest observation")
+
+    async def _find_portfolio_reconciliation_replay(
+        self,
+        s: AsyncSession,
+        evaluation: PortfolioReconciliationEvaluationRow,
+    ) -> PortfolioReconciliationObservation | None:
+        """Find an observation with the incoming account evaluation key.
+
+        Args:
+            s: Open transaction session.
+            evaluation: Incoming raw evaluation.
+
+        Returns:
+            Existing same-key observation, or ``None``.
+        """
+        return (
+            (
+                await s.execute(
+                    select(PortfolioReconciliationObservation).where(
+                        PortfolioReconciliationObservation.wallet_public_id
+                        == evaluation["wallet_public_id"],
+                        PortfolioReconciliationObservation.exchange == evaluation["exchange"],
+                        PortfolioReconciliationObservation.mode == evaluation["mode"],
+                        PortfolioReconciliationObservation.session_id == evaluation["session_id"],
+                        PortfolioReconciliationObservation.sequence_id == evaluation["sequence_id"],
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    async def _version_drift_episode(
+        self,
+        s: AsyncSession,
+        existing: PortfolioDriftEpisode,
+        state: PortfolioReconciliationState,
+        observation_id: int,
+        mismatch_count: int,
+        effective: datetime,
+        evaluation: PortfolioReconciliationEvaluationRow,
+        status: str,
+    ) -> None:
+        """Close and replace one drift-episode lifecycle version.
+
+        Args:
+            s: Open transaction session.
+            existing: Locked active episode version.
+            state: Locked active reconciliation-state predecessor.
+            observation_id: Observation advancing or resolving the episode.
+            mismatch_count: Latest sustained full-mismatch count.
+            effective: Clock-clamped lifecycle effective time.
+            evaluation: Raw evaluation carrying temporal provenance.
+            status: Successor lifecycle status, ``open`` or ``resolved``.
+
+        Returns:
+            None.
+        """
+        resolved = status == "resolved"
+        trigger = (
+            (
+                await s.execute(
+                    select(PortfolioReconciliationObservation).where(
+                        PortfolioReconciliationObservation.id == existing.trigger_observation_id
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+        await self._validate_portfolio_reconciliation_episode_trigger(s, existing, trigger)
+        if resolved:
+            detail = (
+                (
+                    await s.execute(
+                        select(PortfolioReconciliationObservation).where(
+                            PortfolioReconciliationObservation.id
+                            == existing.details_source_observation_id
+                        )
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            if not self._portfolio_reconciliation_episode_observation_is_consistent(
+                detail, existing, existing.latest_full_mismatch_count
+            ):
+                raise RuntimeError("active drift episode detail observation is inconsistent")
+            self._validate_portfolio_reconciliation_episode_state_consistency(existing, state)
+        await s.execute(
+            update(PortfolioDriftEpisode)
+            .where(PortfolioDriftEpisode.id == existing.id)
+            .values(known_to=effective)
+        )
+        successor = PortfolioDriftEpisode(
+            wallet_public_id=existing.wallet_public_id,
+            exchange=existing.exchange,
+            mode=existing.mode,
+            status=status,
+            opened_at=existing.opened_at,
+            closed_at=effective if resolved else None,
+            trigger_observation_id=existing.trigger_observation_id,
+            last_observation_id=observation_id,
+            details_source_observation_id=(
+                existing.details_source_observation_id if resolved else observation_id
+            ),
+            latest_full_mismatch_count=(
+                existing.latest_full_mismatch_count if resolved else mismatch_count
+            ),
+            resolution_reason="matched" if resolved else None,
+            closed_by_user_public_id=None,
+            closed_by_operator_public_id=None,
+            rebase_anchor_public_id=None,
+            public_id=existing.public_id,
+            session_id=evaluation["session_id"],
+            sequence_id=evaluation["sequence_id"],
+            timestamp=effective,
+            known_to=KNOWN_TO_MAX,
+        )
+        s.add(successor)
+        await s.flush()
+
+    async def _write_portfolio_reconciliation(
+        self, s: AsyncSession, evaluation: PortfolioReconciliationEvaluationRow
+    ) -> int:
+        """Append an evaluation and derive state plus episode lifecycle atomically.
+
+        The active state is locked before evidence is appended. Full matches
+        reset the streak and resolve an open episode. Full mismatches advance
+        only a prior full-mismatch streak, minting one stable episode identity
+        at the third consecutive mismatch and reusing it thereafter. Every
+        non-full outcome retains the prior full detail and streak without
+        incrementing or resetting either.
+
+        Args:
+            s: Open transaction session owned by the caller.
+            evaluation: Raw comparison evidence and outcome.
+
+        Returns:
+            The new active reconciliation-state row id.
+
+        Raises:
+            RuntimeError: If predecessor lineage, episode identity, or replay
+                evidence is missing, foreign, or inconsistent.
+        """
+        existing = (
+            (
+                await s.execute(
+                    select(PortfolioReconciliationState)
+                    .where(
+                        PortfolioReconciliationState.known_to == KNOWN_TO_MAX,
+                        *self._portfolio_reconciliation_identity_filters(
+                            evaluation["wallet_public_id"],
+                            evaluation["exchange"],
+                            evaluation["mode"],
+                        ),
+                    )
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if existing is not None:
+            await self._validate_portfolio_reconciliation_lineage(s, existing)
+        else:
+            prior_observation_id = await s.scalar(
+                select(PortfolioReconciliationObservation.id)
+                .where(
+                    PortfolioReconciliationObservation.wallet_public_id
+                    == evaluation["wallet_public_id"],
+                    PortfolioReconciliationObservation.exchange == evaluation["exchange"],
+                    PortfolioReconciliationObservation.mode == evaluation["mode"],
+                    or_(
+                        PortfolioReconciliationObservation.session_id != evaluation["session_id"],
+                        PortfolioReconciliationObservation.sequence_id != evaluation["sequence_id"],
+                    ),
+                )
+                .limit(1)
+            )
+            if prior_observation_id is not None:
+                raise RuntimeError(
+                    "active reconciliation state predecessor is missing for prior observation"
+                )
+        active_episode = (
+            await self._lock_active_drift_episode(
+                s,
+                existing.open_drift_episode_public_id,
+                evaluation["wallet_public_id"],
+                evaluation["exchange"],
+                evaluation["mode"],
+                existing,
+            )
+            if existing is not None
+            else None
+        )
+        if existing is not None and existing.open_drift_episode_public_id is not None:
+            if active_episode is None or active_episode.status != "open":
+                raise RuntimeError("active reconciliation state has no open drift episode")
+        replay = await self._find_portfolio_reconciliation_replay(s, evaluation)
+        if replay is not None:
+            if not self._portfolio_reconciliation_replay_matches(replay, evaluation):
+                raise RuntimeError("conflicting reconciliation evaluation replay")
+            if existing is None:
+                raise RuntimeError("reconciliation observation has no active state")
+            return int(existing.id)
+        if existing is not None:
+            incoming_key = (evaluation["session_id"], evaluation["sequence_id"])
+            current_key = (existing.session_id, existing.sequence_id)
+            if incoming_key < current_key:
+                return int(existing.id)
+        effective = evaluation["bus_time"]
+        if existing is not None and existing.timestamp > effective:
+            effective = existing.timestamp
+        status = evaluation["evaluation_status"]
+        previous_count = existing.consecutive_full_mismatches if existing is not None else 0
+        previous_outcome = existing.last_full_outcome if existing is not None else None
+        if status == "matched":
+            mismatch_count = 0
+            episode_public_id: str | None = None
+        elif status == "mismatched":
+            mismatch_count = previous_count + 1 if previous_outcome == "mismatched" else 1
+            if mismatch_count >= 3:
+                episode_public_id = (
+                    existing.open_drift_episode_public_id
+                    if existing is not None and existing.open_drift_episode_public_id is not None
+                    else str(uuid7())
+                )
+            else:
+                episode_public_id = None
+        else:
+            mismatch_count = previous_count
+            episode_public_id = (
+                existing.open_drift_episode_public_id if existing is not None else None
+            )
+        observation = PortfolioReconciliationObservation(
+            wallet_public_id=evaluation["wallet_public_id"],
+            exchange=evaluation["exchange"],
+            mode=evaluation["mode"],
+            method=evaluation["method"],
+            evaluation_status=status,
+            venue_account_state_public_id=evaluation["venue_account_state_public_id"],
+            venue_account_observation_id=evaluation["venue_account_observation_id"],
+            account_authoritative_until=evaluation["account_authoritative_until"],
+            source_watermark_kind=evaluation["source_watermark_kind"],
+            source_watermark=evaluation["source_watermark"],
+            anchor_public_id=evaluation["anchor_public_id"],
+            expected_json=evaluation["expected_json"],
+            actual_json=evaluation["actual_json"],
+            difference_json=evaluation["difference_json"],
+            tolerance_json=evaluation["tolerance_json"],
+            resulting_full_mismatch_count=mismatch_count,
+            drift_episode_public_id=episode_public_id,
+            error=evaluation["error"],
+            session_id=evaluation["session_id"],
+            sequence_id=evaluation["sequence_id"],
+            timestamp=evaluation["bus_time"],
+            known_to=KNOWN_TO_MAX,
+        )
+        s.add(observation)
+        await s.flush()
+        observation_id = int(observation.id)
+        if status == "mismatched" and mismatch_count == 3:
+            episode = PortfolioDriftEpisode(
+                wallet_public_id=evaluation["wallet_public_id"],
+                exchange=evaluation["exchange"],
+                mode=evaluation["mode"],
+                status="open",
+                opened_at=effective,
+                closed_at=None,
+                trigger_observation_id=observation_id,
+                last_observation_id=observation_id,
+                details_source_observation_id=observation_id,
+                latest_full_mismatch_count=mismatch_count,
+                resolution_reason=None,
+                closed_by_user_public_id=None,
+                closed_by_operator_public_id=None,
+                rebase_anchor_public_id=None,
+                public_id=episode_public_id,
+                session_id=evaluation["session_id"],
+                sequence_id=evaluation["sequence_id"],
+                timestamp=effective,
+                known_to=KNOWN_TO_MAX,
+            )
+            s.add(episode)
+            await s.flush()
+        elif status == "mismatched" and mismatch_count > 3:
+            await self._version_drift_episode(
+                s,
+                cast(PortfolioDriftEpisode, active_episode),
+                cast(PortfolioReconciliationState, existing),
+                observation_id,
+                mismatch_count,
+                effective,
+                evaluation,
+                "open",
+            )
+        elif status == "matched" and active_episode is not None:
+            await self._version_drift_episode(
+                s,
+                active_episode,
+                cast(PortfolioReconciliationState, existing),
+                observation_id,
+                active_episode.latest_full_mismatch_count,
+                effective,
+                evaluation,
+                "resolved",
+            )
+        is_full = status in ("matched", "mismatched")
+        if is_full:
+            last_full_observation_id: int | None = observation_id
+            last_full_outcome: str | None = status
+            detail_source_observation_id: int | None = observation_id
+            anchor_public_id = evaluation["anchor_public_id"]
+            venue_account_state_public_id = evaluation["venue_account_state_public_id"]
+            venue_account_observation_id = evaluation["venue_account_observation_id"]
+            source_watermark_kind = evaluation["source_watermark_kind"]
+            source_watermark = evaluation["source_watermark"]
+            expected_json = evaluation["expected_json"]
+            actual_json = evaluation["actual_json"]
+            difference_json = evaluation["difference_json"]
+            tolerance_json = evaluation["tolerance_json"]
+            reconciled_at: datetime | None = evaluation["bus_time"]
+            authoritative_until = evaluation["account_authoritative_until"]
+        elif existing is not None:
+            last_full_observation_id = existing.last_full_observation_id
+            last_full_outcome = existing.last_full_outcome
+            detail_source_observation_id = existing.detail_source_observation_id
+            anchor_public_id = existing.anchor_public_id
+            venue_account_state_public_id = existing.venue_account_state_public_id
+            venue_account_observation_id = existing.venue_account_observation_id
+            source_watermark_kind = existing.source_watermark_kind
+            source_watermark = existing.source_watermark
+            expected_json = existing.expected_json
+            actual_json = existing.actual_json
+            difference_json = existing.difference_json
+            tolerance_json = existing.tolerance_json
+            reconciled_at = existing.reconciled_at
+            authoritative_until = existing.authoritative_until
+        else:
+            last_full_observation_id = None
+            last_full_outcome = None
+            detail_source_observation_id = None
+            anchor_public_id = None
+            venue_account_state_public_id = None
+            venue_account_observation_id = None
+            source_watermark_kind = None
+            source_watermark = None
+            expected_json = None
+            actual_json = None
+            difference_json = None
+            tolerance_json = None
+            reconciled_at = None
+            authoritative_until = None
+        state_values: dict[str, Any] = {
+            "wallet_public_id": evaluation["wallet_public_id"],
+            "exchange": evaluation["exchange"],
+            "mode": evaluation["mode"],
+            "method": evaluation["method"],
+            "current_evaluation_status": status,
+            "current_observation_id": observation_id,
+            "last_full_observation_id": last_full_observation_id,
+            "last_full_outcome": last_full_outcome,
+            "detail_source_observation_id": detail_source_observation_id,
+            "consecutive_full_mismatches": mismatch_count,
+            "open_drift_episode_public_id": episode_public_id,
+            "anchor_public_id": anchor_public_id,
+            "venue_account_state_public_id": venue_account_state_public_id,
+            "venue_account_observation_id": venue_account_observation_id,
+            "source_watermark_kind": source_watermark_kind,
+            "source_watermark": source_watermark,
+            "expected_json": expected_json,
+            "actual_json": actual_json,
+            "difference_json": difference_json,
+            "tolerance_json": tolerance_json,
+            "reconciled_at": reconciled_at,
+            "authoritative_until": authoritative_until,
+            "error": evaluation["error"],
+            "session_id": evaluation["session_id"],
+            "sequence_id": evaluation["sequence_id"],
+            "timestamp": effective,
+            "known_to": KNOWN_TO_MAX,
+        }
+        if existing is not None:
+            state_values["public_id"] = existing.public_id
+            await s.execute(
+                update(PortfolioReconciliationState)
+                .where(PortfolioReconciliationState.id == existing.id)
+                .values(known_to=effective)
+            )
+        state = PortfolioReconciliationState(**state_values)
+        s.add(state)
+        await s.flush()
+        return int(state.id)
+
+    async def record_portfolio_reconciliation(
+        self, evaluation: PortfolioReconciliationEvaluationRow
+    ) -> int:
+        """Atomically persist evaluation evidence, state, and drift lifecycle.
+
+        This DAL is the single writer and fails closed by validating cross-row
+        consistency between state and observation, episode and observation,
+        and state and episode, plus latest-observation currency, ``opened_at``
+        temporal integrity, and predecessor existence. Therefore no single
+        tampered predecessor/episode/observation row can drive the WRITER into a
+        new authoritative reconciled or drift transition. This is a WRITE-PATH
+        guarantee only: the scoped reader ``get_portfolio_reconciliation_states``
+        returns the raw active rows WITHOUT read-time revalidation, so it is NOT
+        the authoritative fail-closed read surface. That surface — read-time
+        coherence revalidation of the stored fields against the observation
+        lineage, mirroring Phase 3's ``build_portfolio_account_state`` /
+        ``_row_is_coherent`` (Phase 3 S1's raw ``get_venue_account_states`` was
+        likewise revalidated only by the S3 read surface) — is Phase 4 S4 and
+        MUST run before any REST/MCP exposure. Arbitrary direct-database row mutation by an actor with
+        write access is outside this validation boundary, including tampering
+        with SCD2 envelope metadata such as an active row's ``timestamp``,
+        versioning a ``resolved`` episode's terminal and non-authoritative
+        history, or corrupting unrelated planes. That boundary is a database-
+        access-control concern identical to every other plane, including venue
+        truth, positions, and orders.
+
+        A lost concurrent first insert or SQLite stale-read operational race is
+        retried once after rollback. A per-identity process lock serializes
+        same-repository writers, including SQLite where ``FOR UPDATE`` is
+        ignored; PostgreSQL additionally enforces the row lock across
+        repository processes. The evaluation tuple is unique per account:
+        exact replays are idempotent, conflicting replays fail closed, and
+        tuples older than the active predecessor are ignored.
+
+        Args:
+            evaluation: Raw comparison evidence and evaluation outcome.
+
+        Returns:
+            The new active reconciliation-state row id.
+        """
+        identity = (
+            evaluation["wallet_public_id"],
+            evaluation["exchange"],
+            evaluation["mode"],
+        )
+        lock = self._portfolio_reconciliation_locks.setdefault(identity, asyncio.Lock())
+        async with lock, self.session() as s:
+            try:
+                state_id = await self._write_portfolio_reconciliation(s, evaluation)
+                await s.commit()
+            except (IntegrityError, OperationalError):
+                await s.rollback()
+                state_id = await self._write_portfolio_reconciliation(s, evaluation)
+                await s.commit()
+            return state_id
+
+    @staticmethod
+    def _portfolio_reconciliation_state_to_row(
+        state: PortfolioReconciliationState,
+    ) -> PortfolioReconciliationStateRow:
+        """Project a reconciliation state ORM row to its read TypedDict.
+
+        Args:
+            state: Sentinel-active ORM state.
+
+        Returns:
+            The read row dict.
+        """
+        return {
+            "wallet_public_id": state.wallet_public_id,
+            "exchange": state.exchange,
+            "mode": state.mode,
+            "method": state.method,
+            "current_evaluation_status": state.current_evaluation_status,
+            "current_observation_id": state.current_observation_id,
+            "last_full_observation_id": state.last_full_observation_id,
+            "last_full_outcome": state.last_full_outcome,
+            "detail_source_observation_id": state.detail_source_observation_id,
+            "consecutive_full_mismatches": state.consecutive_full_mismatches,
+            "open_drift_episode_public_id": state.open_drift_episode_public_id,
+            "anchor_public_id": state.anchor_public_id,
+            "venue_account_state_public_id": state.venue_account_state_public_id,
+            "venue_account_observation_id": state.venue_account_observation_id,
+            "source_watermark_kind": state.source_watermark_kind,
+            "source_watermark": state.source_watermark,
+            "expected_json": state.expected_json,
+            "actual_json": state.actual_json,
+            "difference_json": state.difference_json,
+            "tolerance_json": state.tolerance_json,
+            "reconciled_at": state.reconciled_at,
+            "authoritative_until": state.authoritative_until,
+            "error": state.error,
+            "public_id": state.public_id,
+            "timestamp": state.timestamp,
+            "session_id": state.session_id,
+            "sequence_id": state.sequence_id,
+        }
+
+    async def get_portfolio_reconciliation_states(
+        self, wallet_public_ids: list[str] | None = None
+    ) -> list[PortfolioReconciliationStateRow]:
+        """Return sentinel-active reconciliation states by optional wallet scope.
+
+        RAW rows for DAL/orchestration use only — NOT the authoritative
+        fail-closed read surface. The stored fields are projected verbatim
+        without read-time coherence revalidation against the observation
+        lineage, so a CHECK-valid tampered active row would read as-is. The
+        authoritative surface (read-time revalidation mirroring Phase 3's
+        ``build_portfolio_account_state``) is Phase 4 S4 and MUST run before any
+        REST/MCP exposure. See ``record_portfolio_reconciliation`` for the
+        write-path fail-closed boundary.
+
+        Args:
+            wallet_public_ids: Full wallet identities to include, or ``None``
+                for no wallet filter. An empty list yields no rows.
+
+        Returns:
+            Active states ordered by exchange then mode.
+        """
+        async with self.session() as s:
+            query = select(PortfolioReconciliationState).where(
+                PortfolioReconciliationState.known_to == KNOWN_TO_MAX
+            )
+            if wallet_public_ids is not None:
+                query = query.where(
+                    PortfolioReconciliationState.wallet_public_id.in_(wallet_public_ids)
+                )
+            query = query.order_by(
+                PortfolioReconciliationState.exchange,
+                PortfolioReconciliationState.mode,
+            )
+            rows = (await s.execute(query)).scalars().all()
+            return [self._portfolio_reconciliation_state_to_row(row) for row in rows]
 
     async def get_fill_shard_keys_by_client_order_ids(
         self, client_order_ids: list[str]

@@ -424,6 +424,68 @@ class VenueAccountStateRow(TypedDict):
     sequence_id: int
 
 
+class PortfolioReconciliationEvaluationRow(TypedDict):
+    """One raw portfolio reconciliation evaluation supplied to the repository.
+
+    The caller supplies only comparison evidence, account provenance, and the
+    raw evaluation outcome. The repository derives the full-mismatch streak,
+    drift-episode identity and lifecycle, observation lineage, and retained
+    current-state detail provenance atomically.
+    """
+
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    method: str
+    evaluation_status: str
+    venue_account_state_public_id: str | None
+    venue_account_observation_id: int | None
+    account_authoritative_until: datetime | None
+    source_watermark_kind: str | None
+    source_watermark: int | None
+    anchor_public_id: str | None
+    expected_json: str | None
+    actual_json: str | None
+    difference_json: str | None
+    tolerance_json: str | None
+    error: str | None
+    session_id: str
+    sequence_id: int
+    bus_time: datetime
+
+
+class PortfolioReconciliationStateRow(TypedDict):
+    """Sentinel-active reconciliation state returned by the repository."""
+
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    method: str
+    current_evaluation_status: str
+    current_observation_id: int
+    last_full_observation_id: int | None
+    last_full_outcome: str | None
+    detail_source_observation_id: int | None
+    consecutive_full_mismatches: int
+    open_drift_episode_public_id: str | None
+    anchor_public_id: str | None
+    venue_account_state_public_id: str | None
+    venue_account_observation_id: int | None
+    source_watermark_kind: str | None
+    source_watermark: int | None
+    expected_json: str | None
+    actual_json: str | None
+    difference_json: str | None
+    tolerance_json: str | None
+    reconciled_at: datetime | None
+    authoritative_until: datetime | None
+    error: str | None
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
 class SettingRow(TypedDict):
     """Row dict returned by get_settings and get_setting_by_key."""
 
