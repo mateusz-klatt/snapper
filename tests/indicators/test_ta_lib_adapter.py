@@ -10,10 +10,16 @@ import pandas as pd
 import pytest
 
 import snapper.indicators.ta_lib_adapter
+from snapper.indicators.ta_lib_adapter import atr
+from snapper.indicators.ta_lib_adapter import bollinger
+from snapper.indicators.ta_lib_adapter import ema
 from snapper.indicators.ta_lib_adapter import get_backend
 from snapper.indicators.ta_lib_adapter import is_talib_available
 from snapper.indicators.ta_lib_adapter import macd
+from snapper.indicators.ta_lib_adapter import obv
 from snapper.indicators.ta_lib_adapter import rsi
+from snapper.indicators.ta_lib_adapter import sma
+from snapper.indicators.ta_lib_adapter import stochastic
 
 
 class TestTALibAdapter:
@@ -477,3 +483,117 @@ class TestBackendConsistency:
         assert macd_line.dtype == float
         assert signal_line.dtype == float
         assert histogram.dtype == float
+
+
+class TestNewIndicatorsFallback:
+    """Python-fallback coverage for the expanded indicator set."""
+
+    @pytest.fixture(autouse=True)
+    def setup_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Disable TA-Lib so the adapter dispatches to the Python fallback."""
+        monkeypatch.setattr(snapper.indicators.ta_lib_adapter, "_talib_available", False)
+
+    def test_sma_fallback(self) -> None:
+        """Given fallback mode, When sma, Then trailing means match."""
+        series = pd.Series([float(x) for x in range(1, 11)])
+        result = sma(series, period=3)
+        assert len(result) == len(series)
+        assert result.iloc[2] == pytest.approx(2.0)
+
+    def test_ema_fallback(self) -> None:
+        """Given fallback mode, When ema, Then the first value seeds from input."""
+        series = pd.Series([float(x) for x in range(1, 11)])
+        result = ema(series, period=3)
+        assert result.iloc[0] == 1.0
+
+    def test_bollinger_fallback(self) -> None:
+        """Given fallback mode, When bollinger, Then bands are ordered."""
+        series = pd.Series([float(x) for x in range(1, 21)])
+        bands = bollinger(series, period=5)
+        valid = bands.dropna()
+        assert (valid["lower"] <= valid["upper"]).all()
+
+    def test_atr_fallback(self) -> None:
+        """Given fallback mode, When atr, Then values are non-negative."""
+        high = pd.Series([10.0, 11.0, 12.0, 11.5])
+        low = pd.Series([9.0, 9.5, 10.5, 10.0])
+        close = pd.Series([9.5, 10.5, 11.5, 10.5])
+        result = atr(high, low, close, period=2)
+        assert (result.dropna() >= 0).all()
+
+    def test_stochastic_fallback(self) -> None:
+        """Given fallback mode, When stochastic, Then %K stays within [0, 100]."""
+        high = pd.Series([10.0, 11.0, 12.0, 13.0])
+        low = pd.Series([9.0, 9.5, 10.5, 11.0])
+        close = pd.Series([9.5, 10.5, 11.5, 12.5])
+        result = stochastic(high, low, close, k_period=2, d_period=2)
+        valid = result["k"].dropna()
+        assert (valid >= 0).all()
+        assert (valid <= 100).all()
+
+    def test_obv_fallback(self) -> None:
+        """Given fallback mode, When obv, Then the seed equals the first volume."""
+        close = pd.Series([10.0, 11.0, 10.0])
+        volume = pd.Series([100.0, 120.0, 90.0])
+        result = obv(close, volume)
+        assert result.iloc[0] == 100.0
+
+
+class TestNewIndicatorsTALib:
+    """Active-backend coverage for the expanded indicator set."""
+
+    def test_sma_empty_and_basic(self) -> None:
+        """Given empty then basic input, When sma, Then handles both shapes."""
+        assert sma(pd.Series([], dtype=float)).empty
+        result = sma(pd.Series([float(x) for x in range(1, 30)]), period=5)
+        assert len(result) == 29
+        assert result.dtype == float
+
+    def test_ema_empty_and_basic(self) -> None:
+        """Given empty then basic input, When ema, Then handles both shapes."""
+        assert ema(pd.Series([], dtype=float)).empty
+        result = ema(pd.Series([float(x) for x in range(1, 30)]), period=5)
+        assert len(result) == 29
+
+    def test_bollinger_empty_and_basic(self) -> None:
+        """Given empty then basic input, When bollinger, Then returns 3 columns."""
+        empty = bollinger(pd.Series([], dtype=float))
+        assert empty["upper"].empty
+        bands = bollinger(pd.Series([float(x) for x in range(1, 40)]), period=20)
+        assert list(bands.columns) == ["upper", "middle", "lower"]
+        assert len(bands) == 39
+
+    def test_atr_empty_and_basic(self) -> None:
+        """Given empty then basic OHLC, When atr, Then handles both shapes."""
+        empty = pd.Series([], dtype=float)
+        assert atr(empty, empty, empty).empty
+        n = 30
+        high = pd.Series([10.0 + i for i in range(n)])
+        low = pd.Series([9.0 + i for i in range(n)])
+        close = pd.Series([9.5 + i for i in range(n)])
+        result = atr(high, low, close, period=14)
+        assert len(result) == n
+        assert (result.dropna() >= 0).all()
+
+    def test_stochastic_empty_and_basic(self) -> None:
+        """Given empty then basic OHLC, When stochastic, Then returns k/d."""
+        empty = pd.Series([], dtype=float)
+        assert stochastic(empty, empty, empty)["k"].empty
+        n = 30
+        high = pd.Series([10.0 + (i % 5) for i in range(n)])
+        low = pd.Series([9.0 + (i % 5) for i in range(n)])
+        close = pd.Series([9.5 + (i % 5) for i in range(n)])
+        result = stochastic(high, low, close, k_period=14, d_period=3)
+        assert list(result.columns) == ["k", "d"]
+        valid = result["k"].dropna()
+        assert (valid >= 0).all()
+        assert (valid <= 100).all()
+
+    def test_obv_empty_and_basic(self) -> None:
+        """Given empty then basic input, When obv, Then handles both shapes."""
+        empty = pd.Series([], dtype=float)
+        assert obv(empty, empty).empty
+        close = pd.Series([float(x) for x in range(1, 20)])
+        volume = pd.Series([100.0] * 19)
+        result = obv(close, volume)
+        assert len(result) == 19
