@@ -167,6 +167,8 @@ from snapper.data.models import UserActiveToken
 from snapper.data.models import UserAlertDefault
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
+from snapper.data.models import VenueAccountObservation
+from snapper.data.models import VenueAccountState
 from snapper.data.models import VenueEvent
 from snapper.data.models import VenueFeeSchedule
 from snapper.data.models import Wallet
@@ -255,6 +257,8 @@ from snapper.data.repository_types import UserAlertDefaultUpsertRow
 from snapper.data.repository_types import UserOperatorMembershipRow
 from snapper.data.repository_types import UserRecentSubmitRow
 from snapper.data.repository_types import UserTradingCapsRow
+from snapper.data.repository_types import VenueAccountAttemptRow
+from snapper.data.repository_types import VenueAccountStateRow
 from snapper.data.repository_types import VenueEventInsertRow
 from snapper.data.repository_types import VenueEventRow
 from snapper.data.repository_types import VenueFeeScheduleRow
@@ -354,8 +358,7 @@ class CredentialConflictError(Exception):
     def __init__(self, wallet_public_id: str, exchange: str, reason: str) -> None:
         """Capture the conflicting key for the caller."""
         super().__init__(
-            f"Credential insert failed for wallet={wallet_public_id} "
-            f"exchange={exchange}: {reason}"
+            f"Credential insert failed for wallet={wallet_public_id} exchange={exchange}: {reason}"
         )
         self.wallet_public_id = wallet_public_id
         self.exchange = exchange
@@ -11866,6 +11869,292 @@ class SQLAlchemyRepository(Repository):
             )
             await s.commit()
             return True
+
+    @staticmethod
+    def _venue_account_identity_filters(
+        wallet_public_id: str, exchange: str, mode: str
+    ) -> list[ColumnElement[bool]]:
+        """Build the identity predicate for one venue account-state row.
+
+        Args:
+            wallet_public_id: Full wallet identity (UUID).
+            exchange: Venue name (lowercase).
+            mode: Trading mode (live/paper).
+
+        Returns:
+            Filters matching the (wallet, exchange, mode) identity.
+        """
+        return [
+            VenueAccountState.wallet_public_id == wallet_public_id,
+            VenueAccountState.exchange == exchange,
+            VenueAccountState.mode == mode,
+        ]
+
+    @staticmethod
+    def _venue_account_rollup_status(balance_status: str, position_status: str) -> str:
+        """Derive the coherent roll-up status from the two component statuses.
+
+        Fail-closed and never caller-supplied: an ``observed`` roll-up requires
+        the balance observed AND positions observed or structurally absent
+        (``not_applicable``); ``simulated`` follows a simulated (paper) balance;
+        ``unsupported`` a wholly unsupported venue; every other combination —
+        including a balance observed while positions errored — is ``error`` so
+        the roll-up can never over-claim truth a component did not provide.
+
+        Args:
+            balance_status: The balance component status.
+            position_status: The position component status.
+
+        Returns:
+            The roll-up status (observed/simulated/unsupported/error).
+        """
+        if balance_status == "observed" and position_status in (
+            "observed",
+            "not_applicable",
+        ):
+            return "observed"
+        if balance_status == "simulated":
+            return "simulated"
+        if balance_status == "unsupported" and position_status in (
+            "unsupported",
+            "not_applicable",
+        ):
+            return "unsupported"
+        return "error"
+
+    async def _write_venue_account_snapshot(
+        self, s: AsyncSession, attempt: VenueAccountAttemptRow
+    ) -> int:
+        """Append the attempt observation and SCD2-materialize the state.
+
+        The repository — not the caller — owns coherence and provenance. The
+        roll-up status is DERIVED from the two component statuses. Each
+        component (balance, positions) is resolved INDEPENDENTLY three ways: a
+        freshly observed/simulated component uses this attempt's payload and
+        stamps its own observation as the source; a TRANSIENT ``error`` retains
+        the last good payload AND its true source id from the locked
+        predecessor (stale-visible, never re-attributed to this attempt); a
+        STRUCTURALLY absent component (``not_applicable``) or unavailable one
+        (``unsupported``) is CLEARED to NULL — the truth is "nothing here", so
+        a prior observed payload must never linger under an authoritative
+        ``observed`` roll-up. The active row is selected ``FOR UPDATE`` by the
+        sentinel-active filter and the effective timestamp clamped to
+        ``max(bus_time, existing.timestamp)`` (clock-skew defense); the
+        successor carries the predecessor's ``public_id``.
+
+        Args:
+            s: Open session owned by the caller.
+            attempt: The raw outcome of one account-observation attempt.
+
+        Returns:
+            The new active state row id (flushed, not committed).
+        """
+        status = self._venue_account_rollup_status(
+            attempt["balance_status"], attempt["position_status"]
+        )
+        balance_fresh = attempt["balance_status"] in ("observed", "simulated")
+        position_fresh = attempt["position_status"] == "observed"
+        obs = VenueAccountObservation(
+            wallet_public_id=attempt["wallet_public_id"],
+            exchange=attempt["exchange"],
+            mode=attempt["mode"],
+            attempt_status=status,
+            balance_status=attempt["balance_status"],
+            position_status=attempt["position_status"],
+            balances_json=attempt["balances_json"] if balance_fresh else None,
+            open_positions_json=(attempt["open_positions_json"] if position_fresh else None),
+            balance_observed_at=(attempt["balance_observed_at"] if balance_fresh else None),
+            position_observed_at=(attempt["position_observed_at"] if position_fresh else None),
+            error=attempt["error"],
+            session_id=attempt["session_id"],
+            sequence_id=attempt["sequence_id"],
+            timestamp=attempt["bus_time"],
+            known_to=KNOWN_TO_MAX,
+        )
+        s.add(obs)
+        await s.flush()
+        obs_id = int(obs.id)
+        existing = (
+            (
+                await s.execute(
+                    select(VenueAccountState)
+                    .where(
+                        VenueAccountState.known_to == KNOWN_TO_MAX,
+                        *self._venue_account_identity_filters(
+                            attempt["wallet_public_id"],
+                            attempt["exchange"],
+                            attempt["mode"],
+                        ),
+                    )
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if balance_fresh:
+            balances_json = attempt["balances_json"]
+            balance_observed_at = attempt["balance_observed_at"]
+            balance_payload_source_observation_id: int | None = obs_id
+            authoritative_until = attempt["authoritative_until"]
+        elif attempt["balance_status"] == "error" and existing is not None:
+            balances_json = existing.balances_json
+            balance_observed_at = existing.balance_observed_at
+            balance_payload_source_observation_id = existing.balance_payload_source_observation_id
+            authoritative_until = existing.authoritative_until
+        else:
+            balances_json = None
+            balance_observed_at = None
+            balance_payload_source_observation_id = None
+            authoritative_until = None
+        if position_fresh:
+            open_positions_json = attempt["open_positions_json"]
+            position_observed_at = attempt["position_observed_at"]
+            position_payload_source_observation_id: int | None = obs_id
+        elif attempt["position_status"] == "error" and existing is not None:
+            open_positions_json = existing.open_positions_json
+            position_observed_at = existing.position_observed_at
+            position_payload_source_observation_id = existing.position_payload_source_observation_id
+        else:
+            open_positions_json = None
+            position_observed_at = None
+            position_payload_source_observation_id = None
+        effective = attempt["bus_time"]
+        new_values: dict[str, Any] = {
+            "wallet_public_id": attempt["wallet_public_id"],
+            "exchange": attempt["exchange"],
+            "mode": attempt["mode"],
+            "sync_status": status,
+            "balance_status": attempt["balance_status"],
+            "position_status": attempt["position_status"],
+            "valuation_status": attempt["valuation_status"],
+            "balances_json": balances_json,
+            "open_positions_json": open_positions_json,
+            "balance_observed_at": balance_observed_at,
+            "position_observed_at": position_observed_at,
+            "current_attempt_observation_id": obs_id,
+            "balance_payload_source_observation_id": balance_payload_source_observation_id,
+            "position_payload_source_observation_id": position_payload_source_observation_id,
+            "authoritative_until": authoritative_until,
+            "error": attempt["error"],
+            "session_id": attempt["session_id"],
+            "sequence_id": attempt["sequence_id"],
+        }
+        if existing is not None:
+            if existing.timestamp > effective:
+                effective = existing.timestamp
+            new_values["public_id"] = existing.public_id
+            await s.execute(
+                update(VenueAccountState)
+                .where(VenueAccountState.id == existing.id)
+                .values(known_to=effective)
+            )
+        new_values["timestamp"] = effective
+        new_values["known_to"] = KNOWN_TO_MAX
+        obj = VenueAccountState(**new_values)
+        s.add(obj)
+        await s.flush()
+        return int(obj.id)
+
+    async def record_venue_account_snapshot(self, attempt: VenueAccountAttemptRow) -> int:
+        """Atomically append an account observation and upsert its SCD2 state.
+
+        Both writes commit in ONE transaction so a state row can never
+        reference a missing observation and a failed materialization leaves
+        no orphan attempt. A concurrent first insert losing the identity's
+        partial-unique race is retried exactly once (fresh objects) — the
+        second pass finds the winner's active row and closes it. Callers
+        serialize writes per identity (one account observer per
+        wallet/exchange); the retry only covers the empty-identity first
+        insert.
+
+        Args:
+            attempt: The raw outcome of one account-observation attempt.
+
+        Returns:
+            The new active state row id.
+        """
+        async with self.session() as s:
+            try:
+                state_id = await self._write_venue_account_snapshot(s, attempt)
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                state_id = await self._write_venue_account_snapshot(s, attempt)
+                await s.commit()
+            return state_id
+
+    @staticmethod
+    def _venue_account_state_to_row(state: VenueAccountState) -> VenueAccountStateRow:
+        """Project a VenueAccountState ORM row to its read TypedDict.
+
+        Args:
+            state: The active ORM row.
+
+        Returns:
+            The read row dict.
+        """
+        return {
+            "wallet_public_id": state.wallet_public_id,
+            "exchange": state.exchange,
+            "mode": state.mode,
+            "sync_status": state.sync_status,
+            "balance_status": state.balance_status,
+            "position_status": state.position_status,
+            "valuation_status": state.valuation_status,
+            "balances_json": state.balances_json,
+            "open_positions_json": state.open_positions_json,
+            "balance_observed_at": state.balance_observed_at,
+            "position_observed_at": state.position_observed_at,
+            "current_attempt_observation_id": state.current_attempt_observation_id,
+            "balance_payload_source_observation_id": (state.balance_payload_source_observation_id),
+            "position_payload_source_observation_id": (
+                state.position_payload_source_observation_id
+            ),
+            "authoritative_until": state.authoritative_until,
+            "error": state.error,
+            "public_id": state.public_id,
+            "timestamp": state.timestamp,
+            "session_id": state.session_id,
+            "sequence_id": state.sequence_id,
+        }
+
+    async def get_venue_account_states(
+        self, wallet_public_ids: list[str]
+    ) -> list[VenueAccountStateRow]:
+        """Return the active venue account-truth rows for the given wallets.
+
+        Sentinel-active read (``known_to == KNOWN_TO_MAX``), never a
+        caller-clock ``as_of`` scan — a venue account state has no truthful
+        historical projection, only its current observation. The partial
+        unique index guarantees at most one active row per identity, so no
+        read-time duplicate collapse is needed. An empty wallet list returns
+        an empty list (never an unfiltered scan).
+
+        Args:
+            wallet_public_ids: Full wallet identities to include.
+
+        Returns:
+            Active account-state rows, ordered by exchange then mode.
+        """
+        if not wallet_public_ids:
+            return []
+        async with self.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(VenueAccountState)
+                        .where(
+                            VenueAccountState.known_to == KNOWN_TO_MAX,
+                            VenueAccountState.wallet_public_id.in_(wallet_public_ids),
+                        )
+                        .order_by(VenueAccountState.exchange, VenueAccountState.mode)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [self._venue_account_state_to_row(r) for r in rows]
 
     async def get_fill_shard_keys_by_client_order_ids(
         self, client_order_ids: list[str]

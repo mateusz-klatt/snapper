@@ -232,6 +232,115 @@ _CK_NOTIFICATION_DEVICE_TOKEN_STATUS = (
     "token_status IN ('active', 'unregistered', 'user_unregistered')"
 )
 _CK_CHANNEL_LOWER_NON_EMPTY = "channel = LOWER(channel) AND LENGTH(channel) > 0"
+_CK_VENUE_ACCOUNT_ATTEMPT_STATUS = (
+    "attempt_status IN ('observed', 'simulated', 'unsupported', 'error')"
+)
+"""Overall outcome of one venue account-observation attempt (PnL Phase 3).
+
+``observed`` = a real venue read succeeded; ``simulated`` = paper (fiction,
+never reconciled); ``unsupported`` = the venue is market-data-only and cannot
+be account-tracked (structural NotImplementedError); ``error`` = the attempt
+failed (auth/permission/timeout/transport/parse). The forbidden outcome is
+labeling a simulated/unsupported/errored attempt ``observed``."""
+_CK_VENUE_ACCOUNT_SYNC_STATUS = "sync_status IN ('observed', 'simulated', 'unsupported', 'error')"
+"""Stored roll-up status of the current venue_account_states row.
+
+Distinct from the EFFECTIVE read status, which additionally derives
+``stale``/``unobserved``/``corrupt``/``clock_error`` at read time — a stored
+``observed`` row past its ``authoritative_until`` is served as stale, never as
+live truth."""
+_CK_VENUE_ACCOUNT_BALANCE_STATUS = (
+    "balance_status IN ('observed', 'simulated', 'unsupported', 'error')"
+)
+"""Per-component status for the balance read (independent of positions)."""
+_CK_VENUE_ACCOUNT_POSITION_STATUS = (
+    "position_status IN ('observed', 'unsupported', 'not_applicable', 'error')"
+)
+"""Per-component status for the open-positions read.
+
+``not_applicable`` = the venue structurally has no positions concept
+(spot/FX/paper) — a KNOWN, benign state, never conflated with ``unsupported``
+(cannot determine) or ``error`` (read failed)."""
+_CK_VENUE_ACCOUNT_VALUATION_STATUS = "valuation_status IN ('native_only')"
+"""Phase 3 stores NATIVE balances/positions only — zero USD math (operator
+directive: fail-closed on futures USD valuation until the Kraken
+contract-multiplier/balanceValue semantics are verified). USD is Phase 5."""
+_CK_VENUE_ACCOUNT_SIMULATED_PAPER = (
+    "(sync_status != 'simulated' AND balance_status != 'simulated') OR mode = 'paper'"
+)
+"""A ``simulated`` status can only ride a paper row — a live account is never
+fiction."""
+_CK_VENUE_ACCOUNT_BALANCE_OBSERVED_AT = (
+    "balance_status != 'observed' OR balance_observed_at IS NOT NULL"
+)
+"""An ``observed`` balance MUST carry the venue observation timestamp — a
+timestamp-less ``observed`` would be indistinguishable from a fabrication."""
+_CK_VENUE_ACCOUNT_OBSERVED_BALANCE = "sync_status != 'observed' OR balance_status = 'observed'"
+"""An ``observed`` roll-up requires the balance component to be genuinely
+observed — the roll-up can never claim truth a simulated/errored/unsupported
+balance did not provide."""
+_CK_VENUE_ACCOUNT_OBSERVED_POSITION = (
+    "sync_status != 'observed' OR position_status IN ('observed', 'not_applicable')"
+)
+"""An ``observed`` roll-up requires positions to be observed or structurally
+absent (``not_applicable``) — an errored/unsupported position read can never
+ride an ``observed`` account."""
+_CK_VENUE_ACCOUNT_OBSERVED_AUTHORITY = (
+    "sync_status != 'observed' OR authoritative_until IS NOT NULL"
+)
+"""An ``observed`` row MUST carry an authority window — without one the read
+layer cannot expire it and would serve it as live truth forever."""
+_CK_VENUE_ACCOUNT_OBS_SIMULATED_PAPER = (
+    "(attempt_status != 'simulated' AND balance_status != 'simulated') OR mode = 'paper'"
+)
+"""A ``simulated`` observation attempt can only ride a paper row — a live
+account attempt is never fiction."""
+_CK_VENUE_ACCOUNT_OBS_OBSERVED_BALANCE = (
+    "attempt_status != 'observed' OR balance_status = 'observed'"
+)
+"""An ``observed`` attempt roll-up requires the balance component observed."""
+_CK_VENUE_ACCOUNT_OBS_OBSERVED_POSITION = (
+    "attempt_status != 'observed' OR position_status IN ('observed', 'not_applicable')"
+)
+"""An ``observed`` attempt roll-up requires positions observed or n/a."""
+_CK_VENUE_ACCOUNT_BALANCE_JSON_PRESENT = (
+    "balance_status NOT IN ('observed', 'simulated') OR balances_json IS NOT NULL"
+)
+"""An ``observed`` or ``simulated`` balance MUST carry its JSON payload — a
+genuinely empty account is an empty array, never NULL. Without this a
+materially empty snapshot could stand as authoritative ``observed`` truth."""
+_CK_VENUE_ACCOUNT_POSITION_OBSERVED_PRESENT = (
+    "position_status != 'observed' OR "
+    "(open_positions_json IS NOT NULL AND position_observed_at IS NOT NULL)"
+)
+"""An ``observed`` positions component MUST carry both its JSON payload and its
+observation timestamp — an empty derivatives book is an empty array with a
+timestamp, never NULLs served as observed."""
+_CK_VENUE_ACCOUNT_BALANCE_PAYLOAD_SOURCE = (
+    "(balances_json IS NULL AND balance_payload_source_observation_id IS NULL) OR "
+    "(balances_json IS NOT NULL AND balance_payload_source_observation_id IS NOT NULL)"
+)
+"""A displayed balance payload and its provenance are inseparable — a balance
+JSON without a source observation id (or a source id pointing at no payload) is
+forged provenance, so the two are both-null or both-non-null."""
+_CK_VENUE_ACCOUNT_POSITION_PAYLOAD_SOURCE = (
+    "(open_positions_json IS NULL AND position_payload_source_observation_id IS NULL) OR "
+    "(open_positions_json IS NOT NULL AND position_payload_source_observation_id IS NOT NULL)"
+)
+"""A displayed positions payload and its provenance are inseparable (see the
+balance rule)."""
+_CK_VENUE_ACCOUNT_BALANCE_FRESH_SOURCE = (
+    "balance_status NOT IN ('observed', 'simulated') OR "
+    "balance_payload_source_observation_id = current_attempt_observation_id"
+)
+"""A freshly observed/simulated balance's payload source MUST be this very
+attempt — a fresh read can never be attributed to an earlier observation."""
+_CK_VENUE_ACCOUNT_POSITION_FRESH_SOURCE = (
+    "position_status != 'observed' OR "
+    "position_payload_source_observation_id = current_attempt_observation_id"
+)
+"""A freshly observed positions component's payload source MUST be this very
+attempt."""
 
 
 class Base(DeclarativeBase):
@@ -684,6 +793,215 @@ class Position(TemporalMixin, Base):
     mark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     marked_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     source_venue_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class VenueAccountObservation(TemporalMixin, Base):
+    """Append-only log of every venue account-observation ATTEMPT (Phase 3).
+
+    A dedicated truth plane, DISJOINT from the order-lifecycle
+    ``venue_events`` table and the fill-derived ``positions`` projection:
+    account snapshots are never folded into a shard, never touch
+    TradeService, and never seed recovery. Each row records one poll
+    attempt by the per-wallet account observer — including failures and
+    unsupported venues — so authority can never be silently invented.
+    Balance and open-position reads are SEPARATE venue calls (not an
+    atomic snapshot), so their statuses and observation timestamps are
+    tracked independently. ``balances_json``/``open_positions_json`` are
+    NULL unless the corresponding component was actually ``observed`` or
+    ``simulated``. Identity is the FULL ``wallet_public_id`` (UUID), never
+    the 12-hex suffix.
+    """
+
+    __tablename__ = "venue_account_observations"
+    __table_args__ = (
+        Index(
+            "ix_venue_account_observations_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_venue_account_observations_identity",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+        ),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_venue_account_obs_exchange_lower"),
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_venue_account_obs_mode"),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_ATTEMPT_STATUS, name="ck_venue_account_obs_attempt_status"
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_BALANCE_STATUS, name="ck_venue_account_obs_balance_status"
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_POSITION_STATUS, name="ck_venue_account_obs_position_status"
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_BALANCE_OBSERVED_AT,
+            name="ck_venue_account_obs_balance_observed_at",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_OBS_SIMULATED_PAPER,
+            name="ck_venue_account_obs_simulated_paper",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_OBS_OBSERVED_BALANCE,
+            name="ck_venue_account_obs_observed_balance",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_OBS_OBSERVED_POSITION,
+            name="ck_venue_account_obs_observed_position",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_BALANCE_JSON_PRESENT,
+            name="ck_venue_account_obs_balance_json_present",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_POSITION_OBSERVED_PRESENT,
+            name="ck_venue_account_obs_position_observed_present",
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
+    attempt_status: Mapped[str] = mapped_column(String(16))
+    balance_status: Mapped[str] = mapped_column(String(16))
+    position_status: Mapped[str] = mapped_column(String(16))
+    balances_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    open_positions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    balance_observed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    position_observed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class VenueAccountState(TemporalMixin, Base):
+    """Current venue account truth per (wallet, exchange, mode) — SCD2 (Phase 3).
+
+    One active SCD2 row per identity, materialized ATOMICALLY with the
+    ``VenueAccountObservation`` that produced it. Authority-driving fields
+    are first-class CHECK-constrained columns (never buried in JSON): a
+    ``simulated`` status can only ride a paper row, an ``observed`` balance
+    must carry its observation timestamp, and ``valuation_status`` is
+    ``native_only`` in Phase 3 (zero USD math). The stored ``sync_status``
+    is the raw attempt outcome; the read layer derives the EFFECTIVE status
+    (``stale`` past ``authoritative_until``, ``clock_error`` on future-dated
+    clocks) so a stale row is never served as live truth.
+
+    ``current_attempt_observation_id`` is the latest attempt (never NULL — every
+    state comes from an attempt). Balance and positions are INDEPENDENT reads, so
+    each carries its own retained-payload provenance:
+    ``balance_payload_source_observation_id`` and
+    ``position_payload_source_observation_id`` each point at the observation
+    whose balance / positions JSON is currently displayed — the attempt's own on
+    a fresh read, an earlier successful observation when that component was
+    retained. Separate per-component provenance keeps a retained payload from
+    masquerading as fresh and never conflates a fresh balance with stale
+    positions. This plane NEVER overwrites the fill-derived ``positions``
+    projection; reconciling the two is Phase 4.
+    """
+
+    __tablename__ = "venue_account_states"
+    __table_args__ = (
+        Index(
+            "uq_venue_account_states_identity",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_venue_account_states_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index("ix_venue_account_states_wallet", "wallet_public_id"),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_venue_account_states_exchange_lower"),
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_venue_account_states_mode"),
+        CheckConstraint(_CK_VENUE_ACCOUNT_SYNC_STATUS, name="ck_venue_account_states_sync_status"),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_BALANCE_STATUS, name="ck_venue_account_states_balance_status"
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_POSITION_STATUS,
+            name="ck_venue_account_states_position_status",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_VALUATION_STATUS,
+            name="ck_venue_account_states_valuation_status",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_SIMULATED_PAPER,
+            name="ck_venue_account_states_simulated_paper",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_BALANCE_OBSERVED_AT,
+            name="ck_venue_account_states_balance_observed_at",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_OBSERVED_BALANCE,
+            name="ck_venue_account_states_observed_balance",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_OBSERVED_POSITION,
+            name="ck_venue_account_states_observed_position",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_OBSERVED_AUTHORITY,
+            name="ck_venue_account_states_observed_authority",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_BALANCE_JSON_PRESENT,
+            name="ck_venue_account_states_balance_json_present",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_POSITION_OBSERVED_PRESENT,
+            name="ck_venue_account_states_position_observed_present",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_BALANCE_PAYLOAD_SOURCE,
+            name="ck_venue_account_states_balance_payload_source",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_POSITION_PAYLOAD_SOURCE,
+            name="ck_venue_account_states_position_payload_source",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_BALANCE_FRESH_SOURCE,
+            name="ck_venue_account_states_balance_fresh_source",
+        ),
+        CheckConstraint(
+            _CK_VENUE_ACCOUNT_POSITION_FRESH_SOURCE,
+            name="ck_venue_account_states_position_fresh_source",
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
+    sync_status: Mapped[str] = mapped_column(String(16))
+    balance_status: Mapped[str] = mapped_column(String(16))
+    position_status: Mapped[str] = mapped_column(String(16))
+    valuation_status: Mapped[str] = mapped_column(
+        String(16), default="native_only", server_default="native_only"
+    )
+    balances_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    open_positions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    balance_observed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    position_observed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    current_attempt_observation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    balance_payload_source_observation_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    position_payload_source_observation_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    authoritative_until: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
 class Signal(TemporalMixin, Base):

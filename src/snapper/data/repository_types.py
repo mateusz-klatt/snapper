@@ -354,6 +354,76 @@ class PositionProjectionUpsertRow(TypedDict):
     bus_time: datetime
 
 
+class VenueAccountAttemptRow(TypedDict):
+    """One venue account-observation attempt — the repository input (Phase 3).
+
+    The caller (per-wallet account observer) supplies only the RAW outcome of a
+    single poll attempt. The repository derives the coherent roll-up status,
+    appends the observation, and materializes the SCD2 state — RETAINING the
+    last good balance/position payloads and their true provenance from the
+    LOCKED predecessor whenever this attempt did not freshly observe them. The
+    caller never supplies the roll-up status, the payload-source id, or the
+    retained payload: those cannot be caller-trusted without risking a stale or
+    unrelated payload masquerading as fresh truth.
+
+    ``balances_json``/``balance_observed_at`` are the FRESH balance read, set
+    ONLY when ``balance_status`` is 'observed' or 'simulated' (else None — the
+    repository retains the predecessor's). ``open_positions_json``/
+    ``position_observed_at`` likewise, set only when ``position_status`` is
+    'observed'. ``authoritative_until`` is the fresh balance's authority window
+    (REQUIRED when the balance is freshly observed so the row can expire; None
+    otherwise — the repository retains the predecessor's). ``bus_time`` is both
+    the observation timestamp and the SCD2 effective time, clamped to
+    ``max(bus_time, existing.timestamp)`` (clock-skew defense).
+    """
+
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    balance_status: str
+    position_status: str
+    valuation_status: str
+    balances_json: str | None
+    open_positions_json: str | None
+    balance_observed_at: datetime | None
+    position_observed_at: datetime | None
+    authoritative_until: datetime | None
+    error: str | None
+    session_id: str
+    sequence_id: int
+    bus_time: datetime
+
+
+class VenueAccountStateRow(TypedDict):
+    """Row dict returned by get_venue_account_states (Phase 3).
+
+    The stored ``sync_status`` is the raw attempt outcome; the EFFECTIVE
+    read status (stale/clock_error) is derived by the read surface from
+    ``balance_observed_at``/``authoritative_until``, never stored.
+    """
+
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    sync_status: str
+    balance_status: str
+    position_status: str
+    valuation_status: str
+    balances_json: str | None
+    open_positions_json: str | None
+    balance_observed_at: datetime | None
+    position_observed_at: datetime | None
+    current_attempt_observation_id: int
+    balance_payload_source_observation_id: int | None
+    position_payload_source_observation_id: int | None
+    authoritative_until: datetime | None
+    error: str | None
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
 class SettingRow(TypedDict):
     """Row dict returned by get_settings and get_setting_by_key."""
 
