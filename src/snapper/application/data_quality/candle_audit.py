@@ -27,6 +27,7 @@ _TIMEFRAME_SECONDS: dict[str, int] = {
     "1m": 60,
     "5m": 300,
     "15m": 900,
+    "30m": 1800,
     "1h": 3600,
     "4h": 14400,
     "1d": 86400,
@@ -68,7 +69,7 @@ def _timeframe_to_seconds(timeframe: str) -> int:
     """Return the interval length of a timeframe in seconds.
 
     Args:
-        timeframe: One of ``1m``, ``5m``, ``15m``, ``1h``, ``4h``, ``1d``.
+        timeframe: One of ``1m``, ``5m``, ``15m``, ``30m``, ``1h``, ``4h``, ``1d``.
 
     Returns:
         The interval length in whole seconds.
@@ -109,6 +110,29 @@ def _is_on_grid(open_at: datetime, interval_seconds: int, anchor_offset_seconds:
     total_micros = (delta.days * _ONE_DAY_SECONDS + delta.seconds) * _MICROS_PER_SECOND
     total_micros += delta.microseconds - anchor_offset_seconds * _MICROS_PER_SECOND
     return total_micros % (interval_seconds * _MICROS_PER_SECOND) == 0
+
+
+def _grid_slot(open_at: datetime, interval_seconds: int, anchor_offset_seconds: int) -> int:
+    """Return the integer grid-slot index nearest ``open_at``.
+
+    Assigns each timestamp to its closest bar slot on the anchored grid using
+    integer microseconds. Gap counting subtracts two slot indices, which is
+    exact for on-grid bars and deterministic (round-half-up) for jittered ones,
+    so opposing sub-interval jitter can neither hide nor invent a missing bar.
+
+    Args:
+        open_at: The aware bar open time.
+        interval_seconds: The timeframe interval in seconds.
+        anchor_offset_seconds: Grid-origin offset from the epoch, in seconds.
+
+    Returns:
+        The nearest grid-slot index.
+    """
+    delta = _as_utc(open_at) - _EPOCH
+    total_micros = (delta.days * _ONE_DAY_SECONDS + delta.seconds) * _MICROS_PER_SECOND
+    total_micros += delta.microseconds - anchor_offset_seconds * _MICROS_PER_SECOND
+    interval_micros = interval_seconds * _MICROS_PER_SECOND
+    return (total_micros + interval_micros // 2) // interval_micros
 
 
 def _row_anomalies(
@@ -183,8 +207,14 @@ def audit_candle_series(
     """Audit one instrument's candle series for one timeframe.
 
     Args:
-        candles: Candle rows, expected in ascending ``open_at`` order.
-        timeframe: The bars' timeframe (``1m``/``5m``/``15m``/``1h``/``4h``/``1d``).
+        candles: Candle rows, expected in ascending ``open_at`` order. Ordering
+            and duplicate violations are detected on the delivered order, while
+            gap and split detection runs over the chronologically-sorted unique
+            timestamps so a merely-permuted-but-complete series yields no false
+            gaps or split suspects. A timestamp seen more than once is reported
+            as a duplicate and excluded from split detection, whose close would
+            otherwise depend on arbitrary delivery order.
+        timeframe: The bars' timeframe (``1m``/``5m``/``15m``/``30m``/``1h``/``4h``/``1d``).
         split_threshold: Fractional close-to-close move above which a bar is
             flagged as a split suspect. Default 0.30 (30%). This is a heuristic
             best suited to instruments that actually split (equities); on highly
@@ -198,58 +228,75 @@ def audit_candle_series(
             (e.g. a market closure) and not reported.
 
     Returns:
-        The detected anomalies, in scan order.
+        The detected anomalies: row-level and ordering anomalies in delivered
+        order, followed by gap and split anomalies in chronological order.
 
     Raises:
         ValueError: If the timeframe is not supported.
     """
     interval_seconds = _timeframe_to_seconds(timeframe)
     anomalies: list[CandleAnomaly] = []
-    previous: CandleRow | None = None
+    seen: set[datetime] = set()
+    duplicated: set[datetime] = set()
+    previous_open: datetime | None = None
     for row in candles:
         anomalies.extend(_row_anomalies(row, interval_seconds, anchor_offset_seconds))
-        if previous is not None:
-            previous_open = _as_utc(previous["open_at"])
-            current_open = _as_utc(row["open_at"])
-            if current_open == previous_open:
+        current_open = _as_utc(row["open_at"])
+        if current_open in seen:
+            duplicated.add(current_open)
+            anomalies.append(
+                CandleAnomaly(
+                    CandleAnomalyType.DUPLICATE_OPEN_AT,
+                    current_open,
+                    f"duplicate open_at {current_open.isoformat()}",
+                )
+            )
+        if previous_open is not None and current_open < previous_open:
+            anomalies.append(
+                CandleAnomaly(
+                    CandleAnomalyType.OUT_OF_ORDER,
+                    current_open,
+                    f"{current_open.isoformat()} precedes {previous_open.isoformat()}",
+                )
+            )
+        seen.add(current_open)
+        previous_open = current_open
+    unique_rows: dict[datetime, CandleRow] = {}
+    for row in candles:
+        unique_rows[_as_utc(row["open_at"])] = row
+    previous_time: datetime | None = None
+    for current_time in sorted(unique_rows):
+        if previous_time is not None:
+            missing = (
+                _grid_slot(current_time, interval_seconds, anchor_offset_seconds)
+                - _grid_slot(previous_time, interval_seconds, anchor_offset_seconds)
+                - 1
+            )
+            if missing > 0 and (
+                expected_gap is None or not expected_gap(previous_time, current_time)
+            ):
                 anomalies.append(
                     CandleAnomaly(
-                        CandleAnomalyType.DUPLICATE_OPEN_AT,
-                        current_open,
-                        f"duplicate open_at {current_open.isoformat()}",
+                        CandleAnomalyType.GAP,
+                        current_time,
+                        f"{missing} missing bar(s) after {previous_time.isoformat()}",
                     )
                 )
-            elif current_open < previous_open:
-                anomalies.append(
-                    CandleAnomaly(
-                        CandleAnomalyType.OUT_OF_ORDER,
-                        current_open,
-                        f"{current_open.isoformat()} precedes {previous_open.isoformat()}",
-                    )
-                )
-            else:
-                gap = current_open - previous_open
-                missing = round(gap.total_seconds() / interval_seconds) - 1
-                if missing > 0 and (
-                    expected_gap is None or not expected_gap(previous_open, current_open)
-                ):
+            previous_close = unique_rows[previous_time]["close"]
+            current_close = unique_rows[current_time]["close"]
+            if (
+                previous_close > 0.0
+                and previous_time not in duplicated
+                and current_time not in duplicated
+            ):
+                change = abs(current_close - previous_close) / previous_close
+                if change > split_threshold:
                     anomalies.append(
                         CandleAnomaly(
-                            CandleAnomalyType.GAP,
-                            current_open,
-                            f"{missing} missing bar(s) after {previous_open.isoformat()}",
+                            CandleAnomalyType.SPLIT_SUSPECT,
+                            current_time,
+                            f"close {previous_close} -> {current_close} ({change:.1%})",
                         )
                     )
-                previous_close = previous["close"]
-                if previous_close > 0.0:
-                    change = abs(row["close"] - previous_close) / previous_close
-                    if change > split_threshold:
-                        anomalies.append(
-                            CandleAnomaly(
-                                CandleAnomalyType.SPLIT_SUSPECT,
-                                current_open,
-                                f"close {previous_close} -> {row['close']} ({change:.1%})",
-                            )
-                        )
-        previous = row
+        previous_time = current_time
     return anomalies

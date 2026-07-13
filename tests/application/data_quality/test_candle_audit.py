@@ -78,6 +78,50 @@ def test_ohlc_invariant_violation() -> None:
     assert _types(audit_candle_series(candles, "1m")) == {CandleAnomalyType.OHLC_INVARIANT}
 
 
+def test_ohlc_high_below_open() -> None:
+    """A high below the open is flagged in isolation.
+
+    Given: a bar whose high is below open only,
+    When: audit_candle_series is called,
+    Then: an OHLC_INVARIANT anomaly is returned.
+    """
+    candles = [_candle(_BASE, open_price=100.0, high=99.5, low=99.0, close=99.2)]
+    assert _types(audit_candle_series(candles, "1m")) == {CandleAnomalyType.OHLC_INVARIANT}
+
+
+def test_ohlc_high_below_close() -> None:
+    """A high below the close is flagged in isolation.
+
+    Given: a bar whose high is below close only,
+    When: audit_candle_series is called,
+    Then: an OHLC_INVARIANT anomaly is returned.
+    """
+    candles = [_candle(_BASE, open_price=99.0, high=99.5, low=98.5, close=100.0)]
+    assert _types(audit_candle_series(candles, "1m")) == {CandleAnomalyType.OHLC_INVARIANT}
+
+
+def test_ohlc_low_above_open() -> None:
+    """A low above the open is flagged in isolation.
+
+    Given: a bar whose low is above open only,
+    When: audit_candle_series is called,
+    Then: an OHLC_INVARIANT anomaly is returned.
+    """
+    candles = [_candle(_BASE, open_price=99.0, high=101.0, low=99.5, close=100.0)]
+    assert _types(audit_candle_series(candles, "1m")) == {CandleAnomalyType.OHLC_INVARIANT}
+
+
+def test_ohlc_low_above_close() -> None:
+    """A low above the close is flagged in isolation.
+
+    Given: a bar whose low is above close only,
+    When: audit_candle_series is called,
+    Then: an OHLC_INVARIANT anomaly is returned.
+    """
+    candles = [_candle(_BASE, open_price=100.0, high=101.0, low=99.5, close=99.0)]
+    assert _types(audit_candle_series(candles, "1m")) == {CandleAnomalyType.OHLC_INVARIANT}
+
+
 def test_non_positive_price() -> None:
     """A non-positive price is flagged and suppresses the invariant check.
 
@@ -144,6 +188,41 @@ def test_daily_alignment_is_not_checked() -> None:
     assert CandleAnomalyType.MISALIGNED_OPEN_AT not in _types(audit_candle_series(candles, "1d"))
 
 
+def test_thirty_minute_series_is_supported() -> None:
+    """The 30m timeframe is a supported, first-class candle interval.
+
+    Given: three aligned, ordered 30m candles,
+    When: audit_candle_series is called with timeframe 30m,
+    Then: no anomalies are returned (no ValueError is raised).
+    """
+    candles = [_candle(_BASE + timedelta(minutes=30 * i)) for i in range(3)]
+    assert audit_candle_series(candles, "30m") == []
+
+
+def test_thirty_minute_misaligned() -> None:
+    """A 30m bar off the half-hour grid is flagged.
+
+    Given: a 30m candle opening 15 minutes past the half hour,
+    When: audit_candle_series is called with timeframe 30m,
+    Then: a MISALIGNED_OPEN_AT anomaly is returned.
+    """
+    candles = [_candle(_BASE + timedelta(minutes=15))]
+    assert _types(audit_candle_series(candles, "30m")) == {CandleAnomalyType.MISALIGNED_OPEN_AT}
+
+
+def test_thirty_minute_gap_flagged() -> None:
+    """A gap in a 30m series is flagged with the missing count.
+
+    Given: two 30m candles 90 minutes apart,
+    When: audit_candle_series is called with timeframe 30m,
+    Then: a GAP anomaly noting two missing bars is returned.
+    """
+    candles = [_candle(_BASE), _candle(_BASE + timedelta(minutes=90))]
+    gaps = [a for a in audit_candle_series(candles, "30m") if a.type is CandleAnomalyType.GAP]
+    assert len(gaps) == 1
+    assert "2 missing" in gaps[0].detail
+
+
 def test_anchor_offset_aligns_venue_bars() -> None:
     """A venue-anchored bar aligns under an anchor offset.
 
@@ -176,8 +255,50 @@ def test_out_of_order() -> None:
     When: audit_candle_series is called,
     Then: an OUT_OF_ORDER anomaly is returned.
     """
-    candles = [_candle(_BASE + timedelta(minutes=5)), _candle(_BASE)]
-    assert CandleAnomalyType.OUT_OF_ORDER in _types(audit_candle_series(candles, "1m"))
+    candles = [_candle(_BASE + timedelta(minutes=1)), _candle(_BASE)]
+    assert _types(audit_candle_series(candles, "1m")) == {CandleAnomalyType.OUT_OF_ORDER}
+
+
+def test_non_adjacent_duplicate() -> None:
+    """A non-adjacent duplicate is flagged as both duplicate and out of order.
+
+    Given: a bar whose open_at repeats a non-adjacent earlier bar and so also
+        precedes its immediate predecessor,
+    When: audit_candle_series is called,
+    Then: both DUPLICATE_OPEN_AT and OUT_OF_ORDER anomalies are returned, since
+        the two facts are independent.
+    """
+    candles = [
+        _candle(_BASE),
+        _candle(_BASE + timedelta(minutes=1)),
+        _candle(_BASE),
+    ]
+    assert _types(audit_candle_series(candles, "1m")) == {
+        CandleAnomalyType.DUPLICATE_OPEN_AT,
+        CandleAnomalyType.OUT_OF_ORDER,
+    }
+
+
+def test_permuted_complete_series_has_no_false_gap_or_split() -> None:
+    """A complete-but-permuted series is flagged only as out of order.
+
+    Given: four consecutive bars whose closes rise gradually (each chronological
+        step under the split threshold) delivered in a shuffled order in which
+        adjacent-delivery close moves would exceed the threshold,
+    When: audit_candle_series is called,
+    Then: only OUT_OF_ORDER is reported, with no spurious GAP or SPLIT_SUSPECT,
+        because gap and split analysis runs over the sorted unique timestamps.
+    """
+    candles = [
+        _candle(_BASE, open_price=100.0, high=101.0, low=99.0, close=100.0),
+        _candle(_BASE + timedelta(minutes=2), open_price=140.0, high=141.0, low=139.0, close=140.0),
+        _candle(_BASE + timedelta(minutes=1), open_price=120.0, high=121.0, low=119.0, close=120.0),
+        _candle(_BASE + timedelta(minutes=3), open_price=160.0, high=161.0, low=159.0, close=160.0),
+    ]
+    result = _types(audit_candle_series(candles, "1m"))
+    assert CandleAnomalyType.OUT_OF_ORDER in result
+    assert CandleAnomalyType.GAP not in result
+    assert CandleAnomalyType.SPLIT_SUSPECT not in result
 
 
 def test_gap_flagged() -> None:
@@ -244,6 +365,67 @@ def test_split_check_skipped_when_prev_close_non_positive() -> None:
         _candle(_BASE + timedelta(minutes=1)),
     ]
     assert CandleAnomalyType.SPLIT_SUSPECT not in _types(audit_candle_series(candles, "1m"))
+
+
+def test_duplicate_close_conflict_does_not_manufacture_split() -> None:
+    """A conflicting duplicate close cannot manufacture or hide a split.
+
+    Given: a duplicated timestamp whose two rows carry conflicting closes,
+        supplied in either delivery order,
+    When: audit_candle_series is called,
+    Then: the duplicate is flagged and the anomaly set is identical for both
+        orders, with no SPLIT_SUSPECT derived from the ambiguous close.
+    """
+    first_order = [
+        _candle(_BASE, open_price=100.0, high=101.0, low=99.0, close=100.0),
+        _candle(_BASE + timedelta(minutes=1), open_price=50.0, high=51.0, low=49.0, close=50.0),
+        _candle(_BASE + timedelta(minutes=1), open_price=100.0, high=101.0, low=99.0, close=100.0),
+        _candle(_BASE + timedelta(minutes=2), open_price=100.0, high=101.0, low=99.0, close=100.0),
+    ]
+    second_order = [
+        _candle(_BASE, open_price=100.0, high=101.0, low=99.0, close=100.0),
+        _candle(_BASE + timedelta(minutes=1), open_price=100.0, high=101.0, low=99.0, close=100.0),
+        _candle(_BASE + timedelta(minutes=1), open_price=50.0, high=51.0, low=49.0, close=50.0),
+        _candle(_BASE + timedelta(minutes=2), open_price=100.0, high=101.0, low=99.0, close=100.0),
+    ]
+    first = _types(audit_candle_series(first_order, "1m"))
+    second = _types(audit_candle_series(second_order, "1m"))
+    assert first == second == {CandleAnomalyType.DUPLICATE_OPEN_AT}
+
+
+def test_gap_count_uses_grid_slots_under_jitter() -> None:
+    """Gap counting assigns each bar to its nearest grid slot under jitter.
+
+    Given: a 1m pair 20 seconds and 2m40s past the anchor (both off-grid),
+    When: audit_candle_series is called,
+    Then: the GAP reports two missing bars (nearest slots 0 and 3), which the
+        old span-rounding would undercount as one.
+    """
+    candles = [
+        _candle(_BASE + timedelta(seconds=20)),
+        _candle(_BASE + timedelta(minutes=2, seconds=40)),
+    ]
+    gaps = [a for a in audit_candle_series(candles, "1m") if a.type is CandleAnomalyType.GAP]
+    assert len(gaps) == 1
+    assert "2 missing" in gaps[0].detail
+
+
+def test_gap_count_respects_anchor_offset() -> None:
+    """Gap counting honors the venue anchor offset.
+
+    Given: two 1h bars at :30 and 2:30 past the hour under a 1800s anchor,
+    When: audit_candle_series is called with anchor_offset_seconds=1800,
+    Then: one missing bar is reported and neither bar is misaligned.
+    """
+    candles = [
+        _candle(datetime(2026, 1, 1, 14, 30, 0, tzinfo=UTC)),
+        _candle(datetime(2026, 1, 1, 16, 30, 0, tzinfo=UTC)),
+    ]
+    result = audit_candle_series(candles, "1h", anchor_offset_seconds=1800)
+    gaps = [a for a in result if a.type is CandleAnomalyType.GAP]
+    assert CandleAnomalyType.MISALIGNED_OPEN_AT not in _types(result)
+    assert len(gaps) == 1
+    assert "1 missing" in gaps[0].detail
 
 
 def test_unsupported_timeframe_raises() -> None:
