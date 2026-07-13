@@ -29,12 +29,17 @@ import pandas as pd
 from snapper.core.types import IndicatorBackend
 from snapper.indicators.atr import atr as python_atr
 from snapper.indicators.bollinger import bollinger as python_bollinger
+from snapper.indicators.cci import cci as python_cci
 from snapper.indicators.ema import ema as python_ema
+from snapper.indicators.keltner import keltner as python_keltner
 from snapper.indicators.macd import macd as python_macd
+from snapper.indicators.mfi import mfi as python_mfi
 from snapper.indicators.obv import obv as python_obv
+from snapper.indicators.roc import roc as python_roc
 from snapper.indicators.rsi import rsi as python_rsi
 from snapper.indicators.sma import sma as python_sma
 from snapper.indicators.stochastic import stochastic as python_stochastic
+from snapper.indicators.vwap import vwap as python_vwap
 
 USE_TALIB = os.getenv("USE_TALIB", "true").lower() in ("true", "1", "yes")
 _talib_available = False
@@ -250,6 +255,134 @@ def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
         return pd.Series([], dtype=float, index=close.index)
     result = _talib.OBV(close.astype(float).values, volume.astype(float).values)
     return pd.Series(result, index=close.index, dtype=float)
+
+
+def roc(series: pd.Series, period: int = 10) -> pd.Series:
+    """Calculate Rate of Change using TA-Lib or Python fallback.
+
+    Args:
+        series: Price series.
+        period: Lookback for the reference price. Default is 10.
+
+    Returns:
+        Series of ROC values (percent).
+    """
+    if not _talib_available or _talib is None:
+        return python_roc(series, period)
+    if len(series) == 0:
+        return pd.Series([], dtype=float, index=series.index)
+    values = series.astype(float).values
+    return pd.Series(_talib.ROC(values, timeperiod=period), index=series.index, dtype=float)
+
+
+def cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
+    """Calculate the Commodity Channel Index using TA-Lib or Python fallback.
+
+    Args:
+        high: Series of high prices.
+        low: Series of low prices.
+        close: Series of closing prices.
+        period: Lookback window. Default is 20.
+
+    Returns:
+        Series of CCI values.
+    """
+    if not _talib_available or _talib is None:
+        return python_cci(high, low, close, period)
+    if len(close) == 0:
+        return pd.Series([], dtype=float, index=close.index)
+    result = _talib.CCI(
+        high.astype(float).values,
+        low.astype(float).values,
+        close.astype(float).values,
+        timeperiod=period,
+    )
+    return pd.Series(result, index=close.index, dtype=float)
+
+
+def mfi(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """Calculate the Money Flow Index using TA-Lib or Python fallback.
+
+    Args:
+        high: Series of high prices.
+        low: Series of low prices.
+        close: Series of closing prices.
+        volume: Series of bar volumes.
+        period: Lookback window. Default is 14.
+
+    Returns:
+        Series of MFI values in [0, 100].
+    """
+    if not _talib_available or _talib is None:
+        return python_mfi(high, low, close, volume, period)
+    if len(close) == 0:
+        return pd.Series([], dtype=float, index=close.index)
+    result = _talib.MFI(
+        high.astype(float).values,
+        low.astype(float).values,
+        close.astype(float).values,
+        volume.astype(float).values,
+        timeperiod=period,
+    )
+    return pd.Series(result, index=close.index, dtype=float)
+
+
+def keltner(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 20,
+    atr_period: int = 10,
+    mult: float = 2.0,
+) -> pd.DataFrame:
+    """Calculate Keltner Channels.
+
+    TA-Lib has no Keltner function, so this composes the pure-python EMA and
+    ATR regardless of backend.
+
+    Args:
+        high: Series of high prices.
+        low: Series of low prices.
+        close: Series of closing prices.
+        period: EMA lookback for the middle line. Default is 20.
+        atr_period: ATR lookback for the band width. Default is 10.
+        mult: ATR multiplier for the band offset. Default is 2.0.
+
+    Returns:
+        DataFrame with columns ``upper``, ``middle`` and ``lower``.
+    """
+    return python_keltner(high, low, close, period, atr_period, mult)
+
+
+def vwap(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """Calculate the rolling Volume-Weighted Average Price.
+
+    TA-Lib has no VWAP function, so this uses the pure-python implementation
+    regardless of backend.
+
+    Args:
+        high: Series of high prices.
+        low: Series of low prices.
+        close: Series of closing prices.
+        volume: Series of bar volumes.
+        period: Rolling window. Default is 14.
+
+    Returns:
+        Series of rolling VWAP values.
+    """
+    return python_vwap(high, low, close, volume, period)
 
 
 def is_talib_available() -> bool:
