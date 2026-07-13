@@ -4,11 +4,14 @@ This module provides a pure Python implementation of the EMA using
 ``pandas`` exponential weighting with ``adjust=False`` (the same
 convention used by :mod:`snapper.indicators.macd`).
 
-NOTE: this warmup convention differs from TA-Lib's ``EMA`` (which seeds
-the first value with an SMA of the first ``period`` samples). The two are
-both valid EMA definitions but are not bit-identical during warmup, so
-callers must not assume cross-backend equality — see
-:mod:`snapper.indicators.ta_lib_adapter`.
+NOTE: this warmup convention differs from TA-Lib's ``EMA`` (which NaNs the
+first ``period - 1`` samples and seeds the value at index ``period - 1`` with
+an SMA of the first ``period`` samples). Because both are recursive with the
+same smoothing factor, the difference decays geometrically but never reaches
+exactly zero, so the two backends are not bit-identical at any index — not
+only during warmup. This is an intentional design choice shared with
+:mod:`snapper.indicators.macd`; callers must not assume cross-backend equality
+— see :mod:`snapper.indicators.ta_lib_adapter`.
 
 Example:
     Calculate a 20-period EMA::

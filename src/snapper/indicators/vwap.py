@@ -57,8 +57,13 @@ def vwap(
         raise ValueError("vwap: high, low, close and volume must have equal length")
     if n == 0:
         return pd.Series([], dtype=float, index=close.index)
-    typical = (high.astype(float) + low.astype(float) + close.astype(float)) / 3.0
-    vol = volume.astype(float)
+    close = close.astype(float)
+    typical = (
+        pd.Series(high.astype(float).to_numpy(), index=close.index)
+        + pd.Series(low.astype(float).to_numpy(), index=close.index)
+        + close
+    ) / 3.0
+    vol = pd.Series(volume.astype(float).to_numpy(), index=close.index)
     weighted = (typical * vol).rolling(window=period, min_periods=period).sum()
     volume_sum = vol.rolling(window=period, min_periods=period).sum()
     safe_volume = volume_sum.where(volume_sum > 0.0)

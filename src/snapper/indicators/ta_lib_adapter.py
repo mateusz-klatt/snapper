@@ -112,8 +112,12 @@ def sma(series: pd.Series, period: int = 20) -> pd.Series:
 
     Returns:
         Series of SMA values.
+
+    Note:
+        For ``period < 2`` the pure-Python path is used, since TA-Lib rejects a
+        period below 2; this keeps the parameter domain backend-independent.
     """
-    if not _talib_available or _talib is None:
+    if not _talib_available or _talib is None or period < 2:
         return python_sma(series, period)
     if len(series) == 0:
         return pd.Series([], dtype=float, index=series.index)
@@ -124,9 +128,11 @@ def sma(series: pd.Series, period: int = 20) -> pd.Series:
 def ema(series: pd.Series, period: int = 20) -> pd.Series:
     """Calculate EMA using TA-Lib or Python fallback.
 
-    TA-Lib seeds the first value with an SMA of the first ``period``
-    samples; the Python fallback seeds from the first observation, so the
-    two differ during warmup — do not assume cross-backend equality.
+    TA-Lib seeds the first value with an SMA of the first ``period`` samples;
+    the Python fallback seeds from the first observation. Because both are
+    recursive with the same smoothing factor, the difference decays but never
+    reaches zero, so the two backends are not bit-identical at any index — do
+    not assume cross-backend equality.
 
     Args:
         series: Price series.
@@ -134,8 +140,12 @@ def ema(series: pd.Series, period: int = 20) -> pd.Series:
 
     Returns:
         Series of EMA values.
+
+    Note:
+        For ``period < 2`` the pure-Python path is used, since TA-Lib rejects a
+        period below 2; this keeps the parameter domain backend-independent.
     """
-    if not _talib_available or _talib is None:
+    if not _talib_available or _talib is None or period < 2:
         return python_ema(series, period)
     if len(series) == 0:
         return pd.Series([], dtype=float, index=series.index)
@@ -153,8 +163,12 @@ def bollinger(series: pd.Series, period: int = 20, num_std: float = 2.0) -> pd.D
 
     Returns:
         DataFrame with columns ``upper``, ``middle`` and ``lower``.
+
+    Note:
+        For ``period < 2`` the pure-Python path is used, since TA-Lib rejects a
+        period below 2; this keeps the parameter domain backend-independent.
     """
-    if not _talib_available or _talib is None:
+    if not _talib_available or _talib is None or period < 2:
         return python_bollinger(series, period, num_std)
     if len(series) == 0:
         empty = pd.Series([], dtype=float, index=series.index)
@@ -286,8 +300,12 @@ def cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> 
 
     Returns:
         Series of CCI values.
+
+    Note:
+        For ``period < 2`` the pure-Python path is used, since TA-Lib rejects a
+        period below 2; this keeps the parameter domain backend-independent.
     """
-    if not _talib_available or _talib is None:
+    if not _talib_available or _talib is None or period < 2:
         return python_cci(high, low, close, period)
     if len(close) == 0:
         return pd.Series([], dtype=float, index=close.index)
@@ -318,8 +336,12 @@ def mfi(
 
     Returns:
         Series of MFI values in [0, 100].
+
+    Note:
+        For ``period < 2`` the pure-Python path is used, since TA-Lib rejects a
+        period below 2; this keeps the parameter domain backend-independent.
     """
-    if not _talib_available or _talib is None:
+    if not _talib_available or _talib is None or period < 2:
         return python_mfi(high, low, close, volume, period)
     if len(close) == 0:
         return pd.Series([], dtype=float, index=close.index)

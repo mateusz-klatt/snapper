@@ -60,7 +60,12 @@ def cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> 
         raise ValueError("cci: high, low and close must have equal length")
     if n == 0:
         return pd.Series([], dtype=float, index=close.index)
-    typical = (high.astype(float) + low.astype(float) + close.astype(float)) / 3.0
+    close = close.astype(float)
+    typical = (
+        pd.Series(high.astype(float).to_numpy(), index=close.index)
+        + pd.Series(low.astype(float).to_numpy(), index=close.index)
+        + close
+    ) / 3.0
     sma_tp = typical.rolling(window=period, min_periods=period).mean()
     mad = typical.rolling(window=period, min_periods=period).apply(_mean_abs_dev, raw=True)
     safe_mad = mad.where(mad > 0.0)

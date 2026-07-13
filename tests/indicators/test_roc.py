@@ -20,15 +20,15 @@ def test_roc_known_values() -> None:
     assert result.iloc[2] == pytest.approx(10.0)
 
 
-def test_roc_zero_reference_is_nan() -> None:
-    """ROC guards a zero reference price.
+def test_roc_zero_reference_is_zero() -> None:
+    """ROC returns zero at a zero reference price, matching TA-Lib.
 
     Given: a series whose prior price is exactly zero,
     When: roc is called with period=1,
-    Then: that position is NaN rather than infinity.
+    Then: that position is 0.0 (TA-Lib's convention) rather than NaN or infinity.
     """
     result = roc(pd.Series([0.0, 5.0]), period=1)
-    assert pd.isna(result.iloc[1])
+    assert result.iloc[1] == 0.0
 
 
 def test_roc_empty_series() -> None:

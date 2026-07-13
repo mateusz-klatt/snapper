@@ -11,13 +11,16 @@ def test_stochastic_known_values() -> None:
 
     Given: a small OHLC fixture,
     When: stochastic is called with k_period=2 and d_period=2,
-    Then: %K matches by hand and all values fall within [0, 100].
+    Then: %K is masked to %D's start (index ``k + d - 2 = 2``), %K and %D match
+        by hand there, and all values fall within [0, 100].
     """
     high = pd.Series([10.0, 11.0, 12.0, 13.0])
     low = pd.Series([9.0, 9.5, 10.5, 11.0])
     close = pd.Series([9.5, 10.5, 11.5, 12.5])
     result = stochastic(high, low, close, k_period=2, d_period=2)
-    assert result["k"].iloc[1] == pytest.approx(75.0)
+    assert pd.isna(result["k"].iloc[1])
+    assert result["k"].iloc[2] == pytest.approx(80.0)
+    assert result["d"].iloc[2] == pytest.approx(77.5)
     assert (result["k"].dropna() >= 0).all()
     assert (result["k"].dropna() <= 100).all()
 
@@ -27,11 +30,12 @@ def test_stochastic_flat_window_is_zero() -> None:
 
     Given: a flat window where highest high equals lowest low,
     When: stochastic is called,
-    Then: %K is defined as 0.0 with no division-by-zero warning.
+    Then: %K is defined as 0.0 with no division-by-zero warning (at the first
+        unmasked position, index ``k + d - 2 = 2``).
     """
     flat = pd.Series([5.0, 5.0, 5.0])
     result = stochastic(flat, flat, flat, k_period=2, d_period=2)
-    assert result["k"].iloc[1] == 0.0
+    assert pd.isna(result["k"].iloc[1])
     assert result["k"].iloc[2] == 0.0
 
 
@@ -58,3 +62,18 @@ def test_stochastic_length_mismatch_raises() -> None:
     """
     with pytest.raises(ValueError, match="equal length"):
         stochastic(pd.Series([1.0, 2.0]), pd.Series([1.0]), pd.Series([1.0, 2.0]))
+
+
+def test_stochastic_aligns_companions_to_close_index() -> None:
+    """A differing high/low index cannot corrupt the result.
+
+    Given: high and low series indexed differently from close,
+    When: stochastic is called,
+    Then: the result is on close's index with matching length, not a union index.
+    """
+    close = pd.Series([9.5, 10.5, 11.5, 12.5], index=[0, 1, 2, 3])
+    high = pd.Series([10.0, 11.0, 12.0, 13.0], index=[10, 11, 12, 13])
+    low = pd.Series([9.0, 9.5, 10.5, 11.0], index=[20, 21, 22, 23])
+    result = stochastic(high, low, close, k_period=2, d_period=2)
+    assert list(result.index) == list(close.index)
+    assert len(result) == len(close)

@@ -60,3 +60,19 @@ def test_vwap_length_mismatch_raises() -> None:
     """
     with pytest.raises(ValueError, match="equal length"):
         vwap(pd.Series([1.0, 2.0]), pd.Series([1.0]), pd.Series([1.0, 2.0]), pd.Series([1.0, 2.0]))
+
+
+def test_vwap_aligns_companions_to_close_index() -> None:
+    """A differing high/low/volume index cannot corrupt the result.
+
+    Given: high, low and volume indexed differently from close,
+    When: vwap is called,
+    Then: the result is on close's index with matching length, not a union index.
+    """
+    close = pd.Series([9.5, 10.5, 11.5, 12.5], index=[0, 1, 2, 3])
+    high = pd.Series([10.0, 11.0, 12.0, 13.0], index=[10, 11, 12, 13])
+    low = pd.Series([9.0, 9.5, 10.5, 11.0], index=[20, 21, 22, 23])
+    volume = pd.Series([100.0, 120.0, 90.0, 110.0], index=[30, 31, 32, 33])
+    result = vwap(high, low, close, volume, period=2)
+    assert list(result.index) == list(close.index)
+    assert len(result) == len(close)
