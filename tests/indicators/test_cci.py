@@ -22,16 +22,18 @@ def test_cci_known_values() -> None:
     assert result.iloc[2] == pytest.approx(66.6667, rel=1e-4)
 
 
-def test_cci_flat_window_is_nan() -> None:
-    """CCI guards a zero mean deviation.
+def test_cci_flat_window_is_zero() -> None:
+    """CCI is zero over a flat window, matching TA-Lib.
 
-    Given: a flat typical-price window,
+    Given: a flat typical-price window (zero mean deviation),
     When: cci is called,
-    Then: the zero mean-deviation position is NaN, not infinity.
+    Then: the value is 0.0 (not NaN or infinity), matching TA-Lib.
     """
     flat = pd.Series([5.0, 5.0, 5.0])
     result = cci(flat, flat, flat, period=2)
-    assert result.iloc[1:].isna().all()
+    assert pd.isna(result.iloc[0])
+    assert result.iloc[1] == 0.0
+    assert result.iloc[2] == 0.0
 
 
 def test_cci_empty_series() -> None:

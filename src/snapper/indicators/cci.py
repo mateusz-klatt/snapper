@@ -8,7 +8,8 @@ Pure Python implementation of the CCI:
 where the mean absolute deviation is taken over the same ``period`` window.
 The 0.015 scaling constant is Lambert's original constant, matching
 TA-Lib's ``CCI``. The first ``period - 1`` positions are NaN (warmup); a
-window with zero mean deviation (flat typical price) yields NaN.
+window with zero mean deviation (flat typical price) yields 0, matching
+TA-Lib.
 
 Example:
     Calculate a 20-period CCI::
@@ -63,4 +64,5 @@ def cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> 
     sma_tp = typical.rolling(window=period, min_periods=period).mean()
     mad = typical.rolling(window=period, min_periods=period).apply(_mean_abs_dev, raw=True)
     safe_mad = mad.where(mad > 0.0)
-    return (typical - sma_tp) / (0.015 * safe_mad)
+    result = (typical - sma_tp) / (0.015 * safe_mad)
+    return result.where((mad > 0.0) | mad.isna(), 0.0)

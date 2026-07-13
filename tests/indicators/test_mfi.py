@@ -23,6 +23,21 @@ def test_mfi_all_up_window_is_100() -> None:
     assert result.iloc[2] == pytest.approx(100.0)
 
 
+def test_mfi_dead_window_is_zero() -> None:
+    """MFI is zero over a dead window, matching TA-Lib.
+
+    Given: a flat window with no money flow (both sums zero),
+    When: mfi is called with period=2,
+    Then: the value is 0.0, not 100, matching TA-Lib.
+    """
+    flat = pd.Series([10.0, 10.0, 10.0])
+    volume = pd.Series([100.0, 100.0, 100.0])
+    result = mfi(flat, flat, flat, volume, period=2)
+    assert pd.isna(result.iloc[0])
+    assert result.iloc[1] == 0.0
+    assert result.iloc[2] == 0.0
+
+
 def test_mfi_bounded_range() -> None:
     """MFI stays within [0, 100].
 

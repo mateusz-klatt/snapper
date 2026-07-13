@@ -10,8 +10,9 @@ oscillator bounded in [0, 100]:
     MFI = 100 - 100 / (1 + money ratio)
 
 When the negative money flow over the window is zero (an all-up window),
-MFI is defined as 100. Warmup positions (the first ``period`` bars, since
-the typical-price direction needs a prior bar) are NaN.
+MFI is 100; when there is no money flow at all (a dead or flat window, both
+sums zero), MFI is 0, matching TA-Lib. Warmup positions (the first
+``period`` bars, since the typical-price direction needs a prior bar) are NaN.
 
 NOTE: this fallback may emit MFI one bar earlier than TA-Lib's ``MFI`` at
 the warmup boundary; the values agree wherever both backends are valid.
@@ -72,4 +73,5 @@ def mfi(
     safe_negative = negative_sum.where(negative_sum > 0.0)
     money_ratio = positive_sum / safe_negative
     values = 100.0 - 100.0 / (1.0 + money_ratio)
-    return values.where((negative_sum > 0.0) | negative_sum.isna(), 100.0)
+    all_up = values.where((negative_sum > 0.0) | negative_sum.isna(), 100.0)
+    return all_up.where((positive_sum > 0.0) | (negative_sum > 0.0) | negative_sum.isna(), 0.0)
