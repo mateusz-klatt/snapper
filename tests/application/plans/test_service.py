@@ -2348,6 +2348,59 @@ class TestSetupPublisher:
         bad_socket.close.assert_called_once()
         assert service._publisher is None
 
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_setup_publisher_creates_zmq_context_when_absent(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """With a broker endpoint and no context yet, one is created."""
+        mock_settings.return_value = SimpleNamespace(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
+            zmq_broker_xpub="tcp://127.0.0.1:7501",
+        )
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        assert service._zmq_context is None
+        created_ctx = MagicMock()
+        created_ctx.socket = MagicMock(return_value=MagicMock())
+
+        with patch("zmq.asyncio.Context", return_value=created_ctx):
+            service._setup_publisher()
+
+        assert service._zmq_context is created_ctx
+        created_ctx.socket.assert_called_once()
+        assert service._publisher is not None
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_start_decision_outbox_drainer_creates_task(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """With a publisher and no live task, the drainer loop task starts."""
+        mock_settings.return_value = SimpleNamespace(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub=None,
+            zmq_broker_xpub=None,
+        )
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        service._publisher = MagicMock()
+        assert service._decision_outbox_task is None
+
+        async def _noop_loop() -> None:
+            return None
+
+        with patch.object(service, "_process_decision_outbox_loop", _noop_loop):
+            service._start_decision_outbox_drainer()
+            created = service._decision_outbox_task
+            assert created is not None
+            await created
+
+        assert service._decision_outbox_task is created
+
 
 class TestLogDecisionPublishesEvent:
     """``_log_decision`` publishes ``plans.decisions.*`` after insert."""
