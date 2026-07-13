@@ -22,6 +22,7 @@ from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import InstrumentSpecMissingError
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.service import _OrderDispatch
+from snapper.application.engine.service import _StrategyOrderProvenance
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
@@ -3611,7 +3612,7 @@ async def test_send_order_ai_attributed_stamps_guard_identity_on_row() -> None:
         reason="heartbeat approved",
         ai_review_public_id="rev-uuid-9",
         ai_review_dispatch_version=1,
-        signal_public_id="sig-uuid-9",
+        provenance=_StrategyOrderProvenance(signal_public_id="sig-uuid-9"),
     )
     insert_row = cast(AsyncMock, engine._repository).insert_trade_command.call_args.args[0]
     assert insert_row["user_public_id"] == "user-from-review"
@@ -3639,12 +3640,26 @@ async def test_send_order_service_principal_stamps_notional_on_row() -> None:
         size=0.25,
         price=90.0,
         reason="engine-sell",
-        signal_public_id="sig-uuid-10",
+        provenance=_StrategyOrderProvenance(signal_public_id="sig-uuid-10"),
     )
     insert_row = cast(AsyncMock, engine._repository).insert_trade_command.call_args.args[0]
     assert insert_row["submitted_notional_usd"] is None
     assert insert_row["signal_public_id"] == "sig-uuid-10"
     assert insert_row["ai_review_public_id"] is None
+
+
+def test_strategy_order_provenance_defaults_to_signal_less_live_frame() -> None:
+    """The strategy-order provenance container preserves live defaults.
+
+    Given: a strategy order without signal lineage or replay metadata,
+    When: its provenance container is constructed with defaults,
+    Then: it represents a signal-less live frame with no replay window.
+    """
+    provenance = _StrategyOrderProvenance()
+    assert provenance.signal_public_id is None
+    assert provenance.origin == "live"
+    assert provenance.replay_window_start is None
+    assert provenance.replay_window_end is None
 
 
 @pytest.mark.asyncio
@@ -3669,9 +3684,11 @@ async def test_send_order_stamps_replay_provenance_on_row() -> None:
         size=0.5,
         price=100.0,
         reason="engine-buy",
-        origin="replay",
-        replay_window_start=window_start,
-        replay_window_end=window_end,
+        provenance=_StrategyOrderProvenance(
+            origin="replay",
+            replay_window_start=window_start,
+            replay_window_end=window_end,
+        ),
     )
     insert_row = cast(AsyncMock, engine._repository).insert_trade_command.call_args.args[0]
     assert insert_row["origin"] == "replay"
@@ -3696,8 +3713,10 @@ async def test_send_order_direct_payload_carries_replay_provenance() -> None:
         size=1.0,
         price=33.0,
         reason="test",
-        origin="replay",
-        replay_window_start=window_start,
+        provenance=_StrategyOrderProvenance(
+            origin="replay",
+            replay_window_start=window_start,
+        ),
     )
     published = socket.sent[0]
     assert published.origin == "replay"

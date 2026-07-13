@@ -436,6 +436,7 @@ async def test_notional_cap_maps_price_unavailable_to_caps_violation() -> None:
         async with enforcer.guard(_submission()):
             raise AssertionError("guard should have rejected before yield")
     assert exc.value.cap_type == "price_unavailable"
+    assert exc.value.detail == "price_stale: age=9999s"
 
 
 @pytest.mark.asyncio
@@ -1458,6 +1459,50 @@ async def test_quantity_cap_admits_mapped_identity_without_matching_key() -> Non
         _submission(instrument_public_id="inst-paper", quantity=Decimal("5"))
     ) as guard:
         assert isinstance(guard, Guard)
+
+
+@pytest.mark.asyncio
+async def test_quantity_cap_prefers_source_key_over_legacy_emission_key() -> None:
+    """A mapped source-keyed limit takes precedence over a legacy limit.
+
+    Given: a mapped paper identity with a permissive source-keyed limit
+        and a restrictive legacy emission-keyed limit,
+    When: a quantity between those limits is admitted,
+    Then: the source limit wins and the submission remains allowed.
+    """
+    caps = _caps(max_order_quantity_per_instrument={"inst-src": "10", "inst-paper": "1"})
+    repo = _stub_repo(caps)
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).side_effect = None
+    cast(MagicMock, cast(MagicMock, repo).resolve_source_instrument_public_id).return_value = {
+        "valuation_public_id": "inst-src",
+        "is_paper": True,
+        "mapped": True,
+    }
+    enforcer = TradingCapsEnforcer(repo, _stub_pricing(), now=lambda: _NOW)
+    async with enforcer.guard(
+        _submission(instrument_public_id="inst-paper", quantity=Decimal("5"))
+    ) as guard:
+        assert isinstance(guard, Guard)
+
+
+@pytest.mark.asyncio
+async def test_submit_without_quantity_skips_quantity_limit_and_notional_quote() -> None:
+    """A quantity-less submit does not evaluate quantity or notional values.
+
+    Given: configured quantity and daily-notional caps with a submit whose
+        quantity is ``None``,
+    When: the enforcer evaluates the submission,
+    Then: it admits without consulting the USD oracle.
+    """
+    caps = _caps(
+        max_order_quantity_per_instrument={"inst-btc": "0"},
+        max_daily_notional_usd=0.0,
+    )
+    pricing = _stub_pricing()
+    enforcer = TradingCapsEnforcer(_stub_repo(caps), pricing, now=lambda: _NOW)
+    async with enforcer.guard(_submission(quantity=None)) as guard:
+        assert guard.submitted_notional_usd is None
+    assert cast(MagicMock, pricing.to_usd).await_count == 0
 
 
 @pytest.mark.asyncio
