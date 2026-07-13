@@ -19,13 +19,15 @@ def test_atr_known_values() -> None:
 
     Given: a small OHLC fixture,
     When: atr is called with period=2,
-    Then: the seed and next Wilder step match hand computation and stay non-negative.
+    Then: the seed excludes TR[0], starts at index period, and Wilder-smooths.
     """
     high, low, close = _ohlc()
     result = atr(high, low, close, period=2)
     assert pd.isna(result.iloc[0])
-    assert result.iloc[1] == pytest.approx(1.25)
-    assert result.iloc[2] == pytest.approx(1.375)
+    assert pd.isna(result.iloc[1])
+    assert result.iloc[2] == pytest.approx(1.5)
+    assert result.iloc[3] == pytest.approx(1.5)
+    assert result.iloc[4] == pytest.approx(1.75)
     assert (result.dropna() >= 0).all()
 
 

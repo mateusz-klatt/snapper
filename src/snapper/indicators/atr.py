@@ -6,9 +6,9 @@ from the previous close to the current high, and the absolute gap from the
 previous close to the current low. ATR is Wilder's smoothing of the True
 Range over ``period`` bars.
 
-The first ``period - 1`` positions are NaN (warmup); the seed at index
-``period - 1`` is the mean of the first ``period`` True Range values, after
-which Wilder smoothing applies.
+The first ``period`` positions are NaN (warmup); the seed at index ``period``
+is the mean of the True Range values at indices 1..period (``TR[0]`` is
+excluded, matching TA-Lib's ``ATR``), after which Wilder smoothing applies.
 
 Example:
     Calculate a 14-period ATR::
@@ -36,8 +36,8 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
         period: Lookback window. Default is 14.
 
     Returns:
-        Series of ATR values with the ``close`` index. The first
-        ``period - 1`` values are NaN; empty input yields an empty series.
+        Series of ATR values with the ``close`` index. The first ``period``
+        values are NaN; empty input yields an empty series.
 
     Raises:
         ValueError: If ``high``, ``low`` and ``close`` differ in length.
@@ -59,12 +59,12 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
             abs(low_values[i] - c[i - 1]),
         )
     out = np.full(n, np.nan, dtype=float)
-    if n < period:
+    if n <= period:
         return pd.Series(out, index=close.index, dtype=float)
-    seed = float(true_range[:period].mean())
-    out[period - 1] = seed
+    seed = float(true_range[1 : period + 1].mean())
+    out[period] = seed
     prev = seed
-    for i in range(period, n):
+    for i in range(period + 1, n):
         prev = (prev * (period - 1) + true_range[i]) / period
         out[i] = prev
     return pd.Series(out, index=close.index, dtype=float)

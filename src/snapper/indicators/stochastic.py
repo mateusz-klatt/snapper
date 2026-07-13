@@ -10,6 +10,11 @@ where ``lowest_low`` / ``highest_high`` are taken over ``k_period`` bars.
 When the range is zero over the window (flat market), ``%K`` is defined as
 0.0 to avoid division by zero.
 
+NOTE: ``%K`` becomes valid at index ``k_period - 1``. TA-Lib's ``STOCHF``
+aligns its ``%K`` output to ``%D``'s start (index ``k_period - 1 +
+d_period - 1``), so this fallback may emit ``%K`` a few bars earlier than the
+TA-Lib path; the values agree wherever both are valid.
+
 Example:
     Calculate a 14/3 fast stochastic::
 
