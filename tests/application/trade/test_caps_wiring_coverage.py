@@ -164,14 +164,14 @@ async def test_plan_executor_start_lazy_constructs_caps_enforcer() -> None:
         :class:`USDConverter` pair from the repo, covering
         plans/service.py lines 142-144. Subscriber / recovery /
         run-loop are stubbed to isolate the lazy-construction
-        branch.
+    branch.
     """
     real_repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
-    await real_repo.create_all()
 
     service = PlanExecutorService()
     service.repository = real_repo
     service._setup_subscriber = MagicMock()
+    service._setup_publisher = MagicMock()
     service._recover_plans = AsyncMock()
     service._run_loop = AsyncMock()
 

@@ -61,6 +61,24 @@ class _OrderDispatch:
     command_public_id: str
 
 
+@dataclass(frozen=True)
+class _StrategyOrderProvenance:
+    """Signal lineage and frame provenance for a strategy order.
+
+    Attributes:
+        signal_public_id: Durable identity of the signal that fired the
+            order.
+        origin: Provenance of the triggering frame.
+        replay_window_start: Replay window start when ``origin`` is replay.
+        replay_window_end: Replay window end when ``origin`` is replay.
+    """
+
+    signal_public_id: str | None = None
+    origin: FrameOrigin = "live"
+    replay_window_start: dt.datetime | None = None
+    replay_window_end: dt.datetime | None = None
+
+
 class InstrumentSpec(TypedDict, total=False):
     """Per-instrument lookup row carrying lot/tick sizing plus identity.
 
@@ -319,11 +337,8 @@ class TradingEngineService:
         sequence_id: int,
         grouped_correlation_id: str | None = None,
         reference_price: float | None = None,
-        signal_public_id: str | None = None,
         ai_review_public_id: str | None = None,
-        origin: FrameOrigin = "live",
-        replay_window_start: dt.datetime | None = None,
-        replay_window_end: dt.datetime | None = None,
+        provenance: _StrategyOrderProvenance,
     ) -> TradeCommandInsertRow:
         """Return the TradeCommand insert row for a strategy submit.
 
@@ -377,11 +392,11 @@ class TradingEngineService:
             "wallet_public_id": self.wallet_public_id or "",
             "operator_public_id": self.operator_public_id or None,
             "source_surface": "strategy",
-            "signal_public_id": signal_public_id,
+            "signal_public_id": provenance.signal_public_id,
             "ai_review_public_id": ai_review_public_id,
-            "origin": origin,
-            "replay_window_start": replay_window_start,
-            "replay_window_end": replay_window_end,
+            "origin": provenance.origin,
+            "replay_window_start": provenance.replay_window_start,
+            "replay_window_end": provenance.replay_window_end,
         }
 
     def _check_in_flight_timeout(self) -> None:
@@ -731,10 +746,7 @@ class TradingEngineService:
         ai_review_public_id: str | None = None,
         ai_review_dispatch_version: int | None = None,
         grouped_correlation_id: str | None = None,
-        signal_public_id: str | None = None,
-        origin: FrameOrigin = "live",
-        replay_window_start: dt.datetime | None = None,
-        replay_window_end: dt.datetime | None = None,
+        provenance: _StrategyOrderProvenance | None = None,
     ) -> _OrderDispatch:
         """Publish order request via the durable-outbox path.
 
@@ -767,16 +779,8 @@ class TradingEngineService:
             grouped_correlation_id: When set (a paired-execution leg),
                 stamped as the command's correlation_id so it joins its
                 group and is held by the outbox arming gate until armed.
-            signal_public_id: Durable lineage stamp — the
-                ``signals.public_id`` of the envelope that fired this
-                emit, threaded from the coordinator so the command row
-                records its decision provenance. ``None`` for
-                signal-less callers (test fixtures, internal stops).
-            origin: The triggering frame's provenance — persisted on
-                the command row and the dispatch payload so executors
-                reject replay-origin submits pre-venue.
-            replay_window_start: Replay window start, when replaying.
-            replay_window_end: Replay window end, when replaying.
+            provenance: Signal lineage and triggering-frame provenance.
+                ``None`` represents a signal-less live order.
 
         Returns:
             An :class:`_OrderDispatch` carrying the venue ``client_order_id``
@@ -791,6 +795,7 @@ class TradingEngineService:
                 can run quantity / notional checks; failing closed
                 makes the spec-loader gap loud and operator-actionable.
         """
+        order_provenance = provenance or _StrategyOrderProvenance()
         signaled_at_dt = None
         if signaled_at is not None:
             signaled_at_dt = dt.datetime.fromtimestamp(signaled_at, tz=dt.UTC)
@@ -840,11 +845,8 @@ class TradingEngineService:
                 sequence_id=sequence_id,
                 grouped_correlation_id=grouped_correlation_id,
                 reference_price=reference_price,
-                signal_public_id=signal_public_id,
                 ai_review_public_id=ai_review_public_id,
-                origin=origin,
-                replay_window_start=replay_window_start,
-                replay_window_end=replay_window_end,
+                provenance=order_provenance,
             )
             command_public_id = await self._insert_strategy_trade_command(
                 strategy_submission,
@@ -877,9 +879,9 @@ class TradingEngineService:
                 reduce_only=reduce_only,
                 wallet_public_id=self.wallet_public_id,
                 operator_public_id=self.operator_public_id or None,
-                origin=origin,
-                replay_window_start=replay_window_start,
-                replay_window_end=replay_window_end,
+                origin=order_provenance.origin,
+                replay_window_start=order_provenance.replay_window_start,
+                replay_window_end=order_provenance.replay_window_end,
             )
             await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)
             if self._repository is not None:
@@ -1051,10 +1053,12 @@ class TradingEngineService:
             ai_review_public_id=ai_review_public_id,
             ai_review_dispatch_version=ai_review_dispatch_version,
             grouped_correlation_id=grouped_correlation_id,
-            signal_public_id=signal_public_id,
-            origin=origin,
-            replay_window_start=replay_window_start,
-            replay_window_end=replay_window_end,
+            provenance=_StrategyOrderProvenance(
+                signal_public_id=signal_public_id,
+                origin=origin,
+                replay_window_start=replay_window_start,
+                replay_window_end=replay_window_end,
+            ),
         )
         self.order_in_flight = True
         self.pending_client_order_id = dispatch.client_order_id

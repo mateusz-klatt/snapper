@@ -52,6 +52,7 @@ from snapper.application.ai_review.citation import validate_ai_review_citation_f
 from snapper.application.pricing.usd_converter import PriceUnavailableError
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.trade.submission import TradeCommandSubmission
+from snapper.core.json_types import JsonObject
 from snapper.data.repository import Repository
 from snapper.data.repository_types import UserTradingCapsRow
 from snapper.messaging.infrastructure.publisher import MessagePublisher
@@ -554,7 +555,8 @@ class TradingCapsEnforcer:
         """
         if submission.command_type == "cancel" or submission.quantity is None:
             return _NotionalQuote(comparison=None, storage=None)
-        if valuation.valuation_public_id is None:
+        valuation_public_id = valuation.valuation_public_id
+        if valuation_public_id is None:
             if fail_closed and valuation.failed:
                 raise CapsViolationError(
                     "price_unavailable",
@@ -562,9 +564,7 @@ class TradingCapsEnforcer:
                 )
             return _NotionalQuote(comparison=None, storage=None)
         try:
-            raw_notional = await self._pricing.to_usd(
-                valuation.valuation_public_id, submission.quantity
-            )
+            raw_notional = await self._pricing.to_usd(valuation_public_id, submission.quantity)
         except PriceUnavailableError as exc:
             if fail_closed:
                 raise CapsViolationError(
@@ -573,10 +573,37 @@ class TradingCapsEnforcer:
                 ) from exc
             logger.warning(
                 "caps_enforcer: submitted-notional quote unavailable for "
-                f"instrument={valuation.valuation_public_id} "
+                f"instrument={valuation_public_id} "
                 f"({exc.reason_code}); persisting NULL notional"
             )
             return _NotionalQuote(comparison=None, storage=None)
+        return self._build_notional_quote(
+            raw_notional,
+            valuation_public_id,
+            fail_closed=fail_closed,
+        )
+
+    @staticmethod
+    def _build_notional_quote(
+        raw_notional: Decimal,
+        valuation_public_id: str,
+        *,
+        fail_closed: bool,
+    ) -> _NotionalQuote:
+        """Validate and normalize a raw admission-time USD notional.
+
+        Args:
+            raw_notional: Decimal returned by the USD oracle.
+            valuation_public_id: Source instrument identity used for logs.
+            fail_closed: Whether invalid oracle values must reject admission.
+
+        Returns:
+            Precision-safe comparison and representable storage values.
+
+        Raises:
+            CapsViolationError: When the oracle value is invalid and a
+                daily-notional cap requires fail-closed evaluation.
+        """
         if not raw_notional.is_finite():
             if fail_closed:
                 raise CapsViolationError(
@@ -585,7 +612,7 @@ class TradingCapsEnforcer:
                 )
             logger.warning(
                 "caps_enforcer: non-finite USD notional for "
-                f"instrument={valuation.valuation_public_id}; persisting NULL notional"
+                f"instrument={valuation_public_id}; persisting NULL notional"
             )
             return _NotionalQuote(comparison=None, storage=None)
         if raw_notional <= 0:
@@ -596,7 +623,7 @@ class TradingCapsEnforcer:
                 )
             logger.warning(
                 "caps_enforcer: non-positive USD notional for "
-                f"instrument={valuation.valuation_public_id}; persisting NULL notional "
+                f"instrument={valuation_public_id}; persisting NULL notional "
                 "(a negative snapshot would shrink later rolling sums)"
             )
             return _NotionalQuote(comparison=None, storage=None)
@@ -611,11 +638,66 @@ class TradingCapsEnforcer:
         else:
             logger.warning(
                 "caps_enforcer: USD notional not representable in NUMERIC(18,2) "
-                f"for instrument={valuation.valuation_public_id}; persisting NULL "
+                f"for instrument={valuation_public_id}; persisting NULL "
                 "notional (cap comparison still applies). The 1e15 bound leaves "
                 "float-rounding headroom below the column maximum"
             )
         return _NotionalQuote(comparison=comparison, storage=storage)
+
+    @staticmethod
+    def _resolve_per_instrument_quantity_limit(
+        submission: TradeCommandSubmission,
+        cap_by_instrument: JsonObject,
+        valuation: _Valuation,
+    ) -> Decimal | None:
+        """Resolve and parse a source-keyed per-instrument quantity limit.
+
+        Args:
+            submission: Submission carrying the emission identity.
+            cap_by_instrument: Quantity limits keyed by instrument identity.
+            valuation: Resolved source identity and mapping status.
+
+        Returns:
+            Parsed limit, or ``None`` when the mapped instrument is
+            unbounded or its configured value is malformed.
+
+        Raises:
+            CapsViolationError: When a paper source identity is unresolved
+                and no legacy emission-keyed limit can be applied.
+        """
+        unresolved = valuation.failed or (valuation.is_paper and not valuation.mapped)
+        key = valuation.valuation_public_id or submission.instrument_public_id or ""
+        per_inst = cap_by_instrument.get(key)
+        if per_inst is None:
+            legacy_key = submission.instrument_public_id or ""
+            if legacy_key and legacy_key != key:
+                per_inst = cap_by_instrument.get(legacy_key)
+                if per_inst is not None:
+                    logger.warning(
+                        "caps_enforcer: per-instrument quantity cap matched the "
+                        f"legacy emission key {legacy_key} — re-key it to the "
+                        f"source identity {key}"
+                    )
+        if per_inst is None:
+            if unresolved:
+                raise CapsViolationError(
+                    "max_order_quantity_per_instrument",
+                    detail=(
+                        "source identity unresolved for paper instrument "
+                        f"{submission.instrument_public_id} — per-instrument "
+                        "caps fail closed until the source_exchange mapping "
+                        "exists (run the paper publisher to author it)"
+                    ),
+                )
+            return None
+        try:
+            return Decimal(str(per_inst))
+        except (InvalidOperation, TypeError) as exc:
+            logger.warning(
+                "caps_enforcer: malformed per-instrument quantity cap — "
+                f"key={key} value={per_inst!r}: {exc}"
+            )
+            return None
 
     @staticmethod
     def _check_quantity_cap(
@@ -625,53 +707,20 @@ class TradingCapsEnforcer:
     ) -> None:
         """Reject if submitted quantity exceeds per-instrument cap.
 
-        JSON-dict form: ``{instrument_public_id: limit}`` per
-        instrument, keyed by the SOURCE (valuation) identity — the
-        convention operators configure against. A legacy key on the
-        emission (paper) identity is still honoured with a WARN so
-        pre-mapping limits are never silently dropped. An UNRESOLVED
-        paper identity (no mapping, or the resolution itself failed)
-        FAILS CLOSED when only a source-keyed dict exists: the
-        configured key cannot be found, and "not found" must never
-        read as unbounded. Scalar form: single Decimal applies to
-        every instrument. Missing per-instrument key means unbounded.
+        JSON-dict form is keyed by source identity with a legacy emission-key
+        fallback. Scalar form applies one Decimal to every instrument.
+        Missing mapped keys and malformed values remain unbounded.
         """
         cap_raw = caps.get("max_order_quantity_per_instrument")
         if cap_raw is None or submission.quantity is None:
             return
         if isinstance(cap_raw, dict):
-            unresolved = valuation.failed or (valuation.is_paper and not valuation.mapped)
-            key = valuation.valuation_public_id or submission.instrument_public_id or ""
-            per_inst = cap_raw.get(key)
-            if per_inst is None:
-                legacy_key = submission.instrument_public_id or ""
-                if legacy_key and legacy_key != key:
-                    per_inst = cap_raw.get(legacy_key)
-                    if per_inst is not None:
-                        logger.warning(
-                            "caps_enforcer: per-instrument quantity cap matched the "
-                            f"legacy emission key {legacy_key} — re-key it to the "
-                            f"source identity {key}"
-                        )
-            if per_inst is None:
-                if unresolved:
-                    raise CapsViolationError(
-                        "max_order_quantity_per_instrument",
-                        detail=(
-                            "source identity unresolved for paper instrument "
-                            f"{submission.instrument_public_id} — per-instrument "
-                            "caps fail closed until the source_exchange mapping "
-                            "exists (run the paper publisher to author it)"
-                        ),
-                    )
-                return
-            try:
-                limit = Decimal(str(per_inst))
-            except (InvalidOperation, TypeError) as exc:
-                logger.warning(
-                    "caps_enforcer: malformed per-instrument quantity cap — "
-                    f"key={key} value={per_inst!r}: {exc}"
-                )
+            limit = TradingCapsEnforcer._resolve_per_instrument_quantity_limit(
+                submission,
+                cap_raw,
+                valuation,
+            )
+            if limit is None:
                 return
         else:
             try:
