@@ -1732,6 +1732,7 @@ class TestResourcePermissions:
             "strategies",
             "orders",
             "positions",
+            "accounts",
             "signals",
             "health",
             "admin",
@@ -1753,6 +1754,17 @@ class TestResourcePermissions:
             the new Positions tab.
         """
         assert RESOURCE_PERMISSIONS["positions"] == Permission.READ_POSITIONS
+
+    def test_accounts_requires_read_account_state(self) -> None:
+        """Accounts resource requires READ_ACCOUNT_STATE permission.
+
+        Given: RESOURCE_PERMISSIONS mapping,
+        When: Checking the 'accounts' entry,
+        Then: Its value is Permission.READ_ACCOUNT_STATE so viewers/operators/admins
+            (which hold READ_ACCOUNT_STATE) can access the venue-account tab, while
+            AI delegates (which do not) are excluded from the derived resource access.
+        """
+        assert RESOURCE_PERMISSIONS["accounts"] == Permission.READ_ACCOUNT_STATE
 
     def test_overview_requires_no_permission(self) -> None:
         """Overview resource is accessible without any specific permission.

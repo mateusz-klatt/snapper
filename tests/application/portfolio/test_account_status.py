@@ -25,6 +25,7 @@ from snapper.application.portfolio.account_status import derive_effective_accoun
 _NOW = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
 _PAST = _NOW - timedelta(hours=1)
 _FUTURE = _NOW + timedelta(hours=1)
+_RECENT = _NOW - timedelta(minutes=1)
 
 
 def test_clock_error_when_balance_observed_in_future() -> None:
@@ -68,15 +69,16 @@ def test_clock_error_when_position_observed_in_future() -> None:
 def test_observed_fresh_within_authoritative_window_passes_through() -> None:
     """A fresh observed row strictly inside its window stays live truth.
 
-    Given: an ``observed`` row with sane past clocks whose
-        authoritative_until is AFTER now (window still open),
+    Given: an ``observed`` row with a RECENT balance observation whose
+        authoritative_until is AFTER now (window still open and observation
+        within the authority cap),
     When: the effective status is derived,
     Then: it is ``observed`` — not stale, not clock_error.
     """
     result = derive_effective_account_status(
         sync_status="observed",
-        balance_observed_at=_PAST,
-        position_observed_at=_PAST,
+        balance_observed_at=_RECENT,
+        position_observed_at=_RECENT,
         authoritative_until=_FUTURE,
         now=_NOW,
     )
@@ -87,15 +89,15 @@ def test_observed_at_authoritative_boundary_passes_through() -> None:
     """The authority boundary is inclusive: now == until stays observed.
 
     Given: an ``observed`` row whose authoritative_until equals now exactly
-        (the boundary instant) with sane past clocks,
+        (the boundary instant) with a recent balance observation,
     When: the effective status is derived,
     Then: it is ``observed`` — the demotion is gated on ``now > until``, so
         the boundary itself is still live truth.
     """
     result = derive_effective_account_status(
         sync_status="observed",
-        balance_observed_at=_PAST,
-        position_observed_at=_PAST,
+        balance_observed_at=_RECENT,
+        position_observed_at=_RECENT,
         authoritative_until=_NOW,
         now=_NOW,
     )
@@ -136,6 +138,67 @@ def test_observed_past_authoritative_window_is_stale() -> None:
         balance_observed_at=_PAST,
         position_observed_at=_PAST,
         authoritative_until=_PAST,
+        now=_NOW,
+    )
+    assert result == EFFECTIVE_STALE
+
+
+def test_observed_forged_far_future_window_is_stale() -> None:
+    """A far-future authoritative_until cannot outlive the observation cap.
+
+    Given: an ``observed`` row whose balance was observed an hour ago but whose
+        authoritative_until is decades in the future (a forged/tampered/
+        migration-bypassed window),
+    When: the effective status is derived,
+    Then: it is ``stale`` — the effective authority end is capped at
+        ``balance_observed_at + AUTHORITY_MAX_WINDOW``, so an implausible window
+        can never read as live truth.
+    """
+    result = derive_effective_account_status(
+        sync_status="observed",
+        balance_observed_at=_PAST,
+        position_observed_at=_PAST,
+        authoritative_until=datetime(2099, 1, 1, tzinfo=UTC),
+        now=_NOW,
+    )
+    assert result == EFFECTIVE_STALE
+
+
+def test_observed_stale_position_observation_is_stale() -> None:
+    """A fresh balance cannot launder a stale position observation into live.
+
+    Given: an ``observed`` row whose balance was observed seconds ago but whose
+        positions were last observed an hour ago (past their authority cap),
+        with a still-open authoritative_until,
+    When: the effective status is derived,
+    Then: it is ``stale`` — the effective authority end is also capped at
+        ``position_observed_at + AUTHORITY_MAX_WINDOW`` whenever positions are
+        observed, so old open positions are never shown as live truth.
+    """
+    result = derive_effective_account_status(
+        sync_status="observed",
+        balance_observed_at=_RECENT,
+        position_observed_at=_PAST,
+        authoritative_until=_FUTURE,
+        now=_NOW,
+    )
+    assert result == EFFECTIVE_STALE
+
+
+def test_observed_with_null_balance_observed_at_is_stale() -> None:
+    """An observed row with no balance observation time fails closed to stale.
+
+    Given: an ``observed`` row with a valid future authoritative_until but a
+        NULL balance_observed_at (no observation time to bound freshness),
+    When: the effective status is derived,
+    Then: it is ``stale`` — an observed row without an observation time cannot
+        be shown as fresh live truth.
+    """
+    result = derive_effective_account_status(
+        sync_status="observed",
+        balance_observed_at=None,
+        position_observed_at=_PAST,
+        authoritative_until=_FUTURE,
         now=_NOW,
     )
     assert result == EFFECTIVE_STALE

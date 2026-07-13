@@ -58,6 +58,7 @@ RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
     "strategies": Permission.READ_STRATEGIES,
     "orders": Permission.READ_ORDERS,
     "positions": Permission.READ_POSITIONS,
+    "accounts": Permission.READ_ACCOUNT_STATE,
     "signals": Permission.READ_MARKET_DATA,
     "health": Permission.READ_SYSTEM_STATUS,
     "admin": Permission.MANAGE_USERS,

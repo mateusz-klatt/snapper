@@ -43,6 +43,7 @@ from snapper.data.repository_types import VenueAccountStateRow
 _NOW = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
 _PAST = _NOW - timedelta(hours=1)
 _FUTURE = _NOW + timedelta(hours=1)
+_RECENT = _NOW - timedelta(minutes=1)
 
 _POS1_TS = "2026-07-13T11:00:00+00:00"
 _POS2_TS = "2026-07-13T11:05:00+00:00"
@@ -90,8 +91,8 @@ def _make_row(
     valuation_status: str = "native_only",
     balances_json: str | None = _VALID_BALANCES_JSON,
     open_positions_json: str | None = _VALID_POSITIONS_JSON,
-    balance_observed_at: datetime | None = _PAST,
-    position_observed_at: datetime | None = _PAST,
+    balance_observed_at: datetime | None = _RECENT,
+    position_observed_at: datetime | None = _RECENT,
     current_attempt_observation_id: int = 5,
     balance_payload_source_observation_id: int | None = 5,
     position_payload_source_observation_id: int | None = 5,
@@ -435,6 +436,27 @@ def test_observed_past_authoritative_window_is_stale_not_authoritative() -> None
     Then: the effective status is ``stale`` and is_authoritative is False.
     """
     result = build_portfolio_account_state(_make_row(authoritative_until=_PAST), _NOW)
+    assert result.effective_status == EFFECTIVE_STALE
+    assert result.is_authoritative is False
+
+
+def test_forged_far_future_authority_window_reads_stale_not_authoritative() -> None:
+    """A forged far-future authority window can never read as live truth.
+
+    Given: a coherent observed row whose balance was observed an hour ago but
+        whose authoritative_until is decades in the future (a tampered/migrated
+        window the DB and coherence checks alone do not bound relative to the
+        observation),
+    When: the row is mapped,
+    Then: the effective status is ``stale`` and is_authoritative is False — the
+        read surface caps the effective authority at the observation age.
+    """
+    row = _make_row(
+        balance_observed_at=_PAST,
+        position_observed_at=_PAST,
+        authoritative_until=datetime(2099, 1, 1, tzinfo=UTC),
+    )
+    result = build_portfolio_account_state(row, _NOW)
     assert result.effective_status == EFFECTIVE_STALE
     assert result.is_authoritative is False
 
@@ -843,8 +865,8 @@ def test_row_identity_provenance_and_ids_are_mapped() -> None:
     assert result.balance_payload_source_observation_id == 5
     assert result.position_payload_source_observation_id == 5
     assert result.error == "transient read failure"
-    assert result.balance_observed_at == _PAST
-    assert result.position_observed_at == _PAST
+    assert result.balance_observed_at == _RECENT
+    assert result.position_observed_at == _RECENT
     assert result.authoritative_until == _FUTURE
     assert result.public_id == "vas-1"
     assert result.session_id == "sess-1"

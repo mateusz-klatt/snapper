@@ -4660,6 +4660,7 @@ def _account_state_row(**overrides: Any) -> dict[str, Any]:
     Returns:
         A row dict shaped like ``VenueAccountStateRow`` for the read map.
     """
+    now = datetime.now(UTC)
     base: dict[str, Any] = {
         "wallet_public_id": "w-1",
         "exchange": "kraken",
@@ -4670,15 +4671,15 @@ def _account_state_row(**overrides: Any) -> dict[str, Any]:
         "valuation_status": "native_only",
         "balances_json": '[{"currency": "USD", "total": 100.0, "free": 100.0, "used": 0.0}]',
         "open_positions_json": None,
-        "balance_observed_at": datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+        "balance_observed_at": now - dt.timedelta(seconds=30),
         "position_observed_at": None,
         "current_attempt_observation_id": 1,
         "balance_payload_source_observation_id": 1,
         "position_payload_source_observation_id": None,
-        "authoritative_until": datetime(2099, 1, 1, tzinfo=UTC),
+        "authoritative_until": now + dt.timedelta(minutes=4),
         "error": None,
         "public_id": "acct-1",
-        "timestamp": datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+        "timestamp": now,
         "session_id": "sess-1",
         "sequence_id": 1,
     }

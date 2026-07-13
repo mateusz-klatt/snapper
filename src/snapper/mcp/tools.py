@@ -1947,10 +1947,12 @@ def register_mcp_tools(
                 ``error_code="account_state_not_found"``
                 (anti-enumeration: a caller cannot tell whether the
                 wallet exists or simply isn't theirs). ``None`` returns
-                states across every wallet the caller can see; an ADMIN
-                with no wallet filter (and any caller with no accessible
-                wallet) resolves to an empty result — a venue account
-                state is never served by an unfiltered scan.
+                states across every wallet the caller can see (ADMIN:
+                every wallet, an unfiltered scan mirroring
+                ``list_positions``; non-admin: every wallet reachable
+                through any operator the caller's claims hold membership
+                in — a non-admin with no accessible wallet resolves to an
+                empty result).
             exchange: Optional native exchange filter, applied post-fetch.
 
         Returns:
