@@ -10,6 +10,11 @@ import pandas as pd
 import pytest
 
 import snapper.indicators.ta_lib_adapter
+from snapper.indicators.bollinger import bollinger as pure_bollinger
+from snapper.indicators.cci import cci as pure_cci
+from snapper.indicators.ema import ema as pure_ema
+from snapper.indicators.mfi import mfi as pure_mfi
+from snapper.indicators.sma import sma as pure_sma
 from snapper.indicators.ta_lib_adapter import atr
 from snapper.indicators.ta_lib_adapter import bollinger
 from snapper.indicators.ta_lib_adapter import cci
@@ -25,6 +30,28 @@ from snapper.indicators.ta_lib_adapter import rsi
 from snapper.indicators.ta_lib_adapter import sma
 from snapper.indicators.ta_lib_adapter import stochastic
 from snapper.indicators.ta_lib_adapter import vwap
+
+
+def test_adapter_period_below_two_routes_to_pure_path() -> None:
+    """A period below 2 uses the pure path, which TA-Lib rejects.
+
+    Given: the adapter with its active backend,
+    When: the SMA, EMA, Bollinger, CCI and MFI facades are called with period=1,
+    Then: each returns the pure-Python result without raising TA_BAD_PARAM, so
+        the parameter domain is backend-independent.
+    """
+    s = pd.Series([1.0, 3.0, 2.0, 5.0])
+    high = pd.Series([2.0, 4.0, 3.0, 6.0])
+    low = pd.Series([0.5, 2.5, 1.5, 4.5])
+    close = pd.Series([1.0, 3.0, 2.0, 5.0])
+    volume = pd.Series([10.0, 20.0, 30.0, 40.0])
+    pd.testing.assert_series_equal(sma(s, 1), pure_sma(s, 1))
+    pd.testing.assert_series_equal(ema(s, 1), pure_ema(s, 1))
+    pd.testing.assert_frame_equal(bollinger(s, 1), pure_bollinger(s, 1))
+    pd.testing.assert_series_equal(cci(high, low, close, 1), pure_cci(high, low, close, 1))
+    pd.testing.assert_series_equal(
+        mfi(high, low, close, volume, 1), pure_mfi(high, low, close, volume, 1)
+    )
 
 
 class TestTALibAdapter:

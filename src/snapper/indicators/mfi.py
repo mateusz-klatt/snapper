@@ -11,11 +11,11 @@ oscillator bounded in [0, 100]:
 
 When the negative money flow over the window is zero (an all-up window),
 MFI is 100; when there is no money flow at all (a dead or flat window, both
-sums zero), MFI is 0, matching TA-Lib. Warmup positions (the first
-``period`` bars, since the typical-price direction needs a prior bar) are NaN.
-
-NOTE: this fallback may emit MFI one bar earlier than TA-Lib's ``MFI`` at
-the warmup boundary; the values agree wherever both backends are valid.
+sums zero), MFI is 0, matching TA-Lib. The first ``period`` positions are NaN
+(warmup): the typical-price direction needs a prior bar, so ``period`` complete
+directional flows are only available from index ``period`` onward, matching
+TA-Lib's ``MFI``. The high, low and volume series are aligned to ``close``
+positionally, so a differing index cannot corrupt the result.
 
 Example:
     Calculate a 14-period MFI::
@@ -63,8 +63,12 @@ def mfi(
         raise ValueError("mfi: high, low, close and volume must have equal length")
     if n == 0:
         return pd.Series([], dtype=float, index=close.index)
-    typical = (high.astype(float) + low.astype(float) + close.astype(float)) / 3.0
-    raw_flow = typical * volume.astype(float)
+    close = close.astype(float)
+    high = pd.Series(high.astype(float).to_numpy(), index=close.index)
+    low = pd.Series(low.astype(float).to_numpy(), index=close.index)
+    volume = pd.Series(volume.astype(float).to_numpy(), index=close.index)
+    typical = (high + low + close) / 3.0
+    raw_flow = typical * volume
     direction = typical.diff()
     positive = raw_flow.where(direction > 0.0, 0.0)
     negative = raw_flow.where(direction < 0.0, 0.0)
@@ -74,4 +78,8 @@ def mfi(
     money_ratio = positive_sum / safe_negative
     values = 100.0 - 100.0 / (1.0 + money_ratio)
     all_up = values.where((negative_sum > 0.0) | negative_sum.isna(), 100.0)
-    return all_up.where((positive_sum > 0.0) | (negative_sum > 0.0) | negative_sum.isna(), 0.0)
+    flat_adjusted = all_up.where(
+        (positive_sum > 0.0) | (negative_sum > 0.0) | negative_sum.isna(), 0.0
+    )
+    warmup = pd.Series(range(n), index=close.index) < period
+    return flat_adjusted.mask(warmup)

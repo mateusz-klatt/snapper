@@ -10,10 +10,11 @@ where ``lowest_low`` / ``highest_high`` are taken over ``k_period`` bars.
 When the range is zero over the window (flat market), ``%K`` is defined as
 0.0 to avoid division by zero.
 
-NOTE: ``%K`` becomes valid at index ``k_period - 1``. TA-Lib's ``STOCHF``
-aligns its ``%K`` output to ``%D``'s start (index ``k_period - 1 +
-d_period - 1``), so this fallback may emit ``%K`` a few bars earlier than the
-TA-Lib path; the values agree wherever both are valid.
+Both ``%K`` and ``%D`` become valid at index ``k_period + d_period - 2``,
+matching TA-Lib's ``STOCHF`` (which aligns its ``%K`` output to ``%D``'s
+start): ``%D`` is computed from the full ``%K`` series, then ``%K`` is masked
+to the same start. The high and low series are aligned to ``close``
+positionally, so a differing index cannot corrupt the result.
 
 Example:
     Calculate a 14/3 fast stochastic::
@@ -61,13 +62,15 @@ def stochastic(
     if n == 0:
         empty = pd.Series([], dtype=float, index=close.index)
         return pd.DataFrame({"k": empty, "d": empty})
-    h = high.astype(float)
-    low_series = low.astype(float)
     c = close.astype(float)
+    h = pd.Series(high.astype(float).to_numpy(), index=c.index)
+    low_series = pd.Series(low.astype(float).to_numpy(), index=c.index)
     lowest_low = low_series.rolling(window=k_period, min_periods=k_period).min()
     highest_high = h.rolling(window=k_period, min_periods=k_period).max()
     span = highest_high - lowest_low
     safe_span = span.where(span > 0.0)
-    percent_k = (100.0 * (c - lowest_low) / safe_span).where((span > 0.0) | span.isna(), 0.0)
-    percent_d = percent_k.rolling(window=d_period, min_periods=d_period).mean()
+    percent_k_full = (100.0 * (c - lowest_low) / safe_span).where((span > 0.0) | span.isna(), 0.0)
+    percent_d = percent_k_full.rolling(window=d_period, min_periods=d_period).mean()
+    warmup = pd.Series(range(n), index=c.index) < (k_period + d_period - 2)
+    percent_k = percent_k_full.mask(warmup)
     return pd.DataFrame({"k": percent_k, "d": percent_d})

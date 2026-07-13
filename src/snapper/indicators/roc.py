@@ -6,7 +6,8 @@ the close versus the close ``period`` bars earlier.
     ROC = 100 * (close - close[t - period]) / close[t - period]
 
 The first ``period`` positions are NaN (warmup). A prior close of exactly
-zero yields NaN at that position (guarded to avoid division by zero).
+zero yields 0.0 at that position, matching TA-Lib's ``ROC`` (which returns
+0.0 rather than dividing by a zero reference).
 
 Example:
     Calculate a 10-period ROC::
@@ -30,12 +31,13 @@ def roc(series: pd.Series, period: int = 10) -> pd.Series:
 
     Returns:
         Series of ROC values (percent) with the input index. The first
-        ``period`` values are NaN; a zero reference price yields NaN at
-        that position. Empty input yields an empty series.
+        ``period`` values are NaN; a zero reference price yields 0.0 at
+        that position (matching TA-Lib). Empty input yields an empty series.
     """
     if len(series) == 0:
         return pd.Series([], dtype=float, index=series.index)
     s = series.astype(float)
     prev = s.shift(period)
-    safe_prev = prev.where(prev.abs() > 0.0)
-    return 100.0 * (s - prev) / safe_prev
+    nonzero = prev.abs() > 0.0
+    result = 100.0 * (s - prev) / prev.where(nonzero)
+    return result.where(nonzero | prev.isna(), 0.0)

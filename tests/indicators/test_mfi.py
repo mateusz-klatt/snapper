@@ -11,7 +11,8 @@ def test_mfi_all_up_window_is_100() -> None:
 
     Given: a strictly rising typical price,
     When: mfi is called with period=2,
-    Then: the negative money flow is zero and MFI is 100.
+    Then: the first ``period`` positions are NaN (warmup) and the first
+        complete window has zero negative money flow, so MFI is 100.
     """
     high = pd.Series([10.0, 11.0, 12.0])
     low = pd.Series([9.0, 10.0, 11.0])
@@ -19,7 +20,7 @@ def test_mfi_all_up_window_is_100() -> None:
     volume = pd.Series([100.0, 100.0, 100.0])
     result = mfi(high, low, close, volume, period=2)
     assert pd.isna(result.iloc[0])
-    assert result.iloc[1] == pytest.approx(100.0)
+    assert pd.isna(result.iloc[1])
     assert result.iloc[2] == pytest.approx(100.0)
 
 
@@ -28,13 +29,14 @@ def test_mfi_dead_window_is_zero() -> None:
 
     Given: a flat window with no money flow (both sums zero),
     When: mfi is called with period=2,
-    Then: the value is 0.0, not 100, matching TA-Lib.
+    Then: after the warmup NaNs the first complete window is 0.0, not 100,
+        matching TA-Lib.
     """
     flat = pd.Series([10.0, 10.0, 10.0])
     volume = pd.Series([100.0, 100.0, 100.0])
     result = mfi(flat, flat, flat, volume, period=2)
     assert pd.isna(result.iloc[0])
-    assert result.iloc[1] == 0.0
+    assert pd.isna(result.iloc[1])
     assert result.iloc[2] == 0.0
 
 
@@ -77,3 +79,19 @@ def test_mfi_length_mismatch_raises() -> None:
     """
     with pytest.raises(ValueError, match="equal length"):
         mfi(pd.Series([1.0, 2.0]), pd.Series([1.0]), pd.Series([1.0, 2.0]), pd.Series([1.0, 2.0]))
+
+
+def test_mfi_aligns_companions_to_close_index() -> None:
+    """A differing high/low/volume index cannot corrupt the result.
+
+    Given: high, low and volume indexed differently from close,
+    When: mfi is called,
+    Then: the result is on close's index with matching length, not a union index.
+    """
+    close = pd.Series([9.5, 10.5, 11.5, 12.5], index=[0, 1, 2, 3])
+    high = pd.Series([10.0, 11.0, 12.0, 13.0], index=[10, 11, 12, 13])
+    low = pd.Series([9.0, 9.5, 10.5, 11.0], index=[20, 21, 22, 23])
+    volume = pd.Series([100.0, 120.0, 90.0, 110.0], index=[30, 31, 32, 33])
+    result = mfi(high, low, close, volume, period=2)
+    assert list(result.index) == list(close.index)
+    assert len(result) == len(close)
