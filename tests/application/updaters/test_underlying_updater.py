@@ -3,6 +3,7 @@
 import re
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -1090,6 +1091,12 @@ class TestBuildFallbackSpec:
             position_limit_long=None,
             position_limit_short=None,
             status=None,
+            contract_size=None,
+            quantity_unit=None,
+            spec_source=None,
+            spec_version=None,
+            spec_observed_at=None,
+            unit_certified=False,
             expiry_at=None,
             instrument_kind="spot",
             funding_type=None,
@@ -1134,6 +1141,12 @@ class TestBuildFallbackSpec:
             position_limit_long=None,
             position_limit_short=None,
             status="online",
+            contract_size=None,
+            quantity_unit=None,
+            spec_source=None,
+            spec_version=None,
+            spec_observed_at=None,
+            unit_certified=False,
             expiry_at=None,
             instrument_kind=None,
             funding_type=None,
@@ -1164,13 +1177,19 @@ class TestBuildFallbackSpec:
             position_limit_long=10,
             position_limit_short=8,
             status="online",
+            contract_size=Decimal("3.125"),
+            quantity_unit="contract_count",
+            spec_source="kraken_futures:rest.get_instruments",
+            spec_version="s2a-v1:test",
+            spec_observed_at=datetime(2026, 4, 1, tzinfo=UTC),
+            unit_certified=True,
             expiry_at=datetime(2026, 6, 20, 16, 30, tzinfo=UTC),
             instrument_kind="future",
-            funding_type=None,
-            funding_frequency_hours=None,
+            funding_type="perpetual_funding",
+            funding_frequency_hours=1,
             rollover_rate_long=None,
             rollover_rate_short=None,
-            max_funding_rate=None,
+            max_funding_rate=0.0025,
         )
 
         result = UnderlyingUpdater._base_fallback_spec(existing)
@@ -1185,8 +1204,17 @@ class TestBuildFallbackSpec:
         assert result.position_limit_long == 10
         assert result.position_limit_short == 8
         assert result.status == "online"
+        assert result.contract_size == Decimal("3.125")
+        assert result.quantity_unit == "contract_count"
+        assert result.spec_source == "kraken_futures:rest.get_instruments"
+        assert result.spec_version == "s2a-v1:test"
+        assert result.spec_observed_at == datetime(2026, 4, 1, tzinfo=UTC)
+        assert result.unit_certified is True
         assert result.expiry_at == datetime(2026, 6, 20, 16, 30, tzinfo=UTC)
         assert result.instrument_kind == "future"
+        assert result.funding_type == "perpetual_funding"
+        assert result.funding_frequency_hours == 1
+        assert result.max_funding_rate == 0.0025
 
 
 class TestYamlSpecFallbackIntegration:
@@ -1275,6 +1303,12 @@ class TestYamlSpecFallbackIntegration:
                 position_limit_long=None,
                 position_limit_short=None,
                 status=None,
+                contract_size=None,
+                quantity_unit=None,
+                spec_source=None,
+                spec_version=None,
+                spec_observed_at=None,
+                unit_certified=False,
                 expiry_at=None,
                 instrument_kind="spot",
                 funding_type=None,

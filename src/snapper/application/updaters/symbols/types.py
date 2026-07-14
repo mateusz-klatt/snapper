@@ -5,7 +5,33 @@ _fetch_symbols(). Using TypedDicts instead of dict[str, Any]
 provides compile-time key validation and IDE support.
 """
 
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from typing import Literal
 from typing import TypedDict
+
+
+@dataclass(frozen=True)
+class InstrumentMetadataInput:
+    """Atomic venue-sourced precision, limit, status, and unit metadata."""
+
+    tick_size: float | None
+    lot_size: float | None
+    min_order_size: float | None
+    max_order_size: float | None
+    cost_decimals: int | None
+    qty_decimals: int | None
+    margin_initial: float | None
+    position_limit_long: int | None
+    position_limit_short: int | None
+    status: str | None
+    contract_size: Decimal | None
+    quantity_unit: Literal["base_asset", "contract_count"] | None
+    spec_source: str | None
+    spec_version: str | None
+    spec_observed_at: datetime | None
+    unit_certified: bool
 
 
 class _WalutomatSymbolRequired(TypedDict):
@@ -51,9 +77,12 @@ class KrakenSymbolRecord(_KrakenSymbolRequired, total=False):
     produce None from _extract_tokenized_pair().
     margin is "true"/"false" string — present only for REST pairs
     where CCXT market data exposes leverage_buy/leverage_sell.
-    is_btnl is the "true" marker for Kraken Bitnomial perpetual
+    is_btnl is the "true" marker for Kraken Bitnomial spot
     discoveries (BTC/USD:BTNL etc.) routed through the BTNL persist
     path with ``can_trade=False`` and an instrument_kind override.
+    metadata is present only for authoritative CCXT catalog records;
+    WS-only, BTNL, and direct tokenized REST records omit it so they
+    cannot refresh or replace venue precision provenance.
     """
 
     asset_class: str
@@ -63,3 +92,4 @@ class KrakenSymbolRecord(_KrakenSymbolRequired, total=False):
     kraken_websocket_symbol: str
     kraken_rest_symbol: str
     ccxt_symbol: str | None
+    metadata: InstrumentMetadataInput

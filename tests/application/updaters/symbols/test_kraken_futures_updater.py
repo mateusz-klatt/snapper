@@ -2,6 +2,7 @@
 
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -17,10 +18,12 @@ from snapper.application.updaters.symbols.kraken_futures import _classify_asset_
 from snapper.application.updaters.symbols.kraken_futures import _extract_expiry
 from snapper.application.updaters.symbols.kraken_futures import _normalize_currency
 from snapper.application.updaters.symbols.kraken_futures import _parse_expiry_datetime
+from snapper.application.updaters.symbols.kraken_futures import _positive_decimal
 from snapper.config.app import AppSettings
 from snapper.core.types import AliasChannelEnum
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
+from snapper.data.models import InstrumentSpec
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import SymbolMarketDataChannelCapability
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
@@ -624,6 +627,126 @@ class TestUpdateDatabase:
             assert call_kwargs.kwargs["funding_type"] is None
             assert call_kwargs.kwargs["funding_frequency_hours"] is None
             assert call_kwargs.kwargs["max_funding_rate"] is None
+
+
+class TestInstrumentMetadata:
+    """Venue metadata extraction and per-instrument certification rules."""
+
+    @pytest.mark.parametrize("value", ("not-a-number", "-1"))
+    def test_positive_decimal_rejects_invalid_or_non_positive_values(self, value: str) -> None:
+        """Malformed and non-positive catalog numbers fail closed."""
+        assert _positive_decimal(value) is None
+
+    @pytest.mark.parametrize(
+        ("symbol", "product_type", "last_trading_time", "expected_kind"),
+        (
+            ("PF_XBTUSD", "futures_vanilla", None, "perpetual"),
+            ("PI_XBTUSD", "futures_inverse", None, "perpetual"),
+            (
+                "FI_XBTUSD_260620",
+                "futures_inverse",
+                "2026-06-20T16:30:00.000Z",
+                "future",
+            ),
+        ),
+    )
+    def test_tradeable_contract_families_receive_complete_certified_metadata(
+        self,
+        symbol: str,
+        product_type: str,
+        last_trading_time: str | None,
+        expected_kind: str,
+    ) -> None:
+        """Linear, inverse, and dated instruments use the same unscaled contract unit."""
+        observed_at = datetime(2026, 7, 14, tzinfo=UTC)
+        schema = _make_schema(
+            symbol=symbol,
+            type=product_type,
+            tickSize=0.25,
+            contractSize=3.5,
+            contractValueTradePrecision=1,
+            maxPositionSize=17.0,
+            marginLevels=[{"contracts": 10, "initialMargin": 0.02, "maintenanceMargin": 0.01}],
+            lastTradingTime=last_trading_time,
+        )
+        fields = KrakenFuturesSymbolUpdaterService._instrument_spec_fields(schema, observed_at)
+        metadata = fields[5]
+        assert fields[1] == expected_kind
+        assert metadata.tick_size == 0.25
+        assert metadata.lot_size == 3.5
+        assert metadata.min_order_size == 3.5
+        assert metadata.contract_size == Decimal("3.5")
+        assert metadata.quantity_unit == "contract_count"
+        assert metadata.qty_decimals == 1
+        assert metadata.cost_decimals is None
+        assert metadata.max_order_size is None
+        assert metadata.margin_initial == 0.02
+        assert metadata.position_limit_long == 17
+        assert metadata.position_limit_short == 17
+        assert metadata.status == "active"
+        assert metadata.spec_source == "kraken_futures:rest.get_instruments"
+        assert metadata.spec_observed_at == observed_at
+        assert metadata.unit_certified is True
+
+    @pytest.mark.parametrize(
+        "schema",
+        (
+            _make_schema(symbol="rr_xbtusd", contractValueTradePrecision=0),
+            _make_schema(symbol="in_xbtusd", contractValueTradePrecision=0),
+            _make_schema(tradeable=False, contractValueTradePrecision=0),
+            _make_schema(contractSize=0, contractValueTradePrecision=0),
+            _make_schema(tickSize=float("nan"), contractValueTradePrecision=0),
+            _make_schema(contractValueTradePrecision=None),
+        ),
+    )
+    def test_reference_inactive_or_incomplete_instrument_never_certifies(
+        self,
+        schema: KrakenFuturesInstrumentSchema,
+    ) -> None:
+        """Reference products and incomplete received definitions fail closed."""
+        fields = KrakenFuturesSymbolUpdaterService._instrument_spec_fields(
+            schema, datetime(2026, 7, 14, tzinfo=UTC)
+        )
+        assert fields[5].unit_certified is False
+
+    def test_fractional_position_limit_is_not_persisted_as_any_order_limit(self) -> None:
+        """A fractional venue position ceiling remains absent from integer limit fields."""
+        schema = _make_schema(
+            contractSize=2.5,
+            contractValueTradePrecision=1,
+            maxPositionSize=17.5,
+        )
+        metadata = KrakenFuturesSymbolUpdaterService._instrument_spec_fields(schema)[5]
+        assert metadata.position_limit_long is None
+        assert metadata.position_limit_short is None
+        assert metadata.max_order_size is None
+        assert metadata.cost_decimals is None
+
+    def test_persist_instrument_schema_writes_atomic_metadata_block(self) -> None:
+        """The updater wiring persists the complete metadata observation through SCD2."""
+        engine = create_engine("sqlite:///:memory:", future=True)
+        Base.metadata.create_all(engine)
+        updater = KrakenFuturesSymbolUpdaterService()
+        observed_at = datetime(2026, 7, 14, tzinfo=UTC)
+        schema = _make_schema(
+            contractSize=2.5,
+            tickSize=0.25,
+            contractValueTradePrecision=1,
+            maxPositionSize=40.0,
+        )
+        with sessionmaker(bind=engine, future=True)() as session:
+            symbol_public_id = updater._persist_instrument_schema(session, schema, observed_at)
+            session.commit()
+            spec = session.execute(select(InstrumentSpec)).scalar_one()
+        assert symbol_public_id is not None
+        assert spec.tick_size == 0.25
+        assert spec.lot_size == 2.5
+        assert spec.min_order_size == 2.5
+        assert spec.contract_size == Decimal("2.5")
+        assert spec.quantity_unit == "contract_count"
+        assert spec.spec_observed_at == observed_at
+        assert spec.unit_certified is True
+        engine.dispose()
 
 
 class TestRuntimeTradeChannelRevalidation:

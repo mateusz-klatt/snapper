@@ -4,9 +4,46 @@ Verifies that TypedDict records can be constructed with required keys,
 optional keys are truly optional, and key access patterns work correctly.
 """
 
+from dataclasses import FrozenInstanceError
+from datetime import UTC
+from datetime import datetime
+from decimal import Decimal
+
+import pytest
+
+from snapper.application.updaters.symbols.types import InstrumentMetadataInput
 from snapper.application.updaters.symbols.types import KrakenSymbolRecord
 from snapper.application.updaters.symbols.types import PolygonSymbolRecord
 from snapper.application.updaters.symbols.types import WalutomatSymbolRecord
+
+
+def test_instrument_metadata_input_is_frozen() -> None:
+    """Atomic metadata cannot be mutated after construction.
+
+    Given: A complete instrument metadata payload,
+    When: A caller attempts to replace one field,
+    Then: The frozen dataclass rejects the mutation.
+    """
+    metadata = InstrumentMetadataInput(
+        tick_size=0.5,
+        lot_size=2.0,
+        min_order_size=2.0,
+        max_order_size=None,
+        cost_decimals=None,
+        qty_decimals=0,
+        margin_initial=None,
+        position_limit_long=None,
+        position_limit_short=None,
+        status="active",
+        contract_size=Decimal("2"),
+        quantity_unit="contract_count",
+        spec_source="kraken_futures:rest.get_instruments",
+        spec_version="s2a-v1:test",
+        spec_observed_at=datetime(2026, 7, 14, tzinfo=UTC),
+        unit_certified=True,
+    )
+    with pytest.raises(FrozenInstanceError):
+        metadata.__setattr__("tick_size", 1.0)
 
 
 class TestWalutomatSymbolRecord:

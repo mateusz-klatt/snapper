@@ -58,6 +58,7 @@ from datetime import UTC
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
+from decimal import Decimal
 from inspect import isawaitable
 from typing import Any
 from typing import Final
@@ -716,6 +717,10 @@ class InstrumentSpecInput:
     are populated by the per-exchange symbol updaters and consumed by
     the funding accrual coroutine. Spot exchanges without margin
     (Walutomat) leave them ``None``.
+
+    The contract and spec-provenance fields form the persisted venue
+    metadata evidence block. Writers must carry or replace that block
+    atomically; ``unit_certified`` remains subject to read-time freshness.
     """
 
     tick_size: float | None = None
@@ -728,6 +733,12 @@ class InstrumentSpecInput:
     position_limit_long: int | None = None
     position_limit_short: int | None = None
     status: str | None = None
+    contract_size: Decimal | None = None
+    quantity_unit: str | None = None
+    spec_source: str | None = None
+    spec_version: str | None = None
+    spec_observed_at: datetime | None = None
+    unit_certified: bool = False
     expiry_at: datetime | None = None
     instrument_kind: str | None = None
     funding_type: str | None = None
@@ -735,6 +746,25 @@ class InstrumentSpecInput:
     rollover_rate_long: float | None = None
     rollover_rate_short: float | None = None
     max_funding_rate: float | None = None
+
+
+def is_effective_unit_certified(
+    spec: InstrumentSpecRow,
+    evaluated_at: datetime,
+) -> bool:
+    """Return whether stored unit evidence is valid at the evaluation instant.
+
+    Certification fails closed for missing, naive, future-dated, or twelve-hour-old
+    observations. Callers must evaluate this predicate every time rather than treating
+    the stored evidence flag as permanent.
+    """
+    observed_at = spec["spec_observed_at"]
+    if not spec["unit_certified"] or observed_at is None:
+        return False
+    if observed_at.utcoffset() is None or evaluated_at.utcoffset() is None:
+        return False
+    age = evaluated_at - observed_at
+    return timedelta(0) <= age < timedelta(hours=12)
 
 
 class _ClosableConnection(Protocol):
@@ -5668,6 +5698,12 @@ class SQLAlchemyRepository(Repository):
                 position_limit_long=row.position_limit_long,
                 position_limit_short=row.position_limit_short,
                 status=row.status,
+                contract_size=row.contract_size,
+                quantity_unit=row.quantity_unit,
+                spec_source=row.spec_source,
+                spec_version=row.spec_version,
+                spec_observed_at=row.spec_observed_at,
+                unit_certified=row.unit_certified,
                 expiry_at=row.expiry_at,
                 instrument_kind=row.instrument_kind,
                 funding_type=row.funding_type,

@@ -3,22 +3,29 @@
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from snapper.application.updaters.symbols.base import PRESERVE_EXISTING
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.types import InstrumentMetadataInput
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
+from snapper.data.models import ExactDecimalNumeric
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import Symbol
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import is_effective_unit_certified
+from snapper.data.repository_types import InstrumentSpecRow
 
 
 @pytest.fixture()
@@ -41,6 +48,63 @@ async def repo() -> SQLAlchemyRepository:
 def _ts(offset_hours: int = 0) -> datetime:
     """Return a deterministic UTC timestamp with optional hour offset."""
     return datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=offset_hours)
+
+
+def _metadata(
+    observed_at: datetime,
+    unit_certified: bool = True,
+    spec_source: str | None = "kraken_futures:rest.get_instruments",
+    spec_version: str | None = "s2a-v1:test",
+) -> InstrumentMetadataInput:
+    """Build complete futures metadata for repository and updater tests."""
+    return InstrumentMetadataInput(
+        tick_size=0.25,
+        lot_size=3.0,
+        min_order_size=3.0,
+        max_order_size=None,
+        cost_decimals=None,
+        qty_decimals=0,
+        margin_initial=0.02,
+        position_limit_long=100,
+        position_limit_short=100,
+        status="active",
+        contract_size=Decimal("3.000000000000000001"),
+        quantity_unit="contract_count",
+        spec_source=spec_source,
+        spec_version=spec_version,
+        spec_observed_at=observed_at,
+        unit_certified=unit_certified,
+    )
+
+
+def _certified_row(observed_at: datetime | None, stored: bool = True) -> InstrumentSpecRow:
+    """Build a complete typed repository row for freshness tests."""
+    return InstrumentSpecRow(
+        instrument_public_id="inst-1",
+        tick_size=0.25,
+        lot_size=3.0,
+        min_order_size=3.0,
+        max_order_size=None,
+        cost_decimals=None,
+        qty_decimals=0,
+        margin_initial=0.02,
+        position_limit_long=100,
+        position_limit_short=100,
+        status="active",
+        contract_size=Decimal("3"),
+        quantity_unit="contract_count",
+        spec_source="kraken_futures:rest.get_instruments",
+        spec_version="s2a-v1:test",
+        spec_observed_at=observed_at,
+        unit_certified=stored,
+        expiry_at=None,
+        instrument_kind="perpetual",
+        funding_type="perpetual_funding",
+        funding_frequency_hours=1,
+        rollover_rate_long=None,
+        rollover_rate_short=None,
+        max_funding_rate=0.0025,
+    )
 
 
 async def _seed_instrument(
@@ -156,6 +220,49 @@ class TestInstrumentSpecModel:
         assert row.expiry_at is not None
         assert row.expiry_at.tzinfo is not None
 
+    def test_exact_sqlite_decimal_codec_still_enforces_positive_check(
+        self, db_session: Session
+    ) -> None:
+        """Exact SQLite text storage cannot bypass the positive contract CHECK."""
+        now = datetime.now(UTC)
+        db_session.add(
+            InstrumentSpec(
+                public_id="spec-negative",
+                instrument_public_id="inst-negative",
+                contract_size=Decimal("-0.000000000000000001"),
+                session_id="session-negative",
+                sequence_id=1,
+                timestamp=now,
+                known_to=KNOWN_TO_MAX,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+
+
+class TestExactDecimalNumeric:
+    """Tests for dialect-specific exact Decimal processors."""
+
+    def test_postgresql_processors_preserve_and_normalize_decimals(self) -> None:
+        """PostgreSQL processors preserve native Decimals and normalize legacy values."""
+        numeric = ExactDecimalNumeric(38, 18)
+        dialect = postgresql_dialect()
+        native = Decimal("1.500000000000000001")
+
+        bind_processor = numeric.bind_processor(dialect)
+        assert bind_processor is numeric._native_bind
+        assert bind_processor(native) is native
+
+        result_processor = numeric.result_processor(dialect, None)
+        assert result_processor is numeric._native_result
+        assert result_processor(None) is None
+        assert result_processor(native) is native
+        assert result_processor("1.5") == Decimal("1.5")
+
+    def test_sqlite_result_processor_decodes_legacy_numeric_value(self) -> None:
+        """SQLite result processing accepts legacy values without the exact-text suffix."""
+        assert ExactDecimalNumeric._sqlite_result(1.5) == Decimal("1.5")
+
 
 class TestGetInstrumentSpec:
     """Tests for async get_instrument_spec repository method."""
@@ -169,6 +276,12 @@ class TestGetInstrumentSpec:
         spec = InstrumentSpecInput(
             tick_size=0.01,
             lot_size=1.0,
+            contract_size=Decimal("7.125000000000000001"),
+            quantity_unit="contract_count",
+            spec_source="kraken_futures:rest.get_instruments",
+            spec_version="s2a-v1:test",
+            spec_observed_at=ts,
+            unit_certified=True,
             expiry_at=expiry,
             instrument_kind="future",
         )
@@ -184,6 +297,12 @@ class TestGetInstrumentSpec:
         assert row["instrument_public_id"] == ipid
         assert row["tick_size"] == 0.01
         assert row["lot_size"] == 1.0
+        assert row["contract_size"] == Decimal("7.125000000000000001")
+        assert row["quantity_unit"] == "contract_count"
+        assert row["spec_source"] == "kraken_futures:rest.get_instruments"
+        assert row["spec_version"] == "s2a-v1:test"
+        assert row["spec_observed_at"] == ts
+        assert row["unit_certified"] is True
         assert row["expiry_at"] == expiry
         assert row["instrument_kind"] == "future"
 
@@ -214,6 +333,12 @@ class TestReviseInstrumentSpecWithExpiry:
         ipid = await _seed_instrument(repo, "BTC-USD", "kraken", ts)
         spec = InstrumentSpecInput(
             tick_size=0.01,
+            contract_size=Decimal("2.5"),
+            quantity_unit="contract_count",
+            spec_source="kraken_futures:rest.get_instruments",
+            spec_version="s2a-v1:unchanged",
+            spec_observed_at=ts,
+            unit_certified=True,
             expiry_at=ts + timedelta(days=30),
             instrument_kind="future",
         )
@@ -233,6 +358,14 @@ class TestReviseInstrumentSpecWithExpiry:
         ipid = await _seed_instrument(repo, "BTC-USD", "kraken", ts)
         spec = InstrumentSpecInput(
             tick_size=0.01,
+            lot_size=2.5,
+            min_order_size=2.5,
+            contract_size=Decimal("2.5"),
+            quantity_unit="contract_count",
+            spec_source="kraken_futures:rest.get_instruments",
+            spec_version="s2a-v1:no-op",
+            spec_observed_at=ts,
+            unit_certified=True,
             expiry_at=ts + timedelta(days=30),
             instrument_kind="future",
         )
@@ -373,6 +506,12 @@ class TestSyncHelpers:
         spec = InstrumentSpecInput(
             tick_size=0.5,
             lot_size=1.0,
+            contract_size=Decimal("2.5"),
+            quantity_unit="contract_count",
+            spec_source="kraken_futures:rest.get_instruments",
+            spec_version="s2a-v1:sync",
+            spec_observed_at=ts,
+            unit_certified=True,
             expiry_at=expiry,
             instrument_kind="future",
         )
@@ -394,6 +533,12 @@ class TestSyncHelpers:
         assert row.instrument_public_id == ipid
         assert row.tick_size == 0.5
         assert row.lot_size == 1.0
+        assert row.contract_size == Decimal("2.5")
+        assert row.quantity_unit == "contract_count"
+        assert row.spec_source == "kraken_futures:rest.get_instruments"
+        assert row.spec_version == "s2a-v1:sync"
+        assert row.spec_observed_at == ts
+        assert row.unit_certified is True
         assert row.expiry_at is not None
         assert row.instrument_kind == "future"
 
@@ -403,6 +548,14 @@ class TestSyncHelpers:
         ts = _ts()
         spec = InstrumentSpecInput(
             tick_size=0.5,
+            lot_size=2.5,
+            min_order_size=2.5,
+            contract_size=Decimal("2.5"),
+            quantity_unit="contract_count",
+            spec_source="kraken_futures:rest.get_instruments",
+            spec_version="s2a-v1:no-op-sync",
+            spec_observed_at=ts,
+            unit_certified=True,
             expiry_at=ts + timedelta(days=30),
             instrument_kind="future",
         )
@@ -709,3 +862,246 @@ class TestPreserveExistingSentinel:
     def test_is_falsy_guard(self) -> None:
         """Verify sentinel is truthy so it is distinguishable from None."""
         assert PRESERVE_EXISTING
+
+
+class TestInstrumentMetadataRevision:
+    """Atomic metadata replacement and preservation contracts."""
+
+    def test_omitted_metadata_preserves_observation_without_refresh(
+        self, sync_repo: tuple[DatabaseRepository, str]
+    ) -> None:
+        """A funding-only revision carries the complete metadata block unchanged."""
+        repo, instrument_public_id = sync_repo
+        first = _ts()
+        second = _ts(1)
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session,
+                instrument_public_id,
+                first,
+                "session-1",
+                1,
+                instrument_kind="perpetual",
+                metadata=_metadata(first),
+            )
+            session.commit()
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session,
+                instrument_public_id,
+                second,
+                "session-1",
+                2,
+                instrument_kind="perpetual",
+                funding_type="perpetual_funding",
+            )
+            session.commit()
+            row = DatabaseRepository.get_instrument_spec_sync(
+                session, instrument_public_id, second + timedelta(seconds=1)
+            )
+        assert row is not None
+        assert row.contract_size == Decimal("3.000000000000000001")
+        assert row.spec_observed_at == first
+        assert row.unit_certified is True
+
+    def test_supplied_metadata_replaces_nulls_and_forces_incomplete_false(
+        self, sync_repo: tuple[DatabaseRepository, str]
+    ) -> None:
+        """A received incomplete definition clears old values and cannot certify."""
+        repo, instrument_public_id = sync_repo
+        first = _ts()
+        second = _ts(1)
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session,
+                instrument_public_id,
+                first,
+                "session-1",
+                1,
+                metadata=_metadata(first),
+            )
+            session.commit()
+        incomplete = InstrumentMetadataInput(
+            tick_size=None,
+            lot_size=None,
+            min_order_size=None,
+            max_order_size=None,
+            cost_decimals=None,
+            qty_decimals=None,
+            margin_initial=None,
+            position_limit_long=None,
+            position_limit_short=None,
+            status="active",
+            contract_size=Decimal("9"),
+            quantity_unit="contract_count",
+            spec_source="kraken_futures:rest.get_instruments",
+            spec_version="s2a-v1:incomplete",
+            spec_observed_at=second,
+            unit_certified=True,
+        )
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session,
+                instrument_public_id,
+                second,
+                "session-1",
+                2,
+                metadata=incomplete,
+            )
+            session.commit()
+            row = DatabaseRepository.get_instrument_spec_sync(
+                session, instrument_public_id, second + timedelta(seconds=1)
+            )
+        assert row is not None
+        assert row.tick_size is None
+        assert row.lot_size is None
+        assert row.contract_size == Decimal("9")
+        assert row.unit_certified is False
+
+    def test_partial_provenance_is_cleared_atomically(
+        self, sync_repo: tuple[DatabaseRepository, str]
+    ) -> None:
+        """A partial provenance triple is discarded instead of bypassing the CHECK."""
+        repo, instrument_public_id = sync_repo
+        observed_at = _ts()
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session,
+                instrument_public_id,
+                observed_at,
+                "session-1",
+                1,
+                metadata=_metadata(observed_at, spec_version=None),
+            )
+            session.commit()
+            row = DatabaseRepository.get_instrument_spec_sync(
+                session, instrument_public_id, observed_at + timedelta(seconds=1)
+            )
+        assert row is not None
+        assert row.spec_source is None
+        assert row.spec_version is None
+        assert row.spec_observed_at is None
+        assert row.unit_certified is False
+
+    def test_explicit_empty_metadata_clears_the_whole_block(
+        self, sync_repo: tuple[DatabaseRepository, str]
+    ) -> None:
+        """A supplied all-NULL observation clears metadata without inventing provenance."""
+        repo, instrument_public_id = sync_repo
+        first = _ts()
+        second = _ts(1)
+        empty = InstrumentMetadataInput(
+            tick_size=None,
+            lot_size=None,
+            min_order_size=None,
+            max_order_size=None,
+            cost_decimals=None,
+            qty_decimals=None,
+            margin_initial=None,
+            position_limit_long=None,
+            position_limit_short=None,
+            status=None,
+            contract_size=None,
+            quantity_unit=None,
+            spec_source=None,
+            spec_version=None,
+            spec_observed_at=None,
+            unit_certified=False,
+        )
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session,
+                instrument_public_id,
+                first,
+                "session-1",
+                1,
+                metadata=_metadata(first),
+            )
+            SymbolUpdaterService._revise_instrument_spec(
+                session,
+                instrument_public_id,
+                second,
+                "session-1",
+                2,
+                metadata=empty,
+            )
+            session.commit()
+            row = DatabaseRepository.get_instrument_spec_sync(
+                session, instrument_public_id, second + timedelta(seconds=1)
+            )
+        assert row is not None
+        assert row.tick_size is None
+        assert row.contract_size is None
+        assert row.quantity_unit is None
+        assert row.spec_source is None
+        assert row.spec_version is None
+        assert row.spec_observed_at is None
+        assert row.unit_certified is False
+
+    def test_identical_reobservation_creates_new_scd2_version(
+        self, sync_repo: tuple[DatabaseRepository, str]
+    ) -> None:
+        """A fresh observation time closes and inserts even when content is unchanged."""
+        repo, instrument_public_id = sync_repo
+        first = _ts()
+        second = _ts(1)
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session,
+                instrument_public_id,
+                first,
+                "session-1",
+                1,
+                metadata=_metadata(first),
+            )
+            SymbolUpdaterService._revise_instrument_spec(
+                session,
+                instrument_public_id,
+                second,
+                "session-1",
+                2,
+                metadata=_metadata(second),
+            )
+            session.commit()
+            rows = (
+                session.execute(
+                    select(InstrumentSpec)
+                    .where(InstrumentSpec.instrument_public_id == instrument_public_id)
+                    .order_by(InstrumentSpec.timestamp)
+                )
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 2
+        assert rows[0].known_to == second
+        assert rows[1].spec_observed_at == second
+
+
+class TestEffectiveUnitCertification:
+    """Twelve-hour read-time unit evidence freshness contract."""
+
+    def test_fresh_certification_is_effective(self) -> None:
+        """A stored certification just below twelve hours remains effective."""
+        observed_at = _ts()
+        assert is_effective_unit_certified(
+            _certified_row(observed_at), observed_at + timedelta(hours=12, microseconds=-1)
+        )
+
+    @pytest.mark.parametrize(
+        ("row", "evaluated_at"),
+        (
+            (_certified_row(_ts()), _ts() + timedelta(hours=12)),
+            (_certified_row(_ts(), stored=False), _ts() + timedelta(hours=1)),
+            (_certified_row(None), _ts() + timedelta(hours=1)),
+            (_certified_row(_ts() + timedelta(seconds=1)), _ts()),
+            (_certified_row(datetime(2026, 1, 1)), _ts()),
+            (_certified_row(_ts()), datetime(2026, 1, 1)),
+        ),
+    )
+    def test_stale_missing_naive_future_or_stored_false_fails_closed(
+        self,
+        row: InstrumentSpecRow,
+        evaluated_at: datetime,
+    ) -> None:
+        """Every invalid freshness input produces an ineffective certification."""
+        assert is_effective_unit_certified(row, evaluated_at) is False

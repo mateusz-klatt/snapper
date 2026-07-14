@@ -22,6 +22,9 @@ from sqlalchemy.orm import sessionmaker
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.application.updaters.symbols.kraken import SPOT_ROLLOVER_RATES_EPOCH
 from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
+from snapper.application.updaters.symbols.kraken import _amount_limit
+from snapper.application.updaters.symbols.kraken import _positive_decimal
+from snapper.application.updaters.symbols.kraken import _precision_decimals
 from snapper.application.updaters.symbols.types import KrakenSymbolRecord
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
@@ -2964,12 +2967,28 @@ class TestKrakenPersistHelpers:
             session.commit()
 
         with db_session_factory() as session:
-            symbol_data: dict[str, Any] = {
-                "native_symbol": "BTC-USD",
-                "kraken_websocket_symbol": "BTC/USD",
-                "kraken_rest_symbol": "XXBTZUSD",
-                "ccxt_symbol": "BTC/USD",
-            }
+            extracted = updater._extract_ccxt_market_pair(
+                "BTC/USD",
+                {
+                    "id": "XXBTZUSD",
+                    "base": "BTC",
+                    "quote": "USD",
+                    "active": True,
+                    "precision": {"price": 0.5, "amount": 0.001, "cost": 0.01},
+                    "limits": {"amount": {"min": 0.001, "max": 25}},
+                },
+                now,
+            )
+            assert extracted is not None
+            symbol_data = KrakenSymbolRecord(
+                native_symbol="BTC-USD",
+                base_currency="BTC",
+                quote_currency="USD",
+                kraken_websocket_symbol="BTC/USD",
+                kraken_rest_symbol="XXBTZUSD",
+                ccxt_symbol="BTC/USD",
+                metadata=extracted["metadata"],
+            )
             _sym = session.query(Symbol).filter_by(native_symbol=symbol_data["native_symbol"]).one()
             created, updated = updater._persist_rest_symbol(
                 session, symbol_data, _sym.public_id, now
@@ -2996,6 +3015,18 @@ class TestKrakenPersistHelpers:
             assert cap.can_trade is True
             assert cap.can_market_data is True
             assert cap.reason is None
+            spec = session.query(InstrumentSpec).one()
+            assert spec.tick_size == 0.5
+            assert spec.lot_size == 0.001
+            assert spec.min_order_size == 0.001
+            assert spec.max_order_size == 25.0
+            assert spec.cost_decimals == 2
+            assert spec.qty_decimals == 3
+            assert spec.contract_size is None
+            assert spec.quantity_unit == "base_asset"
+            assert spec.spec_source == "kraken:ccxt.load_markets"
+            assert spec.spec_observed_at == now
+            assert spec.unit_certified is False
 
 
 class TestKrakenExtractCcxtMarginField:
@@ -3012,10 +3043,60 @@ class TestKrakenExtractCcxtMarginField:
             "id": "XXBTZUSD",
             "info": {"base": "XXBT", "quote": "ZUSD"},
             "margin": True,
+            "active": True,
+            "precision": {"price": 0.5, "amount": 0.0001, "cost": 0.01},
+            "limits": {"amount": {"min": 0.001, "max": 50}},
         }
-        result = KrakenSymbolUpdaterService._extract_ccxt_market_pair("BTC/USD", market)
+        observed_at = datetime(2026, 7, 14, tzinfo=UTC)
+        result = KrakenSymbolUpdaterService._extract_ccxt_market_pair(
+            "BTC/USD", market, observed_at
+        )
         assert result is not None
         assert result["margin"] == "true"
+        metadata = result["metadata"]
+        assert metadata.tick_size == 0.5
+        assert metadata.lot_size == 0.0001
+        assert metadata.min_order_size == 0.001
+        assert metadata.max_order_size == 50.0
+        assert metadata.cost_decimals == 2
+        assert metadata.qty_decimals == 4
+        assert metadata.status == "active"
+        assert metadata.contract_size is None
+        assert metadata.quantity_unit == "base_asset"
+        assert metadata.spec_source == "kraken:ccxt.load_markets"
+        assert metadata.spec_observed_at == observed_at
+        assert metadata.unit_certified is False
+
+    def test_changed_precision_changes_version_and_invalid_values_fail_closed(self) -> None:
+        """Content versions track precision while malformed values remain explicit NULLs."""
+        observed_at = datetime(2026, 7, 14, tzinfo=UTC)
+        first = KrakenSymbolUpdaterService._extract_ccxt_market_pair(
+            "BTC/USD",
+            {
+                "id": "XXBTZUSD",
+                "base": "BTC",
+                "quote": "USD",
+                "precision": {"price": 0.5, "amount": 0.001},
+            },
+            observed_at,
+        )
+        changed = KrakenSymbolUpdaterService._extract_ccxt_market_pair(
+            "BTC/USD",
+            {
+                "id": "XXBTZUSD",
+                "base": "BTC",
+                "quote": "USD",
+                "precision": {"price": 0.25, "amount": "invalid"},
+            },
+            observed_at,
+        )
+        assert first is not None
+        assert changed is not None
+        assert first["metadata"].spec_version != changed["metadata"].spec_version
+        assert changed["metadata"].tick_size == 0.25
+        assert changed["metadata"].lot_size is None
+        assert changed["metadata"].qty_decimals is None
+        assert changed["metadata"].unit_certified is False
 
     def test_margin_false_when_market_has_no_margin(self) -> None:
         """Verify margin field is 'false' when CCXT market reports margin=False.
@@ -3047,6 +3128,28 @@ class TestKrakenExtractCcxtMarginField:
         result = KrakenSymbolUpdaterService._extract_ccxt_market_pair("BAR/USD", market)
         assert result is not None
         assert result["margin"] == "false"
+
+
+class TestKrakenNumericMetadataHelpers:
+    """Tests for fail-closed Kraken numeric metadata parsing."""
+
+    @pytest.mark.parametrize("value", ("0", "-1", "nan"))
+    def test_positive_decimal_rejects_non_positive_or_non_finite_values(self, value: str) -> None:
+        """Non-positive and non-finite venue values are not accepted."""
+        assert _positive_decimal(value) is None
+
+    @pytest.mark.parametrize("value", ("-1", "nan"))
+    def test_precision_decimals_rejects_negative_or_non_finite_values(self, value: str) -> None:
+        """Negative and non-finite precision increments are not accepted."""
+        assert _precision_decimals(value) is None
+
+    def test_amount_limit_reads_valid_nested_amount_limit(self) -> None:
+        """A positive amount limit is read from a valid CCXT limits payload."""
+        assert _amount_limit({"limits": {"amount": {"min": "0.5"}}}, "min") == 0.5
+
+    def test_amount_limit_returns_none_when_amount_is_not_a_mapping(self) -> None:
+        """A limits payload whose amount is absent or non-mapping yields no limit."""
+        assert _amount_limit({"limits": {"amount": None}}, "min") is None
 
 
 class TestKrakenBuildMappingsMarginField:
@@ -3096,6 +3199,24 @@ class TestKrakenBuildMappingsMarginField:
         mappings, _ = updater._build_mappings_from_rest(rest_data)
         assert "FOO-USD" in mappings
         assert mappings["FOO-USD"]["margin"] == "false"
+
+    def test_metadata_propagated_to_mapping(self, updater: KrakenSymbolUpdaterService) -> None:
+        """REST mappings retain the atomic metadata observation from CCXT extraction."""
+        extracted = updater._extract_ccxt_market_pair(
+            "BTC/USD",
+            {
+                "id": "XXBTZUSD",
+                "base": "BTC",
+                "quote": "USD",
+                "precision": {"price": 0.5, "amount": 0.001},
+            },
+            datetime(2026, 7, 14, tzinfo=UTC),
+        )
+        assert extracted is not None
+
+        mappings, _ = updater._build_mappings_from_rest({extracted["rest_id"]: extracted})
+
+        assert mappings["BTC-USD"]["metadata"] is extracted["metadata"]
 
 
 class TestKrakenSpotMarginFunding:
@@ -3614,15 +3735,29 @@ class TestKrakenMarginToNonMarginTransition:
             )
             session.add(sym)
             session.flush()
-            margin_data: dict[str, Any] = {
-                "native_symbol": "XYZ-USD",
-                "base_currency": "XYZ",
-                "quote_currency": "USD",
-                "kraken_websocket_symbol": "XYZ/USD",
-                "kraken_rest_symbol": "XYZUSD",
-                "ccxt_symbol": "XYZ/USD",
-                "margin": "true",
-            }
+            extracted = updater._extract_ccxt_market_pair(
+                "XYZ/USD",
+                {
+                    "id": "XYZUSD",
+                    "base": "XYZ",
+                    "quote": "USD",
+                    "active": True,
+                    "precision": {"price": 0.01, "amount": 0.001},
+                    "margin": True,
+                },
+                now,
+            )
+            assert extracted is not None
+            margin_data = KrakenSymbolRecord(
+                native_symbol="XYZ-USD",
+                base_currency="XYZ",
+                quote_currency="USD",
+                kraken_websocket_symbol="XYZ/USD",
+                kraken_rest_symbol="XYZUSD",
+                ccxt_symbol="XYZ/USD",
+                margin="true",
+                metadata=extracted["metadata"],
+            )
             updater._persist_rest_symbol(session, margin_data, sym.public_id, now)
             session.commit()
 
@@ -3631,6 +3766,8 @@ class TestKrakenMarginToNonMarginTransition:
                 session.query(InstrumentSpec).filter(InstrumentSpec.known_to == KNOWN_TO_MAX).one()
             )
             assert spec.funding_type == "spot_margin_rollover"
+            original_version = spec.spec_version
+            assert spec.spec_observed_at == now
             active_rates = (
                 session.query(FundingRate).filter(FundingRate.known_to == KNOWN_TO_MAX).all()
             )
@@ -3652,6 +3789,9 @@ class TestKrakenMarginToNonMarginTransition:
             )
             assert spec.funding_type is None
             assert spec.rollover_rate_long is None
+            assert spec.spec_observed_at == now
+            assert spec.spec_version == original_version
+            assert spec.unit_certified is False
             active_rates = (
                 session.query(FundingRate).filter(FundingRate.known_to == KNOWN_TO_MAX).all()
             )
@@ -3805,6 +3945,9 @@ class TestKrakenBtnlDiscovery:
             assert spec.instrument_kind == "spot"
             assert spec.funding_type is None
             assert spec.rollover_rate_long is None
+            assert spec.contract_size is None
+            assert spec.spec_observed_at is None
+            assert spec.unit_certified is False
             assert spec.rollover_rate_short is None
 
     @pytest.mark.asyncio

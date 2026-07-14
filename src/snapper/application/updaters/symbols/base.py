@@ -11,6 +11,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
+from typing import Literal
 from uuid import uuid7
 
 import zmq
@@ -22,6 +23,7 @@ from sqlalchemy import update
 
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import get_settings_service
+from snapper.application.updaters.symbols.types import InstrumentMetadataInput
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
@@ -498,23 +500,15 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         rollover_rate_long: float | None | _Preserve = PRESERVE_EXISTING,
         rollover_rate_short: float | None | _Preserve = PRESERVE_EXISTING,
         max_funding_rate: float | None | _Preserve = PRESERVE_EXISTING,
+        metadata: InstrumentMetadataInput | _Preserve = PRESERVE_EXISTING,
     ) -> None:
         """Merge spec fields into InstrumentSpec (sync).
 
-        Reads the existing spec (if any) and carries forward fields the
-        caller did not provide. Three patterns coexist in the merged
-        payload:
-
-        - **Carry-forward** (``tick_size``, ``lot_size``, etc.): always
-          taken from the existing row, since these helpers do not accept
-          them as parameters.
-        - **Direct assignment** (``expiry_at``, ``instrument_kind``):
-          always overwritten with the parameter value, even when None.
-        - **Sentinel carry-forward** (the funding fields): resolved
-          via :meth:`_resolve_funding_fields`. ``PRESERVE_EXISTING``
-          (the default) carries forward the existing value;
-          ``None`` explicitly clears the field to NULL; any concrete
-          value overwrites.
+        Reads the existing spec and treats venue metadata as one atomic block.
+        Omitting ``metadata`` carries the entire existing block forward without
+        refreshing its observation time. Supplying it replaces every metadata
+        field, including explicit NULLs. Direct kind and expiry assignments and
+        the funding sentinel protocol remain independent of that block.
 
         Args:
             session: SQLAlchemy sync session.
@@ -538,6 +532,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             max_funding_rate: Per-boundary cap on perpetual funding
                 rate magnitude, ``None`` to clear, or
                 ``PRESERVE_EXISTING`` to carry forward.
+            metadata: Atomic venue metadata replacement, or
+                ``PRESERVE_EXISTING`` to carry the existing block forward.
         """
         existing = DatabaseRepository.get_instrument_spec_sync(
             session,
@@ -558,17 +554,101 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             rollover_rate_short,
             max_funding_rate,
         )
+        if isinstance(metadata, _Preserve):
+            existing_quantity_unit: Literal["base_asset", "contract_count"] | None = None
+            if existing is not None and existing.quantity_unit == "base_asset":
+                existing_quantity_unit = "base_asset"
+            elif existing is not None and existing.quantity_unit == "contract_count":
+                existing_quantity_unit = "contract_count"
+            resolved_metadata = InstrumentMetadataInput(
+                tick_size=existing.tick_size if existing else None,
+                lot_size=existing.lot_size if existing else None,
+                min_order_size=existing.min_order_size if existing else None,
+                max_order_size=existing.max_order_size if existing else None,
+                cost_decimals=existing.cost_decimals if existing else None,
+                qty_decimals=existing.qty_decimals if existing else None,
+                margin_initial=existing.margin_initial if existing else None,
+                position_limit_long=existing.position_limit_long if existing else None,
+                position_limit_short=existing.position_limit_short if existing else None,
+                status=existing.status if existing else None,
+                contract_size=existing.contract_size if existing else None,
+                quantity_unit=existing_quantity_unit,
+                spec_source=existing.spec_source if existing else None,
+                spec_version=existing.spec_version if existing else None,
+                spec_observed_at=existing.spec_observed_at if existing else None,
+                unit_certified=existing.unit_certified if existing else False,
+            )
+        else:
+            provenance_complete = (
+                metadata.spec_source is not None
+                and metadata.spec_version is not None
+                and metadata.spec_observed_at is not None
+            )
+            provenance_empty = (
+                metadata.spec_source is None
+                and metadata.spec_version is None
+                and metadata.spec_observed_at is None
+            )
+            spec_source = metadata.spec_source if provenance_complete else None
+            spec_version = metadata.spec_version if provenance_complete else None
+            spec_observed_at = metadata.spec_observed_at if provenance_complete else None
+            positive_contract_size = (
+                metadata.contract_size is not None and metadata.contract_size > 0
+            )
+            complete_unit_evidence = (
+                provenance_complete
+                and metadata.quantity_unit == "contract_count"
+                and positive_contract_size
+                and metadata.tick_size is not None
+                and metadata.tick_size > 0
+                and metadata.lot_size is not None
+                and metadata.lot_size > 0
+                and metadata.min_order_size is not None
+                and metadata.min_order_size > 0
+                and metadata.qty_decimals is not None
+                and metadata.qty_decimals >= 0
+                and metadata.status == "active"
+            )
+            resolved_metadata = InstrumentMetadataInput(
+                tick_size=metadata.tick_size,
+                lot_size=metadata.lot_size,
+                min_order_size=metadata.min_order_size,
+                max_order_size=metadata.max_order_size,
+                cost_decimals=metadata.cost_decimals,
+                qty_decimals=metadata.qty_decimals,
+                margin_initial=metadata.margin_initial,
+                position_limit_long=metadata.position_limit_long,
+                position_limit_short=metadata.position_limit_short,
+                status=metadata.status,
+                contract_size=metadata.contract_size,
+                quantity_unit=metadata.quantity_unit,
+                spec_source=spec_source,
+                spec_version=spec_version,
+                spec_observed_at=spec_observed_at,
+                unit_certified=metadata.unit_certified and complete_unit_evidence,
+            )
+            if not provenance_complete and not provenance_empty:
+                logger.warning(
+                    "Discarding partial instrument metadata provenance for {}",
+                    instrument_public_id,
+                )
         spec = InstrumentSpecInput(
-            tick_size=existing.tick_size if existing else None,
-            lot_size=existing.lot_size if existing else None,
-            min_order_size=existing.min_order_size if existing else None,
-            max_order_size=existing.max_order_size if existing else None,
-            cost_decimals=existing.cost_decimals if existing else None,
-            qty_decimals=existing.qty_decimals if existing else None,
-            margin_initial=existing.margin_initial if existing else None,
-            position_limit_long=existing.position_limit_long if existing else None,
-            position_limit_short=existing.position_limit_short if existing else None,
-            status=existing.status if existing else None,
+            tick_size=resolved_metadata.tick_size,
+            lot_size=resolved_metadata.lot_size,
+            min_order_size=resolved_metadata.min_order_size,
+            max_order_size=resolved_metadata.max_order_size,
+            cost_decimals=resolved_metadata.cost_decimals,
+            qty_decimals=resolved_metadata.qty_decimals,
+            margin_initial=resolved_metadata.margin_initial,
+            position_limit_long=resolved_metadata.position_limit_long,
+            position_limit_short=resolved_metadata.position_limit_short,
+            status=resolved_metadata.status,
+            contract_size=resolved_metadata.contract_size,
+            quantity_unit=resolved_metadata.quantity_unit,
+            spec_source=resolved_metadata.spec_source,
+            spec_version=resolved_metadata.spec_version,
+            spec_observed_at=resolved_metadata.spec_observed_at,
+            unit_certified=resolved_metadata.unit_certified,
             expiry_at=expiry_at,
             instrument_kind=instrument_kind,
             funding_type=resolved_funding_type,

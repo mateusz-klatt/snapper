@@ -7,6 +7,7 @@ data transfer.
 """
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from typing import NotRequired
 from typing import TypedDict
@@ -1004,6 +1005,12 @@ class InstrumentSpecRow(TypedDict):
     position_limit_long: int | None
     position_limit_short: int | None
     status: str | None
+    contract_size: Decimal | None
+    quantity_unit: str | None
+    spec_source: str | None
+    spec_version: str | None
+    spec_observed_at: datetime | None
+    unit_certified: bool
     expiry_at: datetime | None
     instrument_kind: str | None
     funding_type: str | None

@@ -6,10 +6,15 @@ including support for tokenized assets.
 """
 
 import asyncio
+import hashlib
 import inspect
+import json
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
+from decimal import InvalidOperation
 from typing import Any
+from typing import TypedDict
 from typing import cast
 
 from loguru import logger
@@ -18,7 +23,9 @@ from sqlalchemy.exc import IntegrityError
 
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
+from snapper.application.updaters.symbols.base import PRESERVE_EXISTING
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.types import InstrumentMetadataInput
 from snapper.application.updaters.symbols.types import KrakenSymbolRecord
 from snapper.config.settings import AppSettings
 from snapper.core.types import AliasChannelEnum
@@ -45,6 +52,110 @@ _BTNL_CAPABILITY_REASON = (
     "only; direct Bitnomial order route not integrated"
 )
 _BTNL_DISCOVERY_WINDOW_SECONDS = 90.0
+_SPOT_SPEC_SOURCE = "kraken:ccxt.load_markets"
+_SPEC_ETL_VERSION = "s2a-v1"
+
+
+class _KrakenPairInfo(TypedDict, total=False):
+    """Normalized Kraken REST pair fields used before native-symbol mapping."""
+
+    base: str
+    quote: str
+    ccxt_symbol: str | None
+    asset_class: str
+    margin: str
+    metadata: InstrumentMetadataInput
+
+
+class _KrakenExtractedPair(_KrakenPairInfo):
+    """CCXT pair extraction result including its Kraken REST identifier."""
+
+    rest_id: str
+
+
+def _positive_decimal(value: object) -> Decimal | None:
+    """Parse a finite positive venue number without a float-to-Decimal conversion."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not parsed.is_finite() or parsed <= 0:
+        return None
+    return parsed
+
+
+def _precision_decimals(value: object) -> int | None:
+    """Derive decimal places from a finite non-negative CCXT precision increment."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not parsed.is_finite() or parsed < 0:
+        return None
+    exponent = cast(int, parsed.normalize().as_tuple().exponent)
+    return max(0, -exponent)
+
+
+def _amount_limit(market: dict[str, Any], key: str) -> float | None:
+    """Read one positive CCXT amount limit from the external market payload."""
+    limits = market.get("limits")
+    if not isinstance(limits, dict):
+        return None
+    amount = limits.get("amount")
+    if not isinstance(amount, dict):
+        return None
+    parsed = _positive_decimal(amount.get(key))
+    return float(parsed) if parsed is not None else None
+
+
+def _spot_metadata(market: dict[str, Any], observed_at: datetime) -> InstrumentMetadataInput:
+    """Build the atomic spot metadata block from one CCXT market definition."""
+    precision = market.get("precision")
+    price_precision = precision.get("price") if isinstance(precision, dict) else None
+    amount_precision = precision.get("amount") if isinstance(precision, dict) else None
+    cost_precision = precision.get("cost") if isinstance(precision, dict) else None
+    tick_decimal = _positive_decimal(price_precision)
+    lot_decimal = _positive_decimal(amount_precision)
+    min_order_size = _amount_limit(market, "min")
+    max_order_size = _amount_limit(market, "max")
+    cost_decimals = _precision_decimals(cost_precision)
+    qty_decimals = _precision_decimals(amount_precision)
+    active = market.get("active")
+    status = "active" if active is True else "inactive" if active is False else None
+    version_payload = {
+        "tick_size": str(tick_decimal) if tick_decimal is not None else None,
+        "lot_size": str(lot_decimal) if lot_decimal is not None else None,
+        "min_order_size": min_order_size,
+        "max_order_size": max_order_size,
+        "cost_decimals": cost_decimals,
+        "qty_decimals": qty_decimals,
+        "status": status,
+        "quantity_unit": "base_asset",
+    }
+    content = json.dumps(version_payload, sort_keys=True, separators=(",", ":"))
+    version = f"{_SPEC_ETL_VERSION}:{hashlib.sha256(content.encode()).hexdigest()}"
+    return InstrumentMetadataInput(
+        tick_size=float(tick_decimal) if tick_decimal is not None else None,
+        lot_size=float(lot_decimal) if lot_decimal is not None else None,
+        min_order_size=min_order_size,
+        max_order_size=max_order_size,
+        cost_decimals=cost_decimals,
+        qty_decimals=qty_decimals,
+        margin_initial=None,
+        position_limit_long=None,
+        position_limit_short=None,
+        status=status,
+        contract_size=None,
+        quantity_unit="base_asset",
+        spec_source=_SPOT_SPEC_SOURCE,
+        spec_version=version,
+        spec_observed_at=observed_at,
+        unit_certified=False,
+    )
 
 
 @register_process(
@@ -116,12 +227,17 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         return "kraken_symbols_last_update"
 
     @staticmethod
-    def _extract_ccxt_market_pair(symbol: str, market: dict[str, Any]) -> dict[str, str] | None:
+    def _extract_ccxt_market_pair(
+        symbol: str,
+        market: dict[str, Any],
+        observed_at: datetime | None = None,
+    ) -> _KrakenExtractedPair | None:
         """Extract base/quote pair info from a single CCXT market entry.
 
         Args:
             symbol: CCXT symbol string.
             market: CCXT market data dictionary.
+            observed_at: Shared UTC catalog observation time, or current UTC when omitted.
 
         Returns:
             Pair info dict, or None if required fields are missing.
@@ -141,10 +257,11 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             "ccxt_symbol": symbol,
             "asset_class": "currency",
             "margin": "true" if market.get("margin") else "false",
+            "metadata": _spot_metadata(market, observed_at or datetime.now(UTC)),
         }
 
     @staticmethod
-    def _extract_tokenized_pair(pair_name: str, pair_data: Any) -> dict[str, Any] | None:
+    def _extract_tokenized_pair(pair_name: str, pair_data: Any) -> _KrakenPairInfo | None:
         """Extract base/quote from a tokenized asset pair entry.
 
         Args:
@@ -167,27 +284,39 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             "asset_class": "tokenized_asset",
         }
 
-    def _collect_ccxt_pairs(self, markets: dict[str, Any]) -> dict[str, dict[str, str]]:
+    def _collect_ccxt_pairs(
+        self,
+        markets: dict[str, Any],
+        observed_at: datetime | None = None,
+    ) -> dict[str, _KrakenPairInfo]:
         """Collect asset pairs from CCXT markets data.
 
         Args:
             markets: CCXT markets dictionary.
+            observed_at: Shared UTC catalog observation time, or current UTC when omitted.
 
         Returns:
             Dict mapping REST symbol to pair info.
         """
-        asset_pairs: dict[str, dict[str, str]] = {}
+        asset_pairs: dict[str, _KrakenPairInfo] = {}
+        observation_time = observed_at or datetime.now(UTC)
         for symbol, market in markets.items():
-            pair_info = self._extract_ccxt_market_pair(symbol, market)
+            pair_info = self._extract_ccxt_market_pair(symbol, market, observation_time)
             if pair_info is not None:
-                rest_id = pair_info.pop("rest_id")
-                asset_pairs[rest_id] = pair_info
+                asset_pairs[pair_info["rest_id"]] = _KrakenPairInfo(
+                    base=pair_info["base"],
+                    quote=pair_info["quote"],
+                    ccxt_symbol=pair_info["ccxt_symbol"],
+                    asset_class=pair_info["asset_class"],
+                    margin=pair_info["margin"],
+                    metadata=pair_info["metadata"],
+                )
         logger.debug(f"Loaded {len(asset_pairs)} pairs from CCXT markets")
         return asset_pairs
 
     def _collect_tokenized_pairs(
         self, tokenized_result: dict[str, Any]
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, _KrakenPairInfo]:
         """Collect asset pairs from tokenized assets API response.
 
         Args:
@@ -196,7 +325,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         Returns:
             Dict mapping pair name to pair info.
         """
-        pairs: dict[str, dict[str, Any]] = {}
+        pairs: dict[str, _KrakenPairInfo] = {}
         for pair_name, pair_data in tokenized_result.items():
             token_info = self._extract_tokenized_pair(pair_name, pair_data)
             if token_info is not None:
@@ -248,7 +377,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             raise RuntimeError(f"Unexpected tokenized result type: {type(tokenized_result)}")
         return tokenized_result
 
-    async def load_kraken_rest_symbols(self) -> dict[str, dict[str, str]]:
+    async def load_kraken_rest_symbols(self) -> dict[str, _KrakenPairInfo]:
         """Load symbols from CCXT and Kraken REST API.
 
         Fetches both standard pairs via CCXT and tokenized assets
@@ -260,7 +389,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         logger.info("Loading symbols from CCXT markets + Kraken REST API")
         try:
             ccxt_client, markets = await self._fetch_ccxt_markets()
-            asset_pairs: dict[str, Any] = self._collect_ccxt_pairs(markets)
+            asset_pairs = self._collect_ccxt_pairs(markets, datetime.now(UTC))
             tokenized_result = await self._fetch_tokenized_result(ccxt_client)
             asset_pairs.update(self._collect_tokenized_pairs(tokenized_result))
             logger.info(
@@ -568,7 +697,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         return native_symbol, ws_symbol, base_currency, quote_currency
 
     def _resolve_pair(
-        self, kraken_rest_symbol: str, pair_info: dict[str, str]
+        self, kraken_rest_symbol: str, pair_info: _KrakenPairInfo
     ) -> tuple[str, str, str, str] | None:
         """Resolve a single REST pair into mapping components.
 
@@ -590,8 +719,8 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         return self._resolve_standard_pair(base, quote)
 
     def _build_mappings_from_rest(
-        self, kraken_rest_symbols: dict[str, dict[str, str]]
-    ) -> tuple[dict[str, dict[str, str]], set[str]]:
+        self, kraken_rest_symbols: dict[str, _KrakenPairInfo]
+    ) -> tuple[dict[str, KrakenSymbolRecord], set[str]]:
         """Build symbol data dicts from REST symbol data.
 
         Args:
@@ -600,7 +729,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         Returns:
             Tuple of (mappings dict keyed by native_symbol, ws_symbols_to_verify set).
         """
-        mappings: dict[str, dict[str, str]] = {}
+        mappings: dict[str, KrakenSymbolRecord] = {}
         ws_symbols_to_verify: set[str] = set()
         for kraken_rest_symbol, pair_info in kraken_rest_symbols.items():
             resolved = self._resolve_pair(kraken_rest_symbol, pair_info)
@@ -608,16 +737,20 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 continue
             native_symbol, ws_symbol, base_currency, quote_currency = resolved
             ws_symbols_to_verify.add(ws_symbol)
-            mappings[native_symbol] = {
-                "native_symbol": native_symbol,
-                "kraken_websocket_symbol": ws_symbol,
-                "kraken_rest_symbol": kraken_rest_symbol,
-                "ccxt_symbol": pair_info.get("ccxt_symbol", ""),
-                "base_currency": base_currency,
-                "quote_currency": quote_currency,
-                "asset_class": pair_info.get("asset_class", "currency"),
-                "margin": pair_info.get("margin", "false"),
-            }
+            record = KrakenSymbolRecord(
+                native_symbol=native_symbol,
+                kraken_websocket_symbol=ws_symbol,
+                kraken_rest_symbol=kraken_rest_symbol,
+                ccxt_symbol=pair_info.get("ccxt_symbol", ""),
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+                asset_class=pair_info.get("asset_class", "currency"),
+                margin=pair_info.get("margin", "false"),
+            )
+            metadata = pair_info.get("metadata")
+            if metadata is not None:
+                record["metadata"] = metadata
+            mappings[native_symbol] = record
         return mappings, ws_symbols_to_verify
 
     @staticmethod
@@ -637,7 +770,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         return len(base) > 1 and base.endswith("x") and base != base.upper()
 
     @staticmethod
-    def _build_ws_only_mapping(instrument: dict[str, str]) -> dict[str, str]:
+    def _build_ws_only_mapping(instrument: dict[str, str]) -> KrakenSymbolRecord:
         """Build a mapping dict for a WS-only instrument.
 
         WS-only instruments have no REST/CCXT representation and are
@@ -658,18 +791,18 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         asset_class = (
             "tokenized_asset" if KrakenSymbolUpdaterService._is_tokenized_base(base) else "crypto"
         )
-        return {
-            "native_symbol": native_symbol,
-            "kraken_websocket_symbol": ws_symbol,
-            "kraken_rest_symbol": "",
-            "ccxt_symbol": "",
-            "base_currency": base,
-            "quote_currency": quote,
-            "asset_class": asset_class,
-            "ws_only": "true",
-        }
+        return KrakenSymbolRecord(
+            native_symbol=native_symbol,
+            kraken_websocket_symbol=ws_symbol,
+            kraken_rest_symbol="",
+            ccxt_symbol="",
+            base_currency=base,
+            quote_currency=quote,
+            asset_class=asset_class,
+            ws_only="true",
+        )
 
-    async def build_verified_mappings(self) -> tuple[dict[str, dict[str, str]], bool]:
+    async def build_verified_mappings(self) -> tuple[dict[str, KrakenSymbolRecord], bool]:
         """Build verified symbol data from REST and WebSocket data.
 
         Loads symbols from REST, verifies via WebSocket, discovers WS-only
@@ -749,10 +882,10 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             btnl_discoveries = {}
         for native, btnl_mapping in btnl_discoveries.items():
             if native not in mappings:
-                mappings[native] = cast(dict[str, str], btnl_mapping)
+                mappings[native] = btnl_mapping
                 btnl_count += 1
         logger.info(f"Fetched and verified {len(mappings)} Kraken symbols ({btnl_count} BTNL)")
-        return list(mappings.values())
+        return cast(list[dict[str, Any]], list(mappings.values()))
 
     def _persist_ws_only_symbol(
         self, session: Any, symbol_data: KrakenSymbolRecord, symbol_public_id: str, now: datetime
@@ -976,6 +1109,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             funding_frequency_hours=4 if is_margin else None,
             rollover_rate_long=_SPOT_ROLLOVER_RATE_LONG if is_margin else None,
             rollover_rate_short=_SPOT_ROLLOVER_RATE_SHORT if is_margin else None,
+            metadata=symbol_data.get("metadata", PRESERVE_EXISTING),
         )
         if is_margin:
             self._seed_spot_rollover_rates(

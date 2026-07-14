@@ -2144,7 +2144,7 @@ class TestOrderMethods:
             symbol="BTC-USD-PERP",
             side=OrderSideEnum.BUY,
             type=ExchangeOrderTypeEnum.LIMIT,
-            amount=5.0,
+            amount=7.25,
             price=66000.0,
             client_order_id="my-order-1",
         )
@@ -2161,11 +2161,19 @@ class TestOrderMethods:
         assert result.symbol == "BTC-USD-PERP"
         assert result.side == OrderSideEnum.BUY
         assert result.status == ExchangeOrderStatusEnum.OPEN
-        assert result.amount == pytest.approx(5.0)
+        assert result.amount == pytest.approx(7.25)
         assert result.price == pytest.approx(66000.0)
         assert result.client_order_id == "my-order-1"
         assert result.db_order_id == 42
         assert result.db_order_public_id == "pub-id-001"
+        auth_client._trade_client.create_order.assert_called_once_with(
+            orderType="lmt",
+            size=7.25,
+            symbol="PF_XBTUSD",
+            side="buy",
+            limitPrice=66000.0,
+            cliOrdId="my-order-1",
+        )
         mock_log.assert_awaited_once()
 
     @pytest.mark.asyncio

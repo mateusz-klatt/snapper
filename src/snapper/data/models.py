@@ -1,7 +1,9 @@
 """SQLAlchemy ORM models for Snapper persistence."""
 
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 from uuid import uuid7
@@ -125,6 +127,57 @@ class UUIDColumn(TypeDecorator[str]):
 
     def process_result_value(self, value: str | None, dialect: Dialect) -> str | None:
         return value
+
+
+class ExactDecimalNumeric(Numeric[Decimal]):
+    """Native Numeric on PostgreSQL with exact Decimal text storage on SQLite.
+
+    SQLite applies NUMERIC affinity by converting ordinary decimal text to an
+    IEEE-754 value, which loses precision before SQLAlchemy can reconstruct a
+    Decimal. A non-numeric suffix keeps the storage class as text while the
+    declared column type remains NUMERIC(38,18). Result processing removes the
+    suffix. PostgreSQL uses SQLAlchemy's native Numeric processors unchanged.
+    """
+
+    def bind_processor(self, dialect: Dialect) -> Callable[[Any], Any] | None:
+        """Return the dialect-specific exact Decimal bind processor."""
+        if dialect.name == "sqlite":
+            return lambda value: None if value is None else f"{value}d"
+        return self._native_bind
+
+    def result_processor(
+        self,
+        dialect: Dialect,
+        coltype: object,
+    ) -> Callable[[Any], Any] | None:
+        """Return the dialect-specific exact Decimal result processor."""
+        if dialect.name == "sqlite":
+            return self._sqlite_result
+        return self._native_result
+
+    @staticmethod
+    def _native_bind(value: object) -> object:
+        """Pass a Decimal directly to a native Numeric database driver."""
+        return value
+
+    @staticmethod
+    def _native_result(value: object) -> Decimal | None:
+        """Normalize a native Numeric result to Decimal."""
+        if value is None:
+            return None
+        if isinstance(value, Decimal):
+            return value
+        return Decimal(str(value))
+
+    @staticmethod
+    def _sqlite_result(value: object) -> Decimal | None:
+        """Decode one SQLite exact-text value or a legacy numeric value."""
+        if value is None:
+            return None
+        raw = str(value)
+        if raw.endswith("d"):
+            raw = raw[:-1]
+        return Decimal(raw)
 
 
 __all__ = [
@@ -1767,6 +1820,28 @@ class InstrumentSpec(TemporalMixin, Base):
             "funding_type IS NULL OR funding_type IN ('spot_margin_rollover', 'perpetual_funding')",
             name="ck_instrument_specs_funding_type",
         ),
+        CheckConstraint(
+            "contract_size IS NULL OR CAST(contract_size AS NUMERIC) > 0",
+            name="ck_instrument_specs_contract_size_positive",
+        ),
+        CheckConstraint(
+            "quantity_unit IS NULL OR quantity_unit IN ('base_asset', 'contract_count')",
+            name="ck_instrument_specs_quantity_unit",
+        ),
+        CheckConstraint(
+            "(spec_source IS NULL AND spec_version IS NULL AND spec_observed_at IS NULL) OR "
+            "(spec_source IS NOT NULL AND spec_version IS NOT NULL AND "
+            "spec_observed_at IS NOT NULL)",
+            name="ck_instrument_specs_provenance",
+        ),
+        CheckConstraint(
+            "unit_certified = false OR (contract_size IS NOT NULL AND "
+            "CAST(contract_size AS NUMERIC) > 0 AND "
+            "quantity_unit IS NOT NULL AND quantity_unit = 'contract_count' AND "
+            "spec_source IS NOT NULL AND "
+            "spec_version IS NOT NULL AND spec_observed_at IS NOT NULL)",
+            name="ck_instrument_specs_unit_certified",
+        ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     tick_size: Mapped[float | None] = mapped_column(Float, comment="Minimum price increment")
@@ -1806,6 +1881,24 @@ class InstrumentSpec(TemporalMixin, Base):
     )
     max_funding_rate: Mapped[float | None] = mapped_column(
         Float, comment="Per-boundary cap on perpetual funding rate magnitude"
+    )
+    contract_size: Mapped[Decimal | None] = mapped_column(
+        ExactDecimalNumeric(38, 18), comment="Venue contract multiplier"
+    )
+    quantity_unit: Mapped[str | None] = mapped_column(
+        String(32), comment="Canonical order and position quantity unit"
+    )
+    spec_source: Mapped[str | None] = mapped_column(
+        String(64), comment="Authoritative instrument metadata source"
+    )
+    spec_version: Mapped[str | None] = mapped_column(
+        String(96), comment="Instrument metadata ETL and content version"
+    )
+    spec_observed_at: Mapped[datetime | None] = mapped_column(
+        TZDateTime(), comment="UTC time when the venue definition was observed"
+    )
+    unit_certified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
     )
 
 

@@ -15,8 +15,12 @@ Native symbol format:
     - Index:             ``BTC-USD-IDX``
 """
 
+import hashlib
+import json
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
+from decimal import InvalidOperation
 from typing import Any
 
 from loguru import logger
@@ -27,6 +31,7 @@ from sqlalchemy.orm import Session as SyncSession
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.types import InstrumentMetadataInput
 from snapper.config.settings import AppSettings
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
@@ -36,6 +41,7 @@ from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import SymbolMarketDataChannelCapability
+from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_instrument
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
@@ -47,6 +53,8 @@ _RUNTIME_CHANNEL_SOURCE = "kraken_futures_publisher_runtime"
 _INVERSE_TYPES = frozenset({"futures_inverse"})
 _RR_PREFIX = "rr_"
 _IN_PREFIX = "in_"
+_FUTURES_SPEC_SOURCE = "kraken_futures:rest.get_instruments"
+_SPEC_ETL_VERSION = "s2a-v1"
 
 _XBT_TO_BTC = {"XBT": "BTC"}
 
@@ -323,9 +331,14 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
         now: datetime,
     ) -> None:
         """Persist instrument spec fields derived from the Kraken catalog."""
-        expiry_at, kind, funding_type, funding_frequency_hours, max_funding_rate = (
-            self._instrument_spec_fields(schema)
-        )
+        (
+            expiry_at,
+            kind,
+            funding_type,
+            funding_frequency_hours,
+            max_funding_rate,
+            metadata,
+        ) = self._instrument_spec_fields(schema, now)
         self._revise_instrument_spec(
             session,
             instrument_public_id,
@@ -337,17 +350,115 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
             funding_type=funding_type,
             funding_frequency_hours=funding_frequency_hours,
             max_funding_rate=max_funding_rate,
+            metadata=metadata,
         )
 
     @staticmethod
     def _instrument_spec_fields(
         schema: KrakenFuturesInstrumentSchema,
-    ) -> tuple[datetime | None, str, str | None, int | None, float | None]:
+        observed_at: datetime | None = None,
+    ) -> tuple[
+        datetime | None,
+        str,
+        str | None,
+        int | None,
+        float | None,
+        InstrumentMetadataInput,
+    ]:
         """Build the instrument spec fields derived from exchange metadata."""
         expiry_at = _parse_expiry_datetime(schema)
+        metadata = _instrument_metadata(schema, observed_at or datetime.now(UTC))
         if schema.last_trading_time:
-            return expiry_at, "future", None, None, None
-        return expiry_at, "perpetual", "perpetual_funding", 1, 0.0025
+            return expiry_at, "future", None, None, None, metadata
+        return expiry_at, "perpetual", "perpetual_funding", 1, 0.0025, metadata
+
+
+def _positive_decimal(value: object) -> Decimal | None:
+    """Parse one finite positive catalog number through its string representation."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except InvalidOperation, ValueError:
+        return None
+    if not parsed.is_finite() or parsed <= 0:
+        return None
+    return parsed
+
+
+def _integral_position_limit(value: object) -> int | None:
+    """Return a positive integral position limit without relabeling it as an order limit."""
+    parsed = _positive_decimal(value)
+    if parsed is None or parsed != parsed.to_integral_value():
+        return None
+    return int(parsed)
+
+
+def _instrument_metadata(
+    schema: KrakenFuturesInstrumentSchema,
+    observed_at: datetime,
+) -> InstrumentMetadataInput:
+    """Build one atomic metadata observation from a validated futures definition."""
+    tick_decimal = _positive_decimal(schema.tick_size)
+    contract_decimal = _positive_decimal(schema.contract_size)
+    try:
+        descriptor = parse_kraken_futures_instrument(schema.model_dump(by_alias=True))
+        lot_decimal = _positive_decimal(descriptor.qty_increment)
+        min_order_decimal = _positive_decimal(descriptor.qty_min)
+    except InvalidOperation, ValueError:
+        lot_decimal = contract_decimal
+        min_order_decimal = contract_decimal
+    qty_decimals = (
+        schema.contract_value_trade_precision
+        if schema.contract_value_trade_precision is not None
+        and schema.contract_value_trade_precision >= 0
+        else None
+    )
+    margin_decimal = (
+        _positive_decimal(schema.margin_levels[0].initial_margin) if schema.margin_levels else None
+    )
+    position_limit = _integral_position_limit(schema.max_position_size)
+    status = "active" if schema.tradeable else "inactive"
+    is_reference = schema.symbol.lower().startswith((_RR_PREFIX, _IN_PREFIX))
+    complete = (
+        tick_decimal is not None
+        and contract_decimal is not None
+        and lot_decimal is not None
+        and min_order_decimal is not None
+        and qty_decimals is not None
+    )
+    version_payload = {
+        "symbol": schema.symbol,
+        "type": schema.type,
+        "tick_size": str(tick_decimal) if tick_decimal is not None else None,
+        "lot_size": str(lot_decimal) if lot_decimal is not None else None,
+        "min_order_size": str(min_order_decimal) if min_order_decimal is not None else None,
+        "contract_size": str(contract_decimal) if contract_decimal is not None else None,
+        "qty_decimals": qty_decimals,
+        "margin_initial": str(margin_decimal) if margin_decimal is not None else None,
+        "position_limit": position_limit,
+        "status": status,
+    }
+    content = json.dumps(version_payload, sort_keys=True, separators=(",", ":"))
+    version = f"{_SPEC_ETL_VERSION}:{hashlib.sha256(content.encode()).hexdigest()}"
+    return InstrumentMetadataInput(
+        tick_size=float(tick_decimal) if tick_decimal is not None else None,
+        lot_size=float(lot_decimal) if lot_decimal is not None else None,
+        min_order_size=float(min_order_decimal) if min_order_decimal is not None else None,
+        max_order_size=None,
+        cost_decimals=None,
+        qty_decimals=qty_decimals,
+        margin_initial=float(margin_decimal) if margin_decimal is not None else None,
+        position_limit_long=position_limit,
+        position_limit_short=position_limit,
+        status=status,
+        contract_size=contract_decimal,
+        quantity_unit="contract_count",
+        spec_source=_FUTURES_SPEC_SOURCE,
+        spec_version=version,
+        spec_observed_at=observed_at,
+        unit_certified=schema.tradeable and not is_reference and complete,
+    )
 
 
 def _parse_expiry_datetime(schema: KrakenFuturesInstrumentSchema) -> datetime | None:
