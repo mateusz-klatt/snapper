@@ -6,6 +6,7 @@ with compile-time type checking — no Pydantic overhead for trusted internal
 data transfer.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -486,6 +487,19 @@ class PortfolioReconciliationEvaluationRow(TypedDict):
     session_id: str
     sequence_id: int
     bus_time: datetime
+
+
+class PortfolioReconciliationMethodConfigRow(TypedDict):
+    """Active operator-authored reconciliation method classification."""
+
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    method: str
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
 
 
 class PortfolioReconciliationStateRow(TypedDict):
@@ -1051,6 +1065,16 @@ class InstrumentSpecRow(TypedDict):
     rollover_rate_long: float | None
     rollover_rate_short: float | None
     max_funding_rate: float | None
+
+
+@dataclass(frozen=True)
+class FuturesReconciliationBundle:
+    """One transactionally consistent futures evaluator input bundle."""
+
+    projection: list[PositionRow] | None
+    instrument_public_ids_by_symbol: dict[str, str]
+    specs_by_instrument_public_id: dict[str, InstrumentSpecRow | None]
+    error: str | None = None
 
 
 class InstrumentFrontMonthRow(TypedDict):

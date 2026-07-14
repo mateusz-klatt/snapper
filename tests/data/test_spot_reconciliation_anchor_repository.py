@@ -15,8 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
+from snapper.data.models import PortfolioReconciliationMethodConfig
 from snapper.data.models import PortfolioReconciliationState
 from snapper.data.models import PortfolioSpotReconciliationAnchor
+from snapper.data.models import Wallet
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
@@ -32,6 +34,32 @@ async def _repo(tmp_path: Path) -> SQLAlchemyRepository:
     """Create a fresh SQLite repository."""
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'anchor.db'}")
     await repo.create_all()
+    async with repo.session() as session:
+        session.add_all(
+            [
+                Wallet(
+                    public_id=_WALLET,
+                    label="spot-reconciliation",
+                    description=None,
+                    is_paper=False,
+                    session_id=_SESSION,
+                    sequence_id=1,
+                    timestamp=_T0 - timedelta(days=1),
+                    known_to=KNOWN_TO_MAX,
+                ),
+                PortfolioReconciliationMethodConfig(
+                    wallet_public_id=_WALLET,
+                    exchange="kraken",
+                    mode="live",
+                    method="spot_execution_replay",
+                    session_id=_SESSION,
+                    sequence_id=2,
+                    timestamp=_T0 - timedelta(days=1),
+                    known_to=KNOWN_TO_MAX,
+                ),
+            ]
+        )
+        await session.commit()
     return repo
 
 

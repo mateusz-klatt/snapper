@@ -20,6 +20,7 @@ from unittest.mock import patch
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy import update
@@ -29,8 +30,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import PortfolioDriftEpisode
+from snapper.data.models import PortfolioReconciliationMethodConfig
 from snapper.data.models import PortfolioReconciliationObservation
 from snapper.data.models import PortfolioReconciliationState
+from snapper.data.models import Wallet
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
@@ -197,6 +200,53 @@ async def _make_repo(tmp_path: Path, name: str = "reconciliation.db") -> SQLAlch
     """
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / name}")
     await repo.create_all()
+    seeded_at = _T0 - timedelta(days=1)
+    async with repo.session() as session:
+        session.add_all(
+            [
+                Wallet(
+                    public_id=_WALLET,
+                    label="reconciliation-primary",
+                    description=None,
+                    is_paper=False,
+                    session_id=_SESSION,
+                    sequence_id=1,
+                    timestamp=seeded_at,
+                    known_to=KNOWN_TO_MAX,
+                ),
+                Wallet(
+                    public_id=_OTHER_WALLET,
+                    label="reconciliation-secondary",
+                    description=None,
+                    is_paper=False,
+                    session_id=_SESSION,
+                    sequence_id=2,
+                    timestamp=seeded_at,
+                    known_to=KNOWN_TO_MAX,
+                ),
+                PortfolioReconciliationMethodConfig(
+                    wallet_public_id=_WALLET,
+                    exchange="kraken_futures",
+                    mode="live",
+                    method="futures_position",
+                    session_id=_SESSION,
+                    sequence_id=3,
+                    timestamp=seeded_at,
+                    known_to=KNOWN_TO_MAX,
+                ),
+                PortfolioReconciliationMethodConfig(
+                    wallet_public_id=_OTHER_WALLET,
+                    exchange="kraken",
+                    mode="live",
+                    method="spot_execution_replay",
+                    session_id=_SESSION,
+                    sequence_id=4,
+                    timestamp=seeded_at,
+                    known_to=KNOWN_TO_MAX,
+                ),
+            ]
+        )
+        await session.commit()
     return repo
 
 
@@ -966,7 +1016,7 @@ async def test_integrity_race_retries_once_and_commits(tmp_path: Path) -> None:
         calls += 1
         if calls == 1:
             raise IntegrityError("insert", {}, RuntimeError("race"))
-        return await original(session, evaluation)
+        return int(await original(session, evaluation))
 
     with patch.object(repo, "_write_portfolio_reconciliation", side_effect=flaky):
         state_id = await repo.record_portfolio_reconciliation(_evaluation(_T0, "matched"))
@@ -985,6 +1035,7 @@ async def test_operational_stale_snapshot_retries_once_and_commits(tmp_path: Pat
     repo = await _make_repo(tmp_path)
     original = repo._write_portfolio_reconciliation
     calls = 0
+    sessions: list[AsyncSession] = []
 
     async def flaky(session: AsyncSession, evaluation: PortfolioReconciliationEvaluationRow) -> int:
         """Fail the first call with OperationalError and delegate the retry.
@@ -1001,13 +1052,15 @@ async def test_operational_stale_snapshot_retries_once_and_commits(tmp_path: Pat
         """
         nonlocal calls
         calls += 1
+        sessions.append(session)
         if calls == 1:
             raise OperationalError("update", {}, RuntimeError("SQLITE_BUSY_SNAPSHOT"))
-        return await original(session, evaluation)
+        return int(await original(session, evaluation))
 
     with patch.object(repo, "_write_portfolio_reconciliation", side_effect=flaky):
         state_id = await repo.record_portfolio_reconciliation(_evaluation(_T0, "matched"))
     assert calls == 2
+    assert sessions[0] is not sessions[1]
     assert state_id == (await _active_state(repo)).id
     assert len(await _observations(repo)) == 1
 
@@ -1015,15 +1068,14 @@ async def test_operational_stale_snapshot_retries_once_and_commits(tmp_path: Pat
 async def test_cross_instance_concurrent_writers_retry_without_corruption(tmp_path: Path) -> None:
     """Independent repository instances retry a stale SQLite write once.
 
-    Given: two repository objects sharing an empty SQLite database,
+    Given: two repository objects sharing empty reconciliation history,
     When: the second observes no predecessor before the first commits,
     Then: its stale write receives one bounded retry and both callers converge
         on one observation and one coherent active state.
     """
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'cross-instance.db'}"
-    first = SQLAlchemyRepository(database_url)
+    first = await _make_repo(tmp_path, "cross-instance.db")
     second = SQLAlchemyRepository(database_url)
-    await first.create_all()
     assert await _states(first) == []
     original_write = second._write_portfolio_reconciliation
     stale_read_complete = asyncio.Event()
@@ -1051,7 +1103,7 @@ async def test_cross_instance_concurrent_writers_retry_without_corruption(tmp_pa
             stale_read_complete.set()
             await release_stale_writer.wait()
             raise OperationalError("insert", {}, RuntimeError("SQLITE_BUSY_SNAPSHOT"))
-        return await original_write(_session, evaluation)
+        return int(await original_write(_session, evaluation))
 
     with patch.object(
         second,
@@ -1085,11 +1137,198 @@ async def test_paper_evaluation_rolls_back_without_entering_storage(tmp_path: Pa
         episode row survives either transaction attempt.
     """
     repo = await _make_repo(tmp_path)
-    with pytest.raises(IntegrityError):
+    with pytest.raises(RuntimeError, match="identity is invalid"):
         await repo.record_portfolio_reconciliation(_evaluation(_T0, "mismatched", mode="paper"))
     assert await _observations(repo) == []
     assert await _states(repo) == []
     assert await _episodes(repo) == []
+
+
+@pytest.mark.parametrize(
+    ("method", "status", "error", "message"),
+    [
+        pytest.param(
+            "futures_position",
+            "pending",
+            None,
+            "portfolio reconciliation status is incompatible with method",
+            id="real-method-status",
+        ),
+        pytest.param(
+            "unclassified",
+            "matched",
+            None,
+            "unclassified reconciliation status is invalid",
+            id="unclassified-status",
+        ),
+        pytest.param(
+            "unclassified",
+            "incomplete",
+            None,
+            "unclassified reconciliation cannot carry full evidence",
+            id="unclassified-evidence",
+        ),
+        pytest.param(
+            "balance_guess",
+            "incomplete",
+            None,
+            "portfolio reconciliation method is invalid",
+            id="unknown-method",
+        ),
+        pytest.param(
+            "futures_position",
+            "error",
+            " ",
+            "error reconciliation requires a non-empty reason",
+            id="empty-error-reason",
+        ),
+    ],
+)
+async def test_evaluation_validation_rejects_application_level_contradictions(
+    tmp_path: Path,
+    method: str,
+    status: str,
+    error: str | None,
+    message: str,
+) -> None:
+    """Invalid method, status, evidence, and error shapes fail before storage.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        method: Incoming reconciliation method.
+        status: Incoming evaluation status.
+        error: Incoming error reason.
+        message: Expected application-level rejection.
+    """
+    repo = await _make_repo(tmp_path)
+    evaluation = _evaluation(_T0, status, method=method, error=error)
+    with pytest.raises(RuntimeError, match=message):
+        await repo.record_portfolio_reconciliation(evaluation)
+    assert await _observations(repo) == []
+    assert await _states(repo) == []
+
+
+async def test_different_real_method_cannot_replace_active_state(tmp_path: Path) -> None:
+    """A matching incoming config cannot override another real state method."""
+    repo = await _make_repo(tmp_path, "different-real-method.db")
+    await repo.record_portfolio_reconciliation(_non_full_evaluation(_T0, "incomplete", 4))
+    before = await _active_state(repo)
+    async with repo.session() as session:
+        await session.execute(
+            update(PortfolioReconciliationMethodConfig)
+            .where(PortfolioReconciliationMethodConfig.known_to == KNOWN_TO_MAX)
+            .values(method="spot_execution_replay")
+        )
+        await session.commit()
+    evaluation = _non_full_evaluation(_T0 + timedelta(seconds=1), "incomplete", 5)
+    evaluation["method"] = "spot_execution_replay"
+    with pytest.raises(RuntimeError, match="method transition is invalid"):
+        await repo.record_portfolio_reconciliation(evaluation)
+    after = await _active_state(repo)
+    assert after.id == before.id
+    assert after.method == "futures_position"
+    assert len(await _observations(repo)) == 1
+
+
+async def test_safe_unclassified_state_transitions_to_first_real_method(tmp_path: Path) -> None:
+    """Evidence-free unclassified history accepts its first configured method."""
+    repo = await _make_repo(tmp_path, "unclassified-transition.db")
+    async with repo.session() as session:
+        await session.execute(delete(PortfolioReconciliationMethodConfig))
+        await session.commit()
+    unclassified = _non_full_evaluation(_T0, "incomplete", 4)
+    unclassified["method"] = "unclassified"
+    await repo.record_portfolio_reconciliation(unclassified)
+    await repo.set_portfolio_reconciliation_method_config(
+        wallet_public_id=_WALLET,
+        exchange="kraken_futures",
+        mode="live",
+        method="futures_position",
+        session_id=_SESSION,
+        sequence_id=5,
+        timestamp=_T0 + timedelta(seconds=1),
+    )
+    incoming = _non_full_evaluation(_T0 + timedelta(seconds=2), "incomplete", 6)
+    state_id = await repo.record_portfolio_reconciliation(incoming)
+    state = await _active_state(repo)
+    assert state_id == state.id
+    assert state.method == "futures_position"
+    assert state.current_evaluation_status == "incomplete"
+    assert len(await _observations(repo)) == 2
+
+
+@pytest.mark.parametrize(
+    ("method", "status", "message"),
+    [
+        pytest.param(
+            "unclassified",
+            "incomplete",
+            "unclassified reconciliation state retains forbidden evidence",
+            id="unclassified",
+        ),
+        pytest.param(
+            "margin_ledger_replay",
+            "error",
+            "margin ledger reconciliation state retains forbidden evidence",
+            id="margin-ledger",
+        ),
+    ],
+)
+async def test_nonfull_only_state_transition_guard_rejects_retained_full_evidence(
+    tmp_path: Path,
+    method: str,
+    status: str,
+    message: str,
+) -> None:
+    """The transition backstop rejects forbidden evidence on non-full methods.
+
+    Direct validation isolates this cross-row guard because the database CHECK
+    rejects persistence of the forged state and predecessor-lineage checks can
+    reject a tampered stored row before method-transition validation runs.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        method: Forged non-full-only state method.
+        status: Compatible current status for that method.
+        message: Expected cross-row rejection.
+    """
+    repo = await _make_repo(tmp_path)
+    await repo.record_portfolio_reconciliation(_evaluation(_T0, "mismatched"))
+    existing = await _active_state(repo)
+    existing.method = method
+    existing.current_evaluation_status = status
+    existing.error = "retained evidence corruption" if status == "error" else None
+    evaluation = _non_full_evaluation(_T0 + timedelta(seconds=1), status, 2)
+    evaluation["method"] = method
+    with pytest.raises(RuntimeError, match=message):
+        repo._validate_portfolio_reconciliation_method_transition(existing, evaluation, None)
+
+
+async def test_evaluation_existence_lookup_detects_only_committed_key(tmp_path: Path) -> None:
+    """Evaluation existence is false before commit and true for its exact key."""
+    repo = await _make_repo(tmp_path, "evaluation-existence.db")
+    assert not await repo.has_portfolio_reconciliation_evaluation(
+        _WALLET,
+        "kraken_futures",
+        "live",
+        _SESSION,
+        1,
+    )
+    await repo.record_portfolio_reconciliation(_evaluation(_T0, "matched"))
+    assert await repo.has_portfolio_reconciliation_evaluation(
+        _WALLET,
+        "kraken_futures",
+        "live",
+        _SESSION,
+        1,
+    )
+    assert not await repo.has_portfolio_reconciliation_evaluation(
+        _WALLET,
+        "kraken_futures",
+        "live",
+        _SESSION,
+        2,
+    )
 
 
 @pytest.mark.parametrize("episode_status", [None, "resolved"])

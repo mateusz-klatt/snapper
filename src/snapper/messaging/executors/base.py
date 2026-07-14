@@ -31,6 +31,8 @@ import zmq.asyncio
 from loguru import logger
 
 from snapper.application.engine.service import compute_shard_key
+from snapper.application.portfolio.account_view import build_portfolio_account_state
+from snapper.application.portfolio.reconciliation_dispatch import dispatch_portfolio_reconciliation
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
 from snapper.application.trade.command_request import order_request_from_command
@@ -258,6 +260,16 @@ only on publish success), so a swallowed corrective publish failure
 also reports ``deferred``; ``no_gap`` is the ordinary clean outcome."""
 
 _RecoveryWatermarks = tuple[float, float, list[VenueEventRow], dict[str, float]]
+_PortfolioReconciliationKey = tuple[str, str, str, str, int]
+
+
+@dataclass(frozen=True)
+class _PortfolioReconciliationWork:
+    """Immutable identity and capability captured from one account snapshot."""
+
+    state_id: int
+    identity: _PortfolioReconciliationKey
+    position_capability: CapabilityStatus
 
 
 @dataclass(frozen=True)
@@ -348,6 +360,8 @@ _ACCOUNT_FETCH_TIMEOUT_S = 15.0
 """Per-call bound on a native balance/position read. A wedged venue call is
 recorded as an ``error`` observation (last-good retained, stale-visible) and
 never blocks the observer loop or the order-reconciliation cycle."""
+_PORTFOLIO_RECONCILIATION_TIMEOUT_S = 60.0
+"""Bound on the complete observer-side portfolio reconciliation branch."""
 _ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG = (
     "balance reader returned data under a non-observable capability"
 )
@@ -610,6 +624,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._verify_unsupported_logged: bool = False
         self._recon_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self._portfolio_reconciliation_tasks: dict[
+            _PortfolioReconciliationKey, asyncio.Task[None]
+        ] = {}
+        self._portfolio_reconciliation_dispatch_open = False
+        self._portfolio_reconciliation_failure_count = 0
+        self._last_portfolio_reconciliation_error = ""
 
     def _require_context(self) -> zmq.asyncio.Context:
         """Return initialized ZMQ context or raise an explicit runtime error.
@@ -1386,6 +1406,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if self.running:
             logger.warning(f"{exchange_name} execution service already running")
             return
+        self._portfolio_reconciliation_dispatch_open = False
         await self._initialize_settings()
         await self._resolve_credentials(exchange_name)
         self._client_context_active = False
@@ -1435,6 +1456,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                             or self.exchange_client.position_capability
                             is CapabilityStatus.SUPPORTED
                         ):
+                            self._portfolio_reconciliation_dispatch_open = True
                             tasks.append(
                                 asyncio.create_task(
                                     self._supervise_loop(
@@ -1448,6 +1470,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                             logger.info(f"ExchangeExecutorService[{exchange_name}] tasks cancelled")
                             raise
                         finally:
+                            self._portfolio_reconciliation_dispatch_open = False
                             for task in tasks:
                                 task.cancel()
                             await asyncio.gather(*tasks, return_exceptions=True)
@@ -1457,13 +1480,18 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         await self.stop()
                         raise
         finally:
-            self._client_context_active = False
+            try:
+                await self._close_and_drain_portfolio_reconciliation()
+            finally:
+                self._client_context_active = False
 
     async def stop(self) -> None:
         """Stop the execution service and close ZMQ connections.
 
-        ZMQ teardown runs first so blocked consumers unwind, then the
-        exchange client is disconnected as an idempotent FALLBACK — but
+        Observer-side portfolio dispatch closes and drains first, before the
+        running flag can stop the account observer. ZMQ teardown then unwinds
+        blocked consumers, and the exchange client is disconnected as an
+        idempotent FALLBACK — but
         ONLY when ``start()`` does not currently own the client
         (``_client_context_active`` False). ``start()`` claims ownership
         BEFORE entering ``async with`` — i.e. before ``connect()`` even
@@ -1485,6 +1513,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         residual: a wedged unwind that never reaches ``__aexit__`` is
         not healed here — loop supervision and bounded cycles own that.
         """
+        await self._close_and_drain_portfolio_reconciliation()
         if self.running:
             self.running = False
             if self.subscriber:
@@ -3203,6 +3232,139 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._venue_recon_failure_count += 1
         self._last_venue_recon_error = str(exc) or exc.__class__.__name__
 
+    def _record_portfolio_reconciliation_failure(self, exc: BaseException) -> None:
+        """Record an observer-side portfolio failure without affecting order healing."""
+        self._portfolio_reconciliation_failure_count += 1
+        self._last_portfolio_reconciliation_error = str(exc) or exc.__class__.__name__
+
+    async def _close_and_drain_portfolio_reconciliation(self) -> None:
+        """Close observer dispatch, cancel every owned task, and drain all completions."""
+        self._portfolio_reconciliation_dispatch_open = False
+        tasks = tuple(self._portfolio_reconciliation_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._portfolio_reconciliation_tasks.clear()
+
+    def _portfolio_reconciliation_task_done(
+        self,
+        key: _PortfolioReconciliationKey,
+        task: asyncio.Task[None],
+    ) -> None:
+        """Retrieve one task outcome and remove only its exact tracked instance."""
+        if self._portfolio_reconciliation_tasks.get(key) is task:
+            self._portfolio_reconciliation_tasks.pop(key, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            self._record_portfolio_reconciliation_failure(error)
+            logger.error(
+                "[{}] portfolio reconciliation task escaped containment: {}",
+                key[1],
+                error,
+            )
+
+    def _schedule_portfolio_reconciliation(
+        self,
+        *,
+        state_id: int,
+        attempt: VenueAccountAttemptRow,
+        position_capability: CapabilityStatus,
+    ) -> None:
+        """Schedule one live snapshot evaluation without delaying its observer."""
+        try:
+            if attempt["mode"] != "live" or not self._portfolio_reconciliation_dispatch_open:
+                return
+            key: _PortfolioReconciliationKey = (
+                attempt["wallet_public_id"],
+                attempt["exchange"],
+                attempt["mode"],
+                attempt["session_id"],
+                attempt["sequence_id"],
+            )
+            existing = self._portfolio_reconciliation_tasks.get(key)
+            if existing is not None and not existing.done():
+                return
+            work = _PortfolioReconciliationWork(
+                state_id=state_id,
+                identity=key,
+                position_capability=position_capability,
+            )
+            runner = self._run_portfolio_reconciliation(work)
+            try:
+                task = asyncio.create_task(
+                    runner,
+                    name=(f"portfolio-reconciliation:{key[0]}:{key[1]}:{key[2]}:{key[3]}:{key[4]}"),
+                )
+            except Exception:
+                runner.close()
+                raise
+            self._portfolio_reconciliation_tasks[key] = task
+            task.add_done_callback(
+                lambda completed: self._portfolio_reconciliation_task_done(key, completed)
+            )
+        except Exception as exc:
+            self._record_portfolio_reconciliation_failure(exc)
+            logger.exception(
+                f"[{attempt.get('exchange', 'unknown')}] "
+                f"portfolio reconciliation scheduling failed: {exc}"
+            )
+
+    async def _run_portfolio_reconciliation(self, work: _PortfolioReconciliationWork) -> None:
+        """Evaluate and persist one exact account-state version within a hard bound."""
+        repository = self._require_sqlalchemy_repository()
+        wallet_public_id, exchange, mode, session_id, sequence_id = work.identity
+        try:
+            async with asyncio.timeout(_PORTFOLIO_RECONCILIATION_TIMEOUT_S):
+                if await repository.has_portfolio_reconciliation_evaluation(
+                    wallet_public_id,
+                    exchange,
+                    mode,
+                    session_id,
+                    sequence_id,
+                ):
+                    return
+                evaluated_at = datetime.now(UTC)
+                state_row = await repository.get_venue_account_state_version(work.state_id)
+                if state_row is None:
+                    raise RuntimeError("venue account state version is unavailable")
+                state_identity: _PortfolioReconciliationKey = (
+                    state_row["wallet_public_id"],
+                    state_row["exchange"],
+                    state_row["mode"],
+                    state_row["session_id"],
+                    state_row["sequence_id"],
+                )
+                if state_identity != work.identity:
+                    raise ValueError("venue account state version identity mismatch")
+                account = build_portfolio_account_state(state_row, evaluated_at)
+                method_config = await repository.get_active_portfolio_reconciliation_method_config(
+                    wallet_public_id,
+                    exchange,
+                    mode,
+                )
+                evaluation = await dispatch_portfolio_reconciliation(
+                    repository=repository,
+                    account=account,
+                    method_config=method_config,
+                    position_capability=work.position_capability,
+                    evaluated_at=evaluated_at,
+                )
+                await repository.record_portfolio_reconciliation(evaluation)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError as exc:
+            self._record_portfolio_reconciliation_failure(exc)
+            logger.error(
+                f"[{exchange}] portfolio reconciliation exceeded "
+                f"{_PORTFOLIO_RECONCILIATION_TIMEOUT_S:.0f}s"
+            )
+        except Exception as exc:
+            self._record_portfolio_reconciliation_failure(exc)
+            logger.exception(f"[{exchange}] portfolio reconciliation failed: {exc}")
+
     async def _account_observer_handler(self) -> None:
         """Supervised loop that observes and persists venue account truth (Phase 3).
 
@@ -3276,7 +3438,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             ),
             "bus_time": now,
         }
-        await repository.record_venue_account_snapshot(attempt)
+        state_id = await repository.record_venue_account_snapshot(attempt)
+        self._schedule_portfolio_reconciliation(
+            state_id=state_id,
+            attempt=attempt,
+            position_capability=client.position_capability,
+        )
 
     def _account_mode(self) -> str:
         """Return the account-truth mode for this executor (paper venue → paper)."""

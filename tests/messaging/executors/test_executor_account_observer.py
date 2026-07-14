@@ -6,6 +6,7 @@ the fail-closed capability/outcome mapping of the balance and position reads,
 the single-cycle snapshot assembly, and the supervised observer loop.
 """
 
+import asyncio
 import json
 from datetime import UTC
 from datetime import datetime
@@ -19,6 +20,7 @@ import pytest
 
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import VenueAccountAttemptRow
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
@@ -77,6 +79,28 @@ def _make_client(
     client.balance_capability = balance_capability
     client.position_capability = position_capability
     return client
+
+
+def _portfolio_attempt(*, mode: str = "live", sequence_id: int = 7) -> VenueAccountAttemptRow:
+    """Build one stable account attempt identity for orchestration tests."""
+    now = datetime(2026, 7, 14, 10, 0, tzinfo=UTC)
+    return {
+        "wallet_public_id": "wallet-1",
+        "exchange": "kraken_futures",
+        "mode": mode,
+        "balance_status": "observed",
+        "position_status": "observed",
+        "valuation_status": "native_only",
+        "balances_json": "[]",
+        "open_positions_json": "[]",
+        "balance_observed_at": now,
+        "position_observed_at": now,
+        "authoritative_until": now + timedelta(minutes=5),
+        "error": None,
+        "session_id": "session-1",
+        "sequence_id": sequence_id,
+        "bus_time": now,
+    }
 
 
 class TestSerializeNativeBalances:
@@ -683,3 +707,531 @@ class TestAccountObserverHandler:
         assert ex._account_observer_failure_count == start + 1
         assert "account_observer" not in ex._task_last_pass
         sleep_mock.assert_awaited_once_with(_ACCOUNT_OBSERVE_INTERVAL_S)
+
+
+class TestPortfolioReconciliationOrchestration:
+    """Owned observer-side reconciliation scheduling and lifecycle behavior."""
+
+    @pytest.mark.asyncio
+    async def test_snapshot_success_schedules_returned_state_without_blocking(self) -> None:
+        """A committed live snapshot starts detached work with its exact state id."""
+        ex = _make_executor()
+        ex._get_exchange_name = MagicMock(return_value="kraken_futures")
+        ex.repository.record_venue_account_snapshot = AsyncMock(return_value=41)
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.read_native_balances = AsyncMock(return_value=[])
+        client.read_native_positions = AsyncMock(return_value=[])
+        ex.exchange_client = client
+        ex._portfolio_reconciliation_dispatch_open = True
+        started = asyncio.Event()
+        release = asyncio.Event()
+        captured: list[base_module._PortfolioReconciliationWork] = []
+
+        async def blocked(work: base_module._PortfolioReconciliationWork) -> None:
+            captured.append(work)
+            started.set()
+            await release.wait()
+
+        ex._run_portfolio_reconciliation = blocked
+        await ex._observe_account_once()
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert captured[0].state_id == 41
+        assert captured[0].position_capability is CapabilityStatus.SUPPORTED
+        assert ex._background_tasks == set()
+        client.read_native_balances.assert_awaited_once()
+        client.read_native_positions.assert_awaited_once()
+        release.set()
+        await asyncio.gather(*tuple(ex._portfolio_reconciliation_tasks.values()))
+
+    @pytest.mark.asyncio
+    async def test_snapshot_failure_never_schedules(self) -> None:
+        """A failed account write leaves no reconciliation work behind."""
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.NOT_APPLICABLE)
+        client.read_native_balances = AsyncMock(return_value=[])
+        ex.exchange_client = client
+        ex.repository.record_venue_account_snapshot = AsyncMock(
+            side_effect=RuntimeError("snapshot failed")
+        )
+        ex._schedule_portfolio_reconciliation = MagicMock()
+        with pytest.raises(RuntimeError, match="snapshot failed"):
+            await ex._observe_account_once()
+        ex._schedule_portfolio_reconciliation.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_paper_and_closed_gate_never_create_tasks(self) -> None:
+        """Paper work and shutdown-gated live work are both rejected synchronously."""
+        ex = _make_executor()
+        ex._run_portfolio_reconciliation = MagicMock()
+        ex._portfolio_reconciliation_dispatch_open = True
+        ex._schedule_portfolio_reconciliation(
+            state_id=1,
+            attempt=_portfolio_attempt(mode="paper"),
+            position_capability=CapabilityStatus.NOT_APPLICABLE,
+        )
+        ex._portfolio_reconciliation_dispatch_open = False
+        ex._schedule_portfolio_reconciliation(
+            state_id=2,
+            attempt=_portfolio_attempt(),
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        ex._run_portfolio_reconciliation.assert_not_called()
+        assert ex._portfolio_reconciliation_tasks == {}
+
+    @pytest.mark.asyncio
+    async def test_same_evaluation_key_is_single_flight(self) -> None:
+        """A running exact-key task suppresses a duplicate scheduler call."""
+        ex = _make_executor()
+        ex._portfolio_reconciliation_dispatch_open = True
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked(_work: object) -> None:
+            started.set()
+            await release.wait()
+
+        ex._run_portfolio_reconciliation = AsyncMock(side_effect=blocked)
+        attempt = _portfolio_attempt()
+        ex._schedule_portfolio_reconciliation(
+            state_id=1,
+            attempt=attempt,
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        ex._schedule_portfolio_reconciliation(
+            state_id=2,
+            attempt=attempt,
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert ex._run_portfolio_reconciliation.await_count == 1
+        assert len(ex._portfolio_reconciliation_tasks) == 1
+        release.set()
+        await asyncio.gather(*tuple(ex._portfolio_reconciliation_tasks.values()))
+
+    @pytest.mark.asyncio
+    async def test_completed_same_key_can_be_replaced(self) -> None:
+        """A completed entry does not suppress a later task with the same key."""
+        ex = _make_executor()
+        ex._portfolio_reconciliation_dispatch_open = True
+        ex._run_portfolio_reconciliation = AsyncMock(return_value=None)
+        attempt = _portfolio_attempt()
+        ex._schedule_portfolio_reconciliation(
+            state_id=1,
+            attempt=attempt,
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        first = tuple(ex._portfolio_reconciliation_tasks.values())[0]
+        await first
+        ex._schedule_portfolio_reconciliation(
+            state_id=2,
+            attempt=attempt,
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        second = tuple(ex._portfolio_reconciliation_tasks.values())[0]
+        await second
+        assert ex._run_portfolio_reconciliation.await_count == 2
+
+    def test_task_creation_failure_is_contained(self) -> None:
+        """A scheduler runtime failure is counted and its coroutine is closed."""
+        ex = _make_executor()
+        ex._portfolio_reconciliation_dispatch_open = True
+        with patch.object(
+            base_module.asyncio,
+            "create_task",
+            side_effect=RuntimeError("no running loop"),
+        ):
+            ex._schedule_portfolio_reconciliation(
+                state_id=1,
+                attempt=_portfolio_attempt(),
+                position_capability=CapabilityStatus.SUPPORTED,
+            )
+        assert ex._portfolio_reconciliation_failure_count == 1
+        assert ex._last_portfolio_reconciliation_error == "no running loop"
+        assert ex._portfolio_reconciliation_tasks == {}
+
+    @pytest.mark.asyncio
+    async def test_preflight_replay_skips_every_downstream_step(self) -> None:
+        """An existing evaluation exits before state, config, dispatch, or S1 work."""
+        ex = _make_executor()
+        ex.repository.has_portfolio_reconciliation_evaluation = AsyncMock(return_value=True)
+        ex.repository.get_venue_account_state_version = AsyncMock()
+        ex.repository.get_active_portfolio_reconciliation_method_config = AsyncMock()
+        ex.repository.record_portfolio_reconciliation = AsyncMock()
+        work = base_module._PortfolioReconciliationWork(
+            state_id=9,
+            identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        with patch.object(
+            base_module,
+            "dispatch_portfolio_reconciliation",
+            new_callable=AsyncMock,
+        ) as dispatch:
+            await ex._run_portfolio_reconciliation(work)
+        ex.repository.get_venue_account_state_version.assert_not_awaited()
+        ex.repository.get_active_portfolio_reconciliation_method_config.assert_not_awaited()
+        dispatch.assert_not_awaited()
+        ex.repository.record_portfolio_reconciliation.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_preflight_race_reaches_s1_idempotency_backstop(self) -> None:
+        """A post-preflight replay is delegated to the durable S1 writer.
+
+        Given: The optimization misses a key that wins before the final S1 write.
+        When: The runner builds and submits its single immutable evaluation object.
+        Then: The S1 replay backstop receives that exact object without a retry rebuild.
+        """
+        ex = _make_executor()
+        ex.repository.has_portfolio_reconciliation_evaluation = AsyncMock(return_value=False)
+        ex.repository.get_venue_account_state_version = AsyncMock(
+            return_value={
+                "wallet_public_id": "wallet-1",
+                "exchange": "kraken_futures",
+                "mode": "live",
+                "session_id": "session-1",
+                "sequence_id": 7,
+            }
+        )
+        ex.repository.get_active_portfolio_reconciliation_method_config = AsyncMock(
+            return_value=None
+        )
+        evaluation = object()
+        ex.repository.record_portfolio_reconciliation = AsyncMock(return_value=41)
+        work = base_module._PortfolioReconciliationWork(
+            state_id=9,
+            identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        with (
+            patch.object(base_module, "build_portfolio_account_state", return_value=object()),
+            patch.object(
+                base_module,
+                "dispatch_portfolio_reconciliation",
+                new_callable=AsyncMock,
+                return_value=evaluation,
+            ) as dispatch,
+        ):
+            await ex._run_portfolio_reconciliation(work)
+        dispatch.assert_awaited_once()
+        ex.repository.record_portfolio_reconciliation.assert_awaited_once_with(evaluation)
+        assert ex._portfolio_reconciliation_failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_scheduled_runner_failure_is_counted_exactly_once(self) -> None:
+        """Runner containment and its done callback never double-count one failure.
+
+        Given: A scheduled live reconciliation whose preflight read raises.
+        When: The owned runner contains the error and its callback retrieves completion.
+        Then: Portfolio failure accounting advances exactly once and the task is removed.
+        """
+        ex = _make_executor()
+        ex._portfolio_reconciliation_dispatch_open = True
+        ex.repository.has_portfolio_reconciliation_evaluation = AsyncMock(
+            side_effect=RuntimeError("preflight failed")
+        )
+        ex._schedule_portfolio_reconciliation(
+            state_id=9,
+            attempt=_portfolio_attempt(),
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        task = tuple(ex._portfolio_reconciliation_tasks.values())[0]
+        await task
+        await asyncio.sleep(0)
+        assert ex._portfolio_reconciliation_failure_count == 1
+        assert ex._last_portfolio_reconciliation_error == "preflight failed"
+        assert ex._portfolio_reconciliation_tasks == {}
+
+    @pytest.mark.asyncio
+    async def test_runner_uses_exact_state_and_isolated_domain_dispatch(self) -> None:
+        """The exact closed version flows to dispatch without taking the order lock."""
+        ex = _make_executor()
+        ex.repository.has_portfolio_reconciliation_evaluation = AsyncMock(return_value=False)
+        state_row = {
+            "wallet_public_id": "wallet-1",
+            "exchange": "kraken_futures",
+            "mode": "live",
+            "session_id": "session-1",
+            "sequence_id": 7,
+        }
+        ex.repository.get_venue_account_state_version = AsyncMock(return_value=state_row)
+        config = {"method": "futures_position"}
+        ex.repository.get_active_portfolio_reconciliation_method_config = AsyncMock(
+            return_value=config
+        )
+        ex.repository.record_portfolio_reconciliation = AsyncMock(return_value=12)
+        account = object()
+        evaluation = object()
+        work = base_module._PortfolioReconciliationWork(
+            state_id=9,
+            identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        await ex._recon_lock.acquire()
+        try:
+            with (
+                patch.object(
+                    base_module,
+                    "build_portfolio_account_state",
+                    return_value=account,
+                ) as build,
+                patch.object(
+                    base_module,
+                    "dispatch_portfolio_reconciliation",
+                    new_callable=AsyncMock,
+                    return_value=evaluation,
+                ) as dispatch,
+            ):
+                await asyncio.wait_for(ex._run_portfolio_reconciliation(work), timeout=1.0)
+        finally:
+            ex._recon_lock.release()
+        ex.repository.get_venue_account_state_version.assert_awaited_once_with(9)
+        evaluated_at = build.call_args.args[1]
+        dispatch_call = dispatch.await_args
+        assert dispatch_call is not None
+        assert dispatch_call.kwargs == {
+            "repository": ex.repository,
+            "account": account,
+            "method_config": config,
+            "position_capability": CapabilityStatus.SUPPORTED,
+            "evaluated_at": evaluated_at,
+        }
+        ex.repository.record_portfolio_reconciliation.assert_awaited_once_with(evaluation)
+        assert ex._venue_recon_failure_count == 0
+        assert ex._portfolio_reconciliation_failure_count == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("state_row", "expected_error"),
+        [
+            (None, "venue account state version is unavailable"),
+            (
+                {
+                    "wallet_public_id": "other-wallet",
+                    "exchange": "kraken_futures",
+                    "mode": "live",
+                    "session_id": "session-1",
+                    "sequence_id": 7,
+                },
+                "venue account state version identity mismatch",
+            ),
+        ],
+    )
+    async def test_missing_or_mismatched_state_fails_before_mapping(
+        self, state_row: object | None, expected_error: str
+    ) -> None:
+        """Unavailable or cross-identity state versions fail closed before dispatch."""
+        ex = _make_executor()
+        ex.repository.has_portfolio_reconciliation_evaluation = AsyncMock(return_value=False)
+        ex.repository.get_venue_account_state_version = AsyncMock(return_value=state_row)
+        work = base_module._PortfolioReconciliationWork(
+            state_id=9,
+            identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        with patch.object(base_module, "build_portfolio_account_state") as build:
+            await ex._run_portfolio_reconciliation(work)
+        build.assert_not_called()
+        assert ex._portfolio_reconciliation_failure_count == 1
+        assert ex._last_portfolio_reconciliation_error == expected_error
+        assert ex._venue_recon_failure_count == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_step", ["config", "dispatch", "record"])
+    async def test_branch_failures_are_contained_and_order_counters_unchanged(
+        self, failure_step: str
+    ) -> None:
+        """Config, evaluation, and S1 failures stay in portfolio accounting."""
+        ex = _make_executor()
+        ex.repository.has_portfolio_reconciliation_evaluation = AsyncMock(return_value=False)
+        state_row = {
+            "wallet_public_id": "wallet-1",
+            "exchange": "kraken_futures",
+            "mode": "live",
+            "session_id": "session-1",
+            "sequence_id": 7,
+        }
+        ex.repository.get_venue_account_state_version = AsyncMock(return_value=state_row)
+        ex.repository.get_active_portfolio_reconciliation_method_config = AsyncMock(
+            return_value=None
+        )
+        ex.repository.record_portfolio_reconciliation = AsyncMock(return_value=1)
+        if failure_step == "config":
+            ex.repository.get_active_portfolio_reconciliation_method_config.side_effect = (
+                RuntimeError("config failed")
+            )
+        if failure_step == "record":
+            ex.repository.record_portfolio_reconciliation.side_effect = RuntimeError(
+                "record failed"
+            )
+        work = base_module._PortfolioReconciliationWork(
+            state_id=9,
+            identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        dispatch_side_effect = (
+            RuntimeError("dispatch failed") if failure_step == "dispatch" else None
+        )
+        with (
+            patch.object(base_module, "build_portfolio_account_state", return_value=object()),
+            patch.object(
+                base_module,
+                "dispatch_portfolio_reconciliation",
+                new_callable=AsyncMock,
+                return_value=object(),
+                side_effect=dispatch_side_effect,
+            ),
+        ):
+            await ex._run_portfolio_reconciliation(work)
+        assert ex._portfolio_reconciliation_failure_count == 1
+        assert ex._venue_recon_failure_count == 0
+        assert ex._last_venue_recon_error == ""
+
+    @pytest.mark.asyncio
+    async def test_complete_runner_timeout_is_contained(self) -> None:
+        """The hard bound cancels a wedged preflight and records one failure."""
+        ex = _make_executor()
+
+        async def blocked(*_args: object) -> bool:
+            await asyncio.Event().wait()
+            return False
+
+        ex.repository.has_portfolio_reconciliation_evaluation = AsyncMock(side_effect=blocked)
+        work = base_module._PortfolioReconciliationWork(
+            state_id=9,
+            identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        with patch.object(base_module, "_PORTFOLIO_RECONCILIATION_TIMEOUT_S", 0.01):
+            await ex._run_portfolio_reconciliation(work)
+        assert ex._portfolio_reconciliation_failure_count == 1
+        assert ex._last_portfolio_reconciliation_error == "TimeoutError"
+
+    @pytest.mark.asyncio
+    async def test_runner_cancellation_propagates_without_failure_count(self) -> None:
+        """Shutdown cancellation remains cancellation rather than an operational failure."""
+        ex = _make_executor()
+        started = asyncio.Event()
+
+        async def blocked(*_args: object) -> bool:
+            started.set()
+            await asyncio.Event().wait()
+            return False
+
+        ex.repository.has_portfolio_reconciliation_evaluation = AsyncMock(side_effect=blocked)
+        work = base_module._PortfolioReconciliationWork(
+            state_id=9,
+            identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
+            position_capability=CapabilityStatus.SUPPORTED,
+        )
+        task = asyncio.create_task(ex._run_portfolio_reconciliation(work))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert ex._portfolio_reconciliation_failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_done_callback_removes_only_exact_task_and_retrieves_errors(self) -> None:
+        """A stale callback preserves replacement work while consuming its own outcome."""
+        ex = _make_executor()
+        key = ("wallet-1", "kraken_futures", "live", "session-1", 7)
+
+        async def fail() -> None:
+            raise RuntimeError("escaped")
+
+        failed = asyncio.create_task(fail())
+        await asyncio.gather(failed, return_exceptions=True)
+        replacement = asyncio.create_task(asyncio.Event().wait())
+        ex._portfolio_reconciliation_tasks[key] = replacement
+        ex._portfolio_reconciliation_task_done(key, failed)
+        assert ex._portfolio_reconciliation_tasks[key] is replacement
+        assert ex._portfolio_reconciliation_failure_count == 1
+        replacement.cancel()
+        await asyncio.gather(replacement, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_done_callback_accepts_cancelled_task(self) -> None:
+        """A cancelled owned task is removed without being counted as a failure."""
+        ex = _make_executor()
+        key = ("wallet-1", "kraken_futures", "live", "session-1", 7)
+        task = asyncio.create_task(asyncio.Event().wait())
+        ex._portfolio_reconciliation_tasks[key] = task
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        ex._portfolio_reconciliation_task_done(key, task)
+        assert ex._portfolio_reconciliation_tasks == {}
+        assert ex._portfolio_reconciliation_failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_stop_drains_owned_tasks_even_when_already_not_running(self) -> None:
+        """Stop closes, cancels, awaits, and removes reconciliation tasks unconditionally."""
+        ex = _make_executor()
+        ex.running = False
+        ex._portfolio_reconciliation_dispatch_open = True
+        started = asyncio.Event()
+
+        async def blocked() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(blocked())
+        key = ("wallet-1", "kraken_futures", "live", "session-1", 7)
+        ex._portfolio_reconciliation_tasks[key] = task
+        await started.wait()
+        await ex.stop()
+        assert task.cancelled()
+        assert ex._portfolio_reconciliation_tasks == {}
+        assert ex._portfolio_reconciliation_dispatch_open is False
+
+    @pytest.mark.asyncio
+    async def test_start_cancellation_outer_cleanup_drains_owned_work(self) -> None:
+        """Outer start cleanup drains work even when cancellation bypasses stop."""
+        ex = _make_executor()
+        ex.running = False
+        client = MagicMock(spec=base_module.ExchangeClientBase)
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.set_tracker = MagicMock()
+        client.supports_websocket_executions = False
+        client.balance_capability = CapabilityStatus.SUPPORTED
+        client.position_capability = CapabilityStatus.NOT_APPLICABLE
+        ex._create_exchange_client = MagicMock(return_value=client)
+        ex._initialize_settings = AsyncMock()
+        ex._resolve_credentials = AsyncMock()
+        ex._setup_zmq_sockets = MagicMock()
+        ex._recover_pending_orders = AsyncMock()
+        portfolio_started = asyncio.Event()
+        portfolio_cancelled = asyncio.Event()
+
+        async def blocked(_work: object) -> None:
+            portfolio_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                portfolio_cancelled.set()
+
+        async def supervise(
+            task_label: str,
+            _attempt: object,
+            **_kwargs: object,
+        ) -> None:
+            if task_label == "account_observer":
+                assert ex._portfolio_reconciliation_dispatch_open is True
+                ex._schedule_portfolio_reconciliation(
+                    state_id=1,
+                    attempt=_portfolio_attempt(),
+                    position_capability=CapabilityStatus.NOT_APPLICABLE,
+                )
+            await asyncio.Event().wait()
+
+        ex._run_portfolio_reconciliation = blocked
+        ex._supervise_loop = supervise
+        start_task = asyncio.create_task(ex.start())
+        await asyncio.wait_for(portfolio_started.wait(), timeout=1.0)
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+        assert portfolio_cancelled.is_set()
+        assert ex._portfolio_reconciliation_tasks == {}
+        assert ex._portfolio_reconciliation_dispatch_open is False
+        assert ex._client_context_active is False

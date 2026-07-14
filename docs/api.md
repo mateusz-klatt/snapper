@@ -2840,8 +2840,23 @@ on the wire). Requires ``read:wallet_credentials`` (ADMIN only).
 Create a new wallet credential. Requires ``manage:wallet_credentials``.
 Plaintext ``credential_payload`` is Fernet-encrypted server-side before
 DB insert. Body: ``exchange``, ``credential_type`` (``api_key_secret``,
-``rsa_pem``, ``oauth``, ``paper``), ``credential_payload`` (dict),
-optional ``label``. Returns 409 if ``(wallet, exchange)`` already exists.
+``rsa_pem``, ``oauth``, ``paper``), required ``reconciliation_method``,
+``credential_payload`` (dict), and optional ``label``. A real method config
+is committed atomically with the credential; ``unclassified`` creates no
+config row. Concrete adapter policy rejects unsupported methods, and paper
+credentials require ``unclassified``. Returns 409 if ``(wallet, exchange)``
+already exists or durable reconciliation history conflicts.
+
+### PUT /api/wallets/{wallet_public_id}/credentials/{credential_public_id}/reconciliation-method
+
+Idempotently classify an existing active live credential. Requires
+``manage:wallet_credentials`` and CSRF validation. The body accepts one real
+``reconciliation_method``. Kraken Futures permits only ``futures_position``;
+Kraken Spot permits ``spot_execution_replay`` or ``margin_ledger_replay``;
+Walutomat permits only ``spot_execution_replay``. Paper, market-data-only,
+unreviewed, and unknown concrete adapters reject every real method. Returns
+404 when the active credential does not belong to the path wallet and 409 when
+reconciliation history makes a different method immutable.
 
 ### POST /api/wallets/{wallet_public_id}/credentials/{credential_public_id}/rotate
 

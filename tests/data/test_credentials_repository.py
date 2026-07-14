@@ -78,6 +78,7 @@ class TestCreateWalletCredential:
             session_id="test-session",
             sequence_id=10,
             timestamp=now,
+            reconciliation_method="unclassified",
         )
 
         assert row["wallet_public_id"] == wallet_id
@@ -108,6 +109,7 @@ class TestCreateWalletCredential:
             session_id="test-session",
             sequence_id=10,
             timestamp=base_ts,
+            reconciliation_method="unclassified",
         )
 
         with pytest.raises(CredentialConflictError) as excinfo:
@@ -120,6 +122,7 @@ class TestCreateWalletCredential:
                 session_id="test-session",
                 sequence_id=11,
                 timestamp=base_ts + timedelta(microseconds=1),
+                reconciliation_method="unclassified",
             )
 
         assert excinfo.value.exchange == "kraken"
@@ -138,6 +141,14 @@ class TestCreateWalletCredential:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
         with (
             patch.object(repo, "session", return_value=mock_ctx),
+            patch.object(repo, "_begin_portfolio_reconciliation_write", new=AsyncMock()),
+            patch.object(repo, "_acquire_wallet_advisory_lock", new=AsyncMock()),
+            patch.object(repo, "_require_active_portfolio_wallet", new=AsyncMock()),
+            patch.object(
+                repo,
+                "_load_active_portfolio_reconciliation_method_config",
+                new=AsyncMock(return_value=None),
+            ),
             pytest.raises(IntegrityError),
         ):
             await repo.create_wallet_credential(
@@ -149,6 +160,7 @@ class TestCreateWalletCredential:
                 session_id="s",
                 sequence_id=99,
                 timestamp=datetime.now(UTC),
+                reconciliation_method="unclassified",
             )
 
 
@@ -175,6 +187,7 @@ class TestRotateWalletCredential:
             session_id="test-session",
             sequence_id=10,
             timestamp=base_ts,
+            reconciliation_method="unclassified",
         )
 
         rotate_ts = datetime.now(UTC)
@@ -226,6 +239,7 @@ class TestRotateWalletCredential:
             session_id="test-session",
             sequence_id=10,
             timestamp=base_ts,
+            reconciliation_method="unclassified",
         )
 
         new_row = await repo.rotate_wallet_credential(
@@ -262,6 +276,7 @@ class TestGetActiveCredentialById:
             session_id="test-session",
             sequence_id=10,
             timestamp=base_ts,
+            reconciliation_method="unclassified",
         )
 
         result = await repo.get_active_credential_by_id(created["public_id"], datetime.now(UTC))
@@ -319,6 +334,7 @@ class TestListWalletCredentialsForWallet:
             session_id="test-session",
             sequence_id=10,
             timestamp=base_ts,
+            reconciliation_method="unclassified",
         )
         await repo.create_wallet_credential(
             wallet_public_id=wallet2_id,
@@ -329,6 +345,7 @@ class TestListWalletCredentialsForWallet:
             session_id="test-session",
             sequence_id=11,
             timestamp=base_ts + timedelta(microseconds=1),
+            reconciliation_method="unclassified",
         )
 
         rows = await repo.list_wallet_credentials_for_wallet(wallet_id, datetime.now(UTC))
@@ -360,6 +377,7 @@ class TestResolveWalletPublicIdByShort:
             session_id="test-session",
             sequence_id=10,
             timestamp=base_ts,
+            reconciliation_method="unclassified",
         )
 
         result = await repo.resolve_wallet_public_id_by_short(
@@ -389,6 +407,7 @@ class TestResolveWalletPublicIdByShort:
             session_id="test-session",
             sequence_id=10,
             timestamp=base_ts,
+            reconciliation_method="unclassified",
         )
 
         result = await repo.resolve_wallet_public_id_by_short(
@@ -418,6 +437,7 @@ class TestResolveWalletPublicIdByShort:
             session_id="test-session",
             sequence_id=10,
             timestamp=base_ts,
+            reconciliation_method="unclassified",
         )
         wallet_short = compute_wallet_short(wallet_id)
 

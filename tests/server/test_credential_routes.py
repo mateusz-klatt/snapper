@@ -23,20 +23,27 @@ import pytest
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
+from pydantic import ValidationError
 
 from snapper.api.schemas.multi_tenant import CreateCredentialBody
 from snapper.api.schemas.multi_tenant import CreateCredentialCommand
 from snapper.api.schemas.multi_tenant import RotateCredentialBody
 from snapper.api.schemas.multi_tenant import RotateCredentialCommand
+from snapper.api.schemas.multi_tenant import SetCredentialReconciliationMethodBody
+from snapper.api.schemas.multi_tenant import SetCredentialReconciliationMethodCommand
+from snapper.application.portfolio.reconciliation_methods import RealPortfolioReconciliationMethod
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import CredentialConflictError
 from snapper.data.repository import CredentialNotFoundError
+from snapper.data.repository import ReconciliationMethodImmutableError
+from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
 from snapper.data.repository_types import WalletCredentialRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.credential_routes import create_credential
 from snapper.server.credential_routes import list_credentials
 from snapper.server.credential_routes import rotate_credential
+from snapper.server.credential_routes import set_credential_reconciliation_method
 
 
 def _cred_row(
@@ -57,6 +64,35 @@ def _cred_row(
         timestamp=datetime.now(UTC),
         session_id="test-sid",
         sequence_id=1,
+    )
+
+
+def _method_config_row(
+    method: RealPortfolioReconciliationMethod = "futures_position",
+) -> PortfolioReconciliationMethodConfigRow:
+    """Minimal active method-config row fixture."""
+    return PortfolioReconciliationMethodConfigRow(
+        wallet_public_id="wallet-42",
+        exchange="kraken_futures",
+        mode="live",
+        method=method,
+        public_id="method-config-1",
+        timestamp=datetime.now(UTC),
+        session_id="test-sid",
+        sequence_id=2,
+    )
+
+
+def _method_command(
+    method: RealPortfolioReconciliationMethod,
+) -> SetCredentialReconciliationMethodCommand:
+    """Build one reconciliation-method command envelope."""
+    return SetCredentialReconciliationMethodCommand(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="cmd-pid",
+        timestamp=datetime.now(UTC),
+        payload=SetCredentialReconciliationMethodBody(reconciliation_method=method),
     )
 
 
@@ -146,6 +182,7 @@ class TestCreateCredential:
             payload=CreateCredentialBody(
                 exchange="kraken",
                 credential_type="api_key_secret",
+                reconciliation_method="spot_execution_replay",
                 credential_payload={"api_key": "k", "api_secret": "s"},
                 label="main key",
             ),
@@ -168,6 +205,7 @@ class TestCreateCredential:
         call_kwargs = mock_repo.create_wallet_credential.await_args.kwargs
         assert call_kwargs["encrypted_payload"] == "gAAAAABencrypted"
         assert call_kwargs["wallet_public_id"] == "wallet-42"
+        assert call_kwargs["reconciliation_method"] == "spot_execution_replay"
         assert result.payload.exchange == "kraken"
 
     @pytest.mark.asyncio
@@ -183,6 +221,7 @@ class TestCreateCredential:
             payload=CreateCredentialBody(
                 exchange="kraken",
                 credential_type="api_key_secret",
+                reconciliation_method="unclassified",
                 credential_payload={"api_key": "k"},
                 label=None,
             ),
@@ -228,6 +267,7 @@ class TestCreateCredential:
             payload=CreateCredentialBody(
                 exchange="kraken",
                 credential_type="api_key_secret",
+                reconciliation_method="spot_execution_replay",
                 credential_payload={"api_key": "k", "api_secret": "s"},
                 label=None,
             ),
@@ -262,6 +302,7 @@ class TestCreateCredential:
             payload=CreateCredentialBody(
                 exchange="paper",
                 credential_type="paper",
+                reconciliation_method="unclassified",
                 credential_payload={},
                 label=None,
             ),
@@ -285,6 +326,411 @@ class TestCreateCredential:
 
         assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
         assert "initial_balance" in str(excinfo.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_paper_unclassified_creation_inserts_no_method_config(self) -> None:
+        """Paper creation accepts only the no-config unclassified selection."""
+        row = _cred_row(exchange="paper", credential_type="paper")
+        mock_repo = AsyncMock()
+        mock_repo.create_wallet_credential = AsyncMock(return_value=row)
+        mock_encryption = MagicMock()
+        mock_encryption.encrypt.return_value = "gAAAAABencrypted"
+        command = CreateCredentialCommand(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="cmd-pid",
+            timestamp=datetime.now(UTC),
+            payload=CreateCredentialBody(
+                exchange="paper",
+                credential_type="paper",
+                reconciliation_method="unclassified",
+                credential_payload={"initial_balance": "1000"},
+                label=None,
+            ),
+        )
+
+        with patch(
+            "snapper.server.credential_routes.get_encryption_service",
+            return_value=mock_encryption,
+        ):
+            result = await create_credential(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert result.payload.exchange == "paper"
+        kwargs = mock_repo.create_wallet_credential.await_args.kwargs
+        assert kwargs["reconciliation_method"] == "unclassified"
+
+    @pytest.mark.asyncio
+    async def test_rejects_real_method_outside_concrete_adapter_policy(self) -> None:
+        """Kraken Futures cannot be configured with a spot method."""
+        mock_repo = AsyncMock()
+        command = CreateCredentialCommand(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="cmd-pid",
+            timestamp=datetime.now(UTC),
+            payload=CreateCredentialBody(
+                exchange="kraken_futures",
+                credential_type="api_key_secret",
+                reconciliation_method="spot_execution_replay",
+                credential_payload={"api_key": "k", "api_secret": "s"},
+                label=None,
+            ),
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_credential(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_repo.create_wallet_credential.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_exchange_lookalike_cannot_inherit_registered_policy(self) -> None:
+        """A futures-looking unknown exchange remains unreviewed and rejects real methods."""
+        mock_repo = AsyncMock()
+        command = CreateCredentialCommand(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="cmd-pid",
+            timestamp=datetime.now(UTC),
+            payload=CreateCredentialBody(
+                exchange="kraken_futures_v2",
+                credential_type="api_key_secret",
+                reconciliation_method="futures_position",
+                credential_payload={"api_key": "k", "api_secret": "s"},
+                label=None,
+            ),
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_credential(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    @pytest.mark.asyncio
+    async def test_unknown_adapter_accepts_explicit_unclassified_without_config(self) -> None:
+        """Unreviewed adapters can remain explicitly unclassified at creation."""
+        row = _cred_row(exchange="future_venue")
+        mock_repo = AsyncMock()
+        mock_repo.create_wallet_credential = AsyncMock(return_value=row)
+        mock_encryption = MagicMock()
+        mock_encryption.encrypt.return_value = "gAAAAABencrypted"
+        command = CreateCredentialCommand(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="cmd-pid",
+            timestamp=datetime.now(UTC),
+            payload=CreateCredentialBody(
+                exchange="future_venue",
+                credential_type="api_key_secret",
+                reconciliation_method="unclassified",
+                credential_payload={"api_key": "k", "api_secret": "s"},
+                label=None,
+            ),
+        )
+
+        with patch(
+            "snapper.server.credential_routes.get_encryption_service",
+            return_value=mock_encryption,
+        ):
+            result = await create_credential(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert result.payload.exchange == "future_venue"
+        kwargs = mock_repo.create_wallet_credential.await_args.kwargs
+        assert kwargs["reconciliation_method"] == "unclassified"
+
+    @pytest.mark.asyncio
+    async def test_paper_rejects_live_method(self) -> None:
+        """Paper credential creation cannot persist a live method config."""
+        mock_repo = AsyncMock()
+        command = CreateCredentialCommand(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="cmd-pid",
+            timestamp=datetime.now(UTC),
+            payload=CreateCredentialBody(
+                exchange="paper",
+                credential_type="paper",
+                reconciliation_method="futures_position",
+                credential_payload={"initial_balance": "1000"},
+                label=None,
+            ),
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_credential(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    @pytest.mark.asyncio
+    async def test_paper_type_and_venue_must_agree(self) -> None:
+        """A paper credential type cannot disguise a live exchange identity."""
+        mock_repo = AsyncMock()
+        command = CreateCredentialCommand(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="cmd-pid",
+            timestamp=datetime.now(UTC),
+            payload=CreateCredentialBody(
+                exchange="kraken",
+                credential_type="paper",
+                reconciliation_method="unclassified",
+                credential_payload={"initial_balance": "1000"},
+                label=None,
+            ),
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_credential(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    @pytest.mark.asyncio
+    async def test_atomic_method_conflict_maps_to_409(self) -> None:
+        """A history conflict from atomic credential provisioning returns conflict."""
+        mock_repo = AsyncMock()
+        mock_repo.create_wallet_credential = AsyncMock(
+            side_effect=ReconciliationMethodImmutableError("method history conflicts")
+        )
+        mock_encryption = MagicMock()
+        mock_encryption.encrypt.return_value = "gAAAAABencrypted"
+        command = CreateCredentialCommand(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="cmd-pid",
+            timestamp=datetime.now(UTC),
+            payload=CreateCredentialBody(
+                exchange="kraken_futures",
+                credential_type="api_key_secret",
+                reconciliation_method="futures_position",
+                credential_payload={"api_key": "k", "api_secret": "s"},
+                label=None,
+            ),
+        )
+
+        with (
+            patch(
+                "snapper.server.credential_routes.get_encryption_service",
+                return_value=mock_encryption,
+            ),
+            pytest.raises(HTTPException) as excinfo,
+        ):
+            await create_credential(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_409_CONFLICT
+
+
+class TestSetCredentialReconciliationMethod:
+    """Behaviour of the administrative reconciliation-method PUT handler."""
+
+    @pytest.mark.asyncio
+    async def test_happy_path_persists_live_method_and_returns_config(self) -> None:
+        """A policy-approved method is written with live account mode."""
+        credential = _cred_row(exchange="kraken_futures")
+        mock_repo = AsyncMock()
+        mock_repo.get_active_credential_by_id = AsyncMock(return_value=credential)
+        mock_repo.set_portfolio_reconciliation_method_config = AsyncMock(
+            return_value=_method_config_row()
+        )
+
+        result = await set_credential_reconciliation_method(
+            request=_make_request(),
+            _principal=_admin_principal(),
+            _csrf=None,
+            wallet_public_id="wallet-42",
+            credential_public_id="cred-1",
+            command=_method_command("futures_position"),
+            repo=mock_repo,
+        )
+
+        kwargs = mock_repo.set_portfolio_reconciliation_method_config.await_args.kwargs
+        assert kwargs["wallet_public_id"] == "wallet-42"
+        assert kwargs["exchange"] == "kraken_futures"
+        assert kwargs["mode"] == "live"
+        assert kwargs["method"] == "futures_position"
+        assert result.payload.public_id == "method-config-1"
+        assert result.payload.method == "futures_position"
+
+    @pytest.mark.asyncio
+    async def test_missing_or_wrong_wallet_credential_returns_404(self) -> None:
+        """The path wallet must own the active credential being classified."""
+        mock_repo = AsyncMock()
+        mock_repo.get_active_credential_by_id = AsyncMock(return_value=_cred_row())
+
+        with pytest.raises(HTTPException) as excinfo:
+            await set_credential_reconciliation_method(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-other",
+                credential_public_id="cred-1",
+                command=_method_command("spot_execution_replay"),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
+        mock_repo.set_portfolio_reconciliation_method_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_active_credential_returns_404(self) -> None:
+        """A closed or absent credential cannot receive configuration."""
+        mock_repo = AsyncMock()
+        mock_repo.get_active_credential_by_id = AsyncMock(return_value=None)
+
+        with pytest.raises(HTTPException) as excinfo:
+            await set_credential_reconciliation_method(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                credential_public_id="cred-missing",
+                command=_method_command("futures_position"),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_policy_rejects_method_before_repository_write(self) -> None:
+        """Kraken Futures rejects a spot method at the administrative surface."""
+        mock_repo = AsyncMock()
+        mock_repo.get_active_credential_by_id = AsyncMock(
+            return_value=_cred_row(exchange="kraken_futures")
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await set_credential_reconciliation_method(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                credential_public_id="cred-1",
+                command=_method_command("spot_execution_replay"),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_repo.set_portfolio_reconciliation_method_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_exchange_rejects_every_real_method(self) -> None:
+        """Unregistered adapters have an empty administrative allowed set."""
+        mock_repo = AsyncMock()
+        mock_repo.get_active_credential_by_id = AsyncMock(
+            return_value=_cred_row(exchange="kraken_futures_v2")
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await set_credential_reconciliation_method(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                credential_public_id="cred-1",
+                command=_method_command("futures_position"),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    @pytest.mark.asyncio
+    async def test_paper_credential_is_rejected(self) -> None:
+        """The administrative endpoint never creates paper method configs."""
+        mock_repo = AsyncMock()
+        mock_repo.get_active_credential_by_id = AsyncMock(
+            return_value=_cred_row(exchange="paper", credential_type="paper")
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await set_credential_reconciliation_method(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                credential_public_id="cred-1",
+                command=_method_command("futures_position"),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_repo.set_portfolio_reconciliation_method_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_immutable_method_change_maps_to_409(self) -> None:
+        """Durable history conflicts surface as HTTP conflict."""
+        mock_repo = AsyncMock()
+        mock_repo.get_active_credential_by_id = AsyncMock(return_value=_cred_row(exchange="kraken"))
+        mock_repo.set_portfolio_reconciliation_method_config = AsyncMock(
+            side_effect=ReconciliationMethodImmutableError("method is immutable")
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await set_credential_reconciliation_method(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                _csrf=None,
+                wallet_public_id="wallet-42",
+                credential_public_id="cred-1",
+                command=_method_command("margin_ledger_replay"),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_409_CONFLICT
+
+    def test_request_schema_rejects_unclassified(self) -> None:
+        """Existing-credential PUT accepts only real methods."""
+        with pytest.raises(ValidationError):
+            SetCredentialReconciliationMethodBody.model_validate(
+                {"reconciliation_method": "unclassified"}
+            )
 
 
 class TestRotateCredential:

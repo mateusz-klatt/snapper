@@ -90,5 +90,6 @@ description = "Paper-mode wallet seeded for open-source dev deployment (10k USD 
 [[wallets.credentials]]
 exchange = "paper"
 credential_type = "paper"
+reconciliation_method = "unclassified"
 initial_balance = "10000.0"
 label = "paper bootstrap"

@@ -27,9 +27,11 @@ from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
+from snapper.data.models import PortfolioReconciliationMethodConfig
 from snapper.data.models import Position
 from snapper.data.models import Symbol
 from snapper.data.models import VenueAccountState
+from snapper.data.models import Wallet
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
@@ -976,6 +978,30 @@ async def test_evaluator_rows_are_accepted_by_s1_writer() -> None:
     session_id = str(uuid7())
     repo = SQLAlchemyRepository(BootstrapSettingsLoader().db_url)
     try:
+        async with repo.session() as session:
+            session.add_all(
+                [
+                    Wallet(
+                        public_id=wallet_public_id,
+                        label=f"futures-evaluator-{wallet_public_id}",
+                        description=None,
+                        is_paper=False,
+                        session_id=session_id,
+                        sequence_id=1,
+                        timestamp=_NOW - timedelta(days=1),
+                    ),
+                    PortfolioReconciliationMethodConfig(
+                        wallet_public_id=wallet_public_id,
+                        exchange="kraken_futures",
+                        mode="live",
+                        method="futures_position",
+                        session_id=session_id,
+                        sequence_id=2,
+                        timestamp=_NOW - timedelta(days=1),
+                    ),
+                ]
+            )
+            await session.commit()
         for sequence_id in (1, 2, 3):
             account = _account(
                 positions=[_venue_position(size=1.0)],
@@ -1068,6 +1094,24 @@ async def test_configured_database_numeric_and_provenance_round_trip() -> None:
         async with repo.session() as session:
             session.add_all(
                 [
+                    Wallet(
+                        public_id=wallet_public_id,
+                        label=f"futures-round-trip-{wallet_public_id}",
+                        description=None,
+                        is_paper=False,
+                        session_id=session_id,
+                        sequence_id=1,
+                        timestamp=persisted_at,
+                    ),
+                    PortfolioReconciliationMethodConfig(
+                        wallet_public_id=wallet_public_id,
+                        exchange="kraken_futures",
+                        mode="live",
+                        method="futures_position",
+                        session_id=session_id,
+                        sequence_id=2,
+                        timestamp=persisted_at,
+                    ),
                     Symbol(
                         native_symbol=native_symbol,
                         base="S2",
@@ -1076,7 +1120,7 @@ async def test_configured_database_numeric_and_provenance_round_trip() -> None:
                         created_at=persisted_at,
                         public_id=symbol_public_id,
                         session_id=session_id,
-                        sequence_id=1,
+                        sequence_id=3,
                         timestamp=persisted_at,
                     ),
                     Instrument(
@@ -1085,7 +1129,7 @@ async def test_configured_database_numeric_and_provenance_round_trip() -> None:
                         source_exchange=None,
                         public_id=instrument_public_id,
                         session_id=session_id,
-                        sequence_id=2,
+                        sequence_id=4,
                         timestamp=persisted_at,
                     ),
                     Position(
@@ -1101,7 +1145,7 @@ async def test_configured_database_numeric_and_provenance_round_trip() -> None:
                         source_venue_event_id=position_watermark,
                         public_id=position_public_id,
                         session_id=session_id,
-                        sequence_id=3,
+                        sequence_id=5,
                         timestamp=persisted_at,
                     ),
                     InstrumentSpec(
@@ -1131,7 +1175,7 @@ async def test_configured_database_numeric_and_provenance_round_trip() -> None:
                         unit_certified=True,
                         public_id=spec_public_id,
                         session_id=session_id,
-                        sequence_id=4,
+                        sequence_id=6,
                         timestamp=persisted_at,
                     ),
                     VenueAccountState(
@@ -1153,7 +1197,7 @@ async def test_configured_database_numeric_and_provenance_round_trip() -> None:
                         error=None,
                         public_id=account_public_id,
                         session_id=session_id,
-                        sequence_id=5,
+                        sequence_id=7,
                         timestamp=persisted_at,
                     ),
                 ]

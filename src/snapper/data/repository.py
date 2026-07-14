@@ -153,6 +153,7 @@ from snapper.data.models import PairedExecutionGroup
 from snapper.data.models import PairedExecutionHalt
 from snapper.data.models import PairedExecutionLeg
 from snapper.data.models import PortfolioDriftEpisode
+from snapper.data.models import PortfolioReconciliationMethodConfig
 from snapper.data.models import PortfolioReconciliationObservation
 from snapper.data.models import PortfolioReconciliationState
 from snapper.data.models import PortfolioSpotReconciliationAnchor
@@ -211,6 +212,7 @@ from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import FundingRateRow
+from snapper.data.repository_types import FuturesReconciliationBundle
 from snapper.data.repository_types import InstrumentContractRow
 from snapper.data.repository_types import InstrumentDetailRow
 from snapper.data.repository_types import InstrumentFeedHealthRow
@@ -241,6 +243,7 @@ from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
+from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
 from snapper.data.repository_types import PortfolioReconciliationStateRow
 from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import PositionCycleRow
@@ -381,6 +384,10 @@ class CredentialNotFoundError(Exception):
     Maps to HTTP 404. Used by ``rotate_wallet_credential`` when the
     source credential row is missing or already closed.
     """
+
+
+class ReconciliationMethodImmutableError(Exception):
+    """Raised when durable reconciliation history forbids a method change."""
 
 
 class WalletConflictError(Exception):
@@ -533,6 +540,9 @@ _LIFECYCLE_FOLD_COMMAND_TYPES: tuple[str, ...] = ("create", "submit")
 _CandleNaturalKey = tuple[str, str, datetime]
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
 _KRAKEN_EQUITIES_EXCHANGE: Final[str] = "kraken_equities"
+_PORTFOLIO_REAL_RECONCILIATION_METHODS: Final[frozenset[str]] = frozenset(
+    {"futures_position", "spot_execution_replay", "margin_ledger_replay"}
+)
 _CANDLE_ID_CACHE_LOOKBACK: Final[timedelta] = timedelta(days=2)
 """How far back ``get_latest_candle_ids`` looks for the newest candle per
 ``(instrument, timeframe)`` when warming the publisher's startup cache.
@@ -1696,6 +1706,70 @@ class Repository(ABC):
         Returns:
             The new active reconciliation-state row id.
         """
+        ...
+
+    @abstractmethod
+    async def has_portfolio_reconciliation_evaluation(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        session_id: str,
+        sequence_id: int,
+    ) -> bool:
+        """Return whether the exact observer evaluation key already exists."""
+        ...
+
+    @abstractmethod
+    async def get_venue_account_state_version(self, state_id: int) -> VenueAccountStateRow | None:
+        """Return one exact venue-account state version by internal id."""
+        ...
+
+    @abstractmethod
+    async def get_active_portfolio_reconciliation_method_config(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+    ) -> PortfolioReconciliationMethodConfigRow | None:
+        """Return the active durable reconciliation classification."""
+        ...
+
+    @abstractmethod
+    async def set_portfolio_reconciliation_method_config(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        method: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> PortfolioReconciliationMethodConfigRow:
+        """Create or immutably revise one durable method classification."""
+        ...
+
+    @abstractmethod
+    async def get_futures_reconciliation_bundle(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        as_of: datetime,
+        venue_symbols: set[str],
+    ) -> FuturesReconciliationBundle:
+        """Read every futures evaluator input from one repeatable snapshot."""
+        ...
+
+    @abstractmethod
+    async def has_spot_margin_reconciliation_signal(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        as_of: datetime,
+    ) -> bool:
+        """Return whether durable evidence contradicts cash-only replay."""
         ...
 
     @abstractmethod
@@ -3726,8 +3800,9 @@ class Repository(ABC):
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
+        reconciliation_method: str,
     ) -> WalletCredentialRow:
-        """Insert a new active wallet credential row.
+        """Atomically insert a credential and any real method config.
 
         The ``encrypted_payload`` is already Fernet-encrypted by the
         caller (the route handler encrypts before calling). The
@@ -7909,6 +7984,265 @@ class SQLAlchemyRepository(Repository):
                 }
                 for pos, inst, sym, cycle_pid in result.all()
             ]
+
+    @staticmethod
+    def _futures_bundle_unavailable(reason: str) -> FuturesReconciliationBundle:
+        """Build a fail-closed futures bundle without internal projection truth."""
+        return FuturesReconciliationBundle(
+            projection=None,
+            instrument_public_ids_by_symbol={},
+            specs_by_instrument_public_id={},
+            error=reason[:512],
+        )
+
+    @staticmethod
+    def _instrument_spec_row(spec: InstrumentSpec) -> InstrumentSpecRow:
+        """Project one instrument specification for evaluator consumption."""
+        return InstrumentSpecRow(
+            instrument_public_id=spec.instrument_public_id,
+            tick_size=spec.tick_size,
+            lot_size=spec.lot_size,
+            min_order_size=spec.min_order_size,
+            max_order_size=spec.max_order_size,
+            cost_decimals=spec.cost_decimals,
+            qty_decimals=spec.qty_decimals,
+            margin_initial=spec.margin_initial,
+            position_limit_long=spec.position_limit_long,
+            position_limit_short=spec.position_limit_short,
+            status=spec.status,
+            contract_size=spec.contract_size,
+            quantity_unit=spec.quantity_unit,
+            spec_source=spec.spec_source,
+            spec_version=spec.spec_version,
+            spec_observed_at=spec.spec_observed_at,
+            unit_certified=spec.unit_certified,
+            expiry_at=spec.expiry_at,
+            instrument_kind=spec.instrument_kind,
+            funding_type=spec.funding_type,
+            funding_frequency_hours=spec.funding_frequency_hours,
+            rollover_rate_long=spec.rollover_rate_long,
+            rollover_rate_short=spec.rollover_rate_short,
+            max_funding_rate=spec.max_funding_rate,
+        )
+
+    async def get_futures_reconciliation_bundle(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        as_of: datetime,
+        venue_symbols: set[str],
+    ) -> FuturesReconciliationBundle:
+        """Load projection, identities, and specs in one repeatable snapshot."""
+        if (
+            not wallet_public_id
+            or mode != "live"
+            or not exchange
+            or exchange.strip().lower() != exchange
+        ):
+            return self._futures_bundle_unavailable("invalid_futures_bundle_identity")
+        if self.dialect_name not in ("postgresql", "sqlite"):
+            return self._futures_bundle_unavailable("unsupported_futures_bundle_dialect")
+        async with self.session() as s, s.begin():
+            if self.dialect_name == "postgresql":
+                await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            position_result = await s.execute(
+                select(
+                    Position,
+                    Instrument.public_id.label("instrument_public_id"),
+                    Instrument.exchange.label("instrument_exchange"),
+                    Symbol.native_symbol.label("native_symbol"),
+                )
+                .outerjoin(
+                    Instrument,
+                    and_(
+                        Position.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .outerjoin(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    Position.wallet_public_id == wallet_public_id,
+                    Position.mode == mode,
+                    *where_active(Position, as_of),
+                )
+                .order_by(Position.id)
+            )
+            projection: list[PositionRow] = []
+            seen_position_ids: set[int] = set()
+            seen_instrument_ids: set[str] = set()
+            projection_symbols: dict[str, str] = {}
+            for (
+                position,
+                instrument_public_id,
+                instrument_exchange,
+                native_symbol,
+            ) in position_result.all():
+                if position.id in seen_position_ids:
+                    return self._futures_bundle_unavailable(
+                        "ambiguous_futures_position_instrument_identity"
+                    )
+                seen_position_ids.add(position.id)
+                if instrument_public_id is None or instrument_exchange is None:
+                    return self._futures_bundle_unavailable(
+                        "missing_futures_position_instrument_identity"
+                    )
+                if instrument_public_id != position.instrument_public_id:
+                    return self._futures_bundle_unavailable(
+                        "conflicting_futures_position_instrument_identity"
+                    )
+                if instrument_exchange != exchange:
+                    continue
+                if not native_symbol:
+                    return self._futures_bundle_unavailable(
+                        "missing_futures_position_instrument_identity"
+                    )
+                if instrument_public_id in seen_instrument_ids:
+                    return self._futures_bundle_unavailable("duplicate_futures_position_identity")
+                seen_instrument_ids.add(instrument_public_id)
+                projection_symbols[native_symbol] = instrument_public_id
+                projection.append(
+                    PositionRow(
+                        public_id=position.public_id,
+                        timestamp=position.timestamp,
+                        session_id=position.session_id,
+                        sequence_id=position.sequence_id,
+                        instrument=native_symbol,
+                        instrument_public_id=instrument_public_id,
+                        exchange=instrument_exchange,
+                        mode=position.mode,
+                        quantity=position.quantity,
+                        average_price=position.average_price,
+                        unrealized_pnl=position.unrealized_pnl,
+                        realized_pnl=position.realized_pnl,
+                        mark_price=position.mark_price,
+                        marked_at=position.marked_at,
+                        source_venue_event_id=position.source_venue_event_id,
+                        position_cycle_public_id=None,
+                        wallet_public_id=position.wallet_public_id,
+                    )
+                )
+            symbols = venue_symbols | set(projection_symbols)
+            symbol_rows: list[tuple[str, str]] = []
+            if symbols:
+                symbol_result = await s.execute(
+                    select(Symbol.native_symbol, Instrument.public_id)
+                    .join(
+                        Instrument,
+                        and_(
+                            Instrument.symbol_public_id == Symbol.public_id,
+                            *where_active(Instrument, as_of),
+                        ),
+                    )
+                    .where(
+                        Symbol.native_symbol.in_(tuple(symbols)),
+                        Instrument.exchange == exchange,
+                        *where_active(Symbol, as_of),
+                    )
+                    .order_by(Symbol.native_symbol, Instrument.public_id)
+                )
+                symbol_rows = list(symbol_result.tuples().all())
+            mappings: dict[str, str] = {}
+            for native_symbol, instrument_public_id in symbol_rows:
+                if native_symbol in mappings:
+                    return self._futures_bundle_unavailable(
+                        "duplicate_futures_native_symbol_mapping"
+                    )
+                mappings[native_symbol] = instrument_public_id
+            for native_symbol, instrument_public_id in projection_symbols.items():
+                if mappings.get(native_symbol) != instrument_public_id:
+                    return self._futures_bundle_unavailable(
+                        "inconsistent_futures_projection_symbol_mapping"
+                    )
+            candidate_ids = set(mappings.values()) | {
+                row["instrument_public_id"] for row in projection
+            }
+            specs: dict[str, InstrumentSpecRow | None] = dict.fromkeys(candidate_ids)
+            if candidate_ids:
+                spec_result = await s.execute(
+                    select(InstrumentSpec)
+                    .where(
+                        InstrumentSpec.instrument_public_id.in_(tuple(candidate_ids)),
+                        *where_active(InstrumentSpec, as_of),
+                    )
+                    .order_by(InstrumentSpec.instrument_public_id, InstrumentSpec.id)
+                )
+                seen_spec_ids: set[str] = set()
+                for spec in spec_result.scalars().all():
+                    if spec.instrument_public_id in seen_spec_ids:
+                        return self._futures_bundle_unavailable("duplicate_futures_instrument_spec")
+                    seen_spec_ids.add(spec.instrument_public_id)
+                    specs[spec.instrument_public_id] = self._instrument_spec_row(spec)
+            return FuturesReconciliationBundle(
+                projection=projection,
+                instrument_public_ids_by_symbol=mappings,
+                specs_by_instrument_public_id=specs,
+            )
+
+    async def has_spot_margin_reconciliation_signal(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        as_of: datetime,
+    ) -> bool:
+        """Check durable leverage, borrow, rollover, and non-cash-anchor evidence."""
+        order_instrument = aliased(Instrument)
+        trade_command_signal = exists().where(
+            TradeCommand.wallet_public_id == wallet_public_id,
+            TradeCommand.exchange == exchange,
+            TradeCommand.mode == mode,
+            TradeCommand.leverage.is_not(None),
+        )
+        order_signal = exists(
+            select(Order.id)
+            .join(
+                order_instrument,
+                and_(
+                    order_instrument.public_id == Order.instrument_public_id,
+                    order_instrument.timestamp <= Order.timestamp,
+                    order_instrument.known_to > Order.timestamp,
+                ),
+            )
+            .where(
+                Order.wallet_public_id == wallet_public_id,
+                Order.mode == mode,
+                Order.leverage.is_not(None),
+                order_instrument.exchange == exchange,
+            )
+        )
+        accrual_signal = exists().where(
+            AccrualLedger.wallet_public_id == wallet_public_id,
+            AccrualLedger.exchange == exchange,
+            AccrualLedger.mode == mode,
+            AccrualLedger.accrual_type.in_(("borrow", "rollover")),
+        )
+        anchor_signal = exists().where(
+            PortfolioSpotReconciliationAnchor.wallet_public_id == wallet_public_id,
+            PortfolioSpotReconciliationAnchor.exchange == exchange,
+            PortfolioSpotReconciliationAnchor.mode == mode,
+            PortfolioSpotReconciliationAnchor.margin_status != "cash",
+            *where_active(PortfolioSpotReconciliationAnchor, as_of),
+        )
+        async with self.session() as s:
+            return bool(
+                await s.scalar(
+                    select(
+                        or_(
+                            trade_command_signal,
+                            order_signal,
+                            accrual_signal,
+                            anchor_signal,
+                        )
+                    )
+                )
+            )
 
     async def get_settings(self, as_of: datetime, category: str | None = None) -> list[SettingRow]:
         """Retrieve active settings, optionally filtered by category."""
@@ -12277,6 +12611,12 @@ class SQLAlchemyRepository(Repository):
             rows = (await s.execute(query)).scalars().all()
             return [self._venue_account_state_to_row(r) for r in rows]
 
+    async def get_venue_account_state_version(self, state_id: int) -> VenueAccountStateRow | None:
+        """Return one immutable SCD2 state version without an active-row filter."""
+        async with self.session() as s:
+            row = await s.get(VenueAccountState, state_id)
+            return None if row is None else self._venue_account_state_to_row(row)
+
     @staticmethod
     def _spot_anchor_to_row(
         anchor: PortfolioSpotReconciliationAnchor,
@@ -12415,6 +12755,334 @@ class SQLAlchemyRepository(Repository):
                 .first()
             )
             return None if anchor is None else self._spot_anchor_to_row(anchor)
+
+    @staticmethod
+    def _portfolio_reconciliation_method_config_to_row(
+        config: PortfolioReconciliationMethodConfig,
+    ) -> PortfolioReconciliationMethodConfigRow:
+        """Project one active method-config model to its typed boundary."""
+        return {
+            "wallet_public_id": config.wallet_public_id,
+            "exchange": config.exchange,
+            "mode": config.mode,
+            "method": config.method,
+            "public_id": config.public_id,
+            "timestamp": config.timestamp,
+            "session_id": config.session_id,
+            "sequence_id": config.sequence_id,
+        }
+
+    async def _load_active_portfolio_reconciliation_method_config(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        *,
+        lock: bool,
+    ) -> PortfolioReconciliationMethodConfig | None:
+        """Load exactly one sentinel-active config and reject corruption."""
+        query = select(PortfolioReconciliationMethodConfig).where(
+            PortfolioReconciliationMethodConfig.known_to == KNOWN_TO_MAX,
+            PortfolioReconciliationMethodConfig.wallet_public_id == wallet_public_id,
+            PortfolioReconciliationMethodConfig.exchange == exchange,
+            PortfolioReconciliationMethodConfig.mode == mode,
+        )
+        if lock:
+            query = query.with_for_update()
+        rows = (await s.execute(query)).scalars().all()
+        if len(rows) > 1:
+            raise RuntimeError("duplicate active portfolio reconciliation method config")
+        if not rows:
+            return None
+        row = rows[0]
+        if (
+            row.wallet_public_id != wallet_public_id
+            or row.exchange != exchange
+            or row.mode != "live"
+            or row.method not in _PORTFOLIO_REAL_RECONCILIATION_METHODS
+        ):
+            raise RuntimeError("invalid active portfolio reconciliation method config")
+        return row
+
+    async def get_active_portfolio_reconciliation_method_config(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+    ) -> PortfolioReconciliationMethodConfigRow | None:
+        """Return one sentinel-active operator-authored method config."""
+        async with self.session() as s:
+            try:
+                config = await self._load_active_portfolio_reconciliation_method_config(
+                    s,
+                    wallet_public_id,
+                    exchange,
+                    mode,
+                    lock=False,
+                )
+            except RuntimeError:
+                return None
+            return (
+                None
+                if config is None
+                else self._portfolio_reconciliation_method_config_to_row(config)
+            )
+
+    async def _require_active_portfolio_wallet(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+    ) -> Wallet:
+        """Require exactly one sentinel-active wallet after advisory locking."""
+        rows = (
+            (
+                await s.execute(
+                    select(Wallet).where(
+                        Wallet.public_id == wallet_public_id,
+                        Wallet.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(rows) != 1:
+            raise RuntimeError("active wallet is absent or ambiguous")
+        return rows[0]
+
+    async def _begin_portfolio_reconciliation_write(self, s: AsyncSession) -> None:
+        """Acquire SQLite's single-writer transaction before reading state."""
+        if self.dialect_name == "sqlite":
+            await s.execute(text("BEGIN IMMEDIATE"))
+
+    @staticmethod
+    def _unclassified_observation_has_no_retained_evidence(
+        row: PortfolioReconciliationObservation,
+    ) -> bool:
+        """Return whether an unclassified observation is safely non-full."""
+        return (
+            row.method == "unclassified"
+            and row.evaluation_status in ("incomplete", "error")
+            and row.venue_account_state_public_id is None
+            and row.venue_account_observation_id is None
+            and row.account_authoritative_until is None
+            and row.source_watermark_kind is None
+            and row.source_watermark is None
+            and row.anchor_public_id is None
+            and row.expected_json is None
+            and row.actual_json is None
+            and row.difference_json is None
+            and row.tolerance_json is None
+            and row.resulting_full_mismatch_count == 0
+            and row.drift_episode_public_id is None
+        )
+
+    @staticmethod
+    def _unclassified_state_has_no_retained_evidence(
+        row: PortfolioReconciliationState,
+    ) -> bool:
+        """Return whether an unclassified state can transition to its first config."""
+        return (
+            row.method == "unclassified"
+            and row.current_evaluation_status in ("incomplete", "error")
+            and row.last_full_observation_id is None
+            and row.last_full_outcome is None
+            and row.detail_source_observation_id is None
+            and row.consecutive_full_mismatches == 0
+            and row.open_drift_episode_public_id is None
+            and row.anchor_public_id is None
+            and row.venue_account_state_public_id is None
+            and row.venue_account_observation_id is None
+            and row.source_watermark_kind is None
+            and row.source_watermark is None
+            and row.expected_json is None
+            and row.actual_json is None
+            and row.difference_json is None
+            and row.tolerance_json is None
+            and row.reconciled_at is None
+            and row.authoritative_until is None
+        )
+
+    async def _portfolio_reconciliation_history(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+    ) -> tuple[
+        list[PortfolioReconciliationObservation],
+        list[PortfolioReconciliationState],
+        bool,
+    ]:
+        """Load all method-bearing history and whether episode history exists."""
+        identity = (
+            PortfolioReconciliationObservation.wallet_public_id == wallet_public_id,
+            PortfolioReconciliationObservation.exchange == exchange,
+            PortfolioReconciliationObservation.mode == mode,
+        )
+        observations = list(
+            (await s.execute(select(PortfolioReconciliationObservation).where(*identity)))
+            .scalars()
+            .all()
+        )
+        states = list(
+            (
+                await s.execute(
+                    select(PortfolioReconciliationState).where(
+                        PortfolioReconciliationState.wallet_public_id == wallet_public_id,
+                        PortfolioReconciliationState.exchange == exchange,
+                        PortfolioReconciliationState.mode == mode,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        episode_exists = bool(
+            await s.scalar(
+                select(
+                    exists().where(
+                        PortfolioDriftEpisode.wallet_public_id == wallet_public_id,
+                        PortfolioDriftEpisode.exchange == exchange,
+                        PortfolioDriftEpisode.mode == mode,
+                    )
+                )
+            )
+        )
+        return observations, states, episode_exists
+
+    def _validate_first_portfolio_reconciliation_config_history(
+        self,
+        observations: list[PortfolioReconciliationObservation],
+        states: list[PortfolioReconciliationState],
+        episode_exists: bool,
+        method: str,
+    ) -> None:
+        """Allow only matching legacy history or safe unclassified history."""
+        methods = {row.method for row in observations} | {row.method for row in states}
+        if not methods:
+            if episode_exists:
+                raise ReconciliationMethodImmutableError(
+                    "drift episode history has no matching reconciliation state"
+                )
+            return
+        if methods == {"unclassified"}:
+            if (
+                episode_exists
+                or not all(
+                    self._unclassified_observation_has_no_retained_evidence(row)
+                    for row in observations
+                )
+                or not all(self._unclassified_state_has_no_retained_evidence(row) for row in states)
+            ):
+                raise ReconciliationMethodImmutableError(
+                    "unclassified reconciliation history contains retained evidence"
+                )
+            return
+        if methods != {method}:
+            raise ReconciliationMethodImmutableError(
+                "reconciliation history does not agree with the requested method"
+            )
+
+    async def _set_portfolio_reconciliation_method_config_locked(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        method: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> PortfolioReconciliationMethodConfig:
+        """Apply one config write while the wallet advisory lock is held."""
+        normalized_exchange = exchange.strip().lower()
+        if not normalized_exchange or normalized_exchange != exchange or mode != "live":
+            raise ValueError("reconciliation method config identity is invalid")
+        if method not in _PORTFOLIO_REAL_RECONCILIATION_METHODS:
+            raise ValueError("reconciliation method config requires a real method")
+        existing = await self._load_active_portfolio_reconciliation_method_config(
+            s,
+            wallet_public_id,
+            normalized_exchange,
+            mode,
+            lock=True,
+        )
+        if existing is not None and existing.method == method:
+            return existing
+        observations, states, episode_exists = await self._portfolio_reconciliation_history(
+            s,
+            wallet_public_id,
+            normalized_exchange,
+            mode,
+        )
+        history_exists = bool(observations or states or episode_exists)
+        if existing is not None:
+            if history_exists:
+                raise ReconciliationMethodImmutableError(
+                    "reconciliation method is immutable after history exists"
+                )
+            effective = max(timestamp, existing.timestamp)
+            await s.execute(
+                update(PortfolioReconciliationMethodConfig)
+                .where(PortfolioReconciliationMethodConfig.id == existing.id)
+                .values(known_to=effective)
+            )
+            public_id = existing.public_id
+        else:
+            self._validate_first_portfolio_reconciliation_config_history(
+                observations,
+                states,
+                episode_exists,
+                method,
+            )
+            effective = timestamp
+            public_id = str(uuid7())
+        config = PortfolioReconciliationMethodConfig(
+            wallet_public_id=wallet_public_id,
+            exchange=normalized_exchange,
+            mode=mode,
+            method=method,
+            public_id=public_id,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            timestamp=effective,
+            known_to=KNOWN_TO_MAX,
+        )
+        s.add(config)
+        await s.flush()
+        return config
+
+    async def set_portfolio_reconciliation_method_config(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        method: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> PortfolioReconciliationMethodConfigRow:
+        """Advisory-lock and persist an immutable durable classification."""
+        identity = (wallet_public_id, exchange, mode)
+        process_lock = self._portfolio_reconciliation_locks.setdefault(identity, asyncio.Lock())
+        async with process_lock, self.session() as s:
+            await self._begin_portfolio_reconciliation_write(s)
+            await self._acquire_wallet_advisory_lock(s, wallet_public_id)
+            await self._require_active_portfolio_wallet(s, wallet_public_id)
+            config = await self._set_portfolio_reconciliation_method_config_locked(
+                s,
+                wallet_public_id,
+                exchange,
+                mode,
+                method,
+                session_id,
+                sequence_id,
+                timestamp,
+            )
+            await s.commit()
+            return self._portfolio_reconciliation_method_config_to_row(config)
 
     @staticmethod
     def _portfolio_reconciliation_identity_filters(
@@ -12957,6 +13625,107 @@ class SQLAlchemyRepository(Repository):
         s.add(successor)
         await s.flush()
 
+    @staticmethod
+    def _portfolio_reconciliation_evaluation_has_no_nonfull_evidence(
+        evaluation: PortfolioReconciliationEvaluationRow,
+    ) -> bool:
+        """Return whether a non-full-only method carries no forbidden evidence."""
+        return all(
+            evaluation[field] is None
+            for field in (
+                "venue_account_state_public_id",
+                "venue_account_observation_id",
+                "account_authoritative_until",
+                "source_watermark_kind",
+                "source_watermark",
+                "anchor_public_id",
+                "expected_json",
+                "actual_json",
+                "difference_json",
+                "tolerance_json",
+            )
+        )
+
+    def _validate_portfolio_reconciliation_evaluation_config(
+        self,
+        evaluation: PortfolioReconciliationEvaluationRow,
+        config: PortfolioReconciliationMethodConfig | None,
+    ) -> None:
+        """Fail closed on invalid status, config mismatch, or non-full evidence."""
+        method = evaluation["method"]
+        status = evaluation["evaluation_status"]
+        exchange = evaluation["exchange"]
+        if evaluation["mode"] != "live" or not exchange or exchange.strip().lower() != exchange:
+            raise RuntimeError("portfolio reconciliation identity is invalid")
+        if method in ("futures_position", "spot_execution_replay"):
+            if status not in ("matched", "mismatched", "incomplete", "unsupported", "error"):
+                raise RuntimeError("portfolio reconciliation status is incompatible with method")
+        elif method == "margin_ledger_replay":
+            if status != "error":
+                raise RuntimeError("margin ledger reconciliation permits only error status")
+            if not self._portfolio_reconciliation_evaluation_has_no_nonfull_evidence(evaluation):
+                raise RuntimeError("margin ledger reconciliation cannot carry full evidence")
+        elif method == "unclassified":
+            if status not in ("incomplete", "error"):
+                raise RuntimeError("unclassified reconciliation status is invalid")
+            if not self._portfolio_reconciliation_evaluation_has_no_nonfull_evidence(evaluation):
+                raise RuntimeError("unclassified reconciliation cannot carry full evidence")
+        else:
+            raise RuntimeError("portfolio reconciliation method is invalid")
+        if status == "error" and not (evaluation["error"] or "").strip():
+            raise RuntimeError("error reconciliation requires a non-empty reason")
+        if method == "unclassified":
+            if config is not None:
+                raise RuntimeError("unclassified reconciliation conflicts with active config")
+        elif config is None or config.method != method:
+            raise RuntimeError("reconciliation evaluation conflicts with active method config")
+
+    def _validate_portfolio_reconciliation_method_transition(
+        self,
+        existing: PortfolioReconciliationState | None,
+        evaluation: PortfolioReconciliationEvaluationRow,
+        config: PortfolioReconciliationMethodConfig | None,
+    ) -> None:
+        """Permit only a safe unclassified-to-first-real-method transition."""
+        if existing is None:
+            return
+        incoming_method = evaluation["method"]
+        if existing.method == incoming_method:
+            if (
+                existing.method == "unclassified"
+                and not self._unclassified_state_has_no_retained_evidence(existing)
+            ):
+                raise RuntimeError("unclassified reconciliation state retains forbidden evidence")
+            if existing.method == "margin_ledger_replay" and (
+                existing.last_full_observation_id is not None
+                or existing.last_full_outcome is not None
+                or existing.detail_source_observation_id is not None
+                or existing.consecutive_full_mismatches != 0
+                or existing.open_drift_episode_public_id is not None
+                or existing.anchor_public_id is not None
+                or existing.venue_account_state_public_id is not None
+                or existing.venue_account_observation_id is not None
+                or existing.source_watermark_kind is not None
+                or existing.source_watermark is not None
+                or existing.expected_json is not None
+                or existing.actual_json is not None
+                or existing.difference_json is not None
+                or existing.tolerance_json is not None
+                or existing.reconciled_at is not None
+                or existing.authoritative_until is not None
+            ):
+                raise RuntimeError("margin ledger reconciliation state retains forbidden evidence")
+            return
+        if (
+            existing.method == "unclassified"
+            and incoming_method in _PORTFOLIO_REAL_RECONCILIATION_METHODS
+            and config is not None
+            and config.method == incoming_method
+            and self._unclassified_state_has_no_retained_evidence(existing)
+        ):
+            return
+        raise RuntimeError("portfolio reconciliation method transition is invalid")
+
     async def _write_portfolio_reconciliation(
         self, s: AsyncSession, evaluation: PortfolioReconciliationEvaluationRow
     ) -> int:
@@ -12980,6 +13749,16 @@ class SQLAlchemyRepository(Repository):
             RuntimeError: If predecessor lineage, episode identity, or replay
                 evidence is missing, foreign, or inconsistent.
         """
+        await self._begin_portfolio_reconciliation_write(s)
+        await self._acquire_wallet_advisory_lock(s, evaluation["wallet_public_id"])
+        await self._require_active_portfolio_wallet(s, evaluation["wallet_public_id"])
+        config = await self._load_active_portfolio_reconciliation_method_config(
+            s,
+            evaluation["wallet_public_id"],
+            evaluation["exchange"],
+            evaluation["mode"],
+            lock=True,
+        )
         existing = (
             (
                 await s.execute(
@@ -13041,6 +13820,8 @@ class SQLAlchemyRepository(Repository):
             if existing is None:
                 raise RuntimeError("reconciliation observation has no active state")
             return int(existing.id)
+        self._validate_portfolio_reconciliation_evaluation_config(evaluation, config)
+        self._validate_portfolio_reconciliation_method_transition(existing, evaluation, config)
         if evaluation["method"] == "spot_execution_replay" and evaluation["evaluation_status"] in (
             "matched",
             "mismatched",
@@ -13261,6 +14042,28 @@ class SQLAlchemyRepository(Repository):
         await s.flush()
         return int(state.id)
 
+    async def _try_record_portfolio_reconciliation(
+        self,
+        evaluation: PortfolioReconciliationEvaluationRow,
+    ) -> int | IntegrityError | OperationalError:
+        """Run one write attempt in an independently owned session.
+
+        Operational failures invalidate their connection inside the owning
+        context so its normal exit cannot issue a rollback against that
+        connection. Integrity failures retain the ordinary rollback path.
+        """
+        async with self.session() as s:
+            try:
+                state_id = await self._write_portfolio_reconciliation(s, evaluation)
+                await s.commit()
+            except OperationalError as exc:
+                await s.invalidate()
+                return exc
+            except IntegrityError as exc:
+                await s.rollback()
+                return exc
+            return state_id
+
     async def record_portfolio_reconciliation(
         self, evaluation: PortfolioReconciliationEvaluationRow
     ) -> int:
@@ -13288,12 +14091,13 @@ class SQLAlchemyRepository(Repository):
         truth, positions, and orders.
 
         A lost concurrent first insert or SQLite stale-read operational race is
-        retried once after rollback. A per-identity process lock serializes
-        same-repository writers, including SQLite where ``FOR UPDATE`` is
-        ignored; PostgreSQL additionally enforces the row lock across
-        repository processes. The evaluation tuple is unique per account:
-        exact replays are idempotent, conflicting replays fail closed, and
-        tuples older than the active predecessor are ignored.
+        retried once in a fresh session after the failed transaction is rolled
+        back or its connection is invalidated. A per-identity process lock
+        serializes same-repository writers, including SQLite where ``FOR
+        UPDATE`` is ignored; PostgreSQL additionally enforces the row lock
+        across repository processes. The evaluation tuple is unique per
+        account: exact replays are idempotent, conflicting replays fail closed,
+        and tuples older than the active predecessor are ignored.
 
         Args:
             evaluation: Raw comparison evidence and evaluation outcome.
@@ -13307,15 +14111,38 @@ class SQLAlchemyRepository(Repository):
             evaluation["mode"],
         )
         lock = self._portfolio_reconciliation_locks.setdefault(identity, asyncio.Lock())
-        async with lock, self.session() as s:
-            try:
-                state_id = await self._write_portfolio_reconciliation(s, evaluation)
-                await s.commit()
-            except IntegrityError, OperationalError:
-                await s.rollback()
-                state_id = await self._write_portfolio_reconciliation(s, evaluation)
-                await s.commit()
-            return state_id
+        async with lock:
+            result = await self._try_record_portfolio_reconciliation(evaluation)
+            if isinstance(result, int):
+                return result
+            retry_result = await self._try_record_portfolio_reconciliation(evaluation)
+            if isinstance(retry_result, int):
+                return retry_result
+            raise retry_result
+
+    async def has_portfolio_reconciliation_evaluation(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        session_id: str,
+        sequence_id: int,
+    ) -> bool:
+        """Check the indexed five-column evaluation idempotency key."""
+        async with self.session() as s:
+            return bool(
+                await s.scalar(
+                    select(
+                        exists().where(
+                            PortfolioReconciliationObservation.wallet_public_id == wallet_public_id,
+                            PortfolioReconciliationObservation.exchange == exchange,
+                            PortfolioReconciliationObservation.mode == mode,
+                            PortfolioReconciliationObservation.session_id == session_id,
+                            PortfolioReconciliationObservation.sequence_id == sequence_id,
+                        )
+                    )
+                )
+            )
 
     @staticmethod
     def _portfolio_reconciliation_state_to_row(
@@ -16672,12 +17499,42 @@ class SQLAlchemyRepository(Repository):
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
+        reconciliation_method: str,
     ) -> WalletCredentialRow:
-        """Insert a new active wallet credential row."""
-        async with self.session() as s:
+        """Atomically insert a credential and its operator classification."""
+        normalized_exchange = exchange.lower()
+        paper_credential = (
+            normalized_exchange == ExchangeEnum.PAPER.value or credential_type == "paper"
+        )
+        if paper_credential and reconciliation_method != "unclassified":
+            raise ValueError("paper credentials cannot have a reconciliation method config")
+        if (
+            not paper_credential
+            and reconciliation_method
+            not in _PORTFOLIO_REAL_RECONCILIATION_METHODS | {"unclassified"}
+        ):
+            raise ValueError("credential reconciliation method is invalid")
+        identity = (wallet_public_id, normalized_exchange, "live")
+        process_lock = self._portfolio_reconciliation_locks.setdefault(identity, asyncio.Lock())
+        async with process_lock, self.session() as s:
+            await self._begin_portfolio_reconciliation_write(s)
+            await self._acquire_wallet_advisory_lock(s, wallet_public_id)
+            await self._require_active_portfolio_wallet(s, wallet_public_id)
+            if not paper_credential and reconciliation_method == "unclassified":
+                existing_config = await self._load_active_portfolio_reconciliation_method_config(
+                    s,
+                    wallet_public_id,
+                    normalized_exchange,
+                    "live",
+                    lock=True,
+                )
+                if existing_config is not None:
+                    raise ReconciliationMethodImmutableError(
+                        "unclassified credential conflicts with active method config"
+                    )
             cred = WalletCredential(
                 wallet_public_id=wallet_public_id,
-                exchange=exchange.lower(),
+                exchange=normalized_exchange,
                 credential_type=credential_type,
                 encrypted_payload=encrypted_payload,
                 label=label,
@@ -16687,6 +17544,17 @@ class SQLAlchemyRepository(Repository):
                 known_to=KNOWN_TO_MAX,
             )
             s.add(cred)
+            if reconciliation_method in _PORTFOLIO_REAL_RECONCILIATION_METHODS:
+                await self._set_portfolio_reconciliation_method_config_locked(
+                    s,
+                    wallet_public_id,
+                    normalized_exchange,
+                    "live",
+                    reconciliation_method,
+                    session_id,
+                    sequence_id,
+                    timestamp,
+                )
             try:
                 await s.commit()
             except IntegrityError as exc:

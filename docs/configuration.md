@@ -246,13 +246,14 @@ bundled `dev.toml` seeds an open-source paper wallet with a paper
 credential; maintainers may have a proprietary override with live
 wallet credentials. On a fresh database, `db-seed` creates the default
 operator, every `[[wallets]]` entry, nested
-`[[wallets.credentials]]` rows, and the first admin user's primary
-operator membership. If the profile has no wallets, the loader falls
-back to a single `default` paper wallet with a `10000.0` initial
-balance. Re-running seed on an established database does not merge
-wallets: users are skipped when any user exists, settings are
-inserted only when the key is absent, and the whole operator/wallet
-bootstrap is skipped when either operators or wallets already exist.
+`[[wallets.credentials]]` rows, each requested live reconciliation-method
+config, and the first admin user's primary operator membership. If the
+profile has no wallets, the loader falls back to a single `default`
+paper wallet with a `10000.0` initial balance. Re-running seed on an
+established database does not merge wallets: users are skipped when any
+user exists, settings are inserted only when the key is absent, and the
+whole operator/wallet bootstrap is skipped when either operators or
+wallets already exist.
 
 The seed loader supports the `api_key_secret`, `rsa_pem`, and `paper`
 envelope shapes. The `oauth` shape is accepted at the
@@ -282,12 +283,14 @@ is_paper = false
 [[wallets.credentials]]
 exchange = "kraken"
 credential_type = "api_key_secret"
+reconciliation_method = "unclassified"
 api_key = "your-kraken-api-key"
 api_secret = "your-kraken-api-secret"
 
 [[wallets.credentials]]
 exchange = "walutomat"
 credential_type = "rsa_pem"
+reconciliation_method = "spot_execution_replay"
 api_key = "your-walutomat-api-key"
 private_key_pem_base64 = "your-pem-base64-encoded"
 ```
@@ -295,7 +298,18 @@ private_key_pem_base64 = "your-pem-base64-encoded"
 Two wallets named `default` — one with `is_paper=true` and one with
 `is_paper=false` — coexist via the `(label, is_paper)` unique index.
 The seed loader encrypts every payload with the master-password Fernet
-key before insert.
+key before insert. Every seed credential requires
+`reconciliation_method`. The accepted values are `futures_position`,
+`spot_execution_replay`, `margin_ledger_replay`, and `unclassified`.
+A real method is inserted atomically with its credential; `unclassified`
+and paper credentials create no method-config row. Concrete adapter policy
+allows only `futures_position` for Kraken Futures, the two replay methods
+for Kraken Spot, and `spot_execution_replay` for Walutomat. Paper,
+market-data-only, unreviewed, and unknown adapters reject every real method.
+For an existing deployment, stop executors, migrate through revision `0026`,
+classify each live credential through the administrative PUT endpoint, and
+then restart. An omitted classification remains fail-closed as
+`unclassified`; the migration never infers or backfills a real method.
 
 ### Trading Parameters
 

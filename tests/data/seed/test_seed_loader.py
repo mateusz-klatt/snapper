@@ -21,6 +21,7 @@ from snapper.data.models import Setting
 from snapper.data.seed.loader import SeedProfile
 from snapper.data.seed.loader import SeedSetting
 from snapper.data.seed.loader import SeedUser
+from snapper.data.seed.loader import SeedWallet
 from snapper.data.seed.loader import SeedWalletCredential
 from snapper.data.seed.loader import _build_credential_envelope
 from snapper.data.seed.loader import _hash_password
@@ -28,6 +29,7 @@ from snapper.data.seed.loader import _known_to_value
 from snapper.data.seed.loader import _package_dir
 from snapper.data.seed.loader import _sync_db_url
 from snapper.data.seed.loader import _timestamp_value
+from snapper.data.seed.loader import _validate_seed_reconciliation_method
 from snapper.data.seed.loader import load_seed_profile
 from snapper.data.seed.loader import resolve_seed_path
 from snapper.data.seed.loader import run_seed
@@ -1001,6 +1003,44 @@ class TestSeedDefaultMultiTenant:
             conn.close()
             cast(Any, engine).dispose()
 
+    def test_real_method_config_is_seeded_with_credential(self, tmp_path: Path) -> None:
+        """A real method inserts its config in the bootstrap transaction."""
+        engine, conn = self._make_db(tmp_path)
+        wallet = SeedWallet(
+            label="futures",
+            is_paper=False,
+            credentials=[
+                SeedWalletCredential(
+                    exchange="kraken_futures",
+                    credential_type="api_key_secret",
+                    reconciliation_method="futures_position",
+                    api_key="key",
+                    api_secret="secret",
+                )
+            ],
+        )
+        try:
+            count = seed_default_multi_tenant(conn, SequenceTracker(), wallets=[wallet])
+            conn.commit()
+
+            assert count == 4
+            config = conn.execute(
+                text(
+                    "SELECT wallet_public_id, exchange, mode, method"
+                    " FROM portfolio_reconciliation_method_configs"
+                )
+            ).first()
+            credential = conn.execute(
+                text("SELECT wallet_public_id FROM wallet_credentials")
+            ).first()
+            assert config is not None
+            assert credential is not None
+            assert config[0] == credential[0]
+            assert config[1:] == ("kraken_futures", "live", "futures_position")
+        finally:
+            conn.close()
+            cast(Any, engine).dispose()
+
 
 class TestBuildCredentialEnvelope:
     """Tests for ``_build_credential_envelope`` payload packing."""
@@ -1017,6 +1057,7 @@ class TestBuildCredentialEnvelope:
         cred = SeedWalletCredential(
             exchange="kraken",
             credential_type="api_key_secret",
+            reconciliation_method="unclassified",
             api_key="public-key",
             api_secret="secret-value",
         )
@@ -1041,6 +1082,7 @@ class TestBuildCredentialEnvelope:
         cred = SeedWalletCredential(
             exchange="walutomat",
             credential_type="rsa_pem",
+            reconciliation_method="spot_execution_replay",
             api_key="wallet-key",
             private_key_pem_base64=base64.b64encode(pem_text.encode("utf-8")).decode("ascii"),
         )
@@ -1067,6 +1109,7 @@ class TestBuildCredentialEnvelope:
         cred = SeedWalletCredential(
             exchange="kraken",
             credential_type="oauth",
+            reconciliation_method="unclassified",
         )
         with pytest.raises(ValueError, match="Unknown seed credential_type 'oauth'"):
             _build_credential_envelope(cred)
@@ -1084,11 +1127,98 @@ class TestBuildCredentialEnvelope:
         cred = SeedWalletCredential(
             exchange="walutomat",
             credential_type="rsa_pem",
+            reconciliation_method="spot_execution_replay",
             api_key="k",
             private_key_pem_base64="!!!not-base64!!!",
         )
         with pytest.raises(ValueError, match="Invalid base64.*walutomat"):
             _build_credential_envelope(cred)
+
+
+class TestSeedReconciliationPolicy:
+    """Seed classifications obey the exact concrete-adapter policy."""
+
+    def test_accepts_each_reviewed_adapter_method_and_unclassified(self) -> None:
+        """Reviewed real methods and explicit unclassified values pass."""
+        credentials = [
+            SeedWalletCredential(
+                exchange="kraken_futures",
+                credential_type="api_key_secret",
+                reconciliation_method="futures_position",
+            ),
+            SeedWalletCredential(
+                exchange="kraken",
+                credential_type="api_key_secret",
+                reconciliation_method="spot_execution_replay",
+            ),
+            SeedWalletCredential(
+                exchange="kraken",
+                credential_type="api_key_secret",
+                reconciliation_method="margin_ledger_replay",
+            ),
+            SeedWalletCredential(
+                exchange="walutomat",
+                credential_type="rsa_pem",
+                reconciliation_method="spot_execution_replay",
+            ),
+            SeedWalletCredential(
+                exchange="polygon",
+                credential_type="api_key_secret",
+                reconciliation_method="unclassified",
+            ),
+            SeedWalletCredential(
+                exchange="paper",
+                credential_type="paper",
+                reconciliation_method="unclassified",
+            ),
+        ]
+
+        for credential in credentials:
+            _validate_seed_reconciliation_method(credential)
+
+    def test_rejects_uppercase_exchange(self) -> None:
+        """Seed exchange identity must retain its lowercase DB invariant."""
+        credential = SeedWalletCredential(
+            exchange="Kraken",
+            credential_type="api_key_secret",
+            reconciliation_method="unclassified",
+        )
+
+        with pytest.raises(ValueError, match="must be lowercase"):
+            _validate_seed_reconciliation_method(credential)
+
+    def test_rejects_paper_type_venue_mismatch(self) -> None:
+        """Paper credential type cannot be paired with a live venue."""
+        credential = SeedWalletCredential(
+            exchange="kraken",
+            credential_type="paper",
+            reconciliation_method="unclassified",
+        )
+
+        with pytest.raises(ValueError, match="paper credential and venue"):
+            _validate_seed_reconciliation_method(credential)
+
+    def test_rejects_real_method_for_paper(self) -> None:
+        """Paper provisioning never creates a live method-config row."""
+        credential = SeedWalletCredential(
+            exchange="paper",
+            credential_type="paper",
+            reconciliation_method="futures_position",
+        )
+
+        with pytest.raises(ValueError, match="Paper seed credentials"):
+            _validate_seed_reconciliation_method(credential)
+
+    def test_rejects_method_outside_concrete_adapter_allowed_set(self) -> None:
+        """An exchange-looking venue cannot select another adapter's method."""
+        credential = SeedWalletCredential(
+            exchange="kraken_futures_preview",
+            credential_type="api_key_secret",
+            reconciliation_method="futures_position",
+        )
+
+        with pytest.raises(ValueError, match="is not allowed"):
+            _validate_seed_reconciliation_method(credential)
 
 
 def _create_multi_tenant_tables(conn: Connection) -> None:
@@ -1135,6 +1265,16 @@ def _create_multi_tenant_tables(conn: Connection) -> None:
             "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
             " wallet_public_id TEXT, exchange TEXT, credential_type TEXT,"
             " encrypted_payload TEXT, label TEXT,"
+            " timestamp TIMESTAMP, known_to DATETIME NOT NULL,"
+            " session_id TEXT NOT NULL DEFAULT '',"
+            " sequence_id INTEGER NOT NULL DEFAULT 0)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE TABLE portfolio_reconciliation_method_configs ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+            " wallet_public_id TEXT, exchange TEXT, mode TEXT, method TEXT,"
             " timestamp TIMESTAMP, known_to DATETIME NOT NULL,"
             " session_id TEXT NOT NULL DEFAULT '',"
             " sequence_id INTEGER NOT NULL DEFAULT 0)"

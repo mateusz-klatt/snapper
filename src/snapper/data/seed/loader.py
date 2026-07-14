@@ -33,8 +33,11 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
+from snapper.application.portfolio.reconciliation_methods import PortfolioReconciliationMethod
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.infrastructure.exchanges.reconciliation_policy import account_mode_for_exchange
+from snapper.infrastructure.exchanges.reconciliation_policy import is_reconciliation_method_allowed
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.security.encryption import get_encryption_service
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -85,6 +88,8 @@ class SeedWalletCredential:
         credential_type: One of ``"api_key_secret"``, ``"rsa_pem"``,
             ``"paper"``. Determines which fields of this dataclass are
             packed into the encrypted envelope.
+        reconciliation_method: Required explicit classification. Real methods
+            create a live config row; ``unclassified`` creates no config row.
         api_key: Exchange API key (for ``api_key_secret`` / ``rsa_pem``).
         api_secret: Exchange API secret (for ``api_key_secret``).
         private_key_pem_base64: Base64-encoded PEM private key
@@ -97,6 +102,7 @@ class SeedWalletCredential:
 
     exchange: str
     credential_type: str
+    reconciliation_method: PortfolioReconciliationMethod
     api_key: str = ""
     api_secret: str = ""
     private_key_pem_base64: str = ""
@@ -379,13 +385,11 @@ def _build_credential_envelope(cred: SeedWalletCredential) -> str:
     if cred.credential_type == "api_key_secret":
         return json.dumps({"api_key": cred.api_key, "api_secret": cred.api_secret})
     if cred.credential_type == "rsa_pem":
-
         try:
             pem_bytes = base64.b64decode(cred.private_key_pem_base64)
         except Exception as exc:
             raise ValueError(
-                f"Invalid base64 in private_key_pem_base64 for exchange "
-                f"'{cred.exchange}': {exc}"
+                f"Invalid base64 in private_key_pem_base64 for exchange '{cred.exchange}': {exc}"
             ) from exc
         return json.dumps({"api_key": cred.api_key, "private_key_pem": pem_bytes.decode("utf-8")})
     if cred.credential_type == "paper":
@@ -395,6 +399,30 @@ def _build_credential_envelope(cred: SeedWalletCredential) -> str:
         f"Unknown seed credential_type '{cred.credential_type}' for exchange "
         f"'{cred.exchange}'. Expected one of: api_key_secret, rsa_pem, paper."
     )
+
+
+def _validate_seed_reconciliation_method(cred: SeedWalletCredential) -> None:
+    """Fail closed when a seed classification contradicts its adapter policy."""
+    if cred.exchange != cred.exchange.lower():
+        raise ValueError(f"Seed credential exchange must be lowercase: '{cred.exchange}'")
+    mode = account_mode_for_exchange(cred.exchange)
+    paper_credential = cred.credential_type == "paper"
+    paper_venue = mode == "paper"
+    if paper_credential != paper_venue:
+        raise ValueError(
+            f"Seed paper credential and venue must agree for exchange '{cred.exchange}'"
+        )
+    if paper_venue:
+        if cred.reconciliation_method != "unclassified":
+            raise ValueError("Paper seed credentials must use reconciliation_method='unclassified'")
+        return
+    if cred.reconciliation_method == "unclassified":
+        return
+    if not is_reconciliation_method_allowed(cred.exchange, cred.reconciliation_method):
+        raise ValueError(
+            f"Reconciliation method '{cred.reconciliation_method}' is not allowed "
+            f"for the registered '{cred.exchange}' adapter"
+        )
 
 
 def _seed_wallet_with_credentials(
@@ -408,15 +436,16 @@ def _seed_wallet_with_credentials(
 
     Called per ``[[wallets]]`` entry in the seed TOML. Encrypts every
     credential payload with the master-password Fernet key before
-    insert. Returns the number of rows inserted (always ``1 + len(
-    credentials)`` unless the wallet already exists — see the unique
-    index on ``(label, is_paper)``).
+    insert. A real reconciliation method creates its config row in the same
+    transaction. Returns the total number of inserted rows.
 
     Raises ``IntegrityError`` if two seed entries collide on
     ``(label, is_paper)`` so the operator fixes the TOML instead of
     getting a silently-merged wallet.
     """
     encryption = get_encryption_service()
+    for credential in wallet.credentials:
+        _validate_seed_reconciliation_method(credential)
     wallet_public_id = str(uuid7())
     conn.execute(
         text(
@@ -467,6 +496,29 @@ def _seed_wallet_with_credentials(
             },
         )
         inserted += 1
+        if cred.reconciliation_method != "unclassified":
+            conn.execute(
+                text(
+                    "INSERT INTO portfolio_reconciliation_method_configs"
+                    " (wallet_public_id, exchange, mode, method, public_id,"
+                    "  session_id, sequence_id, timestamp, known_to)"
+                    " VALUES"
+                    " (:wallet_public_id, :exchange, :mode, :method, :public_id,"
+                    "  :session_id, :sequence_id, :timestamp, :known_to)"
+                ),
+                {
+                    "wallet_public_id": wallet_public_id,
+                    "exchange": cred.exchange,
+                    "mode": "live",
+                    "method": cred.reconciliation_method,
+                    "public_id": str(uuid7()),
+                    "session_id": tracker.session_id,
+                    "sequence_id": tracker.next_sequence("portfolio_reconciliation_method_configs"),
+                    "timestamp": now,
+                    "known_to": known_to,
+                },
+            )
+            inserted += 1
     return inserted
 
 
@@ -482,8 +534,9 @@ def seed_default_multi_tenant(
     1. Operator ``label="default"`` — the seed trading identity used
        by the single-user deployment until an admin introduces
        additional operators.
-    2. One ``Wallet`` + nested ``WalletCredential`` rows per entry in
-       the ``wallets`` argument. Each wallet is identified by the
+    2. One ``Wallet`` + nested ``WalletCredential`` rows and requested
+       real reconciliation-method configs per entry in the ``wallets``
+       argument. Each wallet is identified by the
        ``(label, is_paper)`` unique key so a ``default``/paper and a
        ``default``/live wallet can coexist. When ``wallets`` is None
        or empty, a single hardcoded ``default``/paper wallet is
@@ -512,7 +565,7 @@ def seed_default_multi_tenant(
 
     Returns:
         Count of rows inserted across operators + wallets + memberships
-        + wallet_credentials.
+        + wallet_credentials + reconciliation-method configs.
     """
     inserted = 0
     now = _timestamp_value(conn)
@@ -557,6 +610,7 @@ def seed_default_multi_tenant(
                     SeedWalletCredential(
                         exchange="paper",
                         credential_type="paper",
+                        reconciliation_method="unclassified",
                         initial_balance="10000.0",
                         label="default paper bootstrap",
                     )
@@ -566,10 +620,14 @@ def seed_default_multi_tenant(
 
     wallet_count = 0
     credential_count = 0
+    method_config_count = 0
     for wallet in wallet_list:
         wallet_rows = _seed_wallet_with_credentials(conn, wallet, tracker, now, known_to)
         wallet_count += 1
-        credential_count += wallet_rows - 1
+        credential_count += len(wallet.credentials)
+        method_config_count += sum(
+            credential.reconciliation_method != "unclassified" for credential in wallet.credentials
+        )
         inserted += wallet_rows
 
     admin_row = conn.execute(
@@ -606,7 +664,8 @@ def seed_default_multi_tenant(
     logger.info(
         f"Seeded multi-tenant bootstrap: 1 operator, {wallet_count} wallet(s), "
         f"{1 if admin_row is not None else 0} membership, "
-        f"{credential_count} wallet credential(s)"
+        f"{credential_count} wallet credential(s), "
+        f"{method_config_count} reconciliation method config(s)"
     )
     return inserted
 

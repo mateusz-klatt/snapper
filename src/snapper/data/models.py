@@ -235,6 +235,7 @@ __all__ = [
     "AlertDelivery",
     "InstrumentFeedHealth",
     "PortfolioSpotReconciliationAnchor",
+    "PortfolioReconciliationMethodConfig",
 ]
 
 
@@ -395,12 +396,30 @@ _CK_VENUE_ACCOUNT_POSITION_FRESH_SOURCE = (
 )
 """A freshly observed positions component's payload source MUST be this very
 attempt."""
-_CK_RECONCILIATION_METHOD = "method IN ('futures_position', 'spot_execution_replay')"
+_CK_RECONCILIATION_METHOD = (
+    "method IS NOT NULL AND method IN "
+    "('futures_position', 'spot_execution_replay', 'margin_ledger_replay', 'unclassified')"
+)
 _CK_RECONCILIATION_EVALUATION_STATUS = (
     "evaluation_status IN ('matched', 'mismatched', 'incomplete', 'unsupported', 'error')"
 )
 _CK_RECONCILIATION_CURRENT_STATUS = (
     "current_evaluation_status IN ('matched', 'mismatched', 'incomplete', 'unsupported', 'error')"
+)
+_CK_RECONCILIATION_OBSERVATION_METHOD_STATUS = (
+    "method IS NOT NULL AND evaluation_status IS NOT NULL AND ("
+    "(method IN ('futures_position', 'spot_execution_replay') AND "
+    "evaluation_status IN ('matched', 'mismatched', 'incomplete', 'unsupported', 'error')) OR "
+    "(method = 'margin_ledger_replay' AND evaluation_status = 'error') OR "
+    "(method = 'unclassified' AND evaluation_status IN ('incomplete', 'error')))"
+)
+_CK_RECONCILIATION_STATE_METHOD_STATUS = (
+    "method IS NOT NULL AND current_evaluation_status IS NOT NULL AND ("
+    "(method IN ('futures_position', 'spot_execution_replay') AND "
+    "current_evaluation_status IN "
+    "('matched', 'mismatched', 'incomplete', 'unsupported', 'error')) OR "
+    "(method = 'margin_ledger_replay' AND current_evaluation_status = 'error') OR "
+    "(method = 'unclassified' AND current_evaluation_status IN ('incomplete', 'error')))"
 )
 _CK_RECONCILIATION_LAST_OUTCOME = (
     "last_full_outcome IS NULL OR last_full_outcome IN ('matched', 'mismatched')"
@@ -429,8 +448,20 @@ _CK_RECONCILIATION_EPISODE_THRESHOLD = (
     "(resulting_full_mismatch_count >= 3 AND drift_episode_public_id IS NOT NULL)"
 )
 _CK_RECONCILIATION_SPOT_ANCHOR = (
-    "method != 'spot_execution_replay' OR "
-    "evaluation_status NOT IN ('matched', 'mismatched') OR anchor_public_id IS NOT NULL"
+    "method IS NOT NULL AND evaluation_status IS NOT NULL AND ("
+    "method IN ('futures_position', 'margin_ledger_replay', 'unclassified') OR "
+    "(method = 'spot_execution_replay' AND ("
+    "evaluation_status IN ('incomplete', 'unsupported', 'error') OR "
+    "(evaluation_status IN ('matched', 'mismatched') AND anchor_public_id IS NOT NULL))))"
+)
+_CK_RECONCILIATION_OBSERVATION_NONFULL_METHOD_EVIDENCE = (
+    "method IS NOT NULL AND (method IN ('futures_position', 'spot_execution_replay') OR ("
+    "method IN ('margin_ledger_replay', 'unclassified') AND "
+    "venue_account_state_public_id IS NULL AND venue_account_observation_id IS NULL AND "
+    "account_authoritative_until IS NULL AND source_watermark_kind IS NULL AND "
+    "source_watermark IS NULL AND anchor_public_id IS NULL AND expected_json IS NULL AND "
+    "actual_json IS NULL AND difference_json IS NULL AND tolerance_json IS NULL AND "
+    "resulting_full_mismatch_count = 0 AND drift_episode_public_id IS NULL))"
 )
 _CK_RECONCILIATION_ERROR_TEXT = (
     "evaluation_status != 'error' OR (error IS NOT NULL AND LENGTH(TRIM(error)) > 0)"
@@ -491,8 +522,23 @@ _CK_RECONCILIATION_STATE_EPISODE = (
     "consecutive_full_mismatches >= 3)"
 )
 _CK_RECONCILIATION_STATE_SPOT_ANCHOR = (
-    "method != 'spot_execution_replay' OR "
-    "current_evaluation_status NOT IN ('matched', 'mismatched') OR anchor_public_id IS NOT NULL"
+    "method IS NOT NULL AND current_evaluation_status IS NOT NULL AND ("
+    "method IN ('futures_position', 'margin_ledger_replay', 'unclassified') OR "
+    "(method = 'spot_execution_replay' AND ("
+    "current_evaluation_status IN ('incomplete', 'unsupported', 'error') OR "
+    "(current_evaluation_status IN ('matched', 'mismatched') AND "
+    "anchor_public_id IS NOT NULL))))"
+)
+_CK_RECONCILIATION_STATE_NONFULL_METHOD_EVIDENCE = (
+    "method IS NOT NULL AND (method IN ('futures_position', 'spot_execution_replay') OR ("
+    "method IN ('margin_ledger_replay', 'unclassified') AND "
+    "last_full_observation_id IS NULL AND last_full_outcome IS NULL AND "
+    "detail_source_observation_id IS NULL AND consecutive_full_mismatches = 0 AND "
+    "open_drift_episode_public_id IS NULL AND anchor_public_id IS NULL AND "
+    "venue_account_state_public_id IS NULL AND venue_account_observation_id IS NULL AND "
+    "source_watermark_kind IS NULL AND source_watermark IS NULL AND expected_json IS NULL AND "
+    "actual_json IS NULL AND difference_json IS NULL AND tolerance_json IS NULL AND "
+    "reconciled_at IS NULL AND authoritative_until IS NULL))"
 )
 _CK_DRIFT_EPISODE_STATUS = "status IN ('open', 'resolved', 'rebased')"
 _CK_DRIFT_EPISODE_OBSERVATION_ORDER = "last_observation_id >= trigger_observation_id"
@@ -1271,6 +1317,54 @@ class PortfolioSpotReconciliationAnchor(TemporalMixin, Base):
     provenance: Mapped[str] = mapped_column(String(128), nullable=False)
 
 
+class PortfolioReconciliationMethodConfig(TemporalMixin, Base):
+    """Operator-authored SCD2 reconciliation method for one live venue account."""
+
+    __tablename__ = "portfolio_reconciliation_method_configs"
+    __table_args__ = (
+        Index(
+            "uq_portfolio_reconciliation_method_configs_identity",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_portfolio_reconciliation_method_configs_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index("ix_portfolio_reconciliation_method_configs_wallet", "wallet_public_id"),
+        CheckConstraint(
+            "exchange IS NOT NULL AND LENGTH(TRIM(exchange)) > 0 AND exchange = LOWER(exchange)",
+            name="ck_portfolio_recon_method_configs_exchange_lower",
+        ),
+        CheckConstraint(
+            "mode IS NOT NULL AND mode = 'live'",
+            name="ck_portfolio_recon_method_configs_mode",
+        ),
+        CheckConstraint(
+            "method IS NOT NULL AND method IN "
+            "('futures_position', 'spot_execution_replay', 'margin_ledger_replay')",
+            name="ck_portfolio_recon_method_configs_method",
+        ),
+        CheckConstraint(
+            "timestamp IS NOT NULL AND known_to IS NOT NULL AND known_to >= timestamp",
+            name="ck_portfolio_recon_method_configs_temporal",
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="live", server_default="live"
+    )
+    method: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class PortfolioReconciliationObservation(TemporalMixin, Base):
     """Append-only reconciliation evaluation evidence (PnL Phase 4)."""
 
@@ -1306,6 +1400,10 @@ class PortfolioReconciliationObservation(TemporalMixin, Base):
             name="ck_portfolio_recon_obs_evaluation_status",
         ),
         CheckConstraint(
+            _CK_RECONCILIATION_OBSERVATION_METHOD_STATUS,
+            name="ck_portfolio_recon_obs_method_status",
+        ),
+        CheckConstraint(
             "resulting_full_mismatch_count >= 0",
             name="ck_portfolio_recon_obs_mismatch_count",
         ),
@@ -1328,6 +1426,10 @@ class PortfolioReconciliationObservation(TemporalMixin, Base):
         CheckConstraint(
             _CK_RECONCILIATION_SPOT_ANCHOR,
             name="ck_portfolio_recon_obs_spot_anchor",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_OBSERVATION_NONFULL_METHOD_EVIDENCE,
+            name="ck_portfolio_recon_obs_nonfull_method_evidence",
         ),
         CheckConstraint(
             _CK_RECONCILIATION_WATERMARK_PAIR,
@@ -1396,6 +1498,10 @@ class PortfolioReconciliationState(TemporalMixin, Base):
             name="ck_portfolio_recon_states_current_status",
         ),
         CheckConstraint(
+            _CK_RECONCILIATION_STATE_METHOD_STATUS,
+            name="ck_portfolio_recon_states_method_status",
+        ),
+        CheckConstraint(
             _CK_RECONCILIATION_LAST_OUTCOME,
             name="ck_portfolio_recon_states_last_outcome",
         ),
@@ -1430,6 +1536,10 @@ class PortfolioReconciliationState(TemporalMixin, Base):
         CheckConstraint(
             _CK_RECONCILIATION_STATE_SPOT_ANCHOR,
             name="ck_portfolio_recon_states_spot_anchor",
+        ),
+        CheckConstraint(
+            _CK_RECONCILIATION_STATE_NONFULL_METHOD_EVIDENCE,
+            name="ck_portfolio_recon_states_nonfull_method_evidence",
         ),
         CheckConstraint(
             _CK_RECONCILIATION_STATE_ERROR_TEXT,

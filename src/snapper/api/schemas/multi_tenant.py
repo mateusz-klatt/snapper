@@ -21,6 +21,8 @@ from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.application.portfolio.reconciliation_methods import PortfolioReconciliationMethod
+from snapper.application.portfolio.reconciliation_methods import RealPortfolioReconciliationMethod
 
 
 class WalletInfo(StrictDataSchema[Literal["wallet_info"]]):
@@ -344,12 +346,15 @@ class CreateCredentialBody(StrictBody):
     Attributes:
         exchange: Exchange identifier (lowercase enforced server-side).
         credential_type: One of the four supported types.
+        reconciliation_method: Explicit live-account reconciliation
+            classification. ``unclassified`` persists no method-config row.
         credential_payload: Plaintext JSON dict that will be encrypted.
         label: Optional human-readable description.
     """
 
     exchange: str = Field(min_length=1, max_length=20)
     credential_type: Literal["api_key_secret", "rsa_pem", "oauth", "paper"]
+    reconciliation_method: PortfolioReconciliationMethod
     credential_payload: dict[str, str] = Field(
         description="Plaintext credential fields, encrypted server-side"
     )
@@ -362,6 +367,50 @@ class CreateCredentialCommand(
     """Request envelope for ``POST /api/wallets/{id}/credentials``."""
 
     type: Literal["create_credential_command"] = "create_credential_command"
+
+
+class SetCredentialReconciliationMethodBody(StrictBody):
+    """Request body for explicit classification of an existing credential."""
+
+    reconciliation_method: RealPortfolioReconciliationMethod
+
+
+class SetCredentialReconciliationMethodCommand(
+    PayloadRequest[
+        Literal["set_credential_reconciliation_method_command"],
+        SetCredentialReconciliationMethodBody,
+    ]
+):
+    """Request envelope for the credential reconciliation-method PUT route."""
+
+    type: Literal["set_credential_reconciliation_method_command"] = (
+        "set_credential_reconciliation_method_command"
+    )
+
+
+class CredentialReconciliationMethodInfo(
+    StrictDataSchema[Literal["credential_reconciliation_method_info"]]
+):
+    """Read projection of one active reconciliation-method config version."""
+
+    type: Literal["credential_reconciliation_method_info"] = "credential_reconciliation_method_info"
+    wallet_public_id: str
+    exchange: str
+    mode: Literal["live"]
+    method: RealPortfolioReconciliationMethod
+
+
+class CredentialReconciliationMethodResponse(
+    PayloadResponse[
+        Literal["credential_reconciliation_method_response"],
+        CredentialReconciliationMethodInfo,
+    ]
+):
+    """Response wrapper for an explicit credential classification."""
+
+    type: Literal["credential_reconciliation_method_response"] = (
+        "credential_reconciliation_method_response"
+    )
 
 
 class RotateCredentialBody(StrictBody):
