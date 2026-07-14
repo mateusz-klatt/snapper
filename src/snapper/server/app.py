@@ -2367,7 +2367,7 @@ def _create_orders_executions_router() -> APIRouter:
                         **{
                             key: value
                             for key, value in cast(dict[str, Any], r).items()
-                            if key != "exec_id"
+                            if key in ExecutionData.model_fields
                         },
                     }
                 )

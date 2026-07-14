@@ -2664,6 +2664,9 @@ class MockRepository:
                 "last_price": exe.price,
                 "fee": exe.fee,
                 "fee_asset": exe.fee_asset,
+                "price_decimal": "100.5",
+                "size_decimal": "2.0",
+                "fee_decimal": "0.1",
                 "status": exe.status,
                 "executed_at": exe.executed_at or exe.timestamp,
             }
