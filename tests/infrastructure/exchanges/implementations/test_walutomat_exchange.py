@@ -572,6 +572,11 @@ async def test_read_native_balances_reads_multi_currency() -> None:
     assert entries[1].total == 2.5
     assert entries[1].free == 2.0
     assert entries[1].used == 0.5
+    assert entries[0].total_decimal == "100"
+    assert entries[0].free_decimal == "60"
+    assert entries[0].used_decimal == "40"
+    assert entries[1].total_decimal == "2.5"
+    assert entries[1].numeric_provenance == "venue_raw"
 
 
 @pytest.mark.asyncio()
@@ -2496,6 +2501,10 @@ def test_parse_order_buy_uses_bought_amount() -> None:
     data = _make_api_order(buy_sell="BUY", bought_amount="50.00", sold_amount="200.00")
     result = WalutomatExchangeClient._parse_walutomat_order(data)
     assert math.isclose(result.filled, 50.0, rel_tol=1e-9)
+    assert result.amount_decimal == "100.00"
+    assert result.price_decimal == "4.2800"
+    assert result.filled_decimal == "50.00"
+    assert result.fee_decimal == "0.10"
 
 
 def test_parse_order_sell_uses_sold_amount() -> None:

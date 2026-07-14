@@ -42,6 +42,7 @@ Example:
 """
 
 import asyncio
+import json
 import math
 import os
 import weakref
@@ -154,6 +155,7 @@ from snapper.data.models import PairedExecutionLeg
 from snapper.data.models import PortfolioDriftEpisode
 from snapper.data.models import PortfolioReconciliationObservation
 from snapper.data.models import PortfolioReconciliationState
+from snapper.data.models import PortfolioSpotReconciliationAnchor
 from snapper.data.models import Position
 from snapper.data.models import PositionCycle
 from snapper.data.models import Setting
@@ -248,6 +250,7 @@ from snapper.data.repository_types import ScopeGrantRow
 from snapper.data.repository_types import SettingRow
 from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.data.repository_types import SignalRow
+from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
 from snapper.data.repository_types import TradeCommandDispatchUpdate
@@ -1693,6 +1696,18 @@ class Repository(ABC):
         Returns:
             The new active reconciliation-state row id.
         """
+        ...
+
+    @abstractmethod
+    async def record_spot_reconciliation_anchor(self, anchor: SpotReconciliationAnchorRow) -> int:
+        """Insert one immutable spot bootstrap anchor idempotently."""
+        ...
+
+    @abstractmethod
+    async def get_spot_reconciliation_anchor(
+        self, wallet_public_id: str, exchange: str, mode: str
+    ) -> SpotReconciliationAnchorRow | None:
+        """Return the active immutable spot bootstrap anchor."""
         ...
 
     @abstractmethod
@@ -6426,6 +6441,10 @@ class SQLAlchemyRepository(Repository):
         exec_id = execution_row.get("exec_id")
         trade_id = execution_row.get("trade_id")
         liquidity_role = execution_row.get("liquidity_role", "unknown")
+        price_decimal = execution_row.get("price_decimal")
+        size_decimal = execution_row.get("size_decimal")
+        fee_decimal = execution_row.get("fee_decimal")
+        numeric_provenance = execution_row.get("numeric_provenance", "legacy_float")
         async with self.session() as s:
             execution = Execution(
                 order_public_id=execution_row["order_public_id"],
@@ -6440,6 +6459,10 @@ class SQLAlchemyRepository(Repository):
                 size=execution_row["size"],
                 fee=execution_row["fee"],
                 fee_asset=execution_row["fee_asset"],
+                price_decimal=price_decimal,
+                size_decimal=size_decimal,
+                fee_decimal=fee_decimal,
+                numeric_provenance=numeric_provenance,
                 session_id=execution_row["session_id"],
                 sequence_id=execution_row["sequence_id"],
                 liquidity_role=liquidity_role,
@@ -7542,6 +7565,10 @@ class SQLAlchemyRepository(Repository):
                     "wallet_public_id": exe.wallet_public_id,
                     "operator_public_id": exe.operator_public_id,
                     "liquidity_role": getattr(exe, "liquidity_role", "unknown"),
+                    "price_decimal": exe.price_decimal,
+                    "size_decimal": exe.size_decimal,
+                    "fee_decimal": exe.fee_decimal,
+                    "numeric_provenance": exe.numeric_provenance,
                 }
                 for exe, order, inst, sym in result.all()
             ]
@@ -7605,6 +7632,10 @@ class SQLAlchemyRepository(Repository):
                     "wallet_public_id": exe.wallet_public_id,
                     "operator_public_id": exe.operator_public_id,
                     "liquidity_role": getattr(exe, "liquidity_role", "unknown"),
+                    "price_decimal": exe.price_decimal,
+                    "size_decimal": exe.size_decimal,
+                    "fee_decimal": exe.fee_decimal,
+                    "numeric_provenance": exe.numeric_provenance,
                 }
                 for exe, order, inst, sym in result.all()
             ]
@@ -7759,6 +7790,10 @@ class SQLAlchemyRepository(Repository):
                     "wallet_public_id": exe.wallet_public_id,
                     "operator_public_id": exe.operator_public_id,
                     "liquidity_role": getattr(exe, "liquidity_role", "unknown"),
+                    "price_decimal": exe.price_decimal,
+                    "size_decimal": exe.size_decimal,
+                    "fee_decimal": exe.fee_decimal,
+                    "numeric_provenance": exe.numeric_provenance,
                 }
                 for exe, order, inst, sym in result.all()
             ]
@@ -12243,6 +12278,145 @@ class SQLAlchemyRepository(Repository):
             return [self._venue_account_state_to_row(r) for r in rows]
 
     @staticmethod
+    def _spot_anchor_to_row(
+        anchor: PortfolioSpotReconciliationAnchor,
+    ) -> SpotReconciliationAnchorRow:
+        """Project one immutable anchor ORM row to its typed boundary."""
+        return {
+            "public_id": anchor.public_id,
+            "wallet_public_id": anchor.wallet_public_id,
+            "exchange": anchor.exchange,
+            "mode": anchor.mode,
+            "venue_account_state_public_id": anchor.venue_account_state_public_id,
+            "balance_observation_id": anchor.balance_observation_id,
+            "source_watermark_kind": anchor.source_watermark_kind,
+            "source_watermark": anchor.source_watermark,
+            "balances_json": anchor.balances_json,
+            "first_request_started_at": anchor.first_request_started_at,
+            "first_request_completed_at": anchor.first_request_completed_at,
+            "second_request_started_at": anchor.second_request_started_at,
+            "second_request_completed_at": anchor.second_request_completed_at,
+            "boundary_status": anchor.boundary_status,
+            "inventory_status": anchor.inventory_status,
+            "margin_status": anchor.margin_status,
+            "provenance": anchor.provenance,
+            "session_id": anchor.session_id,
+            "sequence_id": anchor.sequence_id,
+            "timestamp": anchor.timestamp,
+        }
+
+    @staticmethod
+    def _validate_spot_anchor_balances_json(raw: str) -> None:
+        """Require canonical sorted asset-to-exact-decimal-string evidence."""
+
+        def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate anchor balance asset")
+                result[key] = value
+            return result
+
+        parsed = json.loads(raw, object_pairs_hook=unique_object)
+        if not isinstance(parsed, dict) or not parsed:
+            raise ValueError("anchor balances must be a non-empty object")
+        normalized: dict[str, str] = {}
+        for asset, value in parsed.items():
+            if not isinstance(asset, str) or not asset or asset.strip() != asset:
+                raise ValueError("anchor balance asset is invalid")
+            if not isinstance(value, str) or not value:
+                raise ValueError("anchor balance must be an exact decimal string")
+            try:
+                amount = Decimal(value)
+            except Exception as exc:
+                raise ValueError("anchor balance decimal is malformed") from exc
+            exponent = amount.as_tuple().exponent
+            if not amount.is_finite() or not isinstance(exponent, int) or abs(exponent) > 256:
+                raise ValueError("anchor balance decimal is not finite or bounded")
+            rendered = format(amount, "f")
+            if "." in rendered:
+                rendered = rendered.rstrip("0").rstrip(".")
+            normalized[asset] = "0" if rendered in ("", "-0") else rendered
+        canonical = json.dumps(normalized, allow_nan=False, separators=(",", ":"), sort_keys=True)
+        if raw != canonical:
+            raise ValueError("anchor balances must use canonical sorted decimal strings")
+
+    async def record_spot_reconciliation_anchor(self, anchor: SpotReconciliationAnchorRow) -> int:
+        """Insert an immutable bootstrap anchor or accept its exact replay."""
+        self._validate_spot_anchor_balances_json(anchor["balances_json"])
+        identity = (anchor["wallet_public_id"], anchor["exchange"], anchor["mode"])
+        lock = self._portfolio_reconciliation_locks.setdefault(identity, asyncio.Lock())
+        async with lock, self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(PortfolioSpotReconciliationAnchor)
+                        .where(
+                            PortfolioSpotReconciliationAnchor.known_to == KNOWN_TO_MAX,
+                            PortfolioSpotReconciliationAnchor.wallet_public_id
+                            == anchor["wallet_public_id"],
+                            PortfolioSpotReconciliationAnchor.exchange == anchor["exchange"],
+                            PortfolioSpotReconciliationAnchor.mode == anchor["mode"],
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is not None:
+                if self._spot_anchor_to_row(existing) != anchor:
+                    raise RuntimeError("conflicting spot reconciliation bootstrap anchor")
+                return int(existing.id)
+            row = PortfolioSpotReconciliationAnchor(**anchor, known_to=KNOWN_TO_MAX)
+            s.add(row)
+            try:
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                winner = (
+                    (
+                        await s.execute(
+                            select(PortfolioSpotReconciliationAnchor).where(
+                                PortfolioSpotReconciliationAnchor.known_to == KNOWN_TO_MAX,
+                                PortfolioSpotReconciliationAnchor.wallet_public_id
+                                == anchor["wallet_public_id"],
+                                PortfolioSpotReconciliationAnchor.exchange == anchor["exchange"],
+                                PortfolioSpotReconciliationAnchor.mode == anchor["mode"],
+                            )
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if winner is None or self._spot_anchor_to_row(winner) != anchor:
+                    raise RuntimeError("conflicting spot reconciliation bootstrap anchor") from None
+                return int(winner.id)
+            await s.refresh(row)
+            return int(row.id)
+
+    async def get_spot_reconciliation_anchor(
+        self, wallet_public_id: str, exchange: str, mode: str
+    ) -> SpotReconciliationAnchorRow | None:
+        """Return one active immutable bootstrap anchor by account identity."""
+        async with self.session() as s:
+            anchor = (
+                (
+                    await s.execute(
+                        select(PortfolioSpotReconciliationAnchor).where(
+                            PortfolioSpotReconciliationAnchor.known_to == KNOWN_TO_MAX,
+                            PortfolioSpotReconciliationAnchor.wallet_public_id == wallet_public_id,
+                            PortfolioSpotReconciliationAnchor.exchange == exchange,
+                            PortfolioSpotReconciliationAnchor.mode == mode,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            return None if anchor is None else self._spot_anchor_to_row(anchor)
+
+    @staticmethod
     def _portfolio_reconciliation_identity_filters(
         wallet_public_id: str, exchange: str, mode: str
     ) -> list[ColumnElement[bool]]:
@@ -12867,6 +13041,37 @@ class SQLAlchemyRepository(Repository):
             if existing is None:
                 raise RuntimeError("reconciliation observation has no active state")
             return int(existing.id)
+        if evaluation["method"] == "spot_execution_replay" and evaluation["evaluation_status"] in (
+            "matched",
+            "mismatched",
+        ):
+            anchor_public_id = evaluation["anchor_public_id"]
+            source_watermark = evaluation["source_watermark"]
+            if anchor_public_id is None or source_watermark is None:
+                raise RuntimeError("full spot reconciliation requires anchor lineage")
+            if evaluation["source_watermark_kind"] != "execution_id":
+                raise RuntimeError("full spot reconciliation requires execution-id lineage")
+            anchor = (
+                (
+                    await s.execute(
+                        select(PortfolioSpotReconciliationAnchor).where(
+                            PortfolioSpotReconciliationAnchor.known_to == KNOWN_TO_MAX,
+                            PortfolioSpotReconciliationAnchor.public_id == anchor_public_id,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if (
+                anchor is None
+                or anchor.wallet_public_id != evaluation["wallet_public_id"]
+                or anchor.exchange != evaluation["exchange"]
+                or anchor.mode != evaluation["mode"]
+                or anchor.source_watermark_kind != "execution_id"
+                or anchor.source_watermark > source_watermark
+            ):
+                raise RuntimeError("spot reconciliation anchor lineage is invalid")
         if existing is not None:
             incoming_key = (evaluation["session_id"], evaluation["sequence_id"])
             current_key = (existing.session_id, existing.sequence_id)
@@ -13106,7 +13311,7 @@ class SQLAlchemyRepository(Repository):
             try:
                 state_id = await self._write_portfolio_reconciliation(s, evaluation)
                 await s.commit()
-            except (IntegrityError, OperationalError):
+            except IntegrityError, OperationalError:
                 await s.rollback()
                 state_id = await self._write_portfolio_reconciliation(s, evaluation)
                 await s.commit()

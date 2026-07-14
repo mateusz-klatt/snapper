@@ -1209,6 +1209,64 @@ class ExchangeClientBase(ABC):
         resolved_status = status if status is not None else to_fill_status(execution)
         liq_map = {"m": "maker", "t": "taker"}
         resolved_liquidity = liq_map.get(getattr(execution, "liquidity_ind", None) or "", "unknown")
+        price_decimal = (
+            execution.last_price_decimal
+            if execution.last_price_decimal is not None
+            and execution.last_price is not None
+            and resolved_price == execution.last_price
+            else None
+        )
+        if (
+            price_decimal is None
+            and execution.average_price_decimal is not None
+            and execution.average_price is not None
+            and resolved_price == execution.average_price
+        ):
+            price_decimal = execution.average_price_decimal
+        size_decimal = (
+            execution.last_qty_decimal
+            if execution.last_qty_decimal is not None
+            and execution.last_qty is not None
+            and resolved_size == execution.last_qty
+            else None
+        )
+        if (
+            size_decimal is None
+            and execution.cum_qty_decimal is not None
+            and execution.cum_qty is not None
+            and resolved_size == execution.cum_qty
+        ):
+            size_decimal = execution.cum_qty_decimal
+        fee_decimal = (
+            execution.fee_usd_equiv_decimal
+            if execution.fee_usd_equiv_decimal is not None
+            and execution.fee_usd_equiv is not None
+            and resolved_fee == execution.fee_usd_equiv
+            and resolved_fee_asset == "USD"
+            else None
+        )
+        if fee_decimal is None and execution.fees is not None:
+            matching_fees = [
+                item
+                for item in execution.fees
+                if item.asset == resolved_fee_asset
+                and item.quantity == resolved_fee
+                and item.quantity_decimal is not None
+            ]
+            if len(matching_fees) == 1:
+                fee_decimal = matching_fees[0].quantity_decimal
+        if (
+            fee_decimal is None
+            and execution.cum_fee_decimal is not None
+            and execution.cum_fee is not None
+            and resolved_fee == execution.cum_fee
+        ):
+            fee_decimal = execution.cum_fee_decimal
+        numeric_provenance = (
+            "venue_raw"
+            if any(value is not None for value in (price_decimal, size_decimal, fee_decimal))
+            else "legacy_float"
+        )
         try:
             seq = self._tracker.next_sequence("executions")
             await self.repository.insert_execution(
@@ -1227,6 +1285,10 @@ class ExchangeClientBase(ABC):
                 session_id=self._tracker.session_id,
                 sequence_id=seq,
                 liquidity_role=resolved_liquidity,
+                price_decimal=price_decimal,
+                size_decimal=size_decimal,
+                fee_decimal=fee_decimal,
+                numeric_provenance=numeric_provenance,
             )
         except SQLAlchemyError as e:
             logger.error(f"Failed to log execution to database: {e}")

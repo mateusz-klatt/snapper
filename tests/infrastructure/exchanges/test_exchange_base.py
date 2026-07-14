@@ -24,6 +24,7 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
+from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
@@ -952,6 +953,9 @@ async def test_log_execution_to_db_logs_successfully() -> None:
         last_price=50000.0,
         last_qty=1.0,
         fee_usd_equiv=10.0,
+        last_price_decimal="50000.000000000000000005",
+        last_qty_decimal="1.000000000000000005",
+        fee_usd_equiv_decimal="10.000000000000000005",
     )
     await client._log_execution_to_db(
         order_public_id="order-pub-1",
@@ -968,6 +972,10 @@ async def test_log_execution_to_db_logs_successfully() -> None:
     assert call_args["fee_asset"] == "USD"
     assert call_args["exec_id"] == "exec-123"
     assert call_args["trade_id"] == "987654321"
+    assert call_args["price_decimal"] == "50000.000000000000000005"
+    assert call_args["size_decimal"] == "1.000000000000000005"
+    assert call_args["fee_decimal"] == "10.000000000000000005"
+    assert call_args["numeric_provenance"] == "venue_raw"
 
 
 @pytest.mark.asyncio()
@@ -995,6 +1003,10 @@ async def test_log_execution_to_db_uses_fallback_values() -> None:
         last_qty=None,
         cum_qty=2.5,
         fee_usd_equiv=None,
+        average_price_decimal="49500.000000000000000005",
+        cum_qty_decimal="2.500000000000000005",
+        cum_fee=0.0,
+        cum_fee_decimal="0.0",
     )
     await client._log_execution_to_db(
         order_public_id="order-pub-2",
@@ -1007,6 +1019,9 @@ async def test_log_execution_to_db_uses_fallback_values() -> None:
     assert call_args["price"] == pytest.approx(49500.0)
     assert call_args["size"] == pytest.approx(2.5)
     assert call_args["fee"] == pytest.approx(0.0)
+    assert call_args["price_decimal"] == "49500.000000000000000005"
+    assert call_args["size_decimal"] == "2.500000000000000005"
+    assert call_args["fee_decimal"] == "0.0"
 
 
 @pytest.mark.asyncio()
@@ -1032,15 +1047,71 @@ async def test_log_execution_to_db_partial_fill_status() -> None:
         last_price=50000.0,
         last_qty=0.5,
         cum_qty=0.5,
-        fee_usd_equiv=5.0,
+        fee_usd_equiv=None,
+        fees=[
+            ExecutionFeeBreakdown(
+                asset="BTC",
+                quantity=5.0,
+                quantity_decimal="5.000000000000000005",
+            )
+        ],
     )
     await client._log_execution_to_db(
         order_public_id="order-pub-3",
         wallet_public_id="",
         execution=execution,
+        fee=5.0,
+        fee_asset="BTC",
     )
     call_args = mock_repo.insert_execution.call_args[1]
     assert call_args["status"] == "partial"
+    assert call_args["fee_decimal"] == "5.000000000000000005"
+
+
+@pytest.mark.asyncio()
+async def test_log_execution_to_db_uses_cumulative_decimal_for_ambiguous_fees() -> None:
+    """Log execution falls back when multiple raw fees match.
+
+    Given: Two matching fee rows and an exact cumulative fee,
+    When: _log_execution_to_db resolves the fee decimal,
+    Then: The cumulative decimal is persisted instead of an ambiguous row.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.insert_execution = AsyncMock()
+    client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
+    execution = ExecutionUpdate(
+        order_id="order_ambiguous_fee",
+        exec_type="trade",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.FILLED,
+        timestamp=datetime.now(UTC),
+        fees=[
+            ExecutionFeeBreakdown(
+                asset="BTC",
+                quantity=5.0,
+                quantity_decimal="5.000000000000000005",
+            ),
+            ExecutionFeeBreakdown(
+                asset="BTC",
+                quantity=5.0,
+                quantity_decimal="5.000000000000000006",
+            ),
+        ],
+        cum_fee=5.0,
+        cum_fee_decimal="5.000000000000000007",
+    )
+    await client._log_execution_to_db(
+        order_public_id="order-pub-ambiguous-fee",
+        wallet_public_id="",
+        execution=execution,
+        fee=5.0,
+        fee_asset="BTC",
+    )
+    call_args = mock_repo.insert_execution.call_args[1]
+    assert call_args["fee_decimal"] == "5.000000000000000007"
 
 
 @pytest.mark.asyncio()

@@ -92,12 +92,30 @@ class TestSerializeNativeBalances:
             as JSON null, never fabricated into a fake split.
         """
         entries = [
-            NativeBalanceEntry(currency="USD", total=100.0, free=60.0, used=40.0),
+            NativeBalanceEntry(
+                currency="USD",
+                total=100.0,
+                free=60.0,
+                used=40.0,
+                total_decimal="100.000000000000000005",
+                free_decimal="60.0",
+                used_decimal="40.0",
+                numeric_provenance="venue_raw",
+            ),
             NativeBalanceEntry(currency="XBT", total=1.5, free=None, used=None),
         ]
         payload = json.loads(ExchangeExecutorService._serialize_native_balances(entries))
         assert payload == [
-            {"currency": "USD", "total": 100.0, "free": 60.0, "used": 40.0},
+            {
+                "currency": "USD",
+                "total": 100.0,
+                "free": 60.0,
+                "used": 40.0,
+                "total_decimal": "100.000000000000000005",
+                "free_decimal": "60.0",
+                "used_decimal": "40.0",
+                "numeric_provenance": "venue_raw",
+            },
             {"currency": "XBT", "total": 1.5, "free": None, "used": None},
         ]
 

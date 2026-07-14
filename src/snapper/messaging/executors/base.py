@@ -3360,12 +3360,25 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     @staticmethod
     def _serialize_native_balances(entries: list[NativeBalanceEntry]) -> str:
         """Serialize native balance entries to a stable JSON array (Phase 3)."""
-        return json.dumps(
-            [
-                {"currency": e.currency, "total": e.total, "free": e.free, "used": e.used}
-                for e in entries
-            ]
-        )
+        payload: list[dict[str, str | float | None]] = []
+        for entry in entries:
+            item: dict[str, str | float | None] = {
+                "currency": entry.currency,
+                "total": entry.total,
+                "free": entry.free,
+                "used": entry.used,
+            }
+            if (
+                entry.total_decimal is not None
+                or entry.free_decimal is not None
+                or entry.used_decimal is not None
+            ):
+                item["total_decimal"] = entry.total_decimal
+                item["free_decimal"] = entry.free_decimal
+                item["used_decimal"] = entry.used_decimal
+                item["numeric_provenance"] = entry.numeric_provenance
+            payload.append(item)
+        return json.dumps(payload)
 
     @staticmethod
     def _serialize_open_positions(positions: list[OpenPositionSnapshot]) -> str:

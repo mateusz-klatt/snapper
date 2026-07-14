@@ -464,6 +464,10 @@ class AccountBalanceEntry(StrictBody):
     total: float
     free: float | None = None
     used: float | None = None
+    total_decimal: str | None = None
+    free_decimal: str | None = None
+    used_decimal: str | None = None
+    numeric_provenance: str | None = None
 
 
 class AccountPositionEntry(StrictBody):

@@ -14,6 +14,8 @@ surfaces so both label truth identically.
 import json
 import math
 from datetime import datetime
+from decimal import Decimal
+from decimal import InvalidOperation
 from typing import cast
 
 from snapper.application.portfolio.account_status import derive_effective_account_status
@@ -88,15 +90,46 @@ def _parse_balances(raw: str) -> list[AccountBalanceEntry]:
             raise ValueError(_BAD_CURRENCY_MSG)
         free = item.get("free")
         used = item.get("used")
+        total = _finite_number(item.get("total"))
+        total_decimal = _balance_decimal(item.get("total_decimal"), total)
+        free_number = None if free is None else _finite_number(free)
+        used_number = None if used is None else _finite_number(used)
+        free_decimal = _balance_decimal(item.get("free_decimal"), free_number)
+        used_decimal = _balance_decimal(item.get("used_decimal"), used_number)
+        provenance = item.get("numeric_provenance", "legacy_float")
+        if provenance not in ("venue_raw", "legacy_float"):
+            raise ValueError("balance numeric provenance is invalid")
+        if any(value is not None for value in (total_decimal, free_decimal, used_decimal)):
+            if provenance != "venue_raw":
+                raise ValueError("raw balance decimal requires venue provenance")
         entries.append(
             AccountBalanceEntry(
                 currency=currency,
-                total=_finite_number(item.get("total")),
-                free=None if free is None else _finite_number(free),
-                used=None if used is None else _finite_number(used),
+                total=total,
+                free=free_number,
+                used=used_number,
+                total_decimal=total_decimal,
+                free_decimal=free_decimal,
+                used_decimal=used_decimal,
+                numeric_provenance=provenance,
             )
         )
     return entries
+
+
+def _balance_decimal(value: object, companion: float | None) -> str | None:
+    """Validate one optional raw balance decimal against its float companion."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or companion is None:
+        raise ValueError("raw balance decimal is invalid")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError("raw balance decimal is malformed") from exc
+    if not parsed.is_finite() or float(parsed) != companion:
+        raise ValueError("raw balance decimal conflicts with its float companion")
+    return value
 
 
 def _parse_positions(raw: str) -> list[AccountPositionEntry]:

@@ -314,24 +314,33 @@ def _optional_float(value: Any) -> float | None:
     return float(value) if value else None
 
 
-def _parse_execution_fees(schema: KrakenExecutionSchema) -> list[ExecutionFeeBreakdown] | None:
+def _parse_execution_fees(
+    schema: KrakenExecutionSchema, raw_fees: object
+) -> list[ExecutionFeeBreakdown] | None:
     """Parse fee breakdown from Kraken execution schema.
 
     Args:
         schema: Validated Kraken execution schema.
+        raw_fees: Original venue fee rows used to retain decimal strings.
 
     Returns:
         List of fee breakdowns, or None if no fees present.
     """
     if not schema.fees:
         return None
-    return [
-        ExecutionFeeBreakdown(
-            asset=fee.asset or "",
-            quantity=float(fee.qty) if fee.qty else 0.0,
+    raw_rows = raw_fees if isinstance(raw_fees, list) else []
+    parsed: list[ExecutionFeeBreakdown] = []
+    for index, fee in enumerate(schema.fees):
+        raw_row = raw_rows[index] if index < len(raw_rows) else None
+        raw_quantity = raw_row.get("qty") if isinstance(raw_row, dict) else None
+        parsed.append(
+            ExecutionFeeBreakdown(
+                asset=fee.asset or "",
+                quantity=float(fee.qty) if fee.qty else 0.0,
+                quantity_decimal=raw_quantity if isinstance(raw_quantity, str) else None,
+            )
         )
-        for fee in schema.fees
-    ]
+    return parsed
 
 
 def parse_kraken_execution(data: dict[str, Any]) -> ExecutionUpdate:
@@ -349,7 +358,25 @@ def parse_kraken_execution(data: dict[str, Any]) -> ExecutionUpdate:
     Raises:
         ValueError: If required timestamp field is missing.
     """
-    schema = KrakenExecutionSchema.model_validate(data)
+    validation_data = data.copy()
+    for field in ("last_qty", "last_price", "fee_usd_equiv"):
+        raw_value = validation_data.get(field)
+        if isinstance(raw_value, str):
+            validation_data[field] = float(raw_value)
+    raw_fees = validation_data.get("fees")
+    if isinstance(raw_fees, list):
+        validation_fees: list[object] = []
+        for raw_fee in raw_fees:
+            if isinstance(raw_fee, dict):
+                validation_fee = raw_fee.copy()
+                raw_quantity = validation_fee.get("qty")
+                if isinstance(raw_quantity, str):
+                    validation_fee["qty"] = float(raw_quantity)
+                validation_fees.append(validation_fee)
+            else:
+                validation_fees.append(raw_fee)
+        validation_data["fees"] = validation_fees
+    schema = KrakenExecutionSchema.model_validate(validation_data)
     if not schema.timestamp:
         raise ValueError("Execution data missing required 'timestamp' field")
     timestamp = datetime.fromisoformat(schema.timestamp.replace("Z", _UTC_SUFFIX))
@@ -374,7 +401,7 @@ def parse_kraken_execution(data: dict[str, Any]) -> ExecutionUpdate:
         cost=_optional_float(schema.cost),
         average_price=_optional_float(schema.avg_price),
         fee_usd_equiv=_optional_float(schema.fee_usd_equiv),
-        fees=_parse_execution_fees(schema),
+        fees=_parse_execution_fees(schema, data.get("fees")),
         order_qty=_optional_float(schema.order_qty),
         limit_price=_optional_float(schema.limit_price),
         cash_order_qty=_optional_float(schema.cash_order_qty),
@@ -383,6 +410,13 @@ def parse_kraken_execution(data: dict[str, Any]) -> ExecutionUpdate:
         post_only=schema.post_only,
         reduce_only=schema.reduce_only,
         time_in_force=_parse_time_in_force(schema.time_in_force),
+        last_qty_decimal=(data["last_qty"] if isinstance(data.get("last_qty"), str) else None),
+        last_price_decimal=(
+            data["last_price"] if isinstance(data.get("last_price"), str) else None
+        ),
+        fee_usd_equiv_decimal=(
+            data["fee_usd_equiv"] if isinstance(data.get("fee_usd_equiv"), str) else None
+        ),
         reason=schema.reason,
     )
 

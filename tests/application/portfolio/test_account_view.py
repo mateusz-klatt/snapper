@@ -213,6 +213,14 @@ _BALANCES_STRICT_CORRUPT = [
     pytest.param(_balances_json(currency=None), id="currency_null"),
     pytest.param(_balances_json(currency=""), id="currency_empty"),
     pytest.param(_balances_json(currency=123), id="currency_non_string"),
+    pytest.param(_balances_json(total_decimal=1.0), id="raw_decimal_non_string"),
+    pytest.param(_balances_json(total_decimal="NaN"), id="raw_decimal_non_finite"),
+    pytest.param(_balances_json(total_decimal="2"), id="raw_decimal_conflict"),
+    pytest.param(
+        _balances_json(total_decimal="1", numeric_provenance="legacy_float"),
+        id="raw_decimal_wrong_provenance",
+    ),
+    pytest.param(_balances_json(numeric_provenance="invented"), id="bad_provenance"),
 ]
 
 _POSITIONS_STRICT_CORRUPT = [
@@ -424,6 +432,42 @@ def test_observed_fresh_is_authoritative_and_payloads_present() -> None:
     assert result.open_positions is not None
     assert len(result.balances) == 2
     assert len(result.open_positions) == 2
+
+
+def test_raw_balance_decimal_strings_survive_strict_read_mapping() -> None:
+    """Validated venue raw strings remain unchanged beside their float view.
+
+    Given: A coherent balance payload with matching raw and float values,
+    When: The strict account-state mapper parses the payload,
+    Then: The exact venue string and provenance remain unchanged.
+    """
+    payload = _balances_json(
+        total=0.1,
+        total_decimal="0.100000000000000005",
+        numeric_provenance="venue_raw",
+    )
+    result = build_portfolio_account_state(_make_row(balances_json=payload), _NOW)
+    assert result.balances is not None
+    assert result.balances[0].total_decimal == "0.100000000000000005"
+    assert result.balances[0].numeric_provenance == "venue_raw"
+
+
+def test_malformed_raw_balance_decimal_marks_account_state_corrupt() -> None:
+    """A malformed raw decimal makes the public account state fail closed.
+
+    Given: A balance payload with a malformed non-empty raw decimal string,
+    When: The public account-state mapper validates the payload,
+    Then: The state is corrupt, non-authoritative, and exposes no payloads.
+    """
+    payload = _balances_json(
+        total_decimal="1.2.3",
+        numeric_provenance="venue_raw",
+    )
+    result = build_portfolio_account_state(_make_row(balances_json=payload), _NOW)
+    assert result.effective_status == EFFECTIVE_CORRUPT
+    assert result.is_authoritative is False
+    assert result.balances is None
+    assert result.open_positions is None
 
 
 def test_observed_past_authoritative_window_is_stale_not_authoritative() -> None:

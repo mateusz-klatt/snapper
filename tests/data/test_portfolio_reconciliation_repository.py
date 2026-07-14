@@ -33,6 +33,7 @@ from snapper.data.models import PortfolioReconciliationObservation
 from snapper.data.models import PortfolioReconciliationState
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
+from snapper.data.repository_types import SpotReconciliationAnchorRow
 
 _WALLET = "00000000-0000-7000-8000-000000000101"
 _OTHER_WALLET = "00000000-0000-7000-8000-000000000102"
@@ -45,6 +46,35 @@ _EARLIER_SESSION = "00000000-0000-7000-8000-000000000500"
 _PUBLIC = "00000000-0000-7000-8000-000000000601"
 _OTHER_PUBLIC = "00000000-0000-7000-8000-000000000602"
 _T0 = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+
+
+def _spot_anchor(
+    wallet_public_id: str = _OTHER_WALLET,
+    exchange: str = "kraken",
+) -> SpotReconciliationAnchorRow:
+    """Build the real immutable anchor required by full spot outcomes."""
+    return {
+        "public_id": _ANCHOR,
+        "wallet_public_id": wallet_public_id,
+        "exchange": exchange,
+        "mode": "live",
+        "venue_account_state_public_id": _ACCOUNT_STATE,
+        "balance_observation_id": 1,
+        "source_watermark_kind": "execution_id",
+        "source_watermark": 0,
+        "balances_json": '{"USD":"1"}',
+        "first_request_started_at": _T0,
+        "first_request_completed_at": _T0,
+        "second_request_started_at": _T0,
+        "second_request_completed_at": _T0,
+        "boundary_status": "double_read_equal",
+        "inventory_status": "certified_full",
+        "margin_status": "cash",
+        "provenance": "test",
+        "session_id": _SESSION,
+        "sequence_id": 1,
+        "timestamp": _T0,
+    }
 
 
 def _evaluation(
@@ -76,6 +106,7 @@ def _evaluation(
         Complete typed repository input.
     """
     resolved_error = "venue unavailable" if status == "error" and error is None else error
+    full_spot = method == "spot_execution_replay" and status in ("matched", "mismatched")
     return {
         "wallet_public_id": wallet_public_id,
         "exchange": exchange,
@@ -85,9 +116,9 @@ def _evaluation(
         "venue_account_state_public_id": _ACCOUNT_STATE,
         "venue_account_observation_id": 41,
         "account_authoritative_until": bus_time + timedelta(minutes=5),
-        "source_watermark_kind": "venue_event_id",
+        "source_watermark_kind": "execution_id" if full_spot else "venue_event_id",
         "source_watermark": sequence_id,
-        "anchor_public_id": _ANCHOR if method == "spot_execution_replay" else None,
+        "anchor_public_id": _ANCHOR if full_spot else None,
         "expected_json": expected_json,
         "actual_json": '{"quantity": 2}',
         "difference_json": '{"quantity": 1}',
@@ -452,6 +483,7 @@ async def test_initial_incomplete_has_no_invented_full_truth_and_reads_are_scope
         _evaluation(_T0 + timedelta(milliseconds=500), "incomplete", sequence_id=2)
     )
     current = await _active_state(repo)
+    await repo.record_spot_reconciliation_anchor(_spot_anchor())
     await repo.record_portfolio_reconciliation(
         _evaluation(
             _T0 + timedelta(seconds=1),
@@ -1225,9 +1257,10 @@ async def test_resolution_revalidates_episode_opened_at_before_copying(
         )
         await session.commit()
     tampered_episode = (await _episodes(repo))[-1]
-    with patch.object(
-        repo, "_lock_active_drift_episode", return_value=tampered_episode
-    ), pytest.raises(RuntimeError, match="opened_at is inconsistent"):
+    with (
+        patch.object(repo, "_lock_active_drift_episode", return_value=tampered_episode),
+        pytest.raises(RuntimeError, match="opened_at is inconsistent"),
+    ):
         await repo.record_portfolio_reconciliation(
             _evaluation(_T0 + timedelta(seconds=4), "matched", sequence_id=4)
         )
@@ -1418,9 +1451,10 @@ async def test_resolution_revalidates_retained_episode_detail_before_copying(
     tampered_episode = (await _episodes(repo))[-1]
     observation_count = len(await _observations(repo))
     episode_count = len(await _episodes(repo))
-    with patch.object(
-        repo, "_lock_active_drift_episode", return_value=tampered_episode
-    ), pytest.raises(RuntimeError, match="detail observation"):
+    with (
+        patch.object(repo, "_lock_active_drift_episode", return_value=tampered_episode),
+        pytest.raises(RuntimeError, match="detail observation"),
+    ):
         await repo.record_portfolio_reconciliation(
             _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
         )
@@ -1501,9 +1535,10 @@ async def test_resolution_rechecks_episode_state_consistency_before_copying(
         await session.commit()
     tampered_episode = (await _episodes(repo))[-1]
     episode_count = len(await _episodes(repo))
-    with patch.object(
-        repo, "_lock_active_drift_episode", return_value=tampered_episode
-    ), pytest.raises(RuntimeError, match="lineage does not match reconciliation state"):
+    with (
+        patch.object(repo, "_lock_active_drift_episode", return_value=tampered_episode),
+        pytest.raises(RuntimeError, match="lineage does not match reconciliation state"),
+    ):
         await repo.record_portfolio_reconciliation(
             _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
         )

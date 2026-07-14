@@ -243,6 +243,10 @@ class ExecutionInsertRow(TypedDict):
     trade_id: NotRequired[str | None]
     operator_public_id: NotRequired[str | None]
     liquidity_role: NotRequired[str]
+    price_decimal: NotRequired[str | None]
+    size_decimal: NotRequired[str | None]
+    fee_decimal: NotRequired[str | None]
+    numeric_provenance: NotRequired[str | None]
 
 
 class OrderRow(TypedDict):
@@ -305,6 +309,10 @@ class ExecutionRow(TypedDict):
     wallet_public_id: str | None
     operator_public_id: str | None
     liquidity_role: NotRequired[str]
+    price_decimal: NotRequired[str | None]
+    size_decimal: NotRequired[str | None]
+    fee_decimal: NotRequired[str | None]
+    numeric_provenance: NotRequired[str | None]
 
 
 class PositionRow(TypedDict):
@@ -423,6 +431,31 @@ class VenueAccountStateRow(TypedDict):
     timestamp: datetime
     session_id: str
     sequence_id: int
+
+
+class SpotReconciliationAnchorRow(TypedDict):
+    """Immutable bootstrap evidence for one live cash account."""
+
+    public_id: str
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    venue_account_state_public_id: str
+    balance_observation_id: int
+    source_watermark_kind: str
+    source_watermark: int
+    balances_json: str
+    first_request_started_at: datetime
+    first_request_completed_at: datetime
+    second_request_started_at: datetime
+    second_request_completed_at: datetime
+    boundary_status: str
+    inventory_status: str
+    margin_status: str
+    provenance: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
 
 
 class PortfolioReconciliationEvaluationRow(TypedDict):

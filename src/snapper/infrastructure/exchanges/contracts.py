@@ -210,6 +210,10 @@ class NativeBalanceEntry:
     total: float
     free: float | None
     used: float | None
+    total_decimal: str | None = None
+    free_decimal: str | None = None
+    used_decimal: str | None = None
+    numeric_provenance: str = "legacy_float"
 
 
 @dataclass
@@ -287,6 +291,10 @@ class ExchangeOrderSnapshot:
     fee_currency: str | None = None
     db_order_id: int | None = None
     db_order_public_id: str | None = None
+    amount_decimal: str | None = None
+    price_decimal: str | None = None
+    filled_decimal: str | None = None
+    fee_decimal: str | None = None
 
 
 @dataclass
@@ -362,6 +370,7 @@ class ExecutionFeeBreakdown:
 
     asset: str
     quantity: float
+    quantity_decimal: str | None = None
 
 
 @dataclass
@@ -418,6 +427,12 @@ class ExecutionUpdate:
     reduce_only: bool | None = None
     time_in_force: TimeInForceEnum | None = None
     reason: str | None = None
+    last_qty_decimal: str | None = None
+    last_price_decimal: str | None = None
+    fee_usd_equiv_decimal: str | None = None
+    cum_qty_decimal: str | None = None
+    average_price_decimal: str | None = None
+    cum_fee_decimal: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize the instance after initialization."""

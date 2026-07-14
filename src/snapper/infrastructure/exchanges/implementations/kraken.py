@@ -1616,6 +1616,16 @@ class KrakenExchangeClient(ExchangeClientBase):
                     total=_strict_native_balance_field(currency, data, "total"),
                     free=_strict_native_balance_field(currency, data, "free"),
                     used=_strict_native_balance_field(currency, data, "used"),
+                    total_decimal=(data["total"] if isinstance(data.get("total"), str) else None),
+                    free_decimal=(data["free"] if isinstance(data.get("free"), str) else None),
+                    used_decimal=(data["used"] if isinstance(data.get("used"), str) else None),
+                    numeric_provenance=(
+                        "venue_raw"
+                        if any(
+                            isinstance(data.get(field), str) for field in ("total", "free", "used")
+                        )
+                        else "legacy_float"
+                    ),
                 )
             )
         return entries

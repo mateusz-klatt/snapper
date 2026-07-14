@@ -334,14 +334,23 @@ async def test_read_native_balances_faithful_multi_currency() -> None:
             "info": {},
             "timestamp": 1,
             "datetime": "2022-01-01T00:00:00.000Z",
-            "BTC": {"free": 1.5, "used": 0.5, "total": 2.0},
+            "BTC": {"free": "1.500000000000000005", "used": "0.5", "total": "2.0"},
             "USD": {"free": 10000.0, "used": 2000.0, "total": 12000.0},
         }
 
     client._ccxt_client = SimpleNamespace(fetch_balance=_fake_balance)
     entries = await client.read_native_balances()
     assert entries == [
-        NativeBalanceEntry(currency="BTC", total=2.0, free=1.5, used=0.5),
+        NativeBalanceEntry(
+            currency="BTC",
+            total=2.0,
+            free=1.5,
+            used=0.5,
+            total_decimal="2.0",
+            free_decimal="1.500000000000000005",
+            used_decimal="0.5",
+            numeric_provenance="venue_raw",
+        ),
         NativeBalanceEntry(currency="USD", total=12000.0, free=10000.0, used=2000.0),
     ]
 

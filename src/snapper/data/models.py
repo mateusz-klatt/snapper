@@ -234,6 +234,7 @@ __all__ = [
     "AlertEvent",
     "AlertDelivery",
     "InstrumentFeedHealth",
+    "PortfolioSpotReconciliationAnchor",
 ]
 
 
@@ -399,8 +400,7 @@ _CK_RECONCILIATION_EVALUATION_STATUS = (
     "evaluation_status IN ('matched', 'mismatched', 'incomplete', 'unsupported', 'error')"
 )
 _CK_RECONCILIATION_CURRENT_STATUS = (
-    "current_evaluation_status IN "
-    "('matched', 'mismatched', 'incomplete', 'unsupported', 'error')"
+    "current_evaluation_status IN ('matched', 'mismatched', 'incomplete', 'unsupported', 'error')"
 )
 _CK_RECONCILIATION_LAST_OUTCOME = (
     "last_full_outcome IS NULL OR last_full_outcome IN ('matched', 'mismatched')"
@@ -896,6 +896,18 @@ class Execution(TemporalMixin, Base):
         ),
         CheckConstraint(_CK_SIDE_BUY_SELL, name="ck_executions_side"),
         CheckConstraint(_CK_EXECUTIONS_STATUS, name="ck_executions_status"),
+        CheckConstraint(
+            "numeric_provenance IS NULL OR numeric_provenance IN ('venue_raw', 'legacy_float')",
+            name="ck_executions_numeric_provenance",
+        ),
+        CheckConstraint(
+            "(price_decimal IS NULL OR LENGTH(TRIM(price_decimal)) > 0) AND "
+            "(size_decimal IS NULL OR LENGTH(TRIM(size_decimal)) > 0) AND "
+            "(fee_decimal IS NULL OR LENGTH(TRIM(fee_decimal)) > 0) AND "
+            "((price_decimal IS NULL AND size_decimal IS NULL AND fee_decimal IS NULL) OR "
+            "numeric_provenance IS NOT NULL)",
+            name="ck_executions_raw_decimals",
+        ),
     )
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
@@ -913,6 +925,10 @@ class Execution(TemporalMixin, Base):
     size: Mapped[float] = mapped_column(Float)
     fee: Mapped[float] = mapped_column(Float)
     fee_asset: Mapped[str] = mapped_column(String(16))
+    price_decimal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    size_decimal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fee_decimal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    numeric_provenance: Mapped[str | None] = mapped_column(String(16), nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(TZDateTime())
     liquidity_role: Mapped[str] = mapped_column(String(16), default="unknown")
 
@@ -1181,6 +1197,78 @@ class VenueAccountState(TemporalMixin, Base):
     )
     authoritative_until: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class PortfolioSpotReconciliationAnchor(TemporalMixin, Base):
+    """Immutable exact bootstrap inventory for live spot reconciliation."""
+
+    __tablename__ = "portfolio_spot_reconciliation_anchors"
+    __table_args__ = (
+        Index(
+            "uq_portfolio_spot_reconciliation_anchors_identity",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_portfolio_spot_reconciliation_anchors_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_portfolio_spot_anchor_exchange_lower"),
+        CheckConstraint("mode = 'live'", name="ck_portfolio_spot_anchor_mode"),
+        CheckConstraint(
+            "source_watermark_kind = 'execution_id' AND source_watermark >= 0",
+            name="ck_portfolio_spot_anchor_watermark",
+        ),
+        CheckConstraint(
+            "LENGTH(TRIM(balances_json)) > 0 AND LENGTH(TRIM(provenance)) > 0",
+            name="ck_portfolio_spot_anchor_evidence_text",
+        ),
+        CheckConstraint("balance_observation_id > 0", name="ck_portfolio_spot_anchor_observation"),
+        CheckConstraint(
+            "first_request_completed_at >= first_request_started_at AND "
+            "second_request_started_at >= first_request_completed_at AND "
+            "second_request_completed_at >= second_request_started_at AND "
+            "timestamp >= second_request_completed_at",
+            name="ck_portfolio_spot_anchor_timestamp_order",
+        ),
+        CheckConstraint(
+            "boundary_status IN ('cursor_certified', 'double_read_equal', 'uncertified')",
+            name="ck_portfolio_spot_anchor_boundary_status",
+        ),
+        CheckConstraint(
+            "inventory_status IN ('certified_full', 'uncertified', 'suspect_partial')",
+            name="ck_portfolio_spot_anchor_inventory_status",
+        ),
+        CheckConstraint(
+            "margin_status IN ('cash', 'unsupported_margin', 'unknown')",
+            name="ck_portfolio_spot_anchor_margin_status",
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
+    venue_account_state_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    balance_observation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_watermark_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_watermark: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), nullable=False
+    )
+    balances_json: Mapped[str] = mapped_column(Text, nullable=False)
+    first_request_started_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    first_request_completed_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    second_request_started_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    second_request_completed_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    boundary_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    inventory_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    margin_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    provenance: Mapped[str] = mapped_column(String(128), nullable=False)
 
 
 class PortfolioReconciliationObservation(TemporalMixin, Base):

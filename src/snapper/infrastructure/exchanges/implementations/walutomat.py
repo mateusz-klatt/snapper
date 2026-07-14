@@ -220,11 +220,22 @@ def _parse_native_balance(balance_data: dict[str, Any]) -> NativeBalanceEntry:
     currency = balance_data.get("currency")
     if not isinstance(currency, str) or not currency:
         raise ValueError("Walutomat balance row has a missing or invalid currency")
+    total_raw = balance_data.get("balanceTotal")
+    free_raw = balance_data.get("balanceAvailable")
+    used_raw = balance_data.get("balanceReserved")
     return NativeBalanceEntry(
         currency=currency,
         total=_require_finite_balance_amount(balance_data, "balanceTotal"),
         free=_require_finite_balance_amount(balance_data, "balanceAvailable"),
         used=_require_finite_balance_amount(balance_data, "balanceReserved"),
+        total_decimal=total_raw if isinstance(total_raw, str) else None,
+        free_decimal=free_raw if isinstance(free_raw, str) else None,
+        used_decimal=used_raw if isinstance(used_raw, str) else None,
+        numeric_provenance=(
+            "venue_raw"
+            if any(isinstance(value, str) for value in (total_raw, free_raw, used_raw))
+            else "legacy_float"
+        ),
     )
 
 
@@ -979,12 +990,15 @@ class WalutomatExchangeClient(ExchangeClientBase):
             order_status=_active_execution_status(order),
             timestamp=datetime.now(UTC),
             cum_qty=order.filled,
+            cum_qty_decimal=order.filled_decimal,
             exec_id=_walutomat_exec_id(order.id, order.filled),
             cl_ord_id=order.client_order_id or "",
             order_qty=order.amount,
             limit_price=order.price,
             average_price=order.price,
+            average_price_decimal=order.price_decimal,
             cum_fee=order.fee if order.fee and order.fee_currency else None,
+            cum_fee_decimal=order.fee_decimal if order.fee and order.fee_currency else None,
             cum_fee_currency=order.fee_currency if order.fee and order.fee_currency else None,
         )
 
@@ -1067,12 +1081,15 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     order_status=ExchangeOrderStatusEnum.FILLED,
                     timestamp=datetime.now(UTC),
                     cum_qty=final.filled,
+                    cum_qty_decimal=final.filled_decimal,
                     exec_id=_walutomat_exec_id(final.id, final.filled) + "-t",
                     cl_ord_id=final.client_order_id or tracked.cl_ord_id,
                     order_qty=final.amount,
                     limit_price=final.price,
                     average_price=final.price,
+                    average_price_decimal=final.price_decimal,
                     cum_fee=cum_fee,
+                    cum_fee_decimal=final.fee_decimal if cum_fee is not None else None,
                     cum_fee_currency=cum_fee_currency,
                 )
             elif final.status == ExchangeOrderStatusEnum.CANCELED:
@@ -1086,12 +1103,15 @@ class WalutomatExchangeClient(ExchangeClientBase):
                         order_status=ExchangeOrderStatusEnum.PARTIALLY_FILLED,
                         timestamp=datetime.now(UTC),
                         cum_qty=final.filled,
+                        cum_qty_decimal=final.filled_decimal,
                         exec_id=_walutomat_exec_id(final.id, final.filled),
                         cl_ord_id=final.client_order_id or tracked.cl_ord_id,
                         order_qty=final.amount,
                         limit_price=final.price,
                         average_price=final.price,
+                        average_price_decimal=final.price_decimal,
                         cum_fee=cum_fee,
+                        cum_fee_decimal=final.fee_decimal if cum_fee is not None else None,
                         cum_fee_currency=cum_fee_currency,
                     )
                 yield ExecutionUpdate(
@@ -1423,6 +1443,9 @@ class WalutomatExchangeClient(ExchangeClientBase):
 
         commission_str = order_data.get("commissionAmount", "0")
         commission = float(commission_str)
+        raw_filled = order_data.get(fill_field, 0)
+        raw_volume = order_data["volume"]
+        raw_price = order_data["limitPrice"]
 
         return ExchangeOrderSnapshot(
             id=order_data["orderId"],
@@ -1438,6 +1461,10 @@ class WalutomatExchangeClient(ExchangeClientBase):
             timestamp=time.time(),
             fee=commission if commission > 0 else None,
             fee_currency=order_data.get("commissionCurrency"),
+            amount_decimal=raw_volume if isinstance(raw_volume, str) else None,
+            price_decimal=raw_price if isinstance(raw_price, str) else None,
+            filled_decimal=raw_filled if isinstance(raw_filled, str) else None,
+            fee_decimal=commission_str if isinstance(commission_str, str) else None,
         )
 
     async def get_orders(

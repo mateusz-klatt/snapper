@@ -28,6 +28,7 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TimeInForceEnum
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.schemas.kraken import KrakenExecutionFeeSchema
 
 
 @pytest.fixture(autouse=True)
@@ -449,10 +450,10 @@ def test_parse_kraken_execution_valid() -> None:
         "timestamp": "2024-12-22T10:00:00.000000Z",
         "cum_qty": 0.5,
         "cum_cost": 22500.0,
-        "last_qty": 0.5,
-        "last_price": 45000.0,
+        "last_qty": "0.500000000000000005",
+        "last_price": "45000.000000000000000005",
         "fees": [
-            {"asset": "USD", "qty": 22.5},
+            {"asset": "USD", "qty": "22.500000000000000005"},
             {"asset": "EUR", "qty": 0.01},
         ],
     }
@@ -469,6 +470,37 @@ def test_parse_kraken_execution_valid() -> None:
     assert len(result.fees) == 2
     assert result.fees[0].asset == "USD"
     assert result.fees[0].quantity == pytest.approx(22.5)
+    assert result.last_qty_decimal == "0.500000000000000005"
+    assert result.last_price_decimal == "45000.000000000000000005"
+    assert result.fees[0].quantity_decimal == "22.500000000000000005"
+
+
+def test_parse_kraken_execution_accepts_non_dict_fee() -> None:
+    """Preserve a validated fee model while preparing execution schema input.
+
+    Given: Kraken execution data containing a non-dictionary validated fee,
+    When: The adapter prepares and validates the execution payload,
+    Then: The fee passes through and remains available on the parsed execution.
+    """
+    raw_fee = KrakenExecutionFeeSchema(asset="USD", qty=0.125)
+    raw_data: dict[str, Any] = {
+        "order_id": "OQCLSE-BW3P3-BUCMWZ",
+        "exec_type": "trade",
+        "symbol": "BTC/USD",
+        "side": "buy",
+        "order_type": "limit",
+        "order_status": "filled",
+        "timestamp": "2024-12-22T10:00:00.000000Z",
+        "fees": [raw_fee],
+    }
+
+    result = parse_kraken_execution(raw_data)
+
+    assert result.fees is not None
+    assert len(result.fees) == 1
+    assert result.fees[0].asset == "USD"
+    assert result.fees[0].quantity == pytest.approx(0.125)
+    assert result.fees[0].quantity_decimal is None
 
 
 def test_parse_kraken_execution_list_valid() -> None:
