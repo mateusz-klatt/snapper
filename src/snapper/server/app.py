@@ -2364,7 +2364,11 @@ def _create_orders_executions_router() -> APIRouter:
                     **{
                         "last_size": r["size"],
                         "last_price": r["price"],
-                        **cast(dict[str, Any], r),
+                        **{
+                            key: value
+                            for key, value in cast(dict[str, Any], r).items()
+                            if key != "exec_id"
+                        },
                     }
                 )
                 for r in rows

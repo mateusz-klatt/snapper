@@ -2652,6 +2652,7 @@ class MockRepository:
                 "session_id": exe.session_id,
                 "sequence_id": exe.sequence_id,
                 "trade_id": exe.trade_id,
+                "exec_id": exe.exec_id,
                 "exchange_order_id": order.exchange_order_id,
                 "client_order_id": order.client_order_id or "",
                 "instrument": sym.native_symbol,
