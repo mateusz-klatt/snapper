@@ -88,7 +88,7 @@ matplotlib = "^3.11.0"
 scikit-learn = "^1.9.0"
 tqdm = "^4.68.4"
 types-markdown = "^3.10.2.20260712"
-httpx2 = "^2.6.0"
+httpx2 = "^2.7.0"
 
 [tool.poetry.scripts]
 snapper = "snapper.__main__:main"

@@ -2107,14 +2107,14 @@ trio = ["trio (>=0.22.0,<1.0)"]
 
 [[package]]
 name = "httpcore2"
-version = "2.6.0"
+version = "2.7.0"
 description = "A minimal low-level HTTP client."
 optional = false
 python-versions = ">=3.10"
 groups = ["dev"]
 files = [
-    {file = "httpcore2-2.6.0-py3-none-any.whl", hash = "sha256:c237a45c7eef885cf032cb9b850d59fcf1fa7e00230307f08aab26486a6ed584"},
-    {file = "httpcore2-2.6.0.tar.gz", hash = "sha256:95b692b582402ec49b3d84c2343556e4ac4c0962c8b3d39c48d485b9ecc240ab"},
+    {file = "httpcore2-2.7.0-py3-none-any.whl", hash = "sha256:1452f589fe23f55b44546cd884294c41a29330af902bc0b71a761fd52d18f92b"},
+    {file = "httpcore2-2.7.0.tar.gz", hash = "sha256:6dc0fedf329a52a990930a5579edfebaea81118ea700ea0dd7de2b5e5be49efc"},
 ]
 
 [package.dependencies]
@@ -2228,19 +2228,19 @@ files = [
 
 [[package]]
 name = "httpx2"
-version = "2.6.0"
+version = "2.7.0"
 description = "The next generation HTTP client."
 optional = false
 python-versions = ">=3.10"
 groups = ["dev"]
 files = [
-    {file = "httpx2-2.6.0-py3-none-any.whl", hash = "sha256:6cccc3665d6bceb3c1c4f1422ae7e53fda67a853f0135f09b25ce0d4dcac01e3"},
-    {file = "httpx2-2.6.0.tar.gz", hash = "sha256:5d362fd59562cf2139a60c67bb016587a70b36156a517f176c7cbf1587d1ab22"},
+    {file = "httpx2-2.7.0-py3-none-any.whl", hash = "sha256:ed2a2719c696789e09493bd8e2bec3d8bd925cc6e26b68389ec25ade132f7bf4"},
+    {file = "httpx2-2.7.0.tar.gz", hash = "sha256:8b30709aed5c8465b0dd3b95c09ce301c8f79e7e7a2d00ab0af551e0d0375b07"},
 ]
 
 [package.dependencies]
-anyio = "*"
-httpcore2 = "2.6.0"
+anyio = ">=4.10"
+httpcore2 = "2.7.0"
 idna = ">=3.18"
 truststore = ">=0.10"
 
@@ -7545,4 +7545,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "b47c78dd6f6c2fff6730b3e1f20d9f074fc18d8a24f85c548dbee1d48c099b29"
+content-hash = "34f015b51ae2f58fab1c68d8ce0614e2a7c833e0cf1e963a16c2bf1c5fba89b7"
