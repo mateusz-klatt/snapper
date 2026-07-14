@@ -67,7 +67,7 @@ def stochastic(
     low_series = pd.Series(low.astype(float).to_numpy(), index=c.index)
     lowest_low = low_series.rolling(window=k_period, min_periods=k_period).min()
     highest_high = h.rolling(window=k_period, min_periods=k_period).max()
-    span = highest_high - lowest_low
+    span = highest_high.sub(lowest_low)
     safe_span = span.where(span > 0.0)
     percent_k_full = (100.0 * (c - lowest_low) / safe_span).where((span > 0.0) | span.isna(), 0.0)
     percent_d = percent_k_full.rolling(window=d_period, min_periods=d_period).mean()
