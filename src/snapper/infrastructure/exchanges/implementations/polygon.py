@@ -36,7 +36,7 @@ from typing import cast
 import certifi
 import urllib3
 from loguru import logger
-from polygon import RESTClient
+from massive import RESTClient
 from urllib3.util.retry import Retry
 
 from snapper.core.types import ExchangeEnum
@@ -57,6 +57,19 @@ from snapper.infrastructure.exchanges.schemas.polygon import PolygonGroupedAgg
 from snapper.infrastructure.exchanges.schemas.polygon import PolygonPreviousClose
 
 _MARKET_DATA_ONLY_MSG = "PolygonExchangeClient provides market data only."
+
+_POLYGON_REST_BASE = "https://api.polygon.io"
+"""REST base URL for the Massive client (formerly Polygon.io).
+
+The client library was migrated from ``polygon-api-client`` to its official
+successor ``massive``, which relaxes the ``certifi`` upper bound
+(``<2027.0.0``) that ``polygon-api-client`` 1.16.3 pinned (``<2026.0.0``) and so
+unblocks ``ccxt`` 4.5.65 (which requires ``certifi==2026.6.17``). ``massive``
+defaults to ``https://api.massive.com``; the base is pinned to the still-serving
+``https://api.polygon.io`` so the swap is zero-runtime-change (identical
+endpoint, key, and Bearer auth that run in production today — ``massive`` is a
+byte-identical rebrand of the client). Switch to ``https://api.massive.com``
+once the existing key is confirmed to authenticate there."""
 
 
 @dataclass
@@ -189,7 +202,9 @@ class PolygonExchangeClient(ExchangeClientBase):
         self.api_key = api_key
         self.rate_limit = rate_limit_per_minute
         self._request_timestamps: list[float] = []
-        self._client = RESTClient(api_key=api_key, trace=trace, verbose=verbose)
+        self._client = RESTClient(
+            api_key=api_key, trace=trace, verbose=verbose, base=_POLYGON_REST_BASE
+        )
         self.symbols_cache_file = (
             Path(symbols_cache_file) if isinstance(symbols_cache_file, str) else symbols_cache_file
         )
