@@ -1853,9 +1853,11 @@ class InstrumentSpec(TemporalMixin, Base):
         Integer, comment="Decimal precision for quantity"
     )
     margin_initial: Mapped[float | None] = mapped_column(Float, comment="Initial margin percentage")
-    position_limit_long: Mapped[int | None] = mapped_column(Integer, comment="Long position limit")
+    position_limit_long: Mapped[int | None] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), comment="Long position limit"
+    )
     position_limit_short: Mapped[int | None] = mapped_column(
-        Integer, comment="Short position limit"
+        BigInteger().with_variant(Integer, "sqlite"), comment="Short position limit"
     )
     status: Mapped[str | None] = mapped_column(
         String(20), comment="Trading status (e.g., online, offline)"
