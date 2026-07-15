@@ -26,6 +26,9 @@ from snapper.application.portfolio.reconciliation_invariants import (
 from snapper.application.portfolio.reconciliation_invariants import (
     validate_portfolio_reconciliation_observation_lineage,
 )
+from snapper.application.portfolio.reconciliation_invariants import (
+    validate_portfolio_reconciliation_spot_anchor_lineage,
+)
 from snapper.application.portfolio.reconciliation_methods import PortfolioReconciliationMethod
 from snapper.core.json_types import JsonObject
 from snapper.data.repository_types import PortfolioDriftEpisodeRow
@@ -84,33 +87,33 @@ def no_portfolio_reconciliation_view() -> PortfolioReconciliationView:
     return _empty_reconciliation_view("incomplete", None)
 
 
-def _current_evaluation(
-    state: PortfolioReconciliationStateRow,
+def _evaluation_for_observation(
+    observation_id: int,
     observations: list[PortfolioReconciliationLineageObservationRow],
 ) -> PortfolioReconciliationEvaluationRow:
-    """Project the state's current observation to the shared validator input."""
+    """Project one referenced observation to the shared validator input."""
     observations_by_id = {observation["id"]: observation for observation in observations}
-    current = observations_by_id[state["current_observation_id"]]
+    observation = observations_by_id[observation_id]
     return {
-        "wallet_public_id": current["wallet_public_id"],
-        "exchange": current["exchange"],
-        "mode": current["mode"],
-        "method": current["method"],
-        "evaluation_status": current["evaluation_status"],
-        "venue_account_state_public_id": current["venue_account_state_public_id"],
-        "venue_account_observation_id": current["venue_account_observation_id"],
-        "account_authoritative_until": current["account_authoritative_until"],
-        "source_watermark_kind": current["source_watermark_kind"],
-        "source_watermark": current["source_watermark"],
-        "anchor_public_id": current["anchor_public_id"],
-        "expected_json": current["expected_json"],
-        "actual_json": current["actual_json"],
-        "difference_json": current["difference_json"],
-        "tolerance_json": current["tolerance_json"],
-        "error": current["error"],
-        "session_id": current["session_id"],
-        "sequence_id": current["sequence_id"],
-        "bus_time": current["timestamp"],
+        "wallet_public_id": observation["wallet_public_id"],
+        "exchange": observation["exchange"],
+        "mode": observation["mode"],
+        "method": observation["method"],
+        "evaluation_status": observation["evaluation_status"],
+        "venue_account_state_public_id": observation["venue_account_state_public_id"],
+        "venue_account_observation_id": observation["venue_account_observation_id"],
+        "account_authoritative_until": observation["account_authoritative_until"],
+        "source_watermark_kind": observation["source_watermark_kind"],
+        "source_watermark": observation["source_watermark"],
+        "anchor_public_id": observation["anchor_public_id"],
+        "expected_json": observation["expected_json"],
+        "actual_json": observation["actual_json"],
+        "difference_json": observation["difference_json"],
+        "tolerance_json": observation["tolerance_json"],
+        "error": observation["error"],
+        "session_id": observation["session_id"],
+        "sequence_id": observation["sequence_id"],
+        "bus_time": observation["timestamp"],
     }
 
 
@@ -183,12 +186,6 @@ def _validate_state_authority_shape(state: PortfolioReconciliationStateRow) -> N
     )
     if (state["open_drift_episode_public_id"] is not None) != open_episode_expected:
         raise RuntimeError("reconciliation state drift episode threshold is inconsistent")
-    if (
-        state["method"] == "spot_execution_replay"
-        and status in ("matched", "mismatched")
-        and state["anchor_public_id"] is None
-    ):
-        raise RuntimeError("full spot reconciliation has no anchor lineage")
 
 
 def _parse_evidence(raw: str | None) -> JsonObject | None:
@@ -268,6 +265,7 @@ def build_portfolio_reconciliation_view(
             or context["latest_ordered_observation_id"] is not None
             or context["latest_appended_observation_id"] is not None
             or context["open_drift_episode"] is not None
+            or context["spot_anchor"] is not None
         ):
             return _empty_reconciliation_view("corrupt", _CORRUPT_ERROR)
         return no_portfolio_reconciliation_view()
@@ -282,9 +280,25 @@ def build_portfolio_reconciliation_view(
             context["latest_ordered_observation_id"],
             context["latest_appended_observation_id"],
         )
-        evaluation = _current_evaluation(state, context["observations"])
+        evaluation = _evaluation_for_observation(
+            state["current_observation_id"],
+            context["observations"],
+        )
         validate_portfolio_reconciliation_evaluation_config(evaluation, context["config"])
         validate_portfolio_reconciliation_method_transition(state, evaluation, context["config"])
+        detail_source_observation_id = state["detail_source_observation_id"]
+        anchor_evaluation = (
+            evaluation
+            if detail_source_observation_id is None
+            else _evaluation_for_observation(
+                detail_source_observation_id,
+                context["observations"],
+            )
+        )
+        validate_portfolio_reconciliation_spot_anchor_lineage(
+            anchor_evaluation,
+            context["spot_anchor"],
+        )
         _validate_state_authority_shape(state)
         expected = _parse_evidence(state["expected_json"])
         actual = _parse_evidence(state["actual_json"])
@@ -330,5 +344,5 @@ def build_portfolio_reconciliation_view(
             error=state["error"],
             open_drift_episode=open_episode,
         )
-    except (KeyError, RuntimeError, TypeError, ValueError, ValidationError):
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError, ValidationError):
         return _empty_reconciliation_view("corrupt", _CORRUPT_ERROR)

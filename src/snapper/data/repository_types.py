@@ -586,6 +586,7 @@ class PortfolioReconciliationReadContextRow(TypedDict):
     latest_ordered_observation_id: int | None
     latest_appended_observation_id: int | None
     open_drift_episode: PortfolioDriftEpisodeRow | None
+    spot_anchor: SpotReconciliationAnchorRow | None
 
 
 class SettingRow(TypedDict):

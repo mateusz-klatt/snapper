@@ -7,6 +7,7 @@ from pathlib import Path
 
 from sqlalchemy import event
 from sqlalchemy import select
+from sqlalchemy import text
 
 from snapper.application.portfolio.reconciliation_view import build_portfolio_reconciliation_view
 from snapper.data.models import KNOWN_TO_MAX
@@ -27,6 +28,7 @@ _OBSERVATION = "00000000-0000-7000-8000-000000000401"
 _STATE = "00000000-0000-7000-8000-000000000501"
 _CONFIG = "00000000-0000-7000-8000-000000000601"
 _EPISODE = "00000000-0000-7000-8000-000000000701"
+_OTHER_EPISODE = "00000000-0000-7000-8000-000000000702"
 
 
 async def _make_repo(tmp_path: Path, name: str) -> SQLAlchemyRepository:
@@ -154,7 +156,10 @@ def _config() -> PortfolioReconciliationMethodConfig:
     )
 
 
-def _episode(observation_id: int) -> PortfolioDriftEpisode:
+def _episode(
+    observation_id: int,
+    public_id: str = _EPISODE,
+) -> PortfolioDriftEpisode:
     """Build one active open drift episode owned by the target account."""
     return PortfolioDriftEpisode(
         wallet_public_id=_WALLET,
@@ -171,7 +176,7 @@ def _episode(observation_id: int) -> PortfolioDriftEpisode:
         closed_by_user_public_id=None,
         closed_by_operator_public_id=None,
         rebase_anchor_public_id=None,
-        public_id=_EPISODE,
+        public_id=public_id,
         session_id=_SESSION,
         sequence_id=2,
         timestamp=_NOW,
@@ -252,6 +257,7 @@ async def test_read_contexts_are_complete_scoped_and_one_query(
         "latest_full_mismatch_count": 3,
         "public_id": _EPISODE,
     }
+    assert context["spot_anchor"] is None
     empty_context = next(
         row for row in contexts if row["account_state"]["public_id"] == _OTHER_ACCOUNT
     )
@@ -261,6 +267,7 @@ async def test_read_contexts_are_complete_scoped_and_one_query(
     assert empty_context["latest_ordered_observation_id"] is None
     assert empty_context["latest_appended_observation_id"] is None
     assert empty_context["open_drift_episode"] is None
+    assert empty_context["spot_anchor"] is None
 
 
 async def test_read_context_preserves_cross_account_observation_reference(
@@ -309,3 +316,27 @@ async def test_read_context_rejects_persisted_watermark_lineage_mismatch(
     assert view.effective_status == "corrupt"
     assert view.is_authoritative is False
     assert view.expected is None
+
+
+async def test_read_context_joins_only_the_state_referenced_episode(
+    tmp_path: Path,
+) -> None:
+    """A corrupted second open episode cannot duplicate an account context.
+
+    Given: An isolated database whose open-identity index is bypassed to persist
+        two active open episodes for one account.
+    When: The batched read context is loaded for that account.
+    Then: Exactly one account row contains only the episode referenced by state.
+    """
+    repository = await _make_repo(tmp_path, "duplicate-open-episode-context.db")
+    observation_id = await _seed_complete_context(repository)
+    async with repository.session() as session:
+        await session.execute(text("DROP INDEX uq_portfolio_drift_episodes_open_identity"))
+        session.add(_episode(observation_id, _OTHER_EPISODE))
+        await session.commit()
+
+    contexts = await repository.get_portfolio_reconciliation_read_contexts([_WALLET])
+
+    assert len(contexts) == 1
+    assert contexts[0]["open_drift_episode"] is not None
+    assert contexts[0]["open_drift_episode"]["public_id"] == _EPISODE

@@ -2737,6 +2737,7 @@ class MockRepository:
                 latest_ordered_observation_id=None,
                 latest_appended_observation_id=None,
                 open_drift_episode=None,
+                spot_anchor=None,
             )
             for row in rows
         ]

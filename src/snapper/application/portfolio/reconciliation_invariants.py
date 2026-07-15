@@ -7,6 +7,7 @@ from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import PortfolioReconciliationLineageObservationRow
 from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
 from snapper.data.repository_types import PortfolioReconciliationStateRow
+from snapper.data.repository_types import SpotReconciliationAnchorRow
 
 _REAL_PORTFOLIO_RECONCILIATION_METHODS: Final[tuple[RealPortfolioReconciliationMethod, ...]] = (
     "futures_position",
@@ -277,3 +278,43 @@ def validate_portfolio_reconciliation_latest_observation_lineage(
         or existing["current_observation_id"] != latest_appended_observation_id
     ):
         raise RuntimeError("reconciliation state does not reference the latest observation")
+
+
+def validate_portfolio_reconciliation_spot_anchor_lineage(
+    evaluation: PortfolioReconciliationEvaluationRow,
+    anchor: SpotReconciliationAnchorRow | None,
+) -> None:
+    """Validate the certified anchor boundary for one full spot result.
+
+    Args:
+        evaluation: Full evaluation whose anchor lineage must be certified.
+        anchor: Active durable anchor referenced by the evaluation, if found.
+
+    Returns:
+        None.
+
+    Raises:
+        RuntimeError: If required anchor lineage is absent, foreign, or ahead
+            of the evaluation boundary.
+    """
+    if evaluation["method"] != "spot_execution_replay" or evaluation["evaluation_status"] not in (
+        "matched",
+        "mismatched",
+    ):
+        return
+    anchor_public_id = evaluation["anchor_public_id"]
+    source_watermark = evaluation["source_watermark"]
+    if anchor_public_id is None or source_watermark is None:
+        raise RuntimeError("full spot reconciliation requires anchor lineage")
+    if evaluation["source_watermark_kind"] != "execution_id":
+        raise RuntimeError("full spot reconciliation requires execution-id lineage")
+    if (
+        anchor is None
+        or anchor["public_id"] != anchor_public_id
+        or anchor["wallet_public_id"] != evaluation["wallet_public_id"]
+        or anchor["exchange"] != evaluation["exchange"]
+        or anchor["mode"] != evaluation["mode"]
+        or anchor["source_watermark_kind"] != "execution_id"
+        or anchor["source_watermark"] > source_watermark
+    ):
+        raise RuntimeError("spot reconciliation anchor lineage is invalid")

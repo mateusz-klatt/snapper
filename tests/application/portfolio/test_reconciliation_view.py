@@ -18,6 +18,7 @@ from snapper.data.repository_types import PortfolioDriftEpisodeRow
 from snapper.data.repository_types import PortfolioReconciliationLineageObservationRow
 from snapper.data.repository_types import PortfolioReconciliationReadContextRow
 from snapper.data.repository_types import PortfolioReconciliationStateRow
+from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import VenueAccountStateRow
 
 _NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
@@ -25,6 +26,7 @@ _WALLET_ID = "01980f9b-d000-7000-8000-000000000001"
 _ACCOUNT_STATE_ID = "01980f9b-d000-7000-8000-000000000002"
 _STATE_ID = "01980f9b-d000-7000-8000-000000000003"
 _EPISODE_ID = "01980f9b-d000-7000-8000-000000000004"
+_ANCHOR_ID = "01980f9b-d000-7000-8000-000000000006"
 _EXPECTED_JSON = '{"BTC-PERP":{"size":1}}'
 _ACTUAL_JSON = '{"BTC-PERP":{"size":1.0}}'
 _DIFFERENCE_JSON = '{"BTC-PERP":{"size":0}}'
@@ -137,7 +139,66 @@ def _matched_context() -> PortfolioReconciliationReadContextRow:
         "latest_ordered_observation_id": 7,
         "latest_appended_observation_id": 7,
         "open_drift_episode": None,
+        "spot_anchor": None,
     }
+
+
+def _spot_anchor() -> SpotReconciliationAnchorRow:
+    """Build the certified anchor referenced by a full spot result."""
+    return {
+        "public_id": _ANCHOR_ID,
+        "wallet_public_id": _WALLET_ID,
+        "exchange": "binance",
+        "mode": "live",
+        "venue_account_state_public_id": _ACCOUNT_STATE_ID,
+        "balance_observation_id": 41,
+        "source_watermark_kind": "execution_id",
+        "source_watermark": 9000,
+        "balances_json": '{"BTC":"1"}',
+        "first_request_started_at": _NOW - timedelta(seconds=4),
+        "first_request_completed_at": _NOW - timedelta(seconds=3),
+        "second_request_started_at": _NOW - timedelta(seconds=2),
+        "second_request_completed_at": _NOW - timedelta(seconds=1),
+        "boundary_status": "double_read_equal",
+        "inventory_status": "certified_full",
+        "margin_status": "cash",
+        "provenance": "test",
+        "session_id": "anchor-session",
+        "sequence_id": 1,
+        "timestamp": _NOW - timedelta(seconds=1),
+    }
+
+
+def _spot_matched_context() -> PortfolioReconciliationReadContextRow:
+    """Build a coherent full spot result with a certified anchor boundary."""
+    context = _matched_context()
+    state = cast(PortfolioReconciliationStateRow, context["state"])
+    observation = context["observations"][0]
+    config = context["config"]
+    assert config is not None
+    state["method"] = "spot_execution_replay"
+    state["anchor_public_id"] = _ANCHOR_ID
+    observation["method"] = "spot_execution_replay"
+    observation["anchor_public_id"] = _ANCHOR_ID
+    config["method"] = "spot_execution_replay"
+    context["spot_anchor"] = _spot_anchor()
+    return context
+
+
+def _spot_incomplete_context() -> PortfolioReconciliationReadContextRow:
+    """Build a spot non-full successor retaining certified full evidence."""
+    context = _incomplete_context()
+    state = cast(PortfolioReconciliationStateRow, context["state"])
+    config = context["config"]
+    assert config is not None
+    state["method"] = "spot_execution_replay"
+    state["anchor_public_id"] = _ANCHOR_ID
+    for observation in context["observations"]:
+        observation["method"] = "spot_execution_replay"
+    context["observations"][0]["anchor_public_id"] = _ANCHOR_ID
+    config["method"] = "spot_execution_replay"
+    context["spot_anchor"] = _spot_anchor()
+    return context
 
 
 def _required_state(
@@ -284,6 +345,21 @@ def test_fresh_current_full_match_is_authoritative() -> None:
     assert view.actual == {"BTC-PERP": {"size": 1.0}}
     assert view.difference == {"BTC-PERP": {"size": 0}}
     assert view.tolerance == {"absolute": 0.0001}
+
+
+def test_fresh_full_spot_match_with_certified_anchor_is_authoritative() -> None:
+    """A full spot match is authoritative only across its certified anchor.
+
+    Given: A coherent spot state whose loaded anchor certifies its boundary.
+    When: The shared anchor invariant validates the read context.
+    Then: The fresh matched verdict remains authoritative.
+    """
+    view = build_portfolio_reconciliation_view(_spot_matched_context(), _NOW)
+
+    assert view.effective_status == "matched"
+    assert view.is_authoritative is True
+    assert view.method == "spot_execution_replay"
+    assert view.anchor_public_id == _ANCHOR_ID
 
 
 def test_fresh_current_full_mismatch_is_authoritative() -> None:
@@ -447,7 +523,7 @@ def test_initial_unclassified_state_has_no_evidence() -> None:
 
 @pytest.mark.parametrize(
     "orphan_field",
-    ["observations", "latest_ordered", "latest_appended", "episode"],
+    ["observations", "latest_ordered", "latest_appended", "episode", "anchor"],
 )
 def test_no_state_with_orphaned_lineage_is_corrupt(orphan_field: str) -> None:
     """Persisted lineage without its active state fails closed.
@@ -465,14 +541,17 @@ def test_no_state_with_orphaned_lineage_is_corrupt(orphan_field: str) -> None:
     context["latest_ordered_observation_id"] = None
     context["latest_appended_observation_id"] = None
     context["open_drift_episode"] = None
+    context["spot_anchor"] = None
     if orphan_field == "observations":
         context["observations"] = [_matched_observation()]
     elif orphan_field == "latest_ordered":
         context["latest_ordered_observation_id"] = 7
     elif orphan_field == "latest_appended":
         context["latest_appended_observation_id"] = 7
-    else:
+    elif orphan_field == "episode":
         context["open_drift_episode"] = cast(PortfolioDriftEpisodeRow, {})
+    else:
+        context["spot_anchor"] = cast(SpotReconciliationAnchorRow, {})
 
     _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
 
@@ -487,6 +566,26 @@ def test_invalid_method_claiming_matched_is_corrupt() -> None:
     context = _matched_context()
     _required_state(context)["method"] = "invalid"
     _current_observation(context)["method"] = "invalid"
+
+    _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
+
+
+def test_null_required_string_field_is_corrupt() -> None:
+    """A persisted NULL required string cannot escape the account boundary.
+
+    Given: A self-consistent forged context whose exchange fields are NULL.
+    When: Shared config validation attempts string normalization.
+    Then: The account degrades to corrupt instead of raising AttributeError.
+    """
+    context = _matched_context()
+    state = _required_state(context)
+    observation = _current_observation(context)
+    config = context["config"]
+    assert config is not None
+    cast(dict[str, object], context["account_state"])["exchange"] = None
+    cast(dict[str, object], state)["exchange"] = None
+    cast(dict[str, object], observation)["exchange"] = None
+    cast(dict[str, object], config)["exchange"] = None
 
     _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
 
@@ -733,6 +832,82 @@ def test_full_spot_state_without_anchor_is_corrupt() -> None:
     config = context["config"]
     assert config is not None
     config["method"] = "spot_execution_replay"
+
+    _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
+
+
+def test_full_spot_state_with_missing_anchor_row_is_corrupt() -> None:
+    """A full spot verdict cannot trust an anchor identity that resolves absent.
+
+    Given: Coherent spot lineage naming an anchor with no loaded active row.
+    When: Shared anchor lineage validation runs.
+    Then: The view clears evidence and denies authority as corrupt.
+    """
+    context = _spot_matched_context()
+    context["spot_anchor"] = None
+
+    _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
+
+
+def test_spot_nonfull_successor_revalidates_retained_full_anchor() -> None:
+    """Retained spot evidence remains contingent on its certified anchor.
+
+    Given: A non-full spot successor retaining a prior full result.
+    When: Its present or missing retained anchor is revalidated.
+    Then: The valid view keeps evidence, while the missing anchor is corrupt.
+    """
+    valid_context = _spot_incomplete_context()
+    missing_context = _spot_incomplete_context()
+    missing_context["spot_anchor"] = None
+
+    valid_view = build_portfolio_reconciliation_view(valid_context, _NOW)
+
+    assert valid_view.effective_status == "incomplete"
+    assert valid_view.is_authoritative is False
+    assert valid_view.expected == {"BTC-PERP": {"size": 1}}
+    _assert_corrupt(build_portfolio_reconciliation_view(missing_context, _NOW))
+
+
+def test_full_spot_state_requires_execution_id_lineage() -> None:
+    """A full spot verdict cannot use a non-execution source boundary.
+
+    Given: Spot state and observation lineage naming another watermark kind.
+    When: The shared write-and-read anchor validator runs.
+    Then: The view fails closed before granting authority.
+    """
+    context = _spot_matched_context()
+    _required_state(context)["source_watermark_kind"] = "venue_event_id"
+    _current_observation(context)["source_watermark_kind"] = "venue_event_id"
+
+    _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("public_id", "01980f9b-d000-7000-8000-000000000099"),
+        ("wallet_public_id", "01980f9b-d000-7000-8000-000000000099"),
+        ("exchange", "kraken"),
+        ("mode", "paper"),
+        ("source_watermark_kind", "venue_event_id"),
+        ("source_watermark", 9002),
+    ],
+)
+def test_full_spot_state_rejects_invalid_loaded_anchor(field: str, value: object) -> None:
+    """Every loaded anchor identity and boundary mismatch fails closed.
+
+    Given: A full spot state with one forged loaded-anchor field.
+    When: Shared anchor lineage validation compares the durable boundary.
+    Then: The view is corrupt and cannot expose authority or evidence.
+
+    Args:
+        field: Anchor field to forge.
+        value: Persisted value that violates the referenced boundary.
+    """
+    context = _spot_matched_context()
+    anchor = context["spot_anchor"]
+    assert anchor is not None
+    cast(dict[str, object], anchor)[field] = value
 
     _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
 

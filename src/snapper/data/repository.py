@@ -118,6 +118,9 @@ from snapper.application.portfolio.reconciliation_invariants import (
 from snapper.application.portfolio.reconciliation_invariants import (
     validate_portfolio_reconciliation_observation_lineage,
 )
+from snapper.application.portfolio.reconciliation_invariants import (
+    validate_portfolio_reconciliation_spot_anchor_lineage,
+)
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.roles import UserRole
 from snapper.core.json_types import JsonObject
@@ -13791,15 +13794,10 @@ class SQLAlchemyRepository(Repository):
                 .scalars()
                 .first()
             )
-            if (
-                anchor is None
-                or anchor.wallet_public_id != evaluation["wallet_public_id"]
-                or anchor.exchange != evaluation["exchange"]
-                or anchor.mode != evaluation["mode"]
-                or anchor.source_watermark_kind != "execution_id"
-                or anchor.source_watermark > source_watermark
-            ):
-                raise RuntimeError("spot reconciliation anchor lineage is invalid")
+            validate_portfolio_reconciliation_spot_anchor_lineage(
+                evaluation,
+                None if anchor is None else self._spot_anchor_to_row(anchor),
+            )
         effective = evaluation["bus_time"]
         if existing is not None and existing.timestamp > effective:
             effective = existing.timestamp
@@ -14243,6 +14241,7 @@ class SQLAlchemyRepository(Repository):
                     detail_source_observation,
                     PortfolioReconciliationMethodConfig,
                     PortfolioDriftEpisode,
+                    PortfolioSpotReconciliationAnchor,
                     latest_ordered_observation_id,
                     latest_appended_observation_id,
                 )
@@ -14284,12 +14283,17 @@ class SQLAlchemyRepository(Repository):
                 .outerjoin(
                     PortfolioDriftEpisode,
                     and_(
-                        PortfolioDriftEpisode.wallet_public_id
-                        == VenueAccountState.wallet_public_id,
-                        PortfolioDriftEpisode.exchange == VenueAccountState.exchange,
-                        PortfolioDriftEpisode.mode == VenueAccountState.mode,
-                        PortfolioDriftEpisode.status == "open",
+                        PortfolioDriftEpisode.public_id
+                        == PortfolioReconciliationState.open_drift_episode_public_id,
                         PortfolioDriftEpisode.known_to == KNOWN_TO_MAX,
+                    ),
+                )
+                .outerjoin(
+                    PortfolioSpotReconciliationAnchor,
+                    and_(
+                        PortfolioSpotReconciliationAnchor.public_id
+                        == PortfolioReconciliationState.anchor_public_id,
+                        PortfolioSpotReconciliationAnchor.known_to == KNOWN_TO_MAX,
                     ),
                 )
                 .where(VenueAccountState.known_to == KNOWN_TO_MAX)
@@ -14311,6 +14315,7 @@ class SQLAlchemyRepository(Repository):
                 detail_source,
                 config,
                 episode,
+                spot_anchor,
                 latest_ordered_id,
                 latest_appended_id,
             ) in result.all():
@@ -14343,6 +14348,9 @@ class SQLAlchemyRepository(Repository):
                             None
                             if episode is None
                             else self._portfolio_drift_episode_to_row(episode)
+                        ),
+                        "spot_anchor": (
+                            None if spot_anchor is None else self._spot_anchor_to_row(spot_anchor)
                         ),
                     }
                 )
