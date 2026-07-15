@@ -256,6 +256,18 @@ class TestPortfolioDriftRule:
         repo.list_alert_events_with_dedup_key.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_resolution_without_active_owner_grants_is_ignored(self) -> None:
+        """Resolution retains Stage 1's ownerless-drop behavior after extraction."""
+        rule = PortfolioDriftRule()
+        repo = _repo(grants=[])
+
+        rows = await rule.evaluate(_TOPIC, _event("resolved"), repo, _now())
+
+        assert rows == []
+        repo.list_users_with_operator_membership.assert_not_awaited()
+        repo.list_alert_events_with_dedup_key.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_wrong_topic_is_ignored_before_parsing(self) -> None:
         """Only the exact committed lifecycle topic reaches owner discovery."""
         rule = PortfolioDriftRule()

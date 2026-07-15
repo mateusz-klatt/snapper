@@ -4,6 +4,14 @@ from datetime import datetime
 
 from loguru import logger
 
+from snapper.application.notify.portfolio_drift_paging import PORTFOLIO_DRIFT_ALERT_TYPE
+from snapper.application.notify.portfolio_drift_paging import PORTFOLIO_DRIFT_PRIORITY
+from snapper.application.notify.portfolio_drift_paging import PORTFOLIO_DRIFT_THREAD_KEY_PREFIX
+from snapper.application.notify.portfolio_drift_paging import PORTFOLIO_DRIFT_TOPIC
+from snapper.application.notify.portfolio_drift_paging import build_open_portfolio_drift_alert_rows
+from snapper.application.notify.portfolio_drift_paging import (
+    resolve_portfolio_drift_recipient_operators,
+)
 from snapper.application.notify.rules.base import AlertRule
 from snapper.application.notify.rules.dedup import check_dedup_since
 from snapper.data.repository import Repository
@@ -11,8 +19,6 @@ from snapper.data.repository_types import AlertEventInsertRow
 from snapper.messaging.schemas.data import PortfolioDriftEpisodeEventData
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
-
-_TOPIC = "bus.portfolio_drift_episode"
 
 
 class PortfolioDriftRule(AlertRule):
@@ -30,11 +36,11 @@ class PortfolioDriftRule(AlertRule):
     the opening alert.
     """
 
-    alert_type = "drift"
-    subscribe_topic_prefixes = (_TOPIC,)
-    priority = "high"
+    alert_type = PORTFOLIO_DRIFT_ALERT_TYPE
+    subscribe_topic_prefixes = (PORTFOLIO_DRIFT_TOPIC,)
+    priority = PORTFOLIO_DRIFT_PRIORITY
     is_safety_critical = True
-    thread_key_prefix = "snapper.drift"
+    thread_key_prefix = PORTFOLIO_DRIFT_THREAD_KEY_PREFIX
     suppression_window_seconds = 0
 
     async def evaluate(
@@ -57,7 +63,7 @@ class PortfolioDriftRule(AlertRule):
             received this lifecycle transition. Empty for unrelated topics,
             malformed or wrong payloads, ownerless wallets, and dedup hits.
         """
-        if topic != _TOPIC:
+        if topic != PORTFOLIO_DRIFT_TOPIC:
             return []
         try:
             data = parse_message(payload.decode("utf-8"))
@@ -65,7 +71,18 @@ class PortfolioDriftRule(AlertRule):
             return []
         if not isinstance(data, PortfolioDriftEpisodeEventData):
             return []
-        recipient_operators = await self._recipient_operators(
+        if data.lifecycle == "opened":
+            return await build_open_portfolio_drift_alert_rows(
+                repo=repo,
+                wallet_public_id=data.wallet_public_id,
+                exchange=data.exchange,
+                mode=data.mode,
+                episode_public_id=data.episode_public_id,
+                opened_at=data.opened_at,
+                mismatch_count=data.mismatch_count,
+                now=now,
+            )
+        recipient_operators = await resolve_portfolio_drift_recipient_operators(
             repo=repo,
             wallet_public_id=data.wallet_public_id,
             now=now,
@@ -76,14 +93,9 @@ class PortfolioDriftRule(AlertRule):
                 wallet=data.wallet_public_id,
             )
             return []
-        is_open = data.lifecycle == "opened"
-        dedup_key = (
-            f"drift.{data.episode_public_id}"
-            if is_open
-            else f"drift.resolved.{data.episode_public_id}"
-        )
+        dedup_key = f"drift.resolved.{data.episode_public_id}"
         thread_key = f"{self.thread_key_prefix}.{data.episode_public_id}"
-        title = "Portfolio drift detected" if is_open else "Portfolio drift resolved"
+        title = "Portfolio drift resolved"
         body = self._body(data)
         rows: list[AlertEventInsertRow] = []
         for user_public_id in sorted(recipient_operators):
@@ -126,33 +138,8 @@ class PortfolioDriftRule(AlertRule):
         return rows
 
     @staticmethod
-    async def _recipient_operators(
-        *,
-        repo: Repository,
-        wallet_public_id: str,
-        now: datetime,
-    ) -> dict[str, str]:
-        """Map each distinct owning user to one deterministic operator."""
-        grants = await repo.list_active_scope_grants_for_wallet(wallet_public_id, now)
-        operator_public_ids = sorted({grant["operator_public_id"] for grant in grants})
-        recipients: dict[str, str] = {}
-        for operator_public_id in operator_public_ids:
-            user_public_ids = await repo.list_users_with_operator_membership(
-                operator_public_id,
-                now,
-            )
-            for user_public_id in sorted(set(user_public_ids)):
-                recipients.setdefault(user_public_id, operator_public_id)
-        return recipients
-
-    @staticmethod
     def _body(data: PortfolioDriftEpisodeEventData) -> str:
         """Render concise English fallback copy for one lifecycle event."""
-        if data.lifecycle == "opened":
-            return (
-                f"Portfolio drift detected on {data.exchange} for wallet "
-                f"{data.wallet_public_id} after {data.mismatch_count} consecutive full mismatches"
-            )
         reason = data.resolution_reason or "reconciliation matched"
         return (
             f"Portfolio drift resolved on {data.exchange} for wallet "

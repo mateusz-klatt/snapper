@@ -1181,7 +1181,15 @@ frame on `alerts.{user_public_id}.{alert_type}` for the web live-refresh
 bridge, and fans each delivery out to the target user's active APNs
 devices via the outbox-backed `NotifySidecar`
 (`application/notify/sidecar.py`), retrying server/throttled failures on
-its own 30s scheduler. Its `apns_*` settings are read from the database;
+its own 30s scheduler. The same process owns a guarded periodic recovery
+scanner for sentinel-current open portfolio-drift episodes. An eager pass
+at startup and later
+`PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` ticks rebuild the exact Stage 1
+owner page when its source bus frame was lost. Bus and scan inserts take the
+same transaction-serialized `(user_public_id, drift.<episode_public_id>)`
+claim, so only the winner reaches web/APNs fanout. The scanner never writes
+episode, reconciliation, position, order, rebase, or trading state. Its
+`apns_*` settings are read from the database;
 its only supervision is the compose `restart: unless-stopped` policy —
 the outbox drain on the next start recovers any queued deliveries left
 behind.

@@ -57,7 +57,8 @@ The `Default` column reflects the Pydantic defaults on
 `BootstrapSettingsLoader` (`src/snapper/config/bootstrap.py`) for
 the server / encryption / ZMQ / coordinator / trade-safety rows. The
 observability rows further down (`SYSTEM_METRICS_*`, `RETENTION_*`,
-`DB_METRICS_*`, `DB_POOL_*`, `SNAPPER_*_PROBE`) are NOT loaded
+`DB_METRICS_*`, `DB_POOL_*`, `SNAPPER_*_PROBE`) and the notify-sidecar
+`PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` row are NOT loaded
 through that class.
 `application/system_metrics/snapshotter.py` and
 `application/db_stats/snapshotter.py` read their env vars directly
@@ -171,6 +172,7 @@ underlying snapshots and the retention window math.
 | `MARKET_DATA_WATCHDOG_INTERVAL_SECONDS` | `60` | Poll cadence for the per-exchange candle-freshness check (floor 5) |
 | `MARKET_DATA_WATCHDOG_THRESHOLD_SECONDS` | `600` | Whole-exchange silence threshold before the `critical_system_error` alert path fires (floor 120) |
 | `MARKET_DATA_WATCHDOG_EXCHANGE_THRESHOLDS` | unset | Per-exchange overrides as `exchange=seconds` CSV; `0` disables one exchange (e.g. `walutomat=1200,kraken_equities=900`) |
+| `PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` | `60` | Notify-sidecar cadence for scanning current open drift episodes whose owning users lack the lifetime `drift.<episode_public_id>` page; malformed or non-positive values use the default |
 | `SNAPPER_TICK_PROBE` | unset | Enable per-stage tick hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |
 | `SNAPPER_TRADE_PROBE` | unset | Enable per-stage trade hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |
 
@@ -483,6 +485,9 @@ MARKET_DATA_WATCHDOG_DISABLED=false
 MARKET_DATA_WATCHDOG_INTERVAL_SECONDS=60
 MARKET_DATA_WATCHDOG_THRESHOLD_SECONDS=600
 # MARKET_DATA_WATCHDOG_EXCHANGE_THRESHOLDS=
+
+# Notify-sidecar durable drift-page recovery
+PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS=60
 
 # Retention policy framework
 RETENTION_INTERVAL_SECONDS=3600

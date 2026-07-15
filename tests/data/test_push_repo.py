@@ -18,6 +18,8 @@ from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select as _select
@@ -538,6 +540,126 @@ class TestAlertEventRepo:
         assert row["public_id"] == public_id
         assert row["known_to"] == KNOWN_TO_MAX
         assert row["is_safety_critical"] is False
+
+    @pytest.mark.asyncio
+    async def test_atomic_dedup_insert_returns_none_after_first_claim(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """A committed same-user dedup identity suppresses the next insert."""
+        row = AlertEventInsertRow(
+            session_id="s1",
+            sequence_id=1,
+            timestamp=_ts(),
+            user_public_id="user-atomic",
+            alert_type="drift",
+            priority="high",
+            title="Portfolio drift detected",
+            body="Drift",
+            dedup_key="drift.episode-1",
+        )
+
+        first = await repo.insert_alert_event_if_dedup_absent(row)
+        second = await repo.insert_alert_event_if_dedup_absent(row)
+
+        assert first is not None
+        assert second is None
+        matches = await repo.list_alert_events_with_dedup_key(
+            "user-atomic",
+            "drift.episode-1",
+            since=_ts(),
+        )
+        assert [match["public_id"] for match in matches] == [first]
+
+    @pytest.mark.asyncio
+    async def test_atomic_dedup_insert_serializes_repository_instances(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """Concurrent SQLite repository instances produce one claim winner."""
+        competitor = SQLAlchemyRepository(repo.db_url)
+        row = AlertEventInsertRow(
+            session_id="s1",
+            sequence_id=1,
+            timestamp=_ts(),
+            user_public_id="user-race",
+            alert_type="drift",
+            priority="high",
+            title="Portfolio drift detected",
+            body="Drift",
+            dedup_key="drift.episode-race",
+        )
+        try:
+            results = await asyncio.gather(
+                repo.insert_alert_event_if_dedup_absent(row),
+                competitor.insert_alert_event_if_dedup_absent(row),
+            )
+        finally:
+            await competitor.engine.dispose()
+
+        assert sum(result is not None for result in results) == 1
+        matches = await repo.list_alert_events_with_dedup_key(
+            "user-race",
+            "drift.episode-race",
+            since=_ts(),
+        )
+        assert len(matches) == 1
+
+    @pytest.mark.asyncio
+    async def test_atomic_dedup_insert_requires_key(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """Atomic insertion rejects rows without a logical dedup identity."""
+        row = AlertEventInsertRow(
+            session_id="s1",
+            sequence_id=1,
+            timestamp=_ts(),
+            user_public_id="user-no-key",
+            alert_type="drift",
+            priority="high",
+            title="Portfolio drift detected",
+            body="Drift",
+        )
+
+        with pytest.raises(ValueError, match="requires dedup_key"):
+            await repo.insert_alert_event_if_dedup_absent(row)
+
+    @pytest.mark.asyncio
+    async def test_postgresql_atomic_dedup_lock_uses_advisory_transaction_lock(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """PostgreSQL contenders serialize on a transaction advisory key."""
+        session = AsyncMock()
+        with patch.object(type(repo), "dialect_name", new_callable=lambda: "postgresql"):
+            await repo._acquire_alert_event_dedup_lock(
+                session,
+                "user-pg",
+                "drift.episode-pg",
+            )
+
+        statement, parameters = session.execute.await_args.args
+        assert "pg_advisory_xact_lock" in str(statement)
+        assert parameters == {"identity": "user-pg\x1fdrift.episode-pg"}
+
+    @pytest.mark.asyncio
+    async def test_unknown_atomic_dedup_lock_dialect_fails_closed(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """An unsupported database cannot silently run a racy claim."""
+        session = AsyncMock()
+        with (
+            patch.object(type(repo), "dialect_name", new_callable=lambda: "mysql"),
+            pytest.raises(NotImplementedError, match="mysql"),
+        ):
+            await repo._acquire_alert_event_dedup_lock(
+                session,
+                "user-mysql",
+                "drift.episode-mysql",
+            )
+        session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_get_alert_events_by_public_ids_bulk_lookup(

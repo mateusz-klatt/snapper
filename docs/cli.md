@@ -1147,12 +1147,15 @@ snapper polygon-load-csv --all --timespan day
 
 ### `notify`
 
-Long-running iOS Push Foundation sidecar (ZMQ `alerts.*` → APNs HTTP/2).
-Subscribes to the `alerts.` ZMQ prefix, fans out each received
-`AlertEventData` to the target user's active devices via the
-outbox-backed `NotifySidecar`, and retries server/throttled failures
-on its own 30-second scheduler. Configuration is read from the
-`apns_*` settings (provisioned through the seed profile).
+Long-running iOS Push Foundation sidecar (domain events → alert history,
+web fanout, and APNs HTTP/2). It evaluates the registered notify rules,
+fans each resulting alert out through the outbox-backed `NotifySidecar`,
+and retries server/throttled failures on its own 30-second scheduler.
+It also eagerly scans current open portfolio-drift episodes and repeats
+that recovery every `PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` (default
+60), restoring any `drift.<episode_public_id>` page whose real-time bus
+event was lost. Configuration is otherwise read from the `apns_*`
+settings provisioned through the seed profile.
 
 ```bash
 snapper notify
@@ -1160,7 +1163,10 @@ snapper notify
 
 Run under systemd / K8s with `Restart=always` — the sidecar exits
 only on unhandled errors or SIGINT; the outbox drain on the next
-start recovers any queued deliveries left behind.
+start recovers any queued deliveries left behind. Drift recovery is
+notify-only: it reads episode/ownership/dedup evidence and writes only the
+normal alert/delivery outbox rows; it never trades, rebases, or mutates
+portfolio truth.
 
 ## AI Integration
 

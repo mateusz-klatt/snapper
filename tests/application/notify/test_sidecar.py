@@ -25,6 +25,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from snapper.application.notify.apns_client import ApnsSendResult
+from snapper.application.notify.portfolio_drift_recovery import PortfolioDriftRecoveryScanner
 from snapper.application.notify.rules.base import AlertRule
 from snapper.application.notify.rules.base import RuleRegistry
 from snapper.application.notify.sidecar import NotifySidecar
@@ -227,6 +228,7 @@ def _make_sidecar(
     *,
     send_result: ApnsSendResult | Exception | None = None,
     registry: RuleRegistry | None = None,
+    portfolio_drift_recovery_scanner: PortfolioDriftRecoveryScanner | None = None,
 ) -> tuple[NotifySidecar, MagicMock]:
     """Construct a sidecar with a mock subscriber + mock APNs pool.
 
@@ -257,6 +259,7 @@ def _make_sidecar(
         tracker=publisher.tracker,
         publisher=cast(MessagePublisher, publisher),
         registry=registry,
+        portfolio_drift_recovery_scanner=portfolio_drift_recovery_scanner,
     )
     return sidecar, apns
 
@@ -1315,6 +1318,40 @@ class TestSidecarStart:
         sidecar._subscriber.recv_multipart.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_start_and_stop_manage_injected_drift_recovery_scanner(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """The notify process owns the recovery scanner's full lifecycle."""
+        scanner = MagicMock(spec=PortfolioDriftRecoveryScanner)
+        started = asyncio.Event()
+
+        async def start_scanner() -> None:
+            """Signal that the injected scanner reached its start boundary."""
+            started.set()
+
+        scanner.start = AsyncMock(side_effect=start_scanner)
+        scanner.stop = AsyncMock()
+        sidecar, _ = _make_sidecar(
+            repo,
+            portfolio_drift_recovery_scanner=cast(PortfolioDriftRecoveryScanner, scanner),
+        )
+
+        async def _blocks_forever() -> tuple[str, bytes]:
+            """Keep the receive loop alive until the test stops the process."""
+            await asyncio.sleep(3600)
+            return ("", b"")
+
+        sidecar._subscriber.recv_multipart = _blocks_forever
+        task = asyncio.create_task(sidecar.start())
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await sidecar.stop()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        scanner.start.assert_awaited_once()
+        assert scanner.stop.await_count >= 1
+
+    @pytest.mark.asyncio
     async def test_start_subscribes_registry_prefixes(
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1476,6 +1513,65 @@ class TestPersistAndFanoutRow:
         warnings = [r for r in caplog.records if "missing on read-back" in r.getMessage()]
         assert len(warnings) == 1
         apns.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_atomic_drift_dedup_loser_skips_every_fanout(
+        self,
+        repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A concurrent drift claim loser cannot publish or route a duplicate."""
+        sidecar, apns = _make_sidecar(repo)
+        insert = AsyncMock(return_value=None)
+        read_back = AsyncMock()
+        monkeypatch.setattr(sidecar, "_insert_alert_event", insert)
+        monkeypatch.setattr(repo, "get_alert_event_by_public_id", read_back)
+        alert_row = AlertEventInsertRow(
+            user_public_id="user-loser",
+            operator_public_id="operator-1",
+            wallet_public_id="wallet-1",
+            alert_type="drift",
+            priority="high",
+            is_safety_critical=True,
+            title="Portfolio drift detected",
+            body="Drift",
+            dedup_key="drift.episode-loser",
+            thread_key="snapper.drift.episode-loser",
+            source_topic="bus.portfolio_drift_episode",
+        )
+
+        await sidecar._persist_and_fanout_row(alert_row, _ts())
+
+        insert.assert_awaited_once_with(alert_row, _ts())
+        read_back.assert_not_awaited()
+        apns.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_drift_insert_uses_atomic_repository_claim(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """Both recovery and bus drift rows use the serialized insert primitive."""
+        sidecar, _ = _make_sidecar(repo)
+        alert_row = AlertEventInsertRow(
+            user_public_id="user-atomic-sidecar",
+            operator_public_id="operator-1",
+            wallet_public_id="wallet-1",
+            alert_type="drift",
+            priority="high",
+            is_safety_critical=True,
+            title="Portfolio drift detected",
+            body="Drift",
+            dedup_key="drift.episode-sidecar",
+            thread_key="snapper.drift.episode-sidecar",
+            source_topic="bus.portfolio_drift_episode",
+        )
+
+        first = await sidecar._insert_alert_event(alert_row, _ts())
+        second = await sidecar._insert_alert_event(alert_row, _ts(1))
+
+        assert first is not None
+        assert second is None
 
 
 class TestRetryQueueLoop:

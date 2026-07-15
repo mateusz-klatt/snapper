@@ -42,6 +42,9 @@ from pathlib import Path
 
 from snapper.application.db_stats.snapshotter import ENV_VARS as DB_STATS_ENV_VARS
 from snapper.application.market_data_watchdog.watchdog import ENV_VARS as MARKET_WATCHDOG_ENV_VARS
+from snapper.application.notify.portfolio_drift_recovery import (
+    ENV_VARS as PORTFOLIO_DRIFT_RECOVERY_ENV_VARS,
+)
 from snapper.application.retention.policies import ENV_VARS as RETENTION_ENV_VARS
 from snapper.application.system_metrics.snapshotter import ENV_VARS as SYSTEM_METRICS_ENV_VARS
 from snapper.data.repository import ENV_VARS as DB_ENGINE_ENV_VARS
@@ -102,6 +105,7 @@ KNOWN_ENV_KEYS: frozenset[str] = (
     | DB_ENGINE_ENV_VARS
     | DB_STATS_ENV_VARS
     | MARKET_WATCHDOG_ENV_VARS
+    | PORTFOLIO_DRIFT_RECOVERY_ENV_VARS
     | RETENTION_ENV_VARS
     | SYSTEM_METRICS_ENV_VARS
     | TICK_PROBE_ENV_VARS

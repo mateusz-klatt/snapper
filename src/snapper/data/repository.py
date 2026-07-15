@@ -1755,6 +1755,17 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def list_open_portfolio_drift_episodes(self) -> list[PortfolioDriftEpisodeRow]:
+        """Return every sentinel-current open drift episode.
+
+        Returns:
+            Current open episodes ordered by ``opened_at`` then ``public_id``.
+            Historical open SCD2 versions and current closed episodes are
+            excluded.
+        """
+        ...
+
+    @abstractmethod
     async def get_venue_account_state_version(self, state_id: int) -> VenueAccountStateRow | None:
         """Return one exact venue-account state version by internal id."""
         ...
@@ -4098,6 +4109,30 @@ class Repository(ABC):
 
         Returns:
             The row's ``public_id``.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_alert_event_if_dedup_absent(
+        self,
+        row: AlertEventInsertRow,
+    ) -> str | None:
+        """Atomically insert an alert unless its active dedup identity exists.
+
+        The database transaction serializes contenders on
+        ``(user_public_id, dedup_key)`` before checking and inserting. This
+        closes the check-then-insert race between real-time and recovery
+        producers without making the general dedup index unique.
+
+        Args:
+            row: Complete alert event row with a non-empty ``dedup_key``.
+
+        Returns:
+            Inserted event public id, or ``None`` when the active dedup
+            identity already exists.
+
+        Raises:
+            ValueError: If ``dedup_key`` is absent or empty.
         """
         ...
 
@@ -14140,6 +14175,28 @@ class SQLAlchemyRepository(Repository):
                 "sequence_id": episode.sequence_id,
             }
 
+    async def list_open_portfolio_drift_episodes(self) -> list[PortfolioDriftEpisodeRow]:
+        """Return current open drift episodes in deterministic scan order."""
+        async with self.session() as s:
+            episodes = (
+                (
+                    await s.execute(
+                        select(PortfolioDriftEpisode)
+                        .where(
+                            PortfolioDriftEpisode.status == "open",
+                            PortfolioDriftEpisode.known_to == KNOWN_TO_MAX,
+                        )
+                        .order_by(
+                            PortfolioDriftEpisode.opened_at,
+                            PortfolioDriftEpisode.public_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [self._portfolio_drift_episode_to_row(episode) for episode in episodes]
+
     @staticmethod
     def _portfolio_reconciliation_state_to_row(
         state: PortfolioReconciliationState,
@@ -18491,30 +18548,101 @@ class SQLAlchemyRepository(Repository):
         )
         raise last_error
 
+    @staticmethod
+    def _build_alert_event(row: AlertEventInsertRow, public_id: str) -> AlertEvent:
+        """Build one ORM alert-event row from the typed insert boundary."""
+        return AlertEvent(
+            public_id=public_id,
+            session_id=row["session_id"],
+            sequence_id=row["sequence_id"],
+            timestamp=row["timestamp"],
+            known_to=row.get("known_to", KNOWN_TO_MAX),
+            user_public_id=row["user_public_id"],
+            operator_public_id=row.get("operator_public_id"),
+            wallet_public_id=row.get("wallet_public_id"),
+            alert_type=row["alert_type"],
+            priority=row["priority"],
+            is_safety_critical=row.get("is_safety_critical", False),
+            title=row["title"],
+            body=row["body"],
+            payload=row.get("payload"),
+            dedup_key=row.get("dedup_key"),
+            thread_key=row.get("thread_key"),
+            source_topic=row.get("source_topic"),
+        )
+
+    async def _acquire_alert_event_dedup_lock(
+        self,
+        s: AsyncSession,
+        user_public_id: str,
+        dedup_key: str,
+    ) -> None:
+        """Serialize one alert dedup identity for the current transaction.
+
+        PostgreSQL uses a transaction-scoped advisory lock shared by every
+        sidecar process. SQLite obtains its database writer lock before the
+        existence read so separate repository instances cannot both observe a
+        miss.
+
+        Args:
+            s: Open transaction session.
+            user_public_id: Alert recipient identity.
+            dedup_key: Logical event identity minted by the rule.
+
+        Raises:
+            NotImplementedError: If the repository dialect is unsupported.
+        """
+        identity = f"{user_public_id}\x1f{dedup_key}"
+        if self.dialect_name == "postgresql":
+            await s.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
+                {"identity": identity},
+            )
+            return
+        if self.dialect_name == "sqlite":
+            await s.execute(text("BEGIN IMMEDIATE"))
+            return
+        raise NotImplementedError(
+            f"alert-event dedup lock not implemented for dialect={self.dialect_name}"
+        )
+
     async def insert_alert_event(self, row: AlertEventInsertRow) -> str:
         """Insert a temporal (SCD2) alert_events row."""
         public_id = row.get("public_id") or str(uuid7())
         async with self.session() as s:
-            event_row = AlertEvent(
-                public_id=public_id,
-                session_id=row["session_id"],
-                sequence_id=row["sequence_id"],
-                timestamp=row["timestamp"],
-                known_to=row.get("known_to", KNOWN_TO_MAX),
-                user_public_id=row["user_public_id"],
-                operator_public_id=row.get("operator_public_id"),
-                wallet_public_id=row.get("wallet_public_id"),
-                alert_type=row["alert_type"],
-                priority=row["priority"],
-                is_safety_critical=row.get("is_safety_critical", False),
-                title=row["title"],
-                body=row["body"],
-                payload=row.get("payload"),
-                dedup_key=row.get("dedup_key"),
-                thread_key=row.get("thread_key"),
-                source_topic=row.get("source_topic"),
+            s.add(self._build_alert_event(row, public_id))
+            await s.commit()
+            return public_id
+
+    async def insert_alert_event_if_dedup_absent(
+        self,
+        row: AlertEventInsertRow,
+    ) -> str | None:
+        """Atomically insert an alert when its active dedup identity is absent."""
+        dedup_key = row.get("dedup_key")
+        if not dedup_key:
+            raise ValueError("atomic alert-event insert requires dedup_key")
+        user_public_id = row["user_public_id"]
+        public_id = row.get("public_id") or str(uuid7())
+        async with self.session() as s:
+            await self._acquire_alert_event_dedup_lock(
+                s,
+                user_public_id,
+                dedup_key,
             )
-            s.add(event_row)
+            already_exists = await s.scalar(
+                select(
+                    exists().where(
+                        AlertEvent.user_public_id == user_public_id,
+                        AlertEvent.dedup_key == dedup_key,
+                        AlertEvent.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            )
+            if already_exists:
+                await s.rollback()
+                return None
+            s.add(self._build_alert_event(row, public_id))
             await s.commit()
             return public_id
 

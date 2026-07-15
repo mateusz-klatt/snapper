@@ -234,7 +234,12 @@ Per-user alert fanout. The notify (APNs) sidecar consumes domain topics
 each alert, publishes it as an `AlertEventData` frame on this topic
 family before the APNs fanout, and also delivers iOS pushes in-process;
 the WS bridge is the consumer, forwarding frames to authenticated
-WebSocket clients with per-user scope enforcement.
+WebSocket clients with per-user scope enforcement. A periodic database
+scan in the same sidecar recovers open drift episodes whose real-time
+`bus.portfolio_drift_episode` frame was lost. It uses the same owner
+resolution, alert-row builder, and `drift.<episode_public_id>` identity as
+the bus rule; the insert claim is transaction-serialized so the two paths
+cannot double-page.
 
 | Topic | Description |
 | ----- | ----------- |

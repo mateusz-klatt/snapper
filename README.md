@@ -292,7 +292,7 @@ snapper trade-zmq           # Trade runtime / coordinator (pass --instance-id + 
 snapper executor            # Standalone order executor helper
 snapper feed                # Direct Kraken market data publisher helper
 snapper feed-engine         # Dedicated feed container entrypoint
-snapper notify              # iOS Push Foundation sidecar
+snapper notify              # iOS push sidecar + durable drift-page recovery
 snapper egress              # WireGuard + SOCKS5 egress sidecar entrypoint
 ```
 

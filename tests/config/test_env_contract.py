@@ -24,6 +24,9 @@ import pytest
 from pydantic import ValidationError
 
 from snapper.application.db_stats.snapshotter import ENV_VARS as DB_STATS_ENV_VARS
+from snapper.application.notify.portfolio_drift_recovery import (
+    ENV_VARS as PORTFOLIO_DRIFT_RECOVERY_ENV_VARS,
+)
 from snapper.application.retention.policies import ENV_VARS as RETENTION_ENV_VARS
 from snapper.application.system_metrics.snapshotter import ENV_VARS as SYSTEM_METRICS_ENV_VARS
 from snapper.config.bootstrap import BootstrapSettingsLoader
@@ -72,6 +75,11 @@ class TestKnownEnvKeys:
         """The retention subsystem contributes its ENV_VARS."""
         assert RETENTION_ENV_VARS.issubset(KNOWN_ENV_KEYS)
         assert "RETENTION_DISABLED" in KNOWN_ENV_KEYS
+
+    def test_includes_portfolio_drift_recovery_key(self) -> None:
+        """The drift recovery subsystem contributes its interval key."""
+        assert PORTFOLIO_DRIFT_RECOVERY_ENV_VARS.issubset(KNOWN_ENV_KEYS)
+        assert "PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS" in KNOWN_ENV_KEYS
 
     def test_includes_db_stats_keys(self) -> None:
         """The db_stats subsystem contributes its ENV_VARS."""

@@ -2771,14 +2771,16 @@ def backtest_rerun(
 
 @app.command()
 def notify() -> None:
-    """Run the iOS Push Foundation sidecar (ZMQ alerts -> APNs HTTP/2).
+    """Run the iOS Push Foundation sidecar (domain events -> APNs HTTP/2).
 
-    Long-running process. Subscribes to the
-    ``alerts.`` ZMQ prefix, fans out each received ``AlertEventData``
-    to the target user's active devices via the outbox-backed
-    ``NotifySidecar``, and retries server/throttled failures
-    on its own 30-second scheduler. Configuration is read from the
-    ``apns_*`` settings seeded via ``proprietary/data/seed/{dev,prod}.toml``.
+    Long-running process. Evaluates registered notify rules, fans each
+    resulting alert out to the target user's active devices via the
+    outbox-backed ``NotifySidecar``, and retries server/throttled failures
+    on its own 30-second scheduler. The same process periodically recovers
+    missing pages for durable open portfolio-drift episodes. Configuration
+    is read from the ``apns_*`` settings seeded via
+    ``proprietary/data/seed/{dev,prod}.toml`` and the recovery interval env
+    var.
 
     Run under systemd / K8s with ``Restart=always`` — the sidecar
     exits only on unhandled errors or SIGINT, and the outbox drain

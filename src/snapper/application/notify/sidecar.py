@@ -42,6 +42,8 @@ from loguru import logger
 
 from snapper.application.notify.apns_client import ApnsClientPool
 from snapper.application.notify.apns_client import ApnsSendResult
+from snapper.application.notify.portfolio_drift_paging import PORTFOLIO_DRIFT_ALERT_TYPE
+from snapper.application.notify.portfolio_drift_recovery import PortfolioDriftRecoveryScanner
 from snapper.application.notify.push_beta import PushBetaConfig
 from snapper.application.notify.routing import route_alert_to_devices
 from snapper.application.notify.rules.base import RuleRegistry
@@ -119,6 +121,7 @@ class NotifySidecar(RegisterableProcess):
         registry: RuleRegistry | None = None,
         scope_revalidator: ScopeRevalidator | None = None,
         push_beta_provider: Callable[[], PushBetaConfig] | None = None,
+        portfolio_drift_recovery_scanner: PortfolioDriftRecoveryScanner | None = None,
     ) -> None:
         """Wire the sidecar with its collaborators + rule registry.
 
@@ -157,6 +160,9 @@ class NotifySidecar(RegisterableProcess):
                 ``SettingsService.get_setting`` read so the gate
                 honours live admin POSTs to
                 ``/api/settings/push-beta/users``.
+            portfolio_drift_recovery_scanner: Scanner override for tests.
+                ``None`` builds the production scanner over this sidecar's
+                normal persistence and fanout sink.
         """
         self._subscriber = subscriber
         self._repo = repo
@@ -169,6 +175,14 @@ class NotifySidecar(RegisterableProcess):
         self._registry = registry or load_default_registry()
         self._scope_revalidator = scope_revalidator or ScopeRevalidator(tracker=tracker)
         self._push_beta_provider = push_beta_provider
+        self._portfolio_drift_recovery_scanner = (
+            portfolio_drift_recovery_scanner
+            if portfolio_drift_recovery_scanner is not None
+            else PortfolioDriftRecoveryScanner(
+                repo=repo,
+                emit_alert_row=self._persist_and_fanout_row,
+            )
+        )
 
     async def start(self) -> None:
         """Run the sidecar main loop until ``stop()`` is signalled.
@@ -176,9 +190,9 @@ class NotifySidecar(RegisterableProcess):
         Subscribes to every prefix the rule registry aggregates
         (``orders.events.`` + ``plans.decisions.`` + ``system.heartbeats.`` +
         ``bus.portfolio_drift_episode`` for the default set), drains the
-        outbox (crash recovery),
-        spawns the background retry loop, and consumes the receive loop
-        until ``_stop_event`` is set. Each entry boundary mints one
+        outbox (crash recovery), starts the durable drift-recovery scanner,
+        spawns the background retry loop, and consumes the receive loop until
+        ``_stop_event`` is set. Each entry boundary mints one
         ``now`` timestamp (single timestamp per entry boundary)
         which is threaded through every helper and repository call.
         """
@@ -187,6 +201,7 @@ class NotifySidecar(RegisterableProcess):
         self._subscriber.subscribe("admin.scope_revoked")
         self._subscriber.subscribe("admin.user_deactivated")
         await self._drain_outbox(datetime.now(UTC))
+        await self._portfolio_drift_recovery_scanner.start()
         self._retry_task = asyncio.create_task(self._process_retry_queue_loop())
         try:
             while not self._stop_event.is_set():
@@ -202,12 +217,14 @@ class NotifySidecar(RegisterableProcess):
                 topic, payload = recv_task.result()
                 await self._dispatch(topic, payload, datetime.now(UTC))
         finally:
+            await self._portfolio_drift_recovery_scanner.stop()
             if self._retry_task is not None and not self._retry_task.done():
                 self._retry_task.cancel()
 
     async def stop(self) -> None:
-        """Signal the main loop + retry loop to exit on the next tick."""
+        """Signal the receive, retry, and drift-recovery loops to stop."""
         self._stop_event.set()
+        await self._portfolio_drift_recovery_scanner.stop()
 
     async def _dispatch(self, topic: str, payload: bytes, now: datetime) -> None:
         """Route one received bus frame through the rule registry.
@@ -273,6 +290,8 @@ class NotifySidecar(RegisterableProcess):
             now: Entry-boundary timestamp (threaded from ``_dispatch``).
         """
         event_public_id = await self._insert_alert_event(alert_row, now)
+        if event_public_id is None:
+            return
         event = await self._repo.get_alert_event_by_public_id(event_public_id)
         if event is None:
             logger.warning(
@@ -350,8 +369,12 @@ class NotifySidecar(RegisterableProcess):
         )
         await self._publisher.send(topic, frame)
 
-    async def _insert_alert_event(self, alert_row: AlertEventInsertRow, now: datetime) -> str:
-        """Write the SCD2 ``alert_events`` row and return its public_id."""
+    async def _insert_alert_event(
+        self,
+        alert_row: AlertEventInsertRow,
+        now: datetime,
+    ) -> str | None:
+        """Write one event, atomically claiming drift dedup identities."""
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         enriched = AlertEventInsertRow(
@@ -372,6 +395,8 @@ class NotifySidecar(RegisterableProcess):
             thread_key=alert_row.get("thread_key"),
             source_topic=alert_row.get("source_topic"),
         )
+        if enriched["alert_type"] == PORTFOLIO_DRIFT_ALERT_TYPE:
+            return await self._repo.insert_alert_event_if_dedup_absent(enriched)
         return await self._repo.insert_alert_event(enriched)
 
     async def _insert_delivery_for_event(

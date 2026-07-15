@@ -353,6 +353,38 @@ async def test_mismatch_streak_opens_one_stable_episode_on_third(
     assert state.detail_source_observation_id == observations[3].id
 
 
+async def test_open_episode_scan_returns_only_current_version_until_resolution(
+    tmp_path: Path,
+) -> None:
+    """The recovery scan excludes historical open versions and closed episodes.
+
+    Given: An episode opened on mismatch three and versioned on mismatch four,
+    When: Current open episodes are listed before and after a matching result,
+    Then: The open scan returns only the latest version before resolution and
+        no row after the current lifecycle version is resolved.
+    """
+    repo = await _make_repo(tmp_path)
+    for sequence in range(1, 5):
+        await repo.record_portfolio_reconciliation(
+            _evaluation(
+                _T0 + timedelta(seconds=sequence),
+                "mismatched",
+                sequence_id=sequence,
+            )
+        )
+
+    open_rows = await repo.list_open_portfolio_drift_episodes()
+
+    assert len(open_rows) == 1
+    assert open_rows[0]["status"] == "open"
+    assert open_rows[0]["latest_full_mismatch_count"] == 4
+    assert open_rows[0]["opened_at"] == _T0 + timedelta(seconds=3)
+    await repo.record_portfolio_reconciliation(
+        _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
+    )
+    assert await repo.list_open_portfolio_drift_episodes() == []
+
+
 async def test_drift_transition_lookup_preserves_each_exact_lifecycle_version(
     tmp_path: Path,
 ) -> None:
