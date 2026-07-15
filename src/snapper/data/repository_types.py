@@ -489,6 +489,33 @@ class PortfolioReconciliationEvaluationRow(TypedDict):
     bus_time: datetime
 
 
+class PortfolioReconciliationLineageObservationRow(TypedDict):
+    """Observation fields required to validate reconciliation-state lineage."""
+
+    id: int
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    method: str
+    evaluation_status: str
+    venue_account_state_public_id: str | None
+    venue_account_observation_id: int | None
+    account_authoritative_until: datetime | None
+    source_watermark_kind: str | None
+    source_watermark: int | None
+    anchor_public_id: str | None
+    expected_json: str | None
+    actual_json: str | None
+    difference_json: str | None
+    tolerance_json: str | None
+    resulting_full_mismatch_count: int
+    drift_episode_public_id: str | None
+    error: str | None
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
 class PortfolioReconciliationMethodConfigRow(TypedDict):
     """Active operator-authored reconciliation method classification."""
 

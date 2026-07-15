@@ -103,6 +103,21 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm import sessionmaker as sync_sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from snapper.application.portfolio.reconciliation_invariants import (
+    unclassified_state_has_no_retained_evidence,
+)
+from snapper.application.portfolio.reconciliation_invariants import (
+    validate_portfolio_reconciliation_evaluation_config,
+)
+from snapper.application.portfolio.reconciliation_invariants import (
+    validate_portfolio_reconciliation_latest_observation_lineage,
+)
+from snapper.application.portfolio.reconciliation_invariants import (
+    validate_portfolio_reconciliation_method_transition,
+)
+from snapper.application.portfolio.reconciliation_invariants import (
+    validate_portfolio_reconciliation_observation_lineage,
+)
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.roles import UserRole
 from snapper.core.json_types import JsonObject
@@ -243,6 +258,7 @@ from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
+from snapper.data.repository_types import PortfolioReconciliationLineageObservationRow
 from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
 from snapper.data.repository_types import PortfolioReconciliationStateRow
 from snapper.data.repository_types import PositionCycleInsertRow
@@ -12883,25 +12899,8 @@ class SQLAlchemyRepository(Repository):
         row: PortfolioReconciliationState,
     ) -> bool:
         """Return whether an unclassified state can transition to its first config."""
-        return (
-            row.method == "unclassified"
-            and row.current_evaluation_status in ("incomplete", "error")
-            and row.last_full_observation_id is None
-            and row.last_full_outcome is None
-            and row.detail_source_observation_id is None
-            and row.consecutive_full_mismatches == 0
-            and row.open_drift_episode_public_id is None
-            and row.anchor_public_id is None
-            and row.venue_account_state_public_id is None
-            and row.venue_account_observation_id is None
-            and row.source_watermark_kind is None
-            and row.source_watermark is None
-            and row.expected_json is None
-            and row.actual_json is None
-            and row.difference_json is None
-            and row.tolerance_json is None
-            and row.reconciled_at is None
-            and row.authoritative_until is None
+        return unclassified_state_has_no_retained_evidence(
+            SQLAlchemyRepository._portfolio_reconciliation_state_to_row(row)
         )
 
     async def _portfolio_reconciliation_history(
@@ -13392,6 +13391,43 @@ class SQLAlchemyRepository(Repository):
             and observation.timestamp == evaluation["bus_time"]
         )
 
+    @staticmethod
+    def _portfolio_reconciliation_lineage_observation_to_row(
+        observation: PortfolioReconciliationObservation,
+    ) -> PortfolioReconciliationLineageObservationRow:
+        """Project one observation to the pure lineage-validation boundary.
+
+        Args:
+            observation: Referenced reconciliation observation.
+
+        Returns:
+            The fields required for state-lineage validation.
+        """
+        return {
+            "id": int(observation.id),
+            "wallet_public_id": observation.wallet_public_id,
+            "exchange": observation.exchange,
+            "mode": observation.mode,
+            "method": observation.method,
+            "evaluation_status": observation.evaluation_status,
+            "venue_account_state_public_id": observation.venue_account_state_public_id,
+            "venue_account_observation_id": observation.venue_account_observation_id,
+            "account_authoritative_until": observation.account_authoritative_until,
+            "source_watermark_kind": observation.source_watermark_kind,
+            "source_watermark": observation.source_watermark,
+            "anchor_public_id": observation.anchor_public_id,
+            "expected_json": observation.expected_json,
+            "actual_json": observation.actual_json,
+            "difference_json": observation.difference_json,
+            "tolerance_json": observation.tolerance_json,
+            "resulting_full_mismatch_count": observation.resulting_full_mismatch_count,
+            "drift_episode_public_id": observation.drift_episode_public_id,
+            "error": observation.error,
+            "timestamp": observation.timestamp,
+            "session_id": observation.session_id,
+            "sequence_id": observation.sequence_id,
+        }
+
     async def _validate_portfolio_reconciliation_lineage(
         self,
         s: AsyncSession,
@@ -13430,53 +13466,12 @@ class SQLAlchemyRepository(Repository):
             .scalars()
             .all()
         )
-        observations_by_id = {int(observation.id): observation for observation in observations}
-        if set(observations_by_id) != observation_ids:
-            raise RuntimeError("reconciliation state references a missing observation")
-        for observation in observations:
-            if (
-                observation.wallet_public_id != existing.wallet_public_id
-                or observation.exchange != existing.exchange
-                or observation.mode != existing.mode
-            ):
-                raise RuntimeError("reconciliation state references a foreign observation")
-        current = observations_by_id[existing.current_observation_id]
-        if (
-            current.method != existing.method
-            or current.evaluation_status != existing.current_evaluation_status
-            or current.resulting_full_mismatch_count != existing.consecutive_full_mismatches
-            or current.drift_episode_public_id != existing.open_drift_episode_public_id
-            or current.error != existing.error
-            or current.session_id != existing.session_id
-            or current.sequence_id != existing.sequence_id
-        ):
-            raise RuntimeError("reconciliation state current observation metadata is inconsistent")
-        if existing.last_full_observation_id is not None:
-            last_full = observations_by_id[existing.last_full_observation_id]
-            if (
-                last_full.evaluation_status != existing.last_full_outcome
-                or last_full.resulting_full_mismatch_count != existing.consecutive_full_mismatches
-                or last_full.drift_episode_public_id != existing.open_drift_episode_public_id
-            ):
-                raise RuntimeError("reconciliation state last-full observation is inconsistent")
-        if existing.detail_source_observation_id is not None:
-            detail = observations_by_id[existing.detail_source_observation_id]
-            if (
-                detail.resulting_full_mismatch_count != existing.consecutive_full_mismatches
-                or detail.drift_episode_public_id != existing.open_drift_episode_public_id
-                or detail.venue_account_state_public_id != existing.venue_account_state_public_id
-                or detail.venue_account_observation_id != existing.venue_account_observation_id
-                or detail.source_watermark_kind != existing.source_watermark_kind
-                or detail.source_watermark != existing.source_watermark
-                or detail.anchor_public_id != existing.anchor_public_id
-                or detail.expected_json != existing.expected_json
-                or detail.actual_json != existing.actual_json
-                or detail.difference_json != existing.difference_json
-                or detail.tolerance_json != existing.tolerance_json
-                or detail.timestamp != existing.reconciled_at
-                or detail.account_authoritative_until != existing.authoritative_until
-            ):
-                raise RuntimeError("reconciliation state detail observation is inconsistent")
+        existing_row = self._portfolio_reconciliation_state_to_row(existing)
+        observation_rows = [
+            self._portfolio_reconciliation_lineage_observation_to_row(observation)
+            for observation in observations
+        ]
+        validate_portfolio_reconciliation_observation_lineage(existing_row, observation_rows)
         latest_ordered_observation_id = await s.scalar(
             select(PortfolioReconciliationObservation.id)
             .where(
@@ -13498,11 +13493,11 @@ class SQLAlchemyRepository(Repository):
                 PortfolioReconciliationObservation.mode == existing.mode,
             )
         )
-        if (
-            existing.current_observation_id != latest_ordered_observation_id
-            or existing.current_observation_id != latest_appended_observation_id
-        ):
-            raise RuntimeError("reconciliation state does not reference the latest observation")
+        validate_portfolio_reconciliation_latest_observation_lineage(
+            existing_row,
+            latest_ordered_observation_id,
+            latest_appended_observation_id,
+        )
 
     async def _find_portfolio_reconciliation_replay(
         self,
@@ -13625,60 +13620,16 @@ class SQLAlchemyRepository(Repository):
         s.add(successor)
         await s.flush()
 
-    @staticmethod
-    def _portfolio_reconciliation_evaluation_has_no_nonfull_evidence(
-        evaluation: PortfolioReconciliationEvaluationRow,
-    ) -> bool:
-        """Return whether a non-full-only method carries no forbidden evidence."""
-        return all(
-            evaluation[field] is None
-            for field in (
-                "venue_account_state_public_id",
-                "venue_account_observation_id",
-                "account_authoritative_until",
-                "source_watermark_kind",
-                "source_watermark",
-                "anchor_public_id",
-                "expected_json",
-                "actual_json",
-                "difference_json",
-                "tolerance_json",
-            )
-        )
-
     def _validate_portfolio_reconciliation_evaluation_config(
         self,
         evaluation: PortfolioReconciliationEvaluationRow,
         config: PortfolioReconciliationMethodConfig | None,
     ) -> None:
         """Fail closed on invalid status, config mismatch, or non-full evidence."""
-        method = evaluation["method"]
-        status = evaluation["evaluation_status"]
-        exchange = evaluation["exchange"]
-        if evaluation["mode"] != "live" or not exchange or exchange.strip().lower() != exchange:
-            raise RuntimeError("portfolio reconciliation identity is invalid")
-        if method in ("futures_position", "spot_execution_replay"):
-            if status not in ("matched", "mismatched", "incomplete", "unsupported", "error"):
-                raise RuntimeError("portfolio reconciliation status is incompatible with method")
-        elif method == "margin_ledger_replay":
-            if status != "error":
-                raise RuntimeError("margin ledger reconciliation permits only error status")
-            if not self._portfolio_reconciliation_evaluation_has_no_nonfull_evidence(evaluation):
-                raise RuntimeError("margin ledger reconciliation cannot carry full evidence")
-        elif method == "unclassified":
-            if status not in ("incomplete", "error"):
-                raise RuntimeError("unclassified reconciliation status is invalid")
-            if not self._portfolio_reconciliation_evaluation_has_no_nonfull_evidence(evaluation):
-                raise RuntimeError("unclassified reconciliation cannot carry full evidence")
-        else:
-            raise RuntimeError("portfolio reconciliation method is invalid")
-        if status == "error" and not (evaluation["error"] or "").strip():
-            raise RuntimeError("error reconciliation requires a non-empty reason")
-        if method == "unclassified":
-            if config is not None:
-                raise RuntimeError("unclassified reconciliation conflicts with active config")
-        elif config is None or config.method != method:
-            raise RuntimeError("reconciliation evaluation conflicts with active method config")
+        config_row = (
+            None if config is None else self._portfolio_reconciliation_method_config_to_row(config)
+        )
+        validate_portfolio_reconciliation_evaluation_config(evaluation, config_row)
 
     def _validate_portfolio_reconciliation_method_transition(
         self,
@@ -13687,44 +13638,13 @@ class SQLAlchemyRepository(Repository):
         config: PortfolioReconciliationMethodConfig | None,
     ) -> None:
         """Permit only a safe unclassified-to-first-real-method transition."""
-        if existing is None:
-            return
-        incoming_method = evaluation["method"]
-        if existing.method == incoming_method:
-            if (
-                existing.method == "unclassified"
-                and not self._unclassified_state_has_no_retained_evidence(existing)
-            ):
-                raise RuntimeError("unclassified reconciliation state retains forbidden evidence")
-            if existing.method == "margin_ledger_replay" and (
-                existing.last_full_observation_id is not None
-                or existing.last_full_outcome is not None
-                or existing.detail_source_observation_id is not None
-                or existing.consecutive_full_mismatches != 0
-                or existing.open_drift_episode_public_id is not None
-                or existing.anchor_public_id is not None
-                or existing.venue_account_state_public_id is not None
-                or existing.venue_account_observation_id is not None
-                or existing.source_watermark_kind is not None
-                or existing.source_watermark is not None
-                or existing.expected_json is not None
-                or existing.actual_json is not None
-                or existing.difference_json is not None
-                or existing.tolerance_json is not None
-                or existing.reconciled_at is not None
-                or existing.authoritative_until is not None
-            ):
-                raise RuntimeError("margin ledger reconciliation state retains forbidden evidence")
-            return
-        if (
-            existing.method == "unclassified"
-            and incoming_method in _PORTFOLIO_REAL_RECONCILIATION_METHODS
-            and config is not None
-            and config.method == incoming_method
-            and self._unclassified_state_has_no_retained_evidence(existing)
-        ):
-            return
-        raise RuntimeError("portfolio reconciliation method transition is invalid")
+        existing_row = (
+            None if existing is None else self._portfolio_reconciliation_state_to_row(existing)
+        )
+        config_row = (
+            None if config is None else self._portfolio_reconciliation_method_config_to_row(config)
+        )
+        validate_portfolio_reconciliation_method_transition(existing_row, evaluation, config_row)
 
     async def _write_portfolio_reconciliation(
         self, s: AsyncSession, evaluation: PortfolioReconciliationEvaluationRow
