@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from snapper.application.portfolio import reconciliation_dispatch
+from snapper.application.portfolio.reconciliation_view import no_portfolio_reconciliation_view
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import FuturesReconciliationBundle
@@ -94,6 +95,7 @@ def _account(
         balance_payload_source_observation_id=17,
         position_payload_source_observation_id=17,
         error=None,
+        reconciliation=no_portfolio_reconciliation_view(),
     )
 
 

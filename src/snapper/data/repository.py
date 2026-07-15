@@ -257,9 +257,11 @@ from snapper.data.repository_types import PairedExecutionLegFieldUpdate
 from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
+from snapper.data.repository_types import PortfolioDriftEpisodeRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import PortfolioReconciliationLineageObservationRow
 from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
+from snapper.data.repository_types import PortfolioReconciliationReadContextRow
 from snapper.data.repository_types import PortfolioReconciliationStateRow
 from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import PositionCycleRow
@@ -1812,6 +1814,21 @@ class Repository(ABC):
 
         Returns:
             Active reconciliation states ordered by exchange then mode.
+        """
+        ...
+
+    @abstractmethod
+    async def get_portfolio_reconciliation_read_contexts(
+        self, wallet_public_ids: list[str] | None = None
+    ) -> list[PortfolioReconciliationReadContextRow]:
+        """Return complete reconciliation read contexts in one batched load.
+
+        Args:
+            wallet_public_ids: Wallet identities to include, or ``None`` for
+                no wallet filter. An empty list yields an empty result.
+
+        Returns:
+            One complete read-validation context per active account state.
         """
         ...
 
@@ -14111,6 +14128,24 @@ class SQLAlchemyRepository(Repository):
             "sequence_id": state.sequence_id,
         }
 
+    @staticmethod
+    def _portfolio_drift_episode_to_row(
+        episode: PortfolioDriftEpisode,
+    ) -> PortfolioDriftEpisodeRow:
+        """Project one active open drift episode to its typed boundary."""
+        return {
+            "wallet_public_id": episode.wallet_public_id,
+            "exchange": episode.exchange,
+            "mode": episode.mode,
+            "status": episode.status,
+            "opened_at": episode.opened_at,
+            "trigger_observation_id": episode.trigger_observation_id,
+            "last_observation_id": episode.last_observation_id,
+            "details_source_observation_id": episode.details_source_observation_id,
+            "latest_full_mismatch_count": episode.latest_full_mismatch_count,
+            "public_id": episode.public_id,
+        }
+
     async def get_portfolio_reconciliation_states(
         self, wallet_public_ids: list[str] | None = None
     ) -> list[PortfolioReconciliationStateRow]:
@@ -14146,6 +14181,172 @@ class SQLAlchemyRepository(Repository):
             )
             rows = (await s.execute(query)).scalars().all()
             return [self._portfolio_reconciliation_state_to_row(row) for row in rows]
+
+    async def get_portfolio_reconciliation_read_contexts(
+        self, wallet_public_ids: list[str] | None = None
+    ) -> list[PortfolioReconciliationReadContextRow]:
+        """Load complete account reconciliation contexts in one set query.
+
+        The account-state table anchors the result so every rendered account
+        receives exactly one context, including accounts without reconciliation
+        history. Observation references join by internal id without an identity
+        predicate so forged cross-account lineage remains visible to the shared
+        validators and fails closed instead of appearing merely absent.
+
+        Args:
+            wallet_public_ids: Full wallet identities to include, or ``None``
+                for no wallet filter. An empty list yields no rows.
+
+        Returns:
+            Complete read-validation contexts ordered by account identity.
+        """
+        if wallet_public_ids == []:
+            return []
+        current_observation = aliased(PortfolioReconciliationObservation)
+        last_full_observation = aliased(PortfolioReconciliationObservation)
+        detail_source_observation = aliased(PortfolioReconciliationObservation)
+        latest_ordered_observation_id = (
+            select(PortfolioReconciliationObservation.id)
+            .where(
+                PortfolioReconciliationObservation.wallet_public_id
+                == VenueAccountState.wallet_public_id,
+                PortfolioReconciliationObservation.exchange == VenueAccountState.exchange,
+                PortfolioReconciliationObservation.mode == VenueAccountState.mode,
+            )
+            .order_by(
+                PortfolioReconciliationObservation.session_id.desc(),
+                PortfolioReconciliationObservation.sequence_id.desc(),
+                PortfolioReconciliationObservation.id.desc(),
+            )
+            .limit(1)
+            .correlate(VenueAccountState)
+            .scalar_subquery()
+        )
+        latest_appended_observation_id = (
+            select(func.max(PortfolioReconciliationObservation.id))
+            .where(
+                PortfolioReconciliationObservation.wallet_public_id
+                == VenueAccountState.wallet_public_id,
+                PortfolioReconciliationObservation.exchange == VenueAccountState.exchange,
+                PortfolioReconciliationObservation.mode == VenueAccountState.mode,
+            )
+            .correlate(VenueAccountState)
+            .scalar_subquery()
+        )
+        async with self.session() as s:
+            query = (
+                select(
+                    VenueAccountState,
+                    PortfolioReconciliationState,
+                    current_observation,
+                    last_full_observation,
+                    detail_source_observation,
+                    PortfolioReconciliationMethodConfig,
+                    PortfolioDriftEpisode,
+                    latest_ordered_observation_id,
+                    latest_appended_observation_id,
+                )
+                .select_from(VenueAccountState)
+                .outerjoin(
+                    PortfolioReconciliationState,
+                    and_(
+                        PortfolioReconciliationState.wallet_public_id
+                        == VenueAccountState.wallet_public_id,
+                        PortfolioReconciliationState.exchange == VenueAccountState.exchange,
+                        PortfolioReconciliationState.mode == VenueAccountState.mode,
+                        PortfolioReconciliationState.known_to == KNOWN_TO_MAX,
+                    ),
+                )
+                .outerjoin(
+                    current_observation,
+                    current_observation.id == PortfolioReconciliationState.current_observation_id,
+                )
+                .outerjoin(
+                    last_full_observation,
+                    last_full_observation.id
+                    == PortfolioReconciliationState.last_full_observation_id,
+                )
+                .outerjoin(
+                    detail_source_observation,
+                    detail_source_observation.id
+                    == PortfolioReconciliationState.detail_source_observation_id,
+                )
+                .outerjoin(
+                    PortfolioReconciliationMethodConfig,
+                    and_(
+                        PortfolioReconciliationMethodConfig.wallet_public_id
+                        == VenueAccountState.wallet_public_id,
+                        PortfolioReconciliationMethodConfig.exchange == VenueAccountState.exchange,
+                        PortfolioReconciliationMethodConfig.mode == VenueAccountState.mode,
+                        PortfolioReconciliationMethodConfig.known_to == KNOWN_TO_MAX,
+                    ),
+                )
+                .outerjoin(
+                    PortfolioDriftEpisode,
+                    and_(
+                        PortfolioDriftEpisode.wallet_public_id
+                        == VenueAccountState.wallet_public_id,
+                        PortfolioDriftEpisode.exchange == VenueAccountState.exchange,
+                        PortfolioDriftEpisode.mode == VenueAccountState.mode,
+                        PortfolioDriftEpisode.status == "open",
+                        PortfolioDriftEpisode.known_to == KNOWN_TO_MAX,
+                    ),
+                )
+                .where(VenueAccountState.known_to == KNOWN_TO_MAX)
+                .order_by(
+                    VenueAccountState.exchange,
+                    VenueAccountState.mode,
+                    VenueAccountState.wallet_public_id,
+                )
+            )
+            if wallet_public_ids is not None:
+                query = query.where(VenueAccountState.wallet_public_id.in_(wallet_public_ids))
+            result = await s.execute(query)
+            contexts: list[PortfolioReconciliationReadContextRow] = []
+            for (
+                account_state,
+                state,
+                current,
+                last_full,
+                detail_source,
+                config,
+                episode,
+                latest_ordered_id,
+                latest_appended_id,
+            ) in result.all():
+                observation_rows: list[PortfolioReconciliationLineageObservationRow] = []
+                seen_observation_ids: set[int] = set()
+                for observation in (current, last_full, detail_source):
+                    if observation is None or observation.id in seen_observation_ids:
+                        continue
+                    seen_observation_ids.add(observation.id)
+                    observation_rows.append(
+                        self._portfolio_reconciliation_lineage_observation_to_row(observation)
+                    )
+                contexts.append(
+                    {
+                        "account_state": self._venue_account_state_to_row(account_state),
+                        "state": (
+                            None
+                            if state is None
+                            else self._portfolio_reconciliation_state_to_row(state)
+                        ),
+                        "observations": observation_rows,
+                        "config": (
+                            None
+                            if config is None
+                            else self._portfolio_reconciliation_method_config_to_row(config)
+                        ),
+                        "latest_ordered_observation_id": latest_ordered_id,
+                        "latest_appended_observation_id": latest_appended_id,
+                        "open_drift_episode": (
+                            None
+                            if episode is None
+                            else self._portfolio_drift_episode_to_row(episode)
+                        ),
+                    }
+                )
+            return contexts
 
     async def get_fill_shard_keys_by_client_order_ids(
         self, client_order_ids: list[str]

@@ -44,6 +44,8 @@ from snapper.data.models import Symbol
 from snapper.data.models import Wallet
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import PortfolioReconciliationReadContextRow
+from snapper.data.repository_types import VenueAccountStateRow
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
 from snapper.mcp.server import get_current_claims
 from snapper.mcp.tools import _map_cancel_exception_to_envelope
@@ -1684,7 +1686,7 @@ def _venue_account_state_row(
     public_id: str = "acct-1",
     exchange: str = "kraken",
     wallet_public_id: str = "wallet-1",
-) -> dict[str, Any]:
+) -> VenueAccountStateRow:
     """Build a fresh, authoritative ``VenueAccountStateRow`` fixture.
 
     Observation timestamps sit in the past and ``authoritative_until`` in
@@ -1692,30 +1694,45 @@ def _venue_account_state_row(
     ``effective_status="observed"`` (``is_authoritative=True``).
     """
     now = datetime.now(UTC)
-    return {
-        "wallet_public_id": wallet_public_id,
-        "exchange": exchange,
-        "mode": "live",
-        "sync_status": "observed",
-        "balance_status": "observed",
-        "position_status": "observed",
-        "valuation_status": "native_only",
-        "balances_json": json.dumps(
+    return VenueAccountStateRow(
+        wallet_public_id=wallet_public_id,
+        exchange=exchange,
+        mode="live",
+        sync_status="observed",
+        balance_status="observed",
+        position_status="observed",
+        valuation_status="native_only",
+        balances_json=json.dumps(
             [{"currency": "USD", "total": 1000.0, "free": 900.0, "used": 100.0}]
         ),
-        "open_positions_json": json.dumps([]),
-        "balance_observed_at": now - timedelta(minutes=1),
-        "position_observed_at": now - timedelta(minutes=1),
-        "current_attempt_observation_id": 1,
-        "balance_payload_source_observation_id": 1,
-        "position_payload_source_observation_id": 1,
-        "authoritative_until": now + timedelta(hours=1),
-        "error": None,
-        "public_id": public_id,
-        "timestamp": now,
-        "session_id": "s",
-        "sequence_id": 5,
-    }
+        open_positions_json=json.dumps([]),
+        balance_observed_at=now - timedelta(minutes=1),
+        position_observed_at=now - timedelta(minutes=1),
+        current_attempt_observation_id=1,
+        balance_payload_source_observation_id=1,
+        position_payload_source_observation_id=1,
+        authoritative_until=now + timedelta(hours=1),
+        error=None,
+        public_id=public_id,
+        timestamp=now,
+        session_id="s",
+        sequence_id=5,
+    )
+
+
+def _reconciliation_read_context(
+    account_state: VenueAccountStateRow,
+) -> PortfolioReconciliationReadContextRow:
+    """Build a no-state reconciliation context around one venue account."""
+    return PortfolioReconciliationReadContextRow(
+        account_state=account_state,
+        state=None,
+        observations=[],
+        config=None,
+        latest_ordered_observation_id=None,
+        latest_appended_observation_id=None,
+        open_drift_episode=None,
+    )
 
 
 _POSITION_CYCLE_ROW_FIXTURE: dict[str, Any] = {
@@ -1880,12 +1897,15 @@ class TestListVenueAccountStatesTool:
 
     @staticmethod
     def _build_repo(
-        rows: list[dict[str, Any]],
+        rows: list[VenueAccountStateRow],
         accessible_wallets: list[str] | None = None,
     ) -> Any:
         """Build an AsyncMock repo wired for the venue-account-state read path."""
         repo = AsyncMock()
-        repo.get_venue_account_states = AsyncMock(return_value=rows)
+        repo.get_venue_account_states = AsyncMock()
+        repo.get_portfolio_reconciliation_read_contexts = AsyncMock(
+            return_value=[_reconciliation_read_context(row) for row in rows]
+        )
         if accessible_wallets is None:
             accessible_wallets = ["wallet-1"]
         repo.list_accessible_wallets_for_operators = AsyncMock(
@@ -1902,7 +1922,7 @@ class TestListVenueAccountStatesTool:
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
         assert envelope["error_code"] == "permission_denied"
-        repo.get_venue_account_states.assert_not_awaited()
+        repo.get_portfolio_reconciliation_read_contexts.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_operator_happy_path_returns_mapped_states(self) -> None:
@@ -1918,6 +1938,10 @@ class TestListVenueAccountStatesTool:
         assert state["effective_status"] == "observed"
         assert state["is_authoritative"] is True
         assert state["sync_status"] == "observed"
+        assert state["reconciliation"]["effective_status"] == "incomplete"
+        assert state["reconciliation"]["is_authoritative"] is False
+        repo.get_portfolio_reconciliation_read_contexts.assert_awaited_once_with(["wallet-1"])
+        repo.get_venue_account_states.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_wallet_outside_scope_returns_account_state_not_found(self) -> None:
@@ -1930,7 +1954,7 @@ class TestListVenueAccountStatesTool:
         envelope = _decode_envelope(result)
         assert envelope["success"] is False
         assert envelope["error_code"] == "account_state_not_found"
-        repo.get_venue_account_states.assert_not_awaited()
+        repo.get_portfolio_reconciliation_read_contexts.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_empty_result_returns_success_with_empty_list(self) -> None:
@@ -1942,6 +1966,7 @@ class TestListVenueAccountStatesTool:
         assert envelope["success"] is True
         assert envelope["details"]["count"] == 0
         assert envelope["details"]["account_states"] == []
+        repo.get_portfolio_reconciliation_read_contexts.assert_awaited_once_with(["wallet-1"])
 
     @pytest.mark.asyncio
     async def test_post_fetch_exchange_filter(self) -> None:
@@ -1956,6 +1981,7 @@ class TestListVenueAccountStatesTool:
         envelope = _decode_envelope(result)
         assert envelope["details"]["count"] == 1
         assert envelope["details"]["account_states"][0]["exchange"] == "kraken_futures"
+        repo.get_portfolio_reconciliation_read_contexts.assert_awaited_once_with(["wallet-1"])
 
     @pytest.mark.asyncio
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:

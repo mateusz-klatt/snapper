@@ -22,6 +22,7 @@ import pytest
 
 from snapper.application.portfolio.account_view import build_portfolio_account_state
 from snapper.application.portfolio.futures_reconciliation import evaluate
+from snapper.application.portfolio.reconciliation_view import no_portfolio_reconciliation_view
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
@@ -163,6 +164,7 @@ def _account(
         balance_payload_source_observation_id=17,
         position_payload_source_observation_id=17,
         error=None,
+        reconciliation=no_portfolio_reconciliation_view(),
     )
 
 

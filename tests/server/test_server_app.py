@@ -31,6 +31,8 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
+from snapper.data.repository_types import PortfolioReconciliationReadContextRow
+from snapper.data.repository_types import VenueAccountStateRow
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
 from snapper.infrastructure.rest.tracker import reset_rest_call_tracker_for_tests
 from snapper.interface.websocket.models import ConnectionStats
@@ -2558,7 +2560,7 @@ class MockRepository:
         self,
         session_result: Any = None,
         error: Exception | None = None,
-        account_state_rows: list[dict[str, Any]] | None = None,
+        account_state_rows: list[VenueAccountStateRow] | None = None,
         accessible_wallet_ids: list[str] | None = None,
     ) -> None:
         """Initialize the instance."""
@@ -2566,6 +2568,7 @@ class MockRepository:
         self._error = error
         self._account_state_rows = account_state_rows or []
         self._accessible_wallet_ids = accessible_wallet_ids or []
+        self.reconciliation_context_calls: list[list[str] | None] = []
 
     def session(self) -> MockSession:
         """Return mock session with configured result or error."""
@@ -2702,7 +2705,7 @@ class MockRepository:
 
     async def get_venue_account_states(
         self, wallet_public_ids: list[str] | None
-    ) -> list[dict[str, Any]]:
+    ) -> list[VenueAccountStateRow]:
         """Return mock venue account-state rows, wallet-scoped when filtered.
 
         Mirrors the real repository contract: ``None`` (ADMIN, unscoped)
@@ -2714,6 +2717,28 @@ class MockRepository:
             return list(self._account_state_rows)
         return [
             row for row in self._account_state_rows if row["wallet_public_id"] in wallet_public_ids
+        ]
+
+    async def get_portfolio_reconciliation_read_contexts(
+        self, wallet_public_ids: list[str] | None
+    ) -> list[PortfolioReconciliationReadContextRow]:
+        """Return one batched no-state context per scoped account row."""
+        self.reconciliation_context_calls.append(wallet_public_ids)
+        self._raise_if_error()
+        rows = self._account_state_rows
+        if wallet_public_ids is not None:
+            rows = [row for row in rows if row["wallet_public_id"] in wallet_public_ids]
+        return [
+            PortfolioReconciliationReadContextRow(
+                account_state=row,
+                state=None,
+                observations=[],
+                config=None,
+                latest_ordered_observation_id=None,
+                latest_appended_observation_id=None,
+                open_drift_episode=None,
+            )
+            for row in rows
         ]
 
     async def get_candles(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
@@ -4655,7 +4680,7 @@ class TestResolveCandleSingleSource:
         assert _resolve_candle_single_source(_request_with_settings(_RaisingSettings())) is False
 
 
-def _account_state_row(**overrides: Any) -> dict[str, Any]:
+def _account_state_row(**overrides: object) -> VenueAccountStateRow:
     """Build a venue account-state row dict with fail-closed defaults.
 
     Args:
@@ -4665,7 +4690,7 @@ def _account_state_row(**overrides: Any) -> dict[str, Any]:
         A row dict shaped like ``VenueAccountStateRow`` for the read map.
     """
     now = datetime.now(UTC)
-    base: dict[str, Any] = {
+    base: dict[str, object] = {
         "wallet_public_id": "w-1",
         "exchange": "kraken",
         "mode": "live",
@@ -4688,7 +4713,7 @@ def _account_state_row(**overrides: Any) -> dict[str, Any]:
         "sequence_id": 1,
     }
     base.update(overrides)
-    return base
+    return cast(VenueAccountStateRow, base)
 
 
 def _account_state_client(
@@ -4735,9 +4760,11 @@ class TestPortfolioAccountsEndpoint:
         When: GET /portfolio/accounts is called,
         Then: the response is 403 before the route body runs.
         """
-        client = _account_state_client(UserRole.AI_DELEGATE, MockRepository())
+        repo = MockRepository()
+        client = _account_state_client(UserRole.AI_DELEGATE, repo)
         response = client.get("/api/portfolio/accounts")
         assert response.status_code == 403
+        assert repo.reconciliation_context_calls == []
 
     def test_returns_mapped_states_with_provenance(self) -> None:
         """Effective status and authority flags propagate through the map.
@@ -4776,10 +4803,13 @@ class TestPortfolioAccountsEndpoint:
         assert by_id["acct-fresh"]["effective_status"] == "observed"
         assert by_id["acct-fresh"]["is_authoritative"] is True
         assert by_id["acct-fresh"]["balances"][0]["currency"] == "USD"
+        assert by_id["acct-fresh"]["reconciliation"]["effective_status"] == "incomplete"
+        assert by_id["acct-fresh"]["reconciliation"]["is_authoritative"] is False
         assert data["session_id"]
         assert data["sequence_id"] >= 1
         assert data["public_id"]
         assert data["timestamp"]
+        assert repo.reconciliation_context_calls == [None]
 
     def test_wallet_scoping_returns_only_accessible_rows(self) -> None:
         """resolve_target_wallets narrows results to the accessible set.
@@ -4802,6 +4832,7 @@ class TestPortfolioAccountsEndpoint:
         assert data["count"] == 1
         assert data["payload"][0]["public_id"] == "acct-visible"
         assert data["payload"][0]["wallet_public_id"] == "w-visible"
+        assert repo.reconciliation_context_calls == [["w-visible"]]
 
     def test_empty_returns_empty_list(self) -> None:
         """No rows yields an empty payload with count 0.
@@ -4810,12 +4841,14 @@ class TestPortfolioAccountsEndpoint:
         When: an ADMIN calls GET /portfolio/accounts,
         Then: the response is 200 with an empty payload and count 0.
         """
-        client = _account_state_client(UserRole.ADMIN, MockRepository())
+        repo = MockRepository()
+        client = _account_state_client(UserRole.ADMIN, repo)
         response = client.get("/api/portfolio/accounts")
         assert response.status_code == 200
         data = response.json()
         assert data["payload"] == []
         assert data["count"] == 0
+        assert repo.reconciliation_context_calls == [None]
 
     def test_foreign_operator_scope_403_propagates(self) -> None:
         """A 403 from resolve_target_wallets is not remapped to 500.
@@ -4824,9 +4857,11 @@ class TestPortfolioAccountsEndpoint:
         When: GET /portfolio/accounts?operator_public_id=op-foreign is called,
         Then: the 403 propagates through the ``except HTTPException`` guard.
         """
-        client = _account_state_client(UserRole.OPERATOR, MockRepository(), operator_ids=["op-1"])
+        repo = MockRepository()
+        client = _account_state_client(UserRole.OPERATOR, repo, operator_ids=["op-1"])
         response = client.get("/api/portfolio/accounts?operator_public_id=op-foreign")
         assert response.status_code == 403
+        assert repo.reconciliation_context_calls == []
 
     def test_database_error_returns_500(self) -> None:
         """A repository failure surfaces as a 500 with a stable detail.
@@ -4840,3 +4875,4 @@ class TestPortfolioAccountsEndpoint:
         response = client.get("/api/portfolio/accounts")
         assert response.status_code == 500
         assert "Failed to fetch portfolio accounts" in response.json()["detail"]
+        assert repo.reconciliation_context_calls == [None]

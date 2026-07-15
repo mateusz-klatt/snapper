@@ -1213,11 +1213,12 @@ when unknown.
 
 ### GET /api/portfolio/accounts
 
-Fetch truthful venue account state per (wallet, exchange, mode) — the venue's own
-balance/position observation, distinct from the fill-derived position projection
-(PnL Phase 3). Requires `read:account_state` permission. AI delegates are denied.
-There is no `as_of` parameter: a venue account state has no truthful historical
-projection, only its current observation.
+Fetch truthful venue account state and portfolio-reconciliation truth per
+(wallet, exchange, mode). The venue observation remains distinct from the
+fill-derived position projection, while the nested reconciliation view compares
+the two truth planes (PnL Phase 4). Requires `read:account_state` permission. AI
+delegates are denied. There is no `as_of` parameter: an account state has no
+truthful historical projection, only its current observation.
 
 **Request:**
 
@@ -1282,7 +1283,32 @@ GET /api/portfolio/accounts
             "current_attempt_observation_id": 4711,
             "balance_payload_source_observation_id": 4711,
             "position_payload_source_observation_id": 4711,
-            "error": null
+            "error": null,
+            "reconciliation": {
+                "method": null,
+                "evaluation_status": null,
+                "effective_status": "incomplete",
+                "is_authoritative": false,
+                "evaluated_at": null,
+                "current_observation_id": null,
+                "last_full_observation_id": null,
+                "detail_source_observation_id": null,
+                "last_full_outcome": null,
+                "consecutive_full_mismatches": 0,
+                "anchor_public_id": null,
+                "venue_account_state_public_id": null,
+                "venue_account_observation_id": null,
+                "source_watermark_kind": null,
+                "source_watermark": null,
+                "expected": null,
+                "actual": null,
+                "difference": null,
+                "tolerance": null,
+                "reconciled_at": null,
+                "authoritative_until": null,
+                "error": null,
+                "open_drift_episode": null
+            }
         }
     ],
     "count": 1
@@ -1298,11 +1324,25 @@ on a future-dated observation clock, and to `corrupt` when a stored payload
 fails to revalidate. `is_authoritative` is `true` ONLY when `effective_status`
 is exactly `observed`; `simulated` (paper), `unsupported` (market-data-only),
 `error`, `stale`, `clock_error`, and `corrupt` are never authoritative.
-`balances` and `open_positions` are honest NULLs — never fabricated, cleared
-when the state is not fresh or is corrupt. Balance and positions are
+`balances` and `open_positions` are honest NULLs — never fabricated and cleared
+only when the state is corrupt. A stale row can retain labeled last-known
+values. Balance and positions are
 independent reads, each carrying its own `*_observed_at` timestamp and
 `*_payload_source_observation_id` provenance. Values are venue-native only
 (`valuation_status` = `native_only`); USD valuation is Phase 5.
+
+The strict `reconciliation` object is always present. With no persisted
+reconciliation state it has `effective_status="incomplete"`, is not
+authoritative, and carries no evidence. For a persisted state, the read surface
+revalidates its method config, referenced observations, latest-observation
+lineage, and open drift episode before returning it. Any inconsistency yields
+`effective_status="corrupt"`, `is_authoritative=false`, and clears all evidence.
+A valid verdict becomes `clock_error` when its evaluation stamp is more than
+five seconds in the future and `stale` after 900 seconds. Only a fresh, fully
+revalidated current `matched` or `mismatched` verdict is authoritative. Stale
+views retain their validated `expected`, `actual`, `difference`, and
+`tolerance` JSON objects and continue to surface an open drift episode; raw
+persisted JSON strings are never exposed.
 
 ### POST /api/execution-plans
 

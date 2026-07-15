@@ -333,15 +333,17 @@ to `caps_enforcer_getter` at registration.
 - **`list_venue_account_states(wallet_public_id?, exchange?)`** —
     truthful venue account states (balances + open positions per
     wallet/exchange/mode) across the caller's accessible wallets, each
-    mapped through the fail-closed read surface. Requires
+    mapped through the same fail-closed read surface as REST and carrying an
+    always-present strict `reconciliation` object. Requires
     `READ_ACCOUNT_STATE`; AI delegates do **not** hold this permission
     by default, so a delegate call returns `permission_denied`. Wallet
     scope violations return `account_state_not_found`
-    (anti-enumeration). Consumers must trust the derived
-    `effective_status` (and `is_authoritative`, true only when
-    `effective_status` is exactly `observed`) — **not** the raw stored
-    `sync_status`, which does not account for staleness, clock skew, or
-    a corrupt payload.
+    (anti-enumeration). Consumers must trust the account's derived
+    `effective_status` and its reconciliation object's independently derived
+    `effective_status` / `is_authoritative` fields, not raw stored statuses.
+    Reconciliation is authoritative only for a fresh, fully revalidated
+    current `matched` or `mismatched` verdict; stale evidence and open drift
+    episodes remain visible, while corrupt evidence is cleared.
 
 - **`get_ohlcv(exchange, instrument, timeframe, since?, until?,
     limit=200)`** — OHLCV candles for a venue + instrument. Range

@@ -120,6 +120,7 @@ from snapper.application.db_stats.snapshotter import (
 )
 from snapper.application.market_data_watchdog.watchdog import MarketDataWatchdog
 from snapper.application.portfolio.account_view import build_portfolio_account_state
+from snapper.application.portfolio.reconciliation_view import build_portfolio_reconciliation_view
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.retention.scheduler import RetentionScheduler
@@ -2457,15 +2458,18 @@ def _create_orders_executions_router() -> APIRouter:
         operator_public_id: Annotated[str | None, Query(description="Scope to operator")] = None,
         wallet_public_id: Annotated[str | None, Query(description="Scope to wallet")] = None,
     ) -> PortfolioAccountStateListResponse:
-        """Fetch venue account-truth states (PnL Phase 3).
+        """Fetch venue account and reconciliation truth (PnL Phase 4).
 
         Returns the active per-venue account-state rows for the accessible
         wallets, each mapped through the fail-closed read surface: the
         EFFECTIVE status is derived over the stored value (stale/clock_error),
         payloads are revalidated (a parse failure marks the state corrupt),
         and ``is_authoritative`` is set only when the effective status is
-        exactly ``observed``. Account state has no historical projection, so
-        there is no ``as_of`` parameter.
+        exactly ``observed``. The always-present ``reconciliation`` object is
+        independently revalidated from its durable lineage and can be
+        authoritative only for a fresh full matched or mismatched verdict.
+        Account state has no historical projection, so there is no ``as_of``
+        parameter.
 
         Args:
             request: FastAPI request (provides REST tracker for provenance).
@@ -2483,8 +2487,15 @@ def _create_orders_executions_router() -> APIRouter:
             target_wallets = await resolve_target_wallets(
                 _auth, repo, operator_public_id, wallet_public_id
             )
-            rows = await repo.get_venue_account_states(target_wallets)
-            items = [build_portfolio_account_state(r, now) for r in rows]
+            contexts = await repo.get_portfolio_reconciliation_read_contexts(target_wallets)
+            items = [
+                build_portfolio_account_state(
+                    context["account_state"],
+                    now,
+                    build_portfolio_reconciliation_view(context, now),
+                )
+                for context in contexts
+            ]
             tracker: SequenceTracker = request.app.state.rest_tracker
             sid = tracker.session_id
             seq = tracker.next_sequence(_REST_DATA_STREAM)

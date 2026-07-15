@@ -42,6 +42,7 @@ from pydantic import model_validator
 
 from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.api.schemas.portfolio import PortfolioReconciliationView
 from snapper.core.json_types import JsonObject
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
@@ -541,6 +542,7 @@ class PortfolioAccountState(StrictDataSchema[Literal["portfolio_account_state"]]
             shown (own on a fresh read, an earlier one when retained).
         position_payload_source_observation_id: Same, for positions.
         error: Last error detail (transient read failure), or NULL.
+        reconciliation: Fail-closed portfolio reconciliation truth.
     """
 
     type: Literal["portfolio_account_state"] = "portfolio_account_state"
@@ -562,6 +564,7 @@ class PortfolioAccountState(StrictDataSchema[Literal["portfolio_account_state"]]
     balance_payload_source_observation_id: int | None = None
     position_payload_source_observation_id: int | None = None
     error: str | None = None
+    reconciliation: PortfolioReconciliationView
 
 
 class OrderRequestData(StrictDataSchema[Literal["order_request"]]):

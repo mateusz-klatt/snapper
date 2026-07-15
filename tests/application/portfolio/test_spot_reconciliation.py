@@ -12,6 +12,7 @@ from typing import cast
 import pytest
 
 import snapper.application.portfolio.spot_reconciliation as spot_module
+from snapper.application.portfolio.reconciliation_view import no_portfolio_reconciliation_view
 from snapper.application.portfolio.spot_reconciliation import SpotAssetPrecisionEvidence
 from snapper.application.portfolio.spot_reconciliation import SpotInstrumentIdentity
 from snapper.application.portfolio.spot_reconciliation import SpotReplayBoundary
@@ -80,6 +81,7 @@ def _account(
         balance_payload_source_observation_id=41,
         position_payload_source_observation_id=None,
         error=None,
+        reconciliation=no_portfolio_reconciliation_view(),
     )
 
 

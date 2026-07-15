@@ -18,7 +18,9 @@ from decimal import Decimal
 from decimal import InvalidOperation
 from typing import cast
 
+from snapper.api.schemas.portfolio import PortfolioReconciliationView
 from snapper.application.portfolio.account_status import derive_effective_account_status
+from snapper.application.portfolio.reconciliation_view import no_portfolio_reconciliation_view
 from snapper.core.types import OrderExchange
 from snapper.data.repository_types import VenueAccountStateRow
 from snapper.interface.websocket.schemas import ExecutionMode
@@ -251,7 +253,9 @@ def _row_is_coherent(row: VenueAccountStateRow) -> bool:
 
 
 def build_portfolio_account_state(
-    row: VenueAccountStateRow, now: datetime
+    row: VenueAccountStateRow,
+    now: datetime,
+    reconciliation: PortfolioReconciliationView | None = None,
 ) -> PortfolioAccountState:
     """Map a stored account-state row to its fail-closed read response.
 
@@ -265,6 +269,8 @@ def build_portfolio_account_state(
     Args:
         row: The active ``venue_account_states`` row.
         now: The read instant (for staleness/clock derivation).
+        reconciliation: Revalidated reconciliation truth, or None when no
+            reconciliation state is available to the caller.
 
     Returns:
         The mapped account-state response item.
@@ -317,4 +323,7 @@ def build_portfolio_account_state(
         balance_payload_source_observation_id=row["balance_payload_source_observation_id"],
         position_payload_source_observation_id=row["position_payload_source_observation_id"],
         error=row["error"],
+        reconciliation=(
+            reconciliation if reconciliation is not None else no_portfolio_reconciliation_view()
+        ),
     )

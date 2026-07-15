@@ -561,6 +561,33 @@ class PortfolioReconciliationStateRow(TypedDict):
     sequence_id: int
 
 
+class PortfolioDriftEpisodeRow(TypedDict):
+    """Active open portfolio-drift episode projected for read validation."""
+
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    status: str
+    opened_at: datetime
+    trigger_observation_id: int
+    last_observation_id: int
+    details_source_observation_id: int
+    latest_full_mismatch_count: int
+    public_id: str
+
+
+class PortfolioReconciliationReadContextRow(TypedDict):
+    """Complete persisted context for one fail-closed reconciliation view."""
+
+    account_state: VenueAccountStateRow
+    state: PortfolioReconciliationStateRow | None
+    observations: list[PortfolioReconciliationLineageObservationRow]
+    config: PortfolioReconciliationMethodConfigRow | None
+    latest_ordered_observation_id: int | None
+    latest_appended_observation_id: int | None
+    open_drift_episode: PortfolioDriftEpisodeRow | None
+
+
 class SettingRow(TypedDict):
     """Row dict returned by get_settings and get_setting_by_key."""
 

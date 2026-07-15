@@ -52,6 +52,7 @@ from snapper.application.plans.cancel_service import PlansCancelService
 from snapper.application.plans.cancel_service import PlanScopeError
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.portfolio.account_view import build_portfolio_account_state
+from snapper.application.portfolio.reconciliation_view import build_portfolio_reconciliation_view
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -1296,7 +1297,7 @@ async def _list_venue_account_states_tool(
     wallet_public_id: str | None,
     exchange: str | None,
 ) -> CallToolResult:
-    """Run the list-venue-account-states MCP read path (PnL Phase 3)."""
+    """Run the shared account and reconciliation truth read path."""
     access = _get_tool_access_or_envelope(
         claims_getter=claims_getter,
         repository_getter=repository_getter,
@@ -1315,11 +1316,15 @@ async def _list_venue_account_states_tool(
     )
     if scope_envelope is not None:
         return scope_envelope
-    rows = await access.repo.get_venue_account_states(wallet_ids)
+    contexts = await access.repo.get_portfolio_reconciliation_read_contexts(wallet_ids)
     states = [
-        build_portfolio_account_state(row, now)
-        for row in rows
-        if exchange is None or row["exchange"] == exchange
+        build_portfolio_account_state(
+            context["account_state"],
+            now,
+            build_portfolio_reconciliation_view(context, now),
+        )
+        for context in contexts
+        if exchange is None or context["account_state"]["exchange"] == exchange
     ]
     return to_call_tool_result(
         success=True,
@@ -1931,14 +1936,15 @@ def register_mcp_tools(
         wallet_public_id: str | None = None,
         exchange: str | None = None,
     ) -> CallToolResult:
-        """List truthful venue account states (PnL Phase 3).
+        """List truthful venue account and reconciliation states (PnL Phase 4).
 
         Returns the active per-venue account-truth rows for the
         accessible wallets, each mapped through the fail-closed read
         surface (the EFFECTIVE status is derived over the stored value
         and ``is_authoritative`` is set only when it is exactly
-        ``observed``). Requires ``READ_ACCOUNT_STATE``; AI delegates do
-        NOT hold it by default, so a delegate call returns
+        ``observed``). Every row also carries an independently revalidated
+        ``reconciliation`` object. Requires ``READ_ACCOUNT_STATE``; AI
+        delegates do NOT hold it by default, so a delegate call returns
         ``error_code="permission_denied"``.
 
         Args:
@@ -1958,8 +1964,9 @@ def register_mcp_tools(
         Returns:
             Canonical envelope. ``details`` carries ``account_states``
             (list of ``PortfolioAccountState`` dicts) and ``count``.
-            Consumers must trust ``effective_status`` (and
-            ``is_authoritative``), NOT the raw stored ``sync_status``.
+            Consumers must trust each account and reconciliation object's
+            ``effective_status`` and ``is_authoritative`` fields, not their
+            raw stored statuses.
         """
         return await _list_venue_account_states_tool(
             repository_getter=repository_getter,

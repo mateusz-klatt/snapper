@@ -432,6 +432,32 @@ def test_observed_fresh_is_authoritative_and_payloads_present() -> None:
     assert result.open_positions is not None
     assert len(result.balances) == 2
     assert len(result.open_positions) == 2
+    assert result.reconciliation.method is None
+    assert result.reconciliation.evaluation_status is None
+    assert result.reconciliation.effective_status == "incomplete"
+    assert result.reconciliation.is_authoritative is False
+
+
+def test_supplied_reconciliation_view_is_preserved() -> None:
+    """The account mapper attaches the shared revalidated view unchanged.
+
+    Given: a reconciliation view already built by the shared pure mapper,
+    When: the venue account row is mapped,
+    Then: the exact reconciliation object is attached to the account response.
+    """
+    default = build_portfolio_account_state(_make_row(), _NOW).reconciliation
+    reconciliation = default.model_copy(
+        update={
+            "method": "futures_position",
+            "evaluation_status": "matched",
+            "effective_status": "matched",
+            "is_authoritative": True,
+            "evaluated_at": _RECENT,
+            "current_observation_id": 10,
+        }
+    )
+    result = build_portfolio_account_state(_make_row(), _NOW, reconciliation)
+    assert result.reconciliation is reconciliation
 
 
 def test_raw_balance_decimal_strings_survive_strict_read_mapping() -> None:
