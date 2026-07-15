@@ -277,7 +277,7 @@ class TestMain:
             assert conn.execute(text("SELECT COUNT(*) FROM ai_reviews")).scalar() == 1
             assert conn.execute(text("SELECT COUNT(*) FROM ai_delegates")).scalar() == 1
             assert conn.execute(text("SELECT COUNT(*) FROM ai_review_events")).scalar() == 2
-            assert conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar() == 18
+            assert conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar() == 21
             for role in ("admin", "operator", "viewer"):
                 row_count = conn.execute(
                     text(
@@ -286,7 +286,7 @@ class TestMain:
                     ),
                     {"role": role},
                 ).scalar()
-                assert row_count == 6, f"expected 6 alerts for role {role}, got {row_count}"
+                assert row_count == 7, f"expected 7 alerts for role {role}, got {row_count}"
 
     def test_idempotent_skip_when_demo_session_exists(
         self,
@@ -317,7 +317,7 @@ class TestMain:
             first_orders = conn.execute(text("SELECT COUNT(*) FROM orders")).scalar()
             first_alerts = conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar()
             assert first_orders == 4
-            assert first_alerts == 18
+            assert first_alerts == 21
 
         second_rc = seed_demo.main()
         assert second_rc == 0
@@ -388,7 +388,7 @@ class TestMain:
                 ).scalar()
                 == 4
             )
-            assert conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar() == 18
+            assert conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar() == 21
 
     def test_raises_when_paper_wallet_missing(
         self,

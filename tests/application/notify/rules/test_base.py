@@ -102,8 +102,8 @@ class TestRuleRegistry:
 class TestLoadDefaultRegistry:
     """Verifies the default v1.11 registry contract."""
 
-    def test_default_registry_has_six_rules(self) -> None:
-        """load_default_registry wires the five baseline rules plus order_unknown."""
+    def test_default_registry_has_seven_rules(self) -> None:
+        """The default registry wires every supported notify rule."""
         reg = load_default_registry()
 
         alert_types = {rule.alert_type for rule in reg._rules}
@@ -114,6 +114,7 @@ class TestLoadDefaultRegistry:
             "position_stop_loss_fired",
             "critical_system_error",
             "margin_warning",
+            "drift",
         }
 
     def test_every_default_rule_alert_type_is_a_valid_wire_alert_type(self) -> None:
@@ -135,7 +136,7 @@ class TestLoadDefaultRegistry:
         for rule in load_default_registry()._rules:
             assert rule.alert_type in wire_types
 
-    def test_default_prefixes_cover_all_three_topic_families(self) -> None:
+    def test_default_prefixes_cover_all_four_topic_families(self) -> None:
         """The aggregated subscribe-prefix set matches the sidecar's expected subscriptions."""
         reg = load_default_registry()
 
@@ -143,6 +144,7 @@ class TestLoadDefaultRegistry:
             "orders.events.",
             "plans.decisions.",
             "system.heartbeats.",
+            "bus.portfolio_drift_episode",
         }
 
     @pytest.mark.asyncio

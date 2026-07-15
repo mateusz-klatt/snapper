@@ -353,6 +353,134 @@ async def test_mismatch_streak_opens_one_stable_episode_on_third(
     assert state.detail_source_observation_id == observations[3].id
 
 
+async def test_drift_transition_lookup_preserves_each_exact_lifecycle_version(
+    tmp_path: Path,
+) -> None:
+    """Exact evaluation lookup preserves committed episode lifecycle versions.
+
+    Given: an episode opens, advances, and resolves across three evaluations,
+    When: each evaluation tuple is queried after later versions commit,
+    Then: every transition remains available with complete paging evidence.
+    """
+    repo = await _make_repo(tmp_path)
+    assert (
+        await repo.get_portfolio_drift_episode_transition(
+            _WALLET,
+            "kraken_futures",
+            "live",
+            _SESSION,
+            1,
+        )
+        is None
+    )
+    for sequence in range(1, 4):
+        await repo.record_portfolio_reconciliation(
+            _evaluation(_T0 + timedelta(seconds=sequence), "mismatched", sequence_id=sequence)
+        )
+    observations = await _observations(repo)
+    opened = await repo.get_portfolio_drift_episode_transition(
+        _WALLET,
+        "kraken_futures",
+        "live",
+        _SESSION,
+        3,
+    )
+    assert opened is not None
+    episode_public_id = opened["public_id"]
+    assert opened == {
+        "wallet_public_id": _WALLET,
+        "exchange": "kraken_futures",
+        "mode": "live",
+        "status": "open",
+        "opened_at": _T0 + timedelta(seconds=3),
+        "closed_at": None,
+        "trigger_observation_id": observations[2].id,
+        "last_observation_id": observations[2].id,
+        "latest_full_mismatch_count": 3,
+        "resolution_reason": None,
+        "public_id": episode_public_id,
+        "session_id": _SESSION,
+        "sequence_id": 3,
+    }
+    assert (
+        await repo.get_portfolio_drift_episode_transition(
+            _WALLET,
+            "kraken_futures",
+            "live",
+            _OTHER_SESSION,
+            3,
+        )
+        is None
+    )
+
+    await repo.record_portfolio_reconciliation(
+        _evaluation(_T0 + timedelta(seconds=4), "mismatched", sequence_id=4)
+    )
+    assert (
+        await repo.get_portfolio_drift_episode_transition(
+            _WALLET,
+            "kraken_futures",
+            "live",
+            _SESSION,
+            3,
+        )
+        == opened
+    )
+    observations = await _observations(repo)
+    continued = await repo.get_portfolio_drift_episode_transition(
+        _WALLET,
+        "kraken_futures",
+        "live",
+        _SESSION,
+        4,
+    )
+    assert continued is not None
+    assert continued["status"] == "open"
+    assert continued["public_id"] == episode_public_id
+    assert continued["trigger_observation_id"] == observations[2].id
+    assert continued["last_observation_id"] == observations[3].id
+    assert continued["latest_full_mismatch_count"] == 4
+    assert continued["session_id"] == _SESSION
+    assert continued["sequence_id"] == 4
+
+    await repo.record_portfolio_reconciliation(
+        _evaluation(_T0 + timedelta(seconds=5), "matched", sequence_id=5)
+    )
+    assert (
+        await repo.get_portfolio_drift_episode_transition(
+            _WALLET,
+            "kraken_futures",
+            "live",
+            _SESSION,
+            4,
+        )
+        == continued
+    )
+    observations = await _observations(repo)
+    resolved = await repo.get_portfolio_drift_episode_transition(
+        _WALLET,
+        "kraken_futures",
+        "live",
+        _SESSION,
+        5,
+    )
+    assert resolved == {
+        "wallet_public_id": _WALLET,
+        "exchange": "kraken_futures",
+        "mode": "live",
+        "status": "resolved",
+        "opened_at": _T0 + timedelta(seconds=3),
+        "closed_at": _T0 + timedelta(seconds=5),
+        "trigger_observation_id": observations[2].id,
+        "last_observation_id": observations[4].id,
+        "latest_full_mismatch_count": 4,
+        "resolution_reason": "matched",
+        "public_id": episode_public_id,
+        "session_id": _SESSION,
+        "sequence_id": 5,
+    }
+
+
 async def test_match_resolves_episode_and_new_streak_mints_new_identity(
     tmp_path: Path,
 ) -> None:

@@ -261,6 +261,7 @@ from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
 from snapper.data.repository_types import PortfolioDriftEpisodeRow
+from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import PortfolioReconciliationLineageObservationRow
 from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
@@ -1739,6 +1740,18 @@ class Repository(ABC):
         sequence_id: int,
     ) -> bool:
         """Return whether the exact observer evaluation key already exists."""
+        ...
+
+    @abstractmethod
+    async def get_portfolio_drift_episode_transition(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        session_id: str,
+        sequence_id: int,
+    ) -> PortfolioDriftEpisodeTransitionRow | None:
+        """Return the episode version created by an exact evaluation."""
         ...
 
     @abstractmethod
@@ -14083,6 +14096,49 @@ class SQLAlchemyRepository(Repository):
                     )
                 )
             )
+
+    async def get_portfolio_drift_episode_transition(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        session_id: str,
+        sequence_id: int,
+    ) -> PortfolioDriftEpisodeTransitionRow | None:
+        """Return the exact committed drift lifecycle version from one evaluation."""
+        async with self.session() as s:
+            episode = (
+                (
+                    await s.execute(
+                        select(PortfolioDriftEpisode).where(
+                            PortfolioDriftEpisode.wallet_public_id == wallet_public_id,
+                            PortfolioDriftEpisode.exchange == exchange,
+                            PortfolioDriftEpisode.mode == mode,
+                            PortfolioDriftEpisode.session_id == session_id,
+                            PortfolioDriftEpisode.sequence_id == sequence_id,
+                        )
+                    )
+                )
+                .scalars()
+                .one_or_none()
+            )
+            if episode is None:
+                return None
+            return {
+                "wallet_public_id": episode.wallet_public_id,
+                "exchange": episode.exchange,
+                "mode": episode.mode,
+                "status": episode.status,
+                "opened_at": episode.opened_at,
+                "closed_at": episode.closed_at,
+                "trigger_observation_id": episode.trigger_observation_id,
+                "last_observation_id": episode.last_observation_id,
+                "latest_full_mismatch_count": episode.latest_full_mismatch_count,
+                "resolution_reason": episode.resolution_reason,
+                "public_id": episode.public_id,
+                "session_id": episode.session_id,
+                "sequence_id": episode.sequence_id,
+            }
 
     @staticmethod
     def _portfolio_reconciliation_state_to_row(

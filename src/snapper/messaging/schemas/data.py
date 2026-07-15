@@ -1815,6 +1815,53 @@ class BacktestProgressData(StrictDataSchema[Literal["backtest_progress"]]):
         return self
 
 
+class PortfolioDriftEpisodeEventData(StrictDataSchema[Literal["portfolio_drift_episode_event"]]):
+    """Committed portfolio-drift episode lifecycle transition.
+
+    Published on ``bus.portfolio_drift_episode`` by the executor-side
+    reconciliation orchestrator only after the reconciliation transaction
+    commits. The frame is notify-only evidence: consumers may page or render
+    the lifecycle but must never use it to rebase, trade, or mutate portfolio
+    truth.
+
+    Attributes:
+        wallet_public_id: Wallet whose venue account drifted.
+        exchange: Lowercase venue identity.
+        mode: Live mode; paper accounts never open drift episodes.
+        episode_public_id: Stable drift-episode identity across open and close.
+        lifecycle: ``opened`` for the third full mismatch or ``resolved`` for
+            the later full match that closes the episode.
+        opened_at: Durable episode opening timestamp.
+        closed_at: Durable resolution timestamp, present only on resolution.
+        mismatch_count: Latest full-mismatch count retained by the episode.
+        resolution_reason: Durable close reason, present only on resolution.
+    """
+
+    type: Literal["portfolio_drift_episode_event"] = "portfolio_drift_episode_event"
+    wallet_public_id: str
+    exchange: str
+    mode: Literal["live"] = "live"
+    episode_public_id: str
+    lifecycle: Literal["opened", "resolved"]
+    opened_at: datetime
+    closed_at: datetime | None = None
+    mismatch_count: int = Field(ge=3)
+    resolution_reason: Literal["matched"] | None = None
+
+    @model_validator(mode="after")
+    def _lifecycle_fields_are_consistent(self) -> Self:
+        """Require close evidence exactly on resolved lifecycle frames."""
+        if self.lifecycle == "opened":
+            if self.closed_at is not None or self.resolution_reason is not None:
+                raise ValueError("opened drift episode cannot carry resolution fields")
+            return self
+        if self.closed_at is None or self.resolution_reason != "matched":
+            raise ValueError("resolved drift episode requires matched close evidence")
+        if self.closed_at < self.opened_at:
+            raise ValueError("drift episode closed_at cannot precede opened_at")
+        return self
+
+
 AlertType = Literal[
     "order_fill_full",
     "order_rejected",
@@ -1822,6 +1869,7 @@ AlertType = Literal[
     "position_stop_loss_fired",
     "margin_warning",
     "critical_system_error",
+    "drift",
 ]
 """Canonical alert type enumeration for iOS push notifications.
 

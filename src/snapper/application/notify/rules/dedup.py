@@ -52,6 +52,38 @@ async def check_dedup_window(
     if window_seconds <= 0:
         return False
     since = now - timedelta(seconds=window_seconds)
+    return await check_dedup_since(
+        repo=repo,
+        user_public_id=user_public_id,
+        dedup_key=dedup_key,
+        since=since,
+    )
+
+
+async def check_dedup_since(
+    *,
+    repo: Repository,
+    user_public_id: str,
+    dedup_key: str,
+    since: datetime,
+) -> bool:
+    """Return True when a same-key alert exists at or after ``since``.
+
+    This lower-bound form supports lifecycle-scoped deduplication where a
+    durable entity's own opening timestamp defines the complete suppression
+    interval. Unlike a fixed-duration window, the interval grows with the
+    lifecycle and therefore cannot intentionally re-page while that entity's
+    persisted alert remains active.
+
+    Args:
+        repo: Repository for the ``alert_events`` index read.
+        user_public_id: Recipient user UUID7 that scopes the lookup.
+        dedup_key: Rule-minted logical-event key.
+        since: Inclusive lower bound for matching alert timestamps.
+
+    Returns:
+        True when at least one active matching alert exists; False otherwise.
+    """
     matches = await repo.list_alert_events_with_dedup_key(
         user_public_id=user_public_id,
         dedup_key=dedup_key,

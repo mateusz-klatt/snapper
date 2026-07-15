@@ -20,6 +20,8 @@ import pytest
 
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
+from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import VenueAccountAttemptRow
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
@@ -31,6 +33,7 @@ from snapper.messaging.executors.base import _ACCOUNT_OBSERVE_INTERVAL_S
 from snapper.messaging.executors.base import _ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG
 from snapper.messaging.executors.base import _ACCOUNT_UNEXPECTED_POSITION_CAPABILITY_MSG
 from snapper.messaging.executors.base import ExchangeExecutorService
+from snapper.messaging.schemas.data import PortfolioDriftEpisodeEventData
 
 
 class _DummyExecutor(ExchangeExecutorService[Any]):
@@ -63,6 +66,7 @@ def _make_executor() -> Any:
     ex.wallet_public_id = "wallet-1"
     ex.repository = MagicMock(spec=SQLAlchemyRepository)
     ex.repository.record_venue_account_snapshot = AsyncMock(return_value=1)
+    ex.repository.get_portfolio_drift_episode_transition = AsyncMock(return_value=None)
     return ex
 
 
@@ -100,6 +104,60 @@ def _portfolio_attempt(*, mode: str = "live", sequence_id: int = 7) -> VenueAcco
         "session_id": "session-1",
         "sequence_id": sequence_id,
         "bus_time": now,
+    }
+
+
+def _portfolio_evaluation() -> PortfolioReconciliationEvaluationRow:
+    """Build one stable committed evaluation for notification tests."""
+    now = datetime(2026, 7, 15, 10, 0, tzinfo=UTC)
+    return {
+        "wallet_public_id": "wallet-1",
+        "exchange": "kraken_futures",
+        "mode": "live",
+        "method": "futures_position",
+        "evaluation_status": "mismatched",
+        "venue_account_state_public_id": "account-state-1",
+        "venue_account_observation_id": 10,
+        "account_authoritative_until": now + timedelta(minutes=5),
+        "source_watermark_kind": "execution_id",
+        "source_watermark": 42,
+        "anchor_public_id": None,
+        "expected_json": "{}",
+        "actual_json": "{}",
+        "difference_json": "{}",
+        "tolerance_json": "{}",
+        "error": None,
+        "session_id": "session-1",
+        "sequence_id": 7,
+        "bus_time": now,
+    }
+
+
+def _drift_transition(
+    *,
+    status: str = "open",
+    mode: str = "live",
+    closed_at: datetime | None = None,
+    trigger_observation_id: int = 12,
+    last_observation_id: int = 12,
+    mismatch_count: int = 3,
+    resolution_reason: str | None = None,
+) -> PortfolioDriftEpisodeTransitionRow:
+    """Build one post-commit drift lifecycle row."""
+    return {
+        "wallet_public_id": "wallet-1",
+        "exchange": "kraken_futures",
+        "mode": mode,
+        "status": status,
+        "opened_at": datetime(2026, 7, 15, 10, 0, tzinfo=UTC),
+        "closed_at": closed_at,
+        "trigger_observation_id": trigger_observation_id,
+        "last_observation_id": last_observation_id,
+        "latest_full_mismatch_count": mismatch_count,
+        "resolution_reason": resolution_reason,
+        "public_id": "episode-1",
+        "session_id": "session-1",
+        "sequence_id": 7,
     }
 
 
@@ -895,8 +953,9 @@ class TestPortfolioReconciliationOrchestration:
         ex.repository.get_active_portfolio_reconciliation_method_config = AsyncMock(
             return_value=None
         )
-        evaluation = object()
+        evaluation = _portfolio_evaluation()
         ex.repository.record_portfolio_reconciliation = AsyncMock(return_value=41)
+        ex._schedule_portfolio_drift_notification = MagicMock()
         work = base_module._PortfolioReconciliationWork(
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
@@ -914,6 +973,7 @@ class TestPortfolioReconciliationOrchestration:
             await ex._run_portfolio_reconciliation(work)
         dispatch.assert_awaited_once()
         ex.repository.record_portfolio_reconciliation.assert_awaited_once_with(evaluation)
+        ex._schedule_portfolio_drift_notification.assert_called_once_with(evaluation)
         assert ex._portfolio_reconciliation_failure_count == 0
 
     @pytest.mark.asyncio
@@ -959,8 +1019,9 @@ class TestPortfolioReconciliationOrchestration:
             return_value=config
         )
         ex.repository.record_portfolio_reconciliation = AsyncMock(return_value=12)
+        ex._schedule_portfolio_drift_notification = MagicMock()
         account = object()
-        evaluation = object()
+        evaluation = _portfolio_evaluation()
         work = base_module._PortfolioReconciliationWork(
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
@@ -996,6 +1057,7 @@ class TestPortfolioReconciliationOrchestration:
             "evaluated_at": evaluated_at,
         }
         ex.repository.record_portfolio_reconciliation.assert_awaited_once_with(evaluation)
+        ex._schedule_portfolio_drift_notification.assert_called_once_with(evaluation)
         assert ex._venue_recon_failure_count == 0
         assert ex._portfolio_reconciliation_failure_count == 0
 
@@ -1235,3 +1297,193 @@ class TestPortfolioReconciliationOrchestration:
         assert ex._portfolio_reconciliation_tasks == {}
         assert ex._portfolio_reconciliation_dispatch_open is False
         assert ex._client_context_active is False
+
+
+class TestPortfolioDriftNotificationEmission:
+    """Post-commit lifecycle publication stays notify-only and isolated."""
+
+    @staticmethod
+    def _publisher(executor: _DummyExecutor) -> MagicMock:
+        """Attach a publisher mock sharing the executor sequence tracker."""
+        publisher = MagicMock()
+        publisher.tracker = executor._tracker
+        publisher.send = AsyncMock()
+        executor.msg_publisher = publisher
+        return publisher
+
+    @pytest.mark.asyncio
+    async def test_open_transition_publishes_nonblocking_typed_event(self) -> None:
+        """The initial third mismatch emits one typed opened frame after commit."""
+        ex = _make_executor()
+        publisher = self._publisher(ex)
+        transition = _drift_transition()
+        ex.repository.get_portfolio_drift_episode_transition = AsyncMock(return_value=transition)
+
+        await ex._publish_portfolio_drift_notification(_portfolio_evaluation())
+
+        ex.repository.get_portfolio_drift_episode_transition.assert_awaited_once_with(
+            "wallet-1",
+            "kraken_futures",
+            "live",
+            "session-1",
+            7,
+        )
+        send_call = publisher.send.await_args
+        assert send_call is not None
+        assert send_call.args[0] == "bus.portfolio_drift_episode"
+        event = send_call.args[1]
+        assert isinstance(event, PortfolioDriftEpisodeEventData)
+        assert event.lifecycle == "opened"
+        assert event.episode_public_id == "episode-1"
+        assert event.closed_at is None
+        assert event.resolution_reason is None
+        assert send_call.kwargs == {"flags": base_module.zmq.NOBLOCK}
+
+    @pytest.mark.asyncio
+    async def test_resolved_transition_publishes_same_episode_resolution(self) -> None:
+        """A matched close emits a resolved notice with durable close evidence."""
+        ex = _make_executor()
+        publisher = self._publisher(ex)
+        closed_at = datetime(2026, 7, 15, 10, 8, tzinfo=UTC)
+        ex.repository.get_portfolio_drift_episode_transition = AsyncMock(
+            return_value=_drift_transition(
+                status="resolved",
+                closed_at=closed_at,
+                mismatch_count=5,
+                resolution_reason="matched",
+            )
+        )
+
+        await ex._publish_portfolio_drift_notification(_portfolio_evaluation())
+
+        send_call = publisher.send.await_args
+        assert send_call is not None
+        event = send_call.args[1]
+        assert isinstance(event, PortfolioDriftEpisodeEventData)
+        assert event.lifecycle == "resolved"
+        assert event.episode_public_id == "episode-1"
+        assert event.closed_at == closed_at
+        assert event.mismatch_count == 5
+        assert event.resolution_reason == "matched"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "transition",
+        [
+            None,
+            _drift_transition(mode="paper"),
+            _drift_transition(mismatch_count=4),
+            _drift_transition(last_observation_id=13),
+            _drift_transition(
+                status="resolved",
+                closed_at=None,
+                resolution_reason="matched",
+            ),
+            _drift_transition(
+                status="resolved",
+                closed_at=datetime(2026, 7, 15, 10, 8, tzinfo=UTC),
+                resolution_reason=None,
+            ),
+            _drift_transition(status="rebased"),
+        ],
+    )
+    async def test_non_transition_and_invalid_lifecycle_rows_stay_silent(
+        self,
+        transition: PortfolioDriftEpisodeTransitionRow | None,
+    ) -> None:
+        """Normal, continued, malformed, and out-of-scope results never notify."""
+        ex = _make_executor()
+        publisher = self._publisher(ex)
+        ex.repository.get_portfolio_drift_episode_transition = AsyncMock(return_value=transition)
+
+        await ex._publish_portfolio_drift_notification(_portfolio_evaluation())
+
+        publisher.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_publisher_stays_silent_after_transition_read(self) -> None:
+        """A not-yet-wired ZMQ publisher cannot affect committed truth."""
+        ex = _make_executor()
+        ex.msg_publisher = None
+        ex.repository.get_portfolio_drift_episode_transition = AsyncMock(
+            return_value=_drift_transition()
+        )
+
+        await ex._publish_portfolio_drift_notification(_portfolio_evaluation())
+
+        ex.repository.get_portfolio_drift_episode_transition.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_lookup_or_publish_failure_is_fully_contained(self) -> None:
+        """Notify failure never increments reconciliation or order counters."""
+        ex = _make_executor()
+        publisher = self._publisher(ex)
+        ex.repository.get_portfolio_drift_episode_transition = AsyncMock(
+            return_value=_drift_transition()
+        )
+        publisher.send.side_effect = RuntimeError("broker full")
+
+        await ex._publish_portfolio_drift_notification(_portfolio_evaluation())
+
+        assert ex._portfolio_reconciliation_failure_count == 0
+        assert ex._venue_recon_failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_notification_cancellation_propagates(self) -> None:
+        """Shutdown cancellation remains visible to the owning task drain."""
+        ex = _make_executor()
+        ex.repository.get_portfolio_drift_episode_transition = AsyncMock(
+            side_effect=asyncio.CancelledError
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await ex._publish_portfolio_drift_notification(_portfolio_evaluation())
+
+    @pytest.mark.asyncio
+    async def test_scheduler_tracks_and_discards_completed_notify_task(self) -> None:
+        """A successful scheduling call owns the task until completion."""
+        ex = _make_executor()
+        ex._publish_portfolio_drift_notification = AsyncMock(return_value=None)
+        evaluation = _portfolio_evaluation()
+
+        ex._schedule_portfolio_drift_notification(evaluation)
+
+        task = tuple(ex._portfolio_drift_notification_tasks)[0]
+        await task
+        await asyncio.sleep(0)
+        ex._publish_portfolio_drift_notification.assert_awaited_once_with(evaluation)
+        assert ex._portfolio_drift_notification_tasks == set()
+
+    def test_scheduler_creation_failure_is_contained(self) -> None:
+        """A task-factory failure closes the coroutine without touching truth."""
+        ex = _make_executor()
+        evaluation = _portfolio_evaluation()
+        with patch.object(
+            base_module.asyncio,
+            "create_task",
+            side_effect=RuntimeError("task factory unavailable"),
+        ):
+            ex._schedule_portfolio_drift_notification(evaluation)
+
+        assert ex._portfolio_drift_notification_tasks == set()
+        assert ex._portfolio_reconciliation_failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_and_drains_notification_task(self) -> None:
+        """Executor shutdown owns and drains an in-flight notify-only task."""
+        ex = _make_executor()
+        ex.running = False
+        started = asyncio.Event()
+
+        async def blocked() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(blocked())
+        ex._portfolio_drift_notification_tasks.add(task)
+        await started.wait()
+
+        await ex.stop()
+
+        assert task.cancelled()
+        assert ex._portfolio_drift_notification_tasks == set()

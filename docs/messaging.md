@@ -229,7 +229,8 @@ Shape: `accruals.{exchange}.{instrument}.{accrual_type}` (4 segments).
 ### Alerts
 
 Per-user alert fanout. The notify (APNs) sidecar consumes domain topics
-(`orders.events.`, `plans.decisions.`, `system.heartbeats.`), persists
+(`orders.events.`, `plans.decisions.`, `system.heartbeats.`, and
+`bus.portfolio_drift_episode`), persists
 each alert, publishes it as an `AlertEventData` frame on this topic
 family before the APNs fanout, and also delivers iOS pushes in-process;
 the WS bridge is the consumer, forwarding frames to authenticated
@@ -243,6 +244,7 @@ WebSocket clients with per-user scope enforcement.
 | `alerts.<user_public_id>.position_stop_loss_fired` | Stop-loss fired on an open position |
 | `alerts.<user_public_id>.margin_warning` | Margin warning |
 | `alerts.<user_public_id>.critical_system_error` | Critical system error |
+| `alerts.<user_public_id>.drift` | Portfolio drift episode opened or resolved; open pages are safety-critical and deduplicated by episode public ID |
 
 Shape: `alerts.{user_public_id}.{alert_type}` (3 segments). `user_public_id`
 must be a UUID7; `alert_type` is the discriminated union in the
@@ -322,6 +324,7 @@ Internal cross-service event bus over the shared broker.
 | `bus.delegate_offline` | Delegate session torn down |
 | `bus.ai_review_decision` | AI review decision recorded — fast-path fanout to the in-process AI review bus listener that resolves the strategy's await future (WS fanout of the operator's ack is the separate external `ai_reviews.<user>.<strategy>.decision_ack` topic). The matching `bus.ai_review_request` topic is intentionally NOT published today |
 | `bus.caps_violation_after_ai_approve` | Caps violation post-approval |
+| `bus.portfolio_drift_episode` | Notify-only committed drift episode `opened` / `resolved` transition; emitted after reconciliation commit and never used to trade, rebase, or mutate portfolio truth |
 
 Shape: `bus.{name}` (2 segments) where `name` matches
 `[a-z][a-z0-9_]*` (snake_case). The payload's

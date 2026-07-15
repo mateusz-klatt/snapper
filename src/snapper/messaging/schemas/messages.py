@@ -25,6 +25,7 @@ from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import OrderReplaceData
 from snapper.messaging.schemas.data import OrderRequestData
+from snapper.messaging.schemas.data import PortfolioDriftEpisodeEventData
 from snapper.messaging.schemas.data import ProcessCommandAckData
 from snapper.messaging.schemas.data import ProcessCommandData
 from snapper.messaging.schemas.data import ProcessConfiguredEventData
@@ -94,6 +95,7 @@ MESSAGE_TYPE_MAP: dict[str, type[StrictDataSchema[Any]]] = {
     "replay_start": ReplayStartData,
     "replay_end": ReplayEndData,
     "alert_event": AlertEventData,
+    "portfolio_drift_episode_event": PortfolioDriftEpisodeEventData,
     "execution_plan_decision_event": ExecutionPlanDecisionEventData,
     "process_summary_event": ProcessSummaryEventData,
     "process_configured_event": ProcessConfiguredEventData,

@@ -11,11 +11,12 @@ from snapper.application.notify.rules.margin_warning import MarginWarningRule
 from snapper.application.notify.rules.order_fill_full import OrderFillFullRule
 from snapper.application.notify.rules.order_rejected import OrderRejectedRule
 from snapper.application.notify.rules.order_unknown import OrderUnknownRule
+from snapper.application.notify.rules.portfolio_drift import PortfolioDriftRule
 from snapper.application.notify.rules.position_stop_loss_fired import PositionStopLossFiredRule
 
 
 def load_default_registry() -> RuleRegistry:
-    """Build the default registry with all six default alert rules.
+    """Build the default registry with all seven default alert rules.
 
     ``MarginWarningRule`` is registered before ``OrderRejectedRule``
     so the longest-prefix tiebreak (when both share the
@@ -30,7 +31,8 @@ def load_default_registry() -> RuleRegistry:
         A freshly-instantiated ``RuleRegistry`` with the rules
         registered in canonical order — ``order_fill_full``,
         ``margin_warning``, ``order_rejected``, ``order_unknown``,
-        ``position_stop_loss_fired``, ``critical_system_error``.
+        ``position_stop_loss_fired``, ``drift``,
+        ``critical_system_error``.
     """
     registry = RuleRegistry()
     registry.register(OrderFillFullRule())
@@ -38,5 +40,6 @@ def load_default_registry() -> RuleRegistry:
     registry.register(OrderRejectedRule())
     registry.register(OrderUnknownRule())
     registry.register(PositionStopLossFiredRule())
+    registry.register(PortfolioDriftRule())
     registry.register(CriticalSystemErrorRule())
     return registry

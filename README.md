@@ -532,7 +532,8 @@ right process. The optional `postgres` service is gated behind the
   traffic. `command: ["egress"]`, `cap_add: NET_ADMIN`, kernel module bind.
 - `snapper-notify` — alert-rule evaluator + iOS Push Foundation sidecar
   (`command: ["notify"]`). Subscribes to the rule registry's ZMQ
-  prefixes (heartbeats, order events), evaluates the alert rules,
+  prefixes (heartbeats, order events, committed portfolio-drift lifecycle),
+  evaluates the alert rules,
   records `alert_events`, republishes `alerts.{user}.{type}` for the
   WebSocket bridge, and fans deliveries out to APNs using the
   `apns_*` settings. Without this container the ENTIRE alert chain is

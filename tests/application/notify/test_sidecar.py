@@ -1,7 +1,8 @@
 """Tests for ``snapper.application.notify.sidecar.NotifySidecar`` rule-dispatch flow.
 
 Exercises the rule-dispatch pipeline: receive a domain event (orders.events.* /
-plans.decisions.* / system.heartbeats.*) -> ``_dispatch`` runs rules ->
+plans.decisions.* / system.heartbeats.* / bus.portfolio_drift_episode) ->
+``_dispatch`` runs rules ->
 each produced ``AlertEventInsertRow`` is persisted + routed via the
 4-level precedence cascade + fanned out to matching devices via APNs.
 Uses in-memory SQLite via the real repository so SCD2 semantics get

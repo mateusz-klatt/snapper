@@ -1172,7 +1172,8 @@ notify`): a bare CLI (no `PROCESS_AUTOSTART_PROFILE`, healthcheck
 disabled, SQLAlchemy pool clamped to `DB_POOL_SIZE=2` /
 `DB_MAX_OVERFLOW=3`). It subscribes to the source event topics its
 notify rules watch (`orders.events.` / `plans.decisions.` /
-`system.heartbeats.` for the default rule set, plus `admin.scope_revoked`
+`system.heartbeats.` / `bus.portfolio_drift_episode` for the default rule set,
+plus `admin.scope_revoked`
 / `admin.user_deactivated`), evaluates each rule to mint an
 `AlertEventData`, persists it SCD2 (`alert_events` plus one queued
 `alert_deliveries` row per active device), publishes an `AlertEventData`

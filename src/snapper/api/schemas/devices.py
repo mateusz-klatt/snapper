@@ -129,7 +129,7 @@ class DeviceAlertPrefBody(StrictBody):
         alert_type: One of the enumerated alert types
             (``order_fill_full``, ``order_rejected``,
             ``order_unknown``, ``position_stop_loss_fired``,
-            ``margin_warning``, ``critical_system_error``).
+            ``margin_warning``, ``critical_system_error``, ``drift``).
         operator_public_id: Optional operator scope.
         wallet_public_id: Optional wallet scope.
         enabled: Whether to deliver this alert_type at this scope.
@@ -152,6 +152,7 @@ class DeviceAlertPrefBody(StrictBody):
         "position_stop_loss_fired",
         "margin_warning",
         "critical_system_error",
+        "drift",
     ]
     operator_public_id: str | None = None
     wallet_public_id: str | None = None
@@ -269,7 +270,7 @@ class UserAlertDefaultBody(StrictBody):
         alert_type: One of the enumerated alert types
             (``order_fill_full``, ``order_rejected``,
             ``order_unknown``, ``position_stop_loss_fired``,
-            ``margin_warning``, ``critical_system_error``).
+            ``margin_warning``, ``critical_system_error``, ``drift``).
         enabled: Whether to deliver this alert_type at all when no
             device override matches.
         min_priority: Minimum priority required to deliver
@@ -283,6 +284,7 @@ class UserAlertDefaultBody(StrictBody):
         "position_stop_loss_fired",
         "margin_warning",
         "critical_system_error",
+        "drift",
     ]
     enabled: bool = True
     min_priority: Literal["low", "medium", "high"] = "medium"

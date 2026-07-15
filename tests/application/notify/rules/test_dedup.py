@@ -1,4 +1,4 @@
-"""Tests for ``snapper.application.notify.rules.dedup.check_dedup_window``."""
+"""Tests for notify-rule dedup helpers."""
 
 from datetime import UTC
 from datetime import datetime
@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from snapper.application.notify.rules.dedup import check_dedup_since
 from snapper.application.notify.rules.dedup import check_dedup_window
 
 
@@ -64,6 +65,46 @@ class TestCheckDedupWindow:
             dedup_key="order_fill_full.coid-1",
             window_seconds=60,
             now=_ts(0),
+        )
+
+        assert hit is False
+
+
+class TestCheckDedupSince:
+    """Covers lifecycle-lower-bound deduplication."""
+
+    @pytest.mark.asyncio
+    async def test_existing_row_returns_true_with_exact_lower_bound(self) -> None:
+        """The caller-provided lifecycle timestamp reaches the indexed query."""
+        repo = MagicMock()
+        repo.list_alert_events_with_dedup_key = AsyncMock(return_value=[{"public_id": "pid"}])
+        since = _ts(0)
+
+        hit = await check_dedup_since(
+            repo=repo,
+            user_public_id="user-1",
+            dedup_key="drift.episode-1",
+            since=since,
+        )
+
+        assert hit is True
+        repo.list_alert_events_with_dedup_key.assert_awaited_once_with(
+            user_public_id="user-1",
+            dedup_key="drift.episode-1",
+            since=since,
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_row_returns_false(self) -> None:
+        """An empty indexed query allows the lifecycle notice."""
+        repo = MagicMock()
+        repo.list_alert_events_with_dedup_key = AsyncMock(return_value=[])
+
+        hit = await check_dedup_since(
+            repo=repo,
+            user_public_id="user-1",
+            dedup_key="drift.resolved.episode-1",
+            since=_ts(0),
         )
 
         assert hit is False

@@ -64,6 +64,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import OrderRow
+from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import RecordVenueEventParams
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueAccountAttemptRow
@@ -102,6 +103,7 @@ from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import OrderReplaceData
 from snapper.messaging.schemas.data import OrderRequestData
+from snapper.messaging.schemas.data import PortfolioDriftEpisodeEventData
 from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import SymbolAliasUpdateData
 from snapper.messaging.schemas.messages import MessageParseError
@@ -113,6 +115,9 @@ from snapper.messaging.topics.builders import parse_order_command_topic
 from snapper.utils.logging import set_log_context
 
 _EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
+
+_PORTFOLIO_DRIFT_EPISODE_TOPIC = "bus.portfolio_drift_episode"
+"""Internal notify-only topic for committed drift lifecycle transitions."""
 
 _AMBIGUOUS_VERIFY_TIMEOUT_S = 15.0
 """Bound on a single venue lookup during ambiguous-submit verification.
@@ -627,6 +632,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._portfolio_reconciliation_tasks: dict[
             _PortfolioReconciliationKey, asyncio.Task[None]
         ] = {}
+        self._portfolio_drift_notification_tasks: set[asyncio.Task[None]] = set()
         self._portfolio_reconciliation_dispatch_open = False
         self._portfolio_reconciliation_failure_count = 0
         self._last_portfolio_reconciliation_error = ""
@@ -3238,14 +3244,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._last_portfolio_reconciliation_error = str(exc) or exc.__class__.__name__
 
     async def _close_and_drain_portfolio_reconciliation(self) -> None:
-        """Close observer dispatch, cancel every owned task, and drain all completions."""
+        """Close observer dispatch and drain reconciliation plus notify work."""
         self._portfolio_reconciliation_dispatch_open = False
-        tasks = tuple(self._portfolio_reconciliation_tasks.values())
+        reconciliation_tasks = tuple(self._portfolio_reconciliation_tasks.values())
+        notification_tasks = tuple(self._portfolio_drift_notification_tasks)
+        tasks = reconciliation_tasks + notification_tasks
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._portfolio_reconciliation_tasks.clear()
+        self._portfolio_drift_notification_tasks.clear()
 
     def _portfolio_reconciliation_task_done(
         self,
@@ -3312,6 +3321,115 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"portfolio reconciliation scheduling failed: {exc}"
             )
 
+    def _schedule_portfolio_drift_notification(
+        self,
+        evaluation: PortfolioReconciliationEvaluationRow,
+    ) -> None:
+        """Start isolated post-commit drift lifecycle publication.
+
+        Args:
+            evaluation: The exact evaluation whose reconciliation transaction
+                has already committed.
+        """
+        runner = self._publish_portfolio_drift_notification(evaluation)
+        try:
+            task = asyncio.create_task(
+                runner,
+                name=(
+                    "portfolio-drift-notify:"
+                    f"{evaluation['wallet_public_id']}:{evaluation['exchange']}:"
+                    f"{evaluation['session_id']}:{evaluation['sequence_id']}"
+                ),
+            )
+        except Exception as exc:
+            runner.close()
+            logger.warning(
+                "portfolio drift notification scheduling failed: {}",
+                exc,
+            )
+            return
+        self._portfolio_drift_notification_tasks.add(task)
+        task.add_done_callback(self._portfolio_drift_notification_tasks.discard)
+
+    async def _publish_portfolio_drift_notification(
+        self,
+        evaluation: PortfolioReconciliationEvaluationRow,
+    ) -> None:
+        """Publish one committed open or resolved transition without blocking.
+
+        The exact evaluation tuple is looked up only after the reconciliation
+        transaction commits. Missing, continued-open, and non-drift results are
+        silent. Every lookup, schema, and non-blocking ZMQ failure is contained
+        here so notification delivery can never alter reconciliation, order,
+        position, or trading state.
+
+        Args:
+            evaluation: The committed reconciliation evaluation provenance.
+        """
+        try:
+            repository = self._require_sqlalchemy_repository()
+            transition = await repository.get_portfolio_drift_episode_transition(
+                evaluation["wallet_public_id"],
+                evaluation["exchange"],
+                evaluation["mode"],
+                evaluation["session_id"],
+                evaluation["sequence_id"],
+            )
+            if transition is None or transition["mode"] != "live":
+                return
+            lifecycle: Literal["opened", "resolved"]
+            closed_at: datetime | None
+            resolution_reason: Literal["matched"] | None
+            if transition["status"] == "open":
+                if (
+                    transition["latest_full_mismatch_count"] != 3
+                    or transition["trigger_observation_id"] != transition["last_observation_id"]
+                ):
+                    return
+                lifecycle = "opened"
+                closed_at = None
+                resolution_reason = None
+            elif transition["status"] == "resolved":
+                if transition["closed_at"] is None or transition["resolution_reason"] != "matched":
+                    return
+                lifecycle = "resolved"
+                closed_at = transition["closed_at"]
+                resolution_reason = "matched"
+            else:
+                return
+            publisher = self.msg_publisher
+            if publisher is None:
+                return
+            now = datetime.now(UTC)
+            tracker = publisher.tracker
+            event = PortfolioDriftEpisodeEventData(
+                sequence_id=tracker.next_sequence(_PORTFOLIO_DRIFT_EPISODE_TOPIC),
+                public_id=str(uuid7()),
+                timestamp=now,
+                session_id=tracker.session_id,
+                wallet_public_id=transition["wallet_public_id"],
+                exchange=transition["exchange"],
+                mode="live",
+                episode_public_id=transition["public_id"],
+                lifecycle=lifecycle,
+                opened_at=transition["opened_at"],
+                closed_at=closed_at,
+                mismatch_count=transition["latest_full_mismatch_count"],
+                resolution_reason=resolution_reason,
+            )
+            await publisher.send(
+                _PORTFOLIO_DRIFT_EPISODE_TOPIC,
+                event,
+                flags=zmq.NOBLOCK,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "portfolio drift notification failed after reconciliation commit: {}",
+                exc,
+            )
+
     async def _run_portfolio_reconciliation(self, work: _PortfolioReconciliationWork) -> None:
         """Evaluate and persist one exact account-state version within a hard bound."""
         repository = self._require_sqlalchemy_repository()
@@ -3353,6 +3471,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     evaluated_at=evaluated_at,
                 )
                 await repository.record_portfolio_reconciliation(evaluation)
+                self._schedule_portfolio_drift_notification(evaluation)
         except asyncio.CancelledError:
             raise
         except TimeoutError as exc:

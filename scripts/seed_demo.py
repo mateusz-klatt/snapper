@@ -342,9 +342,9 @@ def _seed_demo_alerts_for_user(
 ) -> int:
     """Insert one realistic alert per ``AlertType`` for the given user.
 
-    Six rows total (one per ``AlertType`` literal): order_fill_full,
+    Seven rows total (one per ``AlertType`` literal): order_fill_full,
     order_rejected, order_unknown, position_stop_loss_fired,
-    margin_warning, critical_system_error. Spaced by 30 minutes so
+    margin_warning, critical_system_error, drift. Spaced by 30 minutes so
     the iOS Alerts tab renders chronologically. Returns the count
     inserted.
     """
@@ -421,6 +421,22 @@ def _seed_demo_alerts_for_user(
             "Trader heartbeat stale",
             "ZMQ trader has not produced a heartbeat in 60 seconds",
             {"component": "trader", "stale_seconds": 60},
+        ),
+        (
+            "drift",
+            "high",
+            True,
+            "Portfolio drift detected",
+            "LIVE kraken_futures portfolio drift detected after 3 consecutive mismatches",
+            {
+                "episode_public_id": str(uuid7()),
+                "lifecycle": "opened",
+                "wallet_public_id": wallet_public_id,
+                "operator_public_id": operator_public_id,
+                "exchange": "kraken_futures",
+                "mode": "live",
+                "mismatch_count": 3,
+            },
         ),
     ]
     for offset, (alert_type, priority, critical, title, body, payload) in enumerate(alerts):

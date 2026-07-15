@@ -28,7 +28,8 @@ class AlertRule(ABC):
         alert_type: One of the enumerated ``AlertType`` values —
             ``"order_fill_full"`` / ``"order_rejected"`` /
             ``"order_unknown"`` / ``"position_stop_loss_fired"`` /
-            ``"critical_system_error"`` / ``"margin_warning"``.
+            ``"critical_system_error"`` / ``"margin_warning"`` /
+            ``"drift"``.
         subscribe_topic_prefixes: Tuple of ZMQ topic prefix strings
             the sidecar subscribes on behalf of this rule. Tuple
             (rather than a single string) supports rules that need
@@ -43,8 +44,8 @@ class AlertRule(ABC):
             thread.
         suppression_window_seconds: Dedup window checked against
             ``alert_events.dedup_key`` before emitting. ``0`` opts out
-            of pre-check; the non-unique index on ``alert_events``
-            provides defence in depth.
+            of the standard fixed-window check; rules with durable
+            lifecycle identities may perform an unbounded keyed check.
     """
 
     alert_type: str

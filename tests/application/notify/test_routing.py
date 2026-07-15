@@ -258,6 +258,35 @@ class TestPolicyAllows:
             is True
         )
 
+    def test_drift_page_bypasses_matching_wallet_quiet_hours(self) -> None:
+        """A safety-critical drift page reaches its owner during quiet hours."""
+        alert = _alert(
+            alert_type="drift",
+            priority="high",
+            operator="operator-1",
+            wallet="wallet-1",
+            safety_critical=True,
+        )
+        quiet = _pref(
+            alert_type="drift",
+            operator="operator-1",
+            wallet="wallet-1",
+            min_priority="high",
+            quiet_start=11 * 60,
+            quiet_end=13 * 60,
+        )
+
+        assert (
+            _policy_allows(
+                device=_device(),
+                alert=alert,
+                device_prefs=[quiet],
+                user_defaults=[],
+                now=_now(),
+            )
+            is True
+        )
+
     def test_falls_back_to_user_default_when_no_device_pref(self) -> None:
         """Covered by test body."""
         default = _user_default(enabled=True, min_priority="medium")

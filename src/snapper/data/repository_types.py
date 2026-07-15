@@ -576,6 +576,24 @@ class PortfolioDriftEpisodeRow(TypedDict):
     public_id: str
 
 
+class PortfolioDriftEpisodeTransitionRow(TypedDict):
+    """Portfolio-drift lifecycle version created by one exact evaluation."""
+
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    status: str
+    opened_at: datetime
+    closed_at: datetime | None
+    trigger_observation_id: int
+    last_observation_id: int
+    latest_full_mismatch_count: int
+    resolution_reason: str | None
+    public_id: str
+    session_id: str
+    sequence_id: int
+
+
 class PortfolioReconciliationReadContextRow(TypedDict):
     """Complete persisted context for one fail-closed reconciliation view."""
 

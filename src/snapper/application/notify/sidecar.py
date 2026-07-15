@@ -143,8 +143,7 @@ class NotifySidecar(RegisterableProcess):
                 BEFORE APNs fanout so web clients see updates in
                 <50ms; APNs round-trip is the slower path.
             registry: Alert rule registry — defaults to
-                ``load_default_registry()`` (the core rule set
-                + ``margin_warning``). Injected for tests that want a
+                ``load_default_registry()``. Injected for tests that want a
                 narrower rule set.
             scope_revalidator: Scope-revocation helper — defaults to
                 a fresh ``ScopeRevalidator`` seeded with the shared
@@ -175,8 +174,9 @@ class NotifySidecar(RegisterableProcess):
         """Run the sidecar main loop until ``stop()`` is signalled.
 
         Subscribes to every prefix the rule registry aggregates
-        (``orders.events.`` + ``plans.decisions.`` + ``system.heartbeats.``
-        for the default set), drains the outbox (crash recovery),
+        (``orders.events.`` + ``plans.decisions.`` + ``system.heartbeats.`` +
+        ``bus.portfolio_drift_episode`` for the default set), drains the
+        outbox (crash recovery),
         spawns the background retry loop, and consumes the receive loop
         until ``_stop_event`` is set. Each entry boundary mints one
         ``now`` timestamp (single timestamp per entry boundary)
@@ -808,7 +808,7 @@ def _build_apns_payload(event: AlertEventRow, *, user_language: str | None = Non
     payload budget.
 
     When ``user_language`` is non-null AND the event payload carries
-    ``title_loc_key``/``body_loc_key`` (emitted by every notify rule),
+    ``title_loc_key``/``body_loc_key`` (emitted by localized notify rules),
     the title/body are resolved through ``snapper.i18n.catalog.render``
     so the APNs push renders in the recipient's chosen language.
     Falls back to the EN ``event.title``/``event.body`` columns for
