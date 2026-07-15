@@ -18,6 +18,7 @@ from sqlalchemy import update
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import PortfolioDriftEpisode
 from snapper.data.models import PortfolioReconciliationMethodConfig
+from snapper.data.models import PortfolioReconciliationObservation
 from snapper.data.models import PortfolioReconciliationState
 from snapper.data.models import VenueAccountState
 from snapper.data.models import Wallet
@@ -451,6 +452,43 @@ async def test_unclassified_evaluation_rejects_existing_config(tmp_path: Path) -
         await repository.record_portfolio_reconciliation(
             _evaluation("unclassified", "incomplete", sequence_id=3)
         )
+
+
+async def test_stale_unclassified_evaluation_after_classification_drops_idempotently(
+    tmp_path: Path,
+) -> None:
+    """A pre-classification unclassified tuple that lost the race is dropped, not raised.
+
+    Given: an active real-method state at a newer sequence after the operator
+        classified the wallet,
+    When: a strictly older unclassified evaluation (produced before the config
+        existed) finally arrives out of order,
+    Then: it is ignored idempotently - the active state is untouched, nothing
+        enters storage, and no spurious config-conflict error is raised.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+    """
+    repository = await _make_repo(tmp_path, "stale-unclassified.db")
+    await _seed_wallet(repository)
+    await _configure(repository, "futures_position")
+    newer_id = await repository.record_portfolio_reconciliation(
+        _evaluation("futures_position", "incomplete", sequence_id=5)
+    )
+    before = await _active_state(repository)
+    stale_id = await repository.record_portfolio_reconciliation(
+        _evaluation("unclassified", "incomplete", sequence_id=4)
+    )
+    after = await _active_state(repository)
+    assert stale_id == newer_id == before.id == after.id
+    assert after.method == "futures_position"
+    assert after.sequence_id == 5
+    async with repository.session() as session:
+        observations = (
+            (await session.execute(select(PortfolioReconciliationObservation))).scalars().all()
+        )
+    assert len(observations) == 1
+    assert observations[0].method == "futures_position"
 
 
 @pytest.mark.parametrize(

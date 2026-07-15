@@ -13736,7 +13736,12 @@ class SQLAlchemyRepository(Repository):
         only a prior full-mismatch streak, minting one stable episode identity
         at the third consecutive mismatch and reusing it thereafter. Every
         non-full outcome retains the prior full detail and streak without
-        incrementing or resetting either.
+        incrementing or resetting either. A strictly older evaluation than the
+        active predecessor is a benign out-of-order delivery: it is ignored
+        idempotently right after the replay guard, before method or config
+        validation, so a stale pre-classification tuple that lost the race to a
+        newer real-method evaluation is dropped rather than raising a spurious
+        conflict.
 
         Args:
             s: Open transaction session owned by the caller.
@@ -13820,6 +13825,11 @@ class SQLAlchemyRepository(Repository):
             if existing is None:
                 raise RuntimeError("reconciliation observation has no active state")
             return int(existing.id)
+        if existing is not None:
+            incoming_key = (evaluation["session_id"], evaluation["sequence_id"])
+            current_key = (existing.session_id, existing.sequence_id)
+            if incoming_key < current_key:
+                return int(existing.id)
         self._validate_portfolio_reconciliation_evaluation_config(evaluation, config)
         self._validate_portfolio_reconciliation_method_transition(existing, evaluation, config)
         if evaluation["method"] == "spot_execution_replay" and evaluation["evaluation_status"] in (
@@ -13853,11 +13863,6 @@ class SQLAlchemyRepository(Repository):
                 or anchor.source_watermark > source_watermark
             ):
                 raise RuntimeError("spot reconciliation anchor lineage is invalid")
-        if existing is not None:
-            incoming_key = (evaluation["session_id"], evaluation["sequence_id"])
-            current_key = (existing.session_id, existing.sequence_id)
-            if incoming_key < current_key:
-                return int(existing.id)
         effective = evaluation["bus_time"]
         if existing is not None and existing.timestamp > effective:
             effective = existing.timestamp
