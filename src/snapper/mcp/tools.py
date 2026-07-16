@@ -1322,6 +1322,7 @@ async def _list_venue_account_states_tool(
             context["account_state"],
             now,
             build_portfolio_reconciliation_view(context, now),
+            duplicate_active_rows=context["duplicate_active_rows"],
         )
         for context in contexts
         if exchange is None or context["account_state"]["exchange"] == exchange
@@ -1942,9 +1943,12 @@ def register_mcp_tools(
         accessible wallets, each mapped through the fail-closed read
         surface (the EFFECTIVE status is derived over the stored value
         and ``is_authoritative`` is set only when it is exactly
-        ``observed``). Every row also carries an independently revalidated
-        ``reconciliation`` object. Requires ``READ_ACCOUNT_STATE``; AI
-        delegates do NOT hold it by default, so a delegate call returns
+        ``observed``). Loader-detected duplicate active rows corrupt the
+        whole account presentation, clear its account payloads, and also
+        corrupt its nested ``reconciliation`` object. Otherwise the nested
+        object is independently revalidated from its durable lineage.
+        Requires ``READ_ACCOUNT_STATE``; AI delegates do NOT hold it by
+        default, so a delegate call returns
         ``error_code="permission_denied"``.
 
         Args:

@@ -22,6 +22,9 @@ Errors:
   exists for the requested ``(exchange, wallet_public_id)`` pair. The
   executor process should fail fast at startup so the operator notices
   immediately.
+* ``ValueError`` from the repository is propagated when
+  ``wallet_public_id`` is not a parseable UUID. Valid UUID aliases are
+  canonicalized before lookup.
 * Decryption failures bubble up unwrapped from
   ``SettingsEncryptionService.decrypt`` so the cause (wrong master
   password, key rotation, payload corruption) surfaces in the log.
@@ -100,8 +103,9 @@ class CredentialResolver:
         Args:
             exchange: Exchange identifier (case-insensitive — normalized
                 to lowercase before the DB lookup).
-            wallet_public_id: Public ID of the wallet whose credentials
-                to fetch.
+            wallet_public_id: UUID of the wallet whose credentials to fetch.
+                Uppercase and hyphenless aliases are canonicalized by the
+                repository before lookup.
             as_of: Optional bus time for the temporal query. Defaults to
                 ``datetime.now(UTC)`` which is the right answer at
                 process startup; tests pass an explicit timestamp.
@@ -114,6 +118,7 @@ class CredentialResolver:
 
         Raises:
             CredentialNotFoundError: No active credential row matches.
+            ValueError: The wallet identity is not a parseable UUID.
         """
         bus_time = as_of or datetime.now(UTC)
         normalized_exchange = exchange.lower()

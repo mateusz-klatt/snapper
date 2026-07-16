@@ -523,6 +523,7 @@ class PortfolioReconciliationMethodConfigRow(TypedDict):
     exchange: str
     mode: str
     method: str
+    classified_after_observation_id: int | None
     public_id: str
     timestamp: datetime
     session_id: str
@@ -595,9 +596,16 @@ class PortfolioDriftEpisodeTransitionRow(TypedDict):
 
 
 class PortfolioReconciliationReadContextRow(TypedDict):
-    """Complete persisted context for one fail-closed reconciliation view."""
+    """Complete context for one fail-closed account and reconciliation view.
+
+    ``duplicate_active_rows`` invalidates the whole account presentation,
+    including its nested reconciliation view, because no selected active row
+    can be treated as authoritative when persisted identity truth is
+    ambiguous.
+    """
 
     account_state: VenueAccountStateRow
+    duplicate_active_rows: bool
     state: PortfolioReconciliationStateRow | None
     observations: list[PortfolioReconciliationLineageObservationRow]
     config: PortfolioReconciliationMethodConfigRow | None

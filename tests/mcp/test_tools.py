@@ -1722,10 +1722,13 @@ def _venue_account_state_row(
 
 def _reconciliation_read_context(
     account_state: VenueAccountStateRow,
+    *,
+    duplicate_active_rows: bool = False,
 ) -> PortfolioReconciliationReadContextRow:
     """Build a no-state reconciliation context around one venue account."""
     return PortfolioReconciliationReadContextRow(
         account_state=account_state,
+        duplicate_active_rows=duplicate_active_rows,
         state=None,
         observations=[],
         config=None,
@@ -1943,6 +1946,39 @@ class TestListVenueAccountStatesTool:
         assert state["reconciliation"]["is_authoritative"] is False
         repo.get_portfolio_reconciliation_read_contexts.assert_awaited_once_with(["wallet-1"])
         repo.get_venue_account_states.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_active_rows_corrupt_whole_account_state(self) -> None:
+        """Loader-detected multiplicity fails closed identically on MCP.
+
+        Given: A coherent observed account row inside an ambiguous active
+            read context.
+        When: The account-state MCP tool renders that context.
+        Then: Both account and reconciliation truth are corrupt and
+            non-authoritative, with account payloads cleared.
+        """
+        row = _venue_account_state_row()
+        repo = self._build_repo([row])
+        repo.get_portfolio_reconciliation_read_contexts = AsyncMock(
+            return_value=[
+                _reconciliation_read_context(
+                    row,
+                    duplicate_active_rows=True,
+                )
+            ]
+        )
+        server = _build_server(repository=repo, claims=_make_claims(role=UserRole.OPERATOR))
+
+        result = await server._tool_manager.call_tool("list_venue_account_states", {})
+
+        envelope = _decode_envelope(result)
+        state = envelope["details"]["account_states"][0]
+        assert state["effective_status"] == "corrupt"
+        assert state["is_authoritative"] is False
+        assert state["balances"] is None
+        assert state["open_positions"] is None
+        assert state["reconciliation"]["effective_status"] == "corrupt"
+        assert state["reconciliation"]["is_authoritative"] is False
 
     @pytest.mark.asyncio
     async def test_wallet_outside_scope_returns_account_state_not_found(self) -> None:

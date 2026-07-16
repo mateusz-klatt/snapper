@@ -40,6 +40,7 @@ from snapper.data.repository_types import SpotReconciliationAnchorRow
 
 _WALLET = "00000000-0000-7000-8000-000000000101"
 _OTHER_WALLET = "00000000-0000-7000-8000-000000000102"
+_ALPHA_WALLET = "abcdefab-cdef-7abc-8def-abcdefabcdef"
 _ACCOUNT_STATE = "00000000-0000-7000-8000-000000000201"
 _ANCHOR = "00000000-0000-7000-8000-000000000301"
 _EPISODE = "00000000-0000-7000-8000-000000000401"
@@ -1489,6 +1490,98 @@ async def test_evaluation_existence_lookup_detects_only_committed_key(tmp_path: 
         _SESSION,
         2,
     )
+
+
+@pytest.mark.parametrize(
+    "wallet_alias",
+    [_ALPHA_WALLET.upper(), _ALPHA_WALLET.replace("-", "")],
+)
+async def test_wallet_filtered_reconciliation_reads_canonicalize_aliases(
+    tmp_path: Path,
+    wallet_alias: str,
+) -> None:
+    """State, idempotency, and transition reads share UUID normalization.
+
+    Given: Canonically stored reconciliation history for an alphabetic wallet.
+    When: Each wallet-filtered read receives an uppercase or hyphenless alias.
+    Then: Every read resolves the canonical rows on SQLite.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        wallet_alias: Alternate spelling of the canonical wallet UUID.
+    """
+    repo = await _make_repo(tmp_path, "canonical-read-aliases.db")
+    await _insert_observation(
+        repo,
+        {
+            "wallet_public_id": _ALPHA_WALLET,
+            "public_id": "00000000-0000-7000-8000-000000000701",
+        },
+    )
+    await _insert_state(
+        repo,
+        {
+            "wallet_public_id": _ALPHA_WALLET,
+            "public_id": "00000000-0000-7000-8000-000000000702",
+        },
+    )
+    await _insert_episode(
+        repo,
+        {
+            "wallet_public_id": _ALPHA_WALLET,
+            "public_id": _EPISODE,
+            "session_id": _SESSION,
+            "sequence_id": 1,
+        },
+    )
+
+    states = await repo.get_portfolio_reconciliation_states([wallet_alias])
+    exists_for_alias = await repo.has_portfolio_reconciliation_evaluation(
+        wallet_alias,
+        "kraken_futures",
+        "live",
+        _SESSION,
+        1,
+    )
+    transition = await repo.get_portfolio_drift_episode_transition(
+        wallet_alias,
+        "kraken_futures",
+        "live",
+        _SESSION,
+        1,
+    )
+
+    assert len(states) == 1
+    assert states[0]["wallet_public_id"] == _ALPHA_WALLET
+    assert exists_for_alias is True
+    assert transition is not None
+    assert transition["wallet_public_id"] == _ALPHA_WALLET
+
+
+async def test_wallet_filtered_reconciliation_reads_reject_malformed_uuid(
+    tmp_path: Path,
+) -> None:
+    """Every wallet-filtered reconciliation read rejects malformed UUID text."""
+    repo = await _make_repo(tmp_path, "malformed-read-wallet.db")
+
+    with pytest.raises(ValueError, match="reconciliation wallet identity is invalid"):
+        await repo.get_portfolio_reconciliation_states(["not-a-wallet-uuid"])
+    with pytest.raises(ValueError, match="reconciliation wallet identity is invalid"):
+        await repo.has_portfolio_reconciliation_evaluation(
+            "not-a-wallet-uuid",
+            "kraken_futures",
+            "live",
+            _SESSION,
+            1,
+        )
+    with pytest.raises(ValueError, match="reconciliation wallet identity is invalid"):
+        await repo.get_portfolio_drift_episode_transition(
+            "not-a-wallet-uuid",
+            "kraken_futures",
+            "live",
+            _SESSION,
+            1,
+        )
 
 
 @pytest.mark.parametrize("episode_status", [None, "resolved"])

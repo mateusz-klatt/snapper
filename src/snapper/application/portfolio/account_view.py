@@ -4,11 +4,12 @@ Maps a stored ``venue_account_states`` row into its fail-closed API response:
 it derives the EFFECTIVE status (staleness/clock over the raw stored value),
 STRICTLY revalidates the stored JSON payloads at read time (rejecting non-finite
 numbers, wrong types, empty/absent currency codes and unknown position sides —
-not just malformed JSON), and independently re-checks the observed-row
-coherence invariants the DB CHECKs enforce. Any violation marks the whole state
-``corrupt`` and clears the balances/positions, so a corrupt, tampered, or stale
-row can never be served as authoritative truth. Shared by the REST and MCP read
-surfaces so both label truth identically.
+not just malformed JSON), independently re-checks the observed-row coherence
+invariants the DB CHECKs enforce, and honors loader-detected active-row
+multiplicity. A validation failure or ambiguous active identity marks the whole
+state ``corrupt`` and clears the balances/positions; stale and future-clock rows
+also remain non-authoritative. Shared by the REST and MCP read surfaces so both
+label truth identically.
 """
 
 import json
@@ -29,8 +30,10 @@ from snapper.messaging.schemas.data import AccountPositionEntry
 from snapper.messaging.schemas.data import PortfolioAccountState
 
 EFFECTIVE_CORRUPT = "corrupt"
-"""A stored payload failed read-time revalidation, or an observed row violated
-its coherence invariants — never authoritative."""
+"""A row failed validation or belongs to an ambiguous active identity.
+
+The resulting account presentation is never authoritative.
+"""
 
 _PAYLOAD_NOT_A_LIST_MSG = "account payload is not a JSON list"
 _PAYLOAD_ENTRY_NOT_OBJECT_MSG = "account payload entry is not a JSON object"
@@ -256,26 +259,31 @@ def build_portfolio_account_state(
     row: VenueAccountStateRow,
     now: datetime,
     reconciliation: PortfolioReconciliationView | None = None,
+    *,
+    duplicate_active_rows: bool = False,
 ) -> PortfolioAccountState:
     """Map a stored account-state row to its fail-closed read response.
 
     Derives the EFFECTIVE status (stale/clock_error over the stored value),
     strictly revalidates the stored JSON payloads, and re-checks the
-    observed-row coherence invariants; a payload that fails to parse OR a row
-    that violates coherence marks the whole state ``corrupt`` and clears the
-    balances/positions. ``is_authoritative`` is True only when the effective
-    status is exactly ``observed``.
+    observed-row coherence invariants; a payload that fails to parse, a row
+    that violates coherence, OR loader-detected active-row multiplicity marks
+    the whole state ``corrupt`` and clears the balances/positions.
+    ``is_authoritative`` is True only when the effective status is exactly
+    ``observed``.
 
     Args:
         row: The active ``venue_account_states`` row.
         now: The read instant (for staleness/clock derivation).
         reconciliation: Revalidated reconciliation truth, or None when no
             reconciliation state is available to the caller.
+        duplicate_active_rows: Whether the loader found ambiguous active
+            account or reconciliation rows for this account identity.
 
     Returns:
         The mapped account-state response item.
     """
-    corrupt = not _row_is_coherent(row)
+    corrupt = duplicate_active_rows or not _row_is_coherent(row)
     balances: list[AccountBalanceEntry] | None = None
     positions: list[AccountPositionEntry] | None = None
     if row["balances_json"] is not None:

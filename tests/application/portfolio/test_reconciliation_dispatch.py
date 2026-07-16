@@ -111,6 +111,7 @@ def _config(
         "exchange": exchange,
         "mode": "live",
         "method": method,
+        "classified_after_observation_id": None,
         "public_id": _CONFIG,
         "timestamp": _NOW - timedelta(minutes=2),
         "session_id": _SESSION,

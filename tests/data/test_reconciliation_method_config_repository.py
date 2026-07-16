@@ -24,6 +24,7 @@ from snapper.data.models import VenueAccountState
 from snapper.data.models import Wallet
 from snapper.data.repository import ReconciliationMethodImmutableError
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import _canonicalize_reconciliation_wallet_public_id
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 
 _NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
@@ -31,6 +32,26 @@ _WALLET = "00000000-0000-7000-8000-000000000101"
 _ACCOUNT = "00000000-0000-7000-8000-000000000201"
 _SESSION = "00000000-0000-7000-8000-000000000301"
 _EPISODE = "00000000-0000-7000-8000-000000000401"
+_ALPHA_WALLET = "abcdefab-cdef-7abc-8def-abcdefabcdef"
+
+
+@pytest.mark.parametrize(
+    "wallet_public_id",
+    [
+        _ALPHA_WALLET,
+        _ALPHA_WALLET.upper(),
+        _ALPHA_WALLET.replace("-", ""),
+    ],
+)
+def test_reconciliation_wallet_public_id_is_canonicalized(wallet_public_id: str) -> None:
+    """Canonical, uppercase, and hyphenless UUID spellings converge."""
+    assert _canonicalize_reconciliation_wallet_public_id(wallet_public_id) == _ALPHA_WALLET
+
+
+def test_invalid_reconciliation_wallet_public_id_is_rejected() -> None:
+    """An unparseable reconciliation wallet identity raises ValueError."""
+    with pytest.raises(ValueError, match="reconciliation wallet identity is invalid"):
+        _canonicalize_reconciliation_wallet_public_id("not-a-wallet-uuid")
 
 
 async def _make_repo(tmp_path: Path, name: str) -> SQLAlchemyRepository:
@@ -40,7 +61,10 @@ async def _make_repo(tmp_path: Path, name: str) -> SQLAlchemyRepository:
     return repository
 
 
-async def _seed_wallet(repository: SQLAlchemyRepository) -> None:
+async def _seed_wallet(
+    repository: SQLAlchemyRepository,
+    wallet_public_id: str = _WALLET,
+) -> None:
     """Insert the active live wallet required by both locked writers."""
     async with repository.session() as session:
         session.add(
@@ -48,7 +72,7 @@ async def _seed_wallet(repository: SQLAlchemyRepository) -> None:
                 label="s4a-live-wallet",
                 description=None,
                 is_paper=False,
-                public_id=_WALLET,
+                public_id=wallet_public_id,
                 session_id=_SESSION,
                 sequence_id=1,
                 timestamp=_NOW - timedelta(hours=1),
@@ -56,6 +80,63 @@ async def _seed_wallet(repository: SQLAlchemyRepository) -> None:
             )
         )
         await session.commit()
+
+
+@pytest.mark.parametrize(
+    "wallet_alias",
+    [_ALPHA_WALLET.upper(), _ALPHA_WALLET.replace("-", "")],
+)
+async def test_active_config_read_canonicalizes_wallet_aliases(
+    tmp_path: Path,
+    wallet_alias: str,
+) -> None:
+    """Alias-spelled reads find a canonically stored active method config.
+
+    Given: A canonical alphabetic wallet and active reconciliation method,
+    When: The config read uses its uppercase or hyphenless wallet spelling,
+    Then: The canonical active config is returned on SQLite.
+    """
+    repository = await _make_repo(tmp_path, "aliased-active-config.db")
+    await _seed_wallet(repository, _ALPHA_WALLET)
+    await repository.set_portfolio_reconciliation_method_config(
+        wallet_public_id=_ALPHA_WALLET,
+        exchange="kraken_futures",
+        mode="live",
+        method="futures_position",
+        session_id=_SESSION,
+        sequence_id=2,
+        timestamp=_NOW,
+    )
+
+    config = await repository.get_active_portfolio_reconciliation_method_config(
+        wallet_alias,
+        "kraken_futures",
+        "live",
+    )
+
+    assert config is not None
+    assert config["wallet_public_id"] == _ALPHA_WALLET
+
+
+async def test_active_config_read_rejects_malformed_wallet_identity(
+    tmp_path: Path,
+) -> None:
+    """A malformed config wallet identity raises the exact shared ValueError.
+
+    Given: A reconciliation method-config repository,
+    When: The active-config read receives a non-UUID wallet identity,
+    Then: The DAL rejects it with the writer-compatible canonicalization error.
+    """
+    repository = await _make_repo(tmp_path, "malformed-active-config.db")
+
+    with pytest.raises(ValueError) as exc_info:
+        await repository.get_active_portfolio_reconciliation_method_config(
+            "not-a-wallet-uuid",
+            "kraken_futures",
+            "live",
+        )
+
+    assert str(exc_info.value) == "reconciliation wallet identity is invalid"
 
 
 async def _seed_drift_episode(repository: SQLAlchemyRepository) -> None:
@@ -219,6 +300,127 @@ async def test_non_sqlite_reconciliation_write_skips_begin_immediate(
     ):
         await repository._begin_portfolio_reconciliation_write(session)
     session.execute.assert_not_awaited()
+
+
+async def test_classification_captures_active_unclassified_observation_id(
+    tmp_path: Path,
+) -> None:
+    """Classification durably names the active unclassified predecessor."""
+    repository = await _make_repo(tmp_path, "capture-unclassified-predecessor.db")
+    await _seed_wallet(repository)
+    await repository.record_portfolio_reconciliation(
+        _evaluation("unclassified", "incomplete", sequence_id=2)
+    )
+    predecessor = await _active_state(repository)
+    config = await repository.set_portfolio_reconciliation_method_config(
+        wallet_public_id=_WALLET,
+        exchange="kraken_futures",
+        mode="live",
+        method="futures_position",
+        session_id=_SESSION,
+        sequence_id=3,
+        timestamp=_NOW,
+    )
+    assert config["classified_after_observation_id"] == predecessor.current_observation_id
+    async with repository.session() as session:
+        stored = (
+            (
+                await session.execute(
+                    select(PortfolioReconciliationMethodConfig).where(
+                        PortfolioReconciliationMethodConfig.known_to == KNOWN_TO_MAX
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert stored.classified_after_observation_id == predecessor.current_observation_id
+
+
+async def test_classification_without_prior_state_captures_null(tmp_path: Path) -> None:
+    """A classification with no causal predecessor persists a null lineage id."""
+    repository = await _make_repo(tmp_path, "capture-without-state.db")
+    await _seed_wallet(repository)
+    config = await repository.set_portfolio_reconciliation_method_config(
+        wallet_public_id=_WALLET,
+        exchange="kraken_futures",
+        mode="live",
+        method="futures_position",
+        session_id=_SESSION,
+        sequence_id=2,
+        timestamp=_NOW,
+    )
+    active = await repository.get_active_portfolio_reconciliation_method_config(
+        _WALLET,
+        "kraken_futures",
+        "live",
+    )
+    assert config["classified_after_observation_id"] is None
+    assert active == config
+
+
+async def test_same_method_replay_does_not_refresh_captured_observation_id(
+    tmp_path: Path,
+) -> None:
+    """An idempotent re-PUT preserves the classification-time predecessor id."""
+    repository = await _make_repo(tmp_path, "capture-idempotent-replay.db")
+    await _seed_wallet(repository)
+    await repository.record_portfolio_reconciliation(
+        _evaluation("unclassified", "incomplete", sequence_id=2)
+    )
+    predecessor = await _active_state(repository)
+    first = await repository.set_portfolio_reconciliation_method_config(
+        wallet_public_id=_WALLET,
+        exchange="kraken_futures",
+        mode="live",
+        method="futures_position",
+        session_id=_SESSION,
+        sequence_id=3,
+        timestamp=_NOW,
+    )
+    await repository.record_portfolio_reconciliation(
+        _evaluation("futures_position", "incomplete", sequence_id=4)
+    )
+    successor = await _active_state(repository)
+    replay = await repository.set_portfolio_reconciliation_method_config(
+        wallet_public_id=_WALLET,
+        exchange="kraken_futures",
+        mode="live",
+        method="futures_position",
+        session_id=_SESSION,
+        sequence_id=99,
+        timestamp=_NOW + timedelta(minutes=1),
+    )
+    assert successor.current_observation_id != predecessor.current_observation_id
+    assert first["classified_after_observation_id"] == predecessor.current_observation_id
+    assert replay["classified_after_observation_id"] == predecessor.current_observation_id
+    assert replay["sequence_id"] == 3
+
+
+async def test_pre_history_method_remint_captures_null(tmp_path: Path) -> None:
+    """A history-free method correction re-mints with no predecessor lineage."""
+    repository = await _make_repo(tmp_path, "capture-pre-history-remint.db")
+    await _seed_wallet(repository)
+    first = await repository.set_portfolio_reconciliation_method_config(
+        wallet_public_id=_WALLET,
+        exchange="kraken_futures",
+        mode="live",
+        method="futures_position",
+        session_id=_SESSION,
+        sequence_id=2,
+        timestamp=_NOW - timedelta(minutes=1),
+    )
+    successor = await repository.set_portfolio_reconciliation_method_config(
+        wallet_public_id=_WALLET,
+        exchange="kraken_futures",
+        mode="live",
+        method="spot_execution_replay",
+        session_id=_SESSION,
+        sequence_id=3,
+        timestamp=_NOW,
+    )
+    assert first["classified_after_observation_id"] is None
+    assert successor["classified_after_observation_id"] is None
 
 
 async def test_first_config_lookup_and_same_method_replay_are_idempotent(

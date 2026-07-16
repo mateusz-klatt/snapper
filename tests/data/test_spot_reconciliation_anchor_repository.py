@@ -26,6 +26,7 @@ from snapper.data.repository_types import SpotReconciliationAnchorRow
 _T0 = datetime(2026, 7, 14, 8, 0, tzinfo=UTC)
 _WALLET = "00000000-0000-7000-8000-000000000101"
 _OTHER_WALLET = "00000000-0000-7000-8000-000000000102"
+_ALPHA_WALLET = "abcdefab-cdef-7abc-8def-abcdefabcdef"
 _ANCHOR = "00000000-0000-7000-8000-000000000301"
 _SESSION = "00000000-0000-7000-8000-000000000501"
 
@@ -159,6 +160,46 @@ async def test_anchor_exact_round_trip_idempotence_and_conflict(tmp_path: Path) 
     with pytest.raises(RuntimeError, match="conflicting spot reconciliation"):
         await repo.record_spot_reconciliation_anchor(conflicting)
     assert await repo.get_spot_reconciliation_anchor(_OTHER_WALLET, "kraken", "live") is None
+    await repo.engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "wallet_alias",
+    [_ALPHA_WALLET.upper(), _ALPHA_WALLET.replace("-", "")],
+)
+async def test_anchor_read_canonicalizes_wallet_aliases(
+    tmp_path: Path,
+    wallet_alias: str,
+) -> None:
+    """Alias-spelled reads find a canonically stored spot anchor.
+
+    Given: A spot anchor written under a canonical alphabetic wallet UUID,
+    When: The anchor read uses its uppercase or hyphenless spelling,
+    Then: SQLite returns the anchor under the canonical wallet identity.
+    """
+    repo = await _repo(tmp_path)
+    await repo.record_spot_reconciliation_anchor(_anchor(wallet_public_id=_ALPHA_WALLET))
+
+    stored = await repo.get_spot_reconciliation_anchor(wallet_alias, "kraken", "live")
+
+    assert stored is not None
+    assert stored["wallet_public_id"] == _ALPHA_WALLET
+    await repo.engine.dispose()
+
+
+async def test_anchor_read_rejects_malformed_wallet_identity(tmp_path: Path) -> None:
+    """A malformed anchor wallet identity raises the exact shared ValueError.
+
+    Given: A spot reconciliation anchor repository,
+    When: The anchor read receives a non-UUID wallet identity,
+    Then: The DAL rejects it with the writer-compatible canonicalization error.
+    """
+    repo = await _repo(tmp_path)
+
+    with pytest.raises(ValueError) as exc_info:
+        await repo.get_spot_reconciliation_anchor("not-a-wallet-uuid", "kraken", "live")
+
+    assert str(exc_info.value) == "reconciliation wallet identity is invalid"
     await repo.engine.dispose()
 
 

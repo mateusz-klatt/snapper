@@ -18,6 +18,7 @@ from snapper.data.repository import SQLAlchemyRepository
 _NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 _WALLET = "00000000-0000-7000-8000-000000000101"
 _OTHER_WALLET = "00000000-0000-7000-8000-000000000102"
+_ALPHA_WALLET = "abcdefab-cdef-7abc-8def-abcdefabcdef"
 _SESSION = "00000000-0000-7000-8000-000000000201"
 _INSTRUMENT = "00000000-0000-7000-8000-000000000301"
 _SYMBOL = "00000000-0000-7000-8000-000000000401"
@@ -267,6 +268,56 @@ async def test_trade_command_leverage_is_independent_durable_signal(tmp_path: Pa
         session.add(_trade_command(leverage=0))
         await session.commit()
     await _assert_target_only(repository)
+
+
+@pytest.mark.parametrize(
+    "wallet_alias",
+    [_ALPHA_WALLET.upper(), _ALPHA_WALLET.replace("-", "")],
+)
+async def test_spot_margin_signal_read_canonicalizes_wallet_aliases(
+    tmp_path: Path,
+    wallet_alias: str,
+) -> None:
+    """Uppercase and hyphenless aliases find canonical durable signals.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        wallet_alias: Alternate spelling of the canonical wallet UUID.
+    """
+    repository = await _make_repo(tmp_path, "canonical-signal-wallet.db")
+    async with repository.session() as session:
+        session.add(
+            _trade_command(
+                leverage=1,
+                wallet_public_id=_ALPHA_WALLET,
+            )
+        )
+        await session.commit()
+
+    assert (
+        await repository.has_spot_margin_reconciliation_signal(
+            wallet_alias,
+            "kraken",
+            "live",
+            _NOW,
+        )
+        is True
+    )
+
+
+async def test_spot_margin_signal_read_rejects_malformed_wallet_uuid(
+    tmp_path: Path,
+) -> None:
+    """Malformed wallet text raises the shared stable ValueError."""
+    repository = await _make_repo(tmp_path, "malformed-signal-wallet.db")
+
+    with pytest.raises(ValueError, match="reconciliation wallet identity is invalid"):
+        await repository.has_spot_margin_reconciliation_signal(
+            "not-a-wallet-uuid",
+            "kraken",
+            "live",
+            _NOW,
+        )
 
 
 async def test_order_leverage_uses_instrument_exchange_at_order_time(tmp_path: Path) -> None:

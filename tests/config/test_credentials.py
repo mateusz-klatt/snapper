@@ -27,6 +27,8 @@ from snapper.data.models import WalletCredential
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 
+_CANONICAL_WALLET = "abcdefab-cdef-7abc-8def-abcdefabcdef"
+
 
 @pytest.fixture
 async def repo(tmp_path: Path) -> SQLAlchemyRepository:
@@ -185,6 +187,37 @@ class TestCredentialResolverSuccess:
         )
         assert creds == {"api_key": "k", "api_secret": "s"}
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "wallet_alias",
+        [
+            _CANONICAL_WALLET.upper(),
+            _CANONICAL_WALLET.replace("-", ""),
+        ],
+    )
+    async def test_wallet_uuid_aliases_resolve_canonical_credential(
+        self,
+        repo: SQLAlchemyRepository,
+        encryption: SettingsEncryptionService,
+        wallet_alias: str,
+    ) -> None:
+        """Uppercase and hyphenless wallet UUIDs resolve the canonical row."""
+        await _seed_credential(
+            repo,
+            encryption,
+            wallet_public_id=_CANONICAL_WALLET,
+            exchange="kraken",
+            payload={"api_key": "alias-key", "api_secret": "alias-secret"},
+        )
+        resolver = CredentialResolver(repo, encryption_service=encryption)
+
+        credentials = await resolver.get_credentials(
+            exchange="kraken",
+            wallet_public_id=wallet_alias,
+        )
+
+        assert credentials == {"api_key": "alias-key", "api_secret": "alias-secret"}
+
 
 class TestCredentialResolverErrors:
     """Failure-path tests."""
@@ -211,6 +244,21 @@ class TestCredentialResolverErrors:
             )
         assert excinfo.value.exchange == "kraken"
         assert excinfo.value.wallet_public_id == "00000000-0000-7000-8000-0000000000ff"
+
+    @pytest.mark.asyncio
+    async def test_malformed_wallet_uuid_propagates_value_error(
+        self,
+        repo: SQLAlchemyRepository,
+        encryption: SettingsEncryptionService,
+    ) -> None:
+        """An unparseable wallet UUID remains a repository ValueError."""
+        resolver = CredentialResolver(repo, encryption_service=encryption)
+
+        with pytest.raises(ValueError, match="reconciliation wallet identity is invalid"):
+            await resolver.get_credentials(
+                exchange="kraken",
+                wallet_public_id="not-a-wallet-uuid",
+            )
 
     @pytest.mark.asyncio
     async def test_default_encryption_service_falls_back_to_singleton(

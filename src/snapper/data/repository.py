@@ -66,6 +66,7 @@ from typing import Final
 from typing import Protocol
 from typing import Unpack
 from typing import cast
+from uuid import UUID
 from uuid import uuid7
 
 from loguru import logger
@@ -565,6 +566,16 @@ _KRAKEN_EQUITIES_EXCHANGE: Final[str] = "kraken_equities"
 _PORTFOLIO_REAL_RECONCILIATION_METHODS: Final[frozenset[str]] = frozenset(
     {"futures_position", "spot_execution_replay", "margin_ledger_replay"}
 )
+
+
+def _canonicalize_reconciliation_wallet_public_id(wallet_public_id: str) -> str:
+    """Render one portfolio or credential wallet UUID in canonical form."""
+    try:
+        return str(UUID(wallet_public_id))
+    except ValueError as exc:
+        raise ValueError("reconciliation wallet identity is invalid") from exc
+
+
 _CANDLE_ID_CACHE_LOOKBACK: Final[timedelta] = timedelta(days=2)
 """How far back ``get_latest_candle_ids`` looks for the newest candle per
 ``(instrument, timeframe)`` when warming the publisher's startup cache.
@@ -1848,14 +1859,19 @@ class Repository(ABC):
     async def get_portfolio_reconciliation_read_contexts(
         self, wallet_public_ids: list[str] | None = None
     ) -> list[PortfolioReconciliationReadContextRow]:
-        """Return complete reconciliation read contexts in one batched load.
+        """Return complete account and reconciliation contexts in one load.
+
+        A context whose ``duplicate_active_rows`` marker is true must fail
+        closed across the whole account presentation and its nested
+        reconciliation view.
 
         Args:
             wallet_public_ids: Wallet identities to include, or ``None`` for
                 no wallet filter. An empty list yields an empty result.
 
         Returns:
-            One complete read-validation context per active account state.
+            One complete read-validation context per collapsed active account
+            identity.
         """
         ...
 
@@ -8117,13 +8133,13 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         venue_symbols: set[str],
     ) -> FuturesReconciliationBundle:
-        """Load projection, identities, and specs in one repeatable snapshot."""
-        if (
-            not wallet_public_id
-            or mode != "live"
-            or not exchange
-            or exchange.strip().lower() != exchange
-        ):
+        """Load projection, identities, and specs in one repeatable snapshot.
+
+        Alias UUID spellings are canonicalized before filtering. A malformed
+        wallet identity raises ``ValueError`` like reconciliation writers.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+        if mode != "live" or not exchange or exchange.strip().lower() != exchange:
             return self._futures_bundle_unavailable("invalid_futures_bundle_identity")
         if self.dialect_name not in ("postgresql", "sqlite"):
             return self._futures_bundle_unavailable("unsupported_futures_bundle_dialect")
@@ -8276,7 +8292,12 @@ class SQLAlchemyRepository(Repository):
         mode: str,
         as_of: datetime,
     ) -> bool:
-        """Check durable leverage, borrow, rollover, and non-cash-anchor evidence."""
+        """Check durable leverage, borrow, rollover, and non-cash-anchor evidence.
+
+        Alias UUID spellings are canonicalized before filtering; malformed
+        wallet identities raise ``ValueError`` like reconciliation writers.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
         order_instrument = aliased(Instrument)
         trade_command_signal = exists().where(
             TradeCommand.wallet_public_id == wallet_public_id,
@@ -12618,13 +12639,17 @@ class SQLAlchemyRepository(Repository):
         Returns:
             The new active state row id.
         """
+        canonical_attempt = attempt.copy()
+        canonical_attempt["wallet_public_id"] = _canonicalize_reconciliation_wallet_public_id(
+            attempt["wallet_public_id"]
+        )
         async with self.session() as s:
             try:
-                state_id = await self._write_venue_account_snapshot(s, attempt)
+                state_id = await self._write_venue_account_snapshot(s, canonical_attempt)
                 await s.commit()
             except IntegrityError:
                 await s.rollback()
-                state_id = await self._write_venue_account_snapshot(s, attempt)
+                state_id = await self._write_venue_account_snapshot(s, canonical_attempt)
                 await s.commit()
             return state_id
 
@@ -12686,11 +12711,25 @@ class SQLAlchemyRepository(Repository):
 
         Returns:
             Active account-state rows, ordered by exchange then mode.
+
+        Raises:
+            ValueError: If a supplied wallet identity is malformed. Alias UUID
+                spellings are canonicalized before filtering.
         """
+        canonical_wallet_public_ids = (
+            None
+            if wallet_public_ids is None
+            else [
+                _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+                for wallet_public_id in wallet_public_ids
+            ]
+        )
         async with self.session() as s:
             query = select(VenueAccountState).where(VenueAccountState.known_to == KNOWN_TO_MAX)
-            if wallet_public_ids is not None:
-                query = query.where(VenueAccountState.wallet_public_id.in_(wallet_public_ids))
+            if canonical_wallet_public_ids is not None:
+                query = query.where(
+                    VenueAccountState.wallet_public_id.in_(canonical_wallet_public_ids)
+                )
             query = query.order_by(VenueAccountState.exchange, VenueAccountState.mode)
             rows = (await s.execute(query)).scalars().all()
             return [self._venue_account_state_to_row(r) for r in rows]
@@ -12767,8 +12806,16 @@ class SQLAlchemyRepository(Repository):
 
     async def record_spot_reconciliation_anchor(self, anchor: SpotReconciliationAnchorRow) -> int:
         """Insert an immutable bootstrap anchor or accept its exact replay."""
-        self._validate_spot_anchor_balances_json(anchor["balances_json"])
-        identity = (anchor["wallet_public_id"], anchor["exchange"], anchor["mode"])
+        canonical_anchor = anchor.copy()
+        canonical_anchor["wallet_public_id"] = _canonicalize_reconciliation_wallet_public_id(
+            anchor["wallet_public_id"]
+        )
+        self._validate_spot_anchor_balances_json(canonical_anchor["balances_json"])
+        identity = (
+            canonical_anchor["wallet_public_id"],
+            canonical_anchor["exchange"],
+            canonical_anchor["mode"],
+        )
         lock = self._portfolio_reconciliation_locks.setdefault(identity, asyncio.Lock())
         async with lock, self.session() as s:
             existing = (
@@ -12778,9 +12825,10 @@ class SQLAlchemyRepository(Repository):
                         .where(
                             PortfolioSpotReconciliationAnchor.known_to == KNOWN_TO_MAX,
                             PortfolioSpotReconciliationAnchor.wallet_public_id
-                            == anchor["wallet_public_id"],
-                            PortfolioSpotReconciliationAnchor.exchange == anchor["exchange"],
-                            PortfolioSpotReconciliationAnchor.mode == anchor["mode"],
+                            == canonical_anchor["wallet_public_id"],
+                            PortfolioSpotReconciliationAnchor.exchange
+                            == canonical_anchor["exchange"],
+                            PortfolioSpotReconciliationAnchor.mode == canonical_anchor["mode"],
                         )
                         .with_for_update()
                     )
@@ -12789,10 +12837,10 @@ class SQLAlchemyRepository(Repository):
                 .first()
             )
             if existing is not None:
-                if self._spot_anchor_to_row(existing) != anchor:
+                if self._spot_anchor_to_row(existing) != canonical_anchor:
                     raise RuntimeError("conflicting spot reconciliation bootstrap anchor")
                 return int(existing.id)
-            row = PortfolioSpotReconciliationAnchor(**anchor, known_to=KNOWN_TO_MAX)
+            row = PortfolioSpotReconciliationAnchor(**canonical_anchor, known_to=KNOWN_TO_MAX)
             s.add(row)
             try:
                 await s.commit()
@@ -12804,16 +12852,17 @@ class SQLAlchemyRepository(Repository):
                             select(PortfolioSpotReconciliationAnchor).where(
                                 PortfolioSpotReconciliationAnchor.known_to == KNOWN_TO_MAX,
                                 PortfolioSpotReconciliationAnchor.wallet_public_id
-                                == anchor["wallet_public_id"],
-                                PortfolioSpotReconciliationAnchor.exchange == anchor["exchange"],
-                                PortfolioSpotReconciliationAnchor.mode == anchor["mode"],
+                                == canonical_anchor["wallet_public_id"],
+                                PortfolioSpotReconciliationAnchor.exchange
+                                == canonical_anchor["exchange"],
+                                PortfolioSpotReconciliationAnchor.mode == canonical_anchor["mode"],
                             )
                         )
                     )
                     .scalars()
                     .first()
                 )
-                if winner is None or self._spot_anchor_to_row(winner) != anchor:
+                if winner is None or self._spot_anchor_to_row(winner) != canonical_anchor:
                     raise RuntimeError("conflicting spot reconciliation bootstrap anchor") from None
                 return int(winner.id)
             await s.refresh(row)
@@ -12822,7 +12871,12 @@ class SQLAlchemyRepository(Repository):
     async def get_spot_reconciliation_anchor(
         self, wallet_public_id: str, exchange: str, mode: str
     ) -> SpotReconciliationAnchorRow | None:
-        """Return one active immutable bootstrap anchor by account identity."""
+        """Return one active immutable bootstrap anchor by account identity.
+
+        Alias UUID spellings are canonicalized before filtering; malformed
+        wallet identities raise ``ValueError`` like reconciliation writers.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
         async with self.session() as s:
             anchor = (
                 (
@@ -12850,6 +12904,7 @@ class SQLAlchemyRepository(Repository):
             "exchange": config.exchange,
             "mode": config.mode,
             "method": config.method,
+            "classified_after_observation_id": config.classified_after_observation_id,
             "public_id": config.public_id,
             "timestamp": config.timestamp,
             "session_id": config.session_id,
@@ -12895,7 +12950,12 @@ class SQLAlchemyRepository(Repository):
         exchange: str,
         mode: str,
     ) -> PortfolioReconciliationMethodConfigRow | None:
-        """Return one sentinel-active operator-authored method config."""
+        """Return one sentinel-active operator-authored method config.
+
+        Alias UUID spellings are canonicalized before filtering; malformed
+        wallet identities raise ``ValueError`` like reconciliation writers.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
         async with self.session() as s:
             try:
                 config = await self._load_active_portfolio_reconciliation_method_config(
@@ -13084,6 +13144,10 @@ class SQLAlchemyRepository(Repository):
             normalized_exchange,
             mode,
         )
+        active_state = next((row for row in states if row.known_to == KNOWN_TO_MAX), None)
+        classified_after_observation_id = (
+            None if active_state is None else active_state.current_observation_id
+        )
         history_exists = bool(observations or states or episode_exists)
         if existing is not None:
             if history_exists:
@@ -13111,6 +13175,7 @@ class SQLAlchemyRepository(Repository):
             exchange=normalized_exchange,
             mode=mode,
             method=method,
+            classified_after_observation_id=classified_after_observation_id,
             public_id=public_id,
             session_id=session_id,
             sequence_id=sequence_id,
@@ -13132,6 +13197,7 @@ class SQLAlchemyRepository(Repository):
         timestamp: datetime,
     ) -> PortfolioReconciliationMethodConfigRow:
         """Advisory-lock and persist an immutable durable classification."""
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
         identity = (wallet_public_id, exchange, mode)
         process_lock = self._portfolio_reconciliation_locks.setdefault(identity, asyncio.Lock())
         async with process_lock, self.session() as s:
@@ -14093,17 +14159,21 @@ class SQLAlchemyRepository(Repository):
         Returns:
             The new active reconciliation-state row id.
         """
+        canonical_evaluation = evaluation.copy()
+        canonical_evaluation["wallet_public_id"] = _canonicalize_reconciliation_wallet_public_id(
+            evaluation["wallet_public_id"]
+        )
         identity = (
-            evaluation["wallet_public_id"],
-            evaluation["exchange"],
-            evaluation["mode"],
+            canonical_evaluation["wallet_public_id"],
+            canonical_evaluation["exchange"],
+            canonical_evaluation["mode"],
         )
         lock = self._portfolio_reconciliation_locks.setdefault(identity, asyncio.Lock())
         async with lock:
-            result = await self._try_record_portfolio_reconciliation(evaluation)
+            result = await self._try_record_portfolio_reconciliation(canonical_evaluation)
             if isinstance(result, int):
                 return result
-            retry_result = await self._try_record_portfolio_reconciliation(evaluation)
+            retry_result = await self._try_record_portfolio_reconciliation(canonical_evaluation)
             if isinstance(retry_result, int):
                 return retry_result
             raise retry_result
@@ -14116,7 +14186,12 @@ class SQLAlchemyRepository(Repository):
         session_id: str,
         sequence_id: int,
     ) -> bool:
-        """Check the indexed five-column evaluation idempotency key."""
+        """Check the indexed five-column evaluation idempotency key.
+
+        Alias UUID spellings are canonicalized before filtering; malformed
+        wallet identities raise ``ValueError`` like reconciliation writers.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
         async with self.session() as s:
             return bool(
                 await s.scalar(
@@ -14140,7 +14215,12 @@ class SQLAlchemyRepository(Repository):
         session_id: str,
         sequence_id: int,
     ) -> PortfolioDriftEpisodeTransitionRow | None:
-        """Return the exact committed drift lifecycle version from one evaluation."""
+        """Return the exact committed drift lifecycle version from one evaluation.
+
+        Alias UUID spellings are canonicalized before filtering; malformed
+        wallet identities raise ``ValueError`` like reconciliation writers.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
         async with self.session() as s:
             episode = (
                 (
@@ -14277,14 +14357,26 @@ class SQLAlchemyRepository(Repository):
 
         Returns:
             Active states ordered by exchange then mode.
+
+        Raises:
+            ValueError: If a supplied wallet identity is malformed. Alias UUID
+                spellings are canonicalized before filtering.
         """
+        canonical_wallet_public_ids = (
+            None
+            if wallet_public_ids is None
+            else [
+                _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+                for wallet_public_id in wallet_public_ids
+            ]
+        )
         async with self.session() as s:
             query = select(PortfolioReconciliationState).where(
                 PortfolioReconciliationState.known_to == KNOWN_TO_MAX
             )
-            if wallet_public_ids is not None:
+            if canonical_wallet_public_ids is not None:
                 query = query.where(
-                    PortfolioReconciliationState.wallet_public_id.in_(wallet_public_ids)
+                    PortfolioReconciliationState.wallet_public_id.in_(canonical_wallet_public_ids)
                 )
             query = query.order_by(
                 PortfolioReconciliationState.exchange,
@@ -14300,9 +14392,14 @@ class SQLAlchemyRepository(Repository):
 
         The account-state table anchors the result so every rendered account
         receives exactly one context, including accounts without reconciliation
-        history. Observation references join by internal id without an identity
-        predicate so forged cross-account lineage remains visible to the shared
-        validators and fails closed instead of appearing merely absent.
+        history. Multiplicative joins from duplicate active account anchors,
+        reconciliation states, method configs, referenced open drift episodes,
+        or referenced spot anchors collapse to one context carrying an explicit
+        corruption marker. That marker invalidates the whole account
+        presentation and its nested reconciliation view. Observation references
+        join by internal id without an identity predicate so forged cross-account
+        lineage remains visible to the shared validators and fails closed instead
+        of appearing merely absent.
 
         Args:
             wallet_public_ids: Full wallet identities to include, or ``None``
@@ -14310,8 +14407,20 @@ class SQLAlchemyRepository(Repository):
 
         Returns:
             Complete read-validation contexts ordered by account identity.
+
+        Raises:
+            ValueError: If a supplied wallet identity is malformed. Alias UUID
+                spellings are canonicalized before filtering.
         """
-        if wallet_public_ids == []:
+        canonical_wallet_public_ids = (
+            None
+            if wallet_public_ids is None
+            else [
+                _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+                for wallet_public_id in wallet_public_ids
+            ]
+        )
+        if canonical_wallet_public_ids == []:
             return []
         current_observation = aliased(PortfolioReconciliationObservation)
         last_full_observation = aliased(PortfolioReconciliationObservation)
@@ -14416,10 +14525,19 @@ class SQLAlchemyRepository(Repository):
                     VenueAccountState.wallet_public_id,
                 )
             )
-            if wallet_public_ids is not None:
-                query = query.where(VenueAccountState.wallet_public_id.in_(wallet_public_ids))
+            if canonical_wallet_public_ids is not None:
+                query = query.where(
+                    VenueAccountState.wallet_public_id.in_(canonical_wallet_public_ids)
+                )
             result = await s.execute(query)
             contexts: list[PortfolioReconciliationReadContextRow] = []
+            contexts_by_identity: dict[
+                tuple[str, str, str], PortfolioReconciliationReadContextRow
+            ] = {}
+            active_row_ids: dict[
+                tuple[str, str, str],
+                tuple[set[int], set[int], set[int], set[int], set[int]],
+            ] = {}
             for (
                 account_state,
                 state,
@@ -14432,6 +14550,28 @@ class SQLAlchemyRepository(Repository):
                 latest_ordered_id,
                 latest_appended_id,
             ) in result.all():
+                identity = (
+                    account_state.wallet_public_id,
+                    account_state.exchange,
+                    account_state.mode,
+                )
+                account_state_ids, state_ids, config_ids, episode_ids, spot_anchor_ids = (
+                    active_row_ids.setdefault(
+                        identity,
+                        (set(), set(), set(), set(), set()),
+                    )
+                )
+                account_state_ids.add(account_state.id)
+                if state is not None:
+                    state_ids.add(state.id)
+                if config is not None:
+                    config_ids.add(config.id)
+                if episode is not None:
+                    episode_ids.add(episode.id)
+                if spot_anchor is not None:
+                    spot_anchor_ids.add(spot_anchor.id)
+                if identity in contexts_by_identity:
+                    continue
                 observation_rows: list[PortfolioReconciliationLineageObservationRow] = []
                 seen_observation_ids: set[int] = set()
                 for observation in (current, last_full, detail_source):
@@ -14441,31 +14581,34 @@ class SQLAlchemyRepository(Repository):
                     observation_rows.append(
                         self._portfolio_reconciliation_lineage_observation_to_row(observation)
                     )
-                contexts.append(
-                    {
-                        "account_state": self._venue_account_state_to_row(account_state),
-                        "state": (
-                            None
-                            if state is None
-                            else self._portfolio_reconciliation_state_to_row(state)
-                        ),
-                        "observations": observation_rows,
-                        "config": (
-                            None
-                            if config is None
-                            else self._portfolio_reconciliation_method_config_to_row(config)
-                        ),
-                        "latest_ordered_observation_id": latest_ordered_id,
-                        "latest_appended_observation_id": latest_appended_id,
-                        "open_drift_episode": (
-                            None
-                            if episode is None
-                            else self._portfolio_drift_episode_to_row(episode)
-                        ),
-                        "spot_anchor": (
-                            None if spot_anchor is None else self._spot_anchor_to_row(spot_anchor)
-                        ),
-                    }
+                context: PortfolioReconciliationReadContextRow = {
+                    "account_state": self._venue_account_state_to_row(account_state),
+                    "state": (
+                        None
+                        if state is None
+                        else self._portfolio_reconciliation_state_to_row(state)
+                    ),
+                    "observations": observation_rows,
+                    "config": (
+                        None
+                        if config is None
+                        else self._portfolio_reconciliation_method_config_to_row(config)
+                    ),
+                    "latest_ordered_observation_id": latest_ordered_id,
+                    "latest_appended_observation_id": latest_appended_id,
+                    "open_drift_episode": (
+                        None if episode is None else self._portfolio_drift_episode_to_row(episode)
+                    ),
+                    "spot_anchor": (
+                        None if spot_anchor is None else self._spot_anchor_to_row(spot_anchor)
+                    ),
+                    "duplicate_active_rows": False,
+                }
+                contexts_by_identity[identity] = context
+                contexts.append(context)
+            for identity, context in contexts_by_identity.items():
+                context["duplicate_active_rows"] = any(
+                    len(ids) > 1 for ids in active_row_ids[identity]
                 )
             return contexts
 
@@ -17630,7 +17773,12 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         as_of: datetime,
     ) -> WalletCredentialRow | None:
-        """Return the active wallet credential row or None."""
+        """Return the active wallet credential row or None.
+
+        Alias UUID spellings are canonicalized before filtering; malformed
+        wallet identities raise ``ValueError`` like credential writers.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
         async with self.session() as s:
             result = await s.execute(
                 select(WalletCredential).where(
@@ -17749,6 +17897,7 @@ class SQLAlchemyRepository(Repository):
         reconciliation_method: str,
     ) -> WalletCredentialRow:
         """Atomically insert a credential and its operator classification."""
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
         normalized_exchange = exchange.lower()
         paper_credential = (
             normalized_exchange == ExchangeEnum.PAPER.value or credential_type == "paper"
@@ -17869,7 +18018,12 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         as_of: datetime,
     ) -> list[WalletCredentialRow]:
-        """Active credentials on a single wallet at ``as_of``."""
+        """Return active credentials on one canonicalized wallet at ``as_of``.
+
+        Alias UUID spellings are canonicalized before filtering; malformed
+        wallet identities raise ``ValueError`` like credential writers.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
         async with self.session() as s:
             result = await s.execute(
                 select(WalletCredential)

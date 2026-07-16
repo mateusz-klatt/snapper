@@ -30,6 +30,7 @@ from snapper.application.portfolio.reconciliation_invariants import (
     validate_portfolio_reconciliation_spot_anchor_lineage,
 )
 from snapper.application.portfolio.reconciliation_methods import PortfolioReconciliationMethod
+from snapper.application.portfolio.reconciliation_methods import RealPortfolioReconciliationMethod
 from snapper.core.json_types import JsonObject
 from snapper.data.repository_types import PortfolioDriftEpisodeRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
@@ -44,16 +45,23 @@ _JSON_OBJECT_ADAPTER: Final[TypeAdapter[JsonObject]] = TypeAdapter(
     config=ConfigDict(strict=True, allow_inf_nan=False),
 )
 _CORRUPT_ERROR: Final[str] = "persisted reconciliation state failed read-time validation"
+_REAL_PORTFOLIO_RECONCILIATION_METHODS: Final[tuple[RealPortfolioReconciliationMethod, ...]] = (
+    "futures_position",
+    "spot_execution_replay",
+    "margin_ledger_replay",
+)
 
 
 def _empty_reconciliation_view(
     effective_status: PortfolioReconciliationEffectiveStatus,
     error: str | None,
+    method: PortfolioReconciliationMethod | None = None,
+    evaluation_status: PortfolioReconciliationEvaluationStatus | None = None,
 ) -> PortfolioReconciliationView:
     """Return an evidence-free fail-closed reconciliation view."""
     return PortfolioReconciliationView(
-        method=None,
-        evaluation_status=None,
+        method=method,
+        evaluation_status=evaluation_status,
         effective_status=effective_status,
         is_authoritative=False,
         evaluated_at=None,
@@ -195,6 +203,11 @@ def _parse_evidence(raw: str | None) -> JsonObject | None:
     return _JSON_OBJECT_ADAPTER.validate_json(raw, strict=True)
 
 
+def _is_optional_string(value: object) -> bool:
+    """Return whether a persisted optional string has its strict storage type."""
+    return value is None or isinstance(value, str)
+
+
 def _build_open_episode(
     state: PortfolioReconciliationStateRow,
     episode: PortfolioDriftEpisodeRow | None,
@@ -259,6 +272,8 @@ def build_portfolio_reconciliation_view(
         with all evidence cleared and authority denied.
     """
     state = context["state"]
+    if context["duplicate_active_rows"]:
+        return _empty_reconciliation_view("corrupt", _CORRUPT_ERROR)
     if state is None:
         if (
             context["observations"]
@@ -284,6 +299,47 @@ def build_portfolio_reconciliation_view(
             state["current_observation_id"],
             context["observations"],
         )
+        config = context["config"]
+        state_error_is_valid = _is_optional_string(state["error"])
+        evaluation_error_is_valid = _is_optional_string(evaluation["error"])
+        if (
+            config is not None
+            and config["method"] in _REAL_PORTFOLIO_RECONCILIATION_METHODS
+            and state["method"] == "unclassified"
+            and state["current_evaluation_status"] == "incomplete"
+            and evaluation["method"] == "unclassified"
+            and evaluation["evaluation_status"] == "incomplete"
+            and state_error_is_valid
+            and evaluation_error_is_valid
+            and config["classified_after_observation_id"] is not None
+            and config["classified_after_observation_id"] == state["current_observation_id"]
+        ):
+            validate_portfolio_reconciliation_evaluation_config(evaluation, None)
+            validate_portfolio_reconciliation_method_transition(state, evaluation, config)
+            detail_source_observation_id = state["detail_source_observation_id"]
+            anchor_evaluation = (
+                evaluation
+                if detail_source_observation_id is None
+                else _evaluation_for_observation(
+                    detail_source_observation_id,
+                    context["observations"],
+                )
+            )
+            validate_portfolio_reconciliation_spot_anchor_lineage(
+                anchor_evaluation,
+                context["spot_anchor"],
+            )
+            if context["spot_anchor"] is not None:
+                raise RuntimeError("pending reconciliation has an unexpected spot anchor")
+            _validate_state_authority_shape(state)
+            _build_open_episode(state, context["open_drift_episode"])
+            effective_status = _derive_effective_status("incomplete", state["timestamp"], now)
+            return _empty_reconciliation_view(
+                effective_status,
+                None,
+                method=cast(PortfolioReconciliationMethod, config["method"]),
+                evaluation_status="incomplete",
+            )
         validate_portfolio_reconciliation_evaluation_config(evaluation, context["config"])
         validate_portfolio_reconciliation_method_transition(state, evaluation, context["config"])
         detail_source_observation_id = state["detail_source_observation_id"]
@@ -344,5 +400,5 @@ def build_portfolio_reconciliation_view(
             error=state["error"],
             open_drift_episode=open_episode,
         )
-    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError, ValidationError):
+    except AttributeError, KeyError, RuntimeError, TypeError, ValueError, ValidationError:
         return _empty_reconciliation_view("corrupt", _CORRUPT_ERROR)

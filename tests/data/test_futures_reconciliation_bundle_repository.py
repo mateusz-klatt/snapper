@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 from unittest.mock import PropertyMock
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy import event
 from sqlalchemy import text
 
@@ -22,6 +23,7 @@ from snapper.data.repository import SQLAlchemyRepository
 _NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 _SESSION = "00000000-0000-7000-8000-000000000101"
 _WALLET = "00000000-0000-7000-8000-000000000201"
+_ALPHA_WALLET = "abcdefab-cdef-7abc-8def-abcdefabcdef"
 _TARGET_SYMBOL_ID = "00000000-0000-7000-8000-000000000301"
 _VENUE_ONLY_SYMBOL_ID = "00000000-0000-7000-8000-000000000302"
 _OTHER_SYMBOL_ID = "00000000-0000-7000-8000-000000000303"
@@ -84,12 +86,14 @@ def _position(
     public_id: str,
     instrument_public_id: str,
     sequence_id: int,
+    *,
+    wallet_public_id: str = _WALLET,
 ) -> Position:
     """Build one active wallet position projection."""
     return Position(
         instrument_public_id=instrument_public_id,
         mode="live",
-        wallet_public_id=_WALLET,
+        wallet_public_id=wallet_public_id,
         quantity=1.0,
         average_price=100.0,
         unrealized_pnl=1.0,
@@ -284,19 +288,82 @@ async def test_bundle_rejects_invalid_or_unsupported_snapshot_identity(
         _NOW,
         set(),
     )
-    missing_wallet = await repository.get_futures_reconciliation_bundle(
-        "",
-        "kraken_futures",
-        "live",
-        _NOW,
-        set(),
-    )
     assert paper.projection is None
     assert paper.error == "invalid_futures_bundle_identity"
     assert mixed_case.projection is None
     assert mixed_case.error == "invalid_futures_bundle_identity"
-    assert missing_wallet.projection is None
-    assert missing_wallet.error == "invalid_futures_bundle_identity"
+
+
+@pytest.mark.parametrize("malformed_wallet", ["", "not-a-wallet-uuid"])
+async def test_bundle_rejects_malformed_wallet_uuid(
+    tmp_path: Path,
+    malformed_wallet: str,
+) -> None:
+    """Malformed wallet text raises the shared stable ValueError.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        malformed_wallet: Empty or non-UUID wallet text.
+    """
+    repository = await _make_repo(tmp_path, "malformed-bundle-wallet.db")
+
+    with pytest.raises(ValueError, match="reconciliation wallet identity is invalid"):
+        await repository.get_futures_reconciliation_bundle(
+            malformed_wallet,
+            "kraken_futures",
+            "live",
+            _NOW,
+            set(),
+        )
+
+
+@pytest.mark.parametrize(
+    "wallet_alias",
+    [_ALPHA_WALLET.upper(), _ALPHA_WALLET.replace("-", "")],
+)
+async def test_bundle_wallet_filter_canonicalizes_uuid_aliases(
+    tmp_path: Path,
+    wallet_alias: str,
+) -> None:
+    """Uppercase and hyphenless wallet aliases find canonical projections.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        wallet_alias: Alternate spelling of the canonical wallet UUID.
+    """
+    repository = await _make_repo(tmp_path, "canonical-bundle-wallet.db")
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _symbol(_TARGET_SYMBOL_ID, _TARGET_SYMBOL, 1),
+                _instrument(
+                    _TARGET_INSTRUMENT,
+                    _TARGET_SYMBOL_ID,
+                    "kraken_futures",
+                    2,
+                ),
+                _position(
+                    "00000000-0000-7000-8000-000000000501",
+                    _TARGET_INSTRUMENT,
+                    3,
+                    wallet_public_id=_ALPHA_WALLET,
+                ),
+            ]
+        )
+        await session.commit()
+
+    bundle = await repository.get_futures_reconciliation_bundle(
+        wallet_alias,
+        "kraken_futures",
+        "live",
+        _NOW,
+        {_TARGET_SYMBOL},
+    )
+
+    assert bundle.error is None
+    assert bundle.projection is not None
+    assert len(bundle.projection) == 1
+    assert bundle.projection[0]["wallet_public_id"] == _ALPHA_WALLET
 
 
 async def test_bundle_ignores_proven_other_exchange_without_symbol(

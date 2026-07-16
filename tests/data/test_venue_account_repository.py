@@ -63,6 +63,7 @@ from snapper.data.repository_types import VenueAccountAttemptRow
 
 _WALLET = "00000000-0000-7000-8000-000000000001"
 _OTHER_WALLET = "00000000-0000-7000-8000-000000000002"
+_ALPHA_WALLET = "abcdefab-cdef-7abc-8def-abcdefabcdef"
 _SESSION = "00000000-0000-7000-8000-0000000000aa"
 _T0 = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
 
@@ -793,6 +794,44 @@ async def test_get_states_empty_wallet_list_scopes_to_nothing(tmp_path: Path) ->
     repo = await _make_repo(tmp_path)
     await repo.record_venue_account_snapshot(_attempt_row(_T0))
     assert await repo.get_venue_account_states([]) == []
+
+
+@pytest.mark.parametrize(
+    "wallet_alias",
+    [_ALPHA_WALLET.upper(), _ALPHA_WALLET.replace("-", "")],
+)
+async def test_get_states_canonicalizes_wallet_aliases(
+    tmp_path: Path,
+    wallet_alias: str,
+) -> None:
+    """Alias-spelled wallet filters find the canonical active account row.
+
+    Given: An active account row written with a canonical alphabetic UUID,
+    When: The read filter uses its uppercase or hyphenless spelling,
+    Then: The canonical row is returned instead of an empty SQLite result.
+    """
+    repo = await _make_repo(tmp_path)
+    await repo.record_venue_account_snapshot(_attempt_row(_T0, wallet_public_id=_ALPHA_WALLET))
+
+    rows = await repo.get_venue_account_states([wallet_alias])
+
+    assert len(rows) == 1
+    assert rows[0]["wallet_public_id"] == _ALPHA_WALLET
+
+
+async def test_get_states_rejects_malformed_wallet_filter(tmp_path: Path) -> None:
+    """A malformed wallet filter raises the writer-compatible ValueError.
+
+    Given: A venue-account repository,
+    When: A read filter contains a non-UUID wallet identity,
+    Then: The DAL raises the shared canonicalization error exactly.
+    """
+    repo = await _make_repo(tmp_path)
+
+    with pytest.raises(ValueError) as exc_info:
+        await repo.get_venue_account_states(["not-a-wallet-uuid"])
+
+    assert str(exc_info.value) == "reconciliation wallet identity is invalid"
 
 
 async def test_get_states_none_returns_all_unscoped(tmp_path: Path) -> None:

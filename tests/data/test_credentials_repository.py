@@ -24,6 +24,8 @@ from snapper.data.repository import CredentialConflictError
 from snapper.data.repository import CredentialNotFoundError
 from snapper.data.repository import SQLAlchemyRepository
 
+_CANONICAL_WALLET = "abcdefab-cdef-7abc-8def-abcdefabcdef"
+
 
 async def _seed_wallet(repo: SQLAlchemyRepository, public_id: str | None = None) -> str:
     """Insert a wallet and return its ``public_id``."""
@@ -152,7 +154,7 @@ class TestCreateWalletCredential:
             pytest.raises(IntegrityError),
         ):
             await repo.create_wallet_credential(
-                wallet_public_id="w",
+                wallet_public_id="00000000-0000-7000-8000-000000000001",
                 exchange="",
                 credential_type="paper",
                 encrypted_payload="x",
@@ -352,6 +354,57 @@ class TestListWalletCredentialsForWallet:
 
         assert len(rows) == 1
         assert rows[0]["wallet_public_id"] == wallet_id
+
+
+class TestCredentialWalletUuidReadCanonicalization:
+    """Wallet-filtered credential reads share writer UUID canonicalization."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "wallet_alias",
+        [
+            _CANONICAL_WALLET.upper(),
+            _CANONICAL_WALLET.replace("-", ""),
+        ],
+    )
+    async def test_alias_spelling_finds_canonically_stored_credential(
+        self,
+        repo: SQLAlchemyRepository,
+        wallet_alias: str,
+    ) -> None:
+        """Uppercase and hyphenless UUID reads find the canonical row."""
+        await _seed_wallet(repo, _CANONICAL_WALLET)
+        created = await repo.create_wallet_credential(
+            wallet_public_id=_CANONICAL_WALLET,
+            exchange="kraken",
+            credential_type="api_key_secret",
+            encrypted_payload="gAAAAABcanonical",
+            label=None,
+            session_id="test-session",
+            sequence_id=10,
+            timestamp=datetime.now(UTC) - timedelta(minutes=1),
+            reconciliation_method="unclassified",
+        )
+        as_of = datetime.now(UTC)
+
+        active = await repo.get_active_credential("kraken", wallet_alias, as_of)
+        listed = await repo.list_wallet_credentials_for_wallet(wallet_alias, as_of)
+
+        assert active == created
+        assert listed == [created]
+        assert created["wallet_public_id"] == _CANONICAL_WALLET
+
+    @pytest.mark.asyncio
+    async def test_malformed_wallet_is_rejected_by_both_filtered_reads(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """Both credential readers reject an unparseable wallet identity."""
+        as_of = datetime.now(UTC)
+        with pytest.raises(ValueError, match="reconciliation wallet identity is invalid"):
+            await repo.get_active_credential("kraken", "not-a-wallet-uuid", as_of)
+        with pytest.raises(ValueError, match="reconciliation wallet identity is invalid"):
+            await repo.list_wallet_credentials_for_wallet("not-a-wallet-uuid", as_of)
 
 
 class TestResolveWalletPublicIdByShort:

@@ -76,6 +76,7 @@ def _method_config_row(
         exchange="kraken_futures",
         mode="live",
         method=method,
+        classified_after_observation_id=None,
         public_id="method-config-1",
         timestamp=datetime.now(UTC),
         session_id="test-sid",

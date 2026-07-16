@@ -16,6 +16,7 @@ from snapper.application.portfolio.reconciliation_view import PORTFOLIO_RECONCIL
 from snapper.application.portfolio.reconciliation_view import build_portfolio_reconciliation_view
 from snapper.data.repository_types import PortfolioDriftEpisodeRow
 from snapper.data.repository_types import PortfolioReconciliationLineageObservationRow
+from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
 from snapper.data.repository_types import PortfolioReconciliationReadContextRow
 from snapper.data.repository_types import PortfolioReconciliationStateRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
@@ -120,22 +121,32 @@ def _matched_observation() -> PortfolioReconciliationLineageObservationRow:
     }
 
 
+def _method_config(
+    method: str = "futures_position",
+    classified_after_observation_id: int | None = None,
+) -> PortfolioReconciliationMethodConfigRow:
+    """Build one active durable reconciliation method configuration."""
+    return {
+        "wallet_public_id": _WALLET_ID,
+        "exchange": "binance",
+        "mode": "live",
+        "method": method,
+        "classified_after_observation_id": classified_after_observation_id,
+        "public_id": "01980f9b-d000-7000-8000-000000000005",
+        "timestamp": _NOW - timedelta(days=1),
+        "session_id": "config-session",
+        "sequence_id": 1,
+    }
+
+
 def _matched_context() -> PortfolioReconciliationReadContextRow:
     """Build a complete batched read context for one matched account."""
     return {
         "account_state": _account_state(),
+        "duplicate_active_rows": False,
         "state": _matched_state(),
         "observations": [_matched_observation()],
-        "config": {
-            "wallet_public_id": _WALLET_ID,
-            "exchange": "binance",
-            "mode": "live",
-            "method": "futures_position",
-            "public_id": "01980f9b-d000-7000-8000-000000000005",
-            "timestamp": _NOW - timedelta(days=1),
-            "session_id": "config-session",
-            "sequence_id": 1,
-        },
+        "config": _method_config(),
         "latest_ordered_observation_id": 7,
         "latest_appended_observation_id": 7,
         "open_drift_episode": None,
@@ -310,6 +321,16 @@ def _unclassified_context() -> PortfolioReconciliationReadContextRow:
     return context
 
 
+def _pending_reclassification_context(
+    method: str = "futures_position",
+) -> PortfolioReconciliationReadContextRow:
+    """Build a causally proven classification awaiting its next evaluation."""
+    context = _unclassified_context()
+    state = _required_state(context)
+    context["config"] = _method_config(method, state["current_observation_id"])
+    return context
+
+
 def _assert_corrupt(view: PortfolioReconciliationView) -> None:
     """Assert the evidence-free corruption boundary."""
     assert view.effective_status == "corrupt"
@@ -320,10 +341,19 @@ def _assert_corrupt(view: PortfolioReconciliationView) -> None:
     assert view.current_observation_id is None
     assert view.last_full_observation_id is None
     assert view.detail_source_observation_id is None
+    assert view.last_full_outcome is None
+    assert view.consecutive_full_mismatches == 0
+    assert view.anchor_public_id is None
+    assert view.venue_account_state_public_id is None
+    assert view.venue_account_observation_id is None
+    assert view.source_watermark_kind is None
+    assert view.source_watermark is None
     assert view.expected is None
     assert view.actual is None
     assert view.difference is None
     assert view.tolerance is None
+    assert view.reconciled_at is None
+    assert view.authoritative_until is None
     assert view.open_drift_episode is None
 
 
@@ -519,6 +549,228 @@ def test_initial_unclassified_state_has_no_evidence() -> None:
     assert view.effective_status == "incomplete"
     assert view.is_authoritative is False
     assert view.expected is None
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["futures_position", "spot_execution_replay", "margin_ledger_replay"],
+)
+def test_causally_proven_pending_reclassification_is_incomplete(method: str) -> None:
+    """Every real classification can expose only an evidence-free pending view.
+
+    Given: A real method config naming the exact active unclassified observation.
+    When: The state has not yet folded a real-method evaluation.
+    Then: The configured method is incomplete without authority or evidence.
+
+    Args:
+        method: Real method selected by the operator.
+    """
+    view = build_portfolio_reconciliation_view(
+        _pending_reclassification_context(method),
+        _NOW,
+    )
+
+    assert view.method == method
+    assert view.evaluation_status == "incomplete"
+    assert view.effective_status == "incomplete"
+    assert view.is_authoritative is False
+    assert view.evaluated_at is None
+    assert view.current_observation_id is None
+    assert view.last_full_observation_id is None
+    assert view.detail_source_observation_id is None
+    assert view.last_full_outcome is None
+    assert view.consecutive_full_mismatches == 0
+    assert view.anchor_public_id is None
+    assert view.venue_account_state_public_id is None
+    assert view.venue_account_observation_id is None
+    assert view.source_watermark_kind is None
+    assert view.source_watermark is None
+    assert view.expected is None
+    assert view.actual is None
+    assert view.difference is None
+    assert view.tolerance is None
+    assert view.reconciled_at is None
+    assert view.authoritative_until is None
+    assert view.error is None
+    assert view.open_drift_episode is None
+
+
+@pytest.mark.parametrize("classified_after_observation_id", [None, 6, 8])
+def test_pending_reclassification_requires_exact_causal_identity(
+    classified_after_observation_id: int | None,
+) -> None:
+    """Missing, earlier, and later predecessor identities all fail closed.
+
+    Given: An unclassified state beside a real config without an exact capture.
+    When: The pending predicate compares durable causal lineage.
+    Then: Shape similarity cannot soften the context from corrupt.
+
+    Args:
+        classified_after_observation_id: Missing or unequal captured identity.
+    """
+    context = _pending_reclassification_context()
+    config = context["config"]
+    assert config is not None
+    config["classified_after_observation_id"] = classified_after_observation_id
+
+    _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
+
+
+def test_pending_reclassification_with_retained_state_evidence_is_corrupt() -> None:
+    """Causal identity cannot excuse retained evidence on an unclassified state.
+
+    Given: An exact config capture beside an unclassified state retaining detail.
+    When: The pending branch runs the strict method-transition validation.
+    Then: The contradictory state remains evidence-free corruption.
+    """
+    context = _pending_reclassification_context()
+    _required_state(context)["expected_json"] = "{}"
+
+    _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
+
+
+def test_pending_reclassification_clears_prior_unclassified_reason() -> None:
+    """The normal unclassified reason does not make exact pending lineage corrupt.
+
+    Given: Exact causal lineage carrying the dispatcher's unclassified reason.
+    When: The operator classification is pending its first real evaluation.
+    Then: The configured method remains incomplete and the old reason is cleared.
+    """
+    context = _pending_reclassification_context()
+    state = _required_state(context)
+    observation = _current_observation(context)
+    state["error"] = "reconciliation_method_unclassified"
+    observation["error"] = "reconciliation_method_unclassified"
+
+    view = build_portfolio_reconciliation_view(context, _NOW)
+
+    assert view.method == "futures_position"
+    assert view.evaluation_status == "incomplete"
+    assert view.effective_status == "incomplete"
+    assert view.error is None
+
+
+def test_pending_reclassification_rejects_blob_error_fields() -> None:
+    """Pending projection cannot erase malformed persisted error values.
+
+    Given: Exact pending lineage whose state and observation errors are BLOB bytes.
+    When: The pending exception validates both persisted error field types.
+    Then: The malformed context fails closed as evidence-free corruption.
+    """
+    context = _pending_reclassification_context()
+    state = _required_state(context)
+    observation = _current_observation(context)
+    blob_error = b"malformed pending error"
+    cast(dict[str, object], state)["error"] = blob_error
+    cast(dict[str, object], observation)["error"] = blob_error
+
+    _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
+
+
+@pytest.mark.parametrize("joined_row", ["episode", "anchor"])
+def test_pending_reclassification_rejects_joined_evidence(joined_row: str) -> None:
+    """Unexpected active episode and anchor joins both fail pending truth closed.
+
+    Given: A causally exact pending context with an unrelated joined evidence row.
+    When: Strict downstream lineage checks run before rendering.
+    Then: The context remains corrupt rather than hiding the joined row.
+
+    Args:
+        joined_row: Joined durable evidence kind to forge.
+    """
+    context = _pending_reclassification_context()
+    if joined_row == "episode":
+        context["open_drift_episode"] = cast(PortfolioDriftEpisodeRow, {})
+    else:
+        context["spot_anchor"] = cast(SpotReconciliationAnchorRow, {})
+
+    _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
+
+
+def test_unclassified_error_is_not_a_pending_reclassification() -> None:
+    """A valid unclassified error near-miss remains corrupt beside real config.
+
+    Given: An exact config capture beside an unclassified evaluation with error.
+    When: The pending predicate requires incomplete state and evaluation statuses.
+    Then: The ordinary strict config conflict fails the context closed.
+    """
+    context = _pending_reclassification_context()
+    state = _required_state(context)
+    observation = _current_observation(context)
+    state["current_evaluation_status"] = "error"
+    state["error"] = "classification unavailable"
+    observation["evaluation_status"] = "error"
+    observation["error"] = "classification unavailable"
+
+    _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected_status"),
+    [
+        (
+            _NOW - PORTFOLIO_RECONCILIATION_STALE_AFTER - timedelta(microseconds=1),
+            "stale",
+        ),
+        (
+            _NOW + PORTFOLIO_RECONCILIATION_FUTURE_TOLERANCE + timedelta(microseconds=1),
+            "clock_error",
+        ),
+    ],
+)
+def test_pending_reclassification_applies_freshness_demotions(
+    timestamp: datetime,
+    expected_status: str,
+) -> None:
+    """Old and future pending predecessors remain non-authoritative demotions.
+
+    Given: A causally exact pending predecessor outside a freshness boundary.
+    When: The pending result derives effective status from the state timestamp.
+    Then: Stale and future-clock demotions still apply without evidence.
+
+    Args:
+        timestamp: Stored predecessor timestamp outside one freshness boundary.
+        expected_status: Effective status required for that boundary breach.
+    """
+    context = _pending_reclassification_context()
+    _required_state(context)["timestamp"] = timestamp
+
+    view = build_portfolio_reconciliation_view(context, _NOW)
+
+    assert view.method == "futures_position"
+    assert view.evaluation_status == "incomplete"
+    assert view.effective_status == expected_status
+    assert view.is_authoritative is False
+    assert view.expected is None
+
+
+def test_duplicate_active_rows_fail_closed_before_projection() -> None:
+    """Loader-detected active multiplicity always produces one corrupt view.
+
+    Given: A context marked as containing duplicate active state or config rows.
+    When: The read view begins projection.
+    Then: It clears all evidence before inspecting either selected row.
+    """
+    context = _matched_context()
+    context["duplicate_active_rows"] = True
+
+    _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
+
+
+def test_real_state_and_different_real_config_remain_corrupt() -> None:
+    """The pending exception never softens a real-method config mismatch.
+
+    Given: A futures state beside a different real active configuration.
+    When: The state cannot satisfy the unclassified pending predicate.
+    Then: Ordinary strict config validation keeps the context corrupt.
+    """
+    context = _matched_context()
+    config = context["config"]
+    assert config is not None
+    config["method"] = "spot_execution_replay"
+    config["classified_after_observation_id"] = 7
+
+    _assert_corrupt(build_portfolio_reconciliation_view(context, _NOW))
 
 
 @pytest.mark.parametrize(

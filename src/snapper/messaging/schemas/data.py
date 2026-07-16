@@ -508,12 +508,13 @@ class PortfolioAccountState(StrictDataSchema[Literal["portfolio_account_state"]]
     trust — it demotes an observed row to ``stale`` past its
     ``authoritative_until`` (or when that window is missing), to ``clock_error``
     on a future-dated observation clock, and to ``corrupt`` when a stored JSON
-    payload fails to revalidate. ``is_authoritative`` is True ONLY when
-    ``effective_status`` is exactly ``observed``; ``simulated`` (paper),
+    payload fails to revalidate or active identity truth is ambiguous.
+    ``is_authoritative`` is True ONLY when ``effective_status`` is exactly
+    ``observed``; ``simulated`` (paper),
     ``unsupported`` (market-data-only), ``error``, ``stale``, ``clock_error``,
     and ``corrupt`` are never authoritative. Balances/positions are honest
     NULLs (never fabricated); they are cleared ONLY when the state is
-    ``corrupt`` (a stored payload failed revalidation). A ``stale`` or
+    ``corrupt`` (stored truth failed revalidation or is ambiguous). A ``stale`` or
     ``clock_error`` row KEEPS its last-known payloads, labeled
     non-authoritative (``is_authoritative`` False) so clients show them as
     stale rather than blanking the surface. Balance and positions are

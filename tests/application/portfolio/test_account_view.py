@@ -665,6 +665,27 @@ def test_corrupt_overrides_observed_and_clears_both_payloads() -> None:
     assert result.open_positions is None
 
 
+def test_duplicate_active_rows_force_coherent_observed_account_corrupt() -> None:
+    """Loader-detected active multiplicity defeats a coherent observed row.
+
+    Given: A well-formed fresh observed row selected from an ambiguous active
+        account identity.
+    When: The pure builder receives the loader's duplicate-active marker.
+    Then: The established corrupt shape denies authority and clears both
+        payloads without introducing a new status.
+    """
+    result = build_portfolio_account_state(
+        _make_row(),
+        _NOW,
+        duplicate_active_rows=True,
+    )
+
+    assert result.effective_status == EFFECTIVE_CORRUPT
+    assert result.is_authoritative is False
+    assert result.balances is None
+    assert result.open_positions is None
+
+
 def test_balances_json_object_root_is_corrupt() -> None:
     """A balances payload whose root is a JSON object (not a list) is corrupt.
 

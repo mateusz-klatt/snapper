@@ -1363,6 +1363,7 @@ class PortfolioReconciliationMethodConfig(TemporalMixin, Base):
         String(8), nullable=False, default="live", server_default="live"
     )
     method: Mapped[str] = mapped_column(String(32), nullable=False)
+    classified_after_observation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class PortfolioReconciliationObservation(TemporalMixin, Base):

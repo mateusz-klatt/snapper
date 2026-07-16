@@ -23,6 +23,7 @@ type ReconciliationForgery = Literal[
     "invalid_method",
     "watermark_ahead",
     "cross_account_observation",
+    "causal_mismatch",
 ]
 type SpotAnchorForgery = Literal[
     "missing_anchor",
@@ -45,6 +46,7 @@ async def _persist_forged_context(
         "wrong_state_watermark_kind",
         "anchor_watermark_ahead",
     )
+    causal_mismatch = forgery == "causal_mismatch"
     wallet_public_id = str(uuid7())
     observation_wallet_public_id = (
         str(uuid7()) if forgery == "cross_account_observation" else wallet_public_id
@@ -52,16 +54,28 @@ async def _persist_forged_context(
     account_public_id = str(uuid7())
     session_id = str(uuid7())
     state_method = (
-        "spot_execution_replay"
-        if forgery == "invalid_method" or anchor_forgery
-        else "futures_position"
+        "unclassified"
+        if causal_mismatch
+        else (
+            "spot_execution_replay"
+            if forgery == "invalid_method" or anchor_forgery
+            else "futures_position"
+        )
     )
+    config_method = "futures_position" if causal_mismatch else state_method
     observation_method = "futures_position" if forgery == "invalid_method" else state_method
     anchor_public_id = str(uuid7()) if state_method == "spot_execution_replay" else None
-    watermark_kind = "venue_event_id" if forgery == "wrong_state_watermark_kind" else "execution_id"
-    if not anchor_forgery:
-        watermark_kind = "venue_event_id"
-    state_watermark = 13 if forgery == "watermark_ahead" else 12
+    watermark_kind = (
+        None
+        if causal_mismatch
+        else (
+            "venue_event_id"
+            if forgery == "wrong_state_watermark_kind" or not anchor_forgery
+            else "execution_id"
+        )
+    )
+    state_watermark = None if causal_mismatch else (13 if forgery == "watermark_ahead" else 12)
+    evaluation_status = "incomplete" if causal_mismatch else "matched"
     async with repository.session() as session:
         account = VenueAccountState(
             wallet_public_id=wallet_public_id,
@@ -91,17 +105,17 @@ async def _persist_forged_context(
             exchange="kraken_futures",
             mode="live",
             method=observation_method,
-            evaluation_status="matched",
-            venue_account_state_public_id=account_public_id,
-            venue_account_observation_id=41,
-            account_authoritative_until=now + timedelta(minutes=5),
+            evaluation_status=evaluation_status,
+            venue_account_state_public_id=None if causal_mismatch else account_public_id,
+            venue_account_observation_id=None if causal_mismatch else 41,
+            account_authoritative_until=None if causal_mismatch else now + timedelta(minutes=5),
             source_watermark_kind=watermark_kind,
-            source_watermark=12,
+            source_watermark=None if causal_mismatch else 12,
             anchor_public_id=anchor_public_id,
-            expected_json='{"position":"1"}',
-            actual_json='{"position":"1"}',
-            difference_json='{"position":"0"}',
-            tolerance_json='{"absolute":"0"}',
+            expected_json=None if causal_mismatch else '{"position":"1"}',
+            actual_json=None if causal_mismatch else '{"position":"1"}',
+            difference_json=None if causal_mismatch else '{"position":"0"}',
+            tolerance_json=None if causal_mismatch else '{"absolute":"0"}',
             resulting_full_mismatch_count=0,
             drift_episode_public_id=None,
             error=None,
@@ -123,7 +137,8 @@ async def _persist_forged_context(
                 wallet_public_id=wallet_public_id,
                 exchange="kraken_futures",
                 mode="live",
-                method=state_method,
+                method=config_method,
+                classified_after_observation_id=(observation_id + 1 if causal_mismatch else None),
                 public_id=str(uuid7()),
                 session_id=session_id,
                 sequence_id=1,
@@ -135,24 +150,24 @@ async def _persist_forged_context(
                 exchange="kraken_futures",
                 mode="live",
                 method=state_method,
-                current_evaluation_status="matched",
+                current_evaluation_status=evaluation_status,
                 current_observation_id=observation_id,
-                last_full_observation_id=observation_id,
-                last_full_outcome="matched",
-                detail_source_observation_id=observation_id,
+                last_full_observation_id=None if causal_mismatch else observation_id,
+                last_full_outcome=None if causal_mismatch else "matched",
+                detail_source_observation_id=None if causal_mismatch else observation_id,
                 consecutive_full_mismatches=0,
                 open_drift_episode_public_id=None,
                 anchor_public_id=anchor_public_id,
-                venue_account_state_public_id=account_public_id,
-                venue_account_observation_id=41,
+                venue_account_state_public_id=None if causal_mismatch else account_public_id,
+                venue_account_observation_id=None if causal_mismatch else 41,
                 source_watermark_kind=watermark_kind,
                 source_watermark=state_watermark,
-                expected_json='{"position":"1"}',
-                actual_json='{"position":"1"}',
-                difference_json='{"position":"0"}',
-                tolerance_json='{"absolute":"0"}',
-                reconciled_at=now,
-                authoritative_until=now + timedelta(minutes=5),
+                expected_json=None if causal_mismatch else '{"position":"1"}',
+                actual_json=None if causal_mismatch else '{"position":"1"}',
+                difference_json=None if causal_mismatch else '{"position":"0"}',
+                tolerance_json=None if causal_mismatch else '{"absolute":"0"}',
+                reconciled_at=None if causal_mismatch else now,
+                authoritative_until=None if causal_mismatch else now + timedelta(minutes=5),
                 error=None,
                 public_id=str(uuid7()),
                 session_id=session_id,
@@ -217,7 +232,7 @@ async def _delete_forged_context(
 
 @pytest.mark.parametrize(
     "forgery",
-    ["invalid_method", "watermark_ahead", "cross_account_observation"],
+    ["invalid_method", "watermark_ahead", "cross_account_observation", "causal_mismatch"],
 )
 async def test_persisted_forgery_fails_closed_on_configured_database(
     forgery: ReconciliationForgery,

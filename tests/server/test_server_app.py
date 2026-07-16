@@ -2562,12 +2562,14 @@ class MockRepository:
         error: Exception | None = None,
         account_state_rows: list[VenueAccountStateRow] | None = None,
         accessible_wallet_ids: list[str] | None = None,
+        duplicate_active_rows: bool = False,
     ) -> None:
         """Initialize the instance."""
         self._session_result = session_result or []
         self._error = error
         self._account_state_rows = account_state_rows or []
         self._accessible_wallet_ids = accessible_wallet_ids or []
+        self._duplicate_active_rows = duplicate_active_rows
         self.reconciliation_context_calls: list[list[str] | None] = []
 
     def session(self) -> MockSession:
@@ -2731,6 +2733,7 @@ class MockRepository:
         return [
             PortfolioReconciliationReadContextRow(
                 account_state=row,
+                duplicate_active_rows=self._duplicate_active_rows,
                 state=None,
                 observations=[],
                 config=None,
@@ -4834,6 +4837,32 @@ class TestPortfolioAccountsEndpoint:
         assert data["payload"][0]["public_id"] == "acct-visible"
         assert data["payload"][0]["wallet_public_id"] == "w-visible"
         assert repo.reconciliation_context_calls == [["w-visible"]]
+
+    def test_duplicate_active_rows_corrupt_account_and_reconciliation(self) -> None:
+        """Active multiplicity fails closed across the whole REST account item.
+
+        Given: A coherent fresh observed row in a context whose loader detected
+            duplicate active truth.
+        When: An ADMIN reads the portfolio account route.
+        Then: Both the account and nested reconciliation are corrupt and
+            non-authoritative, and account payloads are cleared.
+        """
+        repo = MockRepository(
+            account_state_rows=[_account_state_row()],
+            duplicate_active_rows=True,
+        )
+        client = _account_state_client(UserRole.ADMIN, repo)
+
+        response = client.get("/api/portfolio/accounts")
+
+        assert response.status_code == 200
+        state = response.json()["payload"][0]
+        assert state["effective_status"] == "corrupt"
+        assert state["is_authoritative"] is False
+        assert state["balances"] is None
+        assert state["open_positions"] is None
+        assert state["reconciliation"]["effective_status"] == "corrupt"
+        assert state["reconciliation"]["is_authoritative"] is False
 
     def test_empty_returns_empty_list(self) -> None:
         """No rows yields an empty payload with count 0.

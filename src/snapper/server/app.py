@@ -2465,9 +2465,11 @@ def _create_orders_executions_router() -> APIRouter:
         EFFECTIVE status is derived over the stored value (stale/clock_error),
         payloads are revalidated (a parse failure marks the state corrupt),
         and ``is_authoritative`` is set only when the effective status is
-        exactly ``observed``. The always-present ``reconciliation`` object is
-        independently revalidated from its durable lineage and can be
-        authoritative only for a fresh full matched or mismatched verdict.
+        exactly ``observed``. Ambiguous duplicate active rows corrupt the
+        whole account presentation as well as its always-present
+        ``reconciliation`` object. Reconciliation truth is independently
+        revalidated from its durable lineage and can be authoritative only
+        for a fresh full matched or mismatched verdict.
         Account state has no historical projection, so there is no ``as_of``
         parameter.
 
@@ -2493,6 +2495,7 @@ def _create_orders_executions_router() -> APIRouter:
                     context["account_state"],
                     now,
                     build_portfolio_reconciliation_view(context, now),
+                    duplicate_active_rows=context["duplicate_active_rows"],
                 )
                 for context in contexts
             ]
