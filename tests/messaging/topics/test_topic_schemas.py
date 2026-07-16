@@ -181,6 +181,20 @@ class TestTopicUtilities:
         assert len(results) == 1
         assert results[0].pattern == "alerts."
 
+    def test_account_state_registry_entry_exists(self) -> None:
+        """The account invalidation root is read-scoped and throttled.
+
+        Given: The WebSocket topic registry.
+        When: Looking up the account-state category.
+        Then: Its sole root uses the requested 500 ms bridge throttle.
+        """
+        results = get_topics_by_category("account_state")
+
+        assert len(results) == 1
+        assert results[0].pattern == "portfolio.accounts."
+        assert results[0].throttle_ms == 500
+        assert results[0].throttle_per_topic is True
+
 
 class TestProcessesAndStrategiesTopics:
     """Tests for the 2026-05-14 process/strategy WS event topic registrations.

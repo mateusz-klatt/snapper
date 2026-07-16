@@ -257,6 +257,100 @@ class TestAdminCategorySubscription:
         assert "admin." in response["topics"]
 
 
+class TestAccountStateCategorySubscription:
+    """Handler-level RBAC matrix for account invalidation subscriptions."""
+
+    @pytest.fixture
+    def mock_websocket(self) -> AsyncMock:
+        """Provide a WebSocket mock that captures subscription responses."""
+        websocket = AsyncMock()
+        websocket.send_text = AsyncMock()
+        return websocket
+
+    @pytest.fixture
+    def mock_manager(self) -> MagicMock:
+        """Provide a connection manager with an available bridge."""
+        manager = MagicMock()
+        manager.get_client_subscriptions = MagicMock(return_value=set())
+        manager.subscribe_client = MagicMock()
+        manager.zmq_bridge = MagicMock()
+        manager.zmq_bridge.add_subscription = AsyncMock()
+        type(manager).tracker = PropertyMock(return_value=SequenceTracker())
+        return manager
+
+    @pytest.mark.parametrize(
+        "role",
+        [UserRole.VIEWER, UserRole.OPERATOR, UserRole.ADMIN],
+    )
+    @pytest.mark.asyncio
+    async def test_read_account_state_roles_can_subscribe(
+        self,
+        role: UserRole,
+        mock_websocket: AsyncMock,
+        mock_manager: MagicMock,
+    ) -> None:
+        """Every role holding READ_ACCOUNT_STATE may subscribe to the root.
+
+        Given: A VIEWER, OPERATOR, or ADMIN principal.
+        When: The principal subscribes to ``portfolio.accounts.``.
+        Then: The handler registers the root with the ZMQ bridge.
+        """
+        message = WSSubscribeRequest(
+            public_id="test-pid",
+            timestamp=datetime(2026, 7, 16, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["portfolio.accounts."],
+        )
+
+        await handle_subscribe(mock_websocket, message, mock_manager, _principal(role))
+
+        response = json.loads(mock_websocket.send_text.call_args[0][0])
+        assert response["type"] == "subscription_success"
+        assert response["status"] == "subscribed"
+        assert response["topics"] == ["portfolio.accounts."]
+        mock_manager.zmq_bridge.add_subscription.assert_awaited_once_with(
+            mock_websocket, ["portfolio.accounts."]
+        )
+
+    @pytest.mark.asyncio
+    async def test_ai_delegate_is_denied_account_state_root(
+        self,
+        mock_websocket: AsyncMock,
+        mock_manager: MagicMock,
+    ) -> None:
+        """AI_DELEGATE cannot subscribe without READ_ACCOUNT_STATE.
+
+        Given: An AI_DELEGATE principal whose role lacks account-state read access.
+        When: The principal requests the account invalidation root.
+        Then: Category RBAC denies it and the bridge is untouched.
+        """
+        repository = MagicMock()
+        repository.list_scope_grant_instrument_pairs = AsyncMock(return_value=set())
+        message = WSSubscribeRequest(
+            public_id="test-pid",
+            timestamp=datetime(2026, 7, 16, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["portfolio.accounts."],
+        )
+
+        await handle_subscribe(
+            mock_websocket,
+            message,
+            mock_manager,
+            _principal(UserRole.AI_DELEGATE),
+            repository,
+        )
+
+        response = json.loads(mock_websocket.send_text.call_args[0][0])
+        assert response["type"] == "subscription_success"
+        assert response["status"] == "denied"
+        assert response["topics"] == []
+        assert response["denied_topics"] == ["portfolio.accounts."]
+        mock_manager.zmq_bridge.add_subscription.assert_not_awaited()
+
+
 class TestIntermediatePrefixRejection:
     """Tests for intermediate prefix rejection in WS subscription validation."""
 

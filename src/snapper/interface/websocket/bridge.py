@@ -25,6 +25,8 @@ from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
+from snapper.core.json_types import JsonObject
+from snapper.core.json_types import JsonValue
 from snapper.data.models import Control
 from snapper.data.repository import get_repository
 from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
@@ -39,14 +41,18 @@ from snapper.interface.websocket.schemas import WSErrorResponse
 from snapper.interface.websocket.scope_filter import AI_REVIEWS_TOPIC_PREFIX
 from snapper.interface.websocket.scope_filter import ALERTS_TOPIC_PREFIX
 from snapper.interface.websocket.scope_filter import ORDERS_EVENTS_TOPIC_PREFIX
-from snapper.interface.websocket.scope_filter import OrdersEventsAccessCache
+from snapper.interface.websocket.scope_filter import PORTFOLIO_ACCOUNTS_TOPIC_PREFIX
+from snapper.interface.websocket.scope_filter import WalletAccessCache
+from snapper.interface.websocket.scope_filter import _enforce_validated_account_state_scope
 from snapper.interface.websocket.scope_filter import enforce_ai_review_scope
 from snapper.interface.websocket.scope_filter import enforce_alerts_scope
 from snapper.interface.websocket.scope_filter import enforce_orders_events_scope
+from snapper.interface.websocket.scope_filter import validate_account_state_event
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.schemas.data import AccountStateChangedEventData
 from snapper.messaging.schemas.messages import GapEnvelope
 from snapper.messaging.topics.builders import is_order_topic
 from snapper.messaging.topics.schemas import REGISTRY_ROOTS
@@ -61,6 +67,9 @@ MAX_PENDING_MESSAGES_MARKET = 100
 MAX_PENDING_MESSAGES_TRADE = 1000
 
 SEND_TIMEOUT_SECONDS = 1.0
+
+type _AccountTrailingKey = tuple[WebSocket, str, str]
+type _AccountTrailingFrame = tuple[str, AccountStateChangedEventData]
 
 
 class ZmqWebSocketBridgeService:
@@ -116,6 +125,8 @@ class ZmqWebSocketBridgeService:
         self._gap_detector: GapDetector = GapDetector("bridge")
         self.available_topics: dict[str, TopicConfigurationModel] = self._build_topic_config()
         self._shutdown_event: asyncio.Event | None = None
+        self._account_trailing_frames: dict[_AccountTrailingKey, _AccountTrailingFrame] = {}
+        self._account_trailing_tasks: dict[_AccountTrailingKey, asyncio.Task[None]] = {}
 
     async def _record_bridge_control(
         self,
@@ -218,7 +229,7 @@ class ZmqWebSocketBridgeService:
 
     def _default_topic_throttle_ms(self, topic: str, fallback: int = 100) -> int:
         """Return configured throttle for a topic or a fallback value."""
-        topic_config = self.available_topics.get(topic)
+        topic_config = self._find_matching_pattern(topic)
         if topic_config is None:
             return fallback
         return topic_config.throttle_ms
@@ -236,7 +247,7 @@ class ZmqWebSocketBridgeService:
         Returns:
             The matching schema's ``throttle_per_topic``, or False.
         """
-        topic_config = self.available_topics.get(topic)
+        topic_config = self._find_matching_pattern(topic)
         if topic_config is None:
             return False
         return topic_config.throttle_per_topic
@@ -358,7 +369,9 @@ class ZmqWebSocketBridgeService:
         for topic in topics:
             self.client_subscriptions[websocket].discard(topic)
             if topic in self.topic_subscriptions:
-                self.topic_subscriptions[topic].pop(websocket, None)
+                removed = self.topic_subscriptions[topic].pop(websocket, None)
+                if removed is not None:
+                    await self._cancel_account_trailing_for_subscription(websocket, topic)
                 if topic in self.topic_metrics:
                     self.topic_metrics[topic].active_subscribers = len(
                         self.topic_subscriptions[topic]
@@ -606,10 +619,148 @@ class ZmqWebSocketBridgeService:
             else subscription.last_sent
         )
         if current_time - last_sent < (subscription.throttle_ms / 1000.0):
-            if topic in self.topic_metrics:
-                self.topic_metrics[topic].throttled_count += 1
+            self._increment_throttled_count(topic)
             return True
         return False
+
+    def _increment_throttled_count(self, topic: str) -> None:
+        """Count one coalesced or dropped frame when metrics are available."""
+        if topic in self.topic_metrics:
+            self.topic_metrics[topic].throttled_count += 1
+
+    def _is_registered_subscription(
+        self,
+        subscription: TopicSubscriptionModel,
+        topic: str,
+    ) -> bool:
+        """Return whether the registry still owns this exact subscription."""
+        registered = self.topic_subscriptions.get(topic, {}).get(subscription.websocket)
+        return registered is subscription
+
+    def _coalesce_account_frame(
+        self,
+        *,
+        subscription: TopicSubscriptionModel,
+        topic: str,
+        received_topic: str,
+        message_str: str,
+        payload: AccountStateChangedEventData,
+        current_time: float,
+    ) -> bool:
+        """Queue the newest account frame when its wallet window is open.
+
+        Args:
+            subscription: Destination subscription owning throttle state.
+            topic: Subscription root used for metrics and registration checks.
+            received_topic: Exact wallet topic, which keys the coalescing window.
+            message_str: Validated raw frame retained for eventual delivery.
+            payload: Strict typed event retained for a fresh scope check.
+            current_time: Receive timestamp used to calculate the window close.
+
+        Returns:
+            ``True`` when delivery is owned by a trailing worker.
+        """
+        key: _AccountTrailingKey = (subscription.websocket, topic, received_topic)
+        if key in self._account_trailing_tasks:
+            self._account_trailing_frames[key] = (message_str, payload)
+            self._increment_throttled_count(topic)
+            return True
+        if not self._is_throttled(subscription, current_time, topic, received_topic):
+            return False
+        self._account_trailing_frames[key] = (message_str, payload)
+        last_sent = (
+            subscription.last_sent_by_topic.get(received_topic, 0.0)
+            if subscription.throttle_per_topic
+            else subscription.last_sent
+        )
+        delay = max(0.0, last_sent + (subscription.throttle_ms / 1000.0) - current_time)
+        task = asyncio.create_task(
+            self._deliver_account_trailing(key, subscription, delay),
+            name=f"account-trailing:{subscription.client_id}:{received_topic}",
+        )
+        self._account_trailing_tasks[key] = task
+        return True
+
+    async def _deliver_account_trailing(
+        self,
+        key: _AccountTrailingKey,
+        subscription: TopicSubscriptionModel,
+        initial_delay: float,
+    ) -> None:
+        """Deliver each latest account frame at its wallet window's trailing edge.
+
+        Args:
+            key: Subscriber, root, and received-wallet topic identity.
+            subscription: Exact subscription instance that queued the worker.
+            initial_delay: Seconds remaining in the current throttle window.
+        """
+        try:
+            await asyncio.sleep(initial_delay)
+            websocket, topic, received_topic = key
+            while True:
+                if not self._is_registered_subscription(subscription, topic):
+                    return
+                message_str, payload = self._account_trailing_frames.pop(key)
+                await self._dispatch_to_subscription(
+                    subscription=subscription,
+                    topic=topic,
+                    received_topic=received_topic,
+                    message_str=message_str,
+                    current_time=time.time(),
+                    max_pending=self._get_max_pending(topic),
+                    is_trade=self._is_trade_topic(topic),
+                    ai_review_payload=None,
+                    orders_events_payload=None,
+                    account_state_payload=payload,
+                    alerts_payload=None,
+                    wallet_access_cache={},
+                    wallet_scope_as_of=datetime.now(UTC),
+                    apply_throttle=False,
+                )
+                if key not in self._account_trailing_frames:
+                    return
+                await asyncio.sleep(subscription.throttle_ms / 1000.0)
+        finally:
+            current_task = asyncio.current_task()
+            if self._account_trailing_tasks.get(key) is current_task:
+                self._account_trailing_tasks.pop(key, None)
+                self._account_trailing_frames.pop(key, None)
+
+    async def _cancel_account_trailing_keys(
+        self,
+        keys: tuple[_AccountTrailingKey, ...],
+    ) -> None:
+        """Cancel and drain selected trailing workers without self-awaiting.
+
+        Args:
+            keys: Exact trailing worker identities being retired.
+        """
+        current_task = asyncio.current_task()
+        draining: list[asyncio.Task[None]] = []
+        for key in keys:
+            task = self._account_trailing_tasks.pop(key)
+            self._account_trailing_frames.pop(key, None)
+            if task is current_task:
+                continue
+            task.cancel()
+            draining.append(task)
+        if draining:
+            await asyncio.gather(*draining, return_exceptions=True)
+
+    async def _cancel_account_trailing_for_subscription(
+        self,
+        websocket: WebSocket,
+        topic: str,
+    ) -> None:
+        """Cancel trailing deliveries owned by one removed subscription."""
+        keys = tuple(
+            key for key in self._account_trailing_tasks if key[0] is websocket and key[1] == topic
+        )
+        await self._cancel_account_trailing_keys(keys)
+
+    async def _cancel_all_account_trailing(self) -> None:
+        """Cancel and drain every bridge-owned account trailing worker."""
+        await self._cancel_account_trailing_keys(tuple(self._account_trailing_tasks))
 
     async def _handle_backpressure(
         self,
@@ -757,11 +908,22 @@ class ZmqWebSocketBridgeService:
         orders_events_payload = self._maybe_parse_orders_events_payload(topic, message_str)
         if not self._orders_events_frame_is_valid(topic, orders_events_payload):
             return
+        account_state_payload = self._maybe_parse_account_state_payload(
+            topic,
+            received_topic,
+            message_str,
+        )
+        if not self._account_state_frame_is_valid(topic, account_state_payload):
+            return
         alerts_payload = self._maybe_parse_alerts_payload(topic, message_str)
         if not self._alerts_frame_is_valid(topic, alerts_payload):
             return
-        orders_events_access_cache: OrdersEventsAccessCache = {}
-        orders_events_as_of = datetime.now(UTC) if orders_events_payload is not None else None
+        wallet_access_cache: WalletAccessCache = {}
+        wallet_scope_as_of = (
+            datetime.now(UTC)
+            if orders_events_payload is not None or account_state_payload is not None
+            else None
+        )
         current_time = time.time()
         max_pending = self._get_max_pending(topic)
         is_trade = self._is_trade_topic(topic)
@@ -777,9 +939,10 @@ class ZmqWebSocketBridgeService:
                 is_trade=is_trade,
                 ai_review_payload=ai_review_payload,
                 orders_events_payload=orders_events_payload,
+                account_state_payload=account_state_payload,
                 alerts_payload=alerts_payload,
-                orders_events_access_cache=orders_events_access_cache,
-                orders_events_as_of=orders_events_as_of,
+                wallet_access_cache=wallet_access_cache,
+                wallet_scope_as_of=wallet_scope_as_of,
             )
 
     def _alerts_frame_is_valid(self, topic: str, alerts_payload: dict[str, Any] | None) -> bool:
@@ -806,7 +969,7 @@ class ZmqWebSocketBridgeService:
         return False
 
     def _orders_events_frame_is_valid(
-        self, topic: str, orders_events_payload: dict[str, Any] | None
+        self, topic: str, orders_events_payload: JsonObject | None
     ) -> bool:
         """Return False (and log + count) when an ``orders.events.*`` frame is malformed.
 
@@ -817,14 +980,82 @@ class ZmqWebSocketBridgeService:
         bumped at this canonical drop site rather than inside the parse
         helper to keep the parser side-effect-free.
         """
-        if not topic.startswith(ORDERS_EVENTS_TOPIC_PREFIX):
+        return self._wallet_scoped_frame_is_valid(
+            topic=topic,
+            topic_prefix=ORDERS_EVENTS_TOPIC_PREFIX,
+            payload=orders_events_payload,
+            family="orders.events",
+        )
+
+    def _account_state_frame_is_valid(
+        self,
+        topic: str,
+        account_state_payload: AccountStateChangedEventData | None,
+    ) -> bool:
+        """Return whether a ``portfolio.accounts.*`` frame is well formed.
+
+        Args:
+            topic: Subscription topic used for fan-out.
+            account_state_payload: Strict typed event or ``None``.
+
+        Returns:
+            ``False`` for malformed account invalidations, otherwise ``True``.
+        """
+        if not topic.startswith(PORTFOLIO_ACCOUNTS_TOPIC_PREFIX):
             return True
-        if orders_events_payload is not None:
+        if account_state_payload is not None:
             return True
+        return self._drop_wallet_scoped_frame(
+            topic=topic,
+            family="portfolio.accounts",
+            detail="failed strict event schema, UUID7 topic, or topic-payload wallet match",
+        )
+
+    def _wallet_scoped_frame_is_valid(
+        self,
+        *,
+        topic: str,
+        topic_prefix: str,
+        payload: JsonObject | None,
+        family: str,
+    ) -> bool:
+        """Validate the parsed envelope required by a wallet scope filter.
+
+        Args:
+            topic: Subscription topic used for fan-out.
+            topic_prefix: Wallet-scoped family owned by the caller.
+            payload: Parsed envelope or ``None`` after a parse failure.
+            family: Human-readable topic family for diagnostics.
+
+        Returns:
+            ``False`` after logging and counting a malformed family frame.
+        """
+        if not topic.startswith(topic_prefix):
+            return True
+        if payload is not None:
+            return True
+        return self._drop_wallet_scoped_frame(
+            topic=topic,
+            family=family,
+            detail="failed JSON / non-dict envelope / missing or non-string wallet_public_id",
+        )
+
+    def _drop_wallet_scoped_frame(self, *, topic: str, family: str, detail: str) -> bool:
+        """Log, count, and reject one invalid wallet-scoped frame.
+
+        Args:
+            topic: Subscription topic used for fan-out.
+            family: Human-readable topic family for diagnostics.
+            detail: Validation failure detail.
+
+        Returns:
+            Always ``False`` so callers can return the canonical drop verdict.
+        """
         logger.warning(
-            "Dropping malformed orders.events.* frame (failed JSON / non-dict envelope / "
-            "missing or non-string wallet_public_id) for topic=%s — would otherwise "
+            "Dropping invalid %s.* frame (%s) for topic=%s — would otherwise "
             "bypass per-frame scope filter",
+            family,
+            detail,
             topic,
         )
         if topic in self.topic_metrics:
@@ -842,10 +1073,12 @@ class ZmqWebSocketBridgeService:
         max_pending: int,
         is_trade: bool,
         ai_review_payload: dict[str, Any] | None,
-        orders_events_payload: dict[str, Any] | None,
+        orders_events_payload: JsonObject | None,
+        account_state_payload: AccountStateChangedEventData | None,
         alerts_payload: dict[str, Any] | None,
-        orders_events_access_cache: OrdersEventsAccessCache,
-        orders_events_as_of: datetime | None,
+        wallet_access_cache: WalletAccessCache,
+        wallet_scope_as_of: datetime | None,
+        apply_throttle: bool = True,
     ) -> None:
         """Apply throttle + per-frame scope + backpressure filters to one subscriber.
 
@@ -854,8 +1087,21 @@ class ZmqWebSocketBridgeService:
         so a misbehaving socket cannot wedge the fan-out loop.
         """
         try:
-            if self._is_throttled(subscription, current_time, topic, received_topic):
+            if not self._is_registered_subscription(subscription, topic):
                 return
+            if apply_throttle:
+                if account_state_payload is not None:
+                    if self._coalesce_account_frame(
+                        subscription=subscription,
+                        topic=topic,
+                        received_topic=received_topic,
+                        message_str=message_str,
+                        payload=account_state_payload,
+                        current_time=current_time,
+                    ):
+                        return
+                elif self._is_throttled(subscription, current_time, topic, received_topic):
+                    return
             if ai_review_payload is not None and not await self._enforce_ai_review_scope(
                 subscription=subscription,
                 topic=topic,
@@ -866,8 +1112,16 @@ class ZmqWebSocketBridgeService:
                 subscription=subscription,
                 topic=topic,
                 payload=orders_events_payload,
-                access_cache=orders_events_access_cache,
-                as_of=orders_events_as_of,
+                access_cache=wallet_access_cache,
+                as_of=wallet_scope_as_of,
+            ):
+                return
+            if account_state_payload is not None and not await self._enforce_account_state_scope(
+                subscription=subscription,
+                topic=received_topic,
+                payload=account_state_payload,
+                access_cache=wallet_access_cache,
+                as_of=wallet_scope_as_of,
             ):
                 return
             if alerts_payload is not None and not self._enforce_alerts_scope(
@@ -876,12 +1130,16 @@ class ZmqWebSocketBridgeService:
                 payload=alerts_payload,
             ):
                 return
+            if not self._is_registered_subscription(subscription, topic):
+                return
             if await self._handle_backpressure(subscription, topic, max_pending, is_trade):
                 return
             await self._try_send_message(
                 subscription, topic, message_str, current_time, received_topic
             )
         except Exception as e:
+            if not self._is_registered_subscription(subscription, topic):
+                return
             logger.warning(f"Failed to send message to client {subscription.client_id}: {e}")
             with contextlib.suppress(Exception):
                 await self.disconnect_client(subscription.websocket)
@@ -939,9 +1197,7 @@ class ZmqWebSocketBridgeService:
             return None
         return parsed
 
-    def _maybe_parse_orders_events_payload(
-        self, topic: str, message_str: str
-    ) -> dict[str, Any] | None:
+    def _maybe_parse_orders_events_payload(self, topic: str, message_str: str) -> JsonObject | None:
         """Parse an ``orders.events.*`` frame's JSON payload exactly once.
 
         Returns ``None`` for non-orders.events. topics (no per-frame
@@ -963,7 +1219,53 @@ class ZmqWebSocketBridgeService:
         bridge keeps the filter contract clean and lets the bridge
         increment ``invalid_messages`` at the canonical drop site.
         """
-        if not topic.startswith(ORDERS_EVENTS_TOPIC_PREFIX):
+        return self._maybe_parse_wallet_scoped_payload(
+            topic=topic,
+            topic_prefix=ORDERS_EVENTS_TOPIC_PREFIX,
+            message_str=message_str,
+        )
+
+    def _maybe_parse_account_state_payload(
+        self,
+        topic: str,
+        received_topic: str,
+        message_str: str,
+    ) -> AccountStateChangedEventData | None:
+        """Parse and validate one ``portfolio.accounts.*`` event.
+
+        Args:
+            topic: Subscription topic used to select the account family.
+            received_topic: Full wallet topic carried by the ZMQ frame.
+            message_str: Raw JSON payload.
+
+        Returns:
+            Strict typed event when its schema and topic invariants hold.
+        """
+        if not topic.startswith(PORTFOLIO_ACCOUNTS_TOPIC_PREFIX):
+            return None
+        return validate_account_state_event(
+            topic=received_topic,
+            payload=message_str,
+        )
+
+    def _maybe_parse_wallet_scoped_payload(
+        self,
+        *,
+        topic: str,
+        topic_prefix: str,
+        message_str: str,
+    ) -> JsonObject | None:
+        """Parse the wallet key required by a per-frame scope filter.
+
+        Args:
+            topic: Subscription topic used for fan-out.
+            topic_prefix: Wallet-scoped family owned by the caller.
+            message_str: Raw JSON payload.
+
+        Returns:
+            Parsed envelope with a string wallet id, otherwise ``None``.
+        """
+        if not topic.startswith(topic_prefix):
             return None
         try:
             parsed = json.loads(message_str)
@@ -1004,8 +1306,8 @@ class ZmqWebSocketBridgeService:
         *,
         subscription: TopicSubscriptionModel,
         topic: str,
-        payload: Mapping[str, Any],
-        access_cache: OrdersEventsAccessCache,
+        payload: Mapping[str, JsonValue],
+        access_cache: WalletAccessCache,
         as_of: datetime | None,
     ) -> bool:
         """Per-frame scope filter for the ``orders.events.*`` family.
@@ -1022,6 +1324,39 @@ class ZmqWebSocketBridgeService:
             topic=topic,
             connection_principal=principal,
             payload=payload,
+            scope_grant_service=get_scope_grant_service(),
+            as_of=as_of,
+            accessible_wallets_cache=access_cache,
+        )
+
+    async def _enforce_account_state_scope(
+        self,
+        *,
+        subscription: TopicSubscriptionModel,
+        topic: str,
+        payload: AccountStateChangedEventData,
+        access_cache: WalletAccessCache,
+        as_of: datetime | None,
+    ) -> bool:
+        """Apply wallet scope to one ``portfolio.accounts.*`` subscriber.
+
+        Args:
+            subscription: Destination subscription and socket.
+            topic: Subscription topic used for fan-out.
+            payload: Parsed account invalidation envelope.
+            access_cache: Frame-local accessible-wallet cache.
+            as_of: Wall-clock shared across the frame's fan-out.
+
+        Returns:
+            Whether the account invalidation may reach the destination.
+        """
+        principal = WebSocketAuthManager.get_instance().get_authenticated_user(
+            subscription.websocket
+        )
+        return await _enforce_validated_account_state_scope(
+            topic=topic,
+            connection_principal=principal,
+            event=payload,
             scope_grant_service=get_scope_grant_service(),
             as_of=as_of,
             accessible_wallets_cache=access_cache,
@@ -1126,14 +1461,15 @@ class ZmqWebSocketBridgeService:
             logger.exception(f"ZMQ message handler for {topic} failed: {e}")
 
     async def subscribe_websocket(
-        self, websocket: WebSocket, topic: str, throttle_ms: int = 100
+        self, websocket: WebSocket, topic: str, throttle_ms: int | None = None
     ) -> bool:
         """Subscribe a WebSocket to a topic with optional throttle.
 
         Args:
             websocket: The WebSocket connection.
             topic: The topic to subscribe to.
-            throttle_ms: Throttle interval in milliseconds.
+            throttle_ms: Optional throttle override in milliseconds. Omitted
+                values use the matching topic registry entry.
 
         Returns:
             True if subscription successful, False otherwise.
@@ -1143,11 +1479,17 @@ class ZmqWebSocketBridgeService:
         if self._websocket_has_topic_subscription(websocket, topic):
             logger.debug(f"WebSocket already subscribed to topic: {topic}")
             return True
+        effective_throttle_ms = self._default_topic_throttle_ms(topic)
+        if throttle_ms is not None:
+            effective_throttle_ms = throttle_ms
         self._register_topic_subscription(
-            websocket, topic, throttle_ms, throttle_per_topic=self._topic_throttle_per_topic(topic)
+            websocket,
+            topic,
+            effective_throttle_ms,
+            throttle_per_topic=self._topic_throttle_per_topic(topic),
         )
         await self.start_zmq_subscriber(topic)
-        logger.info(f"WebSocket subscribed to topic: {topic} (throttle: {throttle_ms}ms)")
+        logger.info(f"WebSocket subscribed to topic: {topic} (throttle: {effective_throttle_ms}ms)")
         return True
 
     async def unsubscribe_websocket(self, websocket: WebSocket, topic: str) -> bool:
@@ -1165,11 +1507,14 @@ class ZmqWebSocketBridgeService:
         removed = self.topic_subscriptions[topic].pop(websocket, None)
         if removed is None:
             return False
+        await self._cancel_account_trailing_for_subscription(websocket, topic)
         logger.info(f"WebSocket unsubscribed from topic: {topic}")
+        live_subscriptions = self.topic_subscriptions.get(topic, {})
+        registered = live_subscriptions.get(websocket)
         if topic in self.topic_metrics:
-            self.topic_metrics[topic].active_subscribers = max(
-                0, self.topic_metrics[topic].active_subscribers - 1
-            )
+            self.topic_metrics[topic].active_subscribers = len(live_subscriptions)
+        if registered is not None and registered is not removed:
+            return True
         if websocket in self.client_subscriptions:
             self.client_subscriptions[websocket].discard(topic)
             if not self.client_subscriptions[websocket]:
@@ -1270,9 +1615,12 @@ class ZmqWebSocketBridgeService:
 
     async def cleanup(self) -> None:
         """Clean up all ZMQ resources and subscriptions."""
-        for task in self.subscriber_tasks.values():
+        subscriber_tasks = tuple(self.subscriber_tasks.values())
+        for task in subscriber_tasks:
             task.cancel()
         self.subscriber_tasks.clear()
+        await asyncio.gather(*subscriber_tasks, return_exceptions=True)
+        await self._cancel_all_account_trailing()
         for socket in self.zmq_subscribers.values():
             socket.setsockopt(zmq.LINGER, 0)
             socket.close()

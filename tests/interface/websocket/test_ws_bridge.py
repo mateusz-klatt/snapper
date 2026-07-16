@@ -13,6 +13,7 @@ from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import PropertyMock
+from unittest.mock import call
 from unittest.mock import patch
 
 import pytest
@@ -32,8 +33,34 @@ from snapper.interface.websocket.models import TopicMetricsModel
 from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import AccountStateChangedEventData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
+from snapper.messaging.schemas.data import SignalData
+
+
+def _account_state_frame(
+    wallet_public_id: str,
+    *,
+    kind: str = "snapshot",
+    sequence_id: int = 1,
+) -> str:
+    """Build one complete typed account invalidation wire frame."""
+    topic = f"portfolio.accounts.{wallet_public_id}"
+    event = AccountStateChangedEventData.model_validate(
+        {
+            "type": "account_state_changed_event",
+            "sequence_id": sequence_id,
+            "public_id": f"account-event-{sequence_id}",
+            "timestamp": datetime(2026, 7, 16, 9, 0, tzinfo=UTC),
+            "session_id": "account-session-1",
+            "wallet_public_id": wallet_public_id,
+            "exchange": "kraken",
+            "mode": "live",
+            "kind": kind,
+        }
+    )
+    return event.publish_to(topic).decode("utf-8")
 
 
 @pytest.fixture
@@ -909,8 +936,8 @@ class TestSubscribeWebsocket:
         return mgr
 
     @pytest.fixture
-    def bridge(self, connection_manager: MagicMock) -> ZmqWebSocketBridgeService:
-        """Provide bridge with available topics configured."""
+    def bridge(self, connection_manager: MagicMock) -> Generator[ZmqWebSocketBridgeService]:
+        """Provide a configured bridge with telemetry I/O isolated."""
         bridge = ZmqWebSocketBridgeService(connection_manager)
         bridge.available_topics = {
             "market.kraken.BTC-USD.candles.1m": TopicConfigurationModel(
@@ -924,7 +951,8 @@ class TestSubscribeWebsocket:
                 throttle_ms=50,
             ),
         }
-        return bridge
+        with patch.object(bridge, "_record_bridge_control", new=AsyncMock()):
+            yield bridge
 
     @pytest.fixture
     def mock_websocket(self) -> AsyncMock:
@@ -3708,6 +3736,1218 @@ class TestOrdersEventsTwoPrincipalLeakGuard:
         ws_primary.send_text.assert_awaited_once_with(payload)
         ws_secondary.send_text.assert_awaited_once_with(payload)
         mock_service.list_accessible_wallet_public_ids.assert_awaited_once()
+
+
+class TestAccountStateScopeBridge:
+    """Bridge wiring for wallet-scoped account invalidation frames."""
+
+    @pytest.fixture
+    def bridge(self) -> ZmqWebSocketBridgeService:
+        """Provide an account-topic bridge with mocked settings."""
+        with patch("snapper.interface.websocket.bridge.get_settings") as mock_settings:
+            mock_settings.return_value.zmq_broker_xpub = "tcp://localhost:5556"
+            mock_settings.return_value.zmq_publisher = "tcp://localhost:5555"
+            return ZmqWebSocketBridgeService(connection_manager=MagicMock())
+
+    def _seed_subscription(self, bridge: ZmqWebSocketBridgeService) -> tuple[AsyncMock, str]:
+        """Attach one account-root subscriber with metrics."""
+        topic = "portfolio.accounts."
+        websocket = AsyncMock()
+        subscription = TopicSubscriptionModel(
+            websocket=websocket,
+            throttle_ms=0,
+            client_id="viewer-1",
+        )
+        bridge.topic_subscriptions[topic] = {websocket: subscription}
+        bridge.topic_metrics[topic] = TopicMetricsModel()
+        return websocket, topic
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "{not-json",
+            "[1, 2, 3]",
+            '{"type": "account_state_changed_event"}',
+            '{"type": "account_state_changed_event", "wallet_public_id": null}',
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_malformed_account_frame_fails_closed(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+        payload: str,
+    ) -> None:
+        """Malformed JSON shapes and wallet keys are dropped before scope checks.
+
+        Given: An account-root subscriber and an unusable event envelope.
+        When: The bridge fans out the frame.
+        Then: Nothing is sent and the invalid-frame metric increments.
+        """
+        websocket, topic = self._seed_subscription(bridge)
+
+        await bridge._forward_to_clients(
+            topic,
+            "portfolio.accounts.00000000-0000-7000-8000-000000000001",
+            payload,
+        )
+
+        websocket.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[topic].invalid_messages == 1
+
+    @pytest.mark.parametrize(
+        "mutation",
+        ["missing_type", "missing_session_id", "extra_field"],
+    )
+    @pytest.mark.asyncio
+    async def test_incomplete_or_extra_account_schema_fails_closed(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+        mutation: str,
+    ) -> None:
+        """Strict account parsing rejects defaulted, incomplete, and extra shapes."""
+        websocket, root = self._seed_subscription(bridge)
+        wallet = "00000000-0000-7000-8000-000000000001"
+        raw = json.loads(_account_state_frame(wallet))
+        if mutation == "missing_type":
+            raw.pop("type")
+        elif mutation == "missing_session_id":
+            raw.pop("session_id")
+        else:
+            raw["signal_reason"] = "must not cross categories"
+        payload = json.dumps(raw)
+
+        await bridge._forward_to_clients(
+            root,
+            f"portfolio.accounts.{wallet}",
+            payload,
+        )
+
+        websocket.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[root].invalid_messages == 1
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("exchange", "unknown_exchange"),
+            ("mode", "sandbox"),
+            ("kind", "classification"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_account_enum_fails_closed(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+        field: str,
+        value: str,
+    ) -> None:
+        """Every account-event enum is validated before fan-out."""
+        websocket, root = self._seed_subscription(bridge)
+        wallet = "00000000-0000-7000-8000-000000000001"
+        raw = json.loads(_account_state_frame(wallet))
+        raw[field] = value
+
+        await bridge._forward_to_clients(
+            root,
+            f"portfolio.accounts.{wallet}",
+            json.dumps(raw),
+        )
+
+        websocket.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[root].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_invalid_account_topic_uuid_fails_closed(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """A structurally complete event cannot authorize a non-UUID wallet topic."""
+        websocket, root = self._seed_subscription(bridge)
+        wallet = "00000000-0000-7000-8000-000000000001"
+
+        await bridge._forward_to_clients(
+            root,
+            "portfolio.accounts.not-a-uuid",
+            _account_state_frame(wallet),
+        )
+
+        websocket.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[root].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_wrong_known_type_on_account_topic_fails_closed(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """A valid signal frame cannot borrow the account topic's read permission."""
+        websocket, root = self._seed_subscription(bridge)
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        signal = SignalData(
+            sequence_id=1,
+            public_id="signal-event-1",
+            timestamp=datetime(2026, 7, 16, 9, 0, tzinfo=UTC),
+            session_id="signal-session-1",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            strength=0.8,
+            reason="known but unauthorized category",
+            fired_at=datetime(2026, 7, 16, 9, 0, tzinfo=UTC),
+            wallet_public_id=wallet,
+        )
+        viewer = AuthPrincipal(
+            username="account-viewer",
+            role=UserRole.VIEWER,
+            user_public_id="viewer-user",
+            operator_public_ids=["viewer-operator"],
+        )
+        auth_manager = MagicMock()
+        auth_manager.get_authenticated_user.return_value = viewer
+
+        with patch("snapper.interface.websocket.bridge.WebSocketAuthManager") as manager_class:
+            manager_class.get_instance.return_value = auth_manager
+            await bridge._forward_to_clients(
+                root,
+                received_topic,
+                signal.publish_to(received_topic).decode("utf-8"),
+            )
+
+        websocket.send_text.assert_not_awaited()
+        manager_class.get_instance.assert_not_called()
+        assert bridge.topic_metrics[root].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_malformed_account_frame_drops_before_admin_bypass(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """ADMIN bypasses wallet lookup only, never strict frame validation."""
+        websocket, root = self._seed_subscription(bridge)
+        wallet = "00000000-0000-7000-8000-000000000001"
+        raw = json.loads(_account_state_frame(wallet))
+        raw["extra_signal_payload"] = True
+        auth_manager = MagicMock()
+        auth_manager.get_authenticated_user.return_value = AuthPrincipal(
+            username="admin",
+            role=UserRole.ADMIN,
+            user_public_id="admin-user",
+            operator_public_ids=[],
+        )
+
+        with patch("snapper.interface.websocket.bridge.WebSocketAuthManager") as manager_class:
+            manager_class.get_instance.return_value = auth_manager
+            await bridge._forward_to_clients(
+                root,
+                f"portfolio.accounts.{wallet}",
+                json.dumps(raw),
+            )
+
+        websocket.send_text.assert_not_awaited()
+        manager_class.get_instance.assert_not_called()
+        assert bridge.topic_metrics[root].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_topic_wallet_mismatch_fails_closed_before_scope_filter(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """The received topic wallet must equal the payload wallet.
+
+        Given: A wallet-A topic carrying a wallet-B account invalidation.
+        When: The bridge validates the frame before per-client fan-out.
+        Then: It drops and counts the frame without invoking wallet scope.
+        """
+        websocket, root = self._seed_subscription(bridge)
+        wallet_a = "00000000-0000-7000-8000-000000000001"
+        wallet_b = "00000000-0000-7000-8000-000000000002"
+        payload = _account_state_frame(wallet_b)
+
+        with patch.object(
+            bridge,
+            "_enforce_account_state_scope",
+            new=AsyncMock(),
+        ) as scope_filter:
+            await bridge._forward_to_clients(
+                root,
+                f"portfolio.accounts.{wallet_a}",
+                payload,
+            )
+
+        websocket.send_text.assert_not_awaited()
+        scope_filter.assert_not_awaited()
+        assert bridge.topic_metrics[root].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_account_frame_isolates_wallets_across_principals(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """Only principals with wallet access receive an invalidation.
+
+        Given: Two VIEWER sockets with disjoint accessible-wallet sets.
+        When: A wallet-A account change reaches the bridge.
+        Then: Only the wallet-A principal receives the frame.
+        """
+        root = "portfolio.accounts."
+        wallet_a = "00000000-0000-7000-8000-000000000001"
+        wallet_b = "00000000-0000-7000-8000-000000000002"
+        websocket_a = AsyncMock()
+        websocket_b = AsyncMock()
+        bridge.topic_subscriptions[root] = {
+            websocket_a: TopicSubscriptionModel(
+                websocket=websocket_a,
+                throttle_ms=0,
+                client_id="viewer-A",
+            ),
+            websocket_b: TopicSubscriptionModel(
+                websocket=websocket_b,
+                throttle_ms=0,
+                client_id="viewer-B",
+            ),
+        }
+        bridge.topic_metrics[root] = TopicMetricsModel()
+        principal_a = AuthPrincipal(
+            username="viewer-a",
+            role=UserRole.VIEWER,
+            user_public_id="user-A",
+            operator_public_ids=["op-A"],
+        )
+        principal_b = AuthPrincipal(
+            username="viewer-b",
+            role=UserRole.VIEWER,
+            user_public_id="user-B",
+            operator_public_ids=["op-B"],
+        )
+        accessible_by_user = {
+            "user-A": {wallet_a},
+            "user-B": {wallet_b},
+        }
+
+        async def _list_accessible(*, principal: AuthPrincipal, as_of: datetime) -> set[str]:
+            """Return the test principal's wallet set at the frame timestamp."""
+            assert as_of.tzinfo is not None
+            return accessible_by_user[principal.user_public_id]
+
+        def _principal_for(websocket: object) -> AuthPrincipal:
+            """Resolve the principal attached to a destination socket."""
+            principals: dict[object, AuthPrincipal] = {
+                websocket_a: principal_a,
+                websocket_b: principal_b,
+            }
+            return principals[websocket]
+
+        scope_service = MagicMock()
+        scope_service.list_accessible_wallet_public_ids = AsyncMock(side_effect=_list_accessible)
+        auth_manager = MagicMock()
+        auth_manager.get_authenticated_user.side_effect = _principal_for
+        payload = _account_state_frame(wallet_a)
+
+        with (
+            patch("snapper.interface.websocket.bridge.WebSocketAuthManager") as manager_class,
+            patch(
+                "snapper.interface.websocket.bridge.get_scope_grant_service",
+                return_value=scope_service,
+            ),
+        ):
+            manager_class.get_instance.return_value = auth_manager
+            await bridge._forward_to_clients(
+                root,
+                f"portfolio.accounts.{wallet_a}",
+                payload,
+            )
+
+        websocket_a.send_text.assert_awaited_once_with(payload)
+        websocket_b.send_text.assert_not_awaited()
+        assert scope_service.list_accessible_wallet_public_ids.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_account_frame_cache_is_reused_only_within_each_frame(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """Equivalent principals share one lookup per frame, never across frames.
+
+        Given: Two sockets with the same authorization identity.
+        When: Two account invalidation frames are delivered.
+        Then: Each frame performs one wallet query and both sockets receive both.
+        """
+        root = "portfolio.accounts."
+        wallet = "00000000-0000-7000-8000-000000000001"
+        primary = AsyncMock()
+        secondary = AsyncMock()
+        bridge.topic_subscriptions[root] = {
+            primary: TopicSubscriptionModel(
+                websocket=primary,
+                throttle_ms=0,
+                client_id="viewer-primary",
+            ),
+            secondary: TopicSubscriptionModel(
+                websocket=secondary,
+                throttle_ms=0,
+                client_id="viewer-secondary",
+            ),
+        }
+        bridge.topic_metrics[root] = TopicMetricsModel()
+        principal = AuthPrincipal(
+            username="viewer-a",
+            role=UserRole.VIEWER,
+            user_public_id="user-A",
+            operator_public_ids=["op-A"],
+        )
+        scope_service = MagicMock()
+        scope_service.list_accessible_wallet_public_ids = AsyncMock(return_value={wallet})
+        auth_manager = MagicMock()
+        auth_manager.get_authenticated_user.return_value = principal
+        payload = _account_state_frame(wallet, kind="reconciliation")
+
+        with (
+            patch("snapper.interface.websocket.bridge.WebSocketAuthManager") as manager_class,
+            patch(
+                "snapper.interface.websocket.bridge.get_scope_grant_service",
+                return_value=scope_service,
+            ),
+        ):
+            manager_class.get_instance.return_value = auth_manager
+            await bridge._forward_to_clients(root, f"portfolio.accounts.{wallet}", payload)
+            await bridge._forward_to_clients(root, f"portfolio.accounts.{wallet}", payload)
+
+        assert scope_service.list_accessible_wallet_public_ids.await_count == 2
+        assert primary.send_text.await_count == 2
+        assert secondary.send_text.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_account_frame_validation_is_constant_for_1000_subscribers(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """One strict parse is reused across a thousand destination checks.
+
+        Given: One valid account frame and one thousand ADMIN subscribers.
+        When: The bridge validates and fans out the frame.
+        Then: Every subscriber receives it after exactly one schema validation.
+        """
+        root = "portfolio.accounts."
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        payload = _account_state_frame(wallet)
+        websockets = [AsyncMock() for _ in range(1000)]
+        bridge.topic_subscriptions[root] = {
+            websocket: TopicSubscriptionModel(
+                websocket=websocket,
+                throttle_ms=0,
+                client_id=f"admin-{index}",
+            )
+            for index, websocket in enumerate(websockets)
+        }
+        bridge.topic_metrics[root] = TopicMetricsModel()
+        admin = AuthPrincipal(
+            username="admin",
+            role=UserRole.ADMIN,
+            user_public_id="admin-user",
+            operator_public_ids=[],
+        )
+        auth_manager = MagicMock()
+        auth_manager.get_authenticated_user.return_value = admin
+        scope_service = MagicMock()
+        scope_service.list_accessible_wallet_public_ids = AsyncMock()
+        validate_json = AccountStateChangedEventData.model_validate_json
+
+        with (
+            patch.object(
+                AccountStateChangedEventData,
+                "model_validate_json",
+                side_effect=validate_json,
+            ) as validator,
+            patch("snapper.interface.websocket.bridge.WebSocketAuthManager") as manager_class,
+            patch(
+                "snapper.interface.websocket.bridge.get_scope_grant_service",
+                return_value=scope_service,
+            ),
+        ):
+            manager_class.get_instance.return_value = auth_manager
+            await bridge._forward_to_clients(root, received_topic, payload)
+
+        assert validator.call_count == 1
+        assert all(websocket.send_text.await_count == 1 for websocket in websockets)
+        scope_service.list_accessible_wallet_public_ids.assert_not_awaited()
+
+    async def _subscribe_account_root(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> tuple[AsyncMock, TopicSubscriptionModel]:
+        """Subscribe through the production path and return its registry state."""
+        websocket = AsyncMock()
+        with patch.object(bridge, "start_zmq_subscriber", new=AsyncMock()):
+            await bridge.add_subscription(websocket, ["portfolio.accounts."])
+        return websocket, bridge.topic_subscriptions["portfolio.accounts."][websocket]
+
+    @pytest.mark.asyncio
+    async def test_live_subscription_uses_account_registry_throttle(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """The handler-facing subscription path installs the registry's 500 ms value."""
+        _, subscription = await self._subscribe_account_root(bridge)
+
+        assert subscription.throttle_ms == 500
+        assert subscription.throttle_per_topic is True
+
+    @pytest.mark.asyncio
+    async def test_snapshot_reconciliation_burst_delivers_trailing_frame(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """A suppressed reconciliation becomes the wallet window's final frame."""
+        websocket, _ = await self._subscribe_account_root(bridge)
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        snapshot = _account_state_frame(wallet, sequence_id=1)
+        reconciliation = _account_state_frame(
+            wallet,
+            kind="reconciliation",
+            sequence_id=2,
+        )
+        newest_reconciliation = _account_state_frame(
+            wallet,
+            kind="reconciliation",
+            sequence_id=3,
+        )
+        sleeper_started = asyncio.Event()
+        release_sleeper = asyncio.Event()
+        requested_delays: list[float] = []
+
+        async def controlled_sleep(delay: float) -> None:
+            """Hold the trailing worker at the measured window boundary."""
+            requested_delays.append(delay)
+            sleeper_started.set()
+            await release_sleeper.wait()
+
+        with (
+            patch.object(
+                bridge,
+                "_enforce_account_state_scope",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "snapper.interface.websocket.bridge.time.time",
+                side_effect=[100.0, 100.1, 100.2, 100.5],
+            ),
+            patch(
+                "snapper.interface.websocket.bridge.asyncio.sleep",
+                side_effect=controlled_sleep,
+            ),
+        ):
+            await bridge._forward_to_clients("portfolio.accounts.", received_topic, snapshot)
+            await bridge._forward_to_clients("portfolio.accounts.", received_topic, reconciliation)
+            await sleeper_started.wait()
+            await bridge._forward_to_clients(
+                "portfolio.accounts.",
+                received_topic,
+                newest_reconciliation,
+            )
+
+            websocket.send_text.assert_awaited_once_with(snapshot)
+            assert requested_delays == pytest.approx([0.4])
+            trailing_tasks = tuple(bridge._account_trailing_tasks.values())
+            assert len(trailing_tasks) == 1
+
+            release_sleeper.set()
+            await asyncio.gather(*trailing_tasks)
+
+        assert websocket.send_text.await_args_list == [
+            call(snapshot),
+            call(newest_reconciliation),
+        ]
+        assert bridge._account_trailing_tasks == {}
+
+    @pytest.mark.asyncio
+    async def test_cross_wallet_bursts_coalesce_independently(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """One account root maintains separate leading and trailing wallet windows."""
+        websocket, _ = await self._subscribe_account_root(bridge)
+        wallet_a = "00000000-0000-7000-8000-000000000001"
+        wallet_b = "00000000-0000-7000-8000-000000000002"
+        topic_a = f"portfolio.accounts.{wallet_a}"
+        topic_b = f"portfolio.accounts.{wallet_b}"
+        snapshot_a = _account_state_frame(wallet_a, sequence_id=1)
+        snapshot_b = _account_state_frame(wallet_b, sequence_id=2)
+        reconciliation_a = _account_state_frame(
+            wallet_a,
+            kind="reconciliation",
+            sequence_id=3,
+        )
+        reconciliation_b = _account_state_frame(
+            wallet_b,
+            kind="reconciliation",
+            sequence_id=4,
+        )
+        both_sleeping = asyncio.Event()
+        release_sleepers = asyncio.Event()
+        requested_delays: list[float] = []
+
+        async def controlled_sleep(delay: float) -> None:
+            """Gate both wallet workers until their shared test boundary."""
+            requested_delays.append(delay)
+            if len(requested_delays) == 2:
+                both_sleeping.set()
+            await release_sleepers.wait()
+
+        with (
+            patch.object(
+                bridge,
+                "_enforce_account_state_scope",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "snapper.interface.websocket.bridge.time.time",
+                side_effect=[100.0, 100.0, 100.1, 100.1, 100.5, 100.5],
+            ),
+            patch(
+                "snapper.interface.websocket.bridge.asyncio.sleep",
+                side_effect=controlled_sleep,
+            ),
+        ):
+            await bridge._forward_to_clients("portfolio.accounts.", topic_a, snapshot_a)
+            await bridge._forward_to_clients("portfolio.accounts.", topic_b, snapshot_b)
+            await bridge._forward_to_clients("portfolio.accounts.", topic_a, reconciliation_a)
+            await bridge._forward_to_clients("portfolio.accounts.", topic_b, reconciliation_b)
+            await both_sleeping.wait()
+
+            assert websocket.send_text.await_args_list == [
+                call(snapshot_a),
+                call(snapshot_b),
+            ]
+            assert requested_delays == pytest.approx([0.4, 0.4])
+            trailing_tasks = tuple(bridge._account_trailing_tasks.values())
+            assert len(trailing_tasks) == 2
+
+            release_sleepers.set()
+            await asyncio.gather(*trailing_tasks)
+
+        delivered = [call.args[0] for call in websocket.send_text.await_args_list]
+        assert delivered[:2] == [snapshot_a, snapshot_b]
+        assert delivered.count(reconciliation_a) == 1
+        assert delivered.count(reconciliation_b) == 1
+
+    @pytest.mark.asyncio
+    async def test_frame_arriving_during_trailing_send_uses_next_window(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """A frame racing a trailing send is retained for the following edge."""
+        websocket, _ = await self._subscribe_account_root(bridge)
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        snapshot = _account_state_frame(wallet, sequence_id=1)
+        first_reconciliation = _account_state_frame(
+            wallet,
+            kind="reconciliation",
+            sequence_id=2,
+        )
+        final_reconciliation = _account_state_frame(
+            wallet,
+            kind="reconciliation",
+            sequence_id=3,
+        )
+        first_sleeping = asyncio.Event()
+        release_first_sleep = asyncio.Event()
+        trailing_scope_started = asyncio.Event()
+        release_trailing_scope = asyncio.Event()
+        second_sleeping = asyncio.Event()
+        release_second_sleep = asyncio.Event()
+        delays: list[float] = []
+        scope_calls = 0
+
+        async def controlled_sleep(delay: float) -> None:
+            """Expose both consecutive throttle-window waits."""
+            delays.append(delay)
+            if len(delays) == 1:
+                first_sleeping.set()
+                await release_first_sleep.wait()
+            else:
+                second_sleeping.set()
+                await release_second_sleep.wait()
+
+        async def controlled_scope(**_kwargs: object) -> bool:
+            """Pause only the first trailing frame's fresh authorization."""
+            nonlocal scope_calls
+            scope_calls += 1
+            if scope_calls == 2:
+                trailing_scope_started.set()
+                await release_trailing_scope.wait()
+            return True
+
+        with (
+            patch.object(
+                bridge,
+                "_enforce_account_state_scope",
+                side_effect=controlled_scope,
+            ),
+            patch(
+                "snapper.interface.websocket.bridge.time.time",
+                side_effect=[100.0, 100.1, 100.5, 100.55, 101.0],
+            ),
+            patch(
+                "snapper.interface.websocket.bridge.asyncio.sleep",
+                side_effect=controlled_sleep,
+            ),
+        ):
+            await bridge._forward_to_clients("portfolio.accounts.", received_topic, snapshot)
+            await bridge._forward_to_clients(
+                "portfolio.accounts.",
+                received_topic,
+                first_reconciliation,
+            )
+            await first_sleeping.wait()
+            trailing_tasks = tuple(bridge._account_trailing_tasks.values())
+            release_first_sleep.set()
+            await trailing_scope_started.wait()
+
+            await bridge._forward_to_clients(
+                "portfolio.accounts.",
+                received_topic,
+                final_reconciliation,
+            )
+            release_trailing_scope.set()
+            await second_sleeping.wait()
+
+            assert websocket.send_text.await_args_list == [
+                call(snapshot),
+                call(first_reconciliation),
+            ]
+            assert delays == pytest.approx([0.4, 0.5])
+
+            release_second_sleep.set()
+            await asyncio.gather(*trailing_tasks)
+
+        assert websocket.send_text.await_args_list == [
+            call(snapshot),
+            call(first_reconciliation),
+            call(final_reconciliation),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_replaced_subscription_survives_authorization_error(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """A stale authorization failure cannot disconnect a replacement.
+
+        Given: An account dispatch paused in authorization for a subscription.
+        When: The socket unsubscribes, resubscribes, and the stale check raises.
+        Then: The replacement stays fully tracked and the socket remains open.
+        """
+        websocket, stale_subscription = await self._subscribe_account_root(bridge)
+        root = "portfolio.accounts."
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        authorization_started = asyncio.Event()
+        release_authorization = asyncio.Event()
+
+        async def raising_scope(
+            *,
+            subscription: TopicSubscriptionModel,
+            **_kwargs: object,
+        ) -> bool:
+            """Raise only after the stale subscription has been replaced."""
+            assert subscription is stale_subscription
+            authorization_started.set()
+            await release_authorization.wait()
+            raise RuntimeError("scope authorization failed")
+
+        fanout: asyncio.Task[None] | None = None
+        try:
+            with (
+                patch.object(
+                    bridge,
+                    "_enforce_account_state_scope",
+                    side_effect=raising_scope,
+                ),
+                patch.object(bridge, "start_zmq_subscriber", new=AsyncMock()),
+                patch.object(bridge, "stop_zmq_subscriber", new=AsyncMock()),
+                patch.object(bridge, "_stop_zmq_subscription", new=AsyncMock()),
+                patch.object(bridge, "_record_bridge_control", new=AsyncMock()),
+                patch("snapper.interface.websocket.bridge.logger") as bridge_logger,
+            ):
+                fanout = asyncio.create_task(
+                    bridge._forward_to_clients(
+                        root,
+                        received_topic,
+                        _account_state_frame(wallet),
+                    )
+                )
+                await asyncio.wait_for(authorization_started.wait(), timeout=1.0)
+
+                assert await bridge.unsubscribe_websocket(websocket, root) is True
+                assert await bridge.subscribe_websocket(websocket, root) is True
+                replacement = bridge.topic_subscriptions[root][websocket]
+                assert replacement is not stale_subscription
+
+                release_authorization.set()
+                await asyncio.wait_for(fanout, timeout=1.0)
+
+            assert bridge.topic_subscriptions[root][websocket] is replacement
+            assert bridge.client_subscriptions[websocket] == {root}
+            assert bridge.topic_metrics[root] == TopicMetricsModel(active_subscribers=1)
+            websocket.send_text.assert_not_awaited()
+            websocket.close.assert_not_awaited()
+            bridge_logger.warning.assert_not_called()
+        finally:
+            release_authorization.set()
+            if fanout is not None and not fanout.done():
+                fanout.cancel()
+                await asyncio.gather(fanout, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_resubscribed_burst_delivers_newest_frame_to_replacement(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """A stale fan-out snapshot cannot claim a replacement's trailing frame.
+
+        Given: A fan-out paused on its first subscriber while its second
+            subscription is removed and replaced for the same WebSocket.
+        When: The replacement receives a leading frame and a two-frame burst.
+        Then: Stale subscription instances consume nothing and the replacement
+            receives exactly the newest coalesced frame.
+        """
+        blocker, _ = await self._subscribe_account_root(bridge)
+        websocket, stale_subscription = await self._subscribe_account_root(bridge)
+        root = "portfolio.accounts."
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        stale_subscription.last_sent_by_topic[received_topic] = 100.0
+        stale_frame = _account_state_frame(wallet, sequence_id=1)
+        leading_frame = _account_state_frame(wallet, sequence_id=2)
+        older_burst_frame = _account_state_frame(wallet, sequence_id=3)
+        newest_burst_frame = _account_state_frame(wallet, sequence_id=4)
+        authorization_started = asyncio.Event()
+        release_authorization = asyncio.Event()
+        trailing_sleeping = asyncio.Event()
+        release_trailing = asyncio.Event()
+
+        async def controlled_scope(
+            *,
+            subscription: TopicSubscriptionModel,
+            **_kwargs: object,
+        ) -> bool:
+            """Pause the first stale destination after the fan-out snapshot."""
+            if subscription.websocket is blocker and not release_authorization.is_set():
+                authorization_started.set()
+                await release_authorization.wait()
+            return True
+
+        async def controlled_sleep(_delay: float) -> None:
+            """Hold the shared trailing worker until the newest frame is queued."""
+            trailing_sleeping.set()
+            await release_trailing.wait()
+
+        stale_fanout: asyncio.Task[None] | None = None
+        try:
+            with (
+                patch.object(
+                    bridge,
+                    "_enforce_account_state_scope",
+                    side_effect=controlled_scope,
+                ),
+                patch.object(bridge, "start_zmq_subscriber", new=AsyncMock()),
+                patch.object(bridge, "stop_zmq_subscriber", new=AsyncMock()),
+                patch(
+                    "snapper.interface.websocket.bridge.time.time",
+                    side_effect=[100.1, 100.2, 100.3, 100.4, 100.7],
+                ),
+                patch(
+                    "snapper.interface.websocket.bridge.asyncio.sleep",
+                    side_effect=controlled_sleep,
+                ),
+            ):
+                stale_fanout = asyncio.create_task(
+                    bridge._forward_to_clients(root, received_topic, stale_frame)
+                )
+                await asyncio.wait_for(authorization_started.wait(), timeout=1.0)
+
+                assert await bridge.unsubscribe_websocket(blocker, root) is True
+                assert await bridge.unsubscribe_websocket(websocket, root) is True
+                await bridge.add_subscription(websocket, [root])
+                replacement = bridge.topic_subscriptions[root][websocket]
+                assert replacement is not stale_subscription
+
+                release_authorization.set()
+                await asyncio.wait_for(stale_fanout, timeout=1.0)
+                blocker.send_text.assert_not_awaited()
+
+                await bridge._forward_to_clients(root, received_topic, leading_frame)
+                websocket.send_text.assert_awaited_once_with(leading_frame)
+                websocket.send_text.reset_mock()
+
+                await bridge._forward_to_clients(root, received_topic, older_burst_frame)
+                await asyncio.wait_for(trailing_sleeping.wait(), timeout=1.0)
+                await bridge._forward_to_clients(root, received_topic, newest_burst_frame)
+                trailing_tasks = tuple(bridge._account_trailing_tasks.values())
+                assert len(trailing_tasks) == 1
+
+                release_trailing.set()
+                await asyncio.wait_for(
+                    asyncio.gather(*trailing_tasks),
+                    timeout=1.0,
+                )
+
+            assert websocket.send_text.await_args_list == [call(newest_burst_frame)]
+            assert bridge._account_trailing_tasks == {}
+            assert bridge._account_trailing_frames == {}
+        finally:
+            release_authorization.set()
+            release_trailing.set()
+            if stale_fanout is not None and not stale_fanout.done():
+                stale_fanout.cancel()
+                await asyncio.gather(stale_fanout, return_exceptions=True)
+            await bridge._cancel_all_account_trailing()
+
+    @pytest.mark.asyncio
+    async def test_trailing_worker_drops_replaced_subscription(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """A worker never delivers into a replacement subscription instance."""
+        websocket, subscription = await self._subscribe_account_root(bridge)
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        worker_sleeping = asyncio.Event()
+        release_worker = asyncio.Event()
+
+        async def controlled_sleep(_delay: float) -> None:
+            """Hold the worker while its registration identity changes."""
+            worker_sleeping.set()
+            await release_worker.wait()
+
+        with (
+            patch.object(
+                bridge,
+                "_enforce_account_state_scope",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "snapper.interface.websocket.bridge.time.time",
+                side_effect=[100.0, 100.1],
+            ),
+            patch(
+                "snapper.interface.websocket.bridge.asyncio.sleep",
+                side_effect=controlled_sleep,
+            ),
+        ):
+            await bridge._forward_to_clients(
+                "portfolio.accounts.", received_topic, _account_state_frame(wallet)
+            )
+            await bridge._forward_to_clients(
+                "portfolio.accounts.",
+                received_topic,
+                _account_state_frame(wallet, kind="reconciliation", sequence_id=2),
+            )
+            await worker_sleeping.wait()
+            trailing_tasks = tuple(bridge._account_trailing_tasks.values())
+            bridge.topic_subscriptions["portfolio.accounts."][websocket] = TopicSubscriptionModel(
+                websocket=websocket,
+                throttle_ms=subscription.throttle_ms,
+                throttle_per_topic=True,
+            )
+
+            release_worker.set()
+            await asyncio.gather(*trailing_tasks)
+
+        assert websocket.send_text.await_count == 1
+        assert bridge._account_trailing_tasks == {}
+
+    @pytest.mark.asyncio
+    async def test_trailing_task_retirement_never_self_awaits(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """A worker may remove its own ownership entry without cancelling itself."""
+        websocket = AsyncMock()
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        key = (websocket, "portfolio.accounts.", received_topic)
+        event = AccountStateChangedEventData.model_validate_json(_account_state_frame(wallet))
+
+        async def retire_current_task() -> None:
+            """Register this coroutine as the worker it retires."""
+            current = asyncio.current_task()
+            assert current is not None
+            bridge._account_trailing_tasks[key] = cast(asyncio.Task[None], current)
+            bridge._account_trailing_frames[key] = (_account_state_frame(wallet), event)
+            await bridge._cancel_account_trailing_keys((key,))
+
+        await asyncio.create_task(retire_current_task())
+
+        assert bridge._account_trailing_tasks == {}
+        assert bridge._account_trailing_frames == {}
+
+    @pytest.mark.asyncio
+    async def test_retired_trailing_worker_leaves_ownership_map_untouched(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """A worker finishing after retirement does not remove another owner."""
+        websocket = AsyncMock()
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        root = "portfolio.accounts."
+        key = (websocket, root, received_topic)
+        message = _account_state_frame(wallet)
+        event = AccountStateChangedEventData.model_validate_json(message)
+        subscription = TopicSubscriptionModel(
+            websocket=websocket,
+            throttle_ms=500,
+            throttle_per_topic=True,
+        )
+        replacement_owner = asyncio.create_task(asyncio.sleep(0))
+        await replacement_owner
+        bridge.topic_subscriptions[root] = {websocket: subscription}
+        bridge._account_trailing_frames[key] = (message, event)
+        bridge._account_trailing_tasks[key] = replacement_owner
+
+        with patch.object(
+            bridge,
+            "_enforce_account_state_scope",
+            new=AsyncMock(return_value=True),
+        ):
+            await bridge._deliver_account_trailing(key, subscription, 0)
+
+        websocket.send_text.assert_awaited_once_with(message)
+        assert bridge._account_trailing_tasks[key] is replacement_owner
+        assert bridge._account_trailing_frames == {}
+        bridge._account_trailing_tasks.pop(key)
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_cancels_blocked_account_trailing_worker(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """Removing a subscription drains its pending trailing delivery."""
+        websocket, _ = await self._subscribe_account_root(bridge)
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        worker_sleeping = asyncio.Event()
+        worker_cancelled = asyncio.Event()
+
+        async def blocked_sleep(delay: float) -> None:
+            """Block positive throttle sleeps and expose cancellation."""
+            if delay == 0:
+                return
+            worker_sleeping.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                worker_cancelled.set()
+
+        with (
+            patch.object(
+                bridge,
+                "_enforce_account_state_scope",
+                new=AsyncMock(return_value=True),
+            ),
+            patch("snapper.interface.websocket.bridge.time.time", side_effect=[100.0, 100.1]),
+            patch("snapper.interface.websocket.bridge.asyncio.sleep", side_effect=blocked_sleep),
+            patch.object(bridge, "stop_zmq_subscriber", new=AsyncMock()),
+        ):
+            await bridge._forward_to_clients(
+                "portfolio.accounts.", received_topic, _account_state_frame(wallet)
+            )
+            await bridge._forward_to_clients(
+                "portfolio.accounts.",
+                received_topic,
+                _account_state_frame(wallet, kind="reconciliation", sequence_id=2),
+            )
+            await worker_sleeping.wait()
+
+            assert await bridge.unsubscribe_websocket(websocket, "portfolio.accounts.") is True
+
+        assert worker_cancelled.is_set()
+        assert bridge._account_trailing_tasks == {}
+        assert bridge._account_trailing_frames == {}
+
+    @pytest.mark.asyncio
+    async def test_resubscribe_during_unsubscribe_drain_preserves_tracking(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """A resubscribe during trailing cancellation cannot become a ghost.
+
+        Given: Unsubscribe is draining a cancelled account trailing worker.
+        When: The same socket resubscribes to the same topic during that await.
+        Then: Its replacement remains registered, tracked, and counted.
+        """
+        websocket, removed = await self._subscribe_account_root(bridge)
+        root = "portfolio.accounts."
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        message = _account_state_frame(wallet)
+        event = AccountStateChangedEventData.model_validate_json(message)
+        key = (websocket, root, received_topic)
+        worker_started = asyncio.Event()
+        cancellation_started = asyncio.Event()
+        release_cancellation = asyncio.Event()
+
+        async def blocked_trailing_worker() -> None:
+            """Hold cancellation open while the replacement is registered."""
+            worker_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_started.set()
+                await release_cancellation.wait()
+                raise
+
+        worker = asyncio.create_task(blocked_trailing_worker())
+        bridge._account_trailing_tasks[key] = worker
+        bridge._account_trailing_frames[key] = (message, event)
+        await asyncio.wait_for(worker_started.wait(), timeout=1.0)
+        unsubscribe: asyncio.Task[bool] | None = None
+
+        with (
+            patch.object(bridge, "start_zmq_subscriber", new=AsyncMock()),
+            patch.object(bridge, "stop_zmq_subscriber", new=AsyncMock()) as stop_subscriber,
+        ):
+            try:
+                unsubscribe = asyncio.create_task(bridge.unsubscribe_websocket(websocket, root))
+                await asyncio.wait_for(cancellation_started.wait(), timeout=1.0)
+
+                assert websocket not in bridge.topic_subscriptions[root]
+                assert await bridge.subscribe_websocket(websocket, root) is True
+                replacement = bridge.topic_subscriptions[root][websocket]
+                assert replacement is not removed
+
+                release_cancellation.set()
+                assert await asyncio.wait_for(unsubscribe, timeout=1.0) is True
+
+                assert bridge.topic_subscriptions[root][websocket] is replacement
+                assert bridge.client_subscriptions[websocket] == {root}
+                assert bridge.topic_metrics[root].active_subscribers == len(
+                    bridge.topic_subscriptions[root]
+                )
+                assert bridge.topic_metrics[root].active_subscribers == 1
+                stop_subscriber.assert_not_awaited()
+                assert bridge._account_trailing_tasks == {}
+                assert bridge._account_trailing_frames == {}
+            finally:
+                release_cancellation.set()
+                if unsubscribe is not None and not unsubscribe.done():
+                    await asyncio.gather(unsubscribe, return_exceptions=True)
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_cleanup_cancels_all_blocked_account_trailing_workers(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """Bridge cleanup drains every wallet's pending trailing delivery."""
+        _, _ = await self._subscribe_account_root(bridge)
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        worker_sleeping = asyncio.Event()
+
+        async def blocked_sleep(delay: float) -> None:
+            """Block only the trailing wait while letting cleanup yield."""
+            if delay == 0:
+                return
+            worker_sleeping.set()
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(
+                bridge,
+                "_enforce_account_state_scope",
+                new=AsyncMock(return_value=True),
+            ),
+            patch("snapper.interface.websocket.bridge.time.time", side_effect=[100.0, 100.1]),
+            patch("snapper.interface.websocket.bridge.asyncio.sleep", side_effect=blocked_sleep),
+        ):
+            await bridge._forward_to_clients(
+                "portfolio.accounts.", received_topic, _account_state_frame(wallet)
+            )
+            await bridge._forward_to_clients(
+                "portfolio.accounts.",
+                received_topic,
+                _account_state_frame(wallet, kind="reconciliation", sequence_id=2),
+            )
+            await worker_sleeping.wait()
+
+            await bridge.cleanup()
+
+        assert bridge._account_trailing_tasks == {}
+        assert bridge._account_trailing_frames == {}
+
+    @pytest.mark.asyncio
+    async def test_cleanup_stops_subscribers_before_trailing_worker_drain(
+        self,
+        bridge: ZmqWebSocketBridgeService,
+    ) -> None:
+        """Verify cleanup closes the subscriber-to-trailing-worker race.
+
+        Given: A subscriber poised to coalesce a frame during worker drainage.
+        When: Bridge cleanup begins.
+        Then: The subscriber is stopped before it can create another worker.
+        """
+        websocket, subscription = await self._subscribe_account_root(bridge)
+        root = "portfolio.accounts."
+        wallet = "00000000-0000-7000-8000-000000000001"
+        received_topic = f"portfolio.accounts.{wallet}"
+        message = _account_state_frame(wallet, kind="reconciliation")
+        event = AccountStateChangedEventData.model_validate_json(message)
+        key = (websocket, root, received_topic)
+        worker_started = asyncio.Event()
+        worker_draining = asyncio.Event()
+        subscriber_started = asyncio.Event()
+        subscriber_cancelled = asyncio.Event()
+
+        async def blocked_worker() -> None:
+            """Expose cancellation while cleanup drains the existing worker."""
+            worker_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                worker_draining.set()
+                await asyncio.sleep(0)
+
+        async def racing_subscriber() -> None:
+            """Attempt to install a replacement worker during the old race."""
+            subscriber_started.set()
+            try:
+                await worker_draining.wait()
+            except asyncio.CancelledError:
+                subscriber_cancelled.set()
+                raise
+            subscription.last_sent_by_topic[received_topic] = 100.0
+            assert bridge._coalesce_account_frame(
+                subscription=subscription,
+                topic=root,
+                received_topic=received_topic,
+                message_str=message,
+                payload=event,
+                current_time=100.1,
+            )
+
+        existing_worker = asyncio.create_task(blocked_worker())
+        subscriber = asyncio.create_task(racing_subscriber())
+        bridge._account_trailing_tasks[key] = existing_worker
+        bridge._account_trailing_frames[key] = (message, event)
+        bridge.subscriber_tasks[root] = subscriber
+        await worker_started.wait()
+        await subscriber_started.wait()
+
+        try:
+            await bridge.cleanup()
+
+            assert subscriber_cancelled.is_set()
+            assert bridge._account_trailing_tasks == {}
+            assert bridge._account_trailing_frames == {}
+        finally:
+            await bridge._cancel_all_account_trailing()
+            subscriber.cancel()
+            await asyncio.gather(subscriber, return_exceptions=True)
 
 
 class TestAlertsFailClosedParsing:

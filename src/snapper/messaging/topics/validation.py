@@ -76,6 +76,7 @@ __all__ = [
     "_validate_backtest_prefix",
     "_validate_backtest_topic",
     "_validate_alerts_topic",
+    "_validate_portfolio_accounts_topic",
 ]
 
 
@@ -116,6 +117,7 @@ def _get_topic_prefix_validators() -> list[tuple[str, Callable[[str], tuple[bool
         ("accruals.", _validate_accruals_topic),
         ("backtest.", _validate_backtest_topic),
         ("alerts.", _validate_alerts_topic),
+        ("portfolio.accounts.", _validate_portfolio_accounts_topic),
         ("plans.decisions.", _validate_plans_decisions_topic),
         ("ai_reviews.", _validate_ai_reviews_topic),
         ("bus.", _validate_bus_topic),
@@ -832,6 +834,33 @@ def _validate_alerts_topic(topic: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_portfolio_accounts_topic(topic: str) -> tuple[bool, str]:
+    """Validate a wallet-scoped account-state invalidation topic.
+
+    Expected shape: ``portfolio.accounts.{wallet_public_id}``, where
+    ``wallet_public_id`` is a canonical UUID7. The payload repeats the wallet
+    id so the WebSocket bridge can enforce per-frame wallet scope.
+
+    Args:
+        topic: Topic string starting with ``portfolio.accounts.``.
+
+    Returns:
+        Tuple of validity and a diagnostic message.
+    """
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 3:
+        return (
+            False,
+            "portfolio.accounts.* requires 3 segments (portfolio.accounts.<wallet_public_id>)",
+        )
+    if segments[0] != "portfolio" or segments[1] != "accounts":
+        return False, f"Expected 'portfolio.accounts' prefix, got '{segments[0]}.{segments[1]}'"
+    wallet_public_id = segments[2]
+    if not is_uuid7(wallet_public_id):
+        return False, f"portfolio.accounts.* segment 3 must be UUID7, got '{wallet_public_id}'"
+    return True, ""
+
+
 _AI_REVIEW_FRAME_SUFFIXES: frozenset[str] = frozenset({"request", "decision_ack", "caps_violation"})
 """Fixed external WS frame suffixes for the
 ``ai_reviews.{user}.{strategy}.*`` topic family. The bridge per-frame
@@ -1214,6 +1243,7 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
         "accruals",
         "backtest",
         "alerts",
+        "portfolio",
         "plans",
         "ai_reviews",
         "bus",

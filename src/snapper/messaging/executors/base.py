@@ -46,6 +46,7 @@ from snapper.core.json_types import JsonValue
 from snapper.core.types import ORDER_STATUS_REASON_ADOPTED
 from snapper.core.types import CancelEventType
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import ExecutionMode
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import FillStatus
 from snapper.core.types import FillStatusEnum
@@ -96,6 +97,7 @@ from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.schemas.data import AccountStateChangedEventData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
@@ -118,6 +120,9 @@ _EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
 
 _PORTFOLIO_DRIFT_EPISODE_TOPIC = "bus.portfolio_drift_episode"
 """Internal notify-only topic for committed drift lifecycle transitions."""
+
+_PORTFOLIO_ACCOUNTS_TOPIC_PREFIX = "portfolio.accounts."
+"""WebSocket-visible topic family for committed account-state invalidations."""
 
 _AMBIGUOUS_VERIFY_TIMEOUT_S = 15.0
 """Bound on a single venue lookup during ambiguous-submit verification.
@@ -632,7 +637,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._portfolio_reconciliation_tasks: dict[
             _PortfolioReconciliationKey, asyncio.Task[None]
         ] = {}
+        self._account_observer_tasks: set[asyncio.Task[None]] = set()
         self._portfolio_drift_notification_tasks: set[asyncio.Task[None]] = set()
+        self._account_state_invalidation_tasks: set[asyncio.Task[None]] = set()
         self._portfolio_reconciliation_dispatch_open = False
         self._portfolio_reconciliation_failure_count = 0
         self._last_portfolio_reconciliation_error = ""
@@ -1463,13 +1470,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                             is CapabilityStatus.SUPPORTED
                         ):
                             self._portfolio_reconciliation_dispatch_open = True
-                            tasks.append(
-                                asyncio.create_task(
-                                    self._supervise_loop(
-                                        "account_observer", self._account_observer_handler
-                                    )
+                            account_observer_task = asyncio.create_task(
+                                self._supervise_loop(
+                                    "account_observer", self._account_observer_handler
                                 )
                             )
+                            self._account_observer_tasks.add(account_observer_task)
+                            account_observer_task.add_done_callback(
+                                self._account_observer_tasks.discard
+                            )
+                            tasks.append(account_observer_task)
                         try:
                             await asyncio.gather(*tasks)
                         except asyncio.CancelledError:
@@ -1494,10 +1504,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def stop(self) -> None:
         """Stop the execution service and close ZMQ connections.
 
-        Observer-side portfolio dispatch closes and drains first, before the
-        running flag can stop the account observer. ZMQ teardown then unwinds
-        blocked consumers, and the exchange client is disconnected as an
-        idempotent FALLBACK — but
+        The account observer is cancelled and awaited before observer-owned
+        reconciliation and publication work is drained. The running flag and
+        ZMQ resources then close together so cancellation during either drain
+        cannot make a later stop skip socket teardown. The exchange client is
+        disconnected as an idempotent FALLBACK — but
         ONLY when ``start()`` does not currently own the client
         (``_client_context_active`` False). ``start()`` claims ownership
         BEFORE entering ``async with`` — i.e. before ``connect()`` even
@@ -1519,6 +1530,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         residual: a wedged unwind that never reaches ``__aexit__`` is
         not healed here — loop supervision and bounded cycles own that.
         """
+        await self._cancel_and_drain_account_observer()
         await self._close_and_drain_portfolio_reconciliation()
         if self.running:
             self.running = False
@@ -3243,18 +3255,35 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._portfolio_reconciliation_failure_count += 1
         self._last_portfolio_reconciliation_error = str(exc) or exc.__class__.__name__
 
-    async def _close_and_drain_portfolio_reconciliation(self) -> None:
-        """Close observer dispatch and drain reconciliation plus notify work."""
-        self._portfolio_reconciliation_dispatch_open = False
-        reconciliation_tasks = tuple(self._portfolio_reconciliation_tasks.values())
-        notification_tasks = tuple(self._portfolio_drift_notification_tasks)
-        tasks = reconciliation_tasks + notification_tasks
-        for task in tasks:
-            task.cancel()
-        if tasks:
+    async def _cancel_and_drain_account_observer(self) -> None:
+        """Cancel and await every tracked account-observer supervisor."""
+        while self._account_observer_tasks:
+            tasks = tuple(self._account_observer_tasks)
+            for task in tasks:
+                task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-        self._portfolio_reconciliation_tasks.clear()
-        self._portfolio_drift_notification_tasks.clear()
+            self._account_observer_tasks.difference_update(tasks)
+
+    async def _close_and_drain_portfolio_reconciliation(self) -> None:
+        """Close dispatch and drain producers before all invalidation work."""
+        self._portfolio_reconciliation_dispatch_open = False
+        while self._portfolio_reconciliation_tasks or self._portfolio_drift_notification_tasks:
+            reconciliation_tasks = tuple(self._portfolio_reconciliation_tasks.items())
+            notification_tasks = tuple(self._portfolio_drift_notification_tasks)
+            tasks = tuple(task for _, task in reconciliation_tasks) + notification_tasks
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for key, task in reconciliation_tasks:
+                if self._portfolio_reconciliation_tasks.get(key) is task:
+                    self._portfolio_reconciliation_tasks.pop(key, None)
+            self._portfolio_drift_notification_tasks.difference_update(notification_tasks)
+        while self._account_state_invalidation_tasks:
+            invalidation_tasks = tuple(self._account_state_invalidation_tasks)
+            for task in invalidation_tasks:
+                task.cancel()
+            await asyncio.gather(*invalidation_tasks, return_exceptions=True)
+            self._account_state_invalidation_tasks.difference_update(invalidation_tasks)
 
     def _portfolio_reconciliation_task_done(
         self,
@@ -3430,6 +3459,92 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 exc,
             )
 
+    async def _publish_account_state_changed(
+        self,
+        *,
+        wallet_public_id: str,
+        exchange: OrderExchange,
+        mode: ExecutionMode,
+        kind: Literal["snapshot", "reconciliation"],
+    ) -> None:
+        """Publish a thin invalidation frame after durable account-state commit.
+
+        Account views remain REST-built, read-time fail-closed projections. This
+        frame carries only the committed identity needed to prompt active clients
+        to refetch. Missing publishers and ordinary publish failures are contained
+        so auxiliary WebSocket fanout can never replace the durable observer or
+        reconciliation result.
+
+        Args:
+            wallet_public_id: Wallet whose account truth changed.
+            exchange: Venue whose durable state changed.
+            mode: Account execution mode.
+            kind: Durable write that triggered the invalidation.
+        """
+        publisher = self.msg_publisher
+        if publisher is None:
+            return
+        topic = f"{_PORTFOLIO_ACCOUNTS_TOPIC_PREFIX}{wallet_public_id}"
+        try:
+            tracker = publisher.tracker
+            event = AccountStateChangedEventData(
+                sequence_id=tracker.next_sequence(topic),
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
+                session_id=tracker.session_id,
+                wallet_public_id=wallet_public_id,
+                exchange=exchange,
+                mode=mode,
+                kind=kind,
+            )
+            await publisher.send(topic, event, flags=zmq.NOBLOCK)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "account state invalidation failed after {} commit: {}",
+                kind,
+                exc,
+            )
+
+    def _schedule_account_state_changed(
+        self,
+        *,
+        wallet_public_id: str,
+        exchange: OrderExchange,
+        mode: ExecutionMode,
+        kind: Literal["snapshot", "reconciliation"],
+    ) -> None:
+        """Start one owned best-effort invalidation after required work is safe.
+
+        Args:
+            wallet_public_id: Wallet whose account truth changed.
+            exchange: Venue whose durable state changed.
+            mode: Account execution mode.
+            kind: Durable write that triggered the invalidation.
+        """
+        runner = self._publish_account_state_changed(
+            wallet_public_id=wallet_public_id,
+            exchange=exchange,
+            mode=mode,
+            kind=kind,
+        )
+        try:
+            task = asyncio.create_task(
+                runner,
+                name=(f"account-state-invalidation:{wallet_public_id}:{exchange}:{kind}"),
+            )
+        except Exception as exc:
+            runner.close()
+            logger.warning(
+                "account state invalidation scheduling failed after {} commit: {}",
+                kind,
+                exc,
+            )
+            return
+        self._account_state_invalidation_tasks.add(task)
+        task.add_done_callback(self._account_state_invalidation_tasks.discard)
+
     async def _run_portfolio_reconciliation(self, work: _PortfolioReconciliationWork) -> None:
         """Evaluate and persist one exact account-state version within a hard bound."""
         repository = self._require_sqlalchemy_repository()
@@ -3471,7 +3586,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     evaluated_at=evaluated_at,
                 )
                 await repository.record_portfolio_reconciliation(evaluation)
-                self._schedule_portfolio_drift_notification(evaluation)
+            self._schedule_portfolio_drift_notification(evaluation)
+            self._schedule_account_state_changed(
+                wallet_public_id=evaluation["wallet_public_id"],
+                exchange=cast(OrderExchange, evaluation["exchange"]),
+                mode=cast(ExecutionMode, evaluation["mode"]),
+                kind="reconciliation",
+            )
         except asyncio.CancelledError:
             raise
         except TimeoutError as exc:
@@ -3562,6 +3683,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             state_id=state_id,
             attempt=attempt,
             position_capability=client.position_capability,
+        )
+        self._schedule_account_state_changed(
+            wallet_public_id=attempt["wallet_public_id"],
+            exchange=cast(OrderExchange, attempt["exchange"]),
+            mode=cast(ExecutionMode, attempt["mode"]),
+            kind="snapshot",
         )
 
     def _account_mode(self) -> str:

@@ -93,14 +93,15 @@ async def test_forward_to_clients_raw_passthrough() -> None:
 def test_topic_throttle_per_topic_from_schema() -> None:
     """``_topic_throttle_per_topic`` reads the matching schema flag, else False.
 
-    Given: The registry (heartbeats opt in, market does not),
+    Given: The registry (heartbeats and account invalidations opt in),
     When: The per-topic flag is resolved for a pattern and an exact topic,
-    Then: Only the heartbeat root pattern returns True.
+    Then: Matching roots and exact descendants inherit their schema flag.
     """
     bridge = ZmqWebSocketBridgeService(connection_manager=None)
     assert bridge._topic_throttle_per_topic("system.heartbeats.") is True
+    assert bridge._topic_throttle_per_topic("portfolio.accounts.") is True
     assert bridge._topic_throttle_per_topic("market.") is False
-    assert bridge._topic_throttle_per_topic("system.heartbeats.strategy.abc") is False
+    assert bridge._topic_throttle_per_topic("system.heartbeats.strategy.abc") is True
 
 
 def test_is_throttled_per_topic_throttles_only_the_repeated_topic() -> None:
@@ -258,6 +259,32 @@ class TestBridgeMissingBranches:
         bridge.client_subscriptions[ws] = {"non_existent_topic"}
         await bridge.unsubscribe_client(ws, ["non_existent_topic"])
         assert ws not in bridge.client_subscriptions
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_client_not_among_topic_subscribers(self) -> None:
+        """Unsubscribe skips trailing cleanup when the client holds no subscription.
+
+        Given: A topic tracked in topic_subscriptions whose subscriber map does
+            not contain the unsubscribing websocket,
+        When: That websocket unsubscribes from the topic,
+        Then: No trailing-coalescing cancellation runs for the absent
+            subscription and the remaining subscriber count is preserved.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        ws: Any = DummyWebSocket()
+        other: Any = DummyWebSocket()
+        bridge.topic_subscriptions["topic1"] = {
+            other: TopicSubscriptionModel(websocket=other, throttle_ms=0)
+        }
+        bridge.client_subscriptions[ws] = {"topic1"}
+        bridge.topic_metrics["topic1"] = TopicMetricsModel(active_subscribers=1)
+        cancel = AsyncMock()
+        bridge._cancel_account_trailing_for_subscription = cancel
+        await bridge.unsubscribe_client(ws, ["topic1"])
+        cancel.assert_not_awaited()
+        assert ws not in bridge.client_subscriptions
+        assert bridge.topic_metrics["topic1"].active_subscribers == 1
+        assert other in bridge.topic_subscriptions["topic1"]
 
     @pytest.mark.asyncio
     async def test_zmq_subscription_loop_json_decode_error(self) -> None:
@@ -705,11 +732,14 @@ class TestForwardToClientsTimeoutCoverage:
 
     @pytest.mark.asyncio
     async def test_disconnect_during_iteration(self) -> None:
-        """Verify disconnect handles concurrent subscription list modification.
+        """Verify concurrent deregistration skips the vanished subscription.
 
         Given: Multiple subscriptions with timeouts,
-        When: Disconnect modifies subscription list during iteration,
-        Then: Iteration over snapshot copy handles modification gracefully.
+        When: The first client's disconnect clears the subscription list during
+            iteration over the snapshot copy,
+        Then: The now-deregistered second subscription is skipped by the
+            registration identity check — it neither receives the frame nor a
+            redundant disconnect — and the loop completes without error.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         topic = "market.candles"
@@ -733,7 +763,8 @@ class TestForwardToClientsTimeoutCoverage:
 
         bridge.disconnect_client = AsyncMock(side_effect=disconnect_clears_list)
         await bridge._forward_to_clients(topic, topic, '{"type":"candle"}')
-        assert bridge.disconnect_client.await_count == 2
+        assert bridge.disconnect_client.await_count == 1
+        mock_ws2.send_text.assert_not_awaited()
 
 
 class TestUnsubscribeWebsocketAllCoverage:

@@ -21,7 +21,7 @@ as a Bearer token instead.
 
 | Role | Access |
 | ---- | ------ |
-| `viewer` | Read-only market data, orders, positions, strategies, system status, backtests, notifications; can register and manage the caller's own notification devices |
+| `viewer` | Read-only market data, orders, positions, account state, strategies, system status, backtests, notifications; can register and manage the caller's own notification devices |
 | `ai_delegate` | Scoped automation principal for MCP and AI-review workflows; can read market/orders/positions/strategies/signals/backtests/system status and create/cancel/manage scoped orders/positions, but cannot manage users, settings, processes, credentials, scope grants, or paired execution, and cannot subscribe to `alerts.` WebSocket topics (device-registration and alert-history REST routes require only authentication) |
 | `operator` | Viewer permissions plus trade execution, process and strategy lifecycle management, backtest management, and paired-execution terminalization |
 | `admin` | Full access including user management, system configuration, wallet/credential management, scope grant management, operator impersonation |
@@ -1220,6 +1220,13 @@ the two truth planes (PnL Phase 4). Requires `read:account_state` permission. AI
 delegates are denied. There is no `as_of` parameter: an account state has no
 truthful historical projection, only its current observation.
 
+Live clients subscribe to `portfolio.accounts.`. Executors publish a thin
+`account_state_changed_event` after snapshot and reconciliation commits; the
+event is an invalidation signal, not an account payload. Clients refetch this
+REST endpoint to rebuild the read-time fail-closed view and retain a 60-second
+safety-net poll for missed frames. The bridge enforces the same accessible-wallet
+scope per frame, with an ADMIN bypass and fail-closed malformed-frame handling.
+
 **Request:**
 
 ```http
@@ -1705,7 +1712,7 @@ fields and this object under `payload`.
     "zmq_bridge": {
         "active_topics": 12,
         "subscriber_tasks": 12,
-        "available_topics": ["market.", "signals.", "system.egress.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
+        "available_topics": ["market.", "signals.", "system.egress.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "portfolio.accounts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
     },
     "connections": {
         "active_connections": 5,
@@ -1769,7 +1776,7 @@ fields and this object under `payload`.
         "active_connections": 5
     },
     "config": {
-        "available_topics": ["market.", "signals.", "system.egress.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
+        "available_topics": ["market.", "signals.", "system.egress.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "portfolio.accounts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
     },
     "connections": {
         "active_connections": 5,
@@ -3003,6 +3010,7 @@ Client-originated control frames (`authenticate`, `reauth`,
         "orders.commands.",
         "orders.events.",
         "plans.decisions.",
+        "portfolio.accounts.",
         "processes.events.configured.",
         "processes.events.runs.",
         "processes.events.summary.",
@@ -3179,6 +3187,7 @@ If the client does not reauthenticate in time:
         "orders.commands.",
         "orders.events.",
         "plans.decisions.",
+        "portfolio.accounts.",
         "processes.events.configured.",
         "processes.events.runs.",
         "processes.events.summary.",
@@ -3187,7 +3196,7 @@ If the client does not reauthenticate in time:
         "system.egress.",
         "system.heartbeats."
     ],
-    "total_available": 14
+    "total_available": 15
 }
 ```
 
@@ -3426,6 +3435,10 @@ the scoped prefixes documented in the WebSocket auth section above.
 - `orders.commands.{exchange}.{instrument}.submit` -- Submit order
 - `orders.commands.{exchange}.{instrument}.cancel` -- Cancel order
 - `orders.commands.{exchange}.{instrument}.replace` -- Replace order
+
+#### Portfolio Accounts
+
+- `portfolio.accounts.{wallet_public_id}` -- Thin committed snapshot or reconciliation invalidation; clients refetch `GET /api/portfolio/accounts`
 
 #### System
 

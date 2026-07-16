@@ -128,6 +128,7 @@ class TestWebSocketHelpersRuntimeError:
         assert determine_topic_category("signals") == "signals"
         assert determine_topic_category("system") == "system"
         assert determine_topic_category("admin") == "admin"
+        assert determine_topic_category("portfolio.accounts") == "account_state"
 
     def test_determine_topic_category_handles_partial_market_prefix(self) -> None:
         """Determine topic category maps partial market prefixes.
@@ -160,6 +161,16 @@ class TestWebSocketHelpersRuntimeError:
         assert determine_topic_category("alerts.user-uuid.") == "notifications"
         assert determine_topic_category("alerts.user-uuid.order_fill_full") == "notifications"
 
+    def test_determine_topic_category_accounts(self) -> None:
+        """Account invalidation topics resolve to their read-only category.
+
+        Given: The account topic root and a full wallet topic.
+        When: Their categories are determined.
+        Then: Both map to the READ_ACCOUNT_STATE-gated category.
+        """
+        assert determine_topic_category("portfolio.accounts.") == "account_state"
+        assert determine_topic_category("portfolio.accounts.wallet-uuid") == "account_state"
+
 
 class TestRoleCategorySecurityMatrix:
     """Role x category x topic security boundary tests.
@@ -173,7 +184,7 @@ class TestRoleCategorySecurityMatrix:
 
         Given: A VIEWER role,
         When: Getting allowed categories,
-        Then: market, system, backtest, trade_events, and the
+        Then: market, system, backtest, trade_events, account_state, and the
             2026-05-14 ``strategies_read`` are allowed (no trade,
             strategy, admin, processes_admin). ``trade_events`` is the
             v0.7.0 split for live ``orders.events.*`` streams — gated
@@ -191,6 +202,7 @@ class TestRoleCategorySecurityMatrix:
             "trade_events",
             "strategies_read",
             "notifications",
+            "account_state",
         }
 
     def test_operator_gets_full_trade_categories(self) -> None:
@@ -199,7 +211,7 @@ class TestRoleCategorySecurityMatrix:
         Given: An OPERATOR role,
         When: Getting allowed categories,
         Then: market, trade, trade_events, signals, strategy, system,
-            backtest, ai_reviews, ``strategies_read``, ``processes_admin``
+            backtest, account_state, ai_reviews, ``strategies_read``, ``processes_admin``
             are allowed but NOT ``admin``. ``trade`` is gated by
             ``CREATE_ORDERS`` (write commands); ``trade_events`` by
             ``READ_ORDERS`` (read-side echo); the 2026-05-14
@@ -221,6 +233,7 @@ class TestRoleCategorySecurityMatrix:
             "strategies_read",
             "processes_admin",
             "notifications",
+            "account_state",
         }
         assert "admin" not in categories
 
@@ -229,7 +242,7 @@ class TestRoleCategorySecurityMatrix:
 
         Given: An ADMIN role,
         When: Getting allowed categories,
-        Then: All eleven categories defined in
+        Then: All thirteen categories defined in
             :data:`CATEGORY_PERMISSIONS` are allowed — every category
             from OPERATOR plus ``admin``. The 2026-05-14
             ``strategies_read`` and ``processes_admin`` lift to ADMIN
@@ -249,6 +262,7 @@ class TestRoleCategorySecurityMatrix:
             "strategies_read",
             "processes_admin",
             "notifications",
+            "account_state",
         }
 
     def test_admin_available_topics_include_admin_prefix(self) -> None:
@@ -280,12 +294,15 @@ class TestRoleCategorySecurityMatrix:
             is absent, ``signals.`` is absent. ``orders.events.``
             (read-side echo — READ_ORDERS gate, v0.7.0 trade_events
             split) IS present so VIEWER's WS surface mirrors the REST
-            ``/api/orders`` they already see.
+            ``/api/orders`` they already see. ``portfolio.accounts.`` is
+            present under the same READ_ACCOUNT_STATE permission as the REST
+            account page.
         """
         topics = get_allowed_topics_for_role(UserRole.VIEWER)
         assert "orders.commands." not in topics
         assert "signals." not in topics
         assert "orders.events." in topics
+        assert "portfolio.accounts." in topics
 
     def test_viewer_available_topics_include_market(self) -> None:
         """VIEWER available topics include market pattern.

@@ -38,6 +38,7 @@ from snapper.messaging.topics.validation import _validate_market_topic
 from snapper.messaging.topics.validation import _validate_orders_commands_topic
 from snapper.messaging.topics.validation import _validate_orders_events_topic
 from snapper.messaging.topics.validation import _validate_plans_decisions_topic
+from snapper.messaging.topics.validation import _validate_portfolio_accounts_topic
 from snapper.messaging.topics.validation import _validate_prefix_pattern
 from snapper.messaging.topics.validation import _validate_processes_commands_topic
 from snapper.messaging.topics.validation import _validate_processes_snapshot_topic
@@ -143,6 +144,60 @@ def test_prefix_signals_invalid_instrument(monkeypatch: pytest.MonkeyPatch) -> N
     is_valid, message = validation.validate_subscription_pattern("signals.kraken.BAD.")
     assert not is_valid
     assert "Unknown instrument 'BAD'" in message
+
+
+class TestPortfolioAccountsTopicValidation:
+    """Tests for the wallet-scoped account invalidation topic family."""
+
+    def test_valid_wallet_topic_and_registry_root_are_accepted(self) -> None:
+        """A UUID7 wallet topic and its root subscription both validate.
+
+        Given: The canonical account topic root and a full wallet topic.
+        When: They are validated through the public dispatchers.
+        Then: Both contracts are accepted.
+        """
+        wallet_public_id = "00000000-0000-7000-8000-000000000001"
+
+        assert validate_topic(f"portfolio.accounts.{wallet_public_id}") == (True, "")
+        assert validate_subscription_pattern("portfolio.accounts.") == (True, "")
+
+    def test_wrong_segment_count_is_rejected(self) -> None:
+        """A publisher cannot omit the wallet topic segment.
+
+        Given: The account topic family without a wallet id.
+        When: Its dedicated validator runs.
+        Then: Validation returns the three-segment format error.
+        """
+        valid, message = _validate_portfolio_accounts_topic("portfolio.accounts")
+
+        assert valid is False
+        assert "requires 3 segments" in message
+
+    def test_wrong_prefix_is_rejected(self) -> None:
+        """The dedicated validator rejects a different portfolio family.
+
+        Given: Three segments with a non-accounts portfolio prefix.
+        When: Its dedicated validator runs directly.
+        Then: Validation identifies the required prefix.
+        """
+        valid, message = _validate_portfolio_accounts_topic(
+            "portfolio.positions.00000000-0000-7000-8000-000000000001"
+        )
+
+        assert valid is False
+        assert "Expected 'portfolio.accounts' prefix" in message
+
+    def test_non_uuid7_wallet_is_rejected(self) -> None:
+        """A malformed wallet topic cannot enter the messaging bus.
+
+        Given: An account topic whose wallet suffix is not UUID7.
+        When: The public topic validator dispatches it.
+        Then: Validation fails on the wallet segment.
+        """
+        valid, message = validate_topic("portfolio.accounts.wallet-1")
+
+        assert valid is False
+        assert "segment 3 must be UUID7" in message
 
 
 class TestTopicContractValidation:

@@ -248,6 +248,8 @@ def determine_topic_category(topic: str) -> str | None:
         "backtest.": "backtest",
         "alerts": "notifications",
         "alerts.": "notifications",
+        "portfolio.accounts": "account_state",
+        "portfolio.accounts.": "account_state",
     }
     direct_result = direct_prefix_map.get(topic)
     if direct_result is not None:
@@ -274,6 +276,8 @@ def determine_topic_category(topic: str) -> str | None:
         return "backtest"
     if topic.startswith("alerts."):
         return "notifications"
+    if topic.startswith("portfolio.accounts."):
+        return "account_state"
     category_map = {
         "candle": "market",
         "tick": "market",

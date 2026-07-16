@@ -9,6 +9,7 @@ the scope-grant verdict from :class:`ScopeGrantService`.
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,9 +17,30 @@ import pytest
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
+from snapper.core.json_types import JsonObject
+from snapper.interface.websocket.scope_filter import enforce_account_state_scope
 from snapper.interface.websocket.scope_filter import enforce_ai_review_scope
 from snapper.interface.websocket.scope_filter import enforce_alerts_scope
 from snapper.interface.websocket.scope_filter import enforce_orders_events_scope
+from snapper.messaging.schemas.data import AccountStateChangedEventData
+
+_ACCOUNT_WALLET_A = "00000000-0000-7000-8000-000000000001"
+_ACCOUNT_WALLET_B = "00000000-0000-7000-8000-000000000002"
+
+
+def _account_event(wallet_public_id: str = _ACCOUNT_WALLET_A) -> AccountStateChangedEventData:
+    """Build one complete account invalidation for scope-filter tests."""
+    return AccountStateChangedEventData(
+        sequence_id=1,
+        public_id="account-event-1",
+        timestamp=datetime(2026, 7, 16, 9, 0, tzinfo=UTC),
+        session_id="account-session-1",
+        topic=f"portfolio.accounts.{wallet_public_id}",
+        wallet_public_id=wallet_public_id,
+        exchange="kraken",
+        mode="live",
+        kind="snapshot",
+    )
 
 
 def _delegate_principal(
@@ -498,6 +520,218 @@ async def test_orders_events_default_as_of_uses_datetime_now_utc() -> None:
     list_mock: AsyncMock = service.list_accessible_wallet_public_ids
     assert list_mock.await_args is not None
     assert before <= list_mock.await_args.kwargs["as_of"] <= after
+
+
+@pytest.mark.asyncio
+async def test_account_state_scope_passes_unrelated_topics() -> None:
+    """The account filter does not affect frames owned by other families.
+
+    Given: A market frame and a VIEWER without wallet access.
+    When: The account-state scope filter evaluates it.
+    Then: The frame passes without an accessible-wallet query.
+    """
+    service = _mock_orders_events_service(accessible=set())
+
+    result = await enforce_account_state_scope(
+        topic="market.kraken.BTC-USD.ticks",
+        connection_principal=_viewer_principal(),
+        payload={"wallet_public_id": _ACCOUNT_WALLET_A},
+        scope_grant_service=service,
+    )
+
+    assert result is True
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    list_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_account_state_scope_drops_without_principal() -> None:
+    """An unauthenticated destination cannot receive account invalidations.
+
+    Given: A well-formed account invalidation without a connection principal.
+    When: The per-frame scope filter evaluates it.
+    Then: The frame is dropped without resolving wallet access.
+    """
+    service = _mock_orders_events_service(accessible={"wallet-A"})
+
+    result = await enforce_account_state_scope(
+        topic=f"portfolio.accounts.{_ACCOUNT_WALLET_A}",
+        connection_principal=None,
+        payload=_account_event(),
+        scope_grant_service=service,
+    )
+
+    assert result is False
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    list_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_account_state_scope_admin_bypasses_wallet_lookup() -> None:
+    """ADMIN receives all account invalidations without a wallet query.
+
+    Given: An ADMIN destination and an arbitrary wallet invalidation.
+    When: The account-state scope filter evaluates it.
+    Then: The frame passes through the REST-parity ADMIN bypass.
+    """
+    service = _mock_orders_events_service(accessible=set())
+
+    result = await enforce_account_state_scope(
+        topic=f"portfolio.accounts.{_ACCOUNT_WALLET_A}",
+        connection_principal=_admin_principal(),
+        payload=_account_event(),
+        scope_grant_service=service,
+    )
+
+    assert result is True
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    list_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"wallet_public_id": None},
+    ],
+)
+@pytest.mark.asyncio
+async def test_account_state_scope_drops_malformed_wallet_payload(payload: JsonObject) -> None:
+    """Missing and non-string wallet keys fail closed.
+
+    Given: An account invalidation without a usable wallet scope key.
+    When: A non-ADMIN destination is authorized per frame.
+    Then: The malformed frame is dropped before any wallet lookup.
+    """
+    service = _mock_orders_events_service(accessible={"wallet-A"})
+
+    result = await enforce_account_state_scope(
+        topic=f"portfolio.accounts.{_ACCOUNT_WALLET_A}",
+        connection_principal=_viewer_principal(),
+        payload=payload,
+        scope_grant_service=service,
+    )
+
+    assert result is False
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    list_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("accessible", "expected"),
+    [
+        ({_ACCOUNT_WALLET_A, _ACCOUNT_WALLET_B}, True),
+        ({_ACCOUNT_WALLET_B}, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_account_state_scope_matches_accessible_wallet_set(
+    accessible: set[str], expected: bool
+) -> None:
+    """Account invalidations follow the REST accessible-wallet set.
+
+    Given: A VIEWER and a resolved set of accessible wallets.
+    When: A wallet-A invalidation is authorized.
+    Then: It is forwarded exactly when wallet-A belongs to that set.
+    """
+    service = _mock_orders_events_service(accessible=accessible)
+    pinned = datetime(2026, 7, 16, 9, 0, tzinfo=UTC)
+
+    result = await enforce_account_state_scope(
+        topic=f"portfolio.accounts.{_ACCOUNT_WALLET_A}",
+        connection_principal=_viewer_principal(),
+        payload=_account_event(),
+        scope_grant_service=service,
+        as_of=pinned,
+    )
+
+    assert result is expected
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    list_mock.assert_awaited_once()
+    assert list_mock.await_args is not None
+    assert list_mock.await_args.kwargs["as_of"] == pinned
+
+
+@pytest.mark.parametrize(
+    "topic",
+    [
+        "portfolio.accounts.not-a-uuid",
+        f"portfolio.accounts.{_ACCOUNT_WALLET_B}",
+    ],
+)
+@pytest.mark.asyncio
+async def test_account_state_scope_validates_topic_before_admin_bypass(topic: str) -> None:
+    """ADMIN cannot bypass UUID or topic-payload wallet validation.
+
+    Given: A complete account event on an invalid or mismatched wallet topic.
+    When: The account-state filter evaluates an ADMIN subscriber.
+    Then: It drops the frame without resolving accessible wallets.
+    """
+    service = _mock_orders_events_service(accessible=set())
+
+    result = await enforce_account_state_scope(
+        topic=topic,
+        connection_principal=_admin_principal(),
+        payload=_account_event(),
+        scope_grant_service=service,
+    )
+
+    assert result is False
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    list_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_account_state_scope_validates_full_schema_before_admin_bypass() -> None:
+    """ADMIN cannot bypass an extra field in an otherwise complete event.
+
+    Given: A complete account event containing one forbidden extra field.
+    When: The account-state filter evaluates an ADMIN subscriber.
+    Then: Strict schema validation drops it before the wallet bypass.
+    """
+    service = _mock_orders_events_service(accessible=set())
+    payload = _account_event().model_dump(mode="json")
+    payload["signal_reason"] = "wrong category"
+
+    result = await enforce_account_state_scope(
+        topic=f"portfolio.accounts.{_ACCOUNT_WALLET_A}",
+        connection_principal=_admin_principal(),
+        payload=payload,
+        scope_grant_service=service,
+    )
+
+    assert result is False
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    list_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_account_state_scope_drops_non_json_mapping_before_admin_bypass() -> None:
+    """A stale internal caller cannot smuggle a non-JSON payload past ADMIN.
+
+    Given: An account-shaped mapping containing a non-JSON object.
+    When: The account-state filter evaluates an ADMIN subscriber.
+    Then: Serialization fails closed before the wallet bypass.
+    """
+    service = _mock_orders_events_service(accessible=set())
+    payload = cast(
+        JsonObject,
+        {
+            "type": "account_state_changed_event",
+            "unserializable": object(),
+        },
+    )
+
+    result = await enforce_account_state_scope(
+        topic=f"portfolio.accounts.{_ACCOUNT_WALLET_A}",
+        connection_principal=_admin_principal(),
+        payload=payload,
+        scope_grant_service=service,
+    )
+
+    assert result is False
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    list_mock.assert_not_awaited()
 
 
 def test_alerts_passes_through_non_alerts_topic() -> None:

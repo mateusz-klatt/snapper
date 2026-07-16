@@ -24,14 +24,11 @@ class TopicSchema:
         category: RBAC category for permission filtering.
         throttle_ms: Bridge-side throttle interval in milliseconds.
         throttle_per_topic: When True, the bridge throttle is applied PER
-            received topic rather than per subscription. Set for
-            per-entity status families (heartbeats) so that a single
-            root subscription does not let one component's frames throttle
-            another's — a root subscription to ``system.heartbeats.`` at a
-            1s throttle would otherwise pass only ~1 of N components' beats
-            per second, leaving most cards stale. Left False for
-            high-cardinality streams (``market.``) where the per-subscription
-            throttle is an intentional aggregate rate cap.
+            received topic rather than per subscription. Set for per-entity
+            status families so a shared root does not let one entity's frames
+            throttle another's. Left False for high-cardinality streams
+            (``market.``) where the per-subscription throttle is an intentional
+            aggregate rate cap.
     """
 
     pattern: str
@@ -56,6 +53,12 @@ TOPIC_REGISTRY: tuple[TopicSchema, ...] = (
     TopicSchema(pattern="accruals.", category="accruals", throttle_ms=1000),
     TopicSchema(pattern="backtest.", category="backtest", throttle_ms=250),
     TopicSchema(pattern="alerts.", category="notifications", throttle_ms=500),
+    TopicSchema(
+        pattern="portfolio.accounts.",
+        category="account_state",
+        throttle_ms=500,
+        throttle_per_topic=True,
+    ),
     TopicSchema(pattern="plans.decisions.", category="trade", throttle_ms=0),
     TopicSchema(pattern="ai_reviews.", category="ai_reviews", throttle_ms=0),
     TopicSchema(pattern="processes.events.summary.", category="system", throttle_ms=500),

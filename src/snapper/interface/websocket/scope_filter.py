@@ -10,19 +10,22 @@ Filters have no transport coupling: each takes already-resolved data
 calls them inside ``_forward_to_clients`` per-subscription so each
 client sees only the events they have scope for.
 
-Three filters live here today:
+Four filters live here today:
 
 - :func:`enforce_ai_review_scope` — gates ``ai_reviews.*`` per-AI-delegate
   by ``(wallet, instrument)`` grant.
 - :func:`enforce_orders_events_scope` — gates ``orders.events.*`` per
   principal by accessible-wallet set, mirroring the REST
   ``/api/orders`` wallet-scope filter (the v0.7.0 RBAC symmetry fix).
+- :func:`enforce_account_state_scope` — gates ``portfolio.accounts.*``
+  invalidations by the same accessible-wallet set as the REST account page.
 - :func:`enforce_alerts_scope` — gates ``alerts.*`` per principal by
   exact ``user_public_id`` match (ADMIN bypass). Powers the web
   (WebSocket) live-refresh path so a web user only sees their own
   alert frames.
 """
 
+import json
 from collections.abc import Mapping
 from collections.abc import MutableMapping
 from datetime import UTC
@@ -32,44 +35,39 @@ from typing import Any
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
+from snapper.core.json_types import JsonValue
+from snapper.messaging.schemas.data import AccountStateChangedEventData
+from snapper.messaging.topics.validation import _validate_portfolio_accounts_topic
 
 __all__ = [
     "AI_REVIEWS_TOPIC_PREFIX",
     "ALERTS_TOPIC_PREFIX",
     "ORDERS_EVENTS_TOPIC_PREFIX",
-    "OrdersEventsAccessCache",
-    "orders_events_access_cache_key",
+    "PORTFOLIO_ACCOUNTS_TOPIC_PREFIX",
+    "WalletAccessCache",
+    "wallet_access_cache_key",
+    "enforce_account_state_scope",
     "enforce_ai_review_scope",
     "enforce_alerts_scope",
     "enforce_orders_events_scope",
+    "validate_account_state_event",
 ]
 
 
 AI_REVIEWS_TOPIC_PREFIX = "ai_reviews."
 ALERTS_TOPIC_PREFIX = "alerts."
 ORDERS_EVENTS_TOPIC_PREFIX = "orders.events."
-OrdersEventsAccessCacheKey = tuple[str, str, tuple[str, ...], str, str | None, str | None]
-OrdersEventsAccessCache = MutableMapping[OrdersEventsAccessCacheKey, frozenset[str]]
-"""Topic-family prefix the orders.events. per-frame filter gates.
+PORTFOLIO_ACCOUNTS_TOPIC_PREFIX = "portfolio.accounts."
+WalletAccessCacheKey = tuple[str, str, tuple[str, ...], str, str | None, str | None]
+WalletAccessCache = MutableMapping[WalletAccessCacheKey, frozenset[str]]
+"""Frame-local accessible-wallet cache keyed by authorization identity.
 
-Frames whose topic does NOT start with this prefix bypass the filter
-entirely (other RBAC paths own them). Frames inside the family go
-through :func:`enforce_orders_events_scope` per-subscription so a
-VIEWER / OPERATOR / AI_DELEGATE only sees ``orders.events.*`` frames
-for wallets covered by their accessible wallet set.
-"""
-"""Topic-family prefix the per-frame filter gates.
-
-Frames whose topic does NOT start with this prefix bypass the filter
-entirely (registry-root subscribed roles already passed the
-subscribe-time RBAC check). Frames inside the family go through
-:func:`enforce_ai_review_scope` per-subscription so AI delegates only
-see CONSULT events for ``(wallet, instrument)`` tuples their scope
-grant covers.
+Both wallet-scoped topic filters reuse this shape. A fresh mapping is created
+for every received ZMQ frame so access changes take effect on the next frame.
 """
 
 
-def orders_events_access_cache_key(principal: AuthPrincipal) -> OrdersEventsAccessCacheKey:
+def wallet_access_cache_key(principal: AuthPrincipal) -> WalletAccessCacheKey:
     """Return the authorization identity key for frame-local wallet access caching.
 
     Args:
@@ -88,6 +86,55 @@ def orders_events_access_cache_key(principal: AuthPrincipal) -> OrdersEventsAcce
         principal.active_wallet_public_id,
         principal.delegate_public_id,
     )
+
+
+def validate_account_state_event(
+    *,
+    topic: str,
+    payload: str | Mapping[str, JsonValue] | AccountStateChangedEventData,
+) -> AccountStateChangedEventData | None:
+    """Return a fully validated account invalidation or fail closed.
+
+    The discriminator is checked before Pydantic validation because the model
+    supplies its literal as a construction default. The topic must then satisfy
+    the canonical wallet-topic contract and repeat the payload wallet exactly.
+
+    Args:
+        topic: Full received ``portfolio.accounts.{wallet_public_id}`` topic.
+        payload: Raw JSON, JSON-shaped mapping, or an already typed event.
+
+    Returns:
+        The strict typed event when every frame invariant holds, otherwise
+        ``None``.
+    """
+    raw_json: str
+    if isinstance(payload, AccountStateChangedEventData):
+        raw_json = payload.model_dump_json()
+    elif isinstance(payload, str):
+        try:
+            decoded: JsonValue = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(decoded, dict) or decoded.get("type") != "account_state_changed_event":
+            return None
+        raw_json = payload
+    else:
+        if payload.get("type") != "account_state_changed_event":
+            return None
+        try:
+            raw_json = json.dumps(dict(payload))
+        except (TypeError, ValueError):
+            return None
+    try:
+        event = AccountStateChangedEventData.model_validate_json(raw_json)
+    except ValueError:
+        return None
+    topic_valid, _ = _validate_portfolio_accounts_topic(topic)
+    if not topic_valid:
+        return None
+    if topic != f"{PORTFOLIO_ACCOUNTS_TOPIC_PREFIX}{event.wallet_public_id}":
+        return None
+    return event
 
 
 async def enforce_ai_review_scope(
@@ -161,10 +208,10 @@ async def enforce_orders_events_scope(
     *,
     topic: str,
     connection_principal: AuthPrincipal | None,
-    payload: Mapping[str, Any],
+    payload: Mapping[str, JsonValue],
     scope_grant_service: ScopeGrantService,
     as_of: datetime | None = None,
-    accessible_wallets_cache: OrdersEventsAccessCache | None = None,
+    accessible_wallets_cache: WalletAccessCache | None = None,
 ) -> bool:
     """Return ``True`` iff principal may receive this ``orders.events.*`` frame.
 
@@ -209,7 +256,125 @@ async def enforce_orders_events_scope(
     Returns:
         ``True`` to forward the frame, ``False`` to drop it.
     """
-    if not topic.startswith(ORDERS_EVENTS_TOPIC_PREFIX):
+    return await _enforce_wallet_scope(
+        topic=topic,
+        topic_prefix=ORDERS_EVENTS_TOPIC_PREFIX,
+        connection_principal=connection_principal,
+        payload=payload,
+        scope_grant_service=scope_grant_service,
+        as_of=as_of,
+        accessible_wallets_cache=accessible_wallets_cache,
+    )
+
+
+async def enforce_account_state_scope(
+    *,
+    topic: str,
+    connection_principal: AuthPrincipal | None,
+    payload: Mapping[str, JsonValue] | AccountStateChangedEventData,
+    scope_grant_service: ScopeGrantService,
+    as_of: datetime | None = None,
+    accessible_wallets_cache: WalletAccessCache | None = None,
+) -> bool:
+    """Return whether a principal may receive an account invalidation frame.
+
+    Mirrors the REST account page's accessible-wallet scope. Every account
+    frame is first revalidated against the exact event schema, UUID7 topic,
+    and topic-payload wallet invariant. ADMIN then bypasses only the accessible
+    wallet lookup. The optional cache is frame-local so one ZMQ frame performs
+    at most one wallet query per authorization identity while scope changes
+    take effect on the next frame.
+
+    Args:
+        topic: Full ``portfolio.accounts.{wallet_public_id}`` topic.
+        connection_principal: Authenticated destination principal.
+        payload: Typed or JSON-shaped account invalidation envelope.
+        scope_grant_service: Owner of accessible-wallet resolution.
+        as_of: Optional wall-clock shared across one frame's fan-out.
+        accessible_wallets_cache: Optional per-frame wallet-access cache.
+
+    Returns:
+        ``True`` to forward the invalidation, otherwise ``False``.
+    """
+    if not topic.startswith(PORTFOLIO_ACCOUNTS_TOPIC_PREFIX):
+        return True
+    event = validate_account_state_event(topic=topic, payload=payload)
+    if event is None:
+        return False
+    return await _enforce_validated_account_state_scope(
+        topic=topic,
+        connection_principal=connection_principal,
+        event=event,
+        scope_grant_service=scope_grant_service,
+        as_of=as_of,
+        accessible_wallets_cache=accessible_wallets_cache,
+    )
+
+
+async def _enforce_validated_account_state_scope(
+    *,
+    topic: str,
+    connection_principal: AuthPrincipal | None,
+    event: AccountStateChangedEventData,
+    scope_grant_service: ScopeGrantService,
+    as_of: datetime | None = None,
+    accessible_wallets_cache: WalletAccessCache | None = None,
+) -> bool:
+    """Authorize an account event whose schema and topic were already validated.
+
+    The bridge calls this only after :func:`validate_account_state_event` has
+    accepted the frame, allowing every subscriber to reuse the same strict
+    typed event. Raw or otherwise untrusted callers must use
+    :func:`enforce_account_state_scope`, which performs validation before this
+    authorization-only step and therefore before the ADMIN wallet bypass.
+
+    Args:
+        topic: Full validated ``portfolio.accounts.{wallet_public_id}`` topic.
+        connection_principal: Authenticated destination principal.
+        event: Strict event returned by :func:`validate_account_state_event`.
+        scope_grant_service: Owner of accessible-wallet resolution.
+        as_of: Optional wall-clock shared across one frame's fan-out.
+        accessible_wallets_cache: Optional per-frame wallet-access cache.
+
+    Returns:
+        ``True`` when the validated event may reach the destination.
+    """
+    return await _enforce_wallet_scope(
+        topic=topic,
+        topic_prefix=PORTFOLIO_ACCOUNTS_TOPIC_PREFIX,
+        connection_principal=connection_principal,
+        payload={"wallet_public_id": event.wallet_public_id},
+        scope_grant_service=scope_grant_service,
+        as_of=as_of,
+        accessible_wallets_cache=accessible_wallets_cache,
+    )
+
+
+async def _enforce_wallet_scope(
+    *,
+    topic: str,
+    topic_prefix: str,
+    connection_principal: AuthPrincipal | None,
+    payload: Mapping[str, JsonValue],
+    scope_grant_service: ScopeGrantService,
+    as_of: datetime | None,
+    accessible_wallets_cache: WalletAccessCache | None,
+) -> bool:
+    """Apply the shared accessible-wallet gate for one topic family.
+
+    Args:
+        topic: Full received topic.
+        topic_prefix: Topic family owned by the calling public filter.
+        connection_principal: Authenticated destination principal.
+        payload: Parsed event envelope containing ``wallet_public_id``.
+        scope_grant_service: Owner of accessible-wallet resolution.
+        as_of: Optional wall-clock shared across one frame's fan-out.
+        accessible_wallets_cache: Optional per-frame wallet-access cache.
+
+    Returns:
+        ``True`` when the topic is unrelated or the wallet is accessible.
+    """
+    if not topic.startswith(topic_prefix):
         return True
     if connection_principal is None:
         return False
@@ -226,7 +391,7 @@ async def enforce_orders_events_scope(
             as_of=wall_clock,
         )
     else:
-        cache_key = orders_events_access_cache_key(connection_principal)
+        cache_key = wallet_access_cache_key(connection_principal)
         cached_accessible = accessible_wallets_cache.get(cache_key)
         if cached_accessible is None:
             cached_accessible = frozenset(

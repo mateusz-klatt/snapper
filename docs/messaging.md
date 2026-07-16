@@ -115,6 +115,21 @@ Topic format varies by category (see per-category tables below).
 `TradeCommand`, `VenueEvent`, and `TradeProjectionCheckpoint` are durable
 database artifacts used by the trade runtime. They are not additional ZMQ topics.
 
+### Portfolio Account Invalidation
+
+| Topic | Description |
+| ----- | ----------- |
+| `portfolio.accounts.{wallet_public_id}` | Thin `AccountStateChangedEventData` invalidation emitted after a venue-account snapshot or reconciliation evaluation commits |
+
+The payload carries wallet, exchange, mode, commit kind, and the standard
+provenance envelope; it deliberately carries no balances or reconciliation
+view. Browser clients subscribe to `portfolio.accounts.`, invalidate active
+portfolio-account queries, and rebuild the fail-closed projection through
+`GET /api/portfolio/accounts`. A 60-second safety-net poll heals dropped or
+missed frames. Subscription requires `read:account_state`, and bridge fan-out
+applies the same per-frame accessible-wallet filter as the REST endpoint.
+Malformed frames and topic/payload wallet mismatches fail closed.
+
 ### System
 
 | Topic | Description |
@@ -1174,14 +1189,14 @@ Bridge automatically:
 - Subscribes to ZMQ topics when WebSocket client subscribes
 - Validates each inbound ZMQ message as JSON and runs `GapDetector.check()` before forwarding
 - Drops messages with malformed JSON (logged as `WARNING`; counted in `invalid_messages` per topic)
-- Applies per-frame scope filters for `ai_reviews.*`, `orders.events.*`, and
-  `alerts.*`; malformed scoped frames fail closed before fan-out
+- Applies per-frame scope filters for `ai_reviews.*`, `orders.events.*`,
+  `portfolio.accounts.*`, and `alerts.*`; account invalidations require the
+  exact typed schema, a UUID7 wallet topic, and topic-payload wallet equality,
+  while every malformed scoped frame fails closed before fan-out
 - Forwards messages via `_forward_to_clients` with per-subscription backpressure
-- Throttles forwarding per subscriber: the live WebSocket subscribe path
-  registers every subscription with a flat 100 ms interval, regardless of
-  topic (`TOPIC_REGISTRY` carries per-prefix `throttle_ms` metadata, but
-  only the bridge's schema-aware registration path reads it, and the
-  WebSocket subscribe handler does not use that path)
+- Throttles forwarding per subscriber with the matching `TOPIC_REGISTRY`
+  interval; account invalidations use a 500 ms per-wallet window with one
+  trailing delivery of the newest suppressed frame
 - Drops market data when a client exceeds `MAX_PENDING_MESSAGES_MARKET` (100)
 - Disconnects slow clients on trade topics when exceeding `MAX_PENDING_MESSAGES_TRADE` (1000)
 - Unsubscribes when last client disconnects

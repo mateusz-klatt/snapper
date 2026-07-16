@@ -568,6 +568,31 @@ class PortfolioAccountState(StrictDataSchema[Literal["portfolio_account_state"]]
     reconciliation: PortfolioReconciliationView
 
 
+class AccountStateChangedEventData(StrictDataSchema[Literal["account_state_changed_event"]]):
+    """Committed account-state change used to invalidate REST projections.
+
+    Published on ``portfolio.accounts.{wallet_public_id}`` after either a
+    venue account snapshot or its reconciliation evaluation commits. The
+    payload deliberately carries no account balances or reconciliation view:
+    subscribers use it only as an invalidation signal and refetch the
+    fail-closed REST projection.
+
+    Attributes:
+        type: Payload discriminator (always
+            ``account_state_changed_event``).
+        wallet_public_id: Wallet whose account projection changed.
+        exchange: Venue whose account observation or reconciliation changed.
+        mode: Trading mode of the committed account-state version.
+        kind: Commit kind that triggered the invalidation.
+    """
+
+    type: Literal["account_state_changed_event"] = "account_state_changed_event"
+    wallet_public_id: str
+    exchange: OrderExchange
+    mode: ExecutionMode
+    kind: Literal["snapshot", "reconciliation"]
+
+
 class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
     """Order request from strategy to executor.
 

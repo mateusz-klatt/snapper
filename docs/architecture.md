@@ -254,9 +254,29 @@ Message types (in `messaging.schemas.data`):
 - `OrderData` — Order status
 - `ExecutionData` — Order execution
 - `OrderRequestData` — Order request
+- `AccountStateChangedEventData` — Thin committed account-state invalidation
 - `HeartbeatData` — Component heartbeat
 
 Every Data class carries `public_id: str` (UUID7), `type: Literal[...]`, and `timestamp: datetime`.
+
+### Account truth invalidation (executors)
+
+Each per-wallet executor observes venue balances and positions independently
+of order reconciliation and persists the resulting account snapshot. After
+that durable write, and again after the matching portfolio-reconciliation
+evaluation commits, it best-effort publishes an
+`AccountStateChangedEventData` frame on
+`portfolio.accounts.{wallet_public_id}`. The frame is only an invalidation
+signal: it never carries balances or a precomputed reconciliation view.
+
+The ZMQ-WebSocket bridge requires `read:account_state` at subscribe time and
+filters every frame against the destination principal's accessible-wallet set
+(ADMIN bypass; malformed payloads and topic/payload wallet mismatches fail
+closed). The browser invalidates the
+active `GET /api/portfolio/accounts` query so the REST read path remains the
+only builder of the time-sensitive, fail-closed view. A 60-second safety-net
+poll covers lossy bridge delivery and raises the client transport-staleness
+ceiling after three missed polls.
 
 ### Venue reconciliation (executors)
 
@@ -533,7 +553,7 @@ FastAPI application:
 - **REST API** — HTTP endpoints
 - **WebSocket** — Real-time streaming via ZMQ bridge
   with per-frame scope filters for `ai_reviews.*`, `orders.events.*`,
-  and `alerts.*`
+  `portfolio.accounts.*`, and `alerts.*`
 - **Static Files** — Frontend dashboard
 - **ClientProvenanceMiddleware** (`provenance_middleware.py`) — Extracts client
   provenance from mutation requests, runs per-session gap detection, records

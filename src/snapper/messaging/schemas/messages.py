@@ -13,6 +13,7 @@ from typing import Any
 
 from snapper.api.schemas.base import PartialBody
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.messaging.schemas.data import AccountStateChangedEventData
 from snapper.messaging.schemas.data import AlertEventData
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import EgressPoolSnapshotEventData
@@ -95,6 +96,7 @@ MESSAGE_TYPE_MAP: dict[str, type[StrictDataSchema[Any]]] = {
     "replay_start": ReplayStartData,
     "replay_end": ReplayEndData,
     "alert_event": AlertEventData,
+    "account_state_changed_event": AccountStateChangedEventData,
     "portfolio_drift_episode_event": PortfolioDriftEpisodeEventData,
     "execution_plan_decision_event": ExecutionPlanDecisionEventData,
     "process_summary_event": ProcessSummaryEventData,

@@ -129,15 +129,16 @@ CATEGORY_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "processes_admin": frozenset({Permission.MANAGE_PROCESSES}),
     "admin": frozenset({Permission.MANAGE_USERS}),
     "backtest": frozenset({Permission.READ_BACKTESTS}),
+    "account_state": frozenset({Permission.READ_ACCOUNT_STATE}),
     "ai_reviews": frozenset({Permission.READ_SIGNALS, Permission.CREATE_ORDERS}),
     "notifications": frozenset({Permission.READ_NOTIFICATIONS}),
 }
 """Permission sets required for each WS topic category.
 
 A role is allowed a category when it holds **all** permissions in the
-category's frozenset.  This is intentionally stricter than REST read
-access: a VIEWER can GET /orders (READ_ORDERS) but cannot subscribe
-to live order events (requires CREATE_ORDERS, i.e. OPERATOR+).
+category's frozenset. Command categories remain stricter than REST read
+access, while read-side event families such as ``trade_events`` and
+``account_state`` deliberately use the matching REST read permission.
 
 The ``signals`` category is intentionally split from ``strategy``: an
 AI_DELEGATE (holding ``READ_SIGNALS`` but NOT ``START_STRATEGIES``)
