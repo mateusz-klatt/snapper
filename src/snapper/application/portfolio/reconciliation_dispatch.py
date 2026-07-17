@@ -1,5 +1,6 @@
 """Fail-closed dispatch for observer-triggered portfolio reconciliation."""
 
+from dataclasses import dataclass
 from datetime import datetime
 
 from snapper.application.portfolio import futures_reconciliation
@@ -10,6 +11,158 @@ from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.messaging.schemas.data import PortfolioAccountState
 
 _REAL_METHODS = frozenset({"futures_position", "spot_execution_replay", "margin_ledger_replay"})
+
+
+def _require_boundary(condition: bool, reason: str) -> None:
+    """Reject one incoherent boundary-capture relationship with its named reason."""
+    if not condition:
+        raise ValueError(reason)
+
+
+def _require_aware_boundary_instant(value: datetime, reason: str) -> None:
+    """Reject one naive boundary-capture instant with its named reason."""
+    _require_boundary(value.utcoffset() is not None, reason)
+
+
+@dataclass(frozen=True)
+class SpotReplayBoundaryCapture:
+    """One validated observer-captured pre-balance execution watermark.
+
+    Shaped after ``SpotReplayBoundary`` (the spot evaluator input) but owned
+    by the observer/dispatch plumbing: it carries only what the observation
+    cycle genuinely measured, and construction itself is the validated
+    factory — ``__post_init__`` rejects every incoherent relationship, so an
+    unvalidated capture cannot exist. The identity fields bind the capture
+    to exactly one account-state version (the same
+    ``(wallet, exchange, mode, session, sequence)`` identity the
+    reconciliation runner checks); dispatch refuses to honor a boundary
+    whose binding does not match the account it is evaluating, so a foreign
+    or stale-cycle capture can never certify another snapshot.
+
+    ``source_watermark`` is the scoped committed ``max(scope_sequence)``
+    read BEFORE the balance request started, with its
+    ``watermark_captured_at`` instant; the enforced ordering ``as_of <=
+    watermark_captured_at <= request_started_at <= request_completed_at <=
+    watermark_after_captured_at`` is the pre-balance certification — it is
+    a validated invariant of the type, not a caller-set flag. The read is
+    unlocked and sealed by construction: the counter is allocated as
+    committed max + 1 under the ingest-side execution fence, so no row at
+    or below the watermark can commit after the capture. ``as_of`` does
+    not define scope membership (the stored scope columns do); the S4c-4
+    replay bundle must pin its temporal reads (instrument identity, specs,
+    asset precisions) to this exact instant. ``watermark_after`` is the
+    same scoped read taken after the balance and position reads completed
+    (``None`` when that read failed), and ``watermark_unchanged`` is
+    venue-quiescence evidence — True exactly when both reads succeeded and
+    were equal; it is NOT a sealing check (contiguity seals the prefix).
+    This capture type deliberately carries no ``range_complete``: the
+    S4c-4 replay bundle owns range certification, and the capture must not
+    even be able to claim it.
+    """
+
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    session_id: str
+    sequence_id: int
+    source_watermark: int
+    as_of: datetime
+    watermark_captured_at: datetime
+    request_started_at: datetime
+    request_completed_at: datetime
+    watermark_after: int | None
+    watermark_after_captured_at: datetime | None
+    watermark_unchanged: bool
+
+    def __post_init__(self) -> None:
+        """Reject any capture whose fields do not form one coherent observation."""
+        _require_boundary(bool(self.wallet_public_id), "spot_boundary_wallet_unbound")
+        _require_boundary(bool(self.exchange), "spot_boundary_exchange_unbound")
+        _require_boundary(bool(self.mode), "spot_boundary_mode_unbound")
+        _require_boundary(bool(self.session_id), "spot_boundary_session_unbound")
+        _require_boundary(self.source_watermark >= 0, "spot_boundary_negative_watermark")
+        _require_aware_boundary_instant(self.as_of, "spot_boundary_naive_as_of")
+        _require_aware_boundary_instant(
+            self.watermark_captured_at, "spot_boundary_naive_watermark_captured_at"
+        )
+        _require_aware_boundary_instant(
+            self.request_started_at, "spot_boundary_naive_request_started_at"
+        )
+        _require_aware_boundary_instant(
+            self.request_completed_at, "spot_boundary_naive_request_completed_at"
+        )
+        _require_boundary(
+            self.as_of <= self.watermark_captured_at,
+            "spot_boundary_as_of_after_capture",
+        )
+        _require_boundary(
+            self.watermark_captured_at <= self.request_started_at,
+            "spot_boundary_watermark_not_pre_balance",
+        )
+        _require_boundary(
+            self.request_started_at <= self.request_completed_at,
+            "spot_boundary_request_window_inverted",
+        )
+        _require_boundary(
+            (self.watermark_after is None) == (self.watermark_after_captured_at is None),
+            "spot_boundary_after_read_incoherent",
+        )
+        if self.watermark_after is not None and self.watermark_after_captured_at is not None:
+            _require_aware_boundary_instant(
+                self.watermark_after_captured_at,
+                "spot_boundary_naive_watermark_after_captured_at",
+            )
+            _require_boundary(
+                self.request_completed_at <= self.watermark_after_captured_at,
+                "spot_boundary_after_capture_not_post_balance",
+            )
+            _require_boundary(
+                self.watermark_after >= self.source_watermark,
+                "spot_boundary_after_watermark_regressed",
+            )
+        _require_boundary(
+            self.watermark_unchanged
+            == (self.watermark_after is not None and self.watermark_after == self.source_watermark),
+            "spot_boundary_unchanged_flag_inconsistent",
+        )
+
+
+def _boundary_bound_to_account(
+    boundary: SpotReplayBoundaryCapture,
+    account: PortfolioAccountState,
+) -> bool:
+    """Return whether the boundary binds to this exact account-state version.
+
+    A capture certifies exactly one observation cycle; honoring a boundary
+    whose ``(wallet, exchange, mode, session, sequence)`` identity does not
+    match the evaluated snapshot would let a foreign or stale-cycle capture
+    masquerade as this account's pre-balance evidence.
+    """
+    return (
+        boundary.wallet_public_id == account.wallet_public_id
+        and boundary.exchange == str(account.exchange).lower()
+        and boundary.mode == str(account.mode)
+        and boundary.session_id == account.session_id
+        and boundary.sequence_id == account.sequence_id
+    )
+
+
+def _account_balance_read_is_current(account: PortfolioAccountState) -> bool:
+    """Return whether the snapshot carries a genuinely current balance read.
+
+    A boundary brackets a venue balance request, so it is meaningless when
+    the cycle produced no successful CURRENT read: an unsupported capability
+    returns without any venue call, and an errored or timed-out read leaves
+    an older RETAINED payload visible. Requiring ``balance_status ==
+    "observed"`` AND the payload-source observation to be the current
+    attempt closes both holes.
+    """
+    observation_id = account.current_attempt_observation_id
+    return (
+        account.balance_status == "observed"
+        and observation_id is not None
+        and account.balance_payload_source_observation_id == observation_id
+    )
 
 
 def _bounded_error(error: Exception) -> str:
@@ -93,6 +246,8 @@ async def dispatch_portfolio_reconciliation(
     method_config: PortfolioReconciliationMethodConfigRow | None,
     position_capability: CapabilityStatus,
     evaluated_at: datetime,
+    *,
+    boundary: SpotReplayBoundaryCapture | None = None,
 ) -> PortfolioReconciliationEvaluationRow:
     """Dispatch one account snapshot through its durable configured method.
 
@@ -102,6 +257,13 @@ async def dispatch_portfolio_reconciliation(
         method_config: Active operator-authored method config, when valid.
         position_capability: Capability captured with the account observation.
         evaluated_at: One shared evaluation and temporal-read instant.
+        boundary: The live observer-captured pre-balance watermark evidence
+            for this exact snapshot, or ``None`` on crash-recovery and replay
+            re-evaluations where no boundary was captured in the same cycle —
+            those spot evaluations honestly stay incomplete. A boundary is
+            honored only when its identity binding matches the evaluated
+            account AND the snapshot carries a current successful balance
+            read; anything else is treated exactly like an absent boundary.
 
     Returns:
         One S1-compatible method-scoped reconciliation evaluation.
@@ -130,11 +292,16 @@ async def dispatch_portfolio_reconciliation(
             str(account.mode),
             evaluated_at,
         )
-        reason = (
-            "unsupported_margin"
-            if durable_signal or _account_has_spot_margin_signal(account, position_capability)
-            else "spot_boundary_unavailable"
-        )
+        if durable_signal or _account_has_spot_margin_signal(account, position_capability):
+            reason = "unsupported_margin"
+        elif (
+            boundary is not None
+            and _boundary_bound_to_account(boundary, account)
+            and _account_balance_read_is_current(account)
+        ):
+            reason = "spot_bundle_unavailable"
+        else:
+            reason = "spot_boundary_unavailable"
         return _nonfull_evaluation(
             account,
             evaluated_at,

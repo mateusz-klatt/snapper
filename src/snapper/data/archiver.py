@@ -169,12 +169,13 @@ def _normalize_rows_to_columns(
 ) -> list[tuple[str, ...]]:
     """Remap rows exported under an old header onto the current columns.
 
-    Schema-evolution guard: a state-table export merges pre-existing
-    archive rows with fresh DB rows and rewrites the file under the
-    CURRENT model header. When the model gained columns since the file
-    was written (e.g. the positions provenance columns), old-width
-    tuples merged verbatim would misalign against the wider header and
-    break restore with an index error. Rows are remapped by column
+    Schema-evolution guard: a state-table or event-table export merges
+    pre-existing archive rows with fresh DB rows and rewrites the file
+    under the CURRENT model header. When the model gained columns since
+    the file was written (e.g. the positions provenance columns, or the
+    executions scope/counter columns), old-width tuples merged verbatim
+    would misalign against the wider header and break restore with an
+    index error. Rows are remapped by column
     NAME; columns the old schema lacked are padded with empty strings,
     which every CSV value parser restores as NULL.
 
@@ -596,6 +597,10 @@ EVENT_TABLES: dict[str, EventTableSpec] = {
             "fee",
             "fee_asset",
             "executed_at",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            "scope_sequence",
         ),
         group_column="order_public_id",
     ),
@@ -725,6 +730,36 @@ def _resolve_event_path(
     return parts / str(day.year) / f"{day.isoformat()}.csv"
 
 
+class ExecutionPurgeUnsupportedError(RuntimeError):
+    """Raised when an archive export requests a purge of the executions ledger.
+
+    Executions are the replayable evidence behind the spot
+    reconciliation counted range proof
+    (``count(rows in (anchor_seq, W]) == W - anchor_seq``). Deciding
+    which execution rows are safe to delete requires reading the active
+    anchor watermarks and each scope's ``max(scope_sequence)`` tip, and
+    then deleting under that decision. The archiver is a synchronous,
+    separate-process consumer whose reads and deletes are independent
+    transactions; nothing serializes them against the anchor writer,
+    which commits through a different engine and event loop. An anchor
+    committing between the protection read and the delete would strand
+    rows above a live watermark, failing the counted proof closed
+    forever for that account — and the anchor is immutable, so the
+    supported API cannot repair it.
+
+    A filtered purge is therefore only as sound as a lock that does not
+    exist. Rather than present a probabilistic guard as a guarantee,
+    execution purge fails closed here. This mirrors
+    :class:`ExecutionRestoreUnsupportedError`: both refuse an operation
+    that cannot be proven safe against the scope counter protocol.
+    Executions are still fully exported to CSV; only the DB delete is
+    refused. Lifting this refusal requires a cross-process lock shared
+    from anchor capture through anchor commit and by the
+    protection-plus-delete path, designed against the counted proof once
+    it exists.
+    """
+
+
 class EventArchiver:
     """Export append-only event rows to per-day CSV archive files.
 
@@ -740,6 +775,10 @@ class EventArchiver:
     ``known_to``, ``session_id``, ``sequence_id``) plus all domain columns.
     Merge/dedup with existing files uses ``(public_id, timestamp, known_to)``
     as the dedup key.
+
+    Execution purge is refused outright
+    (:class:`ExecutionPurgeUnsupportedError`); executions export to CSV
+    but are never deleted from the DB.
 
     Attributes:
         _repo: Sync database repository.
@@ -783,16 +822,33 @@ class EventArchiver:
             day_end: Last day (inclusive) of timestamp range.
             dry_run: If True, count rows without writing files.
             purge: If True, delete exported rows from DB after writing.
+                Refused for ``executions`` — see
+                :class:`ExecutionPurgeUnsupportedError`.
 
         Returns:
             ExportResult with file, row, and purge counts.
 
         Raises:
             ValueError: If table name is not a valid event table.
+            ExecutionPurgeUnsupportedError: If ``purge`` is requested for
+                ``executions``. Raised before any file is written or any
+                row is read, so an unsupported request has no side
+                effects. ``dry_run`` does not exempt the request: a plan
+                that can never be executed must not be reported as one.
         """
         spec = EVENT_TABLES.get(table)
         if spec is None:
             raise ValueError(f"Unknown event table: {table}")
+        if purge and spec.model is Execution:
+            raise ExecutionPurgeUnsupportedError(
+                "execution archive purge is refused: choosing purgeable rows "
+                "requires reading active anchor watermarks and per-scope "
+                "sequence tips, but the archiver's reads and delete are "
+                "separate transactions that nothing serializes against the "
+                "anchor writer; an anchor committing mid-purge would strand "
+                "rows above a live watermark and fail the counted range proof "
+                "closed forever. Export executions without --purge"
+            )
 
         rows = self._repo.get_event_rows_for_archive(
             spec.model,
@@ -820,7 +876,8 @@ class EventArchiver:
 
         files_written = 0
         for path in sorted(files):
-            existing = _read_existing_csv(path)
+            existing_header, existing_rows = _read_existing_csv_with_header(path)
+            existing = _normalize_rows_to_columns(existing_header, existing_rows, spec.columns)
             merged = _merge_and_dedup_events(existing, files[path])
             _write_event_csv(path, spec.columns, merged)
             files_written += 1
@@ -1494,6 +1551,23 @@ def _build_column_parsers(
     return [_parser_for_column(table_cols[name].type) for name in header]
 
 
+class ExecutionRestoreUnsupportedError(RuntimeError):
+    """Raised when an archive restore targets the executions ledger.
+
+    Executions carry the immutable certification scope
+    (``wallet_public_id``, ``exchange``, ``mode``) and the per-scope
+    commit-ordered ``scope_sequence`` counter. The generic audit restore
+    is a direct bulk insert that bypasses the per-wallet execution fence
+    and the ``committed max + 1`` allocation protocol entirely — it could
+    reintroduce a certified sequence at or below an existing anchor
+    watermark or captured boundary, silently corrupting the counted
+    range proof. Restoring executions requires an anchor-aware offline
+    reconstruction protocol (validate scope counters against active
+    anchors and the live tip under the fence) that does not exist yet;
+    until it does, restore fails closed with this error.
+    """
+
+
 @dataclass(slots=True)
 class RestoreResult:
     """Result of an archive restore operation.
@@ -1513,7 +1587,10 @@ class ArchiveRestorer:
     """Restore archived CSV data back into the database.
 
     Supports audit restore (full history with temporal metadata) for
-    all table types.  Deduplicates against existing rows by
+    all table types EXCEPT ``executions``, which fails closed with
+    :class:`ExecutionRestoreUnsupportedError` (the direct insert would
+    bypass the execution fence and the scope counter protocol).
+    Deduplicates against existing rows by
     ``(public_id, timestamp, known_to)`` to prevent double-inserts.
 
     Attributes:
@@ -1547,10 +1624,22 @@ class ArchiveRestorer:
 
         Raises:
             ValueError: If table unknown or source not supported.
+            ExecutionRestoreUnsupportedError: If the table is
+                ``executions`` — the direct insert would bypass the
+                execution fence and the scope counter protocol.
         """
         model = _ALL_TABLE_SPECS.get(table)
         if model is None:
             raise ValueError(f"Unknown table for restore: {table}")
+        if model is Execution:
+            raise ExecutionRestoreUnsupportedError(
+                "execution archive restore is refused: the audit restore's "
+                "direct insert bypasses the per-wallet execution fence and "
+                "the scope_sequence counter protocol and could reintroduce "
+                "a certified sequence at or below an existing anchor "
+                "watermark; an anchor-aware offline reconstruction protocol "
+                "is required before executions can be restored"
+            )
         if source != "audit":
             raise ValueError(f"Restore source '{source}' not yet supported (use 'audit')")
 

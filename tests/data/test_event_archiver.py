@@ -4,6 +4,7 @@ import csv
 from datetime import UTC
 from datetime import date
 from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -12,11 +13,14 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import Table
+from sqlalchemy import func
+from sqlalchemy import select
 from typer.testing import CliRunner
 
 from snapper.cli.app import app
 from snapper.data.archiver import EVENT_TABLES
 from snapper.data.archiver import EventArchiver
+from snapper.data.archiver import ExecutionPurgeUnsupportedError
 from snapper.data.archiver import ExportResult
 from snapper.data.archiver import _format_value
 from snapper.data.archiver import _merge_and_dedup_events
@@ -24,11 +28,14 @@ from snapper.data.archiver import _resolve_event_path
 from snapper.data.archiver import _write_event_csv
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
+from snapper.data.models import Execution
 from snapper.data.models import Instrument
 from snapper.data.models import Order
+from snapper.data.models import PortfolioSpotReconciliationAnchor
 from snapper.data.models import Symbol
 from snapper.data.models import Tick
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import ExecutionPhysicalMutationError
 
 
 def test_format_value_none() -> None:
@@ -263,6 +270,7 @@ class _EventStubRepo:
         self._rows = rows or []
         self._delete_count = delete_count
         self.deleted_ids: list[int] = []
+        self.read_calls: int = 0
 
     def get_instrument_archive_map(self) -> dict[str, tuple[str, str]]:
         return self._instruments
@@ -277,6 +285,7 @@ class _EventStubRepo:
         day_start: date,
         day_end: date,
     ) -> list[tuple[Any, ...]]:
+        self.read_calls += 1
         return self._rows
 
     def delete_rows_by_id(self, model: type[Any], row_ids: list[int]) -> int:
@@ -629,7 +638,7 @@ def _make_execution_row(
     ts: datetime,
     order_public_id: str,
 ) -> tuple[Any, ...]:
-    """Build an execution DB row tuple (id, *columns)."""
+    """Build an execution DB row tuple (id, *columns) incl. the scope plane."""
     return (
         row_id,
         public_id,
@@ -647,15 +656,25 @@ def _make_execution_row(
         0.1,
         "USD",
         ts,
+        "00000000-0000-7000-8000-000000000001",
+        "kraken",
+        "live",
+        row_id,
     )
 
 
 def test_event_archiver_export_executions_via_order(tmp_path: Path) -> None:
-    """Export executions resolves path via order -> instrument chain.
+    """Export executions resolves path and carries the full scope plane.
+
+    The invariant-bearing fields (``wallet_public_id``, ``exchange``,
+    ``mode``, ``scope_sequence``) must round out to the archive: without
+    them a restored/reconstructed row could never satisfy the NOT NULL
+    scope schema or the counter invariant.
 
     Given: Execution referencing an order mapped to an instrument,
     When: export is called for executions,
-    Then: CSV created under the correct exchange/archive_symbol path.
+    Then: CSV created under the correct exchange/archive_symbol path with
+        the scope columns in the header and the scope values in the row.
     """
     ts = datetime(2024, 1, 1, 14, 30, tzinfo=UTC)
     rows = [_make_execution_row(1, "pub-1", ts, "order-1")]
@@ -675,6 +694,97 @@ def test_event_archiver_export_executions_via_order(tmp_path: Path) -> None:
         tmp_path / "archive" / "executions" / "kraken" / "BTC-USD" / "2024" / "2024-01-01.csv"
     )
     assert csv_path.exists()
+    with csv_path.open(encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        data = list(reader)
+    assert header[-4:] == ["wallet_public_id", "exchange", "mode", "scope_sequence"]
+    assert data[0][-4:] == ["00000000-0000-7000-8000-000000000001", "kraken", "live", "1"]
+
+
+def test_event_archiver_export_executions_merges_old_header_files(tmp_path: Path) -> None:
+    """A pre-scope-plane archive file merges cleanly under the new header.
+
+    Files exported before the scope columns existed carry a narrower
+    header; merging their rows verbatim against the wider current header
+    would misalign every column. Old rows must be remapped by column
+    name and padded for the columns their era lacked.
+
+    Given: An existing executions CSV written under the pre-scope header
+        and a new export for the same day,
+    When: export runs,
+    Then: The merged file carries the CURRENT header, the old row padded
+        with empty scope values, and the new row in full.
+    """
+    ts = datetime(2024, 1, 1, 14, 30, tzinfo=UTC)
+    csv_path = (
+        tmp_path / "archive" / "executions" / "kraken" / "BTC-USD" / "2024" / "2024-01-01.csv"
+    )
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    old_header = [
+        "public_id",
+        "timestamp",
+        "known_to",
+        "session_id",
+        "sequence_id",
+        "order_public_id",
+        "exec_id",
+        "trade_id",
+        "side",
+        "status",
+        "price",
+        "size",
+        "fee",
+        "fee_asset",
+        "executed_at",
+    ]
+    old_row = [
+        "pub-old",
+        ts.isoformat(),
+        KNOWN_TO_MAX.isoformat(),
+        "old-session",
+        "1",
+        "order-1",
+        "exec-old",
+        "trade-old",
+        "sell",
+        "filled",
+        "99.0",
+        "2.0",
+        "0.2",
+        "USD",
+        ts.isoformat(),
+    ]
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f, lineterminator="\n")
+        writer.writerow(old_header)
+        writer.writerow(old_row)
+    rows = [_make_execution_row(2, "pub-new", ts.replace(minute=45), "order-1")]
+    repo = _EventStubRepo(
+        orders={"order-1": ("BTC-USD", "kraken")},
+        rows=rows,
+    )
+    archiver = EventArchiver(repo, tmp_path)
+    result = archiver.export(
+        table="executions",
+        day_start=date(2024, 1, 1),
+        day_end=date(2024, 1, 1),
+    )
+    assert result.files_written == 1
+    with csv_path.open(encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        data = {row[0]: row for row in reader}
+    assert header == list(EVENT_TABLES["executions"].columns)
+    assert len(data) == 2
+    assert data["pub-old"][-4:] == ["", "", "", ""]
+    assert data["pub-old"][5] == "order-1"
+    assert data["pub-new"][-4:] == [
+        "00000000-0000-7000-8000-000000000001",
+        "kraken",
+        "live",
+        "2",
+    ]
 
 
 def _make_db_with_events(tmp_path: Path) -> tuple[DatabaseRepository, str]:
@@ -899,6 +1009,168 @@ def test_repo_delete_rows_by_id_batch_boundary(tmp_path: Path) -> None:
         date(2024, 1, 1),
     )
     assert len(remaining) == 0
+    repo.dispose()
+
+
+def _make_db_with_one_execution(tmp_path: Path) -> tuple[DatabaseRepository, int]:
+    """Create a DB holding a single certified execution ledger row.
+
+    The row is written directly through the ORM to seed physical state
+    for the primitive-level guard tests. It stands in for a sealed
+    prefix entry: ``scope_sequence`` 3 inside the
+    ``(wallet, exchange, mode)`` scope, exactly the tip a watermark
+    would have captured.
+
+    Returns:
+        Tuple of (repository, execution primary-key id).
+    """
+    db_url = f"sqlite:///{tmp_path / 'exec.db'}"
+    repo = DatabaseRepository(db_url)
+    Base.metadata.create_all(
+        repo.engine,
+        tables=[cast(Table, Execution.__table__)],
+    )
+    ts = datetime(2024, 1, 1, 14, 30, tzinfo=UTC)
+    with repo.get_session() as session:
+        execution = Execution(
+            public_id="exec-pub-3",
+            order_public_id="order-pub-1",
+            wallet_public_id="wallet-pub-1",
+            exchange="kraken",
+            mode="live",
+            scope_sequence=3,
+            side="buy",
+            status="filled",
+            price=100.0,
+            size=1.0,
+            fee=0.1,
+            fee_asset="USD",
+            session_id="test",
+            sequence_id=1,
+            timestamp=ts,
+            known_to=KNOWN_TO_MAX,
+        )
+        session.add(execution)
+        session.commit()
+        row_id = execution.id
+    return repo, row_id
+
+
+def test_repo_delete_rows_by_id_refuses_execution(tmp_path: Path) -> None:
+    """Physical delete refuses the executions ledger and preserves the row.
+
+    Concrete failure this closes: with a watermark captured at
+    ``scope_sequence`` 3, ``delete_rows_by_id(Execution, [id])`` would
+    physically remove the certified row, dropping ``max(scope_sequence)``
+    to 2 so normal ingest re-allocates ``committed max + 1 == 3`` for a
+    DIFFERENT fill. The counted range proof still passes over the now
+    contiguous ``{1, 2, 3}`` while a sealed prefix entry has been
+    silently replaced — the exact false-authoritative verdict the
+    program exists to prevent.
+
+    Given: A DB holding one certified execution row,
+    When: ``delete_rows_by_id`` is called with the ``Execution`` model,
+    Then: ``ExecutionPhysicalMutationError`` is raised at the primitive
+        and the row still exists, so the sealed prefix is intact.
+    """
+    repo, row_id = _make_db_with_one_execution(tmp_path)
+    with pytest.raises(
+        ExecutionPhysicalMutationError,
+        match="physical execution deletion is refused",
+    ):
+        repo.delete_rows_by_id(Execution, [row_id])
+    with repo.get_session() as session:
+        surviving = session.execute(select(func.count()).select_from(Execution)).scalar_one()
+    assert surviving == 1
+    repo.dispose()
+
+
+def test_repo_delete_rows_by_id_refuses_execution_empty_list(tmp_path: Path) -> None:
+    """Execution refusal fires before the empty-list shortcut.
+
+    The theorem must hold against the primitive regardless of arguments:
+    a caller passing an empty id list must still be refused for the
+    executions model rather than silently returning 0, so no future
+    call site can probe the primitive for the executions table under
+    any argument shape.
+
+    Given: A DB holding one certified execution row,
+    When: ``delete_rows_by_id(Execution, [])`` is called,
+    Then: ``ExecutionPhysicalMutationError`` is raised before the empty
+        list is inspected.
+    """
+    repo, _row_id = _make_db_with_one_execution(tmp_path)
+    with pytest.raises(
+        ExecutionPhysicalMutationError,
+        match="physical execution deletion is refused",
+    ):
+        repo.delete_rows_by_id(Execution, [])
+    repo.dispose()
+
+
+def test_repo_bulk_insert_from_archive_refuses_execution(tmp_path: Path) -> None:
+    """Bulk insert refuses the executions ledger and inserts nothing.
+
+    Concrete failure this closes: a fenceless, dedup-free bulk insert of
+    an archived execution row could reintroduce a ``scope_sequence`` at
+    or below a live anchor watermark, silently corrupting the counted
+    range proof. The refusal must hold at the primitive because a future
+    restore-shaped path could reach it with the ``Execution`` model.
+
+    Given: A DB holding one certified execution row,
+    When: ``bulk_insert_from_archive`` is called with the ``Execution``
+        model and a candidate row,
+    Then: ``ExecutionPhysicalMutationError`` is raised at the primitive
+        and no row is inserted.
+    """
+    repo, _row_id = _make_db_with_one_execution(tmp_path)
+    candidate = {
+        "public_id": "exec-pub-2",
+        "order_public_id": "order-pub-1",
+        "wallet_public_id": "wallet-pub-1",
+        "exchange": "kraken",
+        "mode": "live",
+        "scope_sequence": 2,
+        "side": "buy",
+        "status": "filled",
+        "price": 99.0,
+        "size": 1.0,
+        "fee": 0.1,
+        "fee_asset": "USD",
+        "session_id": "test",
+        "sequence_id": 2,
+        "timestamp": datetime(2024, 1, 1, 14, 29, tzinfo=UTC),
+        "known_to": KNOWN_TO_MAX,
+    }
+    with pytest.raises(
+        ExecutionPhysicalMutationError,
+        match="physical execution reintroduction is refused",
+    ):
+        repo.bulk_insert_from_archive(Execution, [candidate])
+    with repo.get_session() as session:
+        count = session.execute(select(func.count()).select_from(Execution)).scalar_one()
+    assert count == 1
+    repo.dispose()
+
+
+def test_repo_bulk_insert_from_archive_refuses_execution_empty_rows(tmp_path: Path) -> None:
+    """Execution refusal fires before the empty-rows shortcut.
+
+    The theorem holds against the primitive under any argument shape:
+    even an empty row list must be refused for the executions model, so
+    the guard is not dependent on the caller supplying rows.
+
+    Given: A DB holding one certified execution row,
+    When: ``bulk_insert_from_archive(Execution, [])`` is called,
+    Then: ``ExecutionPhysicalMutationError`` is raised before the empty
+        list is inspected.
+    """
+    repo, _row_id = _make_db_with_one_execution(tmp_path)
+    with pytest.raises(
+        ExecutionPhysicalMutationError,
+        match="physical execution reintroduction is refused",
+    ):
+        repo.bulk_insert_from_archive(Execution, [])
     repo.dispose()
 
 
@@ -1202,3 +1474,446 @@ def test_cli_archive_unknown_table_rejected() -> None:
     )
     assert result.exit_code == 1
     assert "unknown" in result.output.lower()
+
+
+_WALLET_ONE = "00000000-0000-7000-8000-000000000001"
+_EXEC_TS = datetime(2024, 1, 1, 14, 30, tzinfo=UTC)
+_EXEC_CSV_PARTS = ("archive", "executions", "kraken", "BTC-USD", "2024", "2024-01-01.csv")
+
+
+def _execution_stub_repo() -> _EventStubRepo:
+    """Build a stub repo holding three exportable execution rows."""
+    return _EventStubRepo(
+        orders={"order-1": ("BTC-USD", "kraken")},
+        rows=[_make_execution_row(i, f"pub-{i}", _EXEC_TS, "order-1") for i in (1, 2, 3)],
+    )
+
+
+def test_event_archiver_purge_executions_refused_and_delete_unreachable(
+    tmp_path: Path,
+) -> None:
+    """Execution purge raises and never reaches the delete path.
+
+    Given: Exportable execution rows and a repo spy recording deletes,
+    When: export is called with purge=True for executions,
+    Then: ExecutionPurgeUnsupportedError is raised and delete_rows_by_id
+        is never invoked. The spy — not a zero rows_purged count — is
+        the assertion: a count of zero is satisfiable by a filter that
+        happens to empty, whereas an unrecorded delete proves the path
+        is unreachable.
+    """
+    repo = _execution_stub_repo()
+    archiver = EventArchiver(cast(DatabaseRepository, repo), tmp_path)
+    with pytest.raises(ExecutionPurgeUnsupportedError, match="execution archive purge is refused"):
+        archiver.export(
+            table="executions",
+            day_start=date(2024, 1, 1),
+            day_end=date(2024, 1, 1),
+            purge=True,
+        )
+    assert repo.deleted_ids == []
+
+
+def test_event_archiver_purge_executions_refused_before_any_side_effect(
+    tmp_path: Path,
+) -> None:
+    """The refusal fires before rows are read or files are written.
+
+    Given: A stub repo counting archive row reads,
+    When: export is called with purge=True for executions,
+    Then: No row read happens and no CSV file is produced — an
+        unsupported request leaves no partial state behind.
+    """
+    repo = _execution_stub_repo()
+    archiver = EventArchiver(cast(DatabaseRepository, repo), tmp_path)
+    with pytest.raises(ExecutionPurgeUnsupportedError):
+        archiver.export(
+            table="executions",
+            day_start=date(2024, 1, 1),
+            day_end=date(2024, 1, 1),
+            purge=True,
+        )
+    assert repo.read_calls == 0
+    assert not list(tmp_path.rglob("*.csv"))
+
+
+def test_event_archiver_purge_executions_refused_in_dry_run(tmp_path: Path) -> None:
+    """dry_run does not exempt an execution purge request from refusal.
+
+    Given: Exportable execution rows,
+    When: export is called with dry_run=True and purge=True,
+    Then: ExecutionPurgeUnsupportedError is raised rather than a plan
+        being reported. A dry run that reports a purge which can never
+        be executed would advertise a capability that does not exist.
+    """
+    repo = _execution_stub_repo()
+    archiver = EventArchiver(cast(DatabaseRepository, repo), tmp_path)
+    with pytest.raises(ExecutionPurgeUnsupportedError):
+        archiver.export(
+            table="executions",
+            day_start=date(2024, 1, 1),
+            day_end=date(2024, 1, 1),
+            dry_run=True,
+            purge=True,
+        )
+    assert repo.deleted_ids == []
+
+
+def test_event_archiver_export_executions_without_purge_archives_every_row(
+    tmp_path: Path,
+) -> None:
+    """Refusing the purge does not degrade the execution archive.
+
+    Given: Three exportable execution rows,
+    When: export is called with purge=False,
+    Then: Every row is written to CSV and nothing is deleted — the
+        archive remains complete; only the DB delete is refused.
+    """
+    repo = _execution_stub_repo()
+    archiver = EventArchiver(cast(DatabaseRepository, repo), tmp_path)
+    result = archiver.export(
+        table="executions",
+        day_start=date(2024, 1, 1),
+        day_end=date(2024, 1, 1),
+    )
+    assert result.rows_exported == 3
+    assert result.rows_purged == 0
+    assert repo.deleted_ids == []
+    with tmp_path.joinpath(*_EXEC_CSV_PARTS).open(encoding="utf-8") as f:
+        reader = csv.reader(f)
+        next(reader)
+        data = list(reader)
+    assert len(data) == 3
+
+
+def test_event_archiver_purge_non_executions_still_deletes(tmp_path: Path) -> None:
+    """The refusal is scoped to executions and leaves other tables purging.
+
+    Given: Tick rows,
+    When: export is called with purge=True for ticks,
+    Then: All rows are deleted — no other event table is affected.
+    """
+    rows = [
+        _make_tick_row(1, "pub-1", _EXEC_TS, "inst-1", 100.5),
+        _make_tick_row(2, "pub-2", _EXEC_TS.replace(minute=31), "inst-1", 101.0),
+    ]
+    repo = _EventStubRepo(instruments={"inst-1": ("BTC-USD", "polygon")}, rows=rows)
+    archiver = EventArchiver(cast(DatabaseRepository, repo), tmp_path)
+    result = archiver.export(
+        table="ticks",
+        day_start=date(2024, 1, 1),
+        day_end=date(2024, 1, 1),
+        purge=True,
+    )
+    assert result.rows_purged == 2
+    assert repo.deleted_ids == [1, 2]
+
+
+def _build_execution(
+    *,
+    public_id: str,
+    order_public_id: str,
+    wallet_public_id: str,
+    exchange: str,
+    mode: str,
+    scope_sequence: int,
+    sequence_id: int,
+) -> Execution:
+    """Build an Execution ORM row for purge-refusal integration tests."""
+    return Execution(
+        public_id=public_id,
+        order_public_id=order_public_id,
+        wallet_public_id=wallet_public_id,
+        exchange=exchange,
+        mode=mode,
+        scope_sequence=scope_sequence,
+        exec_id=f"exec-{public_id}",
+        trade_id=f"trade-{public_id}",
+        side="buy",
+        status="filled",
+        price=100.0,
+        size=1.0,
+        fee=0.1,
+        fee_asset="USD",
+        executed_at=_EXEC_TS,
+        session_id="test",
+        sequence_id=sequence_id,
+        timestamp=_EXEC_TS,
+        known_to=KNOWN_TO_MAX,
+    )
+
+
+def _build_anchor(
+    *,
+    wallet_public_id: str,
+    exchange: str,
+    source_watermark: int,
+    sequence_id: int = 900,
+) -> PortfolioSpotReconciliationAnchor:
+    """Build an active spot reconciliation anchor ORM row."""
+    t0 = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+    return PortfolioSpotReconciliationAnchor(
+        public_id=f"anchor-{wallet_public_id[-4:]}-{exchange}",
+        wallet_public_id=wallet_public_id,
+        exchange=exchange,
+        mode="live",
+        venue_account_state_public_id="00000000-0000-7000-8000-000000000201",
+        balance_observation_id=41,
+        source_watermark_kind="scope_sequence",
+        source_watermark=source_watermark,
+        balances_json='{"BTC":"0.1"}',
+        first_request_started_at=t0,
+        first_request_completed_at=t0 + timedelta(seconds=1),
+        second_request_started_at=t0 + timedelta(seconds=1),
+        second_request_completed_at=t0 + timedelta(seconds=2),
+        boundary_status="double_read_equal",
+        inventory_status="certified_full",
+        margin_status="cash",
+        provenance="kraken:ccxt.fetch_balance",
+        session_id="test",
+        sequence_id=sequence_id,
+        timestamp=t0 + timedelta(seconds=2),
+        known_to=KNOWN_TO_MAX,
+    )
+
+
+_EXECUTION_SCOPES: tuple[tuple[str, int], ...] = (
+    ("live", 1),
+    ("live", 2),
+    ("live", 3),
+    ("live", 4),
+    ("paper", 1),
+    ("paper", 2),
+)
+_ALL_EXECUTION_PUBLIC_IDS = frozenset(f"pub-{mode}-{seq}" for mode, seq in _EXECUTION_SCOPES)
+
+
+def _seed_execution_scopes(repo: DatabaseRepository, *, with_anchor: bool) -> None:
+    """Seed lineage plus six executions, optionally under an active anchor.
+
+    Seeds Symbol -> Instrument -> Order lineage so executions resolve an
+    archive path, four live executions (sequences 1..4) and two paper
+    executions (1..2), all timestamped on 2024-01-01. When
+    ``with_anchor`` is True an active anchor with ``source_watermark=2``
+    covers the live scope, making live sequences 3..4 the replay
+    evidence a purge must never strand.
+    """
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    with repo.get_session() as session:
+        session.add(
+            Symbol(
+                public_id="sym-btc",
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                session_id="test",
+                sequence_id=1,
+                timestamp=ts,
+                created_at=ts,
+            )
+        )
+        session.flush()
+        session.add(
+            Instrument(
+                public_id="inst-btc",
+                symbol_public_id="sym-btc",
+                exchange="kraken",
+                session_id="test",
+                sequence_id=2,
+                timestamp=ts,
+            )
+        )
+        session.flush()
+        session.add(
+            Order(
+                public_id="order-1",
+                instrument_public_id="inst-btc",
+                wallet_public_id=_WALLET_ONE,
+                client_order_id="client-1",
+                created_at=ts,
+                side="buy",
+                order_type="market",
+                size=1.0,
+                status="filled",
+                filled_size=1.0,
+                session_id="test",
+                sequence_id=3,
+                timestamp=ts,
+                known_to=KNOWN_TO_MAX,
+            )
+        )
+        session.flush()
+        seq_id = 4
+        for mode, seq in _EXECUTION_SCOPES:
+            session.add(
+                _build_execution(
+                    public_id=f"pub-{mode}-{seq}",
+                    order_public_id="order-1",
+                    wallet_public_id=_WALLET_ONE,
+                    exchange="kraken",
+                    mode=mode,
+                    scope_sequence=seq,
+                    sequence_id=seq_id,
+                )
+            )
+            seq_id += 1
+        if with_anchor:
+            session.add(
+                _build_anchor(
+                    wallet_public_id=_WALLET_ONE,
+                    exchange="kraken",
+                    source_watermark=2,
+                )
+            )
+        session.commit()
+
+
+def _surviving_execution_public_ids(repo: DatabaseRepository) -> set[str]:
+    """Return the public_id of every execution row still in the DB."""
+    spec = EVENT_TABLES["executions"]
+    rows = repo.get_event_rows_for_archive(
+        spec.model,
+        spec.columns,
+        date(2024, 1, 1),
+        date(2024, 1, 1),
+    )
+    return {str(row[1]) for row in rows}
+
+
+def test_event_archiver_integration_purge_executions_refused_with_live_anchor(
+    tmp_path: Path,
+) -> None:
+    """A real DB under a live anchor refuses the purge and keeps every row.
+
+    Given: A SQLite DB with six executions and an active anchor at
+        source_watermark=2,
+    When: export is called with purge=True for executions,
+    Then: ExecutionPurgeUnsupportedError is raised and all six rows
+        survive — including live sequences 3..4 above the watermark.
+    """
+    repo = DatabaseRepository(f"sqlite:///{tmp_path / 'exec_purge.db'}")
+    Base.metadata.create_all(repo.engine)
+    _seed_execution_scopes(repo, with_anchor=True)
+    archiver = EventArchiver(repo, tmp_path)
+    with pytest.raises(ExecutionPurgeUnsupportedError):
+        archiver.export(
+            table="executions",
+            day_start=date(2024, 1, 1),
+            day_end=date(2024, 1, 1),
+            purge=True,
+        )
+    assert _surviving_execution_public_ids(repo) == _ALL_EXECUTION_PUBLIC_IDS
+    repo.dispose()
+
+
+class _AnchorRacingRepo(DatabaseRepository):
+    """Repository that lands a real anchor on a second engine at delete time.
+
+    Reproduces N2's concrete failure interleave. The archiver decides
+    which execution rows are purgeable while no anchor exists; an anchor
+    then commits on an independent engine (a separate connection and
+    transaction, standing in for the out-of-process anchor writer) before
+    the delete lands; the delete strands rows above the freshly committed
+    watermark. The anchor write is a genuine INSERT through a second
+    ``DatabaseRepository``, not a mock, so reaching the delete path at
+    all is what makes the race real.
+
+    ``delete_calls`` records entry into the delete path. Because the
+    purge is refused before any read, this hook must never fire for
+    executions; if it does, the archiver has decided to delete execution
+    rows without holding anything that serializes it against the anchor
+    writer, which is exactly the defect.
+
+    Attributes:
+        delete_calls: Number of times the delete path was entered.
+    """
+
+    def __init__(self, db_url: str) -> None:
+        """Initialize the racing repository.
+
+        Args:
+            db_url: Database URL for both this repo and the anchor writer.
+        """
+        super().__init__(db_url)
+        self.delete_calls: int = 0
+
+    def delete_rows_by_id(self, model: type[Any], row_ids: list[int]) -> int:
+        """Commit an anchor on a second engine, then perform the delete.
+
+        Args:
+            model: SQLAlchemy model class.
+            row_ids: Row ids the archiver decided were purgeable.
+
+        Returns:
+            Number of rows deleted by the real delete.
+        """
+        self.delete_calls += 1
+        writer = DatabaseRepository(self.db_url)
+        try:
+            with writer.get_session() as session:
+                session.add(
+                    _build_anchor(
+                        wallet_public_id=_WALLET_ONE,
+                        exchange="kraken",
+                        source_watermark=2,
+                    )
+                )
+                session.commit()
+        finally:
+            writer.dispose()
+        return super().delete_rows_by_id(model, row_ids)
+
+
+def test_event_archiver_purge_executions_refuses_anchor_commit_race(
+    tmp_path: Path,
+) -> None:
+    """The anchor-lands-mid-purge failure is unreachable, not merely filtered.
+
+    Given: A real SQLite DB with six executions and NO anchor, plus a
+        repository that commits a real anchor (source_watermark=2) from
+        an independent engine at the moment the delete path is entered,
+    When: export is called with purge=True for executions,
+    Then: The delete path is never entered, so the anchor never lands
+        mid-purge, and every execution row survives.
+
+    This is the finding's scenario made concrete. A filtering guard reads
+    the protection set in one transaction and deletes in another with
+    nothing serializing the two: with no anchor visible at read time it
+    would mark live sequences 1..3 and paper 1 purgeable, the anchor
+    would commit at watermark 2, and the delete would then strand live
+    sequence 3 above a live watermark — failing the counted range proof
+    closed forever against an anchor the supported API cannot rewrite.
+    Refusing the purge removes the window entirely: with no delete there
+    is no race to lose.
+    """
+    repo = _AnchorRacingRepo(f"sqlite:///{tmp_path / 'exec_race.db'}")
+    Base.metadata.create_all(repo.engine)
+    _seed_execution_scopes(repo, with_anchor=False)
+    archiver = EventArchiver(repo, tmp_path)
+    with pytest.raises(ExecutionPurgeUnsupportedError):
+        archiver.export(
+            table="executions",
+            day_start=date(2024, 1, 1),
+            day_end=date(2024, 1, 1),
+            purge=True,
+        )
+    assert repo.delete_calls == 0
+    assert _surviving_execution_public_ids(repo) == _ALL_EXECUTION_PUBLIC_IDS
+    repo.dispose()
+
+
+def test_cli_archive_execution_purge_rejected() -> None:
+    """The CLI rejects --purge for executions with a clean error.
+
+    Given: --table executions --purge,
+    When: CLI invoked,
+    Then: Exits 1 naming executions, without a traceback.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["archive", "--table", "executions", "--day", "2024-01-01", "--purge"],
+    )
+    assert result.exit_code == 1
+    assert "not supported for executions" in result.output

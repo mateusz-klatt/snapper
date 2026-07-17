@@ -32,6 +32,7 @@ from loguru import logger
 
 from snapper.application.engine.service import compute_shard_key
 from snapper.application.portfolio.account_view import build_portfolio_account_state
+from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
 from snapper.application.portfolio.reconciliation_dispatch import dispatch_portfolio_reconciliation
 from snapper.application.portfolio.spot_precision_evidence import (
     derive_walutomat_precision_from_raw_balances,
@@ -280,11 +281,19 @@ _SpotPrecisionEvidenceWork = tuple[SQLAlchemyRepository, VenueAccountAttemptRow]
 
 @dataclass(frozen=True)
 class _PortfolioReconciliationWork:
-    """Immutable identity and capability captured from one account snapshot."""
+    """Immutable identity, capability, and boundary from one account snapshot.
+
+    ``boundary`` is the pre-balance execution-watermark evidence captured in
+    the SAME observation cycle, or ``None`` when no genuine capture exists
+    (paper accounts, watermark read failure). It travels in memory only:
+    crash-recovery re-evaluations rebuilt without a live boundary pass
+    ``None`` and honestly stay incomplete rather than fabricating one.
+    """
 
     state_id: int
     identity: _PortfolioReconciliationKey
     position_capability: CapabilityStatus
+    boundary: SpotReplayBoundaryCapture | None
 
 
 @dataclass(frozen=True)
@@ -3343,6 +3352,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         state_id: int,
         attempt: VenueAccountAttemptRow,
         position_capability: CapabilityStatus,
+        boundary: SpotReplayBoundaryCapture | None,
     ) -> None:
         """Schedule one live snapshot evaluation without delaying its observer."""
         try:
@@ -3362,6 +3372,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 state_id=state_id,
                 identity=key,
                 position_capability=position_capability,
+                boundary=boundary,
             )
             runner = self._run_portfolio_reconciliation(work)
             try:
@@ -3787,6 +3798,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     method_config=method_config,
                     position_capability=work.position_capability,
                     evaluated_at=evaluated_at,
+                    boundary=work.boundary,
                 )
                 await repository.record_portfolio_reconciliation(evaluation)
             self._schedule_portfolio_drift_notification(evaluation)
@@ -3838,34 +3850,73 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         retention, and provenance are all owned by the repository; this method
         only supplies the raw attempt. Persists nothing when no durable
         repository is attached.
+
+        For live accounts the cycle also captures the scoped execution
+        watermark (the unlocked committed ``max(scope_sequence)`` read)
+        BEFORE the balance request starts and again after the balance and
+        position reads complete — the only ordering under which the
+        boundary's pre-balance certification is genuine. The boundary is
+        assembled through the validating ``SpotReplayBoundaryCapture``
+        constructor, bound to this cycle's exact account-state identity.
+        Either capture failing — or the assembled fields failing validation —
+        degrades only the boundary (absent before-read means no boundary at
+        all; a failed after-read leaves the quiescence flag honestly False)
+        — observation itself proceeds unaffected.
         """
         client = self.exchange_client
         repository = self.repository
         if client is None or not isinstance(repository, SQLAlchemyRepository):
             return
         now = datetime.now(UTC)
+        exchange_name = self._get_exchange_name()
+        mode = self._account_mode()
+        capture_before: tuple[int, datetime, datetime] | None = None
+        if mode == "live":
+            capture_before = await self._capture_spot_execution_watermark(
+                repository, exchange_name, mode
+            )
+        request_started_at = datetime.now(UTC)
         (
             balance_status,
             balances_json,
             balance_observed_at,
             balance_error,
         ) = await self._read_account_balances(client, now)
+        request_completed_at = datetime.now(UTC)
         (
             position_status,
             open_positions_json,
             position_observed_at,
             position_error,
         ) = await self._read_account_positions(client, now)
+        session_id = self._tracker.session_id
+        sequence_id = self._tracker.next_sequence(
+            f"account.{exchange_name}.{self.wallet_public_id}"
+        )
+        boundary: SpotReplayBoundaryCapture | None = None
+        if capture_before is not None:
+            capture_after = await self._capture_spot_execution_watermark(
+                repository, exchange_name, mode
+            )
+            boundary = self._assemble_spot_replay_boundary(
+                exchange=exchange_name,
+                mode=mode,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                capture_before=capture_before,
+                capture_after=capture_after,
+                request_started_at=request_started_at,
+                request_completed_at=request_completed_at,
+            )
         authoritative_until: datetime | None = None
         if balance_status in ("observed", "simulated") and balance_observed_at is not None:
             authoritative_until = balance_observed_at + timedelta(
                 seconds=_ACCOUNT_FRESHNESS_CEILING_S
             )
-        exchange_name = self._get_exchange_name()
         attempt: VenueAccountAttemptRow = {
             "wallet_public_id": self.wallet_public_id,
             "exchange": exchange_name,
-            "mode": self._account_mode(),
+            "mode": mode,
             "balance_status": balance_status,
             "position_status": position_status,
             "valuation_status": "native_only",
@@ -3875,10 +3926,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             "position_observed_at": position_observed_at,
             "authoritative_until": authoritative_until,
             "error": balance_error or position_error,
-            "session_id": self._tracker.session_id,
-            "sequence_id": self._tracker.next_sequence(
-                f"account.{exchange_name}.{self.wallet_public_id}"
-            ),
+            "session_id": session_id,
+            "sequence_id": sequence_id,
             "bus_time": now,
         }
         state_id = await repository.record_venue_account_snapshot(attempt)
@@ -3887,6 +3936,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             state_id=state_id,
             attempt=attempt,
             position_capability=client.position_capability,
+            boundary=boundary,
         )
         self._schedule_account_state_changed(
             wallet_public_id=attempt["wallet_public_id"],
@@ -3900,6 +3950,89 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if self._get_exchange_name() == ExchangeEnum.PAPER:
             return "paper"
         return "live"
+
+    async def _capture_spot_execution_watermark(
+        self,
+        repository: SQLAlchemyRepository,
+        exchange: str,
+        mode: str,
+    ) -> tuple[int, datetime, datetime] | None:
+        """Read the scoped execution watermark, degrading to absence.
+
+        Returns ``(watermark, as_of, captured_at)`` where ``as_of`` is the
+        instant the S4c-4 bundle must pin its temporal reads to (it no
+        longer defines scope membership — the stored scope columns do) and
+        ``captured_at`` is taken AFTER the durable read returns, so the
+        watermark provably reflects history no newer than that instant.
+        The repository capture is an unlocked, index-only committed
+        ``max(scope_sequence)`` read — never a serialization point, so it
+        cannot stall behind fill ingest. Remaining failure modes are a
+        malformed wallet identity, a database error, or the shared
+        per-fetch timeout here; any failure returns ``None`` so the cycle
+        carries an explicitly ABSENT boundary instead of a fabricated one,
+        and the venue observation itself is never broken or delayed beyond
+        the same per-fetch bound the balance and position reads already
+        honor.
+        """
+        try:
+            async with asyncio.timeout(_ACCOUNT_FETCH_TIMEOUT_S):
+                watermark, as_of = await repository.get_spot_execution_watermark(
+                    self.wallet_public_id,
+                    exchange,
+                    mode,
+                    datetime.now(UTC),
+                )
+        except Exception as exc:
+            logger.warning(f"[{exchange}] spot execution watermark capture failed: {exc}")
+            return None
+        return watermark, as_of, datetime.now(UTC)
+
+    def _assemble_spot_replay_boundary(
+        self,
+        *,
+        exchange: str,
+        mode: str,
+        session_id: str,
+        sequence_id: int,
+        capture_before: tuple[int, datetime, datetime],
+        capture_after: tuple[int, datetime, datetime] | None,
+        request_started_at: datetime,
+        request_completed_at: datetime,
+    ) -> SpotReplayBoundaryCapture | None:
+        """Build one validated, identity-bound boundary or honestly none.
+
+        Construction runs the ``SpotReplayBoundaryCapture`` validation —
+        watermark sign, timestamp awareness and ordering, after-read
+        coherence, quiescence-flag consistency — and binds the capture to
+        this exact cycle's ``(wallet, exchange, mode, session, sequence)``
+        identity so dispatch can refuse foreign or stale-cycle captures. A
+        validation failure (for example a wall-clock step inverting the
+        capture ordering, or a scope change regressing the after-read)
+        degrades to an ABSENT boundary rather than failing the observation
+        cycle: every failure mode here may cost the certificate, never the
+        snapshot.
+        """
+        watermark_before, as_of, watermark_captured_at = capture_before
+        try:
+            return SpotReplayBoundaryCapture(
+                wallet_public_id=self.wallet_public_id,
+                exchange=exchange,
+                mode=mode,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                source_watermark=watermark_before,
+                as_of=as_of,
+                watermark_captured_at=watermark_captured_at,
+                request_started_at=request_started_at,
+                request_completed_at=request_completed_at,
+                watermark_after=None if capture_after is None else capture_after[0],
+                watermark_after_captured_at=None if capture_after is None else capture_after[2],
+                watermark_unchanged=capture_after is not None
+                and capture_after[0] == watermark_before,
+            )
+        except ValueError as exc:
+            logger.warning(f"[{exchange}] spot replay boundary capture rejected: {exc}")
+            return None
 
     async def _read_account_balances(
         self, client: ExchangeClientBase, now: datetime

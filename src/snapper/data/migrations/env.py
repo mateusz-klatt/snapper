@@ -63,12 +63,34 @@ async def _run_async_migrations(section: dict[str, Any]) -> None:
     Used for ``aiosqlite`` + ``asyncpg`` URLs that we cannot rewrite
     to a sync driver without adding another DBAPI dependency.
 
+    PostgreSQL migrations pin ``READ COMMITTED`` on the connection
+    BEFORE Alembic issues its first query (the ``alembic_version``
+    read that would otherwise freeze a snapshot). The production engine
+    configures no isolation, so a migration inherits whatever
+    ``default_transaction_isolation`` the role or database sets; under
+    an inherited REPEATABLE READ (or SERIALIZABLE) default the whole
+    migration transaction would run against the snapshot pinned by that
+    first read, and a writer that committed AFTER that snapshot but
+    BEFORE the fence's ``LOCK TABLE`` would be INVISIBLE to the named
+    fail-closed validators (:func:`_abort_on_broken_lineage` and the
+    anchor-emptiness assert). The tightening DDL would still force an
+    atomic rollback, but that late backstop is a probability, not the
+    clean fail-closed refusal the validators exist to guarantee. Forcing
+    READ COMMITTED gives every statement a fresh snapshot, so once the
+    ACCESS EXCLUSIVE fence has drained in-flight writers the validators
+    read the latest committed state and are authoritative. The override
+    is applied only on the ``asyncpg`` (PostgreSQL) path; the SQLite
+    driver never reaches here — :func:`run_migrations_online` rewrites
+    ``aiosqlite`` URLs to the sync driver and takes the plain sync path.
+
     Args:
         section: SQLAlchemy section dict from the Alembic config,
             already mutated by :func:`run_migrations_online` if the
             URL needed normalisation.
     """
     connectable = async_engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
+    if "asyncpg" in section.get(_SA_URL_KEY, ""):
+        connectable = connectable.execution_options(isolation_level="READ COMMITTED")
     async with connectable.connect() as connection:
         await connection.run_sync(_apply_migrations)
     await connectable.dispose()

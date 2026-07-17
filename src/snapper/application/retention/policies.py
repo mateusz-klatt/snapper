@@ -6,7 +6,8 @@ purge older rows in batches of at most ``backlog_lookback_days`` days."*
 
 Policies are validated at module import: every ``policy.table`` MUST be
 a key in :data:`snapper.data.archiver.EVENT_TABLES`. v1 supports event
-tables only; ``StateArchiver`` tables fail this validation.
+tables only; ``StateArchiver`` tables fail this validation, as does
+``executions`` (the archiver refuses to purge it).
 
 Three operator-controlled env vars (read directly via
 ``os.environ.get``):
@@ -29,6 +30,8 @@ _DRY_RUN_ENV_VAR = "RETENTION_DRY_RUN"
 _OUTPUT_DIR_ENV_VAR = "RETENTION_OUTPUT_DIR"
 _DEFAULT_OUTPUT_DIR = "data"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes"})
+_PURGE_REFUSED_TABLE = "executions"
+"""Event table the archiver refuses to purge, hence ineligible for retention."""
 ENV_VARS: frozenset[str] = frozenset(
     {_INTERVAL_ENV_VAR, _DISABLED_ENV_VAR, _DRY_RUN_ENV_VAR, _OUTPUT_DIR_ENV_VAR}
 )
@@ -65,24 +68,41 @@ RETENTION_POLICIES: tuple[RetentionPolicy, ...] = (
 
 
 def validate_policies(policies: tuple[RetentionPolicy, ...]) -> None:
-    """Raise :class:`ValueError` if any policy targets a non-event table.
+    """Raise :class:`ValueError` if any policy targets an unsupported table.
 
     v1 supports the keys of
     :data:`snapper.data.archiver.EVENT_TABLES` only; ``StateArchiver``
     tables are not supported and are rejected here.
+
+    ``executions`` is rejected additionally: the retention loop calls
+    the archiver with ``purge=not dry_run``, and the archiver refuses
+    execution purge
+    (:class:`snapper.data.archiver.ExecutionPurgeUnsupportedError`)
+    because its protection reads and delete cannot be serialized against
+    the spot reconciliation anchor writer. Rejecting at import time
+    fails a misconfiguration loudly at startup rather than once per
+    scheduler tick, and keeps the refusal from being silently reopened
+    by adding a policy.
 
     Args:
         policies: Tuple of :class:`RetentionPolicy` to validate.
 
     Raises:
         ValueError: When any policy's ``table`` is not in
-            :data:`EVENT_TABLES`.
+            :data:`EVENT_TABLES`, or is ``executions``.
     """
     for policy in policies:
         if policy.table not in EVENT_TABLES:
             raise ValueError(
                 f"RetentionPolicy table {policy.table!r} not in EVENT_TABLES; "
                 "v1 supports event tables only."
+            )
+        if policy.table == _PURGE_REFUSED_TABLE:
+            raise ValueError(
+                f"RetentionPolicy table {policy.table!r} is not eligible for "
+                "retention: the archiver refuses execution purge because it "
+                "cannot serialize its protection reads and delete against the "
+                "spot reconciliation anchor writer."
             )
 
 

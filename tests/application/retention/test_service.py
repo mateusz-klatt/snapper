@@ -161,6 +161,24 @@ class TestPoliciesModuleValidation:
         """The shipped default list passes the guard."""
         policies_module.validate_policies(RETENTION_POLICIES)
 
+    def test_validate_policies_rejects_executions(self) -> None:
+        """``executions`` cannot enter the retention policy list.
+
+        The retention loop calls the archiver with ``purge=not dry_run``
+        and the archiver refuses execution purge, so an executions
+        policy must fail at import rather than error once per tick. This
+        keeps the refusal from being silently reopened by adding a
+        policy — ``executions`` IS a valid EVENT_TABLES key, so the
+        unknown-table guard alone would let it through.
+        """
+        bad = (RetentionPolicy(table="executions", retain_days=1, backlog_lookback_days=1),)
+        with pytest.raises(ValueError, match="not eligible for retention"):
+            policies_module.validate_policies(bad)
+
+    def test_executions_absent_from_default_policies(self) -> None:
+        """No shipped policy targets the executions ledger."""
+        assert all(policy.table != "executions" for policy in RETENTION_POLICIES)
+
 
 class TestEnvVarParsers:
     """Boolean + numeric parsers for the four retention env vars."""
@@ -298,6 +316,36 @@ class TestEvaluatePolicy:
         await service.evaluate_policy(policy)
 
         assert fake.calls[0].purge is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("_frozen_now_2026_05_01")
+    async def test_execution_purge_refused_through_service_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A REAL archiver refuses an executions policy via the service.
+
+        The policy guard is not the only defence: this test bypasses it
+        by handing ``evaluate_policy`` an executions policy directly and
+        wiring a real :class:`EventArchiver`. It proves the refusal is
+        enforced in the archiver — the path
+        ``service.evaluate_policy -> export(purge=True)`` — rather than
+        only in the CLI, which the retention loop never traverses. The
+        error is captured, not re-raised, and the delete never runs.
+        """
+        monkeypatch.delenv("RETENTION_DRY_RUN", raising=False)
+        repo = MagicMock()
+        with patch.object(service_module, "DatabaseRepository", lambda _db_url: repo):
+            service = RetentionService(
+                db_url="sqlite+aiosqlite:///:memory:",
+                base_dir=Path("data"),
+            )
+        policy = RetentionPolicy(table="executions", retain_days=1, backlog_lookback_days=30)
+
+        result = await service.evaluate_policy(policy)
+
+        assert "execution archive purge is refused" in (result["error"] or "")
+        assert result["purged_rows"] == 0
+        repo.delete_rows_by_id.assert_not_called()
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("_frozen_now_2026_05_01")

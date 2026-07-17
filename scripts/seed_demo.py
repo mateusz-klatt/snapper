@@ -22,6 +22,12 @@ Demo set as of 2026-05-05 (entries chosen to match REAL Kraken Futures
 Bypasses fact -> projection chain: positions are inserted directly so the
 screenshots don't require a running paper executor / strategy runtime.
 This is a screenshot tool, not a production loader.
+
+SQLite only: ``main`` opens a SYNCHRONOUS engine, while every documented
+PostgreSQL ``DB_URL`` is ``postgresql+asyncpg://``, so a server database
+was never reachable here (see :func:`_require_sqlite_dialect`). The
+script refuses any other dialect before touching a row rather than
+pretending to support one it cannot serialize allocations against.
 """
 
 import hashlib
@@ -29,15 +35,19 @@ import json
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from uuid import UUID
 from uuid import uuid7
 
 import bcrypt
 from sqlalchemy import create_engine
+from sqlalchemy import inspect
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.data.models import Execution
+from snapper.data.models import PortfolioSpotReconciliationAnchor
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 KNOWN_TO_MAX_STR = "9999-12-31 23:59:59.000000"
@@ -57,6 +67,206 @@ def _sync_db_url(url: str) -> str:
     if "aiosqlite" in url:
         return url.replace("sqlite+aiosqlite://", "sqlite://")
     return url
+
+
+def _require_sqlite_dialect(conn: Connection) -> None:
+    """Refuse any backend other than SQLite, before a single row is written.
+
+    The PostgreSQL branch this guard replaces could never execute:
+    ``main`` opens a SYNCHRONOUS ``create_engine``, while every
+    documented PostgreSQL ``DB_URL`` is ``postgresql+asyncpg://`` and
+    ``_sync_db_url`` rewrites only the SQLite driver — so a real
+    deployment's URL died at ``engine.connect()`` with ``MissingGreenlet``
+    long before any fence ran. Reaching that branch required hand-writing
+    a ``psycopg2`` URL the application itself cannot open.
+
+    Keeping it alive meant maintaining a fence key, a transaction
+    isolation level, and a native-UUID conversion whose correctness no
+    test could establish without a real server — and a mocked connection
+    proves nothing about any of them, because it returns whatever the
+    mock was told to return. Refusing outright removes the unprovable
+    claim instead of making it subtly correct, and turns a confusing
+    ``MissingGreenlet`` into a stated limitation. Restoring PostgreSQL
+    seeding is deliberate separate work: an asyncpg -> psycopg2 rewrite
+    in ``_sync_db_url`` plus a real PostgreSQL integration test.
+
+    Args:
+        conn: The script's single connection, freshly opened.
+
+    Raises:
+        RuntimeError: When the connection is not SQLite.
+    """
+    dialect = conn.dialect.name
+    if dialect != "sqlite":
+        raise RuntimeError(
+            f"seed_demo supports sqlite only — refusing dialect={dialect}. "
+            "This is a screenshot tool: point DB_URL at the local dev SQLite "
+            "database, or load a server database through the application."
+        )
+
+
+def _canonical_wallet(wallet: str) -> str:
+    """Canonicalize the paper wallet identity ONCE, for every consumer.
+
+    ``insert_execution`` canonicalizes with ``str(UUID(...))`` and uses
+    that ONE spelling for its fence key, its ``max+1`` read, and the
+    persisted row. This script must agree exactly, because SQLite's
+    ``UUIDColumn`` is a ``String(36)`` storing whatever text it is given:
+    an alias-spelled wallet (an uppercase hand-inserted row) would open a
+    SECOND counter scope that the unique index reads as different text.
+    The seed's row and a later production fill would then BOTH commit
+    ``scope_sequence = 1`` — no error is raised, the ledger simply splits
+    in two and the canonical watermark capture never sees the seed's rows.
+
+    Canonicalizing at the single lookup site, rather than at each
+    consumer, is what makes that agreement structural: every fence,
+    query, and write downstream binds this one returned value.
+
+    Args:
+        wallet: The ``public_id`` text read from the ``wallets`` row.
+
+    Returns:
+        The canonical lowercase-hyphenated UUID spelling.
+
+    Raises:
+        RuntimeError: When the stored identity is not a UUID. Production
+            ingest refuses such a wallet outright
+            (``invalid_execution_wallet_identity``), so seeding rows under
+            it would build a scope no live fill could ever extend.
+    """
+    try:
+        return str(UUID(wallet))
+    except ValueError as exc:
+        raise RuntimeError(f"paper wallet public_id is not a valid UUID: {wallet!r}") from exc
+
+
+def _acquire_execution_fence(conn: Connection) -> None:
+    """Serialize the seed's fused ``max+1`` execution inserts with live writers.
+
+    ``_insert_execution`` allocates ``scope_sequence`` as a fused
+    ``INSERT ... SELECT COALESCE(MAX(scope_sequence), 0) + 1`` — sound
+    only while no other connection can allocate concurrently. "One
+    connection" describes this script, not the database: a concurrently
+    running service writer takes the repository's per-wallet execution
+    fence and would race the seed's read-then-write, rejecting either
+    the seed or a published live fill on ``uq_executions_scope_sequence``.
+    ``BEGIN IMMEDIATE`` takes SQLite's database write reservation — the
+    same primitive ``insert_execution`` opens its own transaction with —
+    and must run before the script's first DML so the reservation covers
+    every allocation through to the script's single commit.
+
+    No per-dialect branching remains: ``main`` refuses every non-SQLite
+    dialect via :func:`_require_sqlite_dialect` before reaching this
+    helper, so SQLite is the only backend whose fence this script can
+    take — and the only one whose fence a test can actually prove.
+
+    Args:
+        conn: The script's single connection (one transaction, committed
+            once at the end of ``main``).
+    """
+    conn.execute(text("BEGIN IMMEDIATE"))
+
+
+def _immutable_ledger_table_names() -> frozenset[str]:
+    """Return the PHYSICAL table names the seeder must never rewrite.
+
+    ``executions`` and ``portfolio_spot_reconciliation_anchors`` are
+    append-only ledgers: an execution row's
+    ``(wallet_public_id, exchange, mode, scope_sequence)`` tuple and an
+    anchor row's certified inventory are THEOREM inputs to the
+    authoritative reconciliation verdict, and a re-keying of either by a
+    screenshot tool would either split a counter scope (a published fill
+    silently missing from the canonical watermark capture) or restate a
+    sealed inventory — the exact false-authoritative failure this program
+    exists to prevent. Execution-scope alias normalization is migration
+    0029's job exclusively (``_normalize_wallet_aliases``), taken under
+    the migration write fence; the seeder must not duplicate it.
+
+    The names are read from the mapped models' ``__tablename__`` rather
+    than hard-coded, so the exclusion binds the PHYSICAL table the ORM
+    maps regardless of how the ledger is expressed — a future
+    ``__tablename__`` rename moves the guard with it. The caller compares
+    these against the physical names ``inspect(conn).get_table_names()``
+    returns from the live schema, which is the same physical identity, so
+    no alias, mapper, or Table-object spelling can slip a ledger table
+    past the skip.
+    """
+    return frozenset(
+        {
+            Execution.__tablename__,
+            PortfolioSpotReconciliationAnchor.__tablename__,
+        }
+    )
+
+
+def _normalize_wallet_identity(conn: Connection, stored: str, canonical: str) -> None:
+    """Rewrite a noncanonical root wallet row and its references to canonical.
+
+    :func:`_canonical_wallet` gives every row this script INSERTS the one
+    canonical spelling, but the root ``wallets`` row keeps whatever text
+    was hand-inserted (SQLite's ``UUIDColumn`` is a ``String(36)`` that
+    stores verbatim). Nothing downstream reads the root row's spelling
+    during the seed, yet ``repository.py`` resolves non-admin scope by
+    joining ``wallets.public_id`` against the ``wallet_public_id`` of the
+    active scope grants BY TEXT: with the root row left uppercase and the
+    seeded grant written canonical, that join no longer matches and the
+    seeded wallet becomes invisible to every non-admin operator.
+
+    Canonicalizing only the seeded child rows would therefore make the
+    guarantee hold at the INSERT call sites while the physical root row
+    still diverged. This closes it at the primitive instead: after this
+    runs, the ``wallets`` row and every existing ``wallet_public_id``
+    reference carry the canonical spelling, so the theorem "the seed's
+    wallet is addressable by exactly one spelling everywhere" holds
+    against the database, not merely against the rows ``main`` happens to
+    write. There are no database-level foreign keys on ``wallets`` (every
+    wallet link is a text join), so the references must be rewritten
+    explicitly; the schema is introspected rather than hard-coded so a
+    future wallet-scoped table cannot silently escape the rewrite.
+
+    Runs under the caller's ``BEGIN IMMEDIATE`` write reservation, so the
+    root row and all references move to the canonical spelling atomically
+    with the seed's inserts — a concurrent reader never observes a split
+    identity.
+
+    An already-canonical ``stored`` (the production ``make migrate-dev``
+    case, where the wallet was created via ``str(uuid7())``) is a no-op:
+    the update statements would touch nothing, so the work is skipped.
+
+    The append-only ledgers named by :func:`_immutable_ledger_table_names`
+    are EXCLUDED from the reference rewrite even though they carry a
+    ``wallet_public_id`` column: re-keying a sealed execution or anchor
+    row would corrupt certification input (see that helper). Their alias
+    normalization is migration 0029's sole responsibility, so the seeder
+    issues no ``UPDATE`` against either physical table.
+
+    Args:
+        conn: The script's single connection, already holding the fence.
+        stored: The verbatim ``public_id`` read from the ``wallets`` row.
+        canonical: The :func:`_canonical_wallet` spelling every seeded row
+            binds.
+    """
+    if stored == canonical:
+        return
+    ledger_tables = _immutable_ledger_table_names()
+    inspector = inspect(conn)
+    for table_name in inspector.get_table_names():
+        if table_name in ledger_tables:
+            continue
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        if "wallet_public_id" not in columns:
+            continue
+        conn.execute(
+            text(
+                f"UPDATE {table_name} SET wallet_public_id = :canon "
+                "WHERE wallet_public_id = :stored"
+            ),
+            {"canon": canonical, "stored": stored},
+        )
+    conn.execute(
+        text("UPDATE wallets SET public_id = :canon WHERE public_id = :stored"),
+        {"canon": canonical, "stored": stored},
+    )
 
 
 def _lookup_instrument(conn: Connection, native_symbol: str, exchange: str) -> str | None:
@@ -181,6 +391,8 @@ def _insert_execution(
     wallet: str,
     operator: str,
     order_public_id: str,
+    exchange: str,
+    mode: str,
     side: str,
     status: str,
     price: float,
@@ -188,17 +400,32 @@ def _insert_execution(
     fee: float,
     executed_at: datetime,
 ) -> str:
-    """Insert one execution row and return its public_id."""
+    """Insert one execution row and return its public_id.
+
+    ``exchange``/``mode`` are the fill's immutable certification scope
+    (the caller supplies the order's mode and its instrument's exchange,
+    mirroring what production ingest resolves from lineage) and
+    ``scope_sequence`` is allocated inline as the committed per-scope
+    max + 1 — the same allocation rule ``insert_execution`` applies,
+    race-free because ``main`` acquired the same per-wallet execution
+    fence (``_acquire_execution_fence``) before the first insert and
+    holds it to the script's single commit.
+    """
     public_id = str(uuid7())
     conn.execute(
         text(
             "INSERT INTO executions "
             "(public_id, order_public_id, wallet_public_id, operator_public_id, "
+            " exchange, mode, scope_sequence, "
             " exec_id, trade_id, side, status, price, size, fee, fee_asset, "
             " executed_at, liquidity_role, "
             " timestamp, known_to, session_id, sequence_id) "
             "VALUES "
             "(:public_id, :opid, :wallet, :operator, "
+            " :exchange, :mode, "
+            " (SELECT COALESCE(MAX(scope_sequence), 0) + 1 FROM executions "
+            "  WHERE wallet_public_id = :wallet AND exchange = :exchange "
+            "  AND mode = :mode), "
             " :exid, :tid, :side, :status, :price, :size, :fee, 'USD', "
             " :exec_at, 'taker', "
             " :ts, :known_to, :sid, :seq)"
@@ -208,6 +435,8 @@ def _insert_execution(
             "opid": order_public_id,
             "wallet": wallet,
             "operator": operator,
+            "exchange": exchange,
+            "mode": mode,
             "exid": f"exec-{public_id[:8]}",
             "tid": f"trade-{public_id[:8]}",
             "side": side,
@@ -716,6 +945,15 @@ def _seed_ai_delegate_review(
 def main() -> int:
     """Run the demo seed end-to-end.
 
+    The write fence and the non-ledger root-wallet normalization run
+    BEFORE the idempotency skip gate, and the skip path commits, so a
+    re-run against an already-seeded database still converges the root
+    ``wallets`` row and every non-ledger ``wallet_public_id`` reference to
+    the canonical spelling instead of leaving a first-run alias frozen
+    forever. The append-only ledgers (``executions`` and the spot
+    reconciliation anchor) are excluded from that normalization — their
+    alias handling belongs to migration 0029 alone.
+
     Returns:
         ``0`` on successful completion. Errors raise ``RuntimeError``
         before reaching the return statement.
@@ -726,12 +964,14 @@ def main() -> int:
     tracker._session_id = _DEMO_SESSION_ID
 
     with engine.connect() as conn:
-        wallet = _lookup_paper_wallet(conn)
+        _require_sqlite_dialect(conn)
+        wallet_identity = _lookup_paper_wallet(conn)
         operator = _lookup_operator(conn)
-        if not wallet or not operator:
+        if not wallet_identity or not operator:
             raise RuntimeError(
                 "paper wallet or default operator not found — run `make migrate-dev` first"
             )
+        wallet = _canonical_wallet(wallet_identity)
 
         btc_perp = _lookup_instrument(conn, "BTC-USD-PERP", "kraken_futures")
         eth_perp = _lookup_instrument(conn, "ETH-USD-PERP", "kraken_futures")
@@ -744,6 +984,9 @@ def main() -> int:
                 "run `make run-static` to populate symbols"
             )
 
+        _acquire_execution_fence(conn)
+        _normalize_wallet_identity(conn, wallet_identity, wallet)
+
         existing_demo_rows = (
             conn.execute(
                 text("SELECT COUNT(*) FROM orders WHERE session_id = :sid"),
@@ -752,6 +995,7 @@ def main() -> int:
             or 0
         )
         if existing_demo_rows > 0:
+            conn.commit()
             print(f"demo seed already inserted ({existing_demo_rows} demo orders), skipping")
             return 0
 
@@ -777,6 +1021,8 @@ def main() -> int:
             wallet=wallet,
             operator=operator,
             order_public_id=order1,
+            exchange="kraken_futures",
+            mode="paper",
             side="buy",
             status="filled",
             price=76820.50,
@@ -818,6 +1064,8 @@ def main() -> int:
             wallet=wallet,
             operator=operator,
             order_public_id=order2,
+            exchange="kraken_futures",
+            mode="paper",
             side="sell",
             status="filled",
             price=2820.40,

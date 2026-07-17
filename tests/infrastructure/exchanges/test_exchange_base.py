@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 import snapper.utils.logging as logging_module
+from snapper.data.repository import ExecutionScopeResolutionError
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
@@ -1140,6 +1141,44 @@ async def test_log_execution_to_db_handles_exception() -> None:
         wallet_public_id="",
         execution=execution,
     )
+
+
+@pytest.mark.asyncio()
+async def test_log_execution_to_db_swallows_scope_resolution_refusal() -> None:
+    """A fail-closed scope refusal is logged loudly and never crashes the pipeline.
+
+    The repository refuses a fill whose active Order -> Instrument lineage
+    is missing or crossed; persistence keeps log-and-continue parity with
+    database errors — the fill stays published but unpersisted.
+
+    Given: A repository whose ``insert_execution`` raises the typed
+        ``ExecutionScopeResolutionError`` refusal.
+    When: ``_log_execution_to_db`` is called.
+    Then: The refusal is swallowed after an error log naming the reason.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.insert_execution = AsyncMock(
+        side_effect=ExecutionScopeResolutionError("dangling_execution_order_lineage")
+    )
+    client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
+    execution = ExecutionUpdate(
+        order_id="order_123",
+        exec_type="trade",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.FILLED,
+        timestamp=datetime.now(UTC),
+    )
+    with patch("snapper.infrastructure.exchanges.base.logger.error") as error_log:
+        await client._log_execution_to_db(
+            order_public_id="order-pub-5",
+            wallet_public_id="",
+            execution=execution,
+        )
+    error_log.assert_called_once()
+    assert "dangling_execution_order_lineage" in error_log.call_args.args[0]
 
 
 @pytest.mark.asyncio()

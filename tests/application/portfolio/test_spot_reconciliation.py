@@ -107,7 +107,7 @@ def _anchor() -> SpotReconciliationAnchorRow:
         "mode": "live",
         "venue_account_state_public_id": "00000000-0000-7000-8000-000000000200",
         "balance_observation_id": 40,
-        "source_watermark_kind": "execution_id",
+        "source_watermark_kind": "scope_sequence",
         "source_watermark": 10,
         "balances_json": '{"BTC":"1","USD":"100"}',
         "first_request_started_at": _NOW - timedelta(minutes=2),
@@ -145,7 +145,7 @@ def _boundary(**overrides: object) -> SpotReplayBoundary:
 def _execution(**overrides: object) -> SpotReplayExecutionRow:
     """Build one raw-decimal buy with a quote-asset fee."""
     values: dict[str, object] = {
-        "execution_id": 11,
+        "scope_sequence": 11,
         "wallet_public_id": _WALLET,
         "exchange": "walutomat",
         "mode": "live",
@@ -708,7 +708,7 @@ def test_paper_and_simulated_raise_and_inputs_are_not_mutated() -> None:
     When: The evaluator is invoked for each case,
     Then: Live input remains unchanged and non-live invocations raise.
     """
-    replay = [_execution(execution_id=12), _execution(execution_id=11)]
+    replay = [_execution(scope_sequence=12), _execution(scope_sequence=11)]
     original = replay.copy()
     result = _evaluate(replay=replay, boundary=_boundary(source_watermark=12))
     assert replay == original
@@ -1511,8 +1511,8 @@ def test_replay_boundary_rejects_bad_ordering_clocks_and_cursor_certificate(
 @pytest.mark.parametrize(
     ("row", "reason"),
     [
-        (_execution(execution_id=True), "duplicate_or_invalid_execution_id"),
-        (_execution(execution_id=10), "execution_before_anchor_watermark"),
+        (_execution(scope_sequence=True), "duplicate_or_invalid_execution_sequence"),
+        (_execution(scope_sequence=10), "execution_before_anchor_watermark"),
         (_execution(wallet_public_id="other"), "execution_scope_mismatch"),
         (_execution(exchange="other"), "execution_scope_mismatch"),
         (_execution(mode="paper"), "execution_scope_mismatch"),
@@ -1554,9 +1554,9 @@ def test_execution_duplicates_missing_specs_and_beyond_watermark_handling() -> N
     duplicate = _evaluate(replay=[_execution(), _execution()])
     missing_spec = _evaluate(specs={})
     mismatched_spec = _evaluate(specs={_INSTRUMENT: _changed_spec(instrument_public_id="other")})
-    later = _evaluate(replay=[_execution(execution_id=12)], boundary=_boundary())
+    later = _evaluate(replay=[_execution(scope_sequence=12)], boundary=_boundary())
     zero_fee = _evaluate(replay=[_execution(fee=0.0, fee_decimal="0", fee_asset="")])
-    assert duplicate["error"] == "duplicate_or_invalid_execution_id"
+    assert duplicate["error"] == "duplicate_or_invalid_execution_sequence"
     assert missing_spec["error"] == "missing_spot_precision"
     assert mismatched_spec["error"] == "missing_spot_precision"
     assert later["evaluation_status"] == "mismatched"
@@ -1720,7 +1720,7 @@ def test_fee_tolerance_skips_unrelated_replay_rows() -> None:
         replay=[
             _execution(),
             _execution(
-                execution_id=12,
+                scope_sequence=12,
                 size=0.01,
                 size_decimal="0.01",
                 fee=0.0,

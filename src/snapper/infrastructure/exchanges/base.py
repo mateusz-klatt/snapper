@@ -35,6 +35,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
+from snapper.data.repository import ExecutionScopeResolutionError
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
@@ -1175,6 +1176,16 @@ class ExchangeClientBase(ABC):
         they are used instead of re-deriving from raw execution fields.
         This ensures DB records match published ExecutionData.
 
+        Failure containment: a database error AND a fail-closed scope
+        resolution refusal (``ExecutionScopeResolutionError`` — the
+        repository refuses a fill whose wallet identity is malformed or
+        whose active Order -> Instrument lineage is missing or crossed)
+        are both logged loudly and
+        swallowed, keeping parity with the long-standing DB-error
+        behavior: the fill stays published but unpersisted, and future
+        reconciliation over-reports drift — the fail-safe direction.
+        The executor's fill pipeline is never crashed by persistence.
+
         Args:
             order_public_id: Logical order identity (stable across versions).
             execution: Execution details (timestamp, side, exec_id, trade_id).
@@ -1289,6 +1300,12 @@ class ExchangeClientBase(ABC):
                 size_decimal=size_decimal,
                 fee_decimal=fee_decimal,
                 numeric_provenance=numeric_provenance,
+            )
+        except ExecutionScopeResolutionError as e:
+            logger.error(
+                f"Refused to persist execution for order {order_public_id}: "
+                f"scope resolution failed with reason '{e}' — fill remains "
+                "published but unpersisted"
             )
         except SQLAlchemyError as e:
             logger.error(f"Failed to log execution to database: {e}")

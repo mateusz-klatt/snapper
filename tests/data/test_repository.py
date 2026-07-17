@@ -3941,8 +3941,9 @@ async def test_get_active_orders_for_recovery_filters_by_wallet(tmp_path: Path) 
 async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> None:
     """``wallet_public_id`` filter scopes execution recovery.
 
-    Given: Two executions tagged with two different ``wallet_public_id``
-        values via direct SCD2 update,
+    Given: Two executions inserted under two distinct wallet lineages —
+        each order carries its own wallet and the fenced ingest stamps the
+        matching ``wallet_public_id`` on the fill,
     When: ``get_executions_for_recovery`` is called with
         ``wallet_public_id=wallet_a``,
     Then: Only the execution tagged ``wallet_a`` is returned and the
@@ -3954,7 +3955,7 @@ async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> 
     wallet_b = "00000000-0000-7000-8000-0000000000b2"
     _, order_a = await r.insert_order(
         instrument_public_id=inst_pid,
-        wallet_public_id="00000000-0000-7000-8000-000000000001",
+        wallet_public_id=wallet_a,
         client_order_id="c-exec-a",
         exchange_order_id="e-exec-a",
         created_at=now,
@@ -3969,7 +3970,7 @@ async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> 
     )
     _, order_b = await r.insert_order(
         instrument_public_id=inst_pid,
-        wallet_public_id="00000000-0000-7000-8000-000000000001",
+        wallet_public_id=wallet_b,
         client_order_id="c-exec-b",
         exchange_order_id="e-exec-b",
         created_at=now,
@@ -3984,7 +3985,7 @@ async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> 
     )
     await r.insert_execution(
         order_public_id=order_a,
-        wallet_public_id="00000000-0000-7000-8000-000000000001",
+        wallet_public_id=wallet_a,
         timestamp=now,
         side="buy",
         status="filled",
@@ -3997,7 +3998,7 @@ async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> 
     )
     await r.insert_execution(
         order_public_id=order_b,
-        wallet_public_id="00000000-0000-7000-8000-000000000001",
+        wallet_public_id=wallet_b,
         timestamp=now,
         side="sell",
         status="filled",
@@ -4008,16 +4009,6 @@ async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> 
         session_id="s1",
         sequence_id=43,
     )
-    async with r.session() as s:
-        await s.execute(
-            text("UPDATE executions SET wallet_public_id=:w_a WHERE order_public_id=:order_a"),
-            {"w_a": wallet_a, "order_a": order_a},
-        )
-        await s.execute(
-            text("UPDATE executions SET wallet_public_id=:w_b WHERE order_public_id=:order_b"),
-            {"w_b": wallet_b, "order_b": order_b},
-        )
-        await s.commit()
     filtered = await r.get_executions_for_recovery(
         as_of=now, exchange="kraken", wallet_public_id=wallet_a
     )

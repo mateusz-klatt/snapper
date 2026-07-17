@@ -20,9 +20,11 @@ from sqlalchemy import Numeric
 from sqlalchemy import String
 from sqlalchemy import Text
 from sqlalchemy import UniqueConstraint
+from sqlalchemy import event
 from sqlalchemy import text
 from sqlalchemy import types
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import Mapped
@@ -34,6 +36,7 @@ from snapper.core.json_types import JsonValue
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import RelationshipTypeEnum
+from snapper.data.ledger_triggers import install_execution_immutability_triggers
 
 KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 
@@ -907,6 +910,27 @@ class Execution(TemporalMixin, Base):
 
     PK ``id`` is overridden to ``BigInteger`` on PostgreSQL for
     consistency with the other high-write tables.
+
+    Scope + counter (S4c-2): ``exchange``/``mode`` are the immutable
+    certification scope, resolved ONCE at ingest from the active
+    Order -> Instrument lineage, and ``scope_sequence`` is a per-
+    ``(wallet_public_id, exchange, mode)`` contiguous commit-ordered
+    counter ``1..N`` assigned by ``insert_execution`` under the
+    per-wallet execution fence. ``scope_sequence`` is unrelated to
+    ``TemporalMixin.sequence_id`` (bus provenance) — the former orders
+    committed fills inside one account scope, the latter orders
+    messages inside one session. The columns carry NO server defaults:
+    a scope must never be fabricated (migration 0029 backfills, the
+    writer always supplies).
+
+    Append-only doctrine, schema-enforced: executions are ledger
+    events — no code path may close (``known_to``) or revise a row.
+    The TOTAL unique index ``uq_executions_scope_sequence`` (no
+    ``known_to`` predicate) turns any future SCD2 close+supersede of an
+    execution row into a write-time ``IntegrityError``, because the
+    successor would collide on ``(wallet, exchange, mode,
+    scope_sequence)``. Corrections must enter as NEW events with fresh
+    counters, never as revisions of committed ones.
     """
 
     __tablename__ = "executions"
@@ -941,6 +965,20 @@ class Execution(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        Index(
+            "uq_executions_scope_sequence",
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            "scope_sequence",
+            unique=True,
+        ),
+        CheckConstraint(
+            "exchange = LOWER(exchange) AND LENGTH(TRIM(exchange)) > 0",
+            name="ck_executions_exchange_lower",
+        ),
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_executions_mode"),
+        CheckConstraint("scope_sequence >= 1", name="ck_executions_scope_sequence"),
         CheckConstraint(_CK_SIDE_BUY_SELL, name="ck_executions_side"),
         CheckConstraint(_CK_EXECUTIONS_STATUS, name="ck_executions_status"),
         CheckConstraint(
@@ -964,6 +1002,11 @@ class Execution(TemporalMixin, Base):
     order_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), nullable=False)
+    scope_sequence: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), nullable=False
+    )
     exec_id: Mapped[str | None] = mapped_column(String(64))
     trade_id: Mapped[str | None] = mapped_column(String(64))
     side: Mapped[str] = mapped_column(String(4))
@@ -978,6 +1021,24 @@ class Execution(TemporalMixin, Base):
     numeric_provenance: Mapped[str | None] = mapped_column(String(16), nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(TZDateTime())
     liquidity_role: Mapped[str] = mapped_column(String(16), default="unknown")
+
+
+@event.listens_for(Execution.__table__, "after_create")
+def _install_executions_immutability_triggers(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Install the append-only immutability triggers when ``executions`` is created.
+
+    Fires on ``Base.metadata.create_all`` and any other fresh creation of
+    the table (with the connection's true dialect), so every
+    ``create_all``-built database — the test and in-memory fixtures Alembic
+    never touches — physically rejects UPDATE/DELETE just like the
+    migration-built production table. ``create_all`` uses
+    ``checkfirst=True`` by default, so this fires only when the table is
+    actually created; migrations use ``op.*`` and never call
+    ``create_all``, so this never fires during a migration run.
+    """
+    install_execution_immutability_triggers(connection)
 
 
 class Position(TemporalMixin, Base):
@@ -1270,7 +1331,7 @@ class PortfolioSpotReconciliationAnchor(TemporalMixin, Base):
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_portfolio_spot_anchor_exchange_lower"),
         CheckConstraint("mode = 'live'", name="ck_portfolio_spot_anchor_mode"),
         CheckConstraint(
-            "source_watermark_kind = 'execution_id' AND source_watermark >= 0",
+            "source_watermark_kind = 'scope_sequence' AND source_watermark >= 0",
             name="ck_portfolio_spot_anchor_watermark",
         ),
         CheckConstraint(

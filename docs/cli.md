@@ -976,7 +976,7 @@ snapper archive [OPTIONS]
 | `--from` | str | None | Start of date range (`YYYY-MM-DD`; parsed in the handler) |
 | `--to` | str | None | End of date range (`YYYY-MM-DD`; parsed in the handler) |
 | `--dry-run` | FLAG | False | Report counts without writing files |
-| `--purge` | FLAG | False | Delete exported rows from DB after writing (event tables, plus `candles-audit`/state tables when combined with `--closed-only`) |
+| `--purge` | FLAG | False | Delete exported rows from DB after writing (event tables **except `executions`**, plus `candles-audit`/state tables when combined with `--closed-only`). Refused for `executions` — see the execution exception note below. |
 | `--closed-only` | FLAG | False | Only closed SCD2 versions (`candles-audit` and state tables) |
 | `--output-dir` | str | `data` | Base output directory |
 
@@ -1014,6 +1014,18 @@ snapper archive --table instruments --day 2024-03-15
 - `--purge` is supported for event tables, plus `candles-audit` and
   state tables when combined with `--closed-only` (which protects
   active rows); it is **not** supported for the candle cache export.
+- **Execution exception (`--purge` refused):** `snapper archive --table
+  executions --purge` fails closed with `ExecutionPurgeUnsupportedError`
+  before any file is written or any row is deleted. Executions are the
+  replayable evidence behind spot reconciliation and precision
+  certification; deciding which execution rows are safe to delete
+  requires reading the active per-wallet anchors and unresolved
+  spot/margin signals, which the archiver does not consult. Executions
+  still export to CSV — only the DB delete is refused. As a direct
+  consequence, execution storage is currently **UNBOUNDED**: no
+  automatic retention prunes it (only telemetry has a configured
+  retention policy), and no manual purge path exists. Bounding execution
+  storage is deferred pending an anchor-aware retention design.
 - Event archive CSV files include full temporal metadata (`public_id`,
   `timestamp`, `known_to`, `session_id`, `sequence_id`).
 - Merge/dedup for events uses `(public_id, timestamp, known_to)` as key.
@@ -1053,6 +1065,13 @@ snapper restore --table candles --dir data/archive/candles/polygon/BTC-USD/
 - At least one of `--file` or `--dir` is required.
 - Rows already present in DB (matching `public_id + timestamp + known_to`) are skipped.
 - Audit restore inserts all temporal columns exactly as exported.
+- **Execution exception (restore refused):** `snapper restore --table
+  executions` fails closed with `ExecutionRestoreUnsupportedError`. The
+  audit restore's direct bulk insert would bypass the per-wallet
+  execution fence and the scope-counter protocol that guarantee a
+  contiguous, gap-free execution range proof, so restoring executions is
+  refused. An anchor-aware offline replay is required before executions
+  can be restored; that path does not yet exist.
 
 ## Encryption Management
 

@@ -306,15 +306,15 @@ def validate_portfolio_reconciliation_spot_anchor_lineage(
     source_watermark = evaluation["source_watermark"]
     if anchor_public_id is None or source_watermark is None:
         raise RuntimeError("full spot reconciliation requires anchor lineage")
-    if evaluation["source_watermark_kind"] != "execution_id":
-        raise RuntimeError("full spot reconciliation requires execution-id lineage")
+    if evaluation["source_watermark_kind"] != "scope_sequence":
+        raise RuntimeError("full spot reconciliation requires scope-sequence lineage")
     if (
         anchor is None
         or anchor["public_id"] != anchor_public_id
         or anchor["wallet_public_id"] != evaluation["wallet_public_id"]
         or anchor["exchange"] != evaluation["exchange"]
         or anchor["mode"] != evaluation["mode"]
-        or anchor["source_watermark_kind"] != "execution_id"
+        or anchor["source_watermark_kind"] != "scope_sequence"
         or anchor["source_watermark"] > source_watermark
     ):
         raise RuntimeError("spot reconciliation anchor lineage is invalid")

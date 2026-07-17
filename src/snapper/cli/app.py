@@ -2121,7 +2121,13 @@ def archive_data(
     to_date: str | None = typer.Option(None, "--to", help="End of date range (YYYY-MM-DD)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Report counts without writing files."),
     purge: bool = typer.Option(
-        False, "--purge", help="Delete exported rows from DB after writing."
+        False,
+        "--purge",
+        help=(
+            "Delete exported rows from DB after writing. Not supported for "
+            "executions: they are the replay evidence for the spot "
+            "reconciliation counted proof and are never deleted."
+        ),
     ),
     closed_only: bool = typer.Option(
         False, "--closed-only", help="Only closed SCD2 versions (candles-audit and state tables)."
@@ -2150,7 +2156,7 @@ def archive_data(
         from_date: Start of date range.
         to_date: End of date range.
         dry_run: Count only.
-        purge: Delete exported rows from DB.
+        purge: Delete exported rows from DB. Refused for executions.
         closed_only: Only closed SCD2 versions (candles-audit only).
         output_dir: Base output directory.
     """
@@ -2161,6 +2167,14 @@ def archive_data(
 
     if table == "candles" and purge:
         typer.echo("Error: --purge is not supported for candle cache export")
+        raise typer.Exit(code=1)
+
+    if table == "executions" and purge:
+        typer.echo(
+            "Error: --purge is not supported for executions; they are the "
+            "replay evidence for the spot reconciliation counted proof and "
+            "cannot be safely deleted concurrently with anchor writes"
+        )
         raise typer.Exit(code=1)
 
     scd2_tables = {"candles-audit", *STATE_TABLES}

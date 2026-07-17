@@ -71,7 +71,7 @@ async def _persist_forged_context(
         else (
             "venue_event_id"
             if forgery == "wrong_state_watermark_kind" or not anchor_forgery
-            else "execution_id"
+            else "scope_sequence"
         )
     )
     state_watermark = None if causal_mismatch else (13 if forgery == "watermark_ahead" else 12)
@@ -190,7 +190,7 @@ async def _persist_forged_context(
                     mode="live",
                     venue_account_state_public_id=account_public_id,
                     balance_observation_id=41,
-                    source_watermark_kind="execution_id",
+                    source_watermark_kind="scope_sequence",
                     source_watermark=(13 if forgery == "anchor_watermark_ahead" else 11),
                     balances_json='{"USD":"1"}',
                     first_request_started_at=first_request_started_at,
@@ -292,7 +292,7 @@ async def test_persisted_spot_anchor_forgery_fails_closed_on_configured_database
 ) -> None:
     """Forged spot-anchor lineage remains corrupt on SQLite and PostgreSQL.
 
-    The anchor table restricts its own watermark kind to ``execution_id`` on
+    The anchor table restricts its own watermark kind to ``scope_sequence`` on
     both backends. The wrong-kind variant therefore forges the state and its
     observation while keeping the referenced anchor schema-valid.
 

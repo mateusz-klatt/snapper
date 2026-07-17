@@ -19,9 +19,13 @@ import pytest
 from sqlalchemy import select
 
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Instrument
 from snapper.data.models import Order
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import OrderInsertRow
+
+_WALLET = "00000000-0000-7000-8000-000000000001"
+"""Canonical UUID wallet identity — ``insert_execution`` validates it."""
 
 
 async def _active_order(repo: SQLAlchemyRepository, public_id: str) -> Order:
@@ -64,12 +68,16 @@ def _order_row(now: datetime) -> OrderInsertRow:
         "session_id": "s1",
         "sequence_id": 1,
         "timestamp": now,
-        "wallet_public_id": "wal-1",
+        "wallet_public_id": _WALLET,
     }
 
 
 async def _seeded_repo(tmp_path: Path, name: str) -> tuple[SQLAlchemyRepository, int, str]:
-    """Create a repo with one open order row.
+    """Create a repo with one open order row and its active instrument.
+
+    The instrument leg exists because execution ingest resolves the fill's
+    immutable scope from the active Order -> Instrument lineage and fails
+    closed when either leg is missing.
 
     Args:
         tmp_path: Pytest temporary directory.
@@ -80,7 +88,20 @@ async def _seeded_repo(tmp_path: Path, name: str) -> tuple[SQLAlchemyRepository,
     """
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / name}")
     await repo.create_all()
-    order_id, order_public_id = await repo.insert_order(**_order_row(datetime.now(UTC)))
+    now = datetime.now(UTC)
+    async with repo.session() as s:
+        s.add(
+            Instrument(
+                public_id="inst-btc",
+                symbol_public_id="inst-btc",
+                exchange="kraken",
+                timestamp=now - timedelta(days=1),
+                session_id="s1",
+                sequence_id=1,
+            )
+        )
+        await s.commit()
+    order_id, order_public_id = await repo.insert_order(**_order_row(now))
     return repo, order_id, order_public_id
 
 
@@ -110,7 +131,7 @@ async def _insert_fill(
         size=size,
         fee=0.0,
         fee_asset="USD",
-        wallet_public_id="wal-1",
+        wallet_public_id=_WALLET,
         session_id="s1",
         sequence_id=sequence_id,
     )

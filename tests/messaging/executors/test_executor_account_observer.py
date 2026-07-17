@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
@@ -71,6 +72,9 @@ def _make_executor() -> Any:
     ex.repository.record_venue_account_snapshot = AsyncMock(return_value=1)
     ex.repository.upsert_spot_asset_precision_evidence = AsyncMock(return_value=1)
     ex.repository.get_portfolio_drift_episode_transition = AsyncMock(return_value=None)
+    ex.repository.get_spot_execution_watermark = AsyncMock(
+        return_value=(0, datetime(2026, 7, 14, 9, 59, tzinfo=UTC))
+    )
     return ex
 
 
@@ -132,7 +136,7 @@ def _portfolio_evaluation() -> PortfolioReconciliationEvaluationRow:
         "venue_account_state_public_id": "account-state-1",
         "venue_account_observation_id": 10,
         "account_authoritative_until": now + timedelta(minutes=5),
-        "source_watermark_kind": "execution_id",
+        "source_watermark_kind": "scope_sequence",
         "source_watermark": 42,
         "anchor_public_id": None,
         "expected_json": "{}",
@@ -694,10 +698,12 @@ class TestObserveAccountOnce:
             state_id: int,
             attempt: VenueAccountAttemptRow,
             position_capability: CapabilityStatus,
+            boundary: SpotReplayBoundaryCapture | None,
         ) -> None:
             assert state_id == 41
             assert attempt["wallet_public_id"] == "wallet-1"
             assert position_capability is CapabilityStatus.NOT_APPLICABLE
+            assert isinstance(boundary, SpotReplayBoundaryCapture)
             timeline.append("schedule")
 
         ex.repository.record_venue_account_snapshot = AsyncMock(side_effect=record_snapshot)
@@ -949,7 +955,7 @@ class TestObserveAccountOnce:
         persistence_time = observation_time + timedelta(seconds=2)
 
         with patch.object(base_module, "datetime") as datetime_type:
-            datetime_type.now.side_effect = [observation_time, persistence_time]
+            datetime_type.now.side_effect = [observation_time] * 7 + [persistence_time]
             await ex._observe_account_once()
             await asyncio.wait_for(completed.wait(), timeout=0.1)
             await asyncio.sleep(0)
@@ -1407,6 +1413,317 @@ class TestObserveAccountOnce:
         await asyncio.gather(replacement, return_exceptions=True)
 
 
+class TestSpotBoundaryCapture:
+    """Pre-balance execution-watermark capture and boundary assembly (S4c-2)."""
+
+    @staticmethod
+    def _live_executor(watermarks: AsyncMock) -> tuple[Any, list[str], list[datetime]]:
+        """Wire one live executor whose scoped reads log a shared call order.
+
+        The watermark repository read, the balance read, and the position
+        read all append to one ordered log so tests can prove the physical
+        capture ordering rather than infer it from timestamps alone. The
+        exact ``as_of`` join instants the fenced repository read received
+        are recorded too, mirroring the ``(watermark, as_of)`` return
+        contract so the boundary's as_of threading is observable.
+        """
+        ex = _make_executor()
+        calls: list[str] = []
+        as_ofs: list[datetime] = []
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+
+        async def read_balances() -> list[NativeBalanceEntry]:
+            calls.append("balances")
+            return []
+
+        async def read_positions() -> list[OpenPositionSnapshot]:
+            calls.append("positions")
+            return []
+
+        async def watermark_read(
+            wallet: str, exchange: str, mode: str, as_of: datetime
+        ) -> tuple[int, datetime]:
+            assert wallet == "wallet-1"
+            assert exchange == "kraken"
+            assert mode == "live"
+            assert as_of.utcoffset() is not None
+            calls.append("watermark")
+            as_ofs.append(as_of)
+            watermark = await watermarks(wallet, exchange, mode, as_of)
+            assert isinstance(watermark, int)
+            return watermark, as_of
+
+        client.read_native_balances = AsyncMock(side_effect=read_balances)
+        client.read_native_positions = AsyncMock(side_effect=read_positions)
+        ex.repository.get_spot_execution_watermark = AsyncMock(side_effect=watermark_read)
+        ex.exchange_client = client
+        ex._schedule_portfolio_reconciliation = MagicMock()
+        return ex, calls, as_ofs
+
+    @staticmethod
+    def _scheduled_boundary(ex: Any) -> SpotReplayBoundaryCapture | None:
+        """Return the boundary the observer handed to reconciliation scheduling."""
+        schedule_call = ex._schedule_portfolio_reconciliation.call_args
+        assert schedule_call is not None
+        boundary = schedule_call.kwargs["boundary"]
+        assert boundary is None or isinstance(boundary, SpotReplayBoundaryCapture)
+        return boundary
+
+    @pytest.mark.asyncio
+    async def test_watermark_capture_strictly_precedes_the_balance_read(self) -> None:
+        """The genuine pre-balance ordering is physically enforced, not labelled.
+
+        Given: A live executor whose watermark, balance, and position reads
+            log into one shared ordered call log.
+        When: One observation cycle runs.
+        Then: The watermark read happens strictly before the balance read and
+            again strictly after the position read, and the scheduled boundary
+            carries the pre-read watermark with an equal after-read and the
+            quiescence flag True.
+        """
+        ex, calls, _ = self._live_executor(AsyncMock(return_value=7))
+        await ex._observe_account_once()
+        assert calls == ["watermark", "balances", "positions", "watermark"]
+        boundary = self._scheduled_boundary(ex)
+        assert boundary is not None
+        assert boundary.source_watermark == 7
+        assert boundary.watermark_after == 7
+        assert boundary.watermark_unchanged is True
+
+    @pytest.mark.asyncio
+    async def test_boundary_binds_the_exact_account_state_identity(self) -> None:
+        """The boundary carries the same identity the runner later verifies.
+
+        A capture certifies exactly one observation cycle, so its binding
+        must equal the persisted attempt's
+        ``(wallet, exchange, mode, session, sequence)`` identity — dispatch
+        refuses any boundary whose binding differs from the evaluated
+        account, which is what makes a foreign or stale-cycle capture inert.
+
+        Given: One live observation cycle.
+        When: The snapshot is persisted and the boundary is scheduled.
+        Then: Every boundary identity field equals the recorded attempt's.
+        """
+        ex, _, _ = self._live_executor(AsyncMock(return_value=7))
+        await ex._observe_account_once()
+        attempt = ex.repository.record_venue_account_snapshot.await_args.args[0]
+        boundary = self._scheduled_boundary(ex)
+        assert boundary is not None
+        assert boundary.wallet_public_id == attempt["wallet_public_id"]
+        assert boundary.exchange == attempt["exchange"]
+        assert boundary.mode == attempt["mode"]
+        assert boundary.session_id == attempt["session_id"]
+        assert boundary.sequence_id == attempt["sequence_id"]
+
+    @pytest.mark.asyncio
+    async def test_boundary_threads_the_pre_read_join_as_of_verbatim(self) -> None:
+        """The boundary carries the exact join instant of the pre-balance read.
+
+        The S4c-4 replay bundle must re-read the execution range with the
+        SAME temporal predicate the capture used, so the boundary's
+        ``as_of`` must be the first repository read's join instant — never
+        the after-read's and never a fresh clock sample.
+
+        Given: One live observation cycle recording each read's as_of.
+        When: The boundary is scheduled.
+        Then: boundary.as_of is exactly the first read's join instant and
+            precedes the recorded capture instant.
+        """
+        ex, _, as_ofs = self._live_executor(AsyncMock(return_value=7))
+        await ex._observe_account_once()
+        boundary = self._scheduled_boundary(ex)
+        assert boundary is not None
+        assert len(as_ofs) == 2
+        assert boundary.as_of == as_ofs[0]
+        assert boundary.as_of <= boundary.watermark_captured_at
+
+    @pytest.mark.asyncio
+    async def test_boundary_timestamps_bracket_the_balance_request(self) -> None:
+        """Capture and request instants are ordered and bracket the venue read.
+
+        Given: A live cycle whose balance read records its own wall-clock
+            instant while executing.
+        When: The observation completes.
+        Then: as_of <= watermark_captured_at <= request_started_at <= the
+            in-read instant <= request_completed_at <=
+            watermark_after_captured_at.
+        """
+        ex, _, _ = self._live_executor(AsyncMock(return_value=3))
+        during: list[datetime] = []
+        original = ex.exchange_client.read_native_balances.side_effect
+
+        async def timed_balances() -> list[NativeBalanceEntry]:
+            during.append(datetime.now(UTC))
+            result: list[NativeBalanceEntry] = await original()
+            return result
+
+        ex.exchange_client.read_native_balances = AsyncMock(side_effect=timed_balances)
+        await ex._observe_account_once()
+        boundary = self._scheduled_boundary(ex)
+        assert boundary is not None
+        assert boundary.watermark_after_captured_at is not None
+        assert boundary.as_of <= boundary.watermark_captured_at
+        assert boundary.watermark_captured_at <= boundary.request_started_at
+        assert boundary.request_started_at <= during[0]
+        assert during[0] <= boundary.request_completed_at
+        assert boundary.request_completed_at <= boundary.watermark_after_captured_at
+
+    @pytest.mark.asyncio
+    async def test_failed_pre_read_leaves_observation_intact_and_boundary_absent(
+        self,
+    ) -> None:
+        """A watermark failure degrades only the boundary, never observation.
+
+        Given: A live cycle whose watermark repository read always raises.
+        When: The observation cycle runs.
+        Then: The snapshot is persisted and scheduled normally, the boundary
+            is explicitly absent, and the after-read is never attempted (there
+            is no genuine pre-read to compare against).
+        """
+        ex, calls, _ = self._live_executor(AsyncMock(side_effect=RuntimeError("db down")))
+        await ex._observe_account_once()
+        ex.repository.record_venue_account_snapshot.assert_awaited_once()
+        attempt = ex.repository.record_venue_account_snapshot.await_args.args[0]
+        assert attempt["balance_status"] == "observed"
+        assert calls == ["watermark", "balances", "positions"]
+        assert self._scheduled_boundary(ex) is None
+
+    @pytest.mark.asyncio
+    async def test_failed_after_read_keeps_the_genuine_pre_read_boundary(self) -> None:
+        """A failed after-read never invalidates the genuine pre-read capture.
+
+        Given: A live cycle whose second watermark read raises.
+        When: The observation completes.
+        Then: The boundary keeps the pre-read watermark while the after-read
+            fields stay honestly absent and the quiescence flag stays False.
+        """
+        ex, _, _ = self._live_executor(AsyncMock(side_effect=[3, RuntimeError("db down")]))
+        await ex._observe_account_once()
+        boundary = self._scheduled_boundary(ex)
+        assert boundary is not None
+        assert boundary.source_watermark == 3
+        assert boundary.watermark_after is None
+        assert boundary.watermark_after_captured_at is None
+        assert boundary.watermark_unchanged is False
+
+    @pytest.mark.asyncio
+    async def test_advanced_after_read_reports_inequality(self) -> None:
+        """Watermark movement across the read window is reported truthfully.
+
+        Given: A live cycle whose watermark advances between the two reads.
+        When: The observation completes.
+        Then: The boundary carries both watermarks with watermark_unchanged
+            False for the future quiescence/no-advance check.
+        """
+        ex, _, _ = self._live_executor(AsyncMock(side_effect=[3, 9]))
+        await ex._observe_account_once()
+        boundary = self._scheduled_boundary(ex)
+        assert boundary is not None
+        assert boundary.source_watermark == 3
+        assert boundary.watermark_after == 9
+        assert boundary.watermark_unchanged is False
+
+    @pytest.mark.asyncio
+    async def test_regressed_after_read_degrades_to_an_absent_boundary(self) -> None:
+        """A watermark moving backwards fails boundary validation, not the cycle.
+
+        A regressed after-read contradicts the append-only sealed prefix
+        (only a scope change or data defect can produce it), so the
+        validating constructor rejects the capture and the observer threads
+        an honestly absent boundary while the snapshot persists normally.
+
+        Given: A live cycle whose after-read returns a LOWER watermark.
+        When: The observation completes.
+        Then: The snapshot is recorded, scheduling still runs, and the
+            boundary is explicitly absent.
+        """
+        ex, calls, _ = self._live_executor(AsyncMock(side_effect=[9, 3]))
+        await ex._observe_account_once()
+        ex.repository.record_venue_account_snapshot.assert_awaited_once()
+        assert calls == ["watermark", "balances", "positions", "watermark"]
+        assert self._scheduled_boundary(ex) is None
+
+    @pytest.mark.asyncio
+    async def test_paper_mode_never_captures_and_threads_no_boundary(self) -> None:
+        """Paper accounts observe without any watermark read or boundary.
+
+        Given: A paper-named executor with a SIMULATED balance client.
+        When: The observation cycle runs.
+        Then: The watermark repository read is never awaited and scheduling
+            receives an explicitly absent boundary.
+        """
+        ex = _make_executor()
+        ex._get_exchange_name = MagicMock(return_value=ExchangeEnum.PAPER)
+        client = _make_client(CapabilityStatus.SIMULATED, CapabilityStatus.NOT_APPLICABLE)
+        client.read_native_balances = AsyncMock(return_value=[])
+        ex.exchange_client = client
+        ex._schedule_portfolio_reconciliation = MagicMock()
+        await ex._observe_account_once()
+        ex.repository.get_spot_execution_watermark.assert_not_awaited()
+        assert self._scheduled_boundary(ex) is None
+
+    @pytest.mark.asyncio
+    async def test_work_item_boundary_reaches_dispatch_unchanged(self) -> None:
+        """The captured boundary travels the work item into dispatch verbatim.
+
+        Given: Reconciliation work carrying one captured boundary payload.
+        When: The runner evaluates that exact account-state version.
+        Then: Dispatch receives the identical boundary object by keyword.
+        """
+        ex = _make_executor()
+        ex.repository.has_portfolio_reconciliation_evaluation = AsyncMock(return_value=False)
+        ex.repository.get_venue_account_state_version = AsyncMock(
+            return_value={
+                "wallet_public_id": "wallet-1",
+                "exchange": "kraken_futures",
+                "mode": "live",
+                "session_id": "session-1",
+                "sequence_id": 7,
+            }
+        )
+        ex.repository.get_active_portfolio_reconciliation_method_config = AsyncMock(
+            return_value=None
+        )
+        ex.repository.record_portfolio_reconciliation = AsyncMock(return_value=41)
+        ex._schedule_portfolio_drift_notification = MagicMock()
+        captured_at = datetime(2026, 7, 17, 9, 0, tzinfo=UTC)
+        boundary = SpotReplayBoundaryCapture(
+            wallet_public_id="wallet-1",
+            exchange="kraken_futures",
+            mode="live",
+            session_id="session-1",
+            sequence_id=7,
+            source_watermark=7,
+            as_of=captured_at - timedelta(milliseconds=1),
+            watermark_captured_at=captured_at,
+            request_started_at=captured_at + timedelta(milliseconds=1),
+            request_completed_at=captured_at + timedelta(milliseconds=2),
+            watermark_after=7,
+            watermark_after_captured_at=captured_at + timedelta(milliseconds=3),
+            watermark_unchanged=True,
+        )
+        work = base_module._PortfolioReconciliationWork(
+            state_id=9,
+            identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
+            position_capability=CapabilityStatus.SUPPORTED,
+            boundary=boundary,
+        )
+        with (
+            patch.object(base_module, "build_portfolio_account_state", return_value=object()),
+            patch.object(
+                base_module,
+                "dispatch_portfolio_reconciliation",
+                new_callable=AsyncMock,
+                return_value=_portfolio_evaluation(),
+            ) as dispatch,
+        ):
+            await ex._run_portfolio_reconciliation(work)
+        dispatch_call = dispatch.await_args
+        assert dispatch_call is not None
+        assert dispatch_call.kwargs["boundary"] is boundary
+        assert ex._portfolio_reconciliation_failure_count == 0
+
+
 class TestAccountObserverHandler:
     """The supervised observer loop's success and failure accounting."""
 
@@ -1522,12 +1839,14 @@ class TestPortfolioReconciliationOrchestration:
             state_id=1,
             attempt=_portfolio_attempt(mode="paper"),
             position_capability=CapabilityStatus.NOT_APPLICABLE,
+            boundary=None,
         )
         ex._portfolio_reconciliation_dispatch_open = False
         ex._schedule_portfolio_reconciliation(
             state_id=2,
             attempt=_portfolio_attempt(),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         ex._run_portfolio_reconciliation.assert_not_called()
         assert ex._portfolio_reconciliation_tasks == {}
@@ -1550,11 +1869,13 @@ class TestPortfolioReconciliationOrchestration:
             state_id=1,
             attempt=attempt,
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         ex._schedule_portfolio_reconciliation(
             state_id=2,
             attempt=attempt,
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         await asyncio.wait_for(started.wait(), timeout=1.0)
         assert ex._run_portfolio_reconciliation.await_count == 1
@@ -1573,6 +1894,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=1,
             attempt=attempt,
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         first = tuple(ex._portfolio_reconciliation_tasks.values())[0]
         await first
@@ -1580,6 +1902,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=2,
             attempt=attempt,
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         second = tuple(ex._portfolio_reconciliation_tasks.values())[0]
         await second
@@ -1598,6 +1921,7 @@ class TestPortfolioReconciliationOrchestration:
                 state_id=1,
                 attempt=_portfolio_attempt(),
                 position_capability=CapabilityStatus.SUPPORTED,
+                boundary=None,
             )
         assert ex._portfolio_reconciliation_failure_count == 1
         assert ex._last_portfolio_reconciliation_error == "no running loop"
@@ -1615,6 +1939,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         with patch.object(
             base_module,
@@ -1656,6 +1981,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         with (
             patch.object(base_module, "build_portfolio_account_state", return_value=object()),
@@ -1727,6 +2053,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
 
         with (
@@ -1807,6 +2134,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
 
         with (
@@ -1893,6 +2221,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
 
         with (
@@ -1943,6 +2272,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=9,
             attempt=_portfolio_attempt(),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         task = tuple(ex._portfolio_reconciliation_tasks.values())[0]
         await task
@@ -1976,6 +2306,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         await ex._recon_lock.acquire()
         try:
@@ -2005,6 +2336,7 @@ class TestPortfolioReconciliationOrchestration:
             "method_config": config,
             "position_capability": CapabilityStatus.SUPPORTED,
             "evaluated_at": evaluated_at,
+            "boundary": None,
         }
         ex.repository.record_portfolio_reconciliation.assert_awaited_once_with(evaluation)
         ex._schedule_portfolio_drift_notification.assert_called_once_with(evaluation)
@@ -2039,6 +2371,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         with patch.object(base_module, "build_portfolio_account_state") as build:
             await ex._run_portfolio_reconciliation(work)
@@ -2079,6 +2412,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         dispatch_side_effect = (
             RuntimeError("dispatch failed") if failure_step == "dispatch" else None
@@ -2112,6 +2446,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         with patch.object(base_module, "_PORTFOLIO_RECONCILIATION_TIMEOUT_S", 0.01):
             await ex._run_portfolio_reconciliation(work)
@@ -2134,6 +2469,7 @@ class TestPortfolioReconciliationOrchestration:
             state_id=9,
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
+            boundary=None,
         )
         task = asyncio.create_task(ex._run_portfolio_reconciliation(work))
         await started.wait()
@@ -2339,6 +2675,7 @@ class TestPortfolioReconciliationOrchestration:
                     state_id=1,
                     attempt=_portfolio_attempt(),
                     position_capability=CapabilityStatus.NOT_APPLICABLE,
+                    boundary=None,
                 )
             await asyncio.Event().wait()
 

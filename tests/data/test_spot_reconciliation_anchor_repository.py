@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
+from snapper.data.models import Instrument
+from snapper.data.models import Order
 from snapper.data.models import PortfolioReconciliationMethodConfig
 from snapper.data.models import PortfolioReconciliationState
 from snapper.data.models import PortfolioSpotReconciliationAnchor
@@ -83,7 +85,7 @@ def _anchor(
         "mode": "live",
         "venue_account_state_public_id": "00000000-0000-7000-8000-000000000201",
         "balance_observation_id": 41,
-        "source_watermark_kind": "execution_id",
+        "source_watermark_kind": "scope_sequence",
         "source_watermark": source_watermark,
         "balances_json": (
             '{"BTC":"0.100000000000000005","USD":"123456789012345678.123456789012345678"}'
@@ -108,7 +110,7 @@ def _evaluation(
     wallet_public_id: str = _WALLET,
     source_watermark: int = 2_147_483_650,
     status: str = "mismatched",
-    source_watermark_kind: str = "execution_id",
+    source_watermark_kind: str = "scope_sequence",
     sequence_id: int = 2,
 ) -> PortfolioReconciliationEvaluationRow:
     """Build one full or incomplete S1 evaluation."""
@@ -281,9 +283,41 @@ async def test_execution_repository_preserves_float_and_raw_decimal_evidence(
     """Execution raw text survives exactly beside compatibility floats.
 
     This exact assertion must also run against PostgreSQL because SQLite text
-    success cannot prove PostgreSQL driver or BIGINT insertion behavior.
+    success cannot prove PostgreSQL driver or BIGINT insertion behavior. The
+    ingest path resolves the fill's scope from the active
+    Order -> Instrument lineage, so the fill's order and instrument are
+    seeded first.
     """
     repo = await _repo(tmp_path)
+    async with repo.session() as session:
+        session.add_all(
+            [
+                Instrument(
+                    public_id="00000000-0000-7000-8000-000000000701",
+                    symbol_public_id="00000000-0000-7000-8000-000000000701",
+                    exchange="kraken",
+                    timestamp=_T0 - timedelta(days=1),
+                    session_id=_SESSION,
+                    sequence_id=1,
+                ),
+                Order(
+                    public_id="00000000-0000-7000-8000-000000000601",
+                    instrument_public_id="00000000-0000-7000-8000-000000000701",
+                    mode="live",
+                    wallet_public_id=_WALLET,
+                    created_at=_T0 - timedelta(hours=1),
+                    timestamp=_T0 - timedelta(hours=1),
+                    side="buy",
+                    order_type="limit",
+                    price=0.1,
+                    size=1.0,
+                    status="filled",
+                    session_id=_SESSION,
+                    sequence_id=1,
+                ),
+            ]
+        )
+        await session.commit()
     execution_id = await repo.insert_execution(
         order_public_id="00000000-0000-7000-8000-000000000601",
         wallet_public_id=_WALLET,
@@ -334,7 +368,7 @@ async def test_execution_repository_preserves_float_and_raw_decimal_evidence(
                 anchor_public_id=_ANCHOR,
                 source_watermark_kind="venue_event_id",
             ),
-            "execution-id lineage",
+            "scope-sequence lineage",
         ),
     ],
 )

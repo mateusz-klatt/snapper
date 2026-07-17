@@ -77,7 +77,7 @@ def _matched_state() -> PortfolioReconciliationStateRow:
         "anchor_public_id": None,
         "venue_account_state_public_id": _ACCOUNT_STATE_ID,
         "venue_account_observation_id": 41,
-        "source_watermark_kind": "execution_id",
+        "source_watermark_kind": "scope_sequence",
         "source_watermark": 9001,
         "expected_json": _EXPECTED_JSON,
         "actual_json": _ACTUAL_JSON,
@@ -105,7 +105,7 @@ def _matched_observation() -> PortfolioReconciliationLineageObservationRow:
         "venue_account_state_public_id": _ACCOUNT_STATE_ID,
         "venue_account_observation_id": 41,
         "account_authoritative_until": _NOW + timedelta(seconds=30),
-        "source_watermark_kind": "execution_id",
+        "source_watermark_kind": "scope_sequence",
         "source_watermark": 9001,
         "anchor_public_id": None,
         "expected_json": _EXPECTED_JSON,
@@ -163,7 +163,7 @@ def _spot_anchor() -> SpotReconciliationAnchorRow:
         "mode": "live",
         "venue_account_state_public_id": _ACCOUNT_STATE_ID,
         "balance_observation_id": 41,
-        "source_watermark_kind": "execution_id",
+        "source_watermark_kind": "scope_sequence",
         "source_watermark": 9000,
         "balances_json": '{"BTC":"1"}',
         "first_request_started_at": _NOW - timedelta(seconds=4),
@@ -1120,8 +1120,8 @@ def test_spot_nonfull_successor_revalidates_retained_full_anchor() -> None:
     _assert_corrupt(build_portfolio_reconciliation_view(missing_context, _NOW))
 
 
-def test_full_spot_state_requires_execution_id_lineage() -> None:
-    """A full spot verdict cannot use a non-execution source boundary.
+def test_full_spot_state_requires_scope_sequence_lineage() -> None:
+    """A full spot verdict cannot use a non-scope-sequence boundary.
 
     Given: Spot state and observation lineage naming another watermark kind.
     When: The shared write-and-read anchor validator runs.

@@ -25,6 +25,27 @@ Concurrency / row locking (SQLite is a known, accepted limitation):
     behaviour is covered by ``tests/.../test_scd2_batch_atomicity.py``. Do
     not add application-level locking to paper over the SQLite no-op.
 
+Execution append-only doctrine (schema-enforced fail-closed):
+    ``executions`` rows are append-only ledger events — no code path may
+    ever close (``known_to``) or update an execution version. The TOTAL
+    unique index ``uq_executions_scope_sequence`` (no ``known_to``
+    predicate) enforces the doctrine at write time: an SCD2
+    close+supersede of an execution row would insert a successor with
+    the same ``(wallet, exchange, mode, scope_sequence)`` and be refused
+    with ``IntegrityError`` — a future correction-path author hits this
+    doctrine before the constraint. The watermark capture reads the
+    committed per-scope ``max(scope_sequence)`` with NO ``known_to``
+    filter and no lock; the S4c-4 replay bundle re-reads its exact range
+    and asserts ``known_to`` is still open per in-range row
+    (``superseded_execution_row``), because neither counting a closed
+    row (double-count with its successor) nor skipping it (silent
+    membership change inside a certified range) is sound. If a
+    correction path is ever needed, corrections must enter the ledger as
+    NEW append-only signed events — a separate correction/tombstone row
+    with a fresh ``scope_sequence`` above every captured watermark,
+    folded by replay as a signed adjustment — never as an SCD2 close of
+    an existing execution row.
+
 Example:
     Using the async repository::
 
@@ -73,6 +94,8 @@ from uuid import uuid7
 from loguru import logger
 from sqlalchemy import ColumnElement
 from sqlalchemy import Select
+from sqlalchemy import Table
+from sqlalchemy import TableClause
 from sqlalchemy import Text
 from sqlalchemy import and_
 from sqlalchemy import case
@@ -84,6 +107,7 @@ from sqlalchemy import event
 from sqlalchemy import exists
 from sqlalchemy import func
 from sqlalchemy import insert
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import text
@@ -100,9 +124,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.orm import Mapper
 from sqlalchemy.orm import Session as SyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import sessionmaker as sync_sessionmaker
+from sqlalchemy.orm.state import InstanceState
+from sqlalchemy.orm.util import AliasedInsp
 from sqlalchemy.pool import StaticPool
 
 from snapper.application.portfolio.reconciliation_invariants import (
@@ -319,6 +346,7 @@ __all__ = [
     "CredentialNotFoundError",
     "close_and_insert",
     "close_and_insert_sync",
+    "IMMUTABLE_LEDGER_TABLE_NAMES",
     "get_repository",
     "dispose_repositories",
     "where_active",
@@ -368,6 +396,57 @@ class _SpotAssetPrecisionEvidenceMerge:
     fee_source: str | None
     fee_version: str | None
     fee_observed_at: datetime | None
+
+
+class ExecutionScopeResolutionError(RuntimeError):
+    """Raised when a fill's certification scope cannot be resolved at ingest.
+
+    ``insert_execution`` validates and canonicalizes the wallet identity,
+    then resolves ``(exchange, mode)`` once from the ACTIVE
+    Order -> Instrument lineage and refuses the row pre-persistence when
+    the identity is malformed or that lineage is missing or
+    contradictory, so the executions ledger can never CONTAIN an
+    unresolvable row. The message is one of the stable reasons
+    ``invalid_execution_wallet_identity``,
+    ``dangling_execution_order_lineage``,
+    ``crossed_wallet_execution_lineage``, or
+    ``dangling_execution_instrument_lineage``. The fill-persistence
+    caller (``_log_execution_to_db``) treats it like a database error:
+    log loudly and continue — the fill stays published but unpersisted,
+    and future reconciliation over-reports drift (the fail-safe
+    direction).
+    """
+
+
+class ExecutionPhysicalMutationError(RuntimeError):
+    """Raised when a physical row primitive targets the executions ledger.
+
+    The generic physical primitives ``delete_rows_by_id`` and
+    ``bulk_insert_from_archive`` execute an unconditioned ``DELETE`` or
+    ``INSERT`` for whatever model they are handed, with no fence, no
+    dedup, and no awareness of the per-scope ``scope_sequence`` counter.
+    Applied to :class:`~snapper.data.models.Execution` they would let a
+    caller physically delete a certified sequence and let normal ingest
+    re-allocate ``committed max + 1`` for a DIFFERENT fill, or re-insert
+    an archived sequence at or below a live anchor watermark. Either
+    silently rewrites a sealed prefix while the counted range proof
+    (``count(rows in (anchor_seq, W]) == W - anchor_seq``) still passes,
+    which is precisely the false-authoritative verdict the program exists
+    to prevent.
+
+    The archiver layer already refuses execution purge
+    (:class:`~snapper.data.archiver.ExecutionPurgeUnsupportedError`) and
+    execution restore
+    (:class:`~snapper.data.archiver.ExecutionRestoreUnsupportedError`),
+    but a guarantee enforced only at a call site is not a theorem: the
+    primitive is callable directly and a future path could reach it with
+    the executions model. This refusal moves the guarantee to the
+    load-bearing physical surface so the append-only doctrine holds
+    against the primitive regardless of call site. Executions are never
+    physically deleted or bulk-reintroduced; corrections must enter the
+    ledger as new append-only signed events with a fresh ``scope_sequence``
+    above every captured watermark.
+    """
 
 
 class ScopeGrantConflictError(Exception):
@@ -684,6 +763,123 @@ def venue_event_fill_identity() -> ColumnElement[str]:
     )
 
 
+IMMUTABLE_LEDGER_TABLE_NAMES: frozenset[str] = frozenset({Execution.__tablename__})
+"""Physical table names that are append-only immutable ledgers.
+
+Membership is by PHYSICAL TABLE NAME, not ORM class identity, so the
+append-only doctrine holds as a theorem against every spelling a caller
+can hand a generic mutation primitive: the mapped class, an ``aliased``
+proxy, the bare ``Table`` object, the ``Mapper``, a mapped instance, or
+the raw table-name string. An identity guard (``model is Execution``) is
+bypassable — ``aliased(Execution)`` is not ``Execution`` and
+``Execution.__table__`` is not ``Execution`` — so it is not a theorem;
+resolution to the physical table name is.
+
+For this slice the registry holds only ``executions``, the per-scope
+``scope_sequence`` counter invariant table. The portfolio spot
+reconciliation anchor table joins it in S4c-3: adding its physical name
+here makes every generic primitive inherit the same refusal with no
+further changes at the primitive surfaces.
+"""
+
+
+def _resolve_physical_table_name(target: object) -> str | None:
+    """Resolve any SQLAlchemy mutation target to its physical table name.
+
+    Accepts every spelling a generic primitive can be handed and returns
+    the underlying physical table name so the immutable-ledger guard
+    compares against :data:`IMMUTABLE_LEDGER_TABLE_NAMES` by name rather
+    than by fragile class identity:
+
+    * mapped class (``Execution``) inspects to a ``Mapper`` -> ``local_table.name``
+    * ``aliased(Execution)`` inspects to an ``AliasedInsp`` -> ``mapper.local_table.name``
+    * ``Execution.__table__`` inspects to the self-inspecting ``Table`` -> ``name``
+    * ``sqlalchemy.table("executions", ...)`` inspects to a self-inspecting
+      lightweight ``TableClause`` -> ``name``; ``Table`` is a subclass of
+      ``TableClause``, so the single ``TableClause`` check covers both the
+      full metadata table and the lightweight clause that ``insert``/
+      ``delete``/``update`` accept as a DML target
+    * a ``Mapper`` object inspects to itself -> ``local_table.name``
+    * a mapped instance inspects to an ``InstanceState`` -> ``mapper.local_table.name``
+    * a raw table-name string has no inspection path and is returned as-is
+
+    ``local_table`` is the directly-mapped table and is exact for the
+    single-table ``Execution`` model; a future joined-inheritance ledger
+    would resolve through ``persist_selectable`` instead. ``sa_inspect``
+    is called with ``raiseerr=False`` so a non-inspectable target (a bare
+    SQL expression or a plain object) returns ``None``; the guard treats
+    ``None`` as FAIL-CLOSED (an unresolved target aimed at a generic
+    mutation primitive is refused, never passed), so this resolver never
+    has to enumerate every possible non-table spelling to stay sound.
+
+    Args:
+        target: A mutation target in any accepted SQLAlchemy spelling.
+
+    Returns:
+        The physical table name, or ``None`` when the target resolves to
+        no physical table (which the guard refuses fail-closed).
+    """
+    if isinstance(target, str):
+        return target
+    insp = sa_inspect(target, raiseerr=False)
+    if isinstance(insp, TableClause):
+        return insp.name
+    if isinstance(insp, AliasedInsp):
+        return cast(Table, insp.mapper.local_table).name
+    if isinstance(insp, Mapper):
+        return cast(Table, insp.local_table).name
+    if isinstance(insp, InstanceState):
+        return cast(Table, insp.mapper.local_table).name
+    return None
+
+
+def _guard_immutable_ledger(target: object, refusal: str) -> None:
+    """Refuse any generic mutation primitive aimed at an immutable ledger.
+
+    This is the SINGLE central guard shared by every generic physical
+    mutation primitive — ``close_and_insert``, ``close_and_insert_sync``,
+    ``_upsert_batch``, ``delete_rows_by_id``, and
+    ``bulk_insert_from_archive``. It resolves ``target`` to its physical
+    table name via :func:`_resolve_physical_table_name` and raises when
+    that name is a registered append-only ledger, BEFORE the primitive
+    builds a statement or takes any empty-collection shortcut. Because the
+    decision is on the resolved physical name it holds identically against
+    ``Execution``, ``aliased(Execution)``, ``Execution.__table__``, its
+    ``Mapper``, a mapped instance, and the raw ``"executions"`` string,
+    closing the bypass that the old ``model is Execution`` identity checks
+    left open.
+
+    The legitimate ingest path (``insert_execution``) allocates its
+    ``scope_sequence`` under the per-wallet execution fence and persists
+    with a direct fenced ``session.add`` / fenced ``INSERT`` — it does NOT
+    route through any guarded primitive, so this blanket refusal never
+    touches it.
+
+    Resolution is FAIL-CLOSED: a target that :func:`_resolve_physical_table_name`
+    cannot reduce to a physical table name (``None``) is refused rather
+    than passed. A generic mutation primitive is only ever legitimately
+    handed a mapped class or a table, both of which resolve; an
+    unresolvable target reaching one of these primitives is therefore
+    either a bug or a bypass attempt, and refusing it means no future
+    unforeseen spelling can fail open the way the lightweight
+    ``TableClause`` (``sqlalchemy.table("executions", ...)``) once did.
+
+    Args:
+        target: The mutation target the primitive was handed.
+        refusal: Primitive-specific reason describing the concrete harm
+            being refused; surfaced on the raised error.
+
+    Raises:
+        ExecutionPhysicalMutationError: If ``target`` resolves to a
+            physical table registered in
+            :data:`IMMUTABLE_LEDGER_TABLE_NAMES`, or cannot be resolved to
+            any physical table name at all (fail-closed).
+    """
+    name = _resolve_physical_table_name(target)
+    if name is None or name in IMMUTABLE_LEDGER_TABLE_NAMES:
+        raise ExecutionPhysicalMutationError(refusal)
+
+
 async def close_and_insert(
     session: AsyncSession,
     model: type[Any],
@@ -707,9 +903,25 @@ async def close_and_insert(
         new_values: Column values for the new row (excluding id, public_id, known_to).
         bus_time: Processing timestamp used for close and open.
 
+    Raises:
+        ExecutionPhysicalMutationError: If ``model`` resolves to an
+            append-only immutable-ledger table (e.g.
+            :class:`~snapper.data.models.Execution`). An SCD2
+            close+supersede would revise a committed ``scope_sequence`` in
+            place, rewriting a sealed ledger prefix instead of appending a
+            fresh counter. The refusal resolves the physical table name so
+            it holds for the mapped class, ``aliased`` proxy, or ``Table``
+            alike.
+
     Returns:
         The newly inserted model instance.
     """
+    _guard_immutable_ledger(
+        model,
+        "physical execution supersede is refused: an SCD2 close+insert "
+        "would revise a committed scope_sequence in place, rewriting a "
+        "sealed ledger prefix instead of appending a fresh counter",
+    )
     existing = (
         (
             await session.execute(
@@ -760,9 +972,24 @@ def close_and_insert_sync(
         new_values: Column values for the new row (excluding id, public_id, known_to).
         bus_time: Processing timestamp used for close and open.
 
+    Raises:
+        ExecutionPhysicalMutationError: If ``model`` resolves to an
+            append-only immutable-ledger table (e.g.
+            :class:`~snapper.data.models.Execution`). This is the
+            synchronous twin of :func:`close_and_insert` and shares the
+            same resolution-based refusal so no SCD2 close+supersede can
+            revise a committed ``scope_sequence`` under any target
+            spelling.
+
     Returns:
         The newly inserted model instance.
     """
+    _guard_immutable_ledger(
+        model,
+        "physical execution supersede is refused: an SCD2 close+insert "
+        "would revise a committed scope_sequence in place, rewriting a "
+        "sealed ledger prefix instead of appending a fresh counter",
+    )
     existing = (
         session.execute(
             select(model)
@@ -1324,6 +1551,16 @@ class Repository(ABC):
         ``operator_public_id`` is nullable so strategy-
         emitted fills without a human operator still persist.
         ``liquidity_role`` indicates maker/taker/unknown.
+
+        The writer resolves the fill's immutable certification scope
+        (``exchange``/``mode``) once from the ACTIVE Order -> Instrument
+        lineage and assigns the per-scope commit-ordered
+        ``scope_sequence`` counter under the per-wallet execution fence.
+        Fails closed with ``ExecutionScopeResolutionError`` (reasons
+        ``dangling_execution_order_lineage``,
+        ``crossed_wallet_execution_lineage``,
+        ``dangling_execution_instrument_lineage``) instead of persisting
+        a row whose scope cannot be proven.
         """
         ...
 
@@ -1897,6 +2134,27 @@ class Repository(ABC):
         self, wallet_public_id: str, exchange: str, mode: str
     ) -> SpotReconciliationAnchorRow | None:
         """Return the active immutable spot bootstrap anchor."""
+        ...
+
+    @abstractmethod
+    async def get_spot_execution_watermark(
+        self, wallet_public_id: str, exchange: str, mode: str, as_of: datetime
+    ) -> tuple[int, datetime]:
+        """Capture the account-scoped ``max(scope_sequence)`` append boundary.
+
+        Returns ``(watermark, as_of)`` where ``watermark`` is the sealed
+        committed per-scope ``max(scope_sequence)`` (0 when the account
+        has no execution history) — sealed because the counter is
+        allocated as committed max + 1 under the ingest-side execution
+        fence, so no row at or below the watermark can commit after the
+        capture. The read is unlocked and never a serialization point.
+        Scope membership is the stored immutable ``exchange``/``mode``
+        columns; ``as_of`` does not define membership and is echoed back
+        verbatim as the instant the replay bundle must pin its temporal
+        reads to (instrument identity, specs, asset precisions). The only
+        failure mode is fail-closed identity validation: a malformed
+        wallet identity raises ``ValueError`` like reconciliation writers.
+        """
         ...
 
     @abstractmethod
@@ -5264,6 +5522,7 @@ def _derive_resolve_resolution_mode(
 
 _SQLITE_CONNECT_PRAGMAS: tuple[str, ...] = (
     "PRAGMA foreign_keys=ON",
+    "PRAGMA recursive_triggers=ON",
     "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=NORMAL",
     "PRAGMA busy_timeout=30000",
@@ -5285,6 +5544,16 @@ the operator actually runs on, so we keep the full pack.
 
 * ``foreign_keys=ON`` — application-level FK enforcement
   (mainstream; SQLite default is OFF).
+* ``recursive_triggers=ON`` — SQLite fires a ``BEFORE DELETE``
+  trigger on the delete that ``INSERT OR REPLACE`` (``REPLACE
+  INTO``) performs to resolve a unique-constraint conflict ONLY
+  when this is ON; the default is OFF. Without it a ``REPLACE INTO
+  executions`` would physically delete a sealed row and substitute
+  a different fill at the same ``scope_sequence`` WITHOUT firing
+  ``executions_reject_delete``, silently bypassing the append-only
+  ledger. Enabling it closes that vector so REPLACE is rejected on
+  every app connection. This is a correctness invariant, not a
+  throughput knob, and the ledger's own ingest never uses REPLACE.
 * ``journal_mode=WAL`` — concurrent readers + faster commits.
 * ``synchronous=NORMAL`` — standard WAL durability tradeoff;
   may lose the most recent committed transactions on host power
@@ -6321,9 +6590,28 @@ class SQLAlchemyRepository(Repository):
                 a fresh session opens, the insert commits inline,
                 and the session closes before returning.
 
+        Raises:
+            ExecutionPhysicalMutationError: If ``model`` resolves to an
+                append-only immutable-ledger table (e.g.
+                :class:`~snapper.data.models.Execution`). A
+                conflict-do-nothing insert could commit an arbitrary
+                caller-chosen ``scope_sequence``, opening a gap below the
+                counted watermark that the range proof cannot detect on
+                the insert side. Guarding here — before the statement is
+                built and before the empty-rows shortcut — covers both the
+                native ``on_conflict_do_nothing`` path and the row-by-row
+                integrity fallback, since both flow through this method.
+
         Returns:
             Number of rows successfully inserted.
         """
+        _guard_immutable_ledger(
+            model,
+            "physical execution upsert is refused: a conflict-do-nothing "
+            "insert could commit an arbitrary caller-chosen scope_sequence, "
+            "opening a gap below the counted watermark the range proof "
+            "cannot catch on the insert side",
+        )
         self._ensure_public_ids(rows)
         stmt = self._build_conflict_do_nothing_statement(model, rows, index_elements)
         if stmt is not None:
@@ -6349,6 +6637,14 @@ class SQLAlchemyRepository(Repository):
         index_elements: list[str],
     ) -> Any | None:
         """Build a native conflict-do-nothing statement when supported.
+
+        This builder carries no immutable-ledger guard of its own by
+        design. It is a pure statement factory with no sole append-only
+        harm — ``on_conflict_do_nothing`` can neither delete a sealed row
+        nor free ``max(scope_sequence)`` — and its only caller is
+        :meth:`_upsert_batch`, which refuses immutable-ledger targets
+        before this method runs. Adding a second guard here would be a
+        redundant call-site check, not an independent theorem.
 
         Args:
             model: SQLAlchemy model class to insert into.
@@ -6994,15 +7290,134 @@ class SQLAlchemyRepository(Repository):
             return None
         return float(notional) / float(total)
 
+    @staticmethod
+    def _execution_scope_wallet_key(wallet_public_id: str) -> str:
+        """Canonicalize a wallet identity for scope comparison when possible.
+
+        Mirrors the execution fence key logic: alias UUID spellings must
+        compare equal to their canonical form (PostgreSQL stores wallets
+        in a native ``uuid`` column, so an alias-spelled caller refers to
+        the same stored identity); a non-UUID identity compares raw.
+        """
+        try:
+            return str(UUID(wallet_public_id))
+        except ValueError:
+            return wallet_public_id
+
+    async def _resolve_execution_scope(
+        self,
+        s: AsyncSession,
+        order_public_id: str,
+        wallet_public_id: str,
+    ) -> tuple[str, str]:
+        """Resolve one fill's immutable ``(exchange, mode)`` scope, fail-closed.
+
+        One indexed two-table SELECT against the ACTIVE (``known_to`` open)
+        Order and Instrument versions — stable across SCD2 versions because
+        ``update_order`` copies ``mode``/``instrument_public_id``/
+        ``wallet_public_id`` verbatim to every successor. Refusals are
+        per-row and pre-persistence, which is what keeps the ledger free of
+        unresolvable rows and boundary captures free of lineage scans.
+
+        Raises:
+            ExecutionScopeResolutionError: ``dangling_execution_order_lineage``
+                when no active order version exists,
+                ``crossed_wallet_execution_lineage`` when the active order is
+                owned by another wallet, and
+                ``dangling_execution_instrument_lineage`` when the order's
+                instrument has no active version.
+        """
+        lineage = (
+            await s.execute(
+                select(Order.mode, Order.wallet_public_id, Instrument.exchange)
+                .select_from(Order)
+                .outerjoin(
+                    Instrument,
+                    and_(
+                        Instrument.public_id == Order.instrument_public_id,
+                        Instrument.known_to == KNOWN_TO_MAX,
+                    ),
+                )
+                .where(
+                    Order.public_id == order_public_id,
+                    Order.known_to == KNOWN_TO_MAX,
+                )
+            )
+        ).first()
+        if lineage is None:
+            raise ExecutionScopeResolutionError("dangling_execution_order_lineage")
+        if self._execution_scope_wallet_key(
+            str(lineage.wallet_public_id)
+        ) != self._execution_scope_wallet_key(wallet_public_id):
+            raise ExecutionScopeResolutionError("crossed_wallet_execution_lineage")
+        if lineage.exchange is None:
+            raise ExecutionScopeResolutionError("dangling_execution_instrument_lineage")
+        return str(lineage.exchange), str(lineage.mode)
+
     async def insert_execution(
         self,
         row: ExecutionInsertRow | None = None,
         **kwargs: Unpack[ExecutionInsertRow],
     ) -> int:
-        """Insert execution record and return generated ID."""
+        """Insert execution record and return generated ID.
+
+        Statement order inside the one insert transaction — PostgreSQL:
+        ``SET TRANSACTION ISOLATION LEVEL READ COMMITTED`` -> scope
+        resolve -> fence lock -> committed ``max+1`` read -> ``INSERT``
+        -> ``COMMIT``; SQLite: ``BEGIN IMMEDIATE`` -> scope resolve ->
+        (fence no-op) -> committed ``max+1`` read -> ``INSERT`` ->
+        ``COMMIT``. Both dialect-specific openers are emitted by
+        :meth:`_begin_execution_insert_transaction` as the transaction's
+        FIRST statement.
+
+        The wallet identity is validated and canonicalized ONCE at the
+        top, and the CANONICAL spelling is used for lineage resolution,
+        the fence key, the ``max+1`` read, and the persisted row — SQLite
+        stores ``UUIDColumn`` values verbatim, so a caller's alias
+        spelling would otherwise split one logical wallet into several
+        counter scopes invisible to the canonical watermark capture.
+
+        The scope resolve (:meth:`_resolve_execution_scope`) runs before
+        the lock, so it never lengthens the fence hold — its result is
+        version-stable — and its fail-closed refusals keep unresolvable
+        rows out of the ledger entirely. ``scope_sequence`` is then
+        allocated as the committed per-scope maximum plus one WHILE HOLDING
+        the per-wallet execution fence: the previous same-wallet writer's
+        transaction-scoped fence released only at commit or abort, so the
+        max read here is THE committed scope maximum (never stale), and a
+        rollback discards the assignment leaving no gap (a column write,
+        not a sequence — no database sequence property is load-bearing).
+        Allocation order therefore equals commit order by construction,
+        which is what makes the unlocked capture in
+        :meth:`get_spot_execution_watermark` a sealed committed prefix.
+        The insert side deliberately has NO lock timeout: a fill must never
+        be dropped, and the capture no longer holds the fence at all.
+
+        Isolation is EXPLICIT, never inherited: the engine picks up
+        whatever ``default_transaction_isolation`` the PostgreSQL role or
+        database configures, and the resolve SELECT runs BEFORE the fence
+        wait — under an inherited REPEATABLE READ it would pin a snapshot
+        that, after waiting out another writer, reads a STALE committed
+        maximum; the UNIQUE backstop would reject the duplicate, but the
+        fill-persistence caller swallows that error AFTER publication,
+        permanently omitting the fill. The explicit first statement
+        removes the failure mode instead of relying on server
+        configuration.
+
+        Raises:
+            ExecutionScopeResolutionError: When the wallet identity is
+                malformed (``invalid_execution_wallet_identity``) or the
+                fill's active Order -> Instrument lineage is missing or
+                contradictory (see :meth:`_resolve_execution_scope`); the
+                row is refused before persistence.
+        """
         if row is not None and kwargs:
             raise ValueError("insert_execution accepts either row or keyword fields, not both")
         execution_row = row if row is not None else kwargs
+        try:
+            wallet_public_id = str(UUID(execution_row["wallet_public_id"]))
+        except ValueError as exc:
+            raise ExecutionScopeResolutionError("invalid_execution_wallet_identity") from exc
         operator_public_id = execution_row.get("operator_public_id")
         exec_id = execution_row.get("exec_id")
         trade_id = execution_row.get("trade_id")
@@ -7012,10 +7427,29 @@ class SQLAlchemyRepository(Repository):
         fee_decimal = execution_row.get("fee_decimal")
         numeric_provenance = execution_row.get("numeric_provenance", "legacy_float")
         async with self.session() as s:
+            await self._begin_execution_insert_transaction(s)
+            scope_exchange, scope_mode = await self._resolve_execution_scope(
+                s,
+                execution_row["order_public_id"],
+                wallet_public_id,
+            )
+            await self._acquire_execution_fence_lock(s, wallet_public_id)
+            next_scope_sequence = (
+                await s.execute(
+                    select(func.coalesce(func.max(Execution.scope_sequence), 0) + 1).where(
+                        Execution.wallet_public_id == wallet_public_id,
+                        Execution.exchange == scope_exchange,
+                        Execution.mode == scope_mode,
+                    )
+                )
+            ).scalar_one()
             execution = Execution(
                 order_public_id=execution_row["order_public_id"],
-                wallet_public_id=execution_row["wallet_public_id"],
+                wallet_public_id=wallet_public_id,
                 operator_public_id=operator_public_id,
+                exchange=scope_exchange,
+                mode=scope_mode,
+                scope_sequence=int(next_scope_sequence),
                 exec_id=exec_id,
                 trade_id=trade_id,
                 timestamp=execution_row["timestamp"],
@@ -13285,6 +13719,72 @@ class SQLAlchemyRepository(Repository):
             )
             return None if anchor is None else self._spot_anchor_to_row(anchor)
 
+    async def get_spot_execution_watermark(
+        self, wallet_public_id: str, exchange: str, mode: str, as_of: datetime
+    ) -> tuple[int, datetime]:
+        """Capture the unlocked scoped ``max(scope_sequence)`` append boundary.
+
+        The capture takes NO lock, and this time that is CORRECT for a
+        provable reason (the predecessor's lock-free contract over
+        ``max(Execution.id)`` was a defect; the fenced rework that fixed it
+        is superseded by the counter): ``scope_sequence`` is allocated as
+        the committed per-scope maximum plus one while HOLDING the
+        per-wallet execution fence inside :meth:`insert_execution`, so per
+        scope the values EVER COMMITTED are exactly ``{1..K}``, at most
+        one assignment is in flight (the fence holder, whose value is
+        ``K+1``), and every future assignment is strictly greater. This
+        speaks about allocated values, NOT about rows still stored: rows
+        can leave the table, so the stored set is at most a SUBSET of
+        ``{1..K}`` and must never be assumed contiguous. The sealed prefix
+        additionally REQUIRES that ``K`` never decrease, which the fence
+        does NOT provide — ``K`` is derived from the table on every
+        insert, so deleting a scope's tip lowers it and the next insert
+        re-mints a value at or below a captured watermark, silently
+        replacing a certified fill. That premise is upheld by refusing to
+        delete executions at all through supported paths (the archiver
+        refuses ``--purge`` for this table, and restore is refused
+        likewise); both are load-bearing for THIS contract rather than
+        defense in depth. Given them, an unlocked read of the committed
+        maximum is a sealed prefix — no row at or below the returned
+        watermark can ever commit after the capture.
+        The capture is no longer a serialization point at all: it cannot
+        stall, cannot block ingest, and needs no ``lock_timeout``, no
+        fence acquisition, and no id-sequence cache probe (no
+        ``Execution.id`` property is load-bearing anymore).
+
+        Scope membership is the stored immutable ``exchange``/``mode``
+        columns — no Order/Instrument joins and no ``known_to`` filter
+        (append-only doctrine; see the module docstring) — so the read is
+        index-only on ``uq_executions_scope_sequence``. Lineage integrity
+        is enforced per-row at ingest (:meth:`insert_execution` refuses
+        unresolvable or crossed rows before persistence), and the
+        append-only ``known_to``-still-open assertion moves to the S4c-4
+        replay bundle, range-local, where the exact range is re-read
+        anyway — the total-unique index already refuses a supersede at
+        write time.
+
+        ``as_of`` no longer defines scope membership; it is echoed back
+        verbatim as the instant the S4c-4 replay bundle must pin its
+        temporal reads to (instrument identity, specs, asset precisions),
+        so the certificate's supporting evidence is read at one instant.
+        An account with no execution history yields watermark ``0`` (valid
+        per the spot anchor ``source_watermark >= 0`` CHECK). Alias UUID
+        spellings are canonicalized before filtering; malformed wallet
+        identities raise ``ValueError`` like reconciliation writers.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+        async with self.session() as s:
+            watermark = (
+                await s.execute(
+                    select(func.max(Execution.scope_sequence)).where(
+                        Execution.wallet_public_id == wallet_public_id,
+                        Execution.exchange == exchange,
+                        Execution.mode == mode,
+                    )
+                )
+            ).scalar()
+            return (0 if watermark is None else int(watermark)), as_of
+
     @staticmethod
     def _portfolio_reconciliation_method_config_to_row(
         config: PortfolioReconciliationMethodConfig,
@@ -14285,8 +14785,8 @@ class SQLAlchemyRepository(Repository):
             source_watermark = evaluation["source_watermark"]
             if anchor_public_id is None or source_watermark is None:
                 raise RuntimeError("full spot reconciliation requires anchor lineage")
-            if evaluation["source_watermark_kind"] != "execution_id":
-                raise RuntimeError("full spot reconciliation requires execution-id lineage")
+            if evaluation["source_watermark_kind"] != "scope_sequence":
+                raise RuntimeError("full spot reconciliation requires scope-sequence lineage")
             anchor = (
                 (
                     await s.execute(
@@ -16178,6 +16678,88 @@ class SQLAlchemyRepository(Repository):
             return
         else:
             raise NotImplementedError(f"wallet advisory lock not implemented for dialect={dialect}")
+
+    async def _begin_execution_insert_transaction(self, s: AsyncSession) -> None:
+        """Open the fill-insert transaction with explicit dialect guarantees.
+
+        Must be the transaction's FIRST statement. PostgreSQL: force
+        ``READ COMMITTED`` explicitly — the engine inherits whatever
+        ``default_transaction_isolation`` the role or database
+        configures, and an inherited REPEATABLE READ snapshot pinned by
+        the resolve SELECT before the fence wait would read a STALE
+        committed maximum after the wait (``SET TRANSACTION`` must
+        precede every query in the transaction, which is why this runs
+        first). SQLite: ``BEGIN IMMEDIATE`` takes the database write
+        reservation up front so the committed-``max+1`` allocation is
+        genuinely serialized across CONNECTIONS (two engines — e.g. an
+        executor restart overlap — could otherwise both read the same
+        committed maximum under deferred read transactions and collide
+        on ``uq_executions_scope_sequence``, losing the published fill);
+        it must precede the resolve SELECT because SQLite cannot upgrade
+        an already-open deferred transaction. Any other dialect fails
+        closed like the fence.
+        """
+        dialect = self.dialect_name
+        if dialect == "postgresql":
+            await s.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        elif dialect == "sqlite":
+            await s.execute(text("BEGIN IMMEDIATE"))
+        else:
+            raise NotImplementedError(
+                f"execution insert transaction not implemented for dialect={dialect}"
+            )
+
+    async def _acquire_execution_fence_lock(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+    ) -> None:
+        """Transaction-scoped per-wallet fence guarding counter assignment.
+
+        Uses the two-argument ``pg_advisory_xact_lock(hashtext(
+        'execution_fence'), hashtext(wallet))`` form so the fence lives in a
+        keyspace disjoint from the reconciliation writers' single-argument
+        wallet advisory locks (:meth:`_acquire_wallet_advisory_lock`) —
+        execution ingest never contends with reconciliation-state writer
+        transactions. ``insert_execution`` acquires it BEFORE reading the
+        committed per-scope ``max(scope_sequence)`` and holds it through
+        commit — the lock-before-``max+1`` ordering is the load-bearing
+        precondition of the contiguity proof: each holder reads the true
+        committed scope maximum (the previous holder resolved before this
+        one acquired) and commits ``max+1`` or nothing. The boundary
+        capture takes NO lock; the counter's contiguity is what makes its
+        unlocked committed-max read a sealed prefix. The key is
+        wallet-coarse on purpose (a superset domain over the scope only
+        over-serializes one wallet's own scopes — harmless at fill
+        cadence) and is the canonical UUID spelling when the wallet
+        identity parses as a UUID: PostgreSQL stores wallets in a native
+        ``uuid`` column, so an alias spelling would be capture-visible
+        while hashing to a different raw key; a non-UUID identity falls
+        back to the raw string, which is harmless because such a row can
+        never commit into the PostgreSQL ``uuid`` column at all.
+        Transaction scoped, so it releases on commit, rollback, and crash
+        — no leak mode. SQLite is a no-op HERE because the insert
+        transaction already holds the database write reservation
+        (``BEGIN IMMEDIATE`` emitted as the transaction's first statement
+        by :meth:`_begin_execution_insert_transaction`) — the
+        reservation, not the engine's page-level single writer, is what
+        serializes the read-then-write allocation across connections; any
+        other dialect fails closed with ``NotImplementedError``.
+        """
+        dialect = self.dialect_name
+        if dialect == "postgresql":
+            try:
+                fence_key = str(UUID(wallet_public_id))
+            except ValueError:
+                fence_key = wallet_public_id
+            await s.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext('execution_fence'), hashtext(:wid))"),
+                {"wid": fence_key},
+            )
+        elif dialect == "sqlite":
+            return
+        else:
+            raise NotImplementedError(f"execution fence lock not implemented for dialect={dialect}")
 
     @staticmethod
     def _row_from_grant(grant: WalletOperatorScopeGrant) -> ScopeGrantRow:
@@ -21808,9 +22390,26 @@ class DatabaseRepository:
             model: SQLAlchemy model class.
             row_ids: List of ``id`` values to delete.
 
+        Raises:
+            ExecutionPhysicalMutationError: If ``model`` resolves to an
+                append-only immutable-ledger table (e.g.
+                :class:`~snapper.data.models.Execution`). Physically
+                deleting a certified sequence would let ingest re-allocate
+                that ``scope_sequence`` for a different fill, silently
+                rewriting a sealed prefix while the counted range proof
+                still passes. The refusal resolves the physical table name
+                so ``aliased(Execution)`` and ``Execution.__table__`` are
+                refused identically to the mapped class.
+
         Returns:
             Number of rows actually deleted.
         """
+        _guard_immutable_ledger(
+            model,
+            "physical execution deletion is refused: deleting a certified "
+            "scope_sequence would let ingest re-allocate committed max + 1 "
+            "for a different fill, silently rewriting a sealed prefix",
+        )
         if not row_ids:
             return 0
         total = 0
@@ -21952,9 +22551,26 @@ class DatabaseRepository:
             model: SQLAlchemy model class.
             rows: List of column dicts to insert.
 
+        Raises:
+            ExecutionPhysicalMutationError: If ``model`` resolves to an
+                append-only immutable-ledger table (e.g.
+                :class:`~snapper.data.models.Execution`). A fenceless,
+                dedup-free bulk insert could reintroduce a sequence at or
+                below a live anchor watermark, silently corrupting the
+                counted range proof. The refusal resolves the physical
+                table name so ``insert(Execution.__table__)`` and
+                ``aliased(Execution)`` are refused identically to the
+                mapped class.
+
         Returns:
             Number of rows inserted.
         """
+        _guard_immutable_ledger(
+            model,
+            "physical execution reintroduction is refused: a fenceless "
+            "bulk insert could reintroduce a scope_sequence at or below a "
+            "live anchor watermark, silently corrupting the counted proof",
+        )
         if not rows:
             return 0
         with self.get_session() as session:

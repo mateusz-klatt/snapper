@@ -17,6 +17,7 @@ from snapper.data.archiver import EVENT_TABLES
 from snapper.data.archiver import ArchiveRestorer
 from snapper.data.archiver import CandleAuditArchiver
 from snapper.data.archiver import EventArchiver
+from snapper.data.archiver import ExecutionRestoreUnsupportedError
 from snapper.data.archiver import RestoreResult
 from snapper.data.archiver import StateArchiver
 from snapper.data.archiver import _build_column_parsers
@@ -191,6 +192,32 @@ def test_restore_unsupported_source() -> None:
     restorer = ArchiveRestorer(repo)
     with pytest.raises(ValueError, match="not yet supported"):
         restorer.restore(table="ticks", paths=[], source="cache")
+
+
+def test_restore_executions_is_refused_loudly() -> None:
+    """Execution restore fails closed with the named protocol error.
+
+    The generic audit restore is a direct bulk insert that bypasses the
+    per-wallet execution fence and the ``scope_sequence`` counter
+    protocol — it could reintroduce a certified sequence at or below an
+    existing anchor watermark. Until an anchor-aware offline
+    reconstruction protocol exists, executions must never be restored,
+    and the refusal must fire before any file or database work.
+
+    Given: A restorer over a mocked repository,
+    When: restore targets the ``executions`` table,
+    Then: ``ExecutionRestoreUnsupportedError`` is raised naming the
+        missing reconstruction protocol and the repository is untouched.
+    """
+    repo = MagicMock()
+    restorer = ArchiveRestorer(repo)
+    with pytest.raises(
+        ExecutionRestoreUnsupportedError,
+        match="anchor-aware offline reconstruction protocol",
+    ):
+        restorer.restore(table="executions", paths=[])
+    repo.bulk_insert_from_archive.assert_not_called()
+    repo.get_existing_archive_keys.assert_not_called()
 
 
 def _make_db_with_tick(tmp_path: Path) -> tuple[DatabaseRepository, Path]:

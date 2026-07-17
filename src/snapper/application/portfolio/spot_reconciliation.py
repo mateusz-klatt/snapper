@@ -1,10 +1,10 @@
 """Pure execution-replay reconciliation for live spot and FX accounts.
 
 The evaluator performs no I/O and mutates no caller-owned input. It replays a
-fixed execution-id range from an immutable bootstrap inventory, compares the
-result with venue TOTAL balances using exact ``Decimal`` arithmetic, and fails
-closed when scope, boundary, inventory, numeric, or precision evidence is not
-certified.
+fixed scope-sequence range (the per-account commit-ordered execution counter)
+from an immutable bootstrap inventory, compares the result with venue TOTAL
+balances using exact ``Decimal`` arithmetic, and fails closed when scope,
+boundary, inventory, numeric, or precision evidence is not certified.
 """
 
 import json
@@ -27,15 +27,20 @@ from snapper.messaging.schemas.data import PortfolioAccountState
 
 _METHOD = "spot_execution_replay"
 _MODE = "live"
-_WATERMARK_KIND = "execution_id"
+_WATERMARK_KIND = "scope_sequence"
 _PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?", flags=re.ASCII)
 
 
 @dataclass(frozen=True)
 class SpotReplayExecutionRow:
-    """One account-scoped durable fill used by the bounded replay."""
+    """One account-scoped durable fill used by the bounded replay.
 
-    execution_id: int
+    ``scope_sequence`` is the fill's per-``(wallet, exchange, mode)``
+    commit-ordered counter — the replay range key and the unit of the
+    boundary watermark. It is unrelated to bus-provenance sequence ids.
+    """
+
+    scope_sequence: int
     wallet_public_id: str
     exchange: str
     mode: str
@@ -442,20 +447,20 @@ def _replay_executions(
     now: datetime,
     tolerances: dict[str, _ToleranceAccumulator],
 ) -> tuple[dict[str, Decimal], set[str]]:
-    """Replay the fixed execution-id range and derive precision bounds."""
+    """Replay the fixed scope-sequence range and derive precision bounds."""
     delta: dict[str, Decimal] = {}
     fee_assets: set[str] = set()
     seen: set[int] = set()
-    ordered = sorted(replay, key=lambda item: item.execution_id)
+    ordered = sorted(replay, key=lambda item: item.scope_sequence)
     for row in ordered:
-        if isinstance(row.execution_id, bool):
-            raise _IncompleteError("duplicate_or_invalid_execution_id")
-        if row.execution_id > boundary.source_watermark:
+        if isinstance(row.scope_sequence, bool):
+            raise _IncompleteError("duplicate_or_invalid_execution_sequence")
+        if row.scope_sequence > boundary.source_watermark:
             continue
-        if row.execution_id in seen:
-            raise _IncompleteError("duplicate_or_invalid_execution_id")
-        seen.add(row.execution_id)
-        if row.execution_id <= anchor["source_watermark"]:
+        if row.scope_sequence in seen:
+            raise _IncompleteError("duplicate_or_invalid_execution_sequence")
+        seen.add(row.scope_sequence)
+        if row.scope_sequence <= anchor["source_watermark"]:
             raise _IncompleteError("execution_before_anchor_watermark")
         if (
             row.wallet_public_id != venue_account.wallet_public_id
@@ -602,7 +607,7 @@ def _evaluate_cash(
                 raise _IncompleteError("invalid_fee_precision")
             _add_floor(tolerances, asset, fee_quantum, "fee")
             for row in replay:
-                if row.execution_id > boundary.source_watermark or row.fee_asset != asset:
+                if row.scope_sequence > boundary.source_watermark or row.fee_asset != asset:
                     continue
                 resolved_fee = _resolve_number(
                     row.fee, row.fee_decimal, row.numeric_provenance, "execution_fee"
@@ -721,7 +726,7 @@ def evaluate(
 
     Args:
         anchor: Persisted immutable bootstrap inventory, or honest absence.
-        replay: Complete fixed execution-id range, or honest absence.
+        replay: Complete fixed scope-sequence range, or honest absence.
         replay_boundary: Watermark-before-balance and completeness evidence.
         venue_account: Fresh fail-closed venue account view.
         instruments_by_public_id: Canonical spot pair identities.

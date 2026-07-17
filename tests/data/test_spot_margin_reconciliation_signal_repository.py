@@ -176,7 +176,7 @@ def _anchor(
         mode="live",
         venue_account_state_public_id="00000000-0000-7000-8000-000000000601",
         balance_observation_id=41,
-        source_watermark_kind="execution_id",
+        source_watermark_kind="scope_sequence",
         source_watermark=7,
         balances_json='{"USD":"100"}',
         first_request_started_at=first_started,
