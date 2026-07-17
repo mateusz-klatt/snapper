@@ -1146,7 +1146,7 @@ def update_walutomat_symbols(
     """
 
     async def run_walutomat_update() -> None:
-        updater = WalutomatSymbolUpdaterService(update_threshold_hours=24, force=force)
+        updater = WalutomatSymbolUpdaterService(update_threshold_hours=168, force=force)
         try:
             typer.echo("Starting Walutomat symbol mapping update...")
             await updater.start()
@@ -1950,8 +1950,7 @@ def backfill_candles_from_trades(
             )
             symbol_source = _CLI_SYMBOL_SOURCE_ALL_MAPPED if all_symbols else "selected symbols"
             typer.echo(
-                f"Starting trade candle backfill "
-                f"({exchange}, {start} to {end}, {symbol_source})..."
+                f"Starting trade candle backfill ({exchange}, {start} to {end}, {symbol_source})..."
             )
             await service.start()
             typer.echo("Trade candle backfill complete!")

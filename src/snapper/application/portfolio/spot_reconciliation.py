@@ -8,16 +8,18 @@ certified.
 """
 
 import json
+import re
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from datetime import timedelta
 from decimal import Decimal
 from decimal import InvalidOperation
 
+import snapper.application.portfolio.spot_precision_certification as spot_precision_certification
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
+from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.messaging.schemas.data import AccountBalanceEntry
@@ -26,7 +28,7 @@ from snapper.messaging.schemas.data import PortfolioAccountState
 _METHOD = "spot_execution_replay"
 _MODE = "live"
 _WATERMARK_KIND = "execution_id"
-_PRECISION_MAX_AGE = timedelta(hours=12)
+_PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?", flags=re.ASCII)
 
 
 @dataclass(frozen=True)
@@ -78,19 +80,6 @@ class SpotInstrumentIdentity:
     quote_asset: str
 
 
-@dataclass(frozen=True)
-class SpotAssetPrecisionEvidence:
-    """Independent certified balance and fee precision for one asset."""
-
-    asset: str
-    balance_decimals: int | None
-    fee_decimals: int | None
-    source: str | None
-    version: str | None
-    observed_at: datetime | None
-    certified: bool
-
-
 class _IncompleteError(Exception):
     """Expected fail-closed evaluator outcome carrying a stable reason."""
 
@@ -135,14 +124,11 @@ def _quantum(decimals: int | None) -> Decimal | None:
 
 def _finite_decimal_string(raw: str) -> Decimal:
     """Parse one bounded, finite exact decimal string."""
-    if not raw or raw.strip() != raw:
+    if _PLAIN_DECIMAL.fullmatch(raw) is None:
         raise _IncompleteError("malformed_decimal")
-    try:
-        value = Decimal(raw)
-    except InvalidOperation as exc:
-        raise _IncompleteError("malformed_decimal") from exc
+    value = Decimal(raw)
     exponent = value.as_tuple().exponent
-    if not value.is_finite() or not isinstance(exponent, int) or abs(exponent) > 256:
+    if not isinstance(exponent, int) or abs(exponent) > 256:
         raise _IncompleteError("non_finite_or_unbounded_decimal")
     return value
 
@@ -234,63 +220,52 @@ def _venue_balances(
 
 
 def is_effective_spot_precision_certified(
+    exchange: str,
     spec: InstrumentSpecRow,
     evaluated_at: datetime,
 ) -> bool:
-    """Return whether independent live spot precision evidence is effective.
+    """Delegate venue-bound instrument precision certification to its authority.
 
     Args:
+        exchange: Exact account venue being reconciled.
         spec: Persisted spot instrument precision and provenance evidence.
         evaluated_at: Caller-captured certification instant.
 
     Returns:
         Whether every required spot precision component is fresh and valid.
     """
-    observed_at = spec["spec_observed_at"]
-    tick = spec["tick_size"]
-    if observed_at is None or tick is None or isinstance(tick, bool):
-        return False
-    if observed_at.utcoffset() is None or evaluated_at.utcoffset() is None:
-        return False
-    try:
-        tick_decimal = Decimal(str(tick))
-    except InvalidOperation:
-        return False
-    age = evaluated_at - observed_at
-    return (
-        timedelta(0) <= age < _PRECISION_MAX_AGE
-        and tick_decimal.is_finite()
-        and tick_decimal > 0
-        and spec["instrument_kind"] == "spot"
-        and spec["quantity_unit"] == "base_asset"
-        and spec["status"] == "active"
-        and _quantum(spec["qty_decimals"]) is not None
-        and _quantum(spec["cost_decimals"]) is not None
-        and bool(spec["spec_source"])
-        and bool(spec["spec_version"])
+    return spot_precision_certification.is_spot_instrument_precision_certified(
+        exchange,
+        spec,
+        evaluated_at,
     )
 
 
 def _asset_precision(
+    exchange: str,
     asset: str,
-    asset_precisions: Mapping[str, SpotAssetPrecisionEvidence],
+    asset_precisions: Mapping[str, SpotAssetPrecisionEvidenceRow],
     now: datetime,
     require_fee: bool,
-) -> SpotAssetPrecisionEvidence:
+) -> SpotAssetPrecisionEvidenceRow:
     """Return fresh certified precision for one canonical asset."""
     evidence = asset_precisions.get(asset)
-    if evidence is None or evidence.asset != asset or not evidence.certified:
+    if evidence is None:
         raise _IncompleteError("missing_asset_precision")
-    observed_at = evidence.observed_at
-    if (
-        observed_at is None
-        or observed_at.utcoffset() is None
-        or now.utcoffset() is None
-        or not timedelta(0) <= now - observed_at < _PRECISION_MAX_AGE
-        or not evidence.source
-        or not evidence.version
-        or _quantum(evidence.balance_decimals) is None
-        or (require_fee and _quantum(evidence.fee_decimals) is None)
+    if not spot_precision_certification.is_spot_precision_plane_certified(
+        exchange,
+        asset,
+        "balance",
+        evidence,
+        now,
+    ):
+        raise _IncompleteError("stale_or_uncertified_asset_precision")
+    if require_fee and not spot_precision_certification.is_spot_precision_plane_certified(
+        exchange,
+        asset,
+        "fee",
+        evidence,
+        now,
     ):
         raise _IncompleteError("stale_or_uncertified_asset_precision")
     return evidence
@@ -506,7 +481,11 @@ def _replay_executions(
         spec = specs.get(row.instrument_public_id)
         if spec is None or spec["instrument_public_id"] != row.instrument_public_id:
             raise _IncompleteError("missing_spot_precision")
-        if not is_effective_spot_precision_certified(spec, now):
+        if not is_effective_spot_precision_certified(
+            str(venue_account.exchange).lower(),
+            spec,
+            now,
+        ):
             raise _IncompleteError("stale_or_uncertified_spot_precision")
         tick = Decimal(str(spec["tick_size"]))
         qty_quantum = _quantum(spec["qty_decimals"])
@@ -560,7 +539,7 @@ def _evaluate_cash(
     venue_account: PortfolioAccountState,
     instruments: Mapping[str, SpotInstrumentIdentity],
     specs: Mapping[str, InstrumentSpecRow | None],
-    asset_precisions: Mapping[str, SpotAssetPrecisionEvidence],
+    asset_precisions: Mapping[str, SpotAssetPrecisionEvidenceRow],
     previously_confirmed_assets: frozenset[str],
     liability_totals: Mapping[str, Decimal],
     now: datetime,
@@ -602,16 +581,23 @@ def _evaluate_cash(
     )
     if not assets:
         raise _IncompleteError("empty_inventory")
+    exchange = str(venue_account.exchange).lower()
     for asset in assets:
-        precision = _asset_precision(asset, asset_precisions, now, asset in fee_assets)
-        balance_quantum = _quantum(precision.balance_decimals)
+        precision = _asset_precision(
+            exchange,
+            asset,
+            asset_precisions,
+            now,
+            asset in fee_assets,
+        )
+        balance_quantum = _quantum(precision["balance_decimals"])
         if balance_quantum is None:
             raise _IncompleteError("invalid_balance_precision")
         _add_floor(tolerances, asset, balance_quantum, "balance")
         if venue_legacy.get(asset, False):
             _add_error(tolerances, asset, balance_quantum / 2)
         if asset in fee_assets:
-            fee_quantum = _quantum(precision.fee_decimals)
+            fee_quantum = _quantum(precision["fee_decimals"])
             if fee_quantum is None:
                 raise _IncompleteError("invalid_fee_precision")
             _add_floor(tolerances, asset, fee_quantum, "fee")
@@ -724,7 +710,7 @@ def evaluate(
     venue_account: PortfolioAccountState,
     instruments_by_public_id: Mapping[str, SpotInstrumentIdentity],
     specs_by_instrument_public_id: Mapping[str, InstrumentSpecRow | None],
-    asset_precisions: Mapping[str, SpotAssetPrecisionEvidence],
+    asset_precisions: Mapping[str, SpotAssetPrecisionEvidenceRow],
     previously_confirmed_assets: frozenset[str],
     liability_totals: Mapping[str, Decimal],
     margin_indicators: Sequence[str],

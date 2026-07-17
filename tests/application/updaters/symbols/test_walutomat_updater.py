@@ -10,10 +10,14 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+import snapper.application.portfolio.walutomat_precision_artifact as walutomat_artifact
 from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Instrument
+from snapper.data.models import InstrumentSpec
+from snapper.data.models import SpotAssetPrecisionEvidence
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
@@ -200,6 +204,66 @@ async def test_update_database_creates_and_updates_mappings(
     assert usd_catalog.quote == "PLN"
     assert usd_catalog.asset_type == "forex"
     assert usd_catalog.known_to == KNOWN_TO_MAX
+    with repository.get_session() as session:
+        specs = (
+            session.execute(
+                select(InstrumentSpec)
+                .join(
+                    Instrument,
+                    Instrument.public_id == InstrumentSpec.instrument_public_id,
+                )
+                .where(Instrument.exchange == "walutomat")
+            )
+            .scalars()
+            .all()
+        )
+        precision_rows = (
+            session.execute(
+                select(SpotAssetPrecisionEvidence).where(
+                    SpotAssetPrecisionEvidence.known_to == KNOWN_TO_MAX
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(specs) == 2
+    for spec in specs:
+        assert spec.tick_size == pytest.approx(0.0001)
+        assert spec.lot_size == pytest.approx(0.01)
+        assert spec.qty_decimals == 2
+        assert spec.cost_decimals == 2
+        assert spec.quantity_unit == "base_asset"
+        assert spec.status == "active"
+        assert spec.instrument_kind == "spot"
+        artifact = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+        assert spec.spec_source == walutomat_artifact.WALUTOMAT_DOCUMENTARY_SPEC_SOURCE
+        assert spec.spec_version == walutomat_artifact.walutomat_precision_artifact_version(
+            artifact
+        )
+        assert spec.spec_observed_at == artifact.reviewed_at
+        assert spec.min_order_size is None
+        assert spec.max_order_size is None
+        assert spec.contract_size is None
+        assert spec.margin_initial is None
+        assert spec.position_limit_long is None
+        assert spec.position_limit_short is None
+        assert spec.unit_certified is False
+    precision_by_asset = {row.asset: row for row in precision_rows}
+    assert set(precision_by_asset) == {"EUR", "PLN", "USD"}
+    for precision in precision_by_asset.values():
+        assert precision.exchange == "walutomat"
+        assert precision.balance_decimals is None
+        assert precision.balance_source is None
+        assert precision.balance_version is None
+        assert precision.balance_observed_at is None
+        assert precision.fee_decimals == 2
+        assert precision.fee_source == walutomat_artifact.WALUTOMAT_DOCUMENTARY_FEE_SOURCE
+        assert precision.fee_version == walutomat_artifact.walutomat_precision_artifact_version(
+            walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+        )
+        assert (
+            precision.fee_observed_at == walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT.reviewed_at
+        )
 
 
 @pytest.mark.asyncio()

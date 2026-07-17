@@ -278,6 +278,25 @@ only builder of the time-sensitive, fail-closed view. A 60-second safety-net
 poll covers lossy bridge delivery and raises the client transport-staleness
 ceiling after three missed polls.
 
+### Spot precision certification
+
+Spot reconciliation consumes the persisted exchange column and evaluates each
+asset's balance and fee evidence planes independently. The pure
+`spot_precision_certification.py` predicate is the single certification
+authority: it binds exact provenance families to their venue and plane,
+recomputes content versions, enforces the current documentary floor and
+artifact dates, applies strict 12-hour freshness to observed evidence, and
+rejects a current plane whose decimals are `NULL`. Documentary evidence stays
+fresh only while its exact reviewed artifact remains current. Instrument-spec
+fallbacks use the same venue binding and digest checks; in particular, Kraken
+CCXT precision can certify only a Kraken account.
+
+Walutomat's authenticated balance producer uses those same artifact checks
+before applying the documentary minimum, then persists the candidate's own
+exchange identity. A newer complete-provenance row with `NULL` decimals is an
+explicit plane revocation; neither a sibling plane nor an older ratcheted
+maximum can restore certification.
+
 ### Venue reconciliation (executors)
 
 Executors can periodically poll exchange REST APIs to reconcile local

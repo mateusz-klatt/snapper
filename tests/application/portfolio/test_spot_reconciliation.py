@@ -11,9 +11,16 @@ from typing import cast
 
 import pytest
 
+import snapper.application.portfolio.spot_precision_certification as precision_certification
 import snapper.application.portfolio.spot_reconciliation as spot_module
+import snapper.application.portfolio.walutomat_precision_artifact as walutomat_artifact
 from snapper.application.portfolio.reconciliation_view import no_portfolio_reconciliation_view
-from snapper.application.portfolio.spot_reconciliation import SpotAssetPrecisionEvidence
+from snapper.application.portfolio.spot_precision_evidence import (
+    derive_walutomat_precision_from_raw_balances,
+)
+from snapper.application.portfolio.spot_precision_evidence import (
+    walutomat_observed_balance_precision_version,
+)
 from snapper.application.portfolio.spot_reconciliation import SpotInstrumentIdentity
 from snapper.application.portfolio.spot_reconciliation import SpotReplayBoundary
 from snapper.application.portfolio.spot_reconciliation import SpotReplayExecutionRow
@@ -23,12 +30,17 @@ from snapper.core.types import ExecutionMode
 from snapper.core.types import OrderExchange
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
+from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
+from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.messaging.schemas.data import AccountBalanceEntry
 from snapper.messaging.schemas.data import PortfolioAccountState
 
-_NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+_NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
+_WALUTOMAT_OBSERVED_BALANCE_SOURCE = (
+    "walutomat:api-v2.0.0:account/balances:venue_raw-decimal-triplet"
+)
 _WALLET = "00000000-0000-7000-8000-000000000101"
 _ANCHOR = "00000000-0000-7000-8000-000000000301"
 _INSTRUMENT = "00000000-0000-7000-8000-000000000401"
@@ -39,6 +51,7 @@ def _account(
     balances: list[AccountBalanceEntry] | None = None,
     *,
     mode: str = "live",
+    exchange: str = "walutomat",
 ) -> PortfolioAccountState:
     """Build one fresh authoritative venue balance view."""
     return PortfolioAccountState(
@@ -47,7 +60,7 @@ def _account(
         public_id="00000000-0000-7000-8000-000000000201",
         timestamp=_NOW,
         wallet_public_id=_WALLET,
-        exchange=cast(OrderExchange, "kraken"),
+        exchange=cast(OrderExchange, exchange),
         mode=cast(ExecutionMode, mode),
         sync_status="observed",
         effective_status="observed",
@@ -90,7 +103,7 @@ def _anchor() -> SpotReconciliationAnchorRow:
     row: SpotReconciliationAnchorRow = {
         "public_id": _ANCHOR,
         "wallet_public_id": _WALLET,
-        "exchange": "kraken",
+        "exchange": "walutomat",
         "mode": "live",
         "venue_account_state_public_id": "00000000-0000-7000-8000-000000000200",
         "balance_observation_id": 40,
@@ -134,7 +147,7 @@ def _execution(**overrides: object) -> SpotReplayExecutionRow:
     values: dict[str, object] = {
         "execution_id": 11,
         "wallet_public_id": _WALLET,
-        "exchange": "kraken",
+        "exchange": "walutomat",
         "mode": "live",
         "status": "filled",
         "instrument_public_id": _INSTRUMENT,
@@ -185,19 +198,94 @@ def _spec(
         "rollover_rate_short": None,
         "max_funding_rate": None,
     }
+    row["spec_version"] = precision_certification.kraken_instrument_precision_version(
+        tick_size=row["tick_size"],
+        lot_size=row["lot_size"],
+        min_order_size=row["min_order_size"],
+        max_order_size=row["max_order_size"],
+        cost_decimals=row["cost_decimals"],
+        qty_decimals=row["qty_decimals"],
+        status=row["status"],
+        quantity_unit=row["quantity_unit"],
+    )
     return row
 
 
-def _precision(asset: str) -> SpotAssetPrecisionEvidence:
+def _walutomat_spec() -> InstrumentSpecRow:
+    """Build one specification addressing the exact current review artifact."""
+    artifact = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+    return _changed_spec(
+        tick_size=10.0**-artifact.limit_price_max_decimals,
+        lot_size=10.0**-artifact.market_order_volume_decimals,
+        cost_decimals=artifact.cost_decimals,
+        qty_decimals=artifact.market_order_volume_decimals,
+        spec_source=walutomat_artifact.WALUTOMAT_DOCUMENTARY_SPEC_SOURCE,
+        spec_version=walutomat_artifact.walutomat_precision_artifact_version(artifact),
+        spec_observed_at=artifact.reviewed_at,
+    )
+
+
+def _precision(asset: str, balance_decimals: int = 8) -> SpotAssetPrecisionEvidenceRow:
     """Build fresh certified balance and fee precision."""
-    return SpotAssetPrecisionEvidence(
-        asset=asset,
-        balance_decimals=8,
-        fee_decimals=8,
-        source="venue asset precision",
-        version="s3-test",
-        observed_at=_NOW - timedelta(minutes=1),
-        certified=True,
+    artifact = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+    return {
+        "exchange": "walutomat",
+        "asset": asset,
+        "balance_decimals": balance_decimals,
+        "balance_source": _WALUTOMAT_OBSERVED_BALANCE_SOURCE,
+        "balance_version": walutomat_observed_balance_precision_version(
+            asset,
+            balance_decimals,
+            "certified",
+        ),
+        "balance_observed_at": _NOW - timedelta(minutes=1),
+        "fee_decimals": artifact.fee_decimals,
+        "fee_source": walutomat_artifact.WALUTOMAT_DOCUMENTARY_FEE_SOURCE,
+        "fee_version": walutomat_artifact.walutomat_precision_artifact_version(artifact),
+        "fee_observed_at": artifact.reviewed_at,
+    }
+
+
+def _changed_precision(
+    evidence: SpotAssetPrecisionEvidenceRow,
+    **overrides: object,
+) -> SpotAssetPrecisionEvidenceRow:
+    """Return precision evidence with intentional adversarial overrides."""
+    values: dict[str, object] = dict(evidence)
+    values.update(overrides)
+    return cast(SpotAssetPrecisionEvidenceRow, values)
+
+
+def _changed_precision_plane(
+    evidence: SpotAssetPrecisionEvidenceRow,
+    plane: precision_certification.SpotPrecisionEvidencePlane,
+    decimals: int | None,
+    source: str | None,
+    version: str | None,
+    observed_at: datetime | None,
+) -> SpotAssetPrecisionEvidenceRow:
+    """Replace one precision plane while preserving the repository row shape."""
+    values: dict[str, object] = dict(evidence)
+    values[f"{plane}_decimals"] = decimals
+    values[f"{plane}_source"] = source
+    values[f"{plane}_version"] = version
+    values[f"{plane}_observed_at"] = observed_at
+    return cast(SpotAssetPrecisionEvidenceRow, values)
+
+
+def _documentary_fee_precision(
+    asset: str,
+    evaluated_at: datetime,
+) -> SpotAssetPrecisionEvidenceRow:
+    """Build fresh balance evidence plus the exact current documentary fee plane."""
+    artifact = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+    return _changed_precision(
+        _precision(asset),
+        balance_observed_at=evaluated_at - timedelta(minutes=1),
+        fee_decimals=artifact.fee_decimals,
+        fee_source=walutomat_artifact.WALUTOMAT_DOCUMENTARY_FEE_SOURCE,
+        fee_version=walutomat_artifact.walutomat_precision_artifact_version(artifact),
+        fee_observed_at=artifact.reviewed_at,
     )
 
 
@@ -226,7 +314,7 @@ def _evaluate(
     capability: CapabilityStatus = CapabilityStatus.NOT_APPLICABLE,
     instruments: dict[str, SpotInstrumentIdentity] | None = None,
     specs: dict[str, InstrumentSpecRow | None] | None = None,
-    precisions: dict[str, SpotAssetPrecisionEvidence] | None = None,
+    precisions: dict[str, SpotAssetPrecisionEvidenceRow] | None = None,
     confirmed: frozenset[str] = frozenset({"BTC", "USD"}),
     now: datetime = _NOW,
 ) -> PortfolioReconciliationEvaluationRow:
@@ -254,7 +342,9 @@ def _evaluate(
                 )
             }
         ),
-        specs_by_instrument_public_id=specs if specs is not None else {_INSTRUMENT: _spec()},
+        specs_by_instrument_public_id=(
+            specs if specs is not None else {_INSTRUMENT: _walutomat_spec()}
+        ),
         asset_precisions=(
             precisions
             if precisions is not None
@@ -288,11 +378,47 @@ def test_exact_raw_buy_match_and_canonical_evidence() -> None:
     }
     assert expected["assets"]["USD"]["replay_delta"] == "-1.01"
     tolerance = json.loads(cast(str, result["tolerance_json"]))
-    assert Decimal(tolerance["assets"]["BTC"]["precision_floor"]) == Decimal("0.00000001")
-    assert Decimal(tolerance["assets"]["USD"]["absolute_tolerance"]) == Decimal("0.001")
+    assert Decimal(tolerance["assets"]["BTC"]["precision_floor"]) == Decimal("0.01")
+    assert Decimal(tolerance["assets"]["USD"]["absolute_tolerance"]) == Decimal("0.01")
     assert cast(str, result["expected_json"]) == json.dumps(
         expected, allow_nan=False, separators=(",", ":"), sort_keys=True
     )
+
+
+def test_documented_balance_floor_reports_integer_rendered_drift() -> None:
+    """The two-place currency floor rejects the reproduced false match.
+
+    Given: Expected BTC 1.1, venue raw text ``1``, and certified two-place precision.
+    When: Reconciliation compares the exact values.
+    Then: A 0.1 difference exceeds the conservative 0.01 precision floor.
+    """
+    account = _account(
+        [
+            AccountBalanceEntry(
+                currency="BTC",
+                total=1.0,
+                total_decimal="1",
+                numeric_provenance="venue_raw",
+            ),
+            AccountBalanceEntry(
+                currency="USD",
+                total=98.99,
+                total_decimal="98.99",
+                numeric_provenance="venue_raw",
+            ),
+        ]
+    )
+    result = _evaluate(
+        account=account,
+        precisions={
+            "BTC": _precision("BTC", balance_decimals=2),
+            "USD": _precision("USD"),
+        },
+    )
+
+    assert result["evaluation_status"] == "mismatched"
+    tolerance = json.loads(cast(str, result["tolerance_json"]))
+    assert Decimal(tolerance["assets"]["BTC"]["precision_floor"]) == Decimal("0.01")
 
 
 def test_cursorless_mismatch_is_full_but_cursorless_clean_is_incomplete() -> None:
@@ -361,7 +487,7 @@ def test_sell_third_asset_fee_and_legacy_terms_are_replayed() -> None:
         instruments_by_public_id={
             _INSTRUMENT: SpotInstrumentIdentity(_INSTRUMENT, "BTC/USD", "BTC", "USD")
         },
-        specs_by_instrument_public_id={_INSTRUMENT: _spec()},
+        specs_by_instrument_public_id={_INSTRUMENT: _walutomat_spec()},
         asset_precisions={asset: _precision(asset) for asset in ("BTC", "USD", "KSM")},
         previously_confirmed_assets=frozenset({"BTC", "USD"}),
         liability_totals={},
@@ -439,10 +565,140 @@ def test_incomplete_replay_precision_and_raw_conflict_fail_closed() -> None:
     incomplete_boundary = _evaluate(boundary=_boundary(range_complete=False))
     conflict = _evaluate(replay=[_execution(size=0.2, size_decimal="0.1")])
     stale_spec = _spec(spec_observed_at=_NOW - timedelta(days=1))
-    assert is_effective_spot_precision_certified(_spec(), _NOW) is True
-    assert is_effective_spot_precision_certified(stale_spec, _NOW) is False
+    assert is_effective_spot_precision_certified("kraken", _spec(), _NOW) is True
+    assert is_effective_spot_precision_certified("kraken", stale_spec, _NOW) is False
     assert incomplete_boundary["error"] == "incomplete_replay_boundary"
     assert conflict["error"] == "raw_numeric_companion_conflict"
+
+
+def test_precision_timeline_uses_live_boundary_and_current_artifact_rule() -> None:
+    """Live metadata expires exactly at twelve hours while current docs do not.
+
+    Given: One venue-fed spec and one current documentary artifact spec.
+    When: Certification is evaluated before, at, and after the twelve-hour boundary.
+    Then: Venue evidence expires exactly at the boundary and current artifact evidence persists.
+    """
+    artifact = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+    venue_spec = _changed_spec(spec_observed_at=artifact.reviewed_at)
+    documentary_spec = _walutomat_spec()
+    run_times = (
+        artifact.reviewed_at + timedelta(hours=12) - timedelta(microseconds=1),
+        artifact.reviewed_at + timedelta(hours=12),
+        artifact.reviewed_at + timedelta(days=30),
+    )
+
+    assert [
+        is_effective_spot_precision_certified("kraken", venue_spec, run_time)
+        for run_time in run_times
+    ] == [True, False, False]
+    assert all(
+        is_effective_spot_precision_certified("walutomat", documentary_spec, run_time)
+        for run_time in run_times
+    )
+
+
+def test_walutomat_account_rejects_relabelled_kraken_instrument_source() -> None:
+    """A fresh Kraken label cannot certify a Walutomat replay instrument.
+
+    Given: A coherent Walutomat account and a fresh spec relabeled as Kraken CCXT evidence,
+    When: The consumer delegates venue-bound instrument certification,
+    Then: Reconciliation fails closed before using the relabeled precision.
+    """
+    result = _evaluate(specs={_INSTRUMENT: _spec()})
+
+    assert result["evaluation_status"] == "incomplete"
+    assert result["error"] == "stale_or_uncertified_spot_precision"
+
+
+@pytest.mark.parametrize(
+    ("source", "version"),
+    [
+        (
+            walutomat_artifact.WALUTOMAT_DOCUMENTARY_SPEC_SOURCE,
+            f"s4c-1-v1:{'0' * 64}",
+        ),
+        (
+            "arbitrary",
+            walutomat_artifact.walutomat_precision_artifact_version(
+                walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+            ),
+        ),
+        ("arbitrary", "arbitrary"),
+    ],
+)
+def test_artifact_certification_rejects_wrong_content_or_source(
+    source: str,
+    version: str,
+) -> None:
+    """A digest-shaped string or arbitrary source cannot impersonate the artifact.
+
+    Given: A well-shaped wrong digest or the correct digest under an arbitrary source.
+    When: Documentary precision certification is evaluated.
+    Then: Both forged persisted provenance combinations fail closed.
+    """
+    values: dict[str, object] = dict(_walutomat_spec())
+    values.update(spec_source=source, spec_version=version)
+    spec = cast(InstrumentSpecRow, values)
+    evaluated_at = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT.reviewed_at + timedelta(days=1)
+
+    assert is_effective_spot_precision_certified("walutomat", spec, evaluated_at) is False
+
+
+def test_replacing_current_artifact_invalidates_persisted_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A previously current documentary specification becomes stale on replacement.
+
+    Given: A persisted specification for the current artifact revision.
+    When: The deployed artifact content changes under a new revision.
+    Then: The old specification no longer certifies.
+    """
+    persisted = _walutomat_spec()
+    replacement = replace(
+        walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT,
+        revision="s4c-1-v2",
+        fee_rounding_quantum="0.001",
+    )
+    monkeypatch.setattr(walutomat_artifact, "WALUTOMAT_PRECISION_ARTIFACT", replacement)
+
+    assert (
+        is_effective_spot_precision_certified(
+            "walutomat",
+            persisted,
+            replacement.reviewed_at + timedelta(days=1),
+        )
+        is False
+    )
+
+
+def test_same_revision_artifact_content_change_invalidates_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Artifact certification binds to content independently of revision labels.
+
+    Given: A persisted specification and changed deployed content under the same revision.
+    When: Current-artifact certification recomputes the canonical digest.
+    Then: The old digest fails despite retaining the same well-shaped revision prefix.
+    """
+    persisted = _walutomat_spec()
+    changed_content = replace(
+        walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT,
+        limit_price_max_decimals=5,
+    )
+    monkeypatch.setattr(
+        walutomat_artifact,
+        "WALUTOMAT_PRECISION_ARTIFACT",
+        changed_content,
+    )
+
+    assert (
+        is_effective_spot_precision_certified(
+            "walutomat",
+            persisted,
+            changed_content.reviewed_at + timedelta(days=1),
+        )
+        is False
+    )
 
 
 def test_paper_and_simulated_raise_and_inputs_are_not_mutated() -> None:
@@ -490,7 +746,7 @@ def test_unexpected_failure_becomes_bounded_error() -> None:
         replay_boundary=_boundary(),
         venue_account=_account(),
         instruments_by_public_id=_ExplodingMapping(),
-        specs_by_instrument_public_id={_INSTRUMENT: _spec()},
+        specs_by_instrument_public_id={_INSTRUMENT: _walutomat_spec()},
         asset_precisions={"BTC": _precision("BTC"), "USD": _precision("USD")},
         previously_confirmed_assets=frozenset({"BTC", "USD"}),
         liability_totals={},
@@ -524,13 +780,27 @@ def test_quantum_rejects_missing_boolean_negative_and_unbounded_counts(
     assert spot_module._quantum(decimals) is None
 
 
-@pytest.mark.parametrize("raw", ["", " 1", "invalid", "NaN", "1e-257"])
-def test_exact_decimal_parser_rejects_malformed_nonfinite_and_unbounded(
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        " 1",
+        "invalid",
+        "NaN",
+        "1e-257",
+        "١.٢٣",
+        "+1.23",
+        "-1.23",
+        "1E2",
+        f"0.{'0' * 257}1",
+    ],
+)
+def test_exact_decimal_parser_rejects_nonascii_signed_exponent_and_unbounded(
     raw: str,
 ) -> None:
     """Exact decimal parsing rejects every ambiguous textual boundary.
 
-    Given: Malformed, non-finite, or unbounded decimal text,
+    Given: Malformed, Unicode, signed, exponent-form, or unbounded decimal text,
     When: The exact boundary parser consumes it,
     Then: It raises the stable incomplete signal.
     """
@@ -633,26 +903,31 @@ def test_spot_precision_predicate_rejects_each_uncertified_component(
     When: Effective spot precision is checked,
     Then: Certification is false.
     """
-    assert is_effective_spot_precision_certified(spec, _NOW) is False
+    assert is_effective_spot_precision_certified("kraken", spec, _NOW) is False
 
 
 @pytest.mark.parametrize(
     "evidence",
     [
         None,
-        replace(_precision("BTC"), asset="XBT"),
-        replace(_precision("BTC"), certified=False),
-        replace(_precision("BTC"), observed_at=None),
-        replace(_precision("BTC"), observed_at=datetime(2026, 7, 14, 11, 0)),
-        replace(_precision("BTC"), observed_at=_NOW + timedelta(seconds=1)),
-        replace(_precision("BTC"), source=None),
-        replace(_precision("BTC"), version=None),
-        replace(_precision("BTC"), balance_decimals=None),
-        replace(_precision("BTC"), fee_decimals=None),
+        _changed_precision(_precision("BTC"), asset="XBT"),
+        _changed_precision(_precision("BTC"), exchange="kraken"),
+        _changed_precision(_precision("BTC"), balance_observed_at=None),
+        _changed_precision(
+            _precision("BTC"),
+            balance_observed_at=datetime(2026, 7, 14, 11, 0),
+        ),
+        _changed_precision(
+            _precision("BTC"),
+            balance_observed_at=_NOW + timedelta(seconds=1),
+        ),
+        _changed_precision(_precision("BTC"), balance_source=None),
+        _changed_precision(_precision("BTC"), balance_version=None),
+        _changed_precision(_precision("BTC"), balance_decimals=None),
     ],
 )
 def test_asset_precision_rejects_missing_stale_or_incomplete_evidence(
-    evidence: SpotAssetPrecisionEvidence | None,
+    evidence: SpotAssetPrecisionEvidenceRow | None,
 ) -> None:
     """Every balance and fee precision ambiguity fails closed.
 
@@ -667,6 +942,445 @@ def test_asset_precision_rejects_missing_stale_or_incomplete_evidence(
         "missing_asset_precision",
         "stale_or_uncertified_asset_precision",
     )
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        _changed_precision(_precision("USD"), fee_observed_at=None),
+        _changed_precision(
+            _precision("USD"),
+            fee_observed_at=datetime(2026, 7, 14, 11, 0),
+        ),
+        _changed_precision(
+            _precision("USD"),
+            fee_observed_at=_NOW + timedelta(seconds=1),
+        ),
+        _changed_precision(_precision("USD"), fee_source=None),
+        _changed_precision(_precision("USD"), fee_version=None),
+        _changed_precision(_precision("USD"), fee_decimals=None),
+    ],
+)
+def test_required_fee_precision_uses_its_independent_provenance(
+    evidence: SpotAssetPrecisionEvidenceRow,
+) -> None:
+    """A fee-bearing asset requires its own fresh complete evidence plane.
+
+    Given: Fresh balance evidence with one invalid fee precision component.
+    When: Replay applies a fee in that asset.
+    Then: The independent balance plane cannot certify the fee tolerance.
+    """
+    result = _evaluate(
+        precisions={"BTC": _precision("BTC"), "USD": evidence},
+    )
+
+    assert result["evaluation_status"] == "incomplete"
+    assert result["error"] == "stale_or_uncertified_asset_precision"
+
+
+def test_current_documentary_fee_precision_remains_fresh_while_artifact_is_current() -> None:
+    """The current content-addressed fee rule does not expire at twelve hours.
+
+    Given: Fee precision bound to the exact deployed documentary artifact.
+    When: The fee plane is certified at and well beyond the observed-evidence boundary.
+    Then: It remains certified because the deployed artifact content is still current.
+    """
+    reviewed_at = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT.reviewed_at
+    evaluated_times = (
+        reviewed_at + timedelta(hours=12),
+        reviewed_at + timedelta(days=30),
+    )
+
+    for evaluated_at in evaluated_times:
+        evidence = _documentary_fee_precision("USD", evaluated_at)
+        assert (
+            spot_module._asset_precision(
+                "walutomat",
+                "USD",
+                {"USD": evidence},
+                evaluated_at,
+                True,
+            )
+            is evidence
+        )
+
+
+def test_documentary_fee_source_cannot_certify_balance_precision() -> None:
+    """Documentary fee provenance fails closed on the balance plane.
+
+    Given: Balance decimals carrying the exact current documentary fee provenance.
+    When: Balance precision certification evaluates that asset.
+    Then: The fee-only source cannot certify balance precision.
+    """
+    artifact = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+    evaluated_at = artifact.reviewed_at + timedelta(days=1)
+    evidence = _changed_precision(
+        _precision("USD"),
+        balance_decimals=artifact.fee_decimals,
+        balance_source=walutomat_artifact.WALUTOMAT_DOCUMENTARY_FEE_SOURCE,
+        balance_version=walutomat_artifact.walutomat_precision_artifact_version(artifact),
+        balance_observed_at=artifact.reviewed_at,
+    )
+
+    with pytest.raises(
+        spot_module._IncompleteError,
+        match="stale_or_uncertified_asset_precision",
+    ):
+        spot_module._asset_precision(
+            "walutomat",
+            "USD",
+            {"USD": evidence},
+            evaluated_at,
+            False,
+        )
+
+
+@pytest.mark.parametrize("plane", ["balance", "fee"])
+def test_documentary_instrument_spec_source_certifies_no_asset_plane(
+    plane: precision_certification.SpotPrecisionEvidencePlane,
+) -> None:
+    """Instrument-spec provenance cannot cross-certify per-asset evidence.
+
+    Given: Valid-looking per-asset precision carrying the documentary spec source,
+    When: Either asset evidence plane evaluates that provenance,
+    Then: Certification fails because the source certifies instrument specs only.
+    """
+    artifact = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+    evidence = _changed_precision_plane(
+        _precision("EUR"),
+        plane,
+        2,
+        walutomat_artifact.WALUTOMAT_DOCUMENTARY_SPEC_SOURCE,
+        walutomat_artifact.walutomat_precision_artifact_version(artifact),
+        artifact.reviewed_at,
+    )
+
+    assert (
+        precision_certification.is_spot_precision_plane_certified(
+            "walutomat",
+            "EUR",
+            plane,
+            evidence,
+            artifact.reviewed_at + timedelta(hours=1),
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("plane", ["balance", "fee"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "unrecognized:asset-precision",
+        f"{_WALUTOMAT_OBSERVED_BALANCE_SOURCE}:forged-suffix",
+    ],
+)
+def test_unrecognized_source_certifies_no_asset_plane(
+    plane: precision_certification.SpotPrecisionEvidencePlane,
+    source: str,
+) -> None:
+    """Unknown provenance fails closed even when every other field is fresh.
+
+    Given: Complete, recent precision evidence from an unrecognized source,
+    When: Either asset evidence plane evaluates it,
+    Then: Neither plane is certified by freshness alone.
+    """
+    evidence = _changed_precision_plane(
+        _precision("EUR"),
+        plane,
+        2,
+        source,
+        "test-version",
+        _NOW - timedelta(minutes=1),
+    )
+    assert (
+        precision_certification.is_spot_precision_plane_certified(
+            "walutomat",
+            "EUR",
+            plane,
+            evidence,
+            _NOW,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "forged",
+        walutomat_observed_balance_precision_version("USD", 8, "certified"),
+        walutomat_observed_balance_precision_version("BTC", 2, "certified"),
+    ],
+)
+def test_observed_balance_precision_rejects_forged_or_misbound_version(
+    version: str,
+) -> None:
+    """Observed evidence certifies only its exact content-addressed version.
+
+    Given: Fresh BTC precision carrying a forged, wrong-asset, or wrong-decimals version,
+    When: Reconciliation certifies the observed-balance plane,
+    Then: The version mismatch fails closed despite the recognized source and freshness.
+    """
+    evidence = _changed_precision(_precision("BTC"), balance_version=version)
+
+    with pytest.raises(
+        spot_module._IncompleteError,
+        match="stale_or_uncertified_asset_precision",
+    ):
+        spot_module._asset_precision(
+            "walutomat",
+            "BTC",
+            {"BTC": evidence},
+            _NOW,
+            False,
+        )
+
+
+def test_observed_balance_precision_rejects_an_old_artifact_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changing the artifact floor immediately revokes earlier balance evidence.
+
+    Given: Integer-only evidence produced under the current documentary minimum,
+    When: The deployed artifact raises that minimum while the evidence remains fresh,
+    Then: Certification rejects the old floor-bound content version.
+    """
+    artifact = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+    old_floor = artifact.currency_amount_minimum_decimals
+    assert old_floor is not None
+    observed_at = _NOW - timedelta(minutes=1)
+    candidate = derive_walutomat_precision_from_raw_balances(
+        [
+            NativeBalanceEntry(
+                currency="EUR",
+                total=100.0,
+                free=60.0,
+                used=40.0,
+                total_decimal="100",
+                free_decimal="60",
+                used_decimal="40",
+                numeric_provenance="venue_raw",
+            )
+        ],
+        observed_at,
+    )[0]
+    balance_decimals = candidate.balance_decimals
+    assert balance_decimals is not None
+    assert balance_decimals == old_floor
+    evidence = _changed_precision(
+        _precision(candidate.asset, balance_decimals=balance_decimals),
+        balance_source=candidate.source,
+        balance_version=candidate.version,
+        balance_observed_at=candidate.observed_at,
+    )
+    replacement = replace(
+        artifact,
+        currency_amount_minimum_decimals=old_floor + 1,
+    )
+    monkeypatch.setattr(walutomat_artifact, "WALUTOMAT_PRECISION_ARTIFACT", replacement)
+
+    with pytest.raises(
+        spot_module._IncompleteError,
+        match="stale_or_uncertified_asset_precision",
+    ):
+        spot_module._asset_precision(
+            "walutomat",
+            candidate.asset,
+            {candidate.asset: evidence},
+            _NOW,
+            False,
+        )
+
+
+def test_real_producer_sources_certify_only_their_own_asset_planes() -> None:
+    """Persisted Walutomat sources retain their intended plane compatibility.
+
+    Given: Fresh authenticated-balance evidence and the current documentary fee rule,
+    When: Each source is checked against both per-asset evidence planes,
+    Then: The balance source certifies balance only and the fee source certifies fee only.
+    """
+    artifact = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+    version = walutomat_artifact.walutomat_precision_artifact_version(artifact)
+    observed_at = _NOW - timedelta(minutes=1)
+    balance_candidate = derive_walutomat_precision_from_raw_balances(
+        [
+            NativeBalanceEntry(
+                currency="USD",
+                total=100.0,
+                free=60.0,
+                used=40.0,
+                total_decimal="100.00",
+                free_decimal="60.00",
+                used_decimal="40.00",
+                numeric_provenance="venue_raw",
+            )
+        ],
+        observed_at,
+    )[0]
+
+    assert balance_candidate.balance_decimals is not None
+    assert balance_candidate.source == _WALUTOMAT_OBSERVED_BALANCE_SOURCE
+
+    balance_evidence = _changed_precision_plane(
+        _precision(balance_candidate.asset),
+        "balance",
+        balance_candidate.balance_decimals,
+        balance_candidate.source,
+        balance_candidate.version,
+        balance_candidate.observed_at,
+    )
+    fee_evidence = _changed_precision_plane(
+        _precision("USD"),
+        "fee",
+        artifact.fee_decimals,
+        walutomat_artifact.WALUTOMAT_DOCUMENTARY_FEE_SOURCE,
+        version,
+        artifact.reviewed_at,
+    )
+
+    assert precision_certification.is_spot_precision_plane_certified(
+        "walutomat",
+        balance_candidate.asset,
+        "balance",
+        balance_evidence,
+        _NOW,
+    )
+    assert not precision_certification.is_spot_precision_plane_certified(
+        "walutomat",
+        balance_candidate.asset,
+        "fee",
+        _changed_precision_plane(
+            balance_evidence,
+            "fee",
+            balance_candidate.balance_decimals,
+            balance_candidate.source,
+            balance_candidate.version,
+            balance_candidate.observed_at,
+        ),
+        _NOW,
+    )
+    assert precision_certification.is_spot_precision_plane_certified(
+        "walutomat",
+        "USD",
+        "fee",
+        fee_evidence,
+        _NOW,
+    )
+    assert not precision_certification.is_spot_precision_plane_certified(
+        "walutomat",
+        "USD",
+        "balance",
+        _changed_precision_plane(
+            fee_evidence,
+            "balance",
+            artifact.fee_decimals,
+            walutomat_artifact.WALUTOMAT_DOCUMENTARY_FEE_SOURCE,
+            version,
+            artifact.reviewed_at,
+        ),
+        _NOW,
+    )
+
+
+def test_replaced_artifact_revokes_documentary_fee_precision_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A content replacement revokes old documentary fee evidence without a grace period.
+
+    Given: Persisted fee evidence for the currently deployed artifact.
+    When: Artifact content is replaced and evaluation occurs within twelve hours.
+    Then: The old digest fails closed immediately despite its recent review timestamp.
+    """
+    artifact = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT
+    evaluated_at = artifact.reviewed_at + timedelta(hours=1)
+    evidence = _documentary_fee_precision("USD", evaluated_at)
+    replacement = replace(
+        artifact,
+        fee_policy_url=f"{artifact.fee_policy_url}?replacement=1",
+    )
+    monkeypatch.setattr(walutomat_artifact, "WALUTOMAT_PRECISION_ARTIFACT", replacement)
+
+    with pytest.raises(
+        spot_module._IncompleteError,
+        match="stale_or_uncertified_asset_precision",
+    ):
+        spot_module._asset_precision(
+            "walutomat",
+            "USD",
+            {"USD": evidence},
+            evaluated_at,
+            True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("age", "expected"),
+    [
+        (timedelta(hours=12) - timedelta(microseconds=1), True),
+        (timedelta(hours=12), False),
+    ],
+)
+def test_observed_balance_precision_expires_exactly_at_twelve_hours(
+    age: timedelta,
+    expected: bool,
+) -> None:
+    """Venue-observed precision retains the strict half-open freshness window.
+
+    Given: A complete observed balance plane near its twelve-hour boundary.
+    When: Certification runs immediately before or exactly at that boundary.
+    Then: The former certifies and the latter is stale.
+    """
+    evidence = _changed_precision(
+        _precision("BTC"),
+        balance_observed_at=_NOW - age,
+    )
+
+    if expected:
+        assert (
+            spot_module._asset_precision(
+                "walutomat",
+                "BTC",
+                {"BTC": evidence},
+                _NOW,
+                False,
+            )
+            is evidence
+        )
+    else:
+        with pytest.raises(
+            spot_module._IncompleteError,
+            match="stale_or_uncertified_asset_precision",
+        ):
+            spot_module._asset_precision(
+                "walutomat",
+                "BTC",
+                {"BTC": evidence},
+                _NOW,
+                False,
+            )
+
+
+def test_non_fee_asset_does_not_require_a_fee_evidence_plane() -> None:
+    """An asset without replay fees needs only authenticated balance precision.
+
+    Given: A base asset with fresh balance evidence and an absent fee plane.
+    When: Replay charges its fee in the quote asset instead.
+    Then: The unrelated absent fee plane does not block evaluation.
+    """
+    balance_only = _changed_precision(
+        _precision("BTC"),
+        fee_decimals=None,
+        fee_source=None,
+        fee_version=None,
+        fee_observed_at=None,
+    )
+
+    result = _evaluate(
+        precisions={"BTC": balance_only, "USD": _precision("USD")},
+    )
+
+    assert result["evaluation_status"] == "matched"
 
 
 @pytest.mark.parametrize(
@@ -809,8 +1523,8 @@ def test_replay_boundary_rejects_bad_ordering_clocks_and_cursor_certificate(
         (_execution(quote_asset="BTC"), "unresolved_or_conflicting_instrument"),
         (_execution(base_asset="BTC", quote_asset="BTC"), "unresolved_or_conflicting_instrument"),
         (_execution(price=0.0, price_decimal="0"), "invalid_execution_economics"),
-        (_execution(size=-1.0, size_decimal="-1"), "invalid_execution_economics"),
-        (_execution(fee=-1.0, fee_decimal="-1"), "invalid_execution_economics"),
+        (_execution(size=-1.0, size_decimal="-1"), "malformed_decimal"),
+        (_execution(fee=-1.0, fee_decimal="-1"), "malformed_decimal"),
         (_execution(side="hold"), "invalid_execution_side"),
         (_execution(fee_asset="", fee=0.01), "missing_fee_asset"),
     ],
@@ -924,7 +1638,25 @@ def test_defensive_precision_parsing_handles_invalid_string_object() -> None:
     Then: The predicate returns false without leaking an exception.
     """
     spec = _changed_spec(tick_size=cast(float, _InvalidDecimalText()))
-    assert is_effective_spot_precision_certified(spec, _NOW) is False
+    assert is_effective_spot_precision_certified("kraken", spec, _NOW) is False
+
+
+@pytest.mark.parametrize("lot_size", [None, True, cast(float, _InvalidDecimalText())])
+def test_documentary_precision_rejects_missing_boolean_or_malformed_lot(
+    lot_size: float | None,
+) -> None:
+    """Documentary certification validates its persisted lot-size projection.
+
+    Given: A current-artifact spec with a missing, boolean, or malformed lot size.
+    When: Documentary precision is certified after its review date.
+    Then: The artifact path returns false without accepting or leaking the invalid value.
+    """
+    values: dict[str, object] = dict(_walutomat_spec())
+    values["lot_size"] = lot_size
+    spec = cast(InstrumentSpecRow, values)
+    evaluated_at = walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT.reviewed_at + timedelta(days=1)
+
+    assert is_effective_spot_precision_certified("walutomat", spec, evaluated_at) is False
 
 
 def test_zero_fee_asset_and_zero_liability_remain_in_asset_union() -> None:
@@ -1022,7 +1754,7 @@ def test_defensive_unreachable_precision_and_tolerance_guards(
     monkeypatch.setattr(
         spot_module,
         "_asset_precision",
-        lambda *_: replace(_precision("BTC"), balance_decimals=None),
+        lambda *_: _changed_precision(_precision("BTC"), balance_decimals=None),
     )
     invalid_balance = _evaluate()
     assert invalid_balance["error"] == "invalid_balance_precision"
@@ -1030,7 +1762,10 @@ def test_defensive_unreachable_precision_and_tolerance_guards(
     monkeypatch.setattr(
         spot_module,
         "_asset_precision",
-        lambda asset, *_: replace(_precision(asset), fee_decimals=None),
+        lambda _exchange, asset, *_: _changed_precision(
+            _precision(asset),
+            fee_decimals=None,
+        ),
     )
     invalid_fee = _evaluate()
     assert invalid_fee["error"] == "invalid_fee_precision"
@@ -1069,3 +1804,37 @@ def test_defensive_empty_union_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(spot_module, "_venue_balances", lambda *_: ({}, {}))
     result = _evaluate(replay=[], confirmed=frozenset())
     assert result["error"] == "empty_inventory"
+
+
+def test_documentary_fee_plane_rejects_unparseable_artifact_quantum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a corrupt artifact fee quantum fails certification closed.
+
+    Given: A deployed documentary artifact whose fee rounding quantum cannot
+        parse as a decimal,
+    When: The documentary fee plane is certified,
+    Then: Certification is refused instead of trusting the corrupt artifact.
+    """
+    corrupt = replace(
+        walutomat_artifact.WALUTOMAT_PRECISION_ARTIFACT,
+        fee_rounding_quantum="not-a-decimal",
+    )
+    monkeypatch.setattr(walutomat_artifact, "WALUTOMAT_PRECISION_ARTIFACT", corrupt)
+    assert (
+        precision_certification.is_spot_precision_plane_certified(
+            "walutomat",
+            "USD",
+            "fee",
+            _changed_precision_plane(
+                _precision("USD"),
+                "fee",
+                2,
+                walutomat_artifact.WALUTOMAT_DOCUMENTARY_FEE_SOURCE,
+                "s4c-1-v1:" + "0" * 64,
+                datetime(2026, 7, 16, tzinfo=UTC),
+            ),
+            datetime(2026, 7, 16, 1, tzinfo=UTC),
+        )
+        is False
+    )

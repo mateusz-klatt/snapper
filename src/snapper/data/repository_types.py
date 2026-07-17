@@ -1148,6 +1148,39 @@ class InstrumentSpecRow(TypedDict):
     max_funding_rate: float | None
 
 
+class SpotAssetPrecisionEvidenceRow(TypedDict):
+    """Active precision evidence for one exact venue asset identity."""
+
+    exchange: str
+    asset: str
+    balance_decimals: int | None
+    balance_source: str | None
+    balance_version: str | None
+    balance_observed_at: datetime | None
+    fee_decimals: int | None
+    fee_source: str | None
+    fee_version: str | None
+    fee_observed_at: datetime | None
+
+
+class SpotAssetPrecisionEvidenceUpsertRow(TypedDict):
+    """SCD2 write payload with independently replaceable evidence planes."""
+
+    exchange: str
+    asset: str
+    balance_decimals: int | None
+    balance_source: str | None
+    balance_version: str | None
+    balance_observed_at: datetime | None
+    fee_decimals: int | None
+    fee_source: str | None
+    fee_version: str | None
+    fee_observed_at: datetime | None
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
 @dataclass(frozen=True)
 class FuturesReconciliationBundle:
     """One transactionally consistent futures evaluator input bundle."""

@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Generator
+from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
 from datetime import UTC
@@ -71,6 +72,8 @@ from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import OrderInsertRow
 from snapper.data.repository_types import ShadowCandleUpsertRow
+from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
+from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import TradeRow
@@ -1790,6 +1793,24 @@ class DummyRepository(Repository):
         """Revise instrument spec - no-op returning 0."""
         return 0
 
+    async def upsert_spot_asset_precision_evidence(
+        self,
+        row: SpotAssetPrecisionEvidenceUpsertRow,
+    ) -> int:
+        """Upsert spot precision evidence - no-op returning 0."""
+        del row
+        return 0
+
+    async def get_spot_asset_precision_evidence(
+        self,
+        exchange: str,
+        assets: Sequence[str],
+        as_of: datetime,
+    ) -> dict[str, SpotAssetPrecisionEvidenceRow]:
+        """Read no spot precision evidence for the dummy repository."""
+        del exchange, assets, as_of
+        return {}
+
     async def get_latest_candle_ids(
         self, as_of: datetime
     ) -> dict[tuple[str, str], tuple[datetime, str]]:
@@ -3011,6 +3032,24 @@ class _MinimalRepository(Repository):
         spec: InstrumentSpecInput,
     ) -> int:
         return 0
+
+    async def upsert_spot_asset_precision_evidence(
+        self,
+        row: SpotAssetPrecisionEvidenceUpsertRow,
+    ) -> int:
+        """Upsert no spot precision evidence for the minimal repository."""
+        del row
+        return 0
+
+    async def get_spot_asset_precision_evidence(
+        self,
+        exchange: str,
+        assets: Sequence[str],
+        as_of: datetime,
+    ) -> dict[str, SpotAssetPrecisionEvidenceRow]:
+        """Read no spot precision evidence for the minimal repository."""
+        del exchange, assets, as_of
+        return {}
 
     async def get_candles(
         self,

@@ -33,6 +33,9 @@ from loguru import logger
 from snapper.application.engine.service import compute_shard_key
 from snapper.application.portfolio.account_view import build_portfolio_account_state
 from snapper.application.portfolio.reconciliation_dispatch import dispatch_portfolio_reconciliation
+from snapper.application.portfolio.spot_precision_evidence import (
+    derive_walutomat_precision_from_raw_balances,
+)
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
 from snapper.application.trade.command_request import order_request_from_command
@@ -67,6 +70,7 @@ from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import RecordVenueEventParams
+from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueAccountAttemptRow
 from snapper.data.repository_types import VenueEventRow
@@ -271,6 +275,7 @@ also reports ``deferred``; ``no_gap`` is the ordinary clean outcome."""
 
 _RecoveryWatermarks = tuple[float, float, list[VenueEventRow], dict[str, float]]
 _PortfolioReconciliationKey = tuple[str, str, str, str, int]
+_SpotPrecisionEvidenceWork = tuple[SQLAlchemyRepository, VenueAccountAttemptRow]
 
 
 @dataclass(frozen=True)
@@ -372,6 +377,8 @@ recorded as an ``error`` observation (last-good retained, stale-visible) and
 never blocks the observer loop or the order-reconciliation cycle."""
 _PORTFOLIO_RECONCILIATION_TIMEOUT_S = 60.0
 """Bound on the complete observer-side portfolio reconciliation branch."""
+_SPOT_PRECISION_EVIDENCE_TIMEOUT_S = 3.0
+"""Bound on one detached balance-precision persistence observation."""
 _ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG = (
     "balance reader returned data under a non-observable capability"
 )
@@ -640,6 +647,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._account_observer_tasks: set[asyncio.Task[None]] = set()
         self._portfolio_drift_notification_tasks: set[asyncio.Task[None]] = set()
         self._account_state_invalidation_tasks: set[asyncio.Task[None]] = set()
+        self._spot_precision_evidence_tasks: set[asyncio.Task[None]] = set()
+        self._spot_precision_evidence_active_tasks: dict[str, asyncio.Task[None]] = {}
+        self._spot_precision_evidence_in_flight: dict[str, _SpotPrecisionEvidenceWork] = {}
+        self._spot_precision_evidence_pending_latest: dict[str, _SpotPrecisionEvidenceWork] = {}
         self._portfolio_reconciliation_dispatch_open = False
         self._portfolio_reconciliation_failure_count = 0
         self._last_portfolio_reconciliation_error = ""
@@ -1505,8 +1516,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """Stop the execution service and close ZMQ connections.
 
         The account observer is cancelled and awaited before observer-owned
-        reconciliation and publication work is drained. The running flag and
-        ZMQ resources then close together so cancellation during either drain
+        reconciliation, precision-evidence, and publication work is drained.
+        The running flag and ZMQ resources then close together so cancellation during either drain
         cannot make a later stop skip socket teardown. The exchange client is
         disconnected as an idempotent FALLBACK — but
         ONLY when ``start()`` does not currently own the client
@@ -3265,7 +3276,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             self._account_observer_tasks.difference_update(tasks)
 
     async def _close_and_drain_portfolio_reconciliation(self) -> None:
-        """Close dispatch and drain producers before all invalidation work."""
+        """Close dispatch and drain every observer-owned post-commit task."""
         self._portfolio_reconciliation_dispatch_open = False
         while self._portfolio_reconciliation_tasks or self._portfolio_drift_notification_tasks:
             reconciliation_tasks = tuple(self._portfolio_reconciliation_tasks.items())
@@ -3278,6 +3289,28 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 if self._portfolio_reconciliation_tasks.get(key) is task:
                     self._portfolio_reconciliation_tasks.pop(key, None)
             self._portfolio_drift_notification_tasks.difference_update(notification_tasks)
+        pending_evidence = tuple(self._spot_precision_evidence_pending_latest.items())
+        self._spot_precision_evidence_pending_latest.clear()
+        active_evidence_tasks = tuple(self._spot_precision_evidence_tasks)
+        pending_attempts = tuple(
+            asyncio.create_task(
+                self._attempt_walutomat_balance_precision(exchange, work),
+                name=f"spot-balance-precision-drain:{exchange}",
+            )
+            for exchange, work in pending_evidence
+        )
+        evidence_tasks = active_evidence_tasks + pending_attempts
+        if evidence_tasks:
+            _, unfinished_tasks = await asyncio.wait(
+                evidence_tasks,
+                timeout=_SPOT_PRECISION_EVIDENCE_TIMEOUT_S,
+            )
+            for task in unfinished_tasks:
+                task.cancel()
+            await asyncio.gather(*evidence_tasks, return_exceptions=True)
+            self._spot_precision_evidence_tasks.difference_update(active_evidence_tasks)
+        self._spot_precision_evidence_active_tasks.clear()
+        self._spot_precision_evidence_in_flight.clear()
         while self._account_state_invalidation_tasks:
             invalidation_tasks = tuple(self._account_state_invalidation_tasks)
             for task in invalidation_tasks:
@@ -3545,6 +3578,176 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._account_state_invalidation_tasks.add(task)
         task.add_done_callback(self._account_state_invalidation_tasks.discard)
 
+    @staticmethod
+    def _retained_walutomat_raw_balances(balances_json: str) -> list[NativeBalanceEntry]:
+        """Rebuild every venue-raw row from a committed attempt payload."""
+        payload = cast(list[dict[str, JsonValue]], json.loads(balances_json))
+        entries: list[NativeBalanceEntry] = []
+        for item in payload:
+            if item.get("numeric_provenance") != "venue_raw":
+                continue
+            entries.append(
+                NativeBalanceEntry(
+                    currency=cast(str, item["currency"]),
+                    total=cast(float, item["total"]),
+                    free=cast(float | None, item["free"]),
+                    used=cast(float | None, item["used"]),
+                    total_decimal=cast(str | None, item.get("total_decimal")),
+                    free_decimal=cast(str | None, item.get("free_decimal")),
+                    used_decimal=cast(str | None, item.get("used_decimal")),
+                    numeric_provenance="venue_raw",
+                )
+            )
+        return entries
+
+    async def _persist_walutomat_balance_precision(
+        self,
+        repository: SQLAlchemyRepository,
+        attempt: VenueAccountAttemptRow,
+    ) -> None:
+        """Persist authenticated raw-balance precision without affecting observation."""
+        if attempt["exchange"] != ExchangeEnum.WALUTOMAT.value:
+            return
+        balances_json = attempt["balances_json"]
+        observed_at = attempt["balance_observed_at"]
+        if balances_json is None or observed_at is None:
+            return
+        try:
+            entries = self._retained_walutomat_raw_balances(balances_json)
+            candidates = derive_walutomat_precision_from_raw_balances(entries, observed_at)
+        except Exception as exc:
+            logger.warning(
+                "Walutomat balance precision derivation failed after snapshot commit: {}",
+                exc,
+            )
+            return
+        persisted_at = datetime.now(UTC)
+        for candidate in candidates:
+            row = SpotAssetPrecisionEvidenceUpsertRow(
+                exchange=candidate.exchange,
+                asset=candidate.asset,
+                balance_decimals=candidate.balance_decimals,
+                balance_source=candidate.source,
+                balance_version=candidate.version,
+                balance_observed_at=observed_at,
+                fee_decimals=candidate.fee_decimals,
+                fee_source=None,
+                fee_version=None,
+                fee_observed_at=None,
+                session_id=attempt["session_id"],
+                sequence_id=attempt["sequence_id"],
+                timestamp=persisted_at,
+            )
+            try:
+                await repository.upsert_spot_asset_precision_evidence(row)
+            except Exception as exc:
+                logger.warning(
+                    "Walutomat balance precision persistence failed after snapshot commit: {}",
+                    exc,
+                )
+
+    async def _attempt_walutomat_balance_precision(
+        self,
+        exchange: str,
+        work: _SpotPrecisionEvidenceWork,
+    ) -> None:
+        """Attempt one bounded best-effort balance-precision persistence."""
+        repository, attempt = work
+        try:
+            async with asyncio.timeout(_SPOT_PRECISION_EVIDENCE_TIMEOUT_S):
+                await self._persist_walutomat_balance_precision(repository, attempt)
+        except TimeoutError:
+            logger.warning(
+                "Walutomat balance precision persistence timed out after {:.1f}s for {}",
+                _SPOT_PRECISION_EVIDENCE_TIMEOUT_S,
+                exchange,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Walutomat balance precision worker failed after snapshot commit: {}",
+                exc,
+            )
+
+    async def _run_walutomat_balance_precision(
+        self,
+        exchange: str,
+        initial: _SpotPrecisionEvidenceWork,
+    ) -> None:
+        """Persist one exchange at a time while retaining only its latest pending state."""
+        current = initial
+        self._spot_precision_evidence_in_flight[exchange] = current
+        try:
+            while True:
+                await self._attempt_walutomat_balance_precision(exchange, current)
+                pending = self._spot_precision_evidence_pending_latest.get(exchange)
+                if pending is None:
+                    return
+                self._spot_precision_evidence_in_flight[exchange] = pending
+                current = self._spot_precision_evidence_pending_latest.pop(exchange)
+        finally:
+            if self._spot_precision_evidence_in_flight.get(exchange) is current:
+                self._spot_precision_evidence_in_flight.pop(exchange, None)
+
+    def _spot_precision_evidence_task_done(
+        self,
+        exchange: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        """Release exact task ownership and retrieve any escaped failure."""
+        self._spot_precision_evidence_tasks.discard(task)
+        if self._spot_precision_evidence_active_tasks.get(exchange) is task:
+            self._spot_precision_evidence_active_tasks.pop(exchange, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning(
+                "Walutomat balance precision task escaped containment: {}",
+                error,
+            )
+
+    def _schedule_walutomat_balance_precision(
+        self,
+        repository: SQLAlchemyRepository,
+        attempt: VenueAccountAttemptRow,
+    ) -> None:
+        """Start one owned best-effort precision write for authenticated balances."""
+        if (
+            attempt["exchange"] != ExchangeEnum.WALUTOMAT.value
+            or attempt["balance_status"] != "observed"
+            or attempt["balances_json"] is None
+            or attempt["balance_observed_at"] is None
+        ):
+            return
+        exchange = attempt["exchange"]
+        work = (repository, attempt)
+        existing = self._spot_precision_evidence_active_tasks.get(exchange)
+        if existing is not None and not existing.done():
+            self._spot_precision_evidence_pending_latest[exchange] = work
+            return
+        self._spot_precision_evidence_pending_latest.pop(exchange, None)
+        runner = self._run_walutomat_balance_precision(exchange, work)
+        try:
+            task = asyncio.create_task(
+                runner,
+                name=f"spot-balance-precision:{attempt['wallet_public_id']}:walutomat",
+            )
+        except Exception as exc:
+            runner.close()
+            logger.warning(
+                "Walutomat balance precision scheduling failed after snapshot commit: {}",
+                exc,
+            )
+            return
+        self._spot_precision_evidence_in_flight[exchange] = work
+        self._spot_precision_evidence_active_tasks[exchange] = task
+        self._spot_precision_evidence_tasks.add(task)
+        task.add_done_callback(
+            lambda completed: self._spot_precision_evidence_task_done(exchange, completed)
+        )
+
     async def _run_portfolio_reconciliation(self, work: _PortfolioReconciliationWork) -> None:
         """Evaluate and persist one exact account-state version within a hard bound."""
         repository = self._require_sqlalchemy_repository()
@@ -3679,6 +3882,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             "bus_time": now,
         }
         state_id = await repository.record_venue_account_snapshot(attempt)
+        self._schedule_walutomat_balance_precision(repository, attempt)
         self._schedule_portfolio_reconciliation(
             state_id=state_id,
             attempt=attempt,

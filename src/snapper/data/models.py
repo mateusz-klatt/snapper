@@ -201,6 +201,7 @@ __all__ = [
     "SymbolMarketDataChannelCapability",
     "ProcessRun",
     "InstrumentSpec",
+    "SpotAssetPrecisionEvidence",
     "UnderlyingAsset",
     "InstrumentUnderlyingMapping",
     "MarketSnapshot",
@@ -2101,6 +2102,109 @@ class InstrumentSpec(TemporalMixin, Base):
     unit_certified: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+
+
+class SpotAssetPrecisionEvidence(TemporalMixin, Base):
+    """Versioned independent venue evidence for balance and fee precision.
+
+    Balance fields retain the latest chronological observation while the
+    maximum and its provenance form one monotonic tuple for read projection.
+    """
+
+    __tablename__ = "spot_asset_precision_evidence"
+    __table_args__ = (
+        Index(
+            "uq_spot_asset_precision_evidence_exchange_asset",
+            "exchange",
+            "asset",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_spot_asset_precision_evidence_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_spot_asset_precision_evidence_temporal",
+            "exchange",
+            "asset",
+            "known_to",
+            "timestamp",
+        ),
+        CheckConstraint(
+            _CK_EXCHANGE_LOWER,
+            name="ck_spot_asset_precision_evidence_exchange_lower",
+        ),
+        CheckConstraint(
+            "LENGTH(TRIM(asset)) > 0 AND asset = TRIM(asset) AND "
+            "(balance_source IS NULL OR (LENGTH(TRIM(balance_source)) > 0 AND "
+            "balance_source = TRIM(balance_source))) AND "
+            "(balance_version IS NULL OR (LENGTH(TRIM(balance_version)) > 0 AND "
+            "balance_version = TRIM(balance_version))) AND "
+            "(balance_max_source IS NULL OR (LENGTH(TRIM(balance_max_source)) > 0 AND "
+            "balance_max_source = TRIM(balance_max_source))) AND "
+            "(balance_max_version IS NULL OR (LENGTH(TRIM(balance_max_version)) > 0 AND "
+            "balance_max_version = TRIM(balance_max_version))) AND "
+            "(fee_source IS NULL OR (LENGTH(TRIM(fee_source)) > 0 AND "
+            "fee_source = TRIM(fee_source))) AND "
+            "(fee_version IS NULL OR (LENGTH(TRIM(fee_version)) > 0 AND "
+            "fee_version = TRIM(fee_version)))",
+            name="ck_spot_asset_precision_evidence_text",
+        ),
+        CheckConstraint(
+            "(balance_source IS NULL AND balance_version IS NULL AND "
+            "balance_observed_at IS NULL AND balance_decimals IS NULL) OR "
+            "(balance_source IS NOT NULL AND balance_version IS NOT NULL AND "
+            "balance_observed_at IS NOT NULL)",
+            name="ck_spot_asset_precision_evidence_balance_provenance",
+        ),
+        CheckConstraint(
+            "(balance_decimals_max IS NULL AND balance_max_source IS NULL AND "
+            "balance_max_version IS NULL AND balance_max_observed_at IS NULL) OR "
+            "(balance_decimals_max IS NOT NULL AND balance_max_source IS NOT NULL AND "
+            "balance_max_version IS NOT NULL AND balance_max_observed_at IS NOT NULL)",
+            name="ck_spot_asset_precision_evidence_balance_max_provenance",
+        ),
+        CheckConstraint(
+            "(fee_source IS NULL AND fee_version IS NULL AND fee_observed_at IS NULL AND "
+            "fee_decimals IS NULL) OR (fee_source IS NOT NULL AND fee_version IS NOT NULL "
+            "AND fee_observed_at IS NOT NULL)",
+            name="ck_spot_asset_precision_evidence_fee_provenance",
+        ),
+        CheckConstraint(
+            "balance_observed_at IS NOT NULL OR fee_observed_at IS NOT NULL",
+            name="ck_spot_asset_precision_evidence_observed_plane",
+        ),
+        CheckConstraint(
+            "(balance_decimals IS NULL OR balance_decimals BETWEEN 0 AND 256) AND "
+            "(balance_decimals_max IS NULL OR balance_decimals_max BETWEEN 0 AND 256) AND "
+            "(fee_decimals IS NULL OR fee_decimals BETWEEN 0 AND 256)",
+            name="ck_spot_asset_precision_evidence_decimals",
+        ),
+        CheckConstraint(
+            "balance_decimals IS NULL OR (balance_decimals_max IS NOT NULL AND "
+            "balance_decimals_max >= balance_decimals)",
+            name="ck_spot_asset_precision_evidence_balance_ratchet",
+        ),
+    )
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    asset: Mapped[str] = mapped_column(String(16), nullable=False)
+    balance_decimals: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    balance_decimals_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    balance_max_source: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    balance_max_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    balance_max_observed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    balance_source: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    balance_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    balance_observed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    fee_decimals: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fee_source: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    fee_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    fee_observed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
 class MarketSnapshot(TemporalMixin, Base):

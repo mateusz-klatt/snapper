@@ -23,6 +23,7 @@ from snapper.core.types import ExchangeEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
+from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
 from snapper.data.repository_types import VenueAccountAttemptRow
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
@@ -68,6 +69,7 @@ def _make_executor() -> Any:
     ex.wallet_public_id = "wallet-1"
     ex.repository = MagicMock(spec=SQLAlchemyRepository)
     ex.repository.record_venue_account_snapshot = AsyncMock(return_value=1)
+    ex.repository.upsert_spot_asset_precision_evidence = AsyncMock(return_value=1)
     ex.repository.get_portfolio_drift_episode_transition = AsyncMock(return_value=None)
     return ex
 
@@ -885,6 +887,524 @@ class TestObserveAccountOnce:
         assert attempt["position_status"] == "not_applicable"
         assert attempt["open_positions_json"] is None
         client.read_native_positions.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_walutomat_raw_balance_precision_uses_retained_observation(self) -> None:
+        """Only complete authenticated raw triplets become balance evidence.
+
+        Given: A committed Walutomat balance payload containing one venue-raw
+            triplet, one legacy-float triplet, and one incomplete raw triplet.
+        When: The account observer completes its snapshot cycle.
+        Then: The complete and incomplete raw assets are persisted with the
+            balance observation time while the independent fee plane is untouched.
+        """
+        ex = _make_executor()
+        ex._get_exchange_name = MagicMock(return_value=ExchangeEnum.WALUTOMAT)
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.NOT_APPLICABLE)
+        client.read_native_balances = AsyncMock(
+            return_value=[
+                NativeBalanceEntry(
+                    currency="EUR",
+                    total=100.25,
+                    free=80.0,
+                    used=20.25,
+                    total_decimal="100.25",
+                    free_decimal="80.00",
+                    used_decimal="20.25",
+                    numeric_provenance="venue_raw",
+                ),
+                NativeBalanceEntry(
+                    currency="PLN",
+                    total=10.0,
+                    free=8.0,
+                    used=2.0,
+                    total_decimal="10.00",
+                    free_decimal="8.00",
+                    used_decimal="2.00",
+                ),
+                NativeBalanceEntry(
+                    currency="USD",
+                    total=5.0,
+                    free=4.0,
+                    used=1.0,
+                    total_decimal="5.00",
+                    free_decimal=None,
+                    used_decimal="1.00",
+                    numeric_provenance="venue_raw",
+                ),
+            ]
+        )
+        ex.exchange_client = client
+        persisted: list[SpotAssetPrecisionEvidenceUpsertRow] = []
+        completed = asyncio.Event()
+
+        async def upsert(row: SpotAssetPrecisionEvidenceUpsertRow) -> int:
+            persisted.append(row)
+            if len(persisted) == 2:
+                completed.set()
+            return 9
+
+        ex.repository.upsert_spot_asset_precision_evidence = AsyncMock(side_effect=upsert)
+        observation_time = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+        persistence_time = observation_time + timedelta(seconds=2)
+
+        with patch.object(base_module, "datetime") as datetime_type:
+            datetime_type.now.side_effect = [observation_time, persistence_time]
+            await ex._observe_account_once()
+            await asyncio.wait_for(completed.wait(), timeout=0.1)
+            await asyncio.sleep(0)
+
+        attempt = ex.repository.record_venue_account_snapshot.await_args.args[0]
+        assert len(persisted) == 2
+        rows = {row["asset"]: row for row in persisted}
+        row = rows["EUR"]
+        assert row["exchange"] == ExchangeEnum.WALUTOMAT.value
+        assert row["asset"] == "EUR"
+        assert row["balance_decimals"] == 2
+        balance_source = row["balance_source"]
+        balance_version = row["balance_version"]
+        assert balance_source is not None
+        assert balance_version is not None
+        assert "account/balances" in balance_source
+        assert balance_version.startswith("spot-asset-precision-v1:")
+        assert attempt["balance_observed_at"] == observation_time
+        assert row["balance_observed_at"] == observation_time
+        assert row["timestamp"] == persistence_time
+        assert row["session_id"] == attempt["session_id"]
+        assert row["sequence_id"] == attempt["sequence_id"]
+        assert row["fee_decimals"] is None
+        assert row["fee_source"] is None
+        assert row["fee_version"] is None
+        assert row["fee_observed_at"] is None
+        assert rows["USD"]["balance_decimals"] is None
+        assert rows["USD"]["balance_observed_at"] == attempt["balance_observed_at"]
+        assert ex._spot_precision_evidence_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_walutomat_incomplete_duplicate_prevents_balance_certification(self) -> None:
+        """An incomplete duplicate cannot be filtered out before derivation.
+
+        Given: Complete and incomplete venue-raw rows for the same Walutomat asset.
+        When: The committed payload is converted into balance precision evidence.
+        Then: The asset is persisted as uncertified because every duplicate must agree.
+        """
+        ex = _make_executor()
+        ex._get_exchange_name = MagicMock(return_value=ExchangeEnum.WALUTOMAT)
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.NOT_APPLICABLE)
+        client.read_native_balances = AsyncMock(
+            return_value=[
+                NativeBalanceEntry(
+                    currency="EUR",
+                    total=1.0,
+                    free=1.0,
+                    used=0.0,
+                    total_decimal="1.00",
+                    free_decimal="1.00",
+                    used_decimal="0.00",
+                    numeric_provenance="venue_raw",
+                ),
+                NativeBalanceEntry(
+                    currency="EUR",
+                    total=2.0,
+                    free=2.0,
+                    used=0.0,
+                    total_decimal="2.00",
+                    free_decimal=None,
+                    used_decimal="0.00",
+                    numeric_provenance="venue_raw",
+                ),
+            ]
+        )
+        ex.exchange_client = client
+        completed = asyncio.Event()
+        persisted: list[SpotAssetPrecisionEvidenceUpsertRow] = []
+
+        async def upsert(row: SpotAssetPrecisionEvidenceUpsertRow) -> int:
+            persisted.append(row)
+            completed.set()
+            return 10
+
+        ex.repository.upsert_spot_asset_precision_evidence = AsyncMock(side_effect=upsert)
+
+        await ex._observe_account_once()
+        await asyncio.wait_for(completed.wait(), timeout=0.1)
+        await asyncio.sleep(0)
+
+        assert len(persisted) == 1
+        assert persisted[0]["asset"] == "EUR"
+        assert persisted[0]["balance_decimals"] is None
+        assert persisted[0]["balance_source"] is not None
+        assert persisted[0]["balance_observed_at"] is not None
+        assert ex._spot_precision_evidence_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_walutomat_precision_shutdown_drains_latest_then_cancels_worker(self) -> None:
+        """Shutdown attempts the retained latest observation before cancellation.
+
+        Given: Two committed Walutomat snapshots whose first precision upsert blocks.
+        When: Shutdown drains the owned evidence work.
+        Then: Required followups are already scheduled, the pending latest
+            observation is persisted, and only then is the worker cancelled.
+        """
+        ex = _make_executor()
+        ex._get_exchange_name = MagicMock(return_value=ExchangeEnum.WALUTOMAT)
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.NOT_APPLICABLE)
+        client.read_native_balances = AsyncMock(
+            return_value=[
+                NativeBalanceEntry(
+                    currency="EUR",
+                    total=1.0,
+                    free=1.0,
+                    used=0.0,
+                    total_decimal="1.00",
+                    free_decimal="1.00",
+                    used_decimal="0.00",
+                    numeric_provenance="venue_raw",
+                )
+            ]
+        )
+        ex.exchange_client = client
+        ex._schedule_portfolio_reconciliation = MagicMock()
+        ex._schedule_account_state_changed = MagicMock()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        persistence_order: list[str] = []
+        upsert_count = 0
+
+        async def blocked_upsert(_row: SpotAssetPrecisionEvidenceUpsertRow) -> int:
+            nonlocal upsert_count
+            upsert_count += 1
+            if upsert_count == 2:
+                persistence_order.append("pending persisted")
+                return 2
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                persistence_order.append("worker cancelled")
+                cancelled.set()
+            return 1
+
+        ex.repository.upsert_spot_asset_precision_evidence = AsyncMock(side_effect=blocked_upsert)
+
+        await asyncio.wait_for(ex._observe_account_once(), timeout=0.1)
+        await asyncio.wait_for(started.wait(), timeout=0.1)
+        await asyncio.wait_for(ex._observe_account_once(), timeout=0.1)
+
+        assert ex._schedule_portfolio_reconciliation.call_count == 2
+        assert ex._schedule_account_state_changed.call_count == 2
+        assert len(ex._spot_precision_evidence_tasks) == 1
+        assert ExchangeEnum.WALUTOMAT.value in ex._spot_precision_evidence_pending_latest
+
+        with patch.object(base_module, "_SPOT_PRECISION_EVIDENCE_TIMEOUT_S", 0.01):
+            await ex._close_and_drain_portfolio_reconciliation()
+
+        assert cancelled.is_set()
+        assert persistence_order == ["pending persisted", "worker cancelled"]
+        assert ex.repository.upsert_spot_asset_precision_evidence.await_count == 2
+        assert ex._spot_precision_evidence_tasks == set()
+        assert ex._spot_precision_evidence_active_tasks == {}
+        assert ex._spot_precision_evidence_in_flight == {}
+        assert ex._spot_precision_evidence_pending_latest == {}
+
+    @pytest.mark.asyncio
+    async def test_walutomat_precision_shutdown_awaits_claimed_latest_in_flight(self) -> None:
+        """Shutdown lets a claimed latest observation finish persistence.
+
+        Given: A latest pending observation claimed by the exchange worker while
+            its durable persistence is blocked.
+        When: Shutdown begins after the pending-to-in-flight handoff.
+        Then: Shutdown awaits that persistence within its grace bound instead of
+            cancelling it after finding the pending slot empty.
+        """
+        ex = _make_executor()
+        attempts = [_portfolio_attempt(sequence_id=sequence_id) for sequence_id in (1, 2)]
+        for attempt in attempts:
+            attempt["exchange"] = ExchangeEnum.WALUTOMAT.value
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        latest_started = asyncio.Event()
+        release_latest = asyncio.Event()
+        latest_cancelled = asyncio.Event()
+        completed_sequences: list[int] = []
+
+        async def persist(
+            _repository: SQLAlchemyRepository,
+            attempt: VenueAccountAttemptRow,
+        ) -> None:
+            if attempt["sequence_id"] == 1:
+                first_started.set()
+                await release_first.wait()
+            else:
+                latest_started.set()
+                try:
+                    await release_latest.wait()
+                except asyncio.CancelledError:
+                    latest_cancelled.set()
+                    raise
+            completed_sequences.append(attempt["sequence_id"])
+
+        ex._persist_walutomat_balance_precision = AsyncMock(side_effect=persist)
+
+        ex._schedule_walutomat_balance_precision(ex.repository, attempts[0])
+        await asyncio.wait_for(first_started.wait(), timeout=0.1)
+        ex._schedule_walutomat_balance_precision(ex.repository, attempts[1])
+        release_first.set()
+        await asyncio.wait_for(latest_started.wait(), timeout=0.1)
+
+        exchange = ExchangeEnum.WALUTOMAT.value
+        assert ex._spot_precision_evidence_pending_latest == {}
+        assert ex._spot_precision_evidence_in_flight[exchange][1] is attempts[1]
+
+        shutdown = asyncio.create_task(ex._close_and_drain_portfolio_reconciliation())
+        await asyncio.sleep(0)
+
+        assert not shutdown.done()
+        assert not latest_cancelled.is_set()
+
+        release_latest.set()
+        await asyncio.wait_for(shutdown, timeout=0.1)
+
+        assert completed_sequences == [1, 2]
+        assert not latest_cancelled.is_set()
+        assert ex._spot_precision_evidence_tasks == set()
+        assert ex._spot_precision_evidence_active_tasks == {}
+        assert ex._spot_precision_evidence_in_flight == {}
+        assert ex._spot_precision_evidence_pending_latest == {}
+
+    @pytest.mark.asyncio
+    async def test_walutomat_precision_write_times_out_and_releases_ownership(self) -> None:
+        """A stuck detached persistence attempt is cancelled at its hard deadline.
+
+        Given: One precision worker blocked inside durable persistence.
+        When: Its short evidence deadline expires.
+        Then: The write is cancelled and every ownership slot is released.
+        """
+        ex = _make_executor()
+        attempt = _portfolio_attempt(sequence_id=11)
+        attempt["exchange"] = ExchangeEnum.WALUTOMAT.value
+        attempt["balances_json"] = ex._serialize_native_balances(
+            [
+                NativeBalanceEntry(
+                    currency="EUR",
+                    total=1.0,
+                    free=1.0,
+                    used=0.0,
+                    total_decimal="1.00",
+                    free_decimal="1.00",
+                    used_decimal="0.00",
+                    numeric_provenance="venue_raw",
+                )
+            ]
+        )
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def blocked_upsert(_row: SpotAssetPrecisionEvidenceUpsertRow) -> int:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+            return 1
+
+        ex.repository.upsert_spot_asset_precision_evidence = AsyncMock(side_effect=blocked_upsert)
+
+        with (
+            patch.object(base_module, "_SPOT_PRECISION_EVIDENCE_TIMEOUT_S", 0.01),
+            patch.object(base_module.logger, "warning") as warning,
+        ):
+            ex._schedule_walutomat_balance_precision(ex.repository, attempt)
+            task = tuple(ex._spot_precision_evidence_tasks)[0]
+            await asyncio.wait_for(started.wait(), timeout=0.1)
+            await asyncio.wait_for(task, timeout=0.1)
+            await asyncio.sleep(0)
+
+        assert cancelled.is_set()
+        assert ex._spot_precision_evidence_tasks == set()
+        assert ex._spot_precision_evidence_active_tasks == {}
+        assert ex._spot_precision_evidence_pending_latest == {}
+        ex.repository.upsert_spot_asset_precision_evidence.assert_awaited_once()
+        warning.assert_called_once()
+        assert "timed out" in warning.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_walutomat_precision_single_flight_keeps_only_latest_pending(self) -> None:
+        """Three rapid observations run the first and latest with one pending slot.
+
+        Given: One running exchange worker followed by two newer observations.
+        When: The running persistence fails after both observations arrive.
+        Then: Only the latest pending content runs and the failure stays contained.
+        """
+        ex = _make_executor()
+        attempts = [_portfolio_attempt(sequence_id=sequence_id) for sequence_id in (1, 2, 3)]
+        for attempt in attempts:
+            attempt["exchange"] = ExchangeEnum.WALUTOMAT.value
+        started = asyncio.Event()
+        release = asyncio.Event()
+        persisted_sequences: list[int] = []
+
+        async def persist(
+            _repository: SQLAlchemyRepository,
+            attempt: VenueAccountAttemptRow,
+        ) -> None:
+            persisted_sequences.append(attempt["sequence_id"])
+            if len(persisted_sequences) == 1:
+                started.set()
+                await release.wait()
+                raise RuntimeError("first persistence failed")
+
+        ex._persist_walutomat_balance_precision = AsyncMock(side_effect=persist)
+
+        with patch.object(base_module.logger, "warning") as warning:
+            ex._schedule_walutomat_balance_precision(ex.repository, attempts[0])
+            task = tuple(ex._spot_precision_evidence_tasks)[0]
+            await asyncio.wait_for(started.wait(), timeout=0.1)
+            ex._schedule_walutomat_balance_precision(ex.repository, attempts[1])
+            ex._schedule_walutomat_balance_precision(ex.repository, attempts[2])
+
+            assert len(ex._spot_precision_evidence_tasks) == 1
+            pending = ex._spot_precision_evidence_pending_latest[ExchangeEnum.WALUTOMAT.value]
+            assert pending[1] is attempts[2]
+
+            release.set()
+            await asyncio.wait_for(task, timeout=0.1)
+            await asyncio.sleep(0)
+
+        assert persisted_sequences == [1, 3]
+        assert ex._persist_walutomat_balance_precision.await_count == 2
+        assert ex._spot_precision_evidence_tasks == set()
+        assert ex._spot_precision_evidence_active_tasks == {}
+        assert ex._spot_precision_evidence_pending_latest == {}
+        warning.assert_called_once()
+        assert "worker failed" in warning.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_walutomat_precision_failure_is_contained_per_asset(self) -> None:
+        """One failed evidence row does not suppress another observed asset.
+
+        Given: Two valid Walutomat raw balance triplets whose first upsert fails.
+        When: Detached precision persistence processes the committed attempt.
+        Then: The second asset is still attempted and the failure stays outside
+            the snapshot observer's required work.
+        """
+        ex = _make_executor()
+        ex._get_exchange_name = MagicMock(return_value=ExchangeEnum.WALUTOMAT)
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.NOT_APPLICABLE)
+        client.read_native_balances = AsyncMock(
+            return_value=[
+                NativeBalanceEntry(
+                    currency=asset,
+                    total=1.0,
+                    free=1.0,
+                    used=0.0,
+                    total_decimal="1.00",
+                    free_decimal="1.00",
+                    used_decimal="0.00",
+                    numeric_provenance="venue_raw",
+                )
+                for asset in ("EUR", "USD")
+            ]
+        )
+        ex.exchange_client = client
+        attempted_assets: list[str] = []
+        completed = asyncio.Event()
+
+        async def upsert(row: SpotAssetPrecisionEvidenceUpsertRow) -> int:
+            attempted_assets.append(row["asset"])
+            if row["asset"] == "EUR":
+                raise RuntimeError("precision unavailable")
+            completed.set()
+            return 2
+
+        ex.repository.upsert_spot_asset_precision_evidence = AsyncMock(side_effect=upsert)
+
+        with patch.object(base_module.logger, "warning") as warning:
+            await ex._observe_account_once()
+            await asyncio.wait_for(completed.wait(), timeout=0.1)
+            await asyncio.sleep(0)
+
+        assert attempted_assets == ["EUR", "USD"]
+        warning.assert_called_once()
+        ex.repository.record_venue_account_snapshot.assert_awaited_once()
+        assert ex._spot_precision_evidence_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_walutomat_precision_rejects_foreign_missing_or_malformed_payload(
+        self,
+    ) -> None:
+        """Foreign, missing, and malformed retained payloads fail closed.
+
+        Given: One foreign attempt, one without balances, and one with malformed JSON.
+        When: Best-effort precision persistence is invoked directly.
+        Then: None writes evidence and only the malformed payload is logged.
+        """
+        ex = _make_executor()
+        foreign = _portfolio_attempt()
+        await ex._persist_walutomat_balance_precision(ex.repository, foreign)
+
+        missing = _portfolio_attempt()
+        missing["exchange"] = ExchangeEnum.WALUTOMAT.value
+        missing["balances_json"] = None
+        await ex._persist_walutomat_balance_precision(ex.repository, missing)
+
+        malformed = _portfolio_attempt()
+        malformed["exchange"] = ExchangeEnum.WALUTOMAT.value
+        malformed["balances_json"] = "{"
+        with patch.object(base_module.logger, "warning") as warning:
+            await ex._persist_walutomat_balance_precision(ex.repository, malformed)
+
+        ex.repository.upsert_spot_asset_precision_evidence.assert_not_awaited()
+        warning.assert_called_once()
+
+    def test_walutomat_precision_scheduling_failure_is_contained(self) -> None:
+        """Task creation failure closes the runner without leaking observation work.
+
+        Given: A valid observed Walutomat attempt while task creation raises.
+        When: Precision persistence is scheduled after snapshot commit.
+        Then: The scheduler contains the failure and owns no orphaned task.
+        """
+        ex = _make_executor()
+        attempt = _portfolio_attempt()
+        attempt["exchange"] = ExchangeEnum.WALUTOMAT.value
+        with (
+            patch.object(base_module.asyncio, "create_task", side_effect=RuntimeError("closed")),
+            patch.object(base_module.logger, "warning") as warning,
+        ):
+            ex._schedule_walutomat_balance_precision(ex.repository, attempt)
+
+        warning.assert_called_once()
+        assert ex._spot_precision_evidence_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_walutomat_precision_done_callback_contains_escaped_failure(self) -> None:
+        """A stale failed task cannot remove replacement exchange ownership.
+
+        Given: A failed owned task and a newer active task for the same exchange.
+        When: The failed task's delayed completion callback runs.
+        Then: Its exception is retrieved while the replacement remains active.
+        """
+        ex = _make_executor()
+
+        async def fail() -> None:
+            raise RuntimeError("escaped precision failure")
+
+        failed = asyncio.create_task(fail())
+        ex._spot_precision_evidence_tasks.add(failed)
+        await asyncio.gather(failed, return_exceptions=True)
+        replacement = asyncio.create_task(asyncio.Event().wait())
+        exchange = ExchangeEnum.WALUTOMAT.value
+        ex._spot_precision_evidence_active_tasks[exchange] = replacement
+
+        with patch.object(base_module.logger, "warning") as warning:
+            ex._spot_precision_evidence_task_done(exchange, failed)
+
+        assert failed not in ex._spot_precision_evidence_tasks
+        assert ex._spot_precision_evidence_active_tasks[exchange] is replacement
+        warning.assert_called_once()
+        assert "escaped containment" in warning.call_args.args[0]
+        replacement.cancel()
+        await asyncio.gather(replacement, return_exceptions=True)
 
 
 class TestAccountObserverHandler:

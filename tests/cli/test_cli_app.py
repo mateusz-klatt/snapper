@@ -2979,7 +2979,7 @@ def test_update_walutomat_symbols_runs_updater(
     captured: dict[str, bool | int] = {}
 
     class MockUpdater:
-        def __init__(self, update_threshold_hours: int = 24, force: bool = False):
+        def __init__(self, update_threshold_hours: int = 168, force: bool = False) -> None:
             captured["threshold"] = update_threshold_hours
             captured["force"] = force
 
@@ -2991,7 +2991,7 @@ def test_update_walutomat_symbols_runs_updater(
     assert result.exit_code == 0
     assert "Starting Walutomat symbol mapping update" in result.stdout
     assert "Walutomat symbol mappings updated successfully" in result.stdout
-    assert captured["threshold"] == 24
+    assert captured["threshold"] == 168
 
 
 def test_update_walutomat_market_snapshot_runs_service(

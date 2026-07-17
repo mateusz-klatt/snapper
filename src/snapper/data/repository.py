@@ -45,6 +45,7 @@ import asyncio
 import json
 import math
 import os
+import sqlite3
 import weakref
 from abc import ABC
 from abc import abstractmethod
@@ -138,6 +139,7 @@ from snapper.core.types import PairedFillProjection
 from snapper.core.types import PairedGroupTerminalizeOutcome
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.core.types import TradeSideEnum
+from snapper.core.types import UpsertResult
 from snapper.core.wallet_short import compute_legacy_wallet_short
 from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.archive_symbols import resolve_archive_symbols
@@ -181,6 +183,7 @@ from snapper.data.models import PositionCycle
 from snapper.data.models import Setting
 from snapper.data.models import ShadowCandle
 from snapper.data.models import Signal
+from snapper.data.models import SpotAssetPrecisionEvidence
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
@@ -276,6 +279,8 @@ from snapper.data.repository_types import ScopeGrantRow
 from snapper.data.repository_types import SettingRow
 from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.data.repository_types import SignalRow
+from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
+from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
@@ -336,6 +341,33 @@ SQLAlchemy's default sizing, so the single-container backend is
 unaffected. Registered on the shared ``.env`` allowlist via
 :mod:`snapper.config.env_contract`.
 """
+
+
+class _SpotAssetPrecisionEvidenceAbsentConflictError(Exception):
+    """Signal a retryable first-insert conflict after an absent-key read."""
+
+    def __init__(self, error: IntegrityError) -> None:
+        """Retain the original database error for fail-closed classification."""
+        super().__init__(str(error))
+        self.error = error
+
+
+@dataclass(frozen=True, slots=True)
+class _SpotAssetPrecisionEvidenceMerge:
+    """Chronology-selected plane state plus the monotonic balance-scale ratchet."""
+
+    balance_decimals: int | None
+    balance_decimals_max: int | None
+    balance_max_source: str | None
+    balance_max_version: str | None
+    balance_max_observed_at: datetime | None
+    balance_source: str | None
+    balance_version: str | None
+    balance_observed_at: datetime | None
+    fee_decimals: int | None
+    fee_source: str | None
+    fee_version: str | None
+    fee_observed_at: datetime | None
 
 
 class ScopeGrantConflictError(Exception):
@@ -1112,6 +1144,33 @@ class Repository(ABC):
 
         Returns:
             InstrumentSpecRow dict or None if no spec exists.
+        """
+        ...
+
+    @abstractmethod
+    async def upsert_spot_asset_precision_evidence(
+        self,
+        row: SpotAssetPrecisionEvidenceUpsertRow,
+    ) -> int:
+        """Insert, refresh, or revise one venue asset precision row.
+
+        Exact replay of the complete payload is a no-op. A changed
+        observation closes the prior version and inserts an SCD2 successor.
+        """
+        ...
+
+    @abstractmethod
+    async def get_spot_asset_precision_evidence(
+        self,
+        exchange: str,
+        assets: Sequence[str],
+        as_of: datetime,
+    ) -> dict[str, SpotAssetPrecisionEvidenceRow]:
+        """Batch-read precision evidence keyed by exact requested asset.
+
+        Asset aliases are caller-owned identities and are not collapsed by
+        this persistence layer. Stale observations remain readable so the
+        evaluator can apply its fail-closed freshness predicate.
         """
         ...
 
@@ -5374,6 +5433,7 @@ class SQLAlchemyRepository(Repository):
             self.engine, expire_on_commit=False, class_=AsyncSession
         )
         self._portfolio_reconciliation_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        self._spot_asset_precision_evidence_locks: dict[tuple[str, str], asyncio.Lock] = {}
         _live_sqlalchemy_repositories.add(self)
         with suppress(TypeError):
             _live_sqlalchemy_engines.add(self.engine)
@@ -5902,6 +5962,337 @@ class SQLAlchemyRepository(Repository):
                 rollover_rate_short=row.rollover_rate_short,
                 max_funding_rate=row.max_funding_rate,
             )
+
+    async def _acquire_spot_asset_precision_evidence_process_lock(
+        self,
+        exchange: str,
+        asset: str,
+    ) -> asyncio.Lock:
+        """Acquire this process's lock for one evidence natural key."""
+        key = (exchange, asset)
+        lock = self._spot_asset_precision_evidence_locks.setdefault(key, asyncio.Lock())
+        await lock.acquire()
+        return lock
+
+    async def _acquire_spot_asset_precision_evidence_advisory_lock(
+        self,
+        session: AsyncSession,
+        exchange: str,
+        asset: str,
+    ) -> None:
+        """Acquire the cross-process transaction lock before evidence reads."""
+        dialect = self.dialect_name
+        if dialect == "postgresql":
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
+                {"identity": f"{exchange}\x1f{asset}"},
+            )
+            return
+        if dialect == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
+            return
+        raise NotImplementedError(
+            f"spot precision evidence lock not implemented for dialect={dialect}"
+        )
+
+    @staticmethod
+    def _spot_asset_precision_plane_replaces(
+        source: str | None,
+        version: str | None,
+        observed_at: datetime | None,
+        plane: str,
+    ) -> bool:
+        """Validate one plane's provenance and return replacement intent."""
+        present = (source is not None, version is not None, observed_at is not None)
+        if all(present):
+            return True
+        if not any(present):
+            return False
+        raise ValueError(f"{plane} precision evidence provenance must be complete")
+
+    @staticmethod
+    def _merge_spot_asset_precision_evidence(
+        existing: SpotAssetPrecisionEvidence | None,
+        row: SpotAssetPrecisionEvidenceUpsertRow,
+        replace_balance: bool,
+        replace_fee: bool,
+    ) -> _SpotAssetPrecisionEvidenceMerge:
+        """Merge plane chronology while ratcheting balance scale with its provenance."""
+        current_balance_observed_at = existing.balance_observed_at if existing is not None else None
+        incoming_balance_observed_at = row["balance_observed_at"]
+        apply_balance = replace_balance and (
+            current_balance_observed_at is None
+            or (
+                incoming_balance_observed_at is not None
+                and incoming_balance_observed_at >= current_balance_observed_at
+            )
+        )
+        balance_decimals_max = existing.balance_decimals_max if existing is not None else None
+        balance_max_source = existing.balance_max_source if existing is not None else None
+        balance_max_version = existing.balance_max_version if existing is not None else None
+        balance_max_observed_at = existing.balance_max_observed_at if existing is not None else None
+        incoming_balance_decimals = row["balance_decimals"] if replace_balance else None
+        incoming_covers_maximum = incoming_balance_decimals is not None and (
+            balance_decimals_max is None
+            or incoming_balance_decimals > balance_decimals_max
+            or (
+                incoming_balance_decimals == balance_decimals_max
+                and incoming_balance_observed_at is not None
+                and (
+                    balance_max_observed_at is None
+                    or incoming_balance_observed_at >= balance_max_observed_at
+                )
+            )
+        )
+        if incoming_covers_maximum:
+            balance_decimals_max = incoming_balance_decimals
+            balance_max_source = row["balance_source"]
+            balance_max_version = row["balance_version"]
+            balance_max_observed_at = incoming_balance_observed_at
+        if apply_balance:
+            balance_decimals = row["balance_decimals"]
+            balance_source = row["balance_source"]
+            balance_version = row["balance_version"]
+            balance_observed_at = incoming_balance_observed_at
+        else:
+            balance_decimals = existing.balance_decimals if existing is not None else None
+            balance_source = existing.balance_source if existing is not None else None
+            balance_version = existing.balance_version if existing is not None else None
+            balance_observed_at = current_balance_observed_at
+        current_fee_observed_at = existing.fee_observed_at if existing is not None else None
+        incoming_fee_observed_at = row["fee_observed_at"]
+        apply_fee = replace_fee and (
+            current_fee_observed_at is None
+            or (
+                incoming_fee_observed_at is not None
+                and incoming_fee_observed_at >= current_fee_observed_at
+            )
+        )
+        if apply_fee:
+            fee_decimals = row["fee_decimals"]
+            fee_source = row["fee_source"]
+            fee_version = row["fee_version"]
+            fee_observed_at = incoming_fee_observed_at
+        else:
+            fee_decimals = existing.fee_decimals if existing is not None else None
+            fee_source = existing.fee_source if existing is not None else None
+            fee_version = existing.fee_version if existing is not None else None
+            fee_observed_at = current_fee_observed_at
+        return _SpotAssetPrecisionEvidenceMerge(
+            balance_decimals=balance_decimals,
+            balance_decimals_max=balance_decimals_max,
+            balance_max_source=balance_max_source,
+            balance_max_version=balance_max_version,
+            balance_max_observed_at=balance_max_observed_at,
+            balance_source=balance_source,
+            balance_version=balance_version,
+            balance_observed_at=balance_observed_at,
+            fee_decimals=fee_decimals,
+            fee_source=fee_source,
+            fee_version=fee_version,
+            fee_observed_at=fee_observed_at,
+        )
+
+    async def _upsert_spot_asset_precision_evidence_once(
+        self,
+        row: SpotAssetPrecisionEvidenceUpsertRow,
+        replace_balance: bool,
+        replace_fee: bool,
+    ) -> int:
+        """Merge and write one evidence attempt after transaction locking."""
+        timestamp = row["timestamp"]
+        async with self.session() as session:
+            await self._acquire_spot_asset_precision_evidence_advisory_lock(
+                session,
+                row["exchange"],
+                row["asset"],
+            )
+            result = await session.execute(
+                select(SpotAssetPrecisionEvidence)
+                .where(
+                    SpotAssetPrecisionEvidence.exchange == row["exchange"],
+                    SpotAssetPrecisionEvidence.asset == row["asset"],
+                    SpotAssetPrecisionEvidence.known_to == KNOWN_TO_MAX,
+                )
+                .with_for_update()
+            )
+            existing = result.scalar_one_or_none()
+            effective_timestamp = (
+                max(timestamp, existing.timestamp) if existing is not None else timestamp
+            )
+            merged = self._merge_spot_asset_precision_evidence(
+                existing,
+                row,
+                replace_balance,
+                replace_fee,
+            )
+            if existing is not None and (
+                existing.balance_decimals == merged.balance_decimals
+                and existing.balance_decimals_max == merged.balance_decimals_max
+                and existing.balance_max_source == merged.balance_max_source
+                and existing.balance_max_version == merged.balance_max_version
+                and existing.balance_max_observed_at == merged.balance_max_observed_at
+                and existing.balance_source == merged.balance_source
+                and existing.balance_version == merged.balance_version
+                and existing.balance_observed_at == merged.balance_observed_at
+                and existing.fee_decimals == merged.fee_decimals
+                and existing.fee_source == merged.fee_source
+                and existing.fee_version == merged.fee_version
+                and existing.fee_observed_at == merged.fee_observed_at
+            ):
+                return int(existing.id)
+            inserted = await close_and_insert(
+                session,
+                SpotAssetPrecisionEvidence,
+                [
+                    SpotAssetPrecisionEvidence.exchange == row["exchange"],
+                    SpotAssetPrecisionEvidence.asset == row["asset"],
+                ],
+                {
+                    "exchange": row["exchange"],
+                    "asset": row["asset"],
+                    "balance_decimals": merged.balance_decimals,
+                    "balance_decimals_max": merged.balance_decimals_max,
+                    "balance_max_source": merged.balance_max_source,
+                    "balance_max_version": merged.balance_max_version,
+                    "balance_max_observed_at": merged.balance_max_observed_at,
+                    "balance_source": merged.balance_source,
+                    "balance_version": merged.balance_version,
+                    "balance_observed_at": merged.balance_observed_at,
+                    "fee_decimals": merged.fee_decimals,
+                    "fee_source": merged.fee_source,
+                    "fee_version": merged.fee_version,
+                    "fee_observed_at": merged.fee_observed_at,
+                    "session_id": row["session_id"],
+                    "sequence_id": row["sequence_id"],
+                },
+                effective_timestamp,
+            )
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                if existing is None:
+                    raise _SpotAssetPrecisionEvidenceAbsentConflictError(exc) from exc
+                raise
+            await session.refresh(inserted)
+            return int(inserted.id)
+
+    async def _spot_asset_precision_evidence_active_key_exists(
+        self,
+        exchange: str,
+        asset: str,
+    ) -> bool:
+        """Return whether an active natural-key winner exists after rollback."""
+        async with self.session() as session:
+            result = await session.execute(
+                select(SpotAssetPrecisionEvidence.id).where(
+                    SpotAssetPrecisionEvidence.exchange == exchange,
+                    SpotAssetPrecisionEvidence.asset == asset,
+                    SpotAssetPrecisionEvidence.known_to == KNOWN_TO_MAX,
+                )
+            )
+            return result.scalar_one_or_none() is not None
+
+    async def upsert_spot_asset_precision_evidence(
+        self,
+        row: SpotAssetPrecisionEvidenceUpsertRow,
+    ) -> int:
+        """Merge evidence under its natural-key lock and retry insert races."""
+        replace_balance = self._spot_asset_precision_plane_replaces(
+            row["balance_source"],
+            row["balance_version"],
+            row["balance_observed_at"],
+            "balance",
+        )
+        replace_fee = self._spot_asset_precision_plane_replaces(
+            row["fee_source"],
+            row["fee_version"],
+            row["fee_observed_at"],
+            "fee",
+        )
+        if not replace_balance and not replace_fee:
+            raise ValueError("at least one precision evidence plane must be observed")
+        process_lock: asyncio.Lock | None = None
+        if self.dialect_name == "sqlite":
+            process_lock = await self._acquire_spot_asset_precision_evidence_process_lock(
+                row["exchange"],
+                row["asset"],
+            )
+        try:
+            try:
+                return await self._upsert_spot_asset_precision_evidence_once(
+                    row,
+                    replace_balance,
+                    replace_fee,
+                )
+            except _SpotAssetPrecisionEvidenceAbsentConflictError as conflict:
+                winner_exists = await self._spot_asset_precision_evidence_active_key_exists(
+                    row["exchange"],
+                    row["asset"],
+                )
+                if not winner_exists:
+                    raise conflict.error from conflict
+                return await self._upsert_spot_asset_precision_evidence_once(
+                    row,
+                    replace_balance,
+                    replace_fee,
+                )
+        finally:
+            if process_lock is not None:
+                process_lock.release()
+
+    async def get_spot_asset_precision_evidence(
+        self,
+        exchange: str,
+        assets: Sequence[str],
+        as_of: datetime,
+    ) -> dict[str, SpotAssetPrecisionEvidenceRow]:
+        """Batch-read exact asset identities and reject overlapping versions."""
+        requested_assets = tuple(dict.fromkeys(assets))
+        if not requested_assets:
+            return {}
+        async with self.session() as s:
+            result = await s.execute(
+                select(SpotAssetPrecisionEvidence)
+                .where(
+                    SpotAssetPrecisionEvidence.exchange == exchange,
+                    SpotAssetPrecisionEvidence.asset.in_(requested_assets),
+                    *where_active(SpotAssetPrecisionEvidence, as_of),
+                )
+                .order_by(SpotAssetPrecisionEvidence.asset, SpotAssetPrecisionEvidence.id)
+            )
+            evidence: dict[str, SpotAssetPrecisionEvidenceRow] = {}
+            for persisted in result.scalars().all():
+                if persisted.asset in evidence:
+                    raise RuntimeError("duplicate spot asset precision evidence")
+                balance_certified = persisted.balance_decimals is not None
+                evidence[persisted.asset] = SpotAssetPrecisionEvidenceRow(
+                    exchange=persisted.exchange,
+                    asset=persisted.asset,
+                    balance_decimals=(
+                        persisted.balance_decimals_max if balance_certified else None
+                    ),
+                    balance_source=(
+                        persisted.balance_max_source
+                        if balance_certified
+                        else persisted.balance_source
+                    ),
+                    balance_version=(
+                        persisted.balance_max_version
+                        if balance_certified
+                        else persisted.balance_version
+                    ),
+                    balance_observed_at=(
+                        persisted.balance_max_observed_at
+                        if balance_certified
+                        else persisted.balance_observed_at
+                    ),
+                    fee_decimals=persisted.fee_decimals,
+                    fee_source=persisted.fee_source,
+                    fee_version=persisted.fee_version,
+                    fee_observed_at=persisted.fee_observed_at,
+                )
+            return evidence
 
     async def _upsert_batch(
         self,
@@ -21050,6 +21441,126 @@ class DatabaseRepository:
             match_filters=[InstrumentSpec.instrument_public_id == instrument_public_id],
             new_values=new_values,
             bus_time=timestamp,
+        )
+        if existing is None:
+            return "created"
+        return "updated"
+
+    @staticmethod
+    def _acquire_spot_asset_precision_evidence_advisory_lock_sync(
+        session: SyncSession,
+        exchange: str,
+        asset: str,
+    ) -> None:
+        """Acquire the sync producer's cross-process transaction lock."""
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
+                {"identity": f"{exchange}\x1f{asset}"},
+            )
+            return
+        if dialect == "sqlite":
+            driver_connection = session.connection().connection.driver_connection
+            if not isinstance(driver_connection, sqlite3.Connection):
+                raise TypeError("SQLite session did not expose a sqlite3 connection")
+            if not driver_connection.in_transaction:
+                session.execute(text("BEGIN IMMEDIATE"))
+            return
+        raise NotImplementedError(
+            f"spot precision evidence lock not implemented for dialect={dialect}"
+        )
+
+    @staticmethod
+    def upsert_spot_asset_precision_evidence_sync(
+        session: SyncSession,
+        row: SpotAssetPrecisionEvidenceUpsertRow,
+    ) -> UpsertResult:
+        """SCD2 upsert precision evidence inside a caller-owned transaction.
+
+        Symbol updaters use this helper so instrument and per-asset evidence
+        commit atomically. Each supplied plane retains its own observation
+        provenance while an omitted plane preserves the active value.
+        """
+        replace_balance = SQLAlchemyRepository._spot_asset_precision_plane_replaces(
+            row["balance_source"],
+            row["balance_version"],
+            row["balance_observed_at"],
+            "balance",
+        )
+        replace_fee = SQLAlchemyRepository._spot_asset_precision_plane_replaces(
+            row["fee_source"],
+            row["fee_version"],
+            row["fee_observed_at"],
+            "fee",
+        )
+        if not replace_balance and not replace_fee:
+            raise ValueError("at least one precision evidence plane must be observed")
+        DatabaseRepository._acquire_spot_asset_precision_evidence_advisory_lock_sync(
+            session,
+            row["exchange"],
+            row["asset"],
+        )
+        timestamp = row["timestamp"]
+        existing = session.execute(
+            select(SpotAssetPrecisionEvidence)
+            .where(
+                SpotAssetPrecisionEvidence.exchange == row["exchange"],
+                SpotAssetPrecisionEvidence.asset == row["asset"],
+                SpotAssetPrecisionEvidence.known_to == KNOWN_TO_MAX,
+            )
+            .with_for_update()
+        ).scalar_one_or_none()
+        effective_timestamp = (
+            max(timestamp, existing.timestamp) if existing is not None else timestamp
+        )
+        merged = SQLAlchemyRepository._merge_spot_asset_precision_evidence(
+            existing,
+            row,
+            replace_balance,
+            replace_fee,
+        )
+        if existing is not None and (
+            existing.balance_decimals == merged.balance_decimals
+            and existing.balance_decimals_max == merged.balance_decimals_max
+            and existing.balance_max_source == merged.balance_max_source
+            and existing.balance_max_version == merged.balance_max_version
+            and existing.balance_max_observed_at == merged.balance_max_observed_at
+            and existing.balance_source == merged.balance_source
+            and existing.balance_version == merged.balance_version
+            and existing.balance_observed_at == merged.balance_observed_at
+            and existing.fee_decimals == merged.fee_decimals
+            and existing.fee_source == merged.fee_source
+            and existing.fee_version == merged.fee_version
+            and existing.fee_observed_at == merged.fee_observed_at
+        ):
+            return "unchanged"
+        close_and_insert_sync(
+            session=session,
+            model=SpotAssetPrecisionEvidence,
+            match_filters=[
+                SpotAssetPrecisionEvidence.exchange == row["exchange"],
+                SpotAssetPrecisionEvidence.asset == row["asset"],
+            ],
+            new_values={
+                "exchange": row["exchange"],
+                "asset": row["asset"],
+                "balance_decimals": merged.balance_decimals,
+                "balance_decimals_max": merged.balance_decimals_max,
+                "balance_max_source": merged.balance_max_source,
+                "balance_max_version": merged.balance_max_version,
+                "balance_max_observed_at": merged.balance_max_observed_at,
+                "balance_source": merged.balance_source,
+                "balance_version": merged.balance_version,
+                "balance_observed_at": merged.balance_observed_at,
+                "fee_decimals": merged.fee_decimals,
+                "fee_source": merged.fee_source,
+                "fee_version": merged.fee_version,
+                "fee_observed_at": merged.fee_observed_at,
+                "session_id": row["session_id"],
+                "sequence_id": row["sequence_id"],
+            },
+            bus_time=effective_timestamp,
         )
         if existing is None:
             return "created"

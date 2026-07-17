@@ -6,9 +6,7 @@ including support for tokenized assets.
 """
 
 import asyncio
-import hashlib
 import inspect
-import json
 from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
@@ -21,6 +19,10 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from snapper.application.portfolio.spot_precision_certification import KRAKEN_INSTRUMENT_SPEC_SOURCE
+from snapper.application.portfolio.spot_precision_certification import (
+    kraken_instrument_precision_version,
+)
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import PRESERVE_EXISTING
@@ -52,8 +54,6 @@ _BTNL_CAPABILITY_REASON = (
     "only; direct Bitnomial order route not integrated"
 )
 _BTNL_DISCOVERY_WINDOW_SECONDS = 90.0
-_SPOT_SPEC_SOURCE = "kraken:ccxt.load_markets"
-_SPEC_ETL_VERSION = "s2a-v1"
 
 
 class _KrakenPairInfo(TypedDict, total=False):
@@ -79,7 +79,7 @@ def _positive_decimal(value: object) -> Decimal | None:
         return None
     try:
         parsed = Decimal(str(value))
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     if not parsed.is_finite() or parsed <= 0:
         return None
@@ -92,7 +92,7 @@ def _precision_decimals(value: object) -> int | None:
         return None
     try:
         parsed = Decimal(str(value))
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     if not parsed.is_finite() or parsed < 0:
         return None
@@ -126,18 +126,16 @@ def _spot_metadata(market: dict[str, Any], observed_at: datetime) -> InstrumentM
     qty_decimals = _precision_decimals(amount_precision)
     active = market.get("active")
     status = "active" if active is True else "inactive" if active is False else None
-    version_payload = {
-        "tick_size": str(tick_decimal) if tick_decimal is not None else None,
-        "lot_size": str(lot_decimal) if lot_decimal is not None else None,
-        "min_order_size": min_order_size,
-        "max_order_size": max_order_size,
-        "cost_decimals": cost_decimals,
-        "qty_decimals": qty_decimals,
-        "status": status,
-        "quantity_unit": "base_asset",
-    }
-    content = json.dumps(version_payload, sort_keys=True, separators=(",", ":"))
-    version = f"{_SPEC_ETL_VERSION}:{hashlib.sha256(content.encode()).hexdigest()}"
+    version = kraken_instrument_precision_version(
+        tick_size=tick_decimal,
+        lot_size=lot_decimal,
+        min_order_size=min_order_size,
+        max_order_size=max_order_size,
+        cost_decimals=cost_decimals,
+        qty_decimals=qty_decimals,
+        status=status,
+        quantity_unit="base_asset",
+    )
     return InstrumentMetadataInput(
         tick_size=float(tick_decimal) if tick_decimal is not None else None,
         lot_size=float(lot_decimal) if lot_decimal is not None else None,
@@ -151,7 +149,7 @@ def _spot_metadata(market: dict[str, Any], observed_at: datetime) -> InstrumentM
         status=status,
         contract_size=None,
         quantity_unit="base_asset",
-        spec_source=_SPOT_SPEC_SOURCE,
+        spec_source=KRAKEN_INSTRUMENT_SPEC_SOURCE,
         spec_version=version,
         spec_observed_at=observed_at,
         unit_certified=False,
