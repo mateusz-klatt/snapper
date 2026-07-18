@@ -304,6 +304,50 @@ def build_execution_witnesses(
     return WitnessOutcome(witnesses=witnesses, refusals=())
 
 
+def witness_reverse_coverage_holds(
+    witnesses: Mapping[int, frozenset[int]], expected_sequences: Sequence[int]
+) -> bool:
+    """Return whether every expected execution is witnessed by at least one leg.
+
+    The reverse-coverage half of the certification bijection: every
+    ``scope_sequence`` in the expected range must be present with a non-empty
+    leg set — commit order is not fill order, so witnessing only the tip would
+    miss an earlier-committed but later-filled execution. Shared by the anchor
+    bootstrap (expected ``[1, W]``) and the venue-cursor certificate (expected
+    ``(W_anchor, W_E]``): one composition authority, two callers.
+
+    Args:
+        witnesses: The per-execution witness item-id sets.
+        expected_sequences: The exact scope sequences that must be witnessed.
+
+    Returns:
+        Whether the coverage holds.
+    """
+    return set(witnesses) == set(expected_sequences) and all(legs for legs in witnesses.values())
+
+
+def witness_bijection_holds(
+    witnesses: Mapping[int, frozenset[int]], attributed_item_ids: Sequence[int]
+) -> bool:
+    """Return whether the witnessed legs are exactly the attributed venue items.
+
+    The forward half of the certification bijection: the deduplicated union of
+    witnessed item ids (a terminal execution legitimately shares its
+    predecessor's legs) must equal the attributed item set — an attributed
+    venue fill outside the witness map is un-ingested, a witnessed id outside
+    the attributed set is fabricated evidence.
+
+    Args:
+        witnesses: The per-execution witness item-id sets.
+        attributed_item_ids: The attributed venue history item ids in scope.
+
+    Returns:
+        Whether the bijection holds.
+    """
+    witnessed = sorted({item_id for legs in witnesses.values() for item_id in legs})
+    return witnessed == sorted(attributed_item_ids)
+
+
 def decode_execution_cumulative(basis_units: int) -> Decimal:
     """Decode a venue exec-id basis-unit cumulative into an exact Decimal.
 

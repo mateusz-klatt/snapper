@@ -44,6 +44,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
+from snapper.application.portfolio.spot_anchor_witness import witness_bijection_holds
+from snapper.application.portfolio.spot_anchor_witness import witness_reverse_coverage_holds
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 
 type SpotAnchorRefusal = Literal[
@@ -308,12 +310,9 @@ def spot_anchor_bootstrap_refusals(
             item.item_id for item in _attributed_fills_at_or_before(tip.page, tip.item_id)
         )
         witnesses = observation.execution_witnesses
-        witnessed = sorted({item_id for legs in witnesses.values() for item_id in legs})
-        if set(witnesses) != set(range(1, watermark + 1)) or any(
-            not legs for legs in witnesses.values()
-        ):
+        if not witness_reverse_coverage_holds(witnesses, range(1, watermark + 1)):
             refusals.add("local_execution_not_in_venue_history")
-        if witnessed != attributed_ids:
+        if not witness_bijection_holds(witnesses, attributed_ids):
             refusals.add("venue_fill_not_ingested")
 
     return tuple(sorted(refusals))

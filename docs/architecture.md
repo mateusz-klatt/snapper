@@ -334,9 +334,23 @@ guarded by anchor epoch. The bundle also re-derives the execution hash chain
 from the anchor's sealed tip through the newest matched checkpoint to the
 boundary (regression, divergence, or a broken fold refuse by name), and every
 full verdict durably records its boundary tip as the next cycle's anti-rollback
-checkpoint. Real balance divergence therefore fires `mismatched` immediately,
-while `matched` stays honestly gated behind the venue-cursor certificate
-(S4c-4b) — the boundary is passed with the cursor uncertified until then.
+checkpoint. Real balance divergence therefore fires `mismatched` immediately, and
+`matched` is gated behind the venue-cursor certificate (S4c-4b): for an
+anchored account the observer additionally captures the history tip `H_E`
+before the watermark, then — after the snapshot commits — the fill legs of
+every in-range order, the confirming tip, and the ascending history range
+`(H_anchor, H_E]`; the pure `walutomat_history_certificate` validator then
+proves the tip double-read, the closed-range pagination, the full
+`balanceAfter` chain fold seeded from the anchor's balances, the operation
+taxonomy (external flows and correcting entries refuse), and the range-side
+witness bijection (reusing the bootstrap's composition authority), emitting a
+scheme-bound cursor with a digest of the folded range. Only a certified
+boundary reaches the evaluator with `venue_cursor_certified=True`; any
+refusal keeps the honest uncertified path, and its named reason replaces only
+the evaluator's generic `uncertified_boundary` incomplete — the mismatch-first
+gate order guarantees a certificate failure never suppresses a computable
+`mismatched`. Every capture failure degrades to absent evidence with a named
+log; the balance observation itself is never at risk.
 
 Two claim-domain facts are recorded rather than assumed. Leg completeness is
 enforced in code: every witnessed fill must carry exactly its base and quote

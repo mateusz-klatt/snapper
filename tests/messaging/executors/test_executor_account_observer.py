@@ -22,11 +22,14 @@ import pytest
 
 from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
 from snapper.application.portfolio.spot_anchor_witness import WitnessOutcome
+from snapper.application.portfolio.walutomat_history_certificate import HistoryRangeEvidence
+from snapper.application.portfolio.walutomat_history_certificate import SpotHistoryRangeCapture
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
+from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import VenueAccountAttemptRow
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
@@ -43,6 +46,7 @@ from snapper.messaging.executors.base import _ACCOUNT_UNEXPECTED_POSITION_CAPABI
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.base import _PortfolioReconciliationWork
 from snapper.messaging.executors.base import _SpotAnchorCursorCapture
+from snapper.messaging.executors.base import _SpotHistoryTipCapture
 from snapper.messaging.schemas.data import AccountStateChangedEventData
 from snapper.messaging.schemas.data import PortfolioDriftEpisodeEventData
 
@@ -707,8 +711,10 @@ class TestObserveAccountOnce:
             position_capability: CapabilityStatus,
             boundary: SpotReplayBoundaryCapture | None,
             cursor_capture: _SpotAnchorCursorCapture | None,
+            history_capture: SpotHistoryRangeCapture | None,
         ) -> None:
             assert cursor_capture is None
+            assert history_capture is None
             assert state_id == 41
             assert attempt["wallet_public_id"] == "wallet-1"
             assert position_capability is CapabilityStatus.NOT_APPLICABLE
@@ -1717,6 +1723,7 @@ class TestSpotBoundaryCapture:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=boundary,
             cursor_capture=None,
+            history_capture=None,
         )
         with (
             patch.object(base_module, "build_portfolio_account_state", return_value=object()),
@@ -1851,6 +1858,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.NOT_APPLICABLE,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         ex._portfolio_reconciliation_dispatch_open = False
         ex._schedule_portfolio_reconciliation(
@@ -1859,6 +1867,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         ex._run_portfolio_reconciliation.assert_not_called()
         assert ex._portfolio_reconciliation_tasks == {}
@@ -1883,6 +1892,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         ex._schedule_portfolio_reconciliation(
             state_id=2,
@@ -1890,6 +1900,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         await asyncio.wait_for(started.wait(), timeout=1.0)
         assert ex._run_portfolio_reconciliation.await_count == 1
@@ -1910,6 +1921,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         first = tuple(ex._portfolio_reconciliation_tasks.values())[0]
         await first
@@ -1919,6 +1931,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         second = tuple(ex._portfolio_reconciliation_tasks.values())[0]
         await second
@@ -1939,6 +1952,7 @@ class TestPortfolioReconciliationOrchestration:
                 position_capability=CapabilityStatus.SUPPORTED,
                 boundary=None,
                 cursor_capture=None,
+                history_capture=None,
             )
         assert ex._portfolio_reconciliation_failure_count == 1
         assert ex._last_portfolio_reconciliation_error == "no running loop"
@@ -1958,6 +1972,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         with patch.object(
             base_module,
@@ -2001,6 +2016,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         with (
             patch.object(base_module, "build_portfolio_account_state", return_value=object()),
@@ -2074,6 +2090,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
 
         with (
@@ -2156,6 +2173,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
 
         with (
@@ -2244,6 +2262,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
 
         with (
@@ -2296,6 +2315,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         task = tuple(ex._portfolio_reconciliation_tasks.values())[0]
         await task
@@ -2331,6 +2351,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         await ex._recon_lock.acquire()
         try:
@@ -2361,6 +2382,7 @@ class TestPortfolioReconciliationOrchestration:
             "position_capability": CapabilityStatus.SUPPORTED,
             "evaluated_at": evaluated_at,
             "boundary": None,
+            "history_capture": None,
         }
         ex.repository.record_portfolio_reconciliation.assert_awaited_once_with(evaluation)
         ex._schedule_portfolio_drift_notification.assert_called_once_with(evaluation)
@@ -2397,6 +2419,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         with patch.object(base_module, "build_portfolio_account_state") as build:
             await ex._run_portfolio_reconciliation(work)
@@ -2439,6 +2462,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         dispatch_side_effect = (
             RuntimeError("dispatch failed") if failure_step == "dispatch" else None
@@ -2474,6 +2498,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         with patch.object(base_module, "_PORTFOLIO_RECONCILIATION_TIMEOUT_S", 0.01):
             await ex._run_portfolio_reconciliation(work)
@@ -2498,6 +2523,7 @@ class TestPortfolioReconciliationOrchestration:
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
             cursor_capture=None,
+            history_capture=None,
         )
         task = asyncio.create_task(ex._run_portfolio_reconciliation(work))
         await started.wait()
@@ -2705,6 +2731,7 @@ class TestPortfolioReconciliationOrchestration:
                     position_capability=CapabilityStatus.NOT_APPLICABLE,
                     boundary=None,
                     cursor_capture=None,
+                    history_capture=None,
                 )
             await asyncio.Event().wait()
 
@@ -3061,6 +3088,7 @@ def _anchor_work(
         position_capability=CapabilityStatus.SUPPORTED,
         boundary=boundary,
         cursor_capture=cursor_capture,
+        history_capture=None,
     )
 
 
@@ -3517,3 +3545,672 @@ class TestBootstrapSpotAnchor:
         ex.repository.record_spot_reconciliation_anchor.assert_awaited_once()
         recorded = ex.repository.record_spot_reconciliation_anchor.await_args
         assert recorded.args[0] == anchor_row
+
+
+def _history_anchor_row() -> SpotReconciliationAnchorRow:
+    """Build one sealed cursor-certified anchor row for the anchored range path."""
+    sealed_at = datetime(2026, 7, 17, 8, 0, tzinfo=UTC)
+    scheme = "walutomat:api-v2.0.0:account/history:v1"
+    return {
+        "public_id": "00000000-0000-7000-8000-000000000701",
+        "wallet_public_id": _ANCHOR_WALLET,
+        "exchange": "kraken",
+        "mode": "live",
+        "venue_account_state_public_id": "vas-1",
+        "balance_observation_id": 55,
+        "source_watermark_kind": "scope_sequence",
+        "source_watermark": 1,
+        "balances_json": '{"EUR":"100"}',
+        "first_request_started_at": sealed_at,
+        "first_request_completed_at": sealed_at,
+        "second_request_started_at": sealed_at,
+        "second_request_completed_at": sealed_at,
+        "boundary_status": "cursor_certified",
+        "inventory_status": "venue_reported_full",
+        "margin_status": "cash",
+        "provenance": f"spot_anchor_bootstrap:v1:{scheme}:windowed",
+        "session_id": "session-1",
+        "sequence_id": 1,
+        "timestamp": sealed_at,
+        "source_chain_tip": "a" * 64,
+        "venue_cursor_kind": "account_history_item_id",
+        "venue_cursor_scheme": scheme,
+        "venue_cursor_value": "100",
+        "venue_cursor_requested_at": sealed_at,
+        "venue_cursor_observed_at": sealed_at,
+        "venue_cursor_confirmed_at": sealed_at,
+        "source_watermark_requested_at": sealed_at,
+        "source_watermark_captured_at": sealed_at,
+    }
+
+
+def _history_tip_capture() -> _SpotHistoryTipCapture:
+    """Return one pre-watermark anchored tip capture at H_anchor=100, H_E=103."""
+    return _SpotHistoryTipCapture(anchor=_history_anchor_row(), anchor_item_id=100, tip_item_id=103)
+
+
+def _history_range_capture() -> SpotHistoryRangeCapture:
+    """Return one complete empty-range certificate evidence bundle."""
+    return SpotHistoryRangeCapture(
+        evidence=HistoryRangeEvidence(tip_item_id=100, confirming_tip_item_id=100, rows=()),
+        parsed_executions=(),
+        order_totals={},
+        venue_balances={"EUR": Decimal("100")},
+        anchor_watermark=1,
+    )
+
+
+def _range_history_item(item_id: int) -> VenueAccountHistoryItem:
+    """Return one in-range MARKET_FX history row for the range walker result."""
+    return VenueAccountHistoryItem(
+        item_id=item_id,
+        operation_type="MARKET_FX",
+        operation_amount=Decimal("6"),
+        balance_after=Decimal("106"),
+        currency="EUR",
+        transaction_id="tx-2",
+        ordered_by="API/key-1",
+        order_id="O1",
+    )
+
+
+def _range_fill_legs() -> VenueOrderFillLegs:
+    """Return the lifetime cumulative fill legs of the one in-range order."""
+    return VenueOrderFillLegs(
+        order_id="O1",
+        bought_amount=Decimal("6"),
+        sold_amount=Decimal("30"),
+        commission_amount=Decimal("0.02"),
+        bought_currency="EUR",
+        sold_currency="PLN",
+        commission_currency="EUR",
+        buy_sell="BUY",
+    )
+
+
+def _range_balances_json() -> str:
+    """Return one venue-raw serialized balance payload for the range capture."""
+    return json.dumps([{"currency": "EUR", "total_decimal": "106", "used_decimal": "0"}])
+
+
+def _range_executor() -> tuple[Any, Any, list[str]]:
+    """Wire one executor whose anchored range-capture reads log a call order.
+
+    Every read on the evidence path appends a marker to one shared log so the
+    tests can prove the physical sequencing (fill legs BEFORE the confirming
+    tip, confirming tip BEFORE the range pages) rather than infer it.
+    Individual tests override exactly one read to drive a single degrade.
+    """
+    ex = _make_executor()
+    ex.wallet_public_id = _ANCHOR_WALLET
+    client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+    client.account_history_capability = CapabilityStatus.SUPPORTED
+    calls: list[str] = []
+
+    async def witness_rows(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        calls.append("witness")
+        return [
+            {"exec_id": "E1", "scope_sequence": 2},
+            {"exec_id": "E2", "scope_sequence": 3},
+        ]
+
+    def parse(exec_id: str) -> tuple[str, int, bool]:
+        calls.append("parse")
+        return ("O1", 600000000, exec_id == "E2")
+
+    async def fill_legs(_order_id: str) -> VenueOrderFillLegs:
+        calls.append("legs")
+        return _range_fill_legs()
+
+    async def confirming_tip(_limit: int) -> VenueAccountHistoryTip:
+        calls.append("confirming")
+        return VenueAccountHistoryTip(item_id=103, items=(), reached_genesis=False)
+
+    async def range_read(
+        _continue_from: int, _upto_item_id: int
+    ) -> tuple[VenueAccountHistoryItem, ...]:
+        calls.append("range")
+        return (_range_history_item(101),)
+
+    ex.repository.get_spot_execution_witness_rows = AsyncMock(side_effect=witness_rows)
+    client.parse_execution_exec_id = MagicMock(side_effect=parse)
+    client.read_order_fill_legs = AsyncMock(side_effect=fill_legs)
+    client.read_account_history_tip = AsyncMock(side_effect=confirming_tip)
+    client.read_account_history_range = AsyncMock(side_effect=range_read)
+    ex.exchange_client = client
+    return ex, client, calls
+
+
+class TestCaptureSpotHistoryTip:
+    """The observer's pre-watermark H_E tip read for anchored accounts."""
+
+    @pytest.mark.asyncio
+    async def test_unsupported_history_capability_skips_capture(self) -> None:
+        """A venue without the account-history contract captures no range tip.
+
+        Given: A client whose account-history capability is not SUPPORTED.
+        When: The anchored tip capture runs.
+        Then: It returns None without ever reading the anchor state.
+        """
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.account_history_capability = CapabilityStatus.UNSUPPORTED
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value=_history_anchor_row())
+        result = await ex._capture_spot_history_tip(ex.repository, client, "kraken", "live")
+        assert result is None
+        ex.repository.get_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unanchored_account_skips_capture(self) -> None:
+        """An unanchored account captures no range tip (the bootstrap owns it).
+
+        Given: A supported client but no persisted anchor row for the scope.
+        When: The anchored tip capture runs.
+        Then: It returns None without reading the venue history tip.
+        """
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.account_history_capability = CapabilityStatus.SUPPORTED
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value=None)
+        client.read_account_history_tip = AsyncMock(return_value=_anchor_history_tip())
+        result = await ex._capture_spot_history_tip(ex.repository, client, "kraken", "live")
+        assert result is None
+        client.read_account_history_tip.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", ["", "0", "-5", "1o1", "１００"])
+    async def test_non_positive_anchor_cursor_value_skips_capture(self, value: str) -> None:
+        """An anchor cursor that is not a positive item id yields no capture.
+
+        Given: A persisted anchor whose venue cursor value is empty, zero,
+            negative, alphabetic, or unicode digits ``int`` would accept.
+        When: The anchored tip capture runs.
+        Then: It returns None without reading the venue history tip.
+        """
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.account_history_capability = CapabilityStatus.SUPPORTED
+        anchor = _history_anchor_row()
+        anchor["venue_cursor_value"] = value
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value=anchor)
+        client.read_account_history_tip = AsyncMock(return_value=_anchor_history_tip())
+        result = await ex._capture_spot_history_tip(ex.repository, client, "kraken", "live")
+        assert result is None
+        client.read_account_history_tip.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_anchor_read_failure_degrades_to_no_capture(self) -> None:
+        """A failing anchor read degrades to no capture rather than raising.
+
+        Given: An anchor state read that raises.
+        When: The anchored tip capture runs.
+        Then: The failure is swallowed and None is returned.
+        """
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.account_history_capability = CapabilityStatus.SUPPORTED
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        result = await ex._capture_spot_history_tip(ex.repository, client, "kraken", "live")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_absent_history_tip_yields_no_capture(self) -> None:
+        """A venue reporting no faithful tip read yields no capture.
+
+        Given: An anchored scope whose account-history tip read returns None.
+        When: The anchored tip capture runs.
+        Then: It returns None.
+        """
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.account_history_capability = CapabilityStatus.SUPPORTED
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value=_history_anchor_row())
+        client.read_account_history_tip = AsyncMock(return_value=None)
+        result = await ex._capture_spot_history_tip(ex.repository, client, "kraken", "live")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_successful_capture_carries_anchor_and_parsed_bounds(self) -> None:
+        """A successful read carries the anchor row and both range bounds.
+
+        Given: An anchored scope whose minimal tip read succeeds at item 103.
+        When: The anchored tip capture runs.
+        Then: It returns the anchor with its parsed H_anchor and the observed
+            H_E, and the tip was read at the minimal tip limit.
+        """
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.account_history_capability = CapabilityStatus.SUPPORTED
+        anchor = _history_anchor_row()
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value=anchor)
+        client.read_account_history_tip = AsyncMock(
+            return_value=VenueAccountHistoryTip(item_id=103, items=(), reached_genesis=False)
+        )
+        result = await ex._capture_spot_history_tip(ex.repository, client, "kraken", "live")
+        assert result == _SpotHistoryTipCapture(anchor=anchor, anchor_item_id=100, tip_item_id=103)
+        client.read_account_history_tip.assert_awaited_once_with(
+            base_module._SPOT_HISTORY_TIP_LIMIT
+        )
+
+
+class TestCaptureSpotHistoryRange:
+    """The observer's post-boundary anchored-path evidence gather."""
+
+    @staticmethod
+    async def _capture(ex: Any, balances_json: str | None) -> SpotHistoryRangeCapture | None:
+        """Run the range capture with the canonical tip capture and boundary."""
+        result = await ex._capture_spot_history_range(
+            ex.repository,
+            ex.exchange_client,
+            "kraken",
+            "live",
+            _history_tip_capture(),
+            _anchor_boundary(),
+            balances_json,
+        )
+        assert result is None or isinstance(result, SpotHistoryRangeCapture)
+        return result
+
+    @pytest.mark.asyncio
+    async def test_happy_path_captures_complete_evidence_in_order(self) -> None:
+        """The full evidence gather runs in the certified bracket order.
+
+        Given: An anchored executor whose witness, decode, fill-leg,
+            confirming-tip, and range reads all succeed and log a shared order.
+        When: The range capture runs.
+        Then: The fill legs are read BEFORE the confirming tip, the confirming
+            tip before the range pages, the witness read covers exactly
+            (W_anchor, W_E], the range read covers exactly (H_anchor, H_E],
+            and the capture carries every field verbatim.
+        """
+        ex, client, calls = _range_executor()
+        result = await self._capture(ex, _range_balances_json())
+        assert calls == ["witness", "parse", "parse", "legs", "confirming", "range"]
+        assert result == SpotHistoryRangeCapture(
+            evidence=HistoryRangeEvidence(
+                tip_item_id=103,
+                confirming_tip_item_id=103,
+                rows=(_range_history_item(101),),
+            ),
+            parsed_executions=((2, "O1", 600000000, False), (3, "O1", 600000000, True)),
+            order_totals={"O1": _range_fill_legs()},
+            venue_balances={"EUR": Decimal("106")},
+            anchor_watermark=1,
+        )
+        ex.repository.get_spot_execution_witness_rows.assert_awaited_once_with(
+            _ANCHOR_WALLET, "kraken", "live", 3, from_watermark=1
+        )
+        client.read_order_fill_legs.assert_awaited_once_with("O1")
+        client.read_account_history_tip.assert_awaited_once_with(
+            base_module._SPOT_HISTORY_TIP_LIMIT
+        )
+        client.read_account_history_range.assert_awaited_once_with(100, 103)
+
+    @pytest.mark.asyncio
+    async def test_empty_witness_range_still_captures(self) -> None:
+        """A quiescent cycle with no new executions still gathers evidence.
+
+        Given: An empty witness range (W_E reached no new executions).
+        When: The range capture runs.
+        Then: The capture carries no executions or order totals, no fill-leg
+            read happens, and the confirming tip and range reads still run.
+        """
+        ex, client, calls = _range_executor()
+        ex.repository.get_spot_execution_witness_rows = AsyncMock(return_value=[])
+        result = await self._capture(ex, _range_balances_json())
+        assert result is not None
+        assert result.parsed_executions == ()
+        assert result.order_totals == {}
+        assert calls == ["confirming", "range"]
+        client.read_order_fill_legs.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_balance_payload_degrades(self) -> None:
+        """A cycle without a balance payload gathers no evidence at all.
+
+        Given: A None balances payload (a failed balance read).
+        When: The range capture runs.
+        Then: It returns None before any witness or venue read.
+        """
+        ex, _, calls = _range_executor()
+        result = await self._capture(ex, None)
+        assert result is None
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_non_venue_raw_balances_degrade(self) -> None:
+        """A balance payload without exact decimals gathers no evidence.
+
+        Given: A balances payload whose entries lack the decimal mirrors.
+        When: The range capture runs.
+        Then: It returns None before any witness or venue read.
+        """
+        ex, _, calls = _range_executor()
+        payload = json.dumps([{"currency": "EUR", "total": 106.0}])
+        result = await self._capture(ex, payload)
+        assert result is None
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_witness_read_failure_degrades(self) -> None:
+        """A witness-range gap or read failure degrades to no evidence.
+
+        Given: A witness read raising (a purge, tamper, or plain DB failure).
+        When: The range capture runs.
+        Then: It returns None and no venue read happens.
+        """
+        ex, client, _ = _range_executor()
+        ex.repository.get_spot_execution_witness_rows = AsyncMock(
+            side_effect=RuntimeError("range is not contiguous")
+        )
+        result = await self._capture(ex, _range_balances_json())
+        assert result is None
+        client.read_order_fill_legs.assert_not_awaited()
+        client.read_account_history_range.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_exec_id_degrades_without_decoding(self) -> None:
+        """An execution without any exec id cannot be witnessed.
+
+        Given: A witness row whose exec id is empty.
+        When: The range capture runs.
+        Then: It returns None without invoking the exec-id decoder.
+        """
+        ex, client, _ = _range_executor()
+        ex.repository.get_spot_execution_witness_rows = AsyncMock(
+            return_value=[{"exec_id": "", "scope_sequence": 2}]
+        )
+        result = await self._capture(ex, _range_balances_json())
+        assert result is None
+        client.parse_execution_exec_id.assert_not_called()
+        client.read_order_fill_legs.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_undecodable_exec_id_degrades(self) -> None:
+        """An exec id outside the venue scheme cannot be witnessed.
+
+        Given: An exec-id decoder returning None for the stored id.
+        When: The range capture runs.
+        Then: It returns None and no fill-leg read happens.
+        """
+        ex, client, _ = _range_executor()
+        client.parse_execution_exec_id = MagicMock(return_value=None)
+        result = await self._capture(ex, _range_balances_json())
+        assert result is None
+        client.read_order_fill_legs.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unknown_order_degrades_before_the_confirming_tip(self) -> None:
+        """A venue-unknown order stops the gather before the tip bracket closes.
+
+        Given: A fill-leg read returning None for the in-range order.
+        When: The range capture runs.
+        Then: It returns None and neither the confirming tip nor the range
+            pages are read.
+        """
+        ex, client, calls = _range_executor()
+        client.read_order_fill_legs = AsyncMock(return_value=None)
+        result = await self._capture(ex, _range_balances_json())
+        assert result is None
+        assert "confirming" not in calls
+        client.read_account_history_range.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_failed_confirming_tip_still_delivers_the_capture(self) -> None:
+        """A failed confirming re-read is evidence the certificate refuses by name.
+
+        Given: A confirming tip read returning None.
+        When: The range capture runs.
+        Then: The capture is still delivered with an absent confirming tip so
+            the pure certificate can refuse venue_cursor_unavailable.
+        """
+        ex, _, _ = _range_executor()
+        ex.exchange_client.read_account_history_tip = AsyncMock(return_value=None)
+        result = await self._capture(ex, _range_balances_json())
+        assert result is not None
+        assert result.evidence.confirming_tip_item_id is None
+
+    @pytest.mark.asyncio
+    async def test_unfaithful_range_read_degrades(self) -> None:
+        """A range walk the venue could not deliver faithfully yields no evidence.
+
+        Given: A range read returning None.
+        When: The range capture runs.
+        Then: It returns None.
+        """
+        ex, client, _ = _range_executor()
+        client.read_account_history_range = AsyncMock(return_value=None)
+        result = await self._capture(ex, _range_balances_json())
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_wedged_venue_read_degrades_within_the_bound(self) -> None:
+        """A hung evidence read is cut by the envelope and degrades to None.
+
+        Given: A witness read that never returns and a tiny reconciliation
+            envelope.
+        When: The range capture runs.
+        Then: It returns None instead of wedging the observation.
+        """
+        ex, _, _ = _range_executor()
+
+        async def blocked(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+            await asyncio.Event().wait()
+            return []
+
+        ex.repository.get_spot_execution_witness_rows = AsyncMock(side_effect=blocked)
+        with patch.object(base_module, "_PORTFOLIO_RECONCILIATION_TIMEOUT_S", 0.01):
+            result = await self._capture(ex, _range_balances_json())
+        assert result is None
+
+
+class TestObserveAccountAnchoredCapture:
+    """The observation cycle's anchored-path wiring around the range capture."""
+
+    @staticmethod
+    def _anchored_observer() -> tuple[Any, Any, list[str]]:
+        """Wire one live anchored executor whose cycle reads log a call order."""
+        ex = _make_executor()
+        ex.wallet_public_id = _ANCHOR_WALLET
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.NOT_APPLICABLE)
+        client.account_history_capability = CapabilityStatus.SUPPORTED
+        calls: list[str] = []
+
+        async def tip_read(_limit: int) -> VenueAccountHistoryTip:
+            calls.append("tip")
+            return VenueAccountHistoryTip(item_id=103, items=(), reached_genesis=False)
+
+        async def watermark_read(
+            _wallet: str, _exchange: str, _mode: str, as_of: datetime
+        ) -> tuple[int, datetime]:
+            calls.append("watermark")
+            return 3, as_of
+
+        async def read_balances() -> list[NativeBalanceEntry]:
+            calls.append("balances")
+            return []
+
+        async def record_snapshot(_attempt: VenueAccountAttemptRow) -> int:
+            calls.append("record")
+            return 41
+
+        client.read_account_history_tip = AsyncMock(side_effect=tip_read)
+        client.read_native_balances = AsyncMock(side_effect=read_balances)
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value=_history_anchor_row())
+        ex.repository.get_spot_execution_watermark = AsyncMock(side_effect=watermark_read)
+        ex.repository.record_venue_account_snapshot = AsyncMock(side_effect=record_snapshot)
+        ex.exchange_client = client
+        ex._schedule_portfolio_reconciliation = MagicMock()
+        return ex, client, calls
+
+    @pytest.mark.asyncio
+    async def test_anchored_cycle_threads_the_history_capture(self) -> None:
+        """An anchored cycle gathers the evidence and schedules it complete.
+
+        Given: An anchored live executor whose pre-watermark tip, watermark,
+            and balance reads log a shared order and whose range gather is
+            stubbed to a complete capture.
+        When: One observation cycle runs.
+        Then: The H_E tip is read BEFORE the watermark capture, the range
+            gather runs only AFTER the snapshot commit with the exact tip
+            capture, boundary, and balance payload, and scheduling receives
+            the capture with no bootstrap cursor.
+        """
+        ex, _, calls = self._anchored_observer()
+        capture = _history_range_capture()
+
+        async def range_capture(*_args: object) -> SpotHistoryRangeCapture:
+            calls.append("range_capture")
+            return capture
+
+        ex._capture_spot_history_range = AsyncMock(side_effect=range_capture)
+
+        await ex._observe_account_once()
+
+        assert calls == ["tip", "watermark", "balances", "watermark", "record", "range_capture"]
+        schedule_call = ex._schedule_portfolio_reconciliation.call_args
+        assert schedule_call is not None
+        assert schedule_call.kwargs["cursor_capture"] is None
+        assert schedule_call.kwargs["history_capture"] is capture
+        range_args = ex._capture_spot_history_range.await_args.args
+        assert range_args[2] == "kraken"
+        assert range_args[3] == "live"
+        assert range_args[4] == _SpotHistoryTipCapture(
+            anchor=_history_anchor_row(), anchor_item_id=100, tip_item_id=103
+        )
+        assert range_args[5] is schedule_call.kwargs["boundary"]
+        assert range_args[6] == "[]"
+
+    @pytest.mark.asyncio
+    async def test_anchored_cycle_with_degraded_gather_still_observes(self) -> None:
+        """A failing evidence gather costs only the capture, never the snapshot.
+
+        Given: An anchored live executor whose real range gather fails on the
+            range-page read.
+        When: One observation cycle runs.
+        Then: The snapshot is persisted and scheduling receives an explicitly
+            absent history capture.
+        """
+        ex, client, _ = self._anchored_observer()
+        client.read_native_balances = AsyncMock(
+            return_value=[
+                NativeBalanceEntry(
+                    currency="EUR",
+                    total=106.0,
+                    free=None,
+                    used=0.0,
+                    total_decimal="106",
+                    used_decimal="0",
+                )
+            ]
+        )
+        ex.repository.get_spot_execution_witness_rows = AsyncMock(return_value=[])
+        client.read_account_history_range = AsyncMock(side_effect=RuntimeError("venue down"))
+
+        await ex._observe_account_once()
+
+        ex.repository.record_venue_account_snapshot.assert_awaited_once()
+        schedule_call = ex._schedule_portfolio_reconciliation.call_args
+        assert schedule_call is not None
+        assert schedule_call.kwargs["history_capture"] is None
+
+    @pytest.mark.asyncio
+    async def test_anchored_cycle_without_a_boundary_skips_the_gather(self) -> None:
+        """No boundary means no certificate evidence can be scoped at all.
+
+        Given: An anchored live executor whose watermark capture fails.
+        When: One observation cycle runs.
+        Then: The range gather never runs and scheduling receives neither a
+            boundary nor a history capture while the snapshot persists.
+        """
+        ex, _, _ = self._anchored_observer()
+        ex.repository.get_spot_execution_watermark = AsyncMock(side_effect=RuntimeError("db down"))
+        ex._capture_spot_history_range = AsyncMock()
+
+        await ex._observe_account_once()
+
+        ex._capture_spot_history_range.assert_not_awaited()
+        ex.repository.record_venue_account_snapshot.assert_awaited_once()
+        schedule_call = ex._schedule_portfolio_reconciliation.call_args
+        assert schedule_call is not None
+        assert schedule_call.kwargs["boundary"] is None
+        assert schedule_call.kwargs["history_capture"] is None
+
+    @pytest.mark.asyncio
+    async def test_unanchored_cycle_still_captures_the_bootstrap_cursor(self) -> None:
+        """The unanchored bootstrap path is untouched by the anchored gather.
+
+        Given: A live executor with no persisted anchor whose H0 tip read
+            succeeds.
+        When: One observation cycle runs.
+        Then: The bootstrap cursor capture is scheduled exactly as before, the
+            history capture is absent, and the single tip read used the
+            bootstrap's page limit.
+        """
+        ex, client, _ = self._anchored_observer()
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value=None)
+        tip = _anchor_history_tip()
+        client.read_account_history_tip = AsyncMock(return_value=tip)
+
+        await ex._observe_account_once()
+
+        schedule_call = ex._schedule_portfolio_reconciliation.call_args
+        assert schedule_call is not None
+        cursor_capture = schedule_call.kwargs["cursor_capture"]
+        assert isinstance(cursor_capture, _SpotAnchorCursorCapture)
+        assert cursor_capture.tip is tip
+        assert schedule_call.kwargs["history_capture"] is None
+        client.read_account_history_tip.assert_awaited_once_with(
+            base_module._SPOT_ANCHOR_HISTORY_LIMIT
+        )
+        assert ex.repository.get_spot_reconciliation_anchor.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_work_item_history_capture_reaches_dispatch_unchanged(self) -> None:
+        """The captured evidence travels the work item into dispatch verbatim.
+
+        Given: Reconciliation work carrying one complete history capture.
+        When: The runner evaluates that exact account-state version.
+        Then: Dispatch receives the identical capture object by keyword.
+        """
+        ex = _make_executor()
+        ex.repository.has_portfolio_reconciliation_evaluation = AsyncMock(return_value=False)
+        ex.repository.get_venue_account_state_version = AsyncMock(
+            return_value={
+                "wallet_public_id": "wallet-1",
+                "exchange": "kraken",
+                "mode": "live",
+                "session_id": "session-1",
+                "sequence_id": 7,
+            }
+        )
+        ex.repository.get_active_portfolio_reconciliation_method_config = AsyncMock(
+            return_value=None
+        )
+        ex.repository.record_portfolio_reconciliation = AsyncMock(return_value=41)
+        ex._schedule_portfolio_drift_notification = MagicMock()
+        capture = _history_range_capture()
+        work = base_module._PortfolioReconciliationWork(
+            state_id=9,
+            identity=("wallet-1", "kraken", "live", "session-1", 7),
+            position_capability=CapabilityStatus.NOT_APPLICABLE,
+            boundary=None,
+            cursor_capture=None,
+            history_capture=capture,
+        )
+        with (
+            patch.object(base_module, "build_portfolio_account_state", return_value=object()),
+            patch.object(
+                base_module,
+                "dispatch_portfolio_reconciliation",
+                new_callable=AsyncMock,
+                return_value=_portfolio_evaluation(),
+            ) as dispatch,
+        ):
+            await ex._run_portfolio_reconciliation(work)
+        dispatch_call = dispatch.await_args
+        assert dispatch_call is not None
+        assert dispatch_call.kwargs["history_capture"] is capture
+        assert ex._portfolio_reconciliation_failure_count == 0

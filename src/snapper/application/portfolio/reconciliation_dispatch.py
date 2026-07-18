@@ -8,6 +8,11 @@ from snapper.application.portfolio import spot_reconciliation
 from snapper.application.portfolio.spot_reconciliation import SpotInstrumentIdentity
 from snapper.application.portfolio.spot_reconciliation import SpotReplayBoundary
 from snapper.application.portfolio.spot_reconciliation import SpotReplayExecutionRow
+from snapper.application.portfolio.walutomat_history_certificate import CertificateOutcome
+from snapper.application.portfolio.walutomat_history_certificate import SpotHistoryRangeCapture
+from snapper.application.portfolio.walutomat_history_certificate import (
+    certify_walutomat_history_range,
+)
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
@@ -15,6 +20,15 @@ from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.messaging.schemas.data import PortfolioAccountState
 
 _REAL_METHODS = frozenset({"futures_position", "spot_execution_replay", "margin_ledger_replay"})
+
+_UNCERTIFIED_BOUNDARY_REASON = "uncertified_boundary"
+"""The spot evaluator's generic cursor-gate incomplete reason.
+
+The evaluator raises it when a computably matched outcome is blocked only by
+an uncertified venue cursor; dispatch substitutes the certificate's first
+named refusal for exactly this reason and no other, so a specific certificate
+failure is observable without ever rewriting evaluator-owned classifications.
+"""
 
 
 def _require_boundary(condition: bool, reason: str) -> None:
@@ -252,6 +266,7 @@ async def dispatch_portfolio_reconciliation(
     evaluated_at: datetime,
     *,
     boundary: SpotReplayBoundaryCapture | None = None,
+    history_capture: SpotHistoryRangeCapture | None = None,
 ) -> PortfolioReconciliationEvaluationRow:
     """Dispatch one account snapshot through its durable configured method.
 
@@ -268,6 +283,20 @@ async def dispatch_portfolio_reconciliation(
             honored only when its identity binding matches the evaluated
             account AND the snapshot carries a current successful balance
             read; anything else is treated exactly like an absent boundary.
+        history_capture: The observer's anchored-path venue history-range
+            evidence for the same cycle, or ``None`` when the account is
+            unanchored, the venue lacks the account-history contract, or any
+            evidence read degraded. When present for the bundle's exact
+            anchor epoch, the pure walutomat range certificate runs BEFORE
+            the evaluator: a certified range hands the evaluator a certified
+            venue cursor with complete inventory; an uncertified one keeps
+            today's uncertified boundary, and its first named refusal
+            replaces only the evaluator's generic
+            ``uncertified_boundary`` incomplete reason. The evaluator's
+            mismatch-first gate order structurally guarantees the rewrite
+            can never suppress a computable ``mismatched`` (or touch a
+            ``matched``): the cursor gate is only reached when every asset
+            already compared clean.
 
     Returns:
         One S1-compatible method-scoped reconciliation evaluation.
@@ -334,7 +363,27 @@ async def dispatch_portfolio_reconciliation(
                     "incomplete",
                     spot_bundle.error,
                 )
-            inventory_complete = (
+            outcome: CertificateOutcome | None = None
+            if (
+                history_capture is not None
+                and spot_bundle.anchor is not None
+                and history_capture.anchor_watermark == spot_bundle.anchor["source_watermark"]
+            ):
+                outcome = certify_walutomat_history_range(
+                    evidence=history_capture.evidence,
+                    anchor=spot_bundle.anchor,
+                    venue_balances=history_capture.venue_balances,
+                    parsed_executions=history_capture.parsed_executions,
+                    order_totals=history_capture.order_totals,
+                    watermark_unchanged=boundary.watermark_unchanged,
+                    boundary_watermark=boundary.source_watermark,
+                )
+            venue_cursor: str | None = None
+            venue_cursor_certified = False
+            if outcome is not None and outcome.certified:
+                venue_cursor = outcome.venue_cursor
+                venue_cursor_certified = True
+            inventory_complete = venue_cursor_certified or (
                 bool(account.balances)
                 and account.is_authoritative
                 and spot_bundle.anchor is not None
@@ -346,8 +395,8 @@ async def dispatch_portfolio_reconciliation(
                 watermark_captured_before_balance=True,
                 request_started_at=boundary.request_started_at,
                 request_completed_at=boundary.request_completed_at,
-                venue_cursor=None,
-                venue_cursor_certified=False,
+                venue_cursor=venue_cursor,
+                venue_cursor_certified=venue_cursor_certified,
                 inventory_complete=inventory_complete,
                 inventory_truncated=False,
             )
@@ -368,6 +417,13 @@ async def dispatch_portfolio_reconciliation(
                 position_capability,
                 evaluated_at,
             )
+            if (
+                outcome is not None
+                and outcome.refusals
+                and evaluation["evaluation_status"] == "incomplete"
+                and evaluation["error"] == _UNCERTIFIED_BOUNDARY_REASON
+            ):
+                evaluation["error"] = outcome.refusals[0][:512]
             if spot_bundle.boundary_chain_tip is not None and evaluation["evaluation_status"] in (
                 "matched",
                 "mismatched",

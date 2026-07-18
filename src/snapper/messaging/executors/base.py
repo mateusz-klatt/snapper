@@ -48,6 +48,8 @@ from snapper.application.portfolio.spot_precision_certification import (
 from snapper.application.portfolio.spot_precision_evidence import (
     derive_walutomat_precision_from_raw_balances,
 )
+from snapper.application.portfolio.walutomat_history_certificate import HistoryRangeEvidence
+from snapper.application.portfolio.walutomat_history_certificate import SpotHistoryRangeCapture
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
 from snapper.application.trade.command_request import order_request_from_command
@@ -83,6 +85,7 @@ from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import RecordVenueEventParams
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
+from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueAccountAttemptRow
 from snapper.data.repository_types import VenueEventRow
@@ -310,6 +313,26 @@ class _SpotAnchorCursorCapture:
 
 
 @dataclass(frozen=True)
+class _SpotHistoryTipCapture:
+    """The anchored account's pre-watermark ``H_E`` tip read plus its anchor row.
+
+    The inverse of ``_SpotAnchorCursorCapture``: captured only when the scope
+    already holds a sealed anchor, it pins the range certificate's upper bound
+    ``H_E`` BEFORE the watermark capture so the post-evidence confirming
+    re-read brackets the balance, position, witness, and fill-leg reads.
+    ``anchor_item_id`` is the anchor's parsed ``H_anchor`` venue cursor value
+    (the exclusive lower bound of the range read). It travels in memory only
+    and is ``None`` whenever the account is unanchored, the venue lacks the
+    account-history contract, the anchor cursor value is not a positive item
+    id, or the read failed — the cycle then carries no range evidence at all.
+    """
+
+    anchor: SpotReconciliationAnchorRow
+    anchor_item_id: int
+    tip_item_id: int
+
+
+@dataclass(frozen=True)
 class _PortfolioReconciliationWork:
     """Immutable identity, capability, and boundary from one account snapshot.
 
@@ -320,6 +343,10 @@ class _PortfolioReconciliationWork:
     ``None`` and honestly stay incomplete rather than fabricating one.
     ``cursor_capture`` is the pre-watermark ``H0`` tip read for an unanchored
     account, or ``None`` when no spot-anchor bootstrap will be attempted.
+    ``history_capture`` is the anchored inverse: the complete venue
+    history-range certificate evidence gathered in the same cycle, or
+    ``None`` when the account is unanchored or any evidence read degraded —
+    dispatch then keeps today's honestly uncertified boundary.
     """
 
     state_id: int
@@ -327,6 +354,7 @@ class _PortfolioReconciliationWork:
     position_capability: CapabilityStatus
     boundary: SpotReplayBoundaryCapture | None
     cursor_capture: _SpotAnchorCursorCapture | None
+    history_capture: SpotHistoryRangeCapture | None
 
 
 @dataclass(frozen=True)
@@ -423,6 +451,10 @@ _SPOT_ANCHOR_HISTORY_LIMIT = 100
 """Page size for the anchor bootstrap's account-history tip reads (OQ-3). The
 local execution tip must be on the page or the bootstrap refuses, so the page
 must reach back to the sealed prefix; 100 covers a quiescent account's tail."""
+_SPOT_HISTORY_TIP_LIMIT = 1
+"""Page size for the anchored range capture's H_E and confirming tip reads.
+Only the tip item id matters there — the certified rows come from the ASC
+range walk — so the smallest faithful page suffices."""
 _SPOT_PRECISION_EVIDENCE_TIMEOUT_S = 3.0
 """Bound on one detached balance-precision persistence observation."""
 _ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG = (
@@ -3391,6 +3423,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         position_capability: CapabilityStatus,
         boundary: SpotReplayBoundaryCapture | None,
         cursor_capture: _SpotAnchorCursorCapture | None,
+        history_capture: SpotHistoryRangeCapture | None,
     ) -> None:
         """Schedule one live snapshot evaluation without delaying its observer."""
         try:
@@ -3412,6 +3445,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 position_capability=position_capability,
                 boundary=boundary,
                 cursor_capture=cursor_capture,
+                history_capture=history_capture,
             )
             runner = self._run_portfolio_reconciliation(work)
             try:
@@ -3838,6 +3872,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     position_capability=work.position_capability,
                     evaluated_at=evaluated_at,
                     boundary=work.boundary,
+                    history_capture=work.history_capture,
                 )
                 await repository.record_portfolio_reconciliation(evaluation)
             self._schedule_portfolio_drift_notification(evaluation)
@@ -3902,6 +3937,162 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if tip is None:
             return None
         return _SpotAnchorCursorCapture(tip=tip, requested_at=requested_at, observed_at=observed_at)
+
+    async def _capture_spot_history_tip(
+        self,
+        repository: SQLAlchemyRepository,
+        client: ExchangeClientBase,
+        exchange: str,
+        mode: str,
+    ) -> _SpotHistoryTipCapture | None:
+        """Read the venue history tip ``H_E`` for an anchored account, or ``None``.
+
+        The anchored inverse of ``_capture_spot_anchor_cursor``: it runs BEFORE
+        the watermark capture so the certificate's tip bracket encloses the
+        balance, position, witness, and fill-leg reads that follow. Gated on
+        the venue's account-history capability and on the account being
+        anchored with a positive integer venue cursor value, and fully wrapped
+        so any failure degrades to no-evidence and NEVER breaks the balance
+        observation.
+
+        Args:
+            repository: The durable repository.
+            client: The account's exchange client.
+            exchange: The account's exchange scope.
+            mode: The account's mode scope.
+
+        Returns:
+            The anchor row with its parsed ``H_anchor`` and the observed
+            ``H_E`` tip id, or ``None`` when no range capture applies.
+        """
+        if client.account_history_capability != CapabilityStatus.SUPPORTED:
+            return None
+        try:
+            async with asyncio.timeout(_ACCOUNT_FETCH_TIMEOUT_S):
+                anchor = await repository.get_spot_reconciliation_anchor(
+                    self.wallet_public_id, exchange, mode
+                )
+                if anchor is None:
+                    return None
+                value = anchor["venue_cursor_value"]
+                if not (value.isascii() and value.isdigit() and int(value) > 0):
+                    logger.info(
+                        f"[{exchange}] spot history capture skipped: anchor venue cursor "
+                        f"value {value!r} is not a positive item id"
+                    )
+                    return None
+                tip = await client.read_account_history_tip(_SPOT_HISTORY_TIP_LIMIT)
+        except Exception as exc:
+            logger.info(f"[{exchange}] spot history tip capture failed: {exc}")
+            return None
+        if tip is None:
+            logger.info(f"[{exchange}] spot history capture skipped: tip read unavailable")
+            return None
+        return _SpotHistoryTipCapture(
+            anchor=anchor, anchor_item_id=int(value), tip_item_id=tip.item_id
+        )
+
+    async def _capture_spot_history_range(
+        self,
+        repository: SQLAlchemyRepository,
+        client: ExchangeClientBase,
+        exchange: str,
+        mode: str,
+        tip_capture: _SpotHistoryTipCapture,
+        boundary: SpotReplayBoundaryCapture,
+        balances_json: str | None,
+    ) -> SpotHistoryRangeCapture | None:
+        """Gather the anchored-path certificate evidence, degrading to ``None``.
+
+        Runs AFTER the balance and position reads and the boundary assembly so
+        every read it sequences sits inside the pre-watermark tip's quiescence
+        bracket: the witness rows over ``(W_anchor, W_E]``, their exec-id
+        decode, the per-order lifetime fill legs (all BEFORE the confirming
+        tip re-read so the bracket covers them), then the confirming tip, and
+        finally the ASC range pages ``(H_anchor, H_E]``. The whole gather is
+        bounded by the reconciliation envelope and fully wrapped: any failure
+        or unusable read degrades to ``None`` with a named INFO reason
+        (dispatch then refuses ``venue_history_unavailable``) and NEVER breaks
+        the observation. A failed confirming tip read alone still delivers the
+        capture — the pure certificate refuses it by name.
+
+        Args:
+            repository: The durable repository.
+            client: The account's exchange client.
+            exchange: The account's exchange scope.
+            mode: The account's mode scope.
+            tip_capture: The pre-watermark anchored tip capture.
+            boundary: The validated pre-balance boundary of this cycle.
+            balances_json: The current attempt's serialized balance payload.
+
+        Returns:
+            The complete range-certificate evidence, or ``None``.
+        """
+        anchor = tip_capture.anchor
+        try:
+            async with asyncio.timeout(_PORTFOLIO_RECONCILIATION_TIMEOUT_S):
+                if balances_json is None:
+                    logger.info(f"[{exchange}] spot history capture skipped: no balance payload")
+                    return None
+                venue_balances, _, venue_raw = parse_observed_balances(balances_json)
+                if not venue_balances or not venue_raw:
+                    logger.info(
+                        f"[{exchange}] spot history capture skipped: no exact venue-raw balances"
+                    )
+                    return None
+                witness_rows = await repository.get_spot_execution_witness_rows(
+                    self.wallet_public_id,
+                    exchange,
+                    mode,
+                    boundary.source_watermark,
+                    from_watermark=anchor["source_watermark"],
+                )
+                parsed: list[tuple[int, str, int, bool]] = []
+                for row in witness_rows:
+                    row_exec_id = row["exec_id"]
+                    components = (
+                        client.parse_execution_exec_id(row_exec_id) if row_exec_id else None
+                    )
+                    if components is None:
+                        logger.info(
+                            f"[{exchange}] spot history capture skipped: execution at "
+                            f"scope_sequence {row['scope_sequence']} has no venue-scheme "
+                            f"exec id ({row_exec_id!r})"
+                        )
+                        return None
+                    order_id, basis_units, is_terminal = components
+                    parsed.append((row["scope_sequence"], order_id, basis_units, is_terminal))
+                order_totals: dict[str, VenueOrderFillLegs] = {}
+                for order_id in sorted({entry[1] for entry in parsed}):
+                    legs = await client.read_order_fill_legs(order_id)
+                    if legs is None:
+                        logger.info(
+                            f"[{exchange}] spot history capture skipped: venue does not "
+                            f"know order {order_id}"
+                        )
+                        return None
+                    order_totals[order_id] = legs
+                confirming = await client.read_account_history_tip(_SPOT_HISTORY_TIP_LIMIT)
+                rows = await client.read_account_history_range(
+                    tip_capture.anchor_item_id, tip_capture.tip_item_id
+                )
+        except Exception as exc:
+            logger.info(f"[{exchange}] spot history range capture degraded: {exc}")
+            return None
+        if rows is None:
+            logger.info(f"[{exchange}] spot history capture skipped: range read unfaithful")
+            return None
+        return SpotHistoryRangeCapture(
+            evidence=HistoryRangeEvidence(
+                tip_item_id=tip_capture.tip_item_id,
+                confirming_tip_item_id=None if confirming is None else confirming.item_id,
+                rows=rows,
+            ),
+            parsed_executions=tuple(parsed),
+            order_totals=order_totals,
+            venue_balances=venue_balances,
+            anchor_watermark=anchor["source_watermark"],
+        )
 
     async def _maybe_bootstrap_spot_anchor(
         self, work: _PortfolioReconciliationWork, evaluated_at: datetime
@@ -4124,6 +4315,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         degrades only the boundary (absent before-read means no boundary at
         all; a failed after-read leaves the quiescence flag honestly False)
         — observation itself proceeds unaffected.
+
+        Anchored live accounts additionally capture the venue history-range
+        certificate evidence: the ``H_E`` tip pre-watermark (in the position
+        the unanchored bootstrap's ``H0`` read occupies), then — after the
+        snapshot commits — the witness rows, fill legs, confirming tip, and
+        range pages. All evidence is complete BEFORE the reconciliation work
+        is scheduled so dispatch stays pure and DB-only; every capture
+        failure degrades to absent evidence, never a failed observation.
         """
         client = self.exchange_client
         repository = self.repository
@@ -4134,10 +4333,15 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         mode = self._account_mode()
         capture_before: tuple[int, datetime, datetime] | None = None
         cursor_capture: _SpotAnchorCursorCapture | None = None
+        history_tip: _SpotHistoryTipCapture | None = None
         if mode == "live":
-            cursor_capture = await self._capture_spot_anchor_cursor(
+            history_tip = await self._capture_spot_history_tip(
                 repository, client, exchange_name, mode
             )
+            if history_tip is None:
+                cursor_capture = await self._capture_spot_anchor_cursor(
+                    repository, client, exchange_name, mode
+                )
             capture_before = await self._capture_spot_execution_watermark(
                 repository, exchange_name, mode
             )
@@ -4198,12 +4402,24 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         }
         state_id = await repository.record_venue_account_snapshot(attempt)
         self._schedule_walutomat_balance_precision(repository, attempt)
+        history_capture: SpotHistoryRangeCapture | None = None
+        if history_tip is not None and boundary is not None:
+            history_capture = await self._capture_spot_history_range(
+                repository,
+                client,
+                exchange_name,
+                mode,
+                history_tip,
+                boundary,
+                balances_json,
+            )
         self._schedule_portfolio_reconciliation(
             state_id=state_id,
             attempt=attempt,
             position_capability=client.position_capability,
             boundary=boundary,
             cursor_capture=cursor_capture,
+            history_capture=history_capture,
         )
         self._schedule_account_state_changed(
             wallet_public_id=attempt["wallet_public_id"],

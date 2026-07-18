@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from decimal import Decimal
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -15,12 +16,16 @@ import pytest
 from snapper.application.portfolio import reconciliation_dispatch
 from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
 from snapper.application.portfolio.reconciliation_view import no_portfolio_reconciliation_view
+from snapper.application.portfolio.walutomat_history_certificate import CertificateOutcome
+from snapper.application.portfolio.walutomat_history_certificate import HistoryRangeEvidence
+from snapper.application.portfolio.walutomat_history_certificate import SpotHistoryRangeCapture
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import FuturesReconciliationBundle
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
 from snapper.data.repository_types import PositionRow
+from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import SpotReconciliationBundle
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.messaging.schemas.data import AccountBalanceEntry
@@ -926,6 +931,309 @@ async def test_spot_incomplete_outcome_is_never_stamped_with_a_tip() -> None:
             boundary=_boundary(),
         )
     assert "source_chain_tip" not in result
+
+
+_ANCHOR_SCHEME = "walutomat:api-v2.0.0:account/history:v1"
+
+
+def _anchor_row(*, source_watermark: int = 1) -> SpotReconciliationAnchorRow:
+    """Build one sealed cursor-certified anchor row for the evaluated account."""
+    sealed_at = _NOW - timedelta(minutes=10)
+    return {
+        "public_id": "00000000-0000-7000-8000-000000000701",
+        "wallet_public_id": _WALLET,
+        "exchange": "kraken",
+        "mode": "live",
+        "venue_account_state_public_id": _ACCOUNT,
+        "balance_observation_id": 17,
+        "source_watermark_kind": "scope_sequence",
+        "source_watermark": source_watermark,
+        "balances_json": '{"USD":"10"}',
+        "first_request_started_at": sealed_at,
+        "first_request_completed_at": sealed_at,
+        "second_request_started_at": sealed_at,
+        "second_request_completed_at": sealed_at,
+        "boundary_status": "cursor_certified",
+        "inventory_status": "venue_reported_full",
+        "margin_status": "cash",
+        "provenance": f"spot_anchor_bootstrap:v1:{_ANCHOR_SCHEME}:windowed",
+        "session_id": _SESSION,
+        "sequence_id": 1,
+        "timestamp": sealed_at,
+        "source_chain_tip": "a" * 64,
+        "venue_cursor_kind": "account_history_item_id",
+        "venue_cursor_scheme": _ANCHOR_SCHEME,
+        "venue_cursor_value": "100",
+        "venue_cursor_requested_at": sealed_at,
+        "venue_cursor_observed_at": sealed_at,
+        "venue_cursor_confirmed_at": sealed_at,
+        "source_watermark_requested_at": sealed_at,
+        "source_watermark_captured_at": sealed_at,
+    }
+
+
+def _anchored_spot_bundle(
+    *,
+    boundary_chain_tip: str | None = None,
+) -> SpotReconciliationBundle:
+    """Return an anchored complete-range bundle for certificate-path tests."""
+    return SpotReconciliationBundle(
+        anchor=_anchor_row(),
+        replay=[],
+        instruments_by_public_id={},
+        specs_by_instrument_public_id={},
+        asset_precisions={},
+        previously_confirmed_assets=frozenset(),
+        range_complete=True,
+        boundary_chain_tip=boundary_chain_tip,
+        error=None,
+    )
+
+
+def _history_capture(*, anchor_watermark: int = 1) -> SpotHistoryRangeCapture:
+    """Build one observer-captured empty-range certificate evidence bundle."""
+    return SpotHistoryRangeCapture(
+        evidence=HistoryRangeEvidence(tip_item_id=100, confirming_tip_item_id=100, rows=()),
+        parsed_executions=(),
+        order_totals={},
+        venue_balances={"USD": Decimal("10")},
+        anchor_watermark=anchor_watermark,
+    )
+
+
+async def test_certified_history_range_certifies_the_replay_boundary() -> None:
+    """A certified range certificate hands the evaluator a certified cursor.
+
+    Given: An anchored bundle, a same-epoch history capture, a certificate
+        outcome that certifies, and a patched evaluator returning matched.
+    When: Dispatch evaluates the spot branch.
+    Then: The certificate received the exact capture evidence and boundary
+        watermarks, the evaluator's boundary carries the certified cursor with
+        complete untruncated inventory, the matched outcome's error is
+        untouched, and the chain-tip stamping is unchanged.
+    """
+    bundle = _anchored_spot_bundle(boundary_chain_tip="e" * 64)
+    repository, _, _ = _repository(spot_bundle=bundle)
+    capture = _history_capture()
+    matched = _evaluation_result("matched")
+    outcome = CertificateOutcome(
+        certified=True,
+        venue_cursor=f"{_ANCHOR_SCHEME}:100:{'c' * 64}",
+        refusals=(),
+    )
+    with (
+        patch.object(
+            reconciliation_dispatch,
+            "certify_walutomat_history_range",
+            return_value=outcome,
+        ) as certify,
+        patch.object(
+            reconciliation_dispatch.spot_reconciliation, "evaluate", return_value=matched
+        ) as evaluate,
+    ):
+        result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+            repository,
+            _account(),
+            _config("spot_execution_replay"),
+            CapabilityStatus.NOT_APPLICABLE,
+            _NOW,
+            boundary=_boundary(),
+            history_capture=capture,
+        )
+    certify.assert_called_once_with(
+        evidence=capture.evidence,
+        anchor=bundle.anchor,
+        venue_balances=capture.venue_balances,
+        parsed_executions=capture.parsed_executions,
+        order_totals=capture.order_totals,
+        watermark_unchanged=True,
+        boundary_watermark=7,
+    )
+    replay_boundary = evaluate.call_args.args[2]
+    assert replay_boundary.venue_cursor == f"{_ANCHOR_SCHEME}:100:{'c' * 64}"
+    assert replay_boundary.venue_cursor_certified is True
+    assert replay_boundary.inventory_complete is True
+    assert replay_boundary.inventory_truncated is False
+    assert replay_boundary.range_complete is True
+    assert replay_boundary.source_watermark == 7
+    assert result["evaluation_status"] == "matched"
+    assert result["error"] is None
+    assert result["source_chain_tip"] == "e" * 64
+
+
+async def test_uncertified_range_substitutes_only_the_generic_gate_reason() -> None:
+    """An uncertified certificate names its first refusal on the cursor gate.
+
+    Given: An anchored bundle, a same-epoch capture, a refusing certificate,
+        and a patched evaluator returning the generic uncertified_boundary
+        incomplete.
+    When: Dispatch evaluates the spot branch.
+    Then: The evaluator's boundary stays honestly uncertified and the generic
+        gate reason is replaced by the certificate's first named refusal.
+    """
+    repository, _, _ = _repository(spot_bundle=_anchored_spot_bundle())
+    incomplete = _evaluation_result("incomplete")
+    incomplete["error"] = "uncertified_boundary"
+    outcome = CertificateOutcome(
+        certified=False,
+        venue_cursor=None,
+        refusals=("venue_history_advanced", "watermark_advanced"),
+    )
+    with (
+        patch.object(
+            reconciliation_dispatch,
+            "certify_walutomat_history_range",
+            return_value=outcome,
+        ),
+        patch.object(
+            reconciliation_dispatch.spot_reconciliation, "evaluate", return_value=incomplete
+        ) as evaluate,
+    ):
+        result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+            repository,
+            _account(),
+            _config("spot_execution_replay"),
+            CapabilityStatus.NOT_APPLICABLE,
+            _NOW,
+            boundary=_boundary(),
+            history_capture=_history_capture(),
+        )
+    replay_boundary = evaluate.call_args.args[2]
+    assert replay_boundary.venue_cursor is None
+    assert replay_boundary.venue_cursor_certified is False
+    assert result["evaluation_status"] == "incomplete"
+    assert result["error"] == "venue_history_advanced"
+
+
+async def test_uncertified_range_never_touches_other_incomplete_reasons() -> None:
+    """A specific evaluator incomplete reason is never rewritten.
+
+    Given: A refusing certificate and a patched evaluator returning an
+        incomplete outcome with its own specific reason.
+    When: Dispatch evaluates the spot branch.
+    Then: The evaluator's reason is preserved verbatim.
+    """
+    repository, _, _ = _repository(spot_bundle=_anchored_spot_bundle())
+    incomplete = _evaluation_result("incomplete")
+    incomplete["error"] = "uncertified_inventory"
+    outcome = CertificateOutcome(
+        certified=False, venue_cursor=None, refusals=("venue_history_unavailable",)
+    )
+    with (
+        patch.object(
+            reconciliation_dispatch,
+            "certify_walutomat_history_range",
+            return_value=outcome,
+        ),
+        patch.object(
+            reconciliation_dispatch.spot_reconciliation, "evaluate", return_value=incomplete
+        ),
+    ):
+        result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+            repository,
+            _account(),
+            _config("spot_execution_replay"),
+            CapabilityStatus.NOT_APPLICABLE,
+            _NOW,
+            boundary=_boundary(),
+            history_capture=_history_capture(),
+        )
+    assert result["evaluation_status"] == "incomplete"
+    assert result["error"] == "uncertified_inventory"
+
+
+async def test_uncertified_range_never_touches_a_mismatched_outcome() -> None:
+    """A computable mismatched outcome is never suppressed by refusals.
+
+    The evaluator's mismatch-first gate order means the cursor gate is only
+    reached when every asset compared clean, so a full mismatched verdict must
+    pass through the certificate plumbing byte-identical.
+
+    Given: A refusing certificate and a patched evaluator returning a full
+        mismatched outcome with a derived chain tip on the bundle.
+    When: Dispatch evaluates the spot branch.
+    Then: The mismatched outcome is untouched and still chain-tip stamped.
+    """
+    bundle = _anchored_spot_bundle(boundary_chain_tip="f" * 64)
+    repository, _, _ = _repository(spot_bundle=bundle)
+    mismatched = _evaluation_result("mismatched")
+    outcome = CertificateOutcome(
+        certified=False, venue_cursor=None, refusals=("venue_history_advanced",)
+    )
+    with (
+        patch.object(
+            reconciliation_dispatch,
+            "certify_walutomat_history_range",
+            return_value=outcome,
+        ),
+        patch.object(
+            reconciliation_dispatch.spot_reconciliation, "evaluate", return_value=mismatched
+        ),
+    ):
+        result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+            repository,
+            _account(),
+            _config("spot_execution_replay"),
+            CapabilityStatus.NOT_APPLICABLE,
+            _NOW,
+            boundary=_boundary(),
+            history_capture=_history_capture(),
+        )
+    assert result["evaluation_status"] == "mismatched"
+    assert result["error"] is None
+    assert result["source_chain_tip"] == "f" * 64
+
+
+@pytest.mark.parametrize(
+    ("spot_bundle", "capture"),
+    [
+        (_anchored_spot_bundle(), None),
+        (_unanchored_spot_bundle(), _history_capture()),
+        (_anchored_spot_bundle(), _history_capture(anchor_watermark=2)),
+    ],
+    ids=["absent_capture", "unanchored_bundle", "foreign_anchor_epoch"],
+)
+async def test_certificate_never_runs_without_matching_anchored_evidence(
+    spot_bundle: SpotReconciliationBundle,
+    capture: SpotHistoryRangeCapture | None,
+) -> None:
+    """The certificate requires same-epoch evidence for an anchored bundle.
+
+    Given: An absent capture, an unanchored bundle, or a capture whose anchor
+        watermark disagrees with the bundle's anchor epoch.
+    When: Dispatch evaluates the spot branch with a patched evaluator
+        returning the generic uncertified_boundary incomplete.
+    Then: The certificate never runs, the boundary stays uncertified, and the
+        generic gate reason is NOT substituted (no certificate outcome
+        exists to name anything).
+    """
+    repository, _, _ = _repository(spot_bundle=spot_bundle)
+    incomplete = _evaluation_result("incomplete")
+    incomplete["error"] = "uncertified_boundary"
+    with (
+        patch.object(
+            reconciliation_dispatch,
+            "certify_walutomat_history_range",
+        ) as certify,
+        patch.object(
+            reconciliation_dispatch.spot_reconciliation, "evaluate", return_value=incomplete
+        ) as evaluate,
+    ):
+        result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+            repository,
+            _account(),
+            _config("spot_execution_replay"),
+            CapabilityStatus.NOT_APPLICABLE,
+            _NOW,
+            boundary=_boundary(),
+            history_capture=capture,
+        )
+    certify.assert_not_called()
+    replay_boundary = evaluate.call_args.args[2]
+    assert replay_boundary.venue_cursor is None
+    assert replay_boundary.venue_cursor_certified is False
+    assert result["evaluation_status"] == "incomplete"
+    assert result["error"] == "uncertified_boundary"
 
 
 async def test_spot_branch_bounds_unexpected_errors() -> None:
