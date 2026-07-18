@@ -317,7 +317,7 @@ def _evaluation(
     }
 
 
-async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_six_sets(
+async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_seven_sets(
     tmp_path: Path,
 ) -> None:
     """One snapshot serves every evaluator input from exactly six set reads.
@@ -328,7 +328,7 @@ async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_six_sets(
     When: The bundle is read at boundary watermark 4,
     Then: Replay, identity, spec, precision, and confirmed collections are
         complete, the counted proof passes, the boundary tip equals the
-        independently derived genesis fold, and six SELECTs were issued
+        independently derived genesis fold, and seven SELECTs were issued
         (anchor, replay, state, chain fold, specs, precisions).
     """
     repo = await _repo(tmp_path)
@@ -403,7 +403,7 @@ async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_six_sets(
     assert bundle.previously_confirmed_assets == frozenset({"BTC", "USD"})
     assert bundle.range_complete is True
     assert bundle.boundary_chain_tip == await _derived_tip(repo, 4)
-    assert len(select_statements) == 6
+    assert len(select_statements) == 7
     await repo.engine.dispose()
 
 
@@ -1005,6 +1005,44 @@ async def test_bundle_confirms_assets_from_a_mismatched_full_state(
 
     assert bundle.error is None
     assert bundle.previously_confirmed_assets == frozenset({"BTC", "USD", "DOGE"})
+    assert bundle.boundary_chain_tip == await _derived_tip(repo, 3)
+    await repo.engine.dispose()
+
+
+async def test_bundle_checkpoint_survives_a_later_mismatched_full_verdict(
+    tmp_path: Path,
+) -> None:
+    """The chain checkpoint outlives the state row a mismatched verdict evicts.
+
+    Given: An anchored scope whose matched verdict checkpointed the REAL tip
+        at watermark 3 and whose later mismatched verdict carries a foreign
+        tip, overwriting the active full-state row that once held the match,
+    When: The bundle is read at boundary watermark 3,
+    Then: The matched checkpoint is still found in the append-only epoch
+        observations, never in the evicted state row nor the mismatched tip,
+        so the read succeeds with the independently derived boundary tip.
+    """
+    repo = await _repo(tmp_path)
+    await _seed_market(repo)
+    await _seed_executions(repo, 2)
+    await _record_real_anchor(repo)
+    await _seed_executions(repo, 1, start_sequence_id=20)
+    checkpoint_tip = await _derived_tip(repo, 3)
+    await repo.record_portfolio_reconciliation(
+        _evaluation(status="matched", source_watermark=3, source_chain_tip=checkpoint_tip)
+    )
+    mismatched = _evaluation(status="mismatched", source_watermark=3, source_chain_tip=_WRONG_TIP)
+    mismatched["sequence_id"] = 91
+    mismatched["bus_time"] = _T0 + timedelta(seconds=4)
+    await repo.record_portfolio_reconciliation(mismatched)
+
+    bundle = await repo.get_spot_reconciliation_bundle(
+        _WALLET, "kraken", "live", _AS_OF, 3, frozenset()
+    )
+
+    assert bundle.error is None
+    assert bundle.range_complete is True
+    assert bundle.boundary_chain_tip == checkpoint_tip
     assert bundle.boundary_chain_tip == await _derived_tip(repo, 3)
     await repo.engine.dispose()
 

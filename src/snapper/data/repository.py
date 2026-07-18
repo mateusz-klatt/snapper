@@ -2192,17 +2192,25 @@ class Repository(ABC):
 
     @abstractmethod
     async def get_spot_execution_witness_rows(
-        self, wallet_public_id: str, exchange: str, mode: str, upto_watermark: int
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        upto_watermark: int,
+        from_watermark: int = 0,
     ) -> list[SpotExecutionWitnessRow]:
-        """Read the sealed prefix ``[1, upto_watermark]`` for the anchor witness join.
+        """Read the range ``(from_watermark, upto_watermark]`` for a witness join.
 
         Returns one ``(scope_sequence, exec_id)`` row per execution in ascending
         ``scope_sequence`` order, with no ``known_to`` filter (the total-unique
-        index gives one row per sequence value). Raises ``ExecutionChainError``
-        when the range is not contiguous (``count != upto_watermark``) — a gap is
-        a purge or a tamper and the anchor must fail closed rather than seal a
-        ledger it cannot fully witness. The read is unlocked, mirroring the
-        watermark and chain-tip reads.
+        index gives one row per sequence value). The default ``from_watermark=0``
+        is the anchor bootstrap's sealed prefix ``[1, W]``; the venue-cursor
+        certificate passes the anchor watermark to read its replay range. Raises
+        ``ExecutionChainError`` when the range is not contiguous
+        (``count != upto_watermark - from_watermark``) — a gap is a purge or a
+        tamper and the caller must fail closed rather than certify a ledger it
+        cannot fully witness. The read is unlocked, mirroring the watermark and
+        chain-tip reads.
         """
         ...
 
@@ -13986,9 +13994,14 @@ class SQLAlchemyRepository(Repository):
         return extend_execution_chain(from_tip, records)
 
     async def get_spot_execution_witness_rows(
-        self, wallet_public_id: str, exchange: str, mode: str, upto_watermark: int
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        upto_watermark: int,
+        from_watermark: int = 0,
     ) -> list[SpotExecutionWitnessRow]:
-        """Read the sealed prefix ``[1, upto_watermark]`` for the anchor witness join.
+        """Read the range ``(from_watermark, upto_watermark]`` for a witness join.
 
         See the abstract declaration. Contiguity is required (append-only, delete
         refused through every supported path), so a missing sequence value is a
@@ -14005,7 +14018,7 @@ class SQLAlchemyRepository(Repository):
                             Execution.wallet_public_id == wallet_public_id,
                             Execution.exchange == exchange,
                             Execution.mode == mode,
-                            Execution.scope_sequence >= 1,
+                            Execution.scope_sequence > from_watermark,
                             Execution.scope_sequence <= upto_watermark,
                         )
                         .order_by(Execution.scope_sequence.asc())
@@ -14014,11 +14027,12 @@ class SQLAlchemyRepository(Repository):
                 .scalars()
                 .all()
             )
-            if len(executions) != upto_watermark:
+            if len(executions) != upto_watermark - from_watermark:
                 raise ExecutionChainError(
-                    f"non-contiguous execution prefix for scope "
-                    f"({wallet_public_id}, {exchange}, {mode}): expected {upto_watermark} row(s) "
-                    f"in [1, {upto_watermark}], found {len(executions)}"
+                    f"non-contiguous execution range for scope "
+                    f"({wallet_public_id}, {exchange}, {mode}): expected "
+                    f"{upto_watermark - from_watermark} row(s) in "
+                    f"({from_watermark}, {upto_watermark}], found {len(executions)}"
                 )
             rows: list[SpotExecutionWitnessRow] = [
                 {"scope_sequence": int(execution.scope_sequence), "exec_id": execution.exec_id}
@@ -14274,15 +14288,38 @@ class SQLAlchemyRepository(Repository):
                 .scalars()
                 .first()
             )
+            checkpoint_observation = (
+                (
+                    await s.execute(
+                        select(PortfolioReconciliationObservation)
+                        .where(
+                            PortfolioReconciliationObservation.wallet_public_id == wallet_public_id,
+                            PortfolioReconciliationObservation.exchange == exchange,
+                            PortfolioReconciliationObservation.mode == mode,
+                            PortfolioReconciliationObservation.method == "spot_execution_replay",
+                            PortfolioReconciliationObservation.evaluation_status == "matched",
+                            PortfolioReconciliationObservation.anchor_public_id
+                            == anchor["public_id"],
+                            PortfolioReconciliationObservation.source_chain_tip.is_not(None),
+                            PortfolioReconciliationObservation.source_watermark.is_not(None),
+                        )
+                        .order_by(PortfolioReconciliationObservation.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
             checkpoint: tuple[int, str] | None = None
             if (
-                state is not None
-                and state.last_full_outcome == "matched"
-                and state.source_chain_tip is not None
-                and state.source_watermark is not None
-                and state.anchor_public_id == anchor["public_id"]
+                checkpoint_observation is not None
+                and checkpoint_observation.source_chain_tip is not None
+                and checkpoint_observation.source_watermark is not None
             ):
-                checkpoint = (int(state.source_watermark), state.source_chain_tip)
+                checkpoint = (
+                    int(checkpoint_observation.source_watermark),
+                    checkpoint_observation.source_chain_tip,
+                )
             try:
                 if checkpoint is not None:
                     checkpoint_watermark, checkpoint_tip = checkpoint
