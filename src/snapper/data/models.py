@@ -458,6 +458,12 @@ _CK_RECONCILIATION_SPOT_ANCHOR = (
     "evaluation_status IN ('incomplete', 'unsupported', 'error') OR "
     "(evaluation_status IN ('matched', 'mismatched') AND anchor_public_id IS NOT NULL))))"
 )
+_CK_RECONCILIATION_CHAIN_TIP = (
+    "source_chain_tip IS NULL OR ("
+    "LENGTH(source_chain_tip) = 64 AND "
+    "source_chain_tip = LOWER(source_chain_tip) AND "
+    "source_chain_tip = TRIM(source_chain_tip))"
+)
 _CK_RECONCILIATION_OBSERVATION_NONFULL_METHOD_EVIDENCE = (
     "method IS NOT NULL AND (method IN ('futures_position', 'spot_execution_replay') OR ("
     "method IN ('margin_ledger_replay', 'unclassified') AND "
@@ -1515,6 +1521,10 @@ class PortfolioReconciliationObservation(TemporalMixin, Base):
             name="ck_portfolio_recon_obs_spot_anchor",
         ),
         CheckConstraint(
+            _CK_RECONCILIATION_CHAIN_TIP,
+            name="ck_portfolio_recon_obs_chain_tip",
+        ),
+        CheckConstraint(
             _CK_RECONCILIATION_OBSERVATION_NONFULL_METHOD_EVIDENCE,
             name="ck_portfolio_recon_obs_nonfull_method_evidence",
         ),
@@ -1545,6 +1555,7 @@ class PortfolioReconciliationObservation(TemporalMixin, Base):
     source_watermark: Mapped[int | None] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"), nullable=True
     )
+    source_chain_tip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     anchor_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     expected_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     actual_json: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1636,6 +1647,10 @@ class PortfolioReconciliationState(TemporalMixin, Base):
             _CK_RECONCILIATION_ERROR_LENGTH,
             name="ck_portfolio_recon_states_error_length",
         ),
+        CheckConstraint(
+            _CK_RECONCILIATION_CHAIN_TIP,
+            name="ck_portfolio_recon_states_chain_tip",
+        ),
     )
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     exchange: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -1655,6 +1670,7 @@ class PortfolioReconciliationState(TemporalMixin, Base):
     source_watermark: Mapped[int | None] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"), nullable=True
     )
+    source_chain_tip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     expected_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     actual_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     difference_json: Mapped[str | None] = mapped_column(Text, nullable=True)

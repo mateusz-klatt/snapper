@@ -2707,3 +2707,60 @@ def test_postgresql_migration_shape_and_downgrade() -> None:
     assert "ck_portfolio_drift_closed_order" in ddl
     assert "ck_portfolio_drift_rebased" in ddl
     assert "DROP TABLE portfolio_drift_episodes" in ddl
+
+
+async def test_matched_evaluation_persists_the_chain_checkpoint(tmp_path: Path) -> None:
+    """A full spot outcome durably records its derived chain tip (S4c-4a OD4).
+
+    Given: A matched spot evaluation carrying a derived boundary chain tip,
+    When: It is recorded and followed by a non-full evaluation without one,
+    Then: The observation and the state persist the tip, and the later
+        incomplete cycle carries the checkpoint forward unchanged.
+    """
+    repo = await _make_repo(tmp_path)
+    await _seed_spot_execution(repo)
+    await repo.record_spot_reconciliation_anchor(_spot_anchor())
+    tip = "c" * 64
+    matched = _evaluation(
+        _T0 + timedelta(seconds=1),
+        "matched",
+        wallet_public_id=_OTHER_WALLET,
+        exchange="kraken",
+        method="spot_execution_replay",
+    )
+    matched["source_chain_tip"] = tip
+    await repo.record_portfolio_reconciliation(matched)
+    incomplete = _evaluation(
+        _T0 + timedelta(seconds=2),
+        "incomplete",
+        wallet_public_id=_OTHER_WALLET,
+        exchange="kraken",
+        method="spot_execution_replay",
+        sequence_id=3,
+    )
+    await repo.record_portfolio_reconciliation(incomplete)
+    async with repo.session() as session:
+        state = (
+            await session.execute(
+                select(PortfolioReconciliationState).where(
+                    PortfolioReconciliationState.known_to == KNOWN_TO_MAX,
+                    PortfolioReconciliationState.wallet_public_id == _OTHER_WALLET,
+                )
+            )
+        ).scalar_one()
+        observations = (
+            (
+                await session.execute(
+                    select(PortfolioReconciliationObservation)
+                    .where(PortfolioReconciliationObservation.wallet_public_id == _OTHER_WALLET)
+                    .order_by(PortfolioReconciliationObservation.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert state.current_evaluation_status == "incomplete"
+    assert state.source_chain_tip == tip
+    assert observations[0].source_chain_tip == tip
+    assert observations[-1].source_chain_tip is None
+    await repo.engine.dispose()

@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from snapper.application.portfolio import futures_reconciliation
+from snapper.application.portfolio import spot_reconciliation
+from snapper.application.portfolio.spot_reconciliation import SpotInstrumentIdentity
+from snapper.application.portfolio.spot_reconciliation import SpotReplayBoundary
+from snapper.application.portfolio.spot_reconciliation import SpotReplayExecutionRow
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
@@ -293,22 +297,91 @@ async def dispatch_portfolio_reconciliation(
             evaluated_at,
         )
         if durable_signal or _account_has_spot_margin_signal(account, position_capability):
-            reason = "unsupported_margin"
-        elif (
-            boundary is not None
-            and _boundary_bound_to_account(boundary, account)
-            and _account_balance_read_is_current(account)
+            return _nonfull_evaluation(
+                account,
+                evaluated_at,
+                method,
+                "incomplete",
+                "unsupported_margin",
+            )
+        if (
+            boundary is None
+            or not _boundary_bound_to_account(boundary, account)
+            or not _account_balance_read_is_current(account)
         ):
-            reason = "spot_bundle_unavailable"
-        else:
-            reason = "spot_boundary_unavailable"
-        return _nonfull_evaluation(
-            account,
-            evaluated_at,
-            method,
-            "incomplete",
-            reason,
-        )
+            return _nonfull_evaluation(
+                account,
+                evaluated_at,
+                method,
+                "incomplete",
+                "spot_boundary_unavailable",
+            )
+        try:
+            venue_assets = frozenset(entry.currency for entry in (account.balances or []))
+            spot_bundle = await repository.get_spot_reconciliation_bundle(
+                account.wallet_public_id,
+                str(account.exchange).lower(),
+                str(account.mode),
+                boundary.as_of,
+                boundary.source_watermark,
+                venue_assets,
+            )
+            if spot_bundle.error is not None:
+                return _nonfull_evaluation(
+                    account,
+                    evaluated_at,
+                    method,
+                    "incomplete",
+                    spot_bundle.error,
+                )
+            inventory_complete = (
+                bool(account.balances)
+                and account.is_authoritative
+                and spot_bundle.anchor is not None
+                and spot_bundle.anchor["inventory_status"] == "venue_reported_full"
+            )
+            replay_boundary = SpotReplayBoundary(
+                source_watermark=boundary.source_watermark,
+                range_complete=spot_bundle.range_complete,
+                watermark_captured_before_balance=True,
+                request_started_at=boundary.request_started_at,
+                request_completed_at=boundary.request_completed_at,
+                venue_cursor=None,
+                venue_cursor_certified=False,
+                inventory_complete=inventory_complete,
+                inventory_truncated=False,
+            )
+            evaluation = spot_reconciliation.evaluate(
+                spot_bundle.anchor,
+                [SpotReplayExecutionRow(**row) for row in spot_bundle.replay],
+                replay_boundary,
+                account,
+                {
+                    public_id: SpotInstrumentIdentity(**identity)
+                    for public_id, identity in spot_bundle.instruments_by_public_id.items()
+                },
+                spot_bundle.specs_by_instrument_public_id,
+                spot_bundle.asset_precisions,
+                spot_bundle.previously_confirmed_assets,
+                {},
+                (),
+                position_capability,
+                evaluated_at,
+            )
+            if spot_bundle.boundary_chain_tip is not None and evaluation["evaluation_status"] in (
+                "matched",
+                "mismatched",
+            ):
+                evaluation["source_chain_tip"] = spot_bundle.boundary_chain_tip
+            return evaluation
+        except Exception as error:
+            return _nonfull_evaluation(
+                account,
+                evaluated_at,
+                method,
+                "error",
+                _bounded_error(error),
+            )
     try:
         venue_symbols = {position.symbol for position in (account.open_positions or [])}
         bundle = await repository.get_futures_reconciliation_bundle(

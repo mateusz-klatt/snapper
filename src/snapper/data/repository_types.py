@@ -499,6 +499,7 @@ class PortfolioReconciliationEvaluationRow(TypedDict):
     account_authoritative_until: datetime | None
     source_watermark_kind: str | None
     source_watermark: int | None
+    source_chain_tip: NotRequired[str | None]
     anchor_public_id: str | None
     expected_json: str | None
     actual_json: str | None
@@ -1209,6 +1210,68 @@ class FuturesReconciliationBundle:
     projection: list[PositionRow] | None
     instrument_public_ids_by_symbol: dict[str, str]
     specs_by_instrument_public_id: dict[str, InstrumentSpecRow | None]
+    error: str | None = None
+
+
+class SpotReplayExecutionSourceRow(TypedDict):
+    """One replay-range execution row projected for the spot evaluator.
+
+    A field-for-field persistence mirror of the evaluator's
+    ``SpotReplayExecutionRow`` dataclass, keyed by the per-scope
+    ``scope_sequence`` counter; the raw decimal strings and their provenance
+    pass through verbatim (they are the exactness evidence, never normalized
+    by the DAL).
+    """
+
+    scope_sequence: int
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    status: str
+    instrument_public_id: str
+    symbol: str
+    base_asset: str
+    quote_asset: str
+    side: str
+    price: float
+    size: float
+    fee: float
+    fee_asset: str
+    price_decimal: str | None
+    size_decimal: str | None
+    fee_decimal: str | None
+    numeric_provenance: str | None
+
+
+class SpotInstrumentIdentitySourceRow(TypedDict):
+    """Canonical instrument identity projected for the spot evaluator."""
+
+    instrument_public_id: str
+    symbol: str
+    base_asset: str
+    quote_asset: str
+
+
+@dataclass(frozen=True)
+class SpotReconciliationBundle:
+    """One transactionally consistent spot evaluator input bundle.
+
+    Every collection is read inside a single snapshot transaction pinned to the
+    capture's ``as_of`` instant; ``range_complete`` is the counted contiguity
+    proof over ``(anchor.source_watermark, boundary_watermark]``. ``anchor`` is
+    ``None`` for an unanchored account (the evaluator classifies that itself);
+    ``error`` names the exact fail-closed reason when the bundle cannot be
+    certified, in which case every collection is empty.
+    """
+
+    anchor: SpotReconciliationAnchorRow | None
+    replay: list[SpotReplayExecutionSourceRow]
+    instruments_by_public_id: dict[str, SpotInstrumentIdentitySourceRow]
+    specs_by_instrument_public_id: dict[str, InstrumentSpecRow | None]
+    asset_precisions: dict[str, SpotAssetPrecisionEvidenceRow]
+    previously_confirmed_assets: frozenset[str]
+    range_complete: bool
+    boundary_chain_tip: str | None = None
     error: str | None = None
 
 

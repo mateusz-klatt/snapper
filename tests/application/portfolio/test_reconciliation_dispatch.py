@@ -21,6 +21,7 @@ from snapper.data.repository_types import FuturesReconciliationBundle
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
 from snapper.data.repository_types import PositionRow
+from snapper.data.repository_types import SpotReconciliationBundle
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.messaging.schemas.data import AccountBalanceEntry
 from snapper.messaging.schemas.data import AccountPositionEntry
@@ -205,10 +206,26 @@ def _boundary(
     )
 
 
+def _unanchored_spot_bundle() -> SpotReconciliationBundle:
+    """Return the empty unanchored spot bundle (the honest first-cycle read)."""
+    return SpotReconciliationBundle(
+        anchor=None,
+        replay=[],
+        instruments_by_public_id={},
+        specs_by_instrument_public_id={},
+        asset_precisions={},
+        previously_confirmed_assets=frozenset(),
+        range_complete=False,
+        boundary_chain_tip=None,
+        error=None,
+    )
+
+
 def _repository(
     *,
     durable_signal: bool = False,
     bundle: FuturesReconciliationBundle | None = None,
+    spot_bundle: SpotReconciliationBundle | None = None,
 ) -> tuple[Repository, AsyncMock, AsyncMock]:
     """Build a typed repository double and expose its dispatch reads."""
     raw = MagicMock(spec=Repository)
@@ -226,6 +243,9 @@ def _repository(
     )
     raw.has_spot_margin_reconciliation_signal = signal_read
     raw.get_futures_reconciliation_bundle = bundle_read
+    raw.get_spot_reconciliation_bundle = AsyncMock(
+        return_value=_unanchored_spot_bundle() if spot_bundle is None else spot_bundle
+    )
     return cast(Repository, raw), signal_read, bundle_read
 
 
@@ -373,13 +393,15 @@ async def test_each_spot_margin_signal_fails_closed(
     bundle_read.assert_not_awaited()
 
 
-async def test_spot_boundary_present_reports_bundle_as_the_remaining_gap() -> None:
-    """A genuine pre-balance boundary shifts the incomplete reason truthfully.
+async def test_spot_boundary_present_evaluates_the_unanchored_account() -> None:
+    """A genuine pre-balance boundary now reaches the real spot evaluator.
 
-    Given: A cash spot account whose observer captured a pre-balance boundary.
+    Given: A cash spot account whose observer captured a pre-balance boundary
+        and whose bundle reports the honest unanchored state.
     When: Dispatch evaluates the spot branch with that boundary threaded in.
-    Then: The evaluation stays incomplete but reports spot_bundle_unavailable,
-        making the S4c-2 capture observable without behavior risk.
+    Then: The evaluator itself classifies the state — an unanchored bundle
+        cannot certify its replay range, so the evaluator's own gate order
+        yields incomplete_replay_boundary; the old stub reason is gone.
     """
     repository, signal_read, bundle_read = _repository()
     result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
@@ -392,7 +414,7 @@ async def test_spot_boundary_present_reports_bundle_as_the_remaining_gap() -> No
     )
     assert result["method"] == "spot_execution_replay"
     assert result["evaluation_status"] == "incomplete"
-    assert result["error"] == "spot_bundle_unavailable"
+    assert result["error"] == "incomplete_replay_boundary"
     signal_read.assert_awaited_once_with(_WALLET, "kraken", "live", _NOW)
     bundle_read.assert_not_awaited()
 
@@ -768,3 +790,161 @@ async def test_futures_dispatch_exception_is_method_scoped_error() -> None:
     assert result["evaluation_status"] == "error"
     assert result["error"] == "evaluator failed"
     bundle_read.assert_awaited_once()
+
+
+def _evaluation_result(status: str) -> PortfolioReconciliationEvaluationRow:
+    """Build one minimal evaluator result row for orchestration assertions."""
+    return {
+        "wallet_public_id": _WALLET,
+        "exchange": "kraken",
+        "mode": "live",
+        "method": "spot_execution_replay",
+        "evaluation_status": status,
+        "venue_account_state_public_id": None,
+        "venue_account_observation_id": None,
+        "account_authoritative_until": None,
+        "source_watermark_kind": None,
+        "source_watermark": None,
+        "anchor_public_id": None,
+        "expected_json": None,
+        "actual_json": None,
+        "difference_json": None,
+        "tolerance_json": None,
+        "error": None,
+        "session_id": "session-1",
+        "sequence_id": 1,
+        "bus_time": _NOW,
+    }
+
+
+def _error_spot_bundle(error: str) -> SpotReconciliationBundle:
+    """Return a fail-closed spot bundle carrying one named error."""
+    return SpotReconciliationBundle(
+        anchor=None,
+        replay=[],
+        instruments_by_public_id={},
+        specs_by_instrument_public_id={},
+        asset_precisions={},
+        previously_confirmed_assets=frozenset(),
+        range_complete=False,
+        boundary_chain_tip=None,
+        error=error,
+    )
+
+
+async def test_spot_bundle_error_passes_through_by_name() -> None:
+    """A named bundle refusal becomes the incomplete reason verbatim.
+
+    Given: A spot bundle refusing with execution_chain_diverged,
+    When: Dispatch evaluates the spot branch with a valid boundary,
+    Then: The evaluation is incomplete with exactly that named reason.
+    """
+    repository, _, _ = _repository(spot_bundle=_error_spot_bundle("execution_chain_diverged"))
+    result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+        repository,
+        _account(),
+        _config("spot_execution_replay"),
+        CapabilityStatus.NOT_APPLICABLE,
+        _NOW,
+        boundary=_boundary(),
+    )
+    assert result["evaluation_status"] == "incomplete"
+    assert result["error"] == "execution_chain_diverged"
+
+
+async def test_spot_full_outcome_is_stamped_with_the_boundary_chain_tip() -> None:
+    """A full spot outcome carries the bundle-derived checkpoint tip.
+
+    Given: A bundle with a derived boundary chain tip and a patched evaluator
+        returning a mismatched full outcome,
+    When: Dispatch evaluates the spot branch,
+    Then: The evaluation carries source_chain_tip for the writer, and the
+        evaluator received the bundle's range proof with the cursor
+        honestly uncertified.
+    """
+    bundle = SpotReconciliationBundle(
+        anchor=None,
+        replay=[],
+        instruments_by_public_id={},
+        specs_by_instrument_public_id={},
+        asset_precisions={},
+        previously_confirmed_assets=frozenset(),
+        range_complete=True,
+        boundary_chain_tip="d" * 64,
+        error=None,
+    )
+    repository, _, _ = _repository(spot_bundle=bundle)
+    full = _evaluation_result("mismatched")
+    with patch.object(
+        reconciliation_dispatch.spot_reconciliation, "evaluate", return_value=full
+    ) as evaluate:
+        result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+            repository,
+            _account(),
+            _config("spot_execution_replay"),
+            CapabilityStatus.NOT_APPLICABLE,
+            _NOW,
+            boundary=_boundary(),
+        )
+    assert result["source_chain_tip"] == "d" * 64
+    replay_boundary = evaluate.call_args.args[2]
+    assert replay_boundary.range_complete is True
+    assert replay_boundary.venue_cursor_certified is False
+    assert replay_boundary.venue_cursor is None
+
+
+async def test_spot_incomplete_outcome_is_never_stamped_with_a_tip() -> None:
+    """A non-full spot outcome never claims a chain checkpoint.
+
+    Given: A bundle with a derived tip and a patched evaluator returning an
+        incomplete outcome,
+    When: Dispatch evaluates the spot branch,
+    Then: The evaluation carries no source_chain_tip.
+    """
+    bundle = SpotReconciliationBundle(
+        anchor=None,
+        replay=[],
+        instruments_by_public_id={},
+        specs_by_instrument_public_id={},
+        asset_precisions={},
+        previously_confirmed_assets=frozenset(),
+        range_complete=True,
+        boundary_chain_tip="d" * 64,
+        error=None,
+    )
+    repository, _, _ = _repository(spot_bundle=bundle)
+    incomplete = _evaluation_result("incomplete")
+    with patch.object(
+        reconciliation_dispatch.spot_reconciliation, "evaluate", return_value=incomplete
+    ):
+        result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+            repository,
+            _account(),
+            _config("spot_execution_replay"),
+            CapabilityStatus.NOT_APPLICABLE,
+            _NOW,
+            boundary=_boundary(),
+        )
+    assert "source_chain_tip" not in result
+
+
+async def test_spot_branch_bounds_unexpected_errors() -> None:
+    """An unexpected spot-branch failure degrades to a bounded error outcome.
+
+    Given: A spot bundle read raising an unexpected exception,
+    When: Dispatch evaluates the spot branch,
+    Then: The evaluation is an error with the bounded reason text.
+    """
+    repository, _, _ = _repository()
+    raw = cast(MagicMock, repository)
+    raw.get_spot_reconciliation_bundle = AsyncMock(side_effect=RuntimeError("boom"))
+    result = await reconciliation_dispatch.dispatch_portfolio_reconciliation(
+        repository,
+        _account(),
+        _config("spot_execution_replay"),
+        CapabilityStatus.NOT_APPLICABLE,
+        _NOW,
+        boundary=_boundary(),
+    )
+    assert result["evaluation_status"] == "error"
+    assert "boom" in str(result["error"])

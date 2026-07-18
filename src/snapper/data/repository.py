@@ -312,7 +312,10 @@ from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
 from snapper.data.repository_types import SpotExecutionWitnessRow
+from snapper.data.repository_types import SpotInstrumentIdentitySourceRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
+from snapper.data.repository_types import SpotReconciliationBundle
+from snapper.data.repository_types import SpotReplayExecutionSourceRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
 from snapper.data.repository_types import TradeCommandDispatchUpdate
@@ -2200,6 +2203,33 @@ class Repository(ABC):
         a purge or a tamper and the anchor must fail closed rather than seal a
         ledger it cannot fully witness. The read is unlocked, mirroring the
         watermark and chain-tip reads.
+        """
+        ...
+
+    @abstractmethod
+    async def get_spot_reconciliation_bundle(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        as_of: datetime,
+        boundary_watermark: int,
+        venue_assets: frozenset[str],
+    ) -> SpotReconciliationBundle:
+        """Load the spot evaluator's inputs in one repeatable snapshot (S4c-4a).
+
+        One transaction pinned to the capture's ``as_of`` instant loads the
+        active anchor, the replay range ``(anchor.source_watermark,
+        boundary_watermark]`` (counted-contiguity proof, no ``known_to``
+        filter), the joined instrument identities and specs, the precision
+        plane over ``anchor ∪ venue ∪ replay`` assets, the previously
+        confirmed assets, and the derived boundary chain tip (verified against
+        the newest matched checkpoint for the current anchor epoch —
+        regression or divergence refuses). Every refusal is a named
+        ``error`` on the returned bundle with empty collections; an unanchored
+        account returns ``anchor=None`` and lets the evaluator classify it.
+        A malformed wallet identity raises ``ValueError`` like reconciliation
+        writers.
         """
         ...
 
@@ -6563,51 +6593,63 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
     ) -> dict[str, SpotAssetPrecisionEvidenceRow]:
         """Batch-read exact asset identities and reject overlapping versions."""
+        async with self.session() as s:
+            return await self._load_spot_asset_precision_evidence(s, exchange, assets, as_of)
+
+    @staticmethod
+    async def _load_spot_asset_precision_evidence(
+        s: AsyncSession,
+        exchange: str,
+        assets: Sequence[str],
+        as_of: datetime,
+    ) -> dict[str, SpotAssetPrecisionEvidenceRow]:
+        """Batch-read precision evidence on the CALLER's session.
+
+        Session-scoped so the spot bundle reads the precision plane inside its
+        own snapshot transaction (one consistent instant with the replay range
+        and the anchor) while :meth:`get_spot_asset_precision_evidence` keeps
+        its own-session contract for every other consumer.
+        """
         requested_assets = tuple(dict.fromkeys(assets))
         if not requested_assets:
             return {}
-        async with self.session() as s:
-            result = await s.execute(
-                select(SpotAssetPrecisionEvidence)
-                .where(
-                    SpotAssetPrecisionEvidence.exchange == exchange,
-                    SpotAssetPrecisionEvidence.asset.in_(requested_assets),
-                    *where_active(SpotAssetPrecisionEvidence, as_of),
-                )
-                .order_by(SpotAssetPrecisionEvidence.asset, SpotAssetPrecisionEvidence.id)
+        result = await s.execute(
+            select(SpotAssetPrecisionEvidence)
+            .where(
+                SpotAssetPrecisionEvidence.exchange == exchange,
+                SpotAssetPrecisionEvidence.asset.in_(requested_assets),
+                *where_active(SpotAssetPrecisionEvidence, as_of),
             )
-            evidence: dict[str, SpotAssetPrecisionEvidenceRow] = {}
-            for persisted in result.scalars().all():
-                if persisted.asset in evidence:
-                    raise RuntimeError("duplicate spot asset precision evidence")
-                balance_certified = persisted.balance_decimals is not None
-                evidence[persisted.asset] = SpotAssetPrecisionEvidenceRow(
-                    exchange=persisted.exchange,
-                    asset=persisted.asset,
-                    balance_decimals=(
-                        persisted.balance_decimals_max if balance_certified else None
-                    ),
-                    balance_source=(
-                        persisted.balance_max_source
-                        if balance_certified
-                        else persisted.balance_source
-                    ),
-                    balance_version=(
-                        persisted.balance_max_version
-                        if balance_certified
-                        else persisted.balance_version
-                    ),
-                    balance_observed_at=(
-                        persisted.balance_max_observed_at
-                        if balance_certified
-                        else persisted.balance_observed_at
-                    ),
-                    fee_decimals=persisted.fee_decimals,
-                    fee_source=persisted.fee_source,
-                    fee_version=persisted.fee_version,
-                    fee_observed_at=persisted.fee_observed_at,
-                )
-            return evidence
+            .order_by(SpotAssetPrecisionEvidence.asset, SpotAssetPrecisionEvidence.id)
+        )
+        evidence: dict[str, SpotAssetPrecisionEvidenceRow] = {}
+        for persisted in result.scalars().all():
+            if persisted.asset in evidence:
+                raise RuntimeError("duplicate spot asset precision evidence")
+            balance_certified = persisted.balance_decimals is not None
+            evidence[persisted.asset] = SpotAssetPrecisionEvidenceRow(
+                exchange=persisted.exchange,
+                asset=persisted.asset,
+                balance_decimals=(persisted.balance_decimals_max if balance_certified else None),
+                balance_source=(
+                    persisted.balance_max_source if balance_certified else persisted.balance_source
+                ),
+                balance_version=(
+                    persisted.balance_max_version
+                    if balance_certified
+                    else persisted.balance_version
+                ),
+                balance_observed_at=(
+                    persisted.balance_max_observed_at
+                    if balance_certified
+                    else persisted.balance_observed_at
+                ),
+                fee_decimals=persisted.fee_decimals,
+                fee_source=persisted.fee_source,
+                fee_version=persisted.fee_version,
+                fee_observed_at=persisted.fee_observed_at,
+            )
+        return evidence
 
     async def _upsert_batch(
         self,
@@ -13889,37 +13931,58 @@ class SQLAlchemyRepository(Repository):
         so their loaded columns are accessed before the entities detach; the
         fold itself is pure.
         """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+        async with self.session() as s:
+            return await self._fold_execution_chain_tip(
+                s, wallet_public_id, exchange, mode, from_watermark, from_tip, to_watermark
+            )
+
+    @classmethod
+    async def _fold_execution_chain_tip(
+        cls,
+        s: AsyncSession,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        from_watermark: int,
+        from_tip: str,
+        to_watermark: int,
+    ) -> str:
+        """Fold the chain range on the CALLER's session (pre-canonicalized wallet).
+
+        Session-scoped so the spot bundle folds inside its own snapshot
+        transaction; :meth:`get_spot_execution_chain_tip` keeps the own-session
+        contract for every other consumer.
+        """
         if from_watermark < 0 or to_watermark < from_watermark:
             raise ExecutionChainError(
                 f"invalid chain range: from_watermark={from_watermark} to_watermark={to_watermark}"
             )
-        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
-        async with self.session() as s:
-            executions = (
-                (
-                    await s.execute(
-                        select(Execution)
-                        .where(
-                            Execution.wallet_public_id == wallet_public_id,
-                            Execution.exchange == exchange,
-                            Execution.mode == mode,
-                            Execution.scope_sequence > from_watermark,
-                            Execution.scope_sequence <= to_watermark,
-                        )
-                        .order_by(Execution.scope_sequence.asc())
+        executions = (
+            (
+                await s.execute(
+                    select(Execution)
+                    .where(
+                        Execution.wallet_public_id == wallet_public_id,
+                        Execution.exchange == exchange,
+                        Execution.mode == mode,
+                        Execution.scope_sequence > from_watermark,
+                        Execution.scope_sequence <= to_watermark,
                     )
+                    .order_by(Execution.scope_sequence.asc())
                 )
-                .scalars()
-                .all()
             )
-            expected = to_watermark - from_watermark
-            if len(executions) != expected:
-                raise ExecutionChainError(
-                    f"non-contiguous execution range for scope "
-                    f"({wallet_public_id}, {exchange}, {mode}): expected {expected} row(s) in "
-                    f"({from_watermark}, {to_watermark}], found {len(executions)}"
-                )
-            records = [self._execution_chain_record(execution) for execution in executions]
+            .scalars()
+            .all()
+        )
+        expected = to_watermark - from_watermark
+        if len(executions) != expected:
+            raise ExecutionChainError(
+                f"non-contiguous execution range for scope "
+                f"({wallet_public_id}, {exchange}, {mode}): expected {expected} row(s) in "
+                f"({from_watermark}, {to_watermark}], found {len(executions)}"
+            )
+        records = [cls._execution_chain_record(execution) for execution in executions]
         return extend_execution_chain(from_tip, records)
 
     async def get_spot_execution_witness_rows(
@@ -13962,6 +14025,339 @@ class SQLAlchemyRepository(Repository):
                 for execution in executions
             ]
         return rows
+
+    @staticmethod
+    def _spot_bundle_unavailable(error: str) -> SpotReconciliationBundle:
+        """Return the fail-closed empty spot bundle carrying one named reason."""
+        return SpotReconciliationBundle(
+            anchor=None,
+            replay=[],
+            instruments_by_public_id={},
+            specs_by_instrument_public_id={},
+            asset_precisions={},
+            previously_confirmed_assets=frozenset(),
+            range_complete=False,
+            boundary_chain_tip=None,
+            error=error,
+        )
+
+    @staticmethod
+    def _spot_confirmed_assets_from_state(
+        state: PortfolioReconciliationState | None,
+        anchor_public_id: str,
+        anchor_assets: frozenset[str],
+    ) -> frozenset[str]:
+        """Derive the previously confirmed assets from the active state row.
+
+        Eligible only when the state's last FULL outcome came from the current
+        anchor epoch with its detail evidence still the retained one; assets
+        whose actual reading was ``absent_as_zero`` never confirm. Ineligible
+        or absent state yields the anchor keys alone (the honest first-run
+        value). A malformed retained payload raises ``ValueError`` so the
+        caller refuses by name rather than silently shrinking the tripwire.
+        """
+        if (
+            state is None
+            or state.method != "spot_execution_replay"
+            or state.last_full_outcome not in ("matched", "mismatched")
+            or state.detail_source_observation_id is None
+            or state.detail_source_observation_id != state.last_full_observation_id
+            or state.anchor_public_id != anchor_public_id
+            or state.actual_json is None
+        ):
+            return anchor_assets
+
+        def _reject_duplicates(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
+            mapping: dict[str, JsonValue] = {}
+            for key, value in pairs:
+                if key in mapping:
+                    raise ValueError(f"duplicate confirmed-asset key: {key!r}")
+                mapping[key] = value
+            return mapping
+
+        payload = json.loads(
+            state.actual_json,
+            object_pairs_hook=_reject_duplicates,
+        )
+        assets = payload.get("assets")
+        if not isinstance(assets, dict):
+            raise ValueError("confirmed-asset payload has no assets object")
+        confirmed: set[str] = set()
+        for asset, detail in assets.items():
+            if not isinstance(detail, dict) or not isinstance(detail.get("absent_as_zero"), bool):
+                raise ValueError(f"confirmed-asset detail malformed for {asset!r}")
+            if detail["absent_as_zero"] is False:
+                confirmed.add(asset)
+        return frozenset(confirmed) | anchor_assets
+
+    async def get_spot_reconciliation_bundle(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        as_of: datetime,
+        boundary_watermark: int,
+        venue_assets: frozenset[str],
+    ) -> SpotReconciliationBundle:
+        """Load the spot evaluator's inputs in one repeatable snapshot.
+
+        See the abstract declaration. Two temporal instants are load-bearing:
+        every read here pins to the capture-echoed ``as_of`` (the boundary
+        contract), while the evaluator judges freshness against its own
+        ``now`` — a spec revised between them reads clean here yet fails
+        freshness there, which is fail-closed. ``range_complete`` is the
+        counted contiguity proof over the sealed allocation (committed max+1
+        under the ingest fence), replacing any in-transaction tip recheck; the
+        chain fold verifies the range against the anchor tip and the newest
+        matched checkpoint of the current anchor epoch, so a rolled-back or
+        diverged ledger refuses by name before any evaluation.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+        if mode != "live" or not exchange or exchange.strip().lower() != exchange:
+            return self._spot_bundle_unavailable("invalid_spot_bundle_identity")
+        if self.dialect_name not in ("postgresql", "sqlite"):
+            return self._spot_bundle_unavailable("unsupported_spot_bundle_dialect")
+        async with self.session() as s, s.begin():
+            if self.dialect_name == "postgresql":
+                await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            anchor_orm = (
+                (
+                    await s.execute(
+                        select(PortfolioSpotReconciliationAnchor).where(
+                            PortfolioSpotReconciliationAnchor.known_to == KNOWN_TO_MAX,
+                            PortfolioSpotReconciliationAnchor.wallet_public_id == wallet_public_id,
+                            PortfolioSpotReconciliationAnchor.exchange == exchange,
+                            PortfolioSpotReconciliationAnchor.mode == mode,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if anchor_orm is None:
+                return SpotReconciliationBundle(
+                    anchor=None,
+                    replay=[],
+                    instruments_by_public_id={},
+                    specs_by_instrument_public_id={},
+                    asset_precisions={},
+                    previously_confirmed_assets=frozenset(),
+                    range_complete=False,
+                    boundary_chain_tip=None,
+                    error=None,
+                )
+            anchor = self._spot_anchor_to_row(anchor_orm)
+            anchor_watermark = anchor["source_watermark"]
+            if anchor_watermark < 1 or anchor_watermark > boundary_watermark:
+                return self._spot_bundle_unavailable("invalid_spot_bundle_watermarks")
+            try:
+                self._validate_spot_anchor_balances_json(anchor["balances_json"])
+                anchor_assets = frozenset(json.loads(anchor["balances_json"]))
+            except ValueError:
+                return self._spot_bundle_unavailable("corrupt_spot_anchor_balances")
+
+            replay_result = await s.execute(
+                select(
+                    Execution,
+                    Order.public_id.label("order_public_id"),
+                    Order.mode.label("order_mode"),
+                    Instrument.public_id.label("instrument_public_id"),
+                    Instrument.exchange.label("instrument_exchange"),
+                    Symbol.native_symbol.label("native_symbol"),
+                    Symbol.base.label("base_asset"),
+                    Symbol.quote.label("quote_asset"),
+                )
+                .outerjoin(
+                    Order,
+                    and_(
+                        Execution.order_public_id == Order.public_id,
+                        *where_active(Order, as_of),
+                    ),
+                )
+                .outerjoin(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .outerjoin(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    Execution.wallet_public_id == wallet_public_id,
+                    Execution.exchange == exchange,
+                    Execution.mode == mode,
+                    Execution.scope_sequence > anchor_watermark,
+                    Execution.scope_sequence <= boundary_watermark,
+                )
+                .order_by(Execution.scope_sequence.asc())
+            )
+            replay: list[SpotReplayExecutionSourceRow] = []
+            instruments: dict[str, SpotInstrumentIdentitySourceRow] = {}
+            seen_sequences: set[int] = set()
+            for (
+                execution,
+                order_public_id,
+                order_mode,
+                instrument_public_id,
+                instrument_exchange,
+                native_symbol,
+                base_asset,
+                quote_asset,
+            ) in replay_result.all():
+                if execution.scope_sequence in seen_sequences:
+                    return self._spot_bundle_unavailable("ambiguous_spot_instrument_identity")
+                seen_sequences.add(execution.scope_sequence)
+                if execution.known_to != KNOWN_TO_MAX:
+                    return self._spot_bundle_unavailable("unstable_spot_replay_range")
+                if order_public_id is None:
+                    return self._spot_bundle_unavailable("missing_spot_execution_order_identity")
+                if (
+                    instrument_public_id is None
+                    or not native_symbol
+                    or not base_asset
+                    or not quote_asset
+                ):
+                    return self._spot_bundle_unavailable("missing_spot_instrument_identity")
+                if instrument_exchange != execution.exchange or order_mode != execution.mode:
+                    return self._spot_bundle_unavailable("conflicting_spot_instrument_identity")
+                identity: SpotInstrumentIdentitySourceRow = {
+                    "instrument_public_id": instrument_public_id,
+                    "symbol": native_symbol,
+                    "base_asset": base_asset,
+                    "quote_asset": quote_asset,
+                }
+                known = instruments.get(instrument_public_id)
+                if known is not None and known != identity:
+                    return self._spot_bundle_unavailable("conflicting_spot_instrument_identity")
+                instruments[instrument_public_id] = identity
+                replay.append(
+                    {
+                        "scope_sequence": int(execution.scope_sequence),
+                        "wallet_public_id": execution.wallet_public_id,
+                        "exchange": execution.exchange,
+                        "mode": execution.mode,
+                        "status": execution.status,
+                        "instrument_public_id": instrument_public_id,
+                        "symbol": native_symbol,
+                        "base_asset": base_asset,
+                        "quote_asset": quote_asset,
+                        "side": execution.side,
+                        "price": execution.price,
+                        "size": execution.size,
+                        "fee": execution.fee,
+                        "fee_asset": execution.fee_asset,
+                        "price_decimal": execution.price_decimal,
+                        "size_decimal": execution.size_decimal,
+                        "fee_decimal": execution.fee_decimal,
+                        "numeric_provenance": execution.numeric_provenance,
+                    }
+                )
+            range_complete = len(replay) == boundary_watermark - anchor_watermark
+
+            state = (
+                (
+                    await s.execute(
+                        select(PortfolioReconciliationState).where(
+                            PortfolioReconciliationState.known_to == KNOWN_TO_MAX,
+                            PortfolioReconciliationState.wallet_public_id == wallet_public_id,
+                            PortfolioReconciliationState.exchange == exchange,
+                            PortfolioReconciliationState.mode == mode,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            checkpoint: tuple[int, str] | None = None
+            if (
+                state is not None
+                and state.last_full_outcome == "matched"
+                and state.source_chain_tip is not None
+                and state.source_watermark is not None
+                and state.anchor_public_id == anchor["public_id"]
+            ):
+                checkpoint = (int(state.source_watermark), state.source_chain_tip)
+            try:
+                if checkpoint is not None:
+                    checkpoint_watermark, checkpoint_tip = checkpoint
+                    if boundary_watermark < checkpoint_watermark:
+                        return self._spot_bundle_unavailable("execution_chain_regressed")
+                    derived_checkpoint = await self._fold_execution_chain_tip(
+                        s,
+                        wallet_public_id,
+                        exchange,
+                        mode,
+                        anchor_watermark,
+                        anchor["source_chain_tip"],
+                        checkpoint_watermark,
+                    )
+                    if derived_checkpoint != checkpoint_tip:
+                        return self._spot_bundle_unavailable("execution_chain_diverged")
+                    boundary_chain_tip = await self._fold_execution_chain_tip(
+                        s,
+                        wallet_public_id,
+                        exchange,
+                        mode,
+                        checkpoint_watermark,
+                        checkpoint_tip,
+                        boundary_watermark,
+                    )
+                else:
+                    boundary_chain_tip = await self._fold_execution_chain_tip(
+                        s,
+                        wallet_public_id,
+                        exchange,
+                        mode,
+                        anchor_watermark,
+                        anchor["source_chain_tip"],
+                        boundary_watermark,
+                    )
+            except ExecutionChainError:
+                return self._spot_bundle_unavailable("execution_chain_broken")
+
+            spec_result = await s.execute(
+                select(InstrumentSpec).where(
+                    InstrumentSpec.instrument_public_id.in_(tuple(instruments)),
+                    *where_active(InstrumentSpec, as_of),
+                )
+            )
+            specs: dict[str, InstrumentSpecRow | None] = dict.fromkeys(instruments)
+            for spec in spec_result.scalars().all():
+                if specs.get(spec.instrument_public_id) is not None:
+                    return self._spot_bundle_unavailable("duplicate_spot_instrument_spec")
+                specs[spec.instrument_public_id] = self._instrument_spec_row(spec)
+
+            replay_assets = {row["base_asset"] for row in replay}
+            replay_assets |= {row["quote_asset"] for row in replay}
+            replay_assets |= {row["fee_asset"] for row in replay if row["fee_asset"]}
+            precision_assets = sorted(anchor_assets | venue_assets | replay_assets)
+            asset_precisions = await self._load_spot_asset_precision_evidence(
+                s, exchange, precision_assets, as_of
+            )
+            try:
+                previously_confirmed = self._spot_confirmed_assets_from_state(
+                    state, anchor["public_id"], anchor_assets
+                )
+            except ValueError:
+                return self._spot_bundle_unavailable("corrupt_confirmed_asset_source")
+
+        return SpotReconciliationBundle(
+            anchor=anchor,
+            replay=replay,
+            instruments_by_public_id=instruments,
+            specs_by_instrument_public_id=specs,
+            asset_precisions=asset_precisions,
+            previously_confirmed_assets=previously_confirmed,
+            range_complete=range_complete,
+            boundary_chain_tip=boundary_chain_tip,
+            error=None,
+        )
 
     @staticmethod
     def _execution_chain_record(execution: Execution) -> ExecutionChainRecord:
@@ -15041,6 +15437,7 @@ class SQLAlchemyRepository(Repository):
             account_authoritative_until=evaluation["account_authoritative_until"],
             source_watermark_kind=evaluation["source_watermark_kind"],
             source_watermark=evaluation["source_watermark"],
+            source_chain_tip=evaluation.get("source_chain_tip"),
             anchor_public_id=evaluation["anchor_public_id"],
             expected_json=evaluation["expected_json"],
             actual_json=evaluation["actual_json"],
@@ -15113,6 +15510,7 @@ class SQLAlchemyRepository(Repository):
             venue_account_observation_id = evaluation["venue_account_observation_id"]
             source_watermark_kind = evaluation["source_watermark_kind"]
             source_watermark = evaluation["source_watermark"]
+            source_chain_tip = evaluation.get("source_chain_tip")
             expected_json = evaluation["expected_json"]
             actual_json = evaluation["actual_json"]
             difference_json = evaluation["difference_json"]
@@ -15128,6 +15526,7 @@ class SQLAlchemyRepository(Repository):
             venue_account_observation_id = existing.venue_account_observation_id
             source_watermark_kind = existing.source_watermark_kind
             source_watermark = existing.source_watermark
+            source_chain_tip = existing.source_chain_tip
             expected_json = existing.expected_json
             actual_json = existing.actual_json
             difference_json = existing.difference_json
@@ -15143,6 +15542,7 @@ class SQLAlchemyRepository(Repository):
             venue_account_observation_id = None
             source_watermark_kind = None
             source_watermark = None
+            source_chain_tip = None
             expected_json = None
             actual_json = None
             difference_json = None
@@ -15166,6 +15566,7 @@ class SQLAlchemyRepository(Repository):
             "venue_account_observation_id": venue_account_observation_id,
             "source_watermark_kind": source_watermark_kind,
             "source_watermark": source_watermark,
+            "source_chain_tip": source_chain_tip,
             "expected_json": expected_json,
             "actual_json": actual_json,
             "difference_json": difference_json,

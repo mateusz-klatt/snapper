@@ -325,6 +325,19 @@ observer's balance snapshot is never at risk), and only a fully proven
 observation is sealed — once, immutably. The anchor's `venue_cursor_value`
 (`H0`) is the left endpoint S4c-4's replay-range proof folds from.
 
+Once an anchor exists, spot execution replay is LIVE (S4c-4a): the dispatch
+feeds the evaluator a transactionally consistent bundle — the anchor, the
+replay range `(W_anchor, W_boundary]` proven contiguous by count, instrument
+identities and specs pinned to the capture's `as_of`, the certified precision
+plane over the anchor∪venue∪replay assets, and the previously confirmed assets
+guarded by anchor epoch. The bundle also re-derives the execution hash chain
+from the anchor's sealed tip through the newest matched checkpoint to the
+boundary (regression, divergence, or a broken fold refuse by name), and every
+full verdict durably records its boundary tip as the next cycle's anti-rollback
+checkpoint. Real balance divergence therefore fires `mismatched` immediately,
+while `matched` stays honestly gated behind the venue-cursor certificate
+(S4c-4b) — the boundary is passed with the cursor uncertified until then.
+
 Two claim-domain facts are recorded rather than assumed. Leg completeness is
 enforced in code: every witnessed fill must carry exactly its base and quote
 legs, and each order's COMMISSION history items must sum exactly to the
