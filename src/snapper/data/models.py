@@ -686,7 +686,7 @@ class Candle(TemporalMixin, Base):
         primary_key=True,
         autoincrement=True,
     )
-    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn())
     open_at: Mapped[datetime] = mapped_column(TZDateTime())
     timeframe: Mapped[str] = mapped_column(String(8))
     open: Mapped[float] = mapped_column(Float)
@@ -759,22 +759,13 @@ class Tick(TemporalMixin, Base):
     """
 
     __tablename__ = "ticks"
-    __table_args__ = (
-        Index("ix_tick_instrument_ts", "instrument_public_id", "timestamp"),
-        Index(
-            "ix_ticks_public_id",
-            "public_id",
-            unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
-            postgresql_where=_KNOWN_TO_ACTIVE_PG,
-        ),
-    )
+    __table_args__ = (Index("ix_tick_instrument_ts", "instrument_public_id", "timestamp"),)
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
         primary_key=True,
         autoincrement=True,
     )
-    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn())
     bid: Mapped[float | None] = mapped_column(Float)
     ask: Mapped[float | None] = mapped_column(Float)
     last: Mapped[float | None] = mapped_column(Float)
