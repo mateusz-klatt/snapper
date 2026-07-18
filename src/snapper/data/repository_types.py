@@ -457,6 +457,15 @@ class SpotReconciliationAnchorRow(TypedDict):
     session_id: str
     sequence_id: int
     timestamp: datetime
+    source_chain_tip: str
+    venue_cursor_kind: str
+    venue_cursor_scheme: str
+    venue_cursor_value: str
+    venue_cursor_requested_at: datetime
+    venue_cursor_observed_at: datetime
+    venue_cursor_confirmed_at: datetime
+    source_watermark_requested_at: datetime
+    source_watermark_captured_at: datetime
 
 
 class PortfolioReconciliationEvaluationRow(TypedDict):

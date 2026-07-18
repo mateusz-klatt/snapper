@@ -1331,7 +1331,7 @@ class PortfolioSpotReconciliationAnchor(TemporalMixin, Base):
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_portfolio_spot_anchor_exchange_lower"),
         CheckConstraint("mode = 'live'", name="ck_portfolio_spot_anchor_mode"),
         CheckConstraint(
-            "source_watermark_kind = 'scope_sequence' AND source_watermark >= 0",
+            "source_watermark_kind = 'scope_sequence' AND source_watermark >= 1",
             name="ck_portfolio_spot_anchor_watermark",
         ),
         CheckConstraint(
@@ -1340,23 +1340,47 @@ class PortfolioSpotReconciliationAnchor(TemporalMixin, Base):
         ),
         CheckConstraint("balance_observation_id > 0", name="ck_portfolio_spot_anchor_observation"),
         CheckConstraint(
+            "venue_cursor_requested_at <= venue_cursor_observed_at AND "
+            "venue_cursor_observed_at <= source_watermark_requested_at AND "
+            "source_watermark_requested_at <= source_watermark_captured_at AND "
+            "source_watermark_captured_at <= first_request_started_at AND "
             "first_request_completed_at >= first_request_started_at AND "
             "second_request_started_at >= first_request_completed_at AND "
             "second_request_completed_at >= second_request_started_at AND "
-            "timestamp >= second_request_completed_at",
+            "venue_cursor_confirmed_at >= second_request_completed_at AND "
+            "timestamp >= venue_cursor_confirmed_at",
             name="ck_portfolio_spot_anchor_timestamp_order",
         ),
         CheckConstraint(
-            "boundary_status IN ('cursor_certified', 'double_read_equal', 'uncertified')",
+            "boundary_status = 'cursor_certified'",
             name="ck_portfolio_spot_anchor_boundary_status",
         ),
         CheckConstraint(
-            "inventory_status IN ('certified_full', 'uncertified', 'suspect_partial')",
+            "inventory_status = 'venue_reported_full'",
             name="ck_portfolio_spot_anchor_inventory_status",
         ),
         CheckConstraint(
             "margin_status IN ('cash', 'unsupported_margin', 'unknown')",
             name="ck_portfolio_spot_anchor_margin_status",
+        ),
+        CheckConstraint(
+            "venue_cursor_kind IN ('account_history_item_id') AND "
+            "LENGTH(TRIM(venue_cursor_scheme)) > 0 AND "
+            "venue_cursor_scheme = LOWER(venue_cursor_scheme) AND "
+            "venue_cursor_scheme = TRIM(venue_cursor_scheme) AND "
+            "LENGTH(TRIM(venue_cursor_value)) > 0 AND "
+            "venue_cursor_value = TRIM(venue_cursor_value)",
+            name="ck_portfolio_spot_anchor_venue_cursor",
+        ),
+        CheckConstraint(
+            "SUBSTR(venue_cursor_scheme, 1, LENGTH(exchange) + 1) = exchange || ':'",
+            name="ck_portfolio_spot_anchor_cursor_venue_binding",
+        ),
+        CheckConstraint(
+            "LENGTH(source_chain_tip) = 64 AND "
+            "source_chain_tip = LOWER(source_chain_tip) AND "
+            "source_chain_tip = TRIM(source_chain_tip)",
+            name="ck_portfolio_spot_anchor_chain_tip",
         ),
     )
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
@@ -1377,6 +1401,15 @@ class PortfolioSpotReconciliationAnchor(TemporalMixin, Base):
     inventory_status: Mapped[str] = mapped_column(String(24), nullable=False)
     margin_status: Mapped[str] = mapped_column(String(24), nullable=False)
     provenance: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_chain_tip: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue_cursor_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    venue_cursor_scheme: Mapped[str] = mapped_column(String(64), nullable=False)
+    venue_cursor_value: Mapped[str] = mapped_column(String(128), nullable=False)
+    venue_cursor_requested_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    venue_cursor_observed_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    venue_cursor_confirmed_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    source_watermark_requested_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    source_watermark_captured_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
 
 
 class PortfolioReconciliationMethodConfig(TemporalMixin, Base):

@@ -277,9 +277,10 @@ def _seed_spot_reconciliation_anchor(conn: Connection, *, wallet: str) -> str:
     """Insert one immutable spot reconciliation anchor row and return its public_id.
 
     Satisfies every anchor CHECK (live mode, lowercase exchange, ordered
-    request timestamps, ``scope_sequence`` watermark unit, non-empty
-    evidence text, enum statuses) so the row is a legitimate sealed anchor
-    the seeder must never re-key.
+    ten-instant read chain, ``scope_sequence`` watermark unit, non-empty
+    evidence text, certified statuses, exchange-bound venue cursor and
+    lowercase chain tip) so the row is a legitimate sealed anchor the
+    seeder must never re-key.
     """
     public_id = str(uuid7())
     conn.execute(
@@ -291,6 +292,10 @@ def _seed_spot_reconciliation_anchor(conn: Connection, *, wallet: str) -> str:
             " first_request_started_at, first_request_completed_at, "
             " second_request_started_at, second_request_completed_at, "
             " boundary_status, inventory_status, margin_status, provenance, "
+            " source_chain_tip, venue_cursor_kind, venue_cursor_scheme, "
+            " venue_cursor_value, venue_cursor_requested_at, "
+            " venue_cursor_observed_at, venue_cursor_confirmed_at, "
+            " source_watermark_requested_at, source_watermark_captured_at, "
             " timestamp, known_to, session_id, sequence_id) "
             "VALUES "
             "(:pid, :wallet, 'kraken', 'live', "
@@ -298,7 +303,12 @@ def _seed_spot_reconciliation_anchor(conn: Connection, *, wallet: str) -> str:
             " 'scope_sequence', 3, '{\"BTC\": \"1.0\"}', "
             " '2026-05-01 10:00:00.000000', '2026-05-01 10:00:01.000000', "
             " '2026-05-01 10:00:02.000000', '2026-05-01 10:00:03.000000', "
-            " 'double_read_equal', 'certified_full', 'cash', 'demo-anchor', "
+            " 'cursor_certified', 'venue_reported_full', 'cash', 'demo-anchor', "
+            " 'e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6', "
+            " 'account_history_item_id', 'kraken:ccxt:account/history:v1', "
+            " '1', '2026-05-01 09:59:56.000000', "
+            " '2026-05-01 09:59:57.000000', '2026-05-01 10:00:03.000000', "
+            " '2026-05-01 09:59:58.000000', '2026-05-01 09:59:59.000000', "
             " '2026-05-01 10:00:04.000000', :ka, :sid, 1)"
         ),
         {

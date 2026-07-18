@@ -13620,6 +13620,15 @@ class SQLAlchemyRepository(Repository):
             "session_id": anchor.session_id,
             "sequence_id": anchor.sequence_id,
             "timestamp": anchor.timestamp,
+            "source_chain_tip": anchor.source_chain_tip,
+            "venue_cursor_kind": anchor.venue_cursor_kind,
+            "venue_cursor_scheme": anchor.venue_cursor_scheme,
+            "venue_cursor_value": anchor.venue_cursor_value,
+            "venue_cursor_requested_at": anchor.venue_cursor_requested_at,
+            "venue_cursor_observed_at": anchor.venue_cursor_observed_at,
+            "venue_cursor_confirmed_at": anchor.venue_cursor_confirmed_at,
+            "source_watermark_requested_at": anchor.source_watermark_requested_at,
+            "source_watermark_captured_at": anchor.source_watermark_captured_at,
         }
 
     @staticmethod

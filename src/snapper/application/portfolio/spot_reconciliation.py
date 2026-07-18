@@ -368,7 +368,8 @@ def _validate_anchor(
         or not anchor["session_id"]
         or not anchor["provenance"]
         or anchor["boundary_status"] not in ("cursor_certified", "double_read_equal", "uncertified")
-        or anchor["inventory_status"] not in ("certified_full", "uncertified", "suspect_partial")
+        or anchor["inventory_status"]
+        not in ("venue_reported_full", "uncertified", "suspect_partial")
         or anchor["margin_status"] not in ("cash", "unsupported_margin", "unknown")
     ):
         raise _IncompleteError("malformed_anchor")
@@ -659,7 +660,7 @@ def _evaluate_cash(
         }
     if mismatched:
         status = "mismatched"
-    elif anchor["inventory_status"] != "certified_full" or not boundary.inventory_complete:
+    elif anchor["inventory_status"] != "venue_reported_full" or not boundary.inventory_complete:
         raise _IncompleteError("uncertified_inventory")
     elif (
         anchor["boundary_status"] == "uncertified"
