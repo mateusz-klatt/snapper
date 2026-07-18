@@ -1352,6 +1352,20 @@ async def test_read_account_history_tip_default_raises() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_read_account_history_range_default_raises() -> None:
+    """The base account-history range read fail-closes rather than fabricate rows.
+
+    Given: A venue client without an account-history implementation,
+    When: read_account_history_range is called,
+    Then: NotImplementedError is raised so an unsupported venue never certifies
+        a cursor range.
+    """
+    client = DummyExchangeClient(repository=None)
+    with pytest.raises(NotImplementedError, match="account history"):
+        await client.read_account_history_range(0, 100)
+
+
+@pytest.mark.asyncio()
 async def test_read_order_fill_legs_default_raises() -> None:
     """The base order-fill-legs read fail-closes on an unsupported venue.
 

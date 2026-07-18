@@ -417,6 +417,7 @@ def _parse_walutomat_history_item(row: dict[str, Any]) -> VenueAccountHistoryIte
         transaction_id=transaction_id if isinstance(transaction_id, str) else None,
         ordered_by=ordered_by if isinstance(ordered_by, str) else "",
         order_id=_walutomat_operation_detail(row.get("operationDetails"), "orderId"),
+        correcting_entry=row.get("correctingEntry") is True,
     )
 
 
@@ -1941,6 +1942,66 @@ class WalutomatExchangeClient(ExchangeClientBase):
         return VenueAccountHistoryTip(
             item_id=items[0].item_id, items=items, reached_genesis=len(rows) < limit
         )
+
+    async def read_account_history_range(
+        self, continue_from: int, upto_item_id: int, item_limit: int = 200, max_pages: int = 25
+    ) -> tuple[VenueAccountHistoryItem, ...] | None:
+        """Page the history range ``(continue_from, upto_item_id]`` ascending.
+
+        Explicit ``sortOrder=ASC`` (the venue default is DESC) with the
+        EXCLUSIVE ``continueFrom`` cursor, one signed GET per page; strictly
+        increasing item ids are enforced across pages (a regression is venue
+        corruption and returns ``None``). Rows above ``upto_item_id`` end the
+        walk and are excluded; a short page ends it at the history tip. The
+        certificate's validator owns the reached-the-bound refusal.
+
+        Args:
+            continue_from: Exclusive lower cursor.
+            upto_item_id: Inclusive upper bound.
+            item_limit: Per-page size (venue max 200).
+            max_pages: Hard page cap bounding the walk.
+
+        Returns:
+            The ordered ascending in-range rows, or ``None`` on an unfaithful
+            read (transport failure mid-walk, id regression).
+
+        Raises:
+            RuntimeError: If not connected, not authenticated, or the venue
+                returns a non-success envelope on the first page.
+            ValueError: If a result payload is not a list or a row is malformed.
+        """
+        client = self._require_authenticated()
+        rows: list[VenueAccountHistoryItem] = []
+        cursor = continue_from
+        for _page in range(max_pages):
+            query = f"continueFrom={cursor}&itemLimit={item_limit}&sortOrder=ASC"
+            endpoint = f"/api/v2.0.0/account/history?{query}"
+            headers = self._get_auth_headers(endpoint, "")
+            url = f"{self.api_base_url}/account/history?{query}"
+            await self._acquire_rest_slot()
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("success") is not True:
+                raise RuntimeError("Walutomat account history envelope did not report success")
+            payload = result.get("result")
+            if not isinstance(payload, list):
+                raise ValueError("Walutomat account history result is not a list")
+            page = [_parse_walutomat_history_item(row) for row in payload]
+            for item in page:
+                if item.item_id <= cursor:
+                    logger.warning(
+                        f"Walutomat history range: item id {item.item_id} did not advance "
+                        f"past cursor {cursor} — refusing the unfaithful walk"
+                    )
+                    return None
+                if item.item_id > upto_item_id:
+                    return tuple(rows)
+                rows.append(item)
+                cursor = item.item_id
+            if len(page) < item_limit or cursor >= upto_item_id:
+                return tuple(rows)
+        return tuple(rows)
 
     def get_supported_pairs(self) -> list[str]:
         """Get list of available trading pairs.

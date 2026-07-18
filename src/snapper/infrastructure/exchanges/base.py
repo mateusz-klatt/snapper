@@ -54,6 +54,7 @@ from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryItem
 from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
 from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
 from snapper.infrastructure.exchanges.contracts import to_fill_status
@@ -939,6 +940,39 @@ class ExchangeClientBase(ABC):
             NotImplementedError: When the client declares no account-history
                 capability.
         """
+        await asyncio.sleep(0)
+        raise NotImplementedError(_ACCOUNT_HISTORY_UNSUPPORTED_MSG)
+
+    async def read_account_history_range(
+        self, continue_from: int, upto_item_id: int, item_limit: int = 200, max_pages: int = 25
+    ) -> tuple[VenueAccountHistoryItem, ...] | None:
+        """Read the account-history range ``(continue_from, upto_item_id]`` ascending.
+
+        The venue-cursor certificate calls this ONLY when
+        ``account_history_capability`` is ``SUPPORTED``; the default fail-closes
+        by raising. A supporting implementation pages ascending from the
+        EXCLUSIVE ``continue_from`` cursor until it reaches ``upto_item_id`` (or
+        the history's end, or ``max_pages`` — the honest range cap), enforcing
+        strictly increasing item ids, and returns the ordered rows at or below
+        ``upto_item_id``; ``None`` when the range cannot be read faithfully this
+        cycle. A range that stops short of ``upto_item_id`` is returned as-is —
+        the pure validator refuses it by name; the adapter never guesses.
+
+        Args:
+            continue_from: Exclusive lower cursor (the anchor's ``H_anchor``).
+            upto_item_id: Inclusive upper bound (the captured tip ``H_E``).
+            item_limit: Per-page size (venue max 200).
+            max_pages: Hard page cap bounding the range read.
+
+        Returns:
+            The ordered ascending rows in range, or ``None`` when the read could
+            not be completed faithfully this cycle.
+
+        Raises:
+            NotImplementedError: When the client declares no account-history
+                capability.
+        """
+        _ = (continue_from, upto_item_id, item_limit, max_pages)
         await asyncio.sleep(0)
         raise NotImplementedError(_ACCOUNT_HISTORY_UNSUPPORTED_MSG)
 

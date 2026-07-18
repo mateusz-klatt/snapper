@@ -6110,3 +6110,147 @@ def test_effective_price_zero_counter_cumulative_returns_nothing() -> None:
         None,
         None,
     )
+
+
+def _history_row(item_id: int) -> dict[str, Any]:
+    """Build one minimal PAYIN account/history row for range-walk tests."""
+    return {
+        "historyItemId": item_id,
+        "operationType": "PAYIN",
+        "operationAmount": "10",
+        "balanceAfter": "10",
+        "currency": "PLN",
+    }
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_range_multi_page_walk_concatenates_pages() -> None:
+    """Given: A range whose rows span one full page and one short page.
+
+    When: read_account_history_range walks with item_limit 2,
+    Then: Both signed GETs carry the advancing exclusive continueFrom cursor
+        with itemLimit and sortOrder=ASC, and the pages concatenate in order.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    stub = StubAsyncClient(
+        get_responses=[
+            StubResponse({"success": True, "result": [_history_row(101), _history_row(102)]}),
+            StubResponse({"success": True, "result": [_history_row(103)]}),
+        ]
+    )
+    client._http_client = cast(httpx.AsyncClient, stub)
+    rows = await client.read_account_history_range(100, 1000, item_limit=2)
+    assert rows is not None
+    assert [item.item_id for item in rows] == [101, 102, 103]
+    assert "continueFrom=100&itemLimit=2&sortOrder=ASC" in stub.get_calls[0][0]
+    assert "continueFrom=102&itemLimit=2&sortOrder=ASC" in stub.get_calls[1][0]
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_range_row_above_upto_ends_walk_excluded() -> None:
+    """Given: A page whose last row lies above the inclusive upper bound.
+
+    When: read_account_history_range walks up to item id 102,
+    Then: The walk ends at the bound and the above-bound row is excluded.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    stub = StubAsyncClient(
+        get_responses=[
+            StubResponse(
+                {
+                    "success": True,
+                    "result": [_history_row(101), _history_row(102), _history_row(103)],
+                }
+            )
+        ]
+    )
+    client._http_client = cast(httpx.AsyncClient, stub)
+    rows = await client.read_account_history_range(100, 102)
+    assert rows is not None
+    assert [item.item_id for item in rows] == [101, 102]
+    assert len(stub.get_calls) == 1
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_range_id_not_advancing_returns_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Given: A page whose row id does not advance past the exclusive cursor.
+
+    When: read_account_history_range walks the range,
+    Then: None is returned (unfaithful walk) and the refusal is a WARNING.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    stub = StubAsyncClient(
+        get_responses=[StubResponse({"success": True, "result": [_history_row(100)]})]
+    )
+    client._http_client = cast(httpx.AsyncClient, stub)
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            rows = await client.read_account_history_range(100, 1000)
+    finally:
+        logger.remove(sink_id)
+    assert rows is None
+    warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any(
+        "did not advance" in r.message and "refusing" in r.message for r in warning_records
+    ), f"expected refusal WARNING, got {[r.message for r in warning_records]}"
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_range_non_success_envelope_raises() -> None:
+    """Given: A non-success account/history envelope on the first page.
+
+    When: read_account_history_range walks the range,
+    Then: RuntimeError is raised so the certificate cycle degrades loudly.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": False})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(RuntimeError, match="did not report success"):
+        await client.read_account_history_range(100, 1000)
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_range_non_list_result_raises() -> None:
+    """Given: An account/history result that is not a list.
+
+    When: read_account_history_range walks the range,
+    Then: ValueError is raised rather than coercing a malformed payload.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": True, "result": {"not": "a list"}})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(ValueError, match="not a list"):
+        await client.read_account_history_range(100, 1000)
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_range_page_cap_returns_partial_walk() -> None:
+    """Given: A full below-bound page and an exhausted one-page cap.
+
+    When: read_account_history_range walks with max_pages 1,
+    Then: The partial walk is returned as-is — the pure validator, not the
+        adapter, owns the reached-the-bound refusal.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    stub = StubAsyncClient(
+        get_responses=[StubResponse({"success": True, "result": [_history_row(101)]})]
+    )
+    client._http_client = cast(httpx.AsyncClient, stub)
+    rows = await client.read_account_history_range(100, 1000, item_limit=1, max_pages=1)
+    assert rows is not None
+    assert [item.item_id for item in rows] == [101]
+    assert len(stub.get_calls) == 1
+
+
+def test_parse_walutomat_history_item_correcting_entry_flag() -> None:
+    """Given: One row flagged correctingEntry true and one without the key.
+
+    When: They are parsed,
+    Then: correcting_entry is True for the flagged row and False when absent.
+    """
+    flagged = dict(_history_row(7), correctingEntry=True)
+    assert _parse_walutomat_history_item(flagged).correcting_entry is True
+    assert _parse_walutomat_history_item(_history_row(8)).correcting_entry is False

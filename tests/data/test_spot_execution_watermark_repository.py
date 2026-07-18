@@ -651,3 +651,45 @@ async def test_witness_rows_fail_closed_on_a_non_contiguous_prefix(
     await _insert_fill(repository, _LIVE_ORDER, _WALLET, 1)
     with pytest.raises(ExecutionChainError, match="non-contiguous"):
         await repository.get_spot_execution_witness_rows(_WALLET, "walutomat", "live", 2)
+
+
+@pytest.mark.asyncio
+async def test_witness_rows_range_read_starts_after_the_from_watermark(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A from_watermark range read returns only the rows after the trusted anchor.
+
+    Given: Three committed fills for the live walutomat scope,
+    When: The witness rows are read for the range (1, 3],
+    Then: Only scope sequences 2 and 3 project, in ascending order.
+    """
+    await _seed_lineage(repository)
+    await _insert_fill(repository, _LIVE_ORDER, _WALLET, 1)
+    await _insert_fill(repository, _LIVE_ORDER, _WALLET, 2)
+    await _insert_fill(repository, _LIVE_ORDER, _WALLET, 3)
+    rows = await repository.get_spot_execution_witness_rows(
+        _WALLET, "walutomat", "live", 3, from_watermark=1
+    )
+    assert rows == [
+        {"scope_sequence": 2, "exec_id": None},
+        {"scope_sequence": 3, "exec_id": None},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_witness_rows_fail_closed_on_a_non_contiguous_range(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A gap inside a from_watermark range fails closed like a gapped prefix.
+
+    Given: Two committed fills but a range (1, 3] expecting two rows above 1,
+    When: The witness rows are read with from_watermark=1,
+    Then: ExecutionChainError names the non-contiguous range.
+    """
+    await _seed_lineage(repository)
+    await _insert_fill(repository, _LIVE_ORDER, _WALLET, 1)
+    await _insert_fill(repository, _LIVE_ORDER, _WALLET, 2)
+    with pytest.raises(ExecutionChainError, match="range"):
+        await repository.get_spot_execution_witness_rows(
+            _WALLET, "walutomat", "live", 3, from_watermark=1
+        )

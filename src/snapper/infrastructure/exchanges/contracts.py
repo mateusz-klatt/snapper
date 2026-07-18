@@ -426,6 +426,7 @@ class VenueAccountHistoryItem:
     transaction_id: str | None
     ordered_by: str
     order_id: str | None
+    correcting_entry: bool = False
 
 
 @dataclass(frozen=True)
