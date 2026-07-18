@@ -65,7 +65,11 @@ def pin_locked_charset_normalizer(root: Path) -> int:
 
 
 def main() -> int:
-    """Pin the locked charset-normalizer version into the active interpreter."""
+    """Pin the locked charset-normalizer version into the active interpreter.
+
+    Returns:
+        The pin's return code (``0`` when there is nothing to pin).
+    """
     return pin_locked_charset_normalizer(_default_root())
 
 
