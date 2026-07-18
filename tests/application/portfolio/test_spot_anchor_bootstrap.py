@@ -50,15 +50,14 @@ _BASELINE = SpotAnchorObservation(
     balances_1=dict(_BALANCES),
     balances_2=dict(_BALANCES),
     balances_reserved={"BTC": Decimal("0"), "USD": Decimal("0")},
-    source_watermark=5,
+    source_watermark=1,
     watermark_unchanged=True,
     source_chain_tip="a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
     tip_0=VenueHistoryTip(item_id=100, page=_PAGE),
     tip_1_item_id=100,
     precision_certified={"BTC": True, "USD": True},
     margin_signal=False,
-    ingested_item_ids=frozenset({100, 99}),
-    witness_item_ids=frozenset({100}),
+    execution_witnesses={1: frozenset({100, 99})},
     venue_cursor_requested_at=_T,
     venue_cursor_observed_at=_T + timedelta(seconds=1),
     source_watermark_requested_at=_T + timedelta(seconds=2),
@@ -123,7 +122,7 @@ _REFUSAL_CASES = [
         replace(_BASELINE, balance_status="stale"), "inventory_not_observed", id="not_observed"
     ),
     pytest.param(
-        replace(_BASELINE, witness_item_ids=frozenset()),
+        replace(_BASELINE, execution_witnesses={1: frozenset()}),
         "local_execution_not_in_venue_history",
         id="no_witness",
     ),
@@ -139,7 +138,7 @@ _REFUSAL_CASES = [
     ),
     pytest.param(replace(_BASELINE, tip_0=None), "venue_cursor_unavailable", id="no_tip"),
     pytest.param(
-        replace(_BASELINE, ingested_item_ids=frozenset({99})),
+        replace(_BASELINE, execution_witnesses={1: frozenset({99})}),
         "venue_fill_not_ingested",
         id="not_ingested",
     ),
@@ -226,17 +225,19 @@ def test_an_un_ingested_partial_fill_on_the_page_is_refused() -> None:
 def test_all_applicable_reasons_are_returned_sorted() -> None:
     """An observation violating several obligations returns all of them, sorted.
 
-    Given: An observation with the anchor present, a margin signal, and a
-        virgin watermark.
+    Given: An observation with the anchor present, a margin signal, and
+        non-venue-raw balances.
     When: The refusals are computed.
     Then: All three names are returned in sorted order.
     """
-    observation = replace(_BASELINE, anchor_exists=True, margin_signal=True, source_watermark=0)
+    observation = replace(
+        _BASELINE, anchor_exists=True, margin_signal=True, balances_are_venue_raw=False
+    )
     refusals = spot_anchor_bootstrap_refusals(observation)
     assert refusals == (
         "anchor_already_exists",
+        "balances_not_venue_raw",
         "margin_not_proven_cash",
-        "scope_without_committed_execution",
     )
 
 
@@ -254,7 +255,7 @@ def test_build_spot_anchor_produces_a_certified_row() -> None:
     assert row["inventory_status"] == "venue_reported_full"
     assert row["margin_status"] == "cash"
     assert row["source_watermark_kind"] == "scope_sequence"
-    assert row["source_watermark"] == 5
+    assert row["source_watermark"] == 1
     assert row["venue_cursor_kind"] == "account_history_item_id"
     assert row["venue_cursor_value"] == "100"
     assert row["venue_cursor_scheme"] == _SCHEME
@@ -266,14 +267,14 @@ def test_build_spot_anchor_produces_a_certified_row() -> None:
 def test_build_spot_anchor_raises_with_the_refusal_tuple() -> None:
     """An uncertifiable observation raises carrying its exact refusal tuple.
 
-    Given: An observation with a virgin watermark.
+    Given: An observation carrying a durable margin signal.
     When: The anchor build is attempted.
     Then: ``SpotAnchorNotCertifiableError`` is raised carrying that refusal.
     """
-    observation = replace(_BASELINE, source_watermark=0)
+    observation = replace(_BASELINE, margin_signal=True)
     with pytest.raises(SpotAnchorNotCertifiableError) as caught:
         build_spot_anchor(observation)
-    assert caught.value.refusals == ("scope_without_committed_execution",)
+    assert caught.value.refusals == ("margin_not_proven_cash",)
 
 
 def test_a_naive_read_instant_inverts_the_boundary_window() -> None:
@@ -303,8 +304,26 @@ def test_a_duplicate_currency_page_checks_only_its_newest_balance() -> None:
         balance_after=Decimal("0.9"),
     )
     tip = VenueHistoryTip(item_id=100, page=(_PAGE[0], _PAGE[1], older))
-    observation = replace(_BASELINE, tip_0=tip, ingested_item_ids=frozenset({100, 99, 98}))
+    observation = replace(_BASELINE, tip_0=tip, execution_witnesses={1: frozenset({100, 99, 98})})
     assert spot_anchor_bootstrap_refusals(observation) == ()
+
+
+def test_reverse_coverage_refuses_an_unwitnessed_earlier_execution() -> None:
+    """Every sealed-prefix execution must be witnessed, not just the tip one.
+
+    Given: A two-execution prefix whose earlier commit has no venue history
+        items (commit order is not venue fill order, so a later-filled execution
+        can be committed first).
+    When: The refusals are computed.
+    Then: ``local_execution_not_in_venue_history`` fires — witnessing only the
+        tip execution would have missed it.
+    """
+    observation = replace(
+        _BASELINE,
+        source_watermark=2,
+        execution_witnesses={1: frozenset(), 2: frozenset({100, 99})},
+    )
+    assert "local_execution_not_in_venue_history" in spot_anchor_bootstrap_refusals(observation)
 
 
 def test_build_refuses_when_the_tip_is_absent() -> None:

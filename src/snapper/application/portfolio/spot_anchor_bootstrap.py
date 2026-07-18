@@ -101,11 +101,16 @@ class SpotAnchorObservation:
     persisted observer balance read; ``balances_2`` the reconciliation-time
     re-read. ``tip_0`` carries ``H0`` and its page; ``tip_1_item_id`` is the
     confirming ``H1``. ``precision_certified`` maps each balance asset to its
-    already-evaluated precision-plane certification. ``ingested_item_ids`` is
-    the set of venue history item ids the caller has matched (by fill identity)
-    to a local execution with ``scope_sequence <= source_watermark`` (O6);
-    ``witness_item_ids`` is the venue history item ids of the execution AT
-    ``source_watermark`` (O5) — empty when that execution is not yet in history.
+    already-evaluated precision-plane certification. ``execution_witnesses``
+    maps EACH sealed-prefix ``scope_sequence`` in ``[1, source_watermark]`` to
+    the venue history item ids of that execution's COMPLETE leg set, matched by
+    the caller via real fill identity. The module proves reverse coverage plus a
+    bijection with the attributed page (every execution witnessed, every
+    attributed fill ingested), because ``scope_sequence`` is commit order, not
+    venue fill order, so witnessing only the tip execution would miss an earlier
+    committed but later-filled execution. The caller MUST certify each witness
+    is leg-complete (base, quote, AND fee): a fill whose fee leg is still in
+    flight has an incomplete effect the item-id membership alone cannot detect.
     """
 
     public_id: str
@@ -130,8 +135,7 @@ class SpotAnchorObservation:
     tip_1_item_id: int | None
     precision_certified: Mapping[str, bool]
     margin_signal: bool
-    ingested_item_ids: frozenset[int]
-    witness_item_ids: frozenset[int]
+    execution_witnesses: Mapping[int, frozenset[int]]
     venue_cursor_requested_at: datetime
     venue_cursor_observed_at: datetime
     venue_cursor_confirmed_at: datetime
@@ -286,15 +290,17 @@ def spot_anchor_bootstrap_refusals(
             refusals.add("venue_history_manual_unattributed")
         if _venue_history_balance_chain_mismatch(tip.page, observation.balances_1):
             refusals.add("venue_history_balance_chain_mismatch")
-        attributed_ids = {
+        attributed_ids = sorted(
             item.item_id for item in _attributed_fills_at_or_before(tip.page, tip.item_id)
-        }
-        if not attributed_ids <= observation.ingested_item_ids:
-            refusals.add("venue_fill_not_ingested")
-        if watermark >= 1 and (
-            not observation.witness_item_ids or not observation.witness_item_ids <= attributed_ids
+        )
+        witnesses = observation.execution_witnesses
+        witnessed = sorted(item_id for legs in witnesses.values() for item_id in legs)
+        if set(witnesses) != set(range(1, watermark + 1)) or any(
+            not legs for legs in witnesses.values()
         ):
             refusals.add("local_execution_not_in_venue_history")
+        if witnessed != attributed_ids:
+            refusals.add("venue_fill_not_ingested")
 
     return tuple(sorted(refusals))
 
