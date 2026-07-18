@@ -5789,3 +5789,282 @@ def test_parse_walutomat_decimal_grouped_amount_raises() -> None:
         _parse_walutomat_decimal("1 234.56")
     with pytest.raises(ValueError, match="ambiguous Walutomat amount"):
         _parse_walutomat_decimal("1 234.56 PLN")
+
+
+def _snapshot_with_counter(
+    *,
+    filled: str = "6",
+    counter: str | None = "30.30",
+    side: OrderSideEnum = OrderSideEnum.BUY,
+    price: float = 5.10,
+    status: ExchangeOrderStatusEnum = ExchangeOrderStatusEnum.OPEN,
+) -> ExchangeOrderSnapshot:
+    """Build an order snapshot carrying two-sided cumulative fill truth."""
+    return ExchangeOrderSnapshot(
+        id="ord-cf",
+        client_order_id="cid-cf",
+        symbol="EUR-PLN",
+        side=side,
+        type=ExchangeOrderTypeEnum.LIMIT,
+        amount=10.0,
+        price=price,
+        status=status,
+        filled=float(filled),
+        remaining=10.0 - float(filled),
+        timestamp=0.0,
+        filled_decimal=filled,
+        counter_filled=float(counter) if counter is not None else None,
+        counter_filled_decimal=counter,
+    )
+
+
+def test_parse_walutomat_order_carries_the_counter_cumulative() -> None:
+    """Given: BUY and SELL order payloads with both cumulative sides.
+
+    When: They are parsed,
+    Then: filled stays the side-specific base cumulative and counter_filled
+        carries the opposite side, exactly.
+    """
+    buy = WalutomatExchangeClient._parse_walutomat_order(
+        {
+            "orderId": "O1",
+            "buySell": "BUY",
+            "currencyPair": "EURPLN",
+            "volume": "10",
+            "limitPrice": "5.10",
+            "status": "ACTIVE",
+            "boughtAmount": "6",
+            "soldAmount": "30.30",
+        }
+    )
+    assert buy.filled == 6.0
+    assert buy.counter_filled_decimal == "30.30"
+    sell = WalutomatExchangeClient._parse_walutomat_order(
+        {
+            "orderId": "O2",
+            "buySell": "SELL",
+            "currencyPair": "EURPLN",
+            "volume": "10",
+            "limitPrice": "5.10",
+            "status": "ACTIVE",
+            "boughtAmount": "30.90",
+            "soldAmount": "6",
+        }
+    )
+    assert sell.filled == 6.0
+    assert sell.counter_filled_decimal == "30.90"
+
+
+def test_effective_price_first_emission_prices_from_zero() -> None:
+    """Given: A first fill snapshot (no previous) with price improvement.
+
+    When: The effective price fields are derived,
+    Then: The delta covers the whole cumulative and the price is exact
+        counter/filled — better than the 5.10 limit.
+    """
+    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
+        _snapshot_with_counter(), None
+    )
+    assert last_qty == 6.0
+    assert last_price == 5.05
+    assert average_price == 5.05
+
+
+def test_effective_price_second_delta_prices_the_increment() -> None:
+    """Given: A second partial fill at a different effective price.
+
+    When: The effective price fields are derived against the tracked previous,
+    Then: last_price prices ONLY the increment and average_price the VWAP.
+    """
+    previous = _TrackedOrder(
+        order_id="ord-cf",
+        cl_ord_id="cid-cf",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        amount=10.0,
+        filled=6.0,
+        price=5.10,
+        counter_filled=30.30,
+        counter_filled_decimal="30.30",
+        filled_decimal="6",
+    )
+    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
+        _snapshot_with_counter(filled="10", counter="50.70"), previous
+    )
+    assert last_qty == 4.0
+    assert last_price == 5.10
+    assert average_price == 5.07
+
+
+def test_effective_price_zero_delta_terminal_omits_last_fields() -> None:
+    """Given: A terminal snapshot repeating the tracked cumulative.
+
+    When: The effective price fields are derived,
+    Then: last_qty/last_price are omitted (status-only frame) and the
+        cumulative VWAP survives.
+    """
+    previous = _TrackedOrder(
+        order_id="ord-cf",
+        cl_ord_id="cid-cf",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        amount=10.0,
+        filled=6.0,
+        price=5.10,
+        counter_filled=30.30,
+        counter_filled_decimal="30.30",
+        filled_decimal="6",
+    )
+    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
+        _snapshot_with_counter(), previous
+    )
+    assert last_qty is None
+    assert last_price is None
+    assert average_price == 5.05
+
+
+def test_effective_price_without_counter_returns_nothing() -> None:
+    """Given: A snapshot with no counter cumulative (legacy venue payload).
+
+    When: The effective price fields are derived,
+    Then: Everything is None so the caller falls back to the limit price.
+    """
+    assert walutomat_mod._effective_price_fields(_snapshot_with_counter(counter=None), None) == (
+        None,
+        None,
+        None,
+    )
+
+
+def test_effective_price_zero_filled_returns_nothing() -> None:
+    """Given: A snapshot with counter data but zero filled.
+
+    When: The effective price fields are derived,
+    Then: Everything is None (no division by zero).
+    """
+    assert walutomat_mod._effective_price_fields(
+        _snapshot_with_counter(filled="0", counter="0"), None
+    ) == (None, None, None)
+
+
+def test_effective_price_previous_without_counter_keeps_only_average() -> None:
+    """Given: A tracked previous from before the counter upgrade.
+
+    When: The effective price fields are derived,
+    Then: The delta is not derivable (no previous counter) but the cumulative
+        VWAP still is.
+    """
+    previous = _TrackedOrder(
+        order_id="ord-cf",
+        cl_ord_id="cid-cf",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        amount=10.0,
+        filled=3.0,
+        price=5.10,
+    )
+    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
+        _snapshot_with_counter(), previous
+    )
+    assert last_qty is None
+    assert last_price is None
+    assert average_price == 5.05
+
+
+def test_effective_price_negative_counter_delta_keeps_only_average() -> None:
+    """Given: A counter cumulative that regressed against the tracked previous.
+
+    When: The effective price fields are derived,
+    Then: The anomalous delta is refused (no last fields) and the VWAP kept.
+    """
+    previous = _TrackedOrder(
+        order_id="ord-cf",
+        cl_ord_id="cid-cf",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        amount=10.0,
+        filled=3.0,
+        price=5.10,
+        counter_filled=40.0,
+        counter_filled_decimal="40.0",
+        filled_decimal="3",
+    )
+    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
+        _snapshot_with_counter(), previous
+    )
+    assert last_qty is None
+    assert last_price is None
+    assert average_price == 5.05
+
+
+def test_active_execution_update_emits_effective_prices() -> None:
+    """Given: An improved fill snapshot with counter data.
+
+    When: The active execution update is built,
+    Then: The update carries the effective prices and the counter cumulative,
+        never the limit price as economics.
+    """
+    client = WalutomatExchangeClient()
+    update = client._build_active_execution_update(_snapshot_with_counter(), None)
+    assert update.last_qty == 6.0
+    assert update.last_price == 5.05
+    assert update.average_price == 5.05
+    assert update.cum_cost == 30.30
+    assert update.limit_price == 5.10
+    assert update.average_price_decimal is None
+
+
+def test_active_execution_update_falls_back_to_limit_price_with_warning() -> None:
+    """Given: A snapshot without counter data.
+
+    When: The active execution update is built,
+    Then: The legacy limit-price shape is preserved (defensive fallback).
+    """
+    client = WalutomatExchangeClient()
+    update = client._build_active_execution_update(_snapshot_with_counter(counter=None), None)
+    assert update.last_qty is None
+    assert update.last_price is None
+    assert update.average_price == 5.10
+
+
+@pytest.mark.asyncio()
+async def test_resolve_disappeared_closed_with_counter_prices_effectively() -> None:
+    """Given: A disappeared order with counter data and a new fill delta.
+
+    When: The terminal is resolved,
+    Then: The FILLED event prices the delta effectively (no limit-price
+        economics, no warning fallback) and carries the counter cumulative.
+    """
+    client = WalutomatExchangeClient()
+    final = _snapshot_with_counter(
+        filled="10", counter="50.70", status=ExchangeOrderStatusEnum.CLOSED
+    )
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return final
+
+    client.get_order = mock_get_order
+    tracked = _TrackedOrder(
+        order_id="ord-cf",
+        cl_ord_id="cid-cf",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        amount=10.0,
+        filled=6.0,
+        price=5.10,
+        counter_filled=30.30,
+        counter_filled_decimal="30.30",
+        filled_decimal="6",
+    )
+    events = [event async for event in client._resolve_disappeared("ord-cf", tracked)]
+    assert len(events) == 1
+    assert events[0].order_status is ExchangeOrderStatusEnum.CLOSED
+    assert events[0].last_qty == 4.0
+    assert events[0].last_price == 5.10
+    assert events[0].average_price == 5.07
+    assert events[0].cum_cost == 50.70

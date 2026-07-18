@@ -275,7 +275,14 @@ __all__ = [
 
 @dataclass
 class ExchangeOrderSnapshot:
-    """Snapshot of an order's current state on an exchange."""
+    """Snapshot of an order's current state on an exchange.
+
+    ``counter_filled`` is the opposite-currency GROSS cumulative of the filled
+    side (a walutomat BUY's ``soldAmount``, a SELL's ``boughtAmount``) — the
+    counter-amount truth effective execution prices derive from under price
+    improvement. ``None`` on venues that do not report it; ``filled`` semantics
+    are untouched (the witness identity depends on them).
+    """
 
     id: str
     client_order_id: str | None
@@ -296,6 +303,8 @@ class ExchangeOrderSnapshot:
     price_decimal: str | None = None
     filled_decimal: str | None = None
     fee_decimal: str | None = None
+    counter_filled: float | None = None
+    counter_filled_decimal: str | None = None
 
 
 @dataclass

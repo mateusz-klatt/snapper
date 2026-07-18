@@ -165,6 +165,9 @@ class _TrackedOrder:
     amount: float
     filled: float
     price: float
+    counter_filled: float | None = None
+    counter_filled_decimal: str | None = None
+    filled_decimal: str | None = None
 
 
 def _snapshot_tracked_order(order: ExchangeOrderSnapshot) -> _TrackedOrder:
@@ -178,7 +181,67 @@ def _snapshot_tracked_order(order: ExchangeOrderSnapshot) -> _TrackedOrder:
         amount=order.amount,
         filled=order.filled,
         price=order.price or 0.0,
+        counter_filled=order.counter_filled,
+        counter_filled_decimal=order.counter_filled_decimal,
+        filled_decimal=order.filled_decimal,
     )
+
+
+def _effective_price_fields(
+    order: ExchangeOrderSnapshot, previous: _TrackedOrder | None
+) -> tuple[float | None, float | None, float | None]:
+    """Derive ``(last_qty, last_price, average_price)`` from two-sided cumulatives.
+
+    Walutomat permits price improvement, so the execution price is NEVER the
+    limit price: the cumulative effective price is ``counter_cum / filled_cum``
+    and the per-delta effective price is ``Δcounter / Δfilled`` between poll
+    snapshots, computed in exact ``Decimal`` from the venue's own strings and
+    floated only at the boundary. Returns ``(None, None, None)`` when the
+    snapshot carries no counter cumulative (the caller falls back to the legacy
+    limit-price shape with a warning); omits the ``last_*`` pair when the fill
+    delta is not positive (a zero-delta terminal is a status-only frame) or the
+    previous snapshot lacks counter data to delta against.
+
+    Args:
+        order: The current order snapshot (two-sided cumulatives).
+        previous: The last tracked snapshot, or ``None`` on the first emission.
+
+    Returns:
+        The per-delta quantity and price (both ``None`` when not derivable) and
+        the cumulative effective average price (``None`` without counter data).
+    """
+    if order.counter_filled_decimal is None:
+        return None, None, None
+    counter_cum = Decimal(order.counter_filled_decimal)
+    filled_cum = (
+        Decimal(order.filled_decimal)
+        if order.filled_decimal is not None
+        else Decimal(str(order.filled))
+    )
+    if filled_cum <= 0:
+        return None, None, None
+    average_price = float(counter_cum / filled_cum)
+    if previous is None:
+        previous_filled = Decimal(0)
+        previous_counter: Decimal | None = Decimal(0)
+    else:
+        previous_filled = (
+            Decimal(previous.filled_decimal)
+            if previous.filled_decimal is not None
+            else Decimal(str(previous.filled))
+        )
+        previous_counter = (
+            Decimal(previous.counter_filled_decimal)
+            if previous.counter_filled_decimal is not None
+            else None
+        )
+    delta_filled = filled_cum - previous_filled
+    if previous_counter is None or delta_filled <= 0:
+        return None, None, average_price
+    delta_counter = counter_cum - previous_counter
+    if delta_counter < 0:
+        return None, None, average_price
+    return float(delta_filled), float(delta_counter / delta_filled), average_price
 
 
 def _should_emit_active_execution(
@@ -1087,10 +1150,12 @@ class WalutomatExchangeClient(ExchangeClientBase):
             tracked[order.id] = _snapshot_tracked_order(order)
             if first_poll or not _should_emit_active_execution(order, previous):
                 continue
-            updates.append(self._build_active_execution_update(order))
+            updates.append(self._build_active_execution_update(order, previous))
         return current_ids, updates
 
-    def _build_active_execution_update(self, order: ExchangeOrderSnapshot) -> ExecutionUpdate:
+    def _build_active_execution_update(
+        self, order: ExchangeOrderSnapshot, previous: _TrackedOrder | None
+    ) -> ExecutionUpdate:
         """Build an execution update for a fill detected on an active order.
 
         ``exec_id`` is DETERMINISTIC — ``f(orderId, cumulative)`` in basis
@@ -1101,7 +1166,23 @@ class WalutomatExchangeClient(ExchangeClientBase):
         order's running commission, not per-fill fees); the executor's fee
         watermark turns it into per-emission deltas — attaching the full
         snapshot fee to every delta used to multi-charge partial fills.
+
+        The execution price is the EFFECTIVE price derived from the venue's
+        two-sided cumulatives (``last_price`` per delta, ``average_price``
+        cumulative VWAP) — Walutomat permits price improvement, so the limit
+        price is only a bound, never the fill economics. A snapshot without
+        counter data degrades to the legacy limit-price shape with a warning;
+        an absorbed publish gap is priced at the latest delta's effective price
+        (exact repair would need a committed counter-cumulative anchor —
+        deferred, documented).
         """
+        last_qty, last_price, average_price = _effective_price_fields(order, previous)
+        if average_price is None:
+            logger.warning(
+                f"Walutomat order {order.id}: no counter cumulative on snapshot — "
+                f"falling back to limit price for the execution economics"
+            )
+            average_price = order.price
         return ExecutionUpdate(
             order_id=order.id,
             exec_type="trade",
@@ -1112,12 +1193,14 @@ class WalutomatExchangeClient(ExchangeClientBase):
             timestamp=datetime.now(UTC),
             cum_qty=order.filled,
             cum_qty_decimal=order.filled_decimal,
+            cum_cost=order.counter_filled,
             exec_id=_walutomat_exec_id(order.id, order.filled),
             cl_ord_id=order.client_order_id or "",
             order_qty=order.amount,
             limit_price=order.price,
-            average_price=order.price,
-            average_price_decimal=order.price_decimal,
+            last_qty=last_qty,
+            last_price=last_price,
+            average_price=average_price,
             cum_fee=order.fee if order.fee and order.fee_currency else None,
             cum_fee_decimal=order.fee_decimal if order.fee and order.fee_currency else None,
             cum_fee_currency=order.fee_currency if order.fee and order.fee_currency else None,
@@ -1192,6 +1275,13 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     oid,
                 )
                 return
+            last_qty, last_price, average_price = _effective_price_fields(final, tracked)
+            if average_price is None:
+                logger.warning(
+                    f"Walutomat order {final.id}: no counter cumulative on terminal "
+                    f"snapshot — falling back to limit price for the execution economics"
+                )
+                average_price = final.price
             if final.status == ExchangeOrderStatusEnum.CLOSED:
                 yield ExecutionUpdate(
                     order_id=final.id,
@@ -1203,12 +1293,14 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     timestamp=datetime.now(UTC),
                     cum_qty=final.filled,
                     cum_qty_decimal=final.filled_decimal,
+                    cum_cost=final.counter_filled,
                     exec_id=_walutomat_exec_id(final.id, final.filled) + "-t",
                     cl_ord_id=final.client_order_id or tracked.cl_ord_id,
                     order_qty=final.amount,
                     limit_price=final.price,
-                    average_price=final.price,
-                    average_price_decimal=final.price_decimal,
+                    last_qty=last_qty,
+                    last_price=last_price,
+                    average_price=average_price,
                     cum_fee=cum_fee,
                     cum_fee_decimal=final.fee_decimal if cum_fee is not None else None,
                     cum_fee_currency=cum_fee_currency,
@@ -1225,12 +1317,14 @@ class WalutomatExchangeClient(ExchangeClientBase):
                         timestamp=datetime.now(UTC),
                         cum_qty=final.filled,
                         cum_qty_decimal=final.filled_decimal,
+                        cum_cost=final.counter_filled,
                         exec_id=_walutomat_exec_id(final.id, final.filled),
                         cl_ord_id=final.client_order_id or tracked.cl_ord_id,
                         order_qty=final.amount,
                         limit_price=final.price,
-                        average_price=final.price,
-                        average_price_decimal=final.price_decimal,
+                        last_qty=last_qty,
+                        last_price=last_price,
+                        average_price=average_price,
                         cum_fee=cum_fee,
                         cum_fee_decimal=final.fee_decimal if cum_fee is not None else None,
                         cum_fee_currency=cum_fee_currency,
@@ -1622,17 +1716,29 @@ class WalutomatExchangeClient(ExchangeClientBase):
     def _parse_walutomat_order(order_data: dict[str, Any]) -> ExchangeOrderSnapshot:
         """Parse a single Walutomat order response into an ExchangeOrderSnapshot.
 
+        ``filled`` stays the side-specific GROSS base cumulative (the witness
+        identity — never normalized); the OPPOSITE cumulative is carried as
+        ``counter_filled`` (a BUY's ``soldAmount``, a SELL's ``boughtAmount``),
+        parsed through the hardened exact-decimal path, so effective execution
+        prices under price improvement derive from the venue's own two-sided
+        truth instead of the limit price.
+
         Args:
             order_data: Raw order data dictionary from Walutomat API.
 
         Returns:
-            Parsed ExchangeOrderSnapshot with side-aware fill, status mapping,
-            and commission data.
+            Parsed ExchangeOrderSnapshot with side-aware fill, counter-amount
+            cumulative, status mapping, and commission data.
         """
         is_buy = order_data["buySell"] == "BUY"
         fill_field = "boughtAmount" if is_buy else "soldAmount"
+        counter_field = "soldAmount" if is_buy else "boughtAmount"
         filled = float(order_data.get(fill_field, 0))
         volume = float(order_data["volume"])
+        raw_counter = order_data.get(counter_field)
+        counter_decimal = (
+            str(_parse_walutomat_decimal(raw_counter)) if isinstance(raw_counter, str) else None
+        )
 
         if order_data["status"] == "ACTIVE":
             status = ExchangeOrderStatusEnum.OPEN
@@ -1665,6 +1771,8 @@ class WalutomatExchangeClient(ExchangeClientBase):
             price_decimal=raw_price if isinstance(raw_price, str) else None,
             filled_decimal=raw_filled if isinstance(raw_filled, str) else None,
             fee_decimal=commission_str if isinstance(commission_str, str) else None,
+            counter_filled=float(counter_decimal) if counter_decimal is not None else None,
+            counter_filled_decimal=counter_decimal,
         )
 
     async def get_orders(
