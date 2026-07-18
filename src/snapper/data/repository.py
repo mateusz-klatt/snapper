@@ -132,6 +132,9 @@ from sqlalchemy.orm.state import InstanceState
 from sqlalchemy.orm.util import AliasedInsp
 from sqlalchemy.pool import StaticPool
 
+from snapper.application.portfolio.execution_chain import ExecutionChainError
+from snapper.application.portfolio.execution_chain import ExecutionChainRecord
+from snapper.application.portfolio.execution_chain import extend_execution_chain
 from snapper.application.portfolio.reconciliation_invariants import (
     unclassified_state_has_no_retained_evidence,
 )
@@ -2154,6 +2157,32 @@ class Repository(ABC):
         reads to (instrument identity, specs, asset precisions). The only
         failure mode is fail-closed identity validation: a malformed
         wallet identity raises ``ValueError`` like reconciliation writers.
+        """
+        ...
+
+    @abstractmethod
+    async def get_spot_execution_chain_tip(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        from_watermark: int,
+        from_tip: str,
+        to_watermark: int,
+    ) -> str:
+        """Fold the scope's executions in ``(from_watermark, to_watermark]`` onto ``from_tip``.
+
+        Reads rows with ``from_watermark < scope_sequence <= to_watermark`` in
+        ascending ``scope_sequence`` order, with no ``known_to`` filter (the
+        total-unique index gives one row per sequence value), and extends the
+        derived tamper-evidence chain from ``from_tip`` over their canonical
+        bytes. ``from_tip`` is ``execution_chain_genesis(...)`` for a bootstrap
+        over the whole prefix (``from_watermark == 0``) or a trusted checkpoint
+        tip committed by an anchor/verdict for an extension over a surviving
+        range. Raises ``ExecutionChainError`` when the bounds are invalid or the
+        stored range is not contiguous (a gap is a purge or a tamper and must
+        fail closed), so a verification caller converts it to a stable
+        ``incomplete`` result rather than a matched verdict.
         """
         ...
 
@@ -13784,6 +13813,83 @@ class SQLAlchemyRepository(Repository):
                 )
             ).scalar()
             return (0 if watermark is None else int(watermark)), as_of
+
+    async def get_spot_execution_chain_tip(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+        from_watermark: int,
+        from_tip: str,
+        to_watermark: int,
+    ) -> str:
+        """Fold the scope's executions in ``(from_watermark, to_watermark]`` onto ``from_tip``.
+
+        See the abstract declaration. The contiguity assertion is sound because
+        executions are append-only (delete refused through every supported
+        path), so per scope the values committed are ``{1..K}`` and a value
+        missing from the half-open range is a purge or a tamper, not a normal
+        state — it fails closed. Records are projected inside the read session
+        so their loaded columns are accessed before the entities detach; the
+        fold itself is pure.
+        """
+        if from_watermark < 0 or to_watermark < from_watermark:
+            raise ExecutionChainError(
+                f"invalid chain range: from_watermark={from_watermark} to_watermark={to_watermark}"
+            )
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+        async with self.session() as s:
+            executions = (
+                (
+                    await s.execute(
+                        select(Execution)
+                        .where(
+                            Execution.wallet_public_id == wallet_public_id,
+                            Execution.exchange == exchange,
+                            Execution.mode == mode,
+                            Execution.scope_sequence > from_watermark,
+                            Execution.scope_sequence <= to_watermark,
+                        )
+                        .order_by(Execution.scope_sequence.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            expected = to_watermark - from_watermark
+            if len(executions) != expected:
+                raise ExecutionChainError(
+                    f"non-contiguous execution range for scope "
+                    f"({wallet_public_id}, {exchange}, {mode}): expected {expected} row(s) in "
+                    f"({from_watermark}, {to_watermark}], found {len(executions)}"
+                )
+            records = [self._execution_chain_record(execution) for execution in executions]
+        return extend_execution_chain(from_tip, records)
+
+    @staticmethod
+    def _execution_chain_record(execution: Execution) -> ExecutionChainRecord:
+        """Project one ORM execution onto its canonical tamper-evidence chain record."""
+        return ExecutionChainRecord(
+            scope_sequence=execution.scope_sequence,
+            public_id=execution.public_id,
+            order_public_id=execution.order_public_id,
+            wallet_public_id=execution.wallet_public_id,
+            operator_public_id=execution.operator_public_id,
+            exchange=execution.exchange,
+            mode=execution.mode,
+            exec_id=execution.exec_id,
+            trade_id=execution.trade_id,
+            side=execution.side,
+            status=execution.status,
+            fee_asset=execution.fee_asset,
+            price_decimal=execution.price_decimal,
+            size_decimal=execution.size_decimal,
+            fee_decimal=execution.fee_decimal,
+            numeric_provenance=execution.numeric_provenance,
+            liquidity_role=execution.liquidity_role,
+            timestamp=execution.timestamp,
+            executed_at=execution.executed_at,
+        )
 
     @staticmethod
     def _portfolio_reconciliation_method_config_to_row(
