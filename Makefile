@@ -155,13 +155,6 @@ IMAGE_NAME := klattm/snapper
 IMAGE_TAG := latest
 PYRUN := $(VENV_PY) -m
 
-# Version of charset-normalizer the project lock pins. `make setup` installs
-# this into the fresh venv BEFORE upgrading poetry, so poetry (whose own
-# dependency tree would otherwise pull a newer charset-normalizer) does not
-# trigger a downgrade during `poetry install`. On Windows that downgrade tries
-# to delete charset-normalizer's loaded mypyc `.pyd`, which is locked, and fails
-# with WinError 5; pre-pinning avoids the reinstall entirely.
-CHARSET_LOCK_VERSION := $(shell grep -A1 '^name = "charset-normalizer"' poetry.lock 2>/dev/null | sed -n 's/^version = "\(.*\)"$$/\1/p')
 PYTEST_TIMEOUT := --timeout=15 --timeout-method=thread
 ROOT_DIR := $(CURDIR)
 SERVER_PORT ?= 8000
@@ -198,7 +191,7 @@ setup:
 	$(info Setting up development environment...)
 	$(PYTHON) -m venv .venv
 	$(PYRUN) pip install --upgrade pip
-	@[ -z "$(CHARSET_LOCK_VERSION)" ] || $(PYRUN) pip install "charset-normalizer==$(CHARSET_LOCK_VERSION)"
+	$(VENV_PY) scripts/pin_locked_charset_normalizer.py
 	$(PYRUN) pip install --upgrade poetry
 	$(PYRUN) poetry install --with dev --with cloud
 	$(PYRUN) pre_commit install
