@@ -111,6 +111,9 @@ class SpotAnchorObservation:
     committed but later-filled execution. The caller MUST certify each witness
     is leg-complete (base, quote, AND fee): a fill whose fee leg is still in
     flight has an incomplete effect the item-id membership alone cannot detect.
+    A terminal (order-close) execution owns no new fill and shares its active
+    predecessor's legs, so the witnessed item ids are deduplicated before the
+    bijection while every execution still maps to a non-empty leg set.
     """
 
     public_id: str
@@ -294,7 +297,7 @@ def spot_anchor_bootstrap_refusals(
             item.item_id for item in _attributed_fills_at_or_before(tip.page, tip.item_id)
         )
         witnesses = observation.execution_witnesses
-        witnessed = sorted(item_id for legs in witnesses.values() for item_id in legs)
+        witnessed = sorted({item_id for legs in witnesses.values() for item_id in legs})
         if set(witnesses) != set(range(1, watermark + 1)) or any(
             not legs for legs in witnesses.values()
         ):

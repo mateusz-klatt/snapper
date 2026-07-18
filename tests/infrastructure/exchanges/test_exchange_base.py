@@ -21,6 +21,7 @@ from snapper.infrastructure.exchanges._subscription_health import SubscriptionHe
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
@@ -1324,6 +1325,43 @@ async def test_get_order_fill_summary_defaults_to_none() -> None:
     """
     client = DummyExchangeClient(repository=None)
     assert await client.get_order_fill_summary("ex-1") is None
+
+
+def test_account_history_capability_defaults_unsupported() -> None:
+    """The base account-history capability fail-closes to UNSUPPORTED.
+
+    Given: A venue client that does not override the capability,
+    When: The class attribute is inspected,
+    Then: It is UNSUPPORTED so the spot-anchor bootstrap never runs against a
+        venue that cannot be faithfully account-history read.
+    """
+    assert ExchangeClientBase.account_history_capability is CapabilityStatus.UNSUPPORTED
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_tip_default_raises() -> None:
+    """The base account-history tip read fail-closes rather than fabricate a tip.
+
+    Given: A venue client without an account-history implementation,
+    When: read_account_history_tip is called,
+    Then: NotImplementedError is raised so an unsupported venue never anchors.
+    """
+    client = DummyExchangeClient(repository=None)
+    with pytest.raises(NotImplementedError, match="account history"):
+        await client.read_account_history_tip(200)
+
+
+@pytest.mark.asyncio()
+async def test_read_order_fill_legs_default_raises() -> None:
+    """The base order-fill-legs read fail-closes on an unsupported venue.
+
+    Given: A venue client without an account-history implementation,
+    When: read_order_fill_legs is called,
+    Then: NotImplementedError is raised.
+    """
+    client = DummyExchangeClient(repository=None)
+    with pytest.raises(NotImplementedError, match="order fill leg"):
+        await client.read_order_fill_legs("ex-1")
 
 
 @pytest.mark.asyncio()

@@ -6,6 +6,7 @@ import contextlib
 import math
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
@@ -28,12 +29,18 @@ from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
+from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryItem
+from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
+from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.exchanges.implementations.walutomat import _active_execution_status
+from snapper.infrastructure.exchanges.implementations.walutomat import _parse_walutomat_decimal
+from snapper.infrastructure.exchanges.implementations.walutomat import _parse_walutomat_history_item
 from snapper.infrastructure.exchanges.implementations.walutomat import _should_emit_active_execution
 from snapper.infrastructure.exchanges.implementations.walutomat import _snapshot_tracked_order
 from snapper.infrastructure.exchanges.implementations.walutomat import _TrackedOrder
+from snapper.infrastructure.exchanges.implementations.walutomat import _walutomat_operation_detail
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
 
@@ -5426,3 +5433,275 @@ async def test_create_order_rejects_stop_types_before_any_send() -> None:
         )
         with pytest.raises(ValueError, match="does not support stop orders"):
             await client.create_order(request)
+
+
+def test_account_history_capability_supported() -> None:
+    """Given: The WalutomatExchangeClient class.
+
+    When: Its account-history capability is inspected,
+    Then: It is SUPPORTED (the venue exposes a faithful account/history ledger).
+    """
+    assert WalutomatExchangeClient.account_history_capability is CapabilityStatus.SUPPORTED
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_tip_returns_descending_page_and_tip() -> None:
+    """Given: A connected, authenticated client returning an ascending page.
+
+    When: read_account_history_tip is called,
+    Then: The page is sorted newest-first, the tip is the max id, and each item
+        parses its order id and exact signed amount (both amount renderings).
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [
+                {
+                    "historyItemId": 99,
+                    "operationType": "MARKET_FX",
+                    "operationAmount": "-30 PLN",
+                    "balanceAfter": "70 PLN",
+                    "currency": "PLN",
+                    "transactionId": "T1",
+                    "orderedBy": "API/key",
+                    "operationDetails": [{"key": "orderId", "value": "O1"}],
+                },
+                {
+                    "historyItemId": 100,
+                    "operationType": "MARKET_FX",
+                    "operationAmount": "6",
+                    "balanceAfter": "106",
+                    "currency": "EUR",
+                    "transactionId": "T1",
+                    "orderedBy": "API/key",
+                    "operationDetails": [{"key": "orderId", "value": "O1"}],
+                },
+            ],
+        }
+    )
+    stub = StubAsyncClient(get_responses=[get_resp])
+    client._http_client = cast(httpx.AsyncClient, stub)
+    tip = await client.read_account_history_tip(200)
+    assert tip is not None
+    assert isinstance(tip, VenueAccountHistoryTip)
+    assert tip.item_id == 100
+    assert [item.item_id for item in tip.items] == [100, 99]
+    assert tip.items[0].order_id == "O1"
+    assert tip.items[0].operation_amount == Decimal("6")
+    assert tip.items[1].operation_amount == Decimal("-30")
+    assert "itemLimit=200" in stub.get_calls[0][0]
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_tip_empty_history_returns_none() -> None:
+    """Given: An account with no history rows.
+
+    When: read_account_history_tip is called,
+    Then: None is returned (there is no tip to seal).
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": True, "result": []})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    assert await client.read_account_history_tip(200) is None
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_tip_non_success_raises() -> None:
+    """Given: A non-success account/history envelope.
+
+    When: read_account_history_tip is called,
+    Then: RuntimeError is raised so the observer degrades to no-bootstrap.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": False})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(RuntimeError, match="did not report success"):
+        await client.read_account_history_tip(200)
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_tip_non_list_result_raises() -> None:
+    """Given: An account/history result that is not a list.
+
+    When: read_account_history_tip is called,
+    Then: ValueError is raised.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": True, "result": {"not": "a list"}})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(ValueError, match="not a list"):
+        await client.read_account_history_tip(200)
+
+
+@pytest.mark.asyncio()
+async def test_read_order_fill_legs_parses_both_legs() -> None:
+    """Given: A filled order with distinct bought/sold/commission legs.
+
+    When: read_order_fill_legs is called,
+    Then: Both legs and the commission are parsed as exact Decimals with the
+        venue's direct currencies and direction.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [
+                {
+                    "orderId": "O1",
+                    "boughtAmount": "10",
+                    "soldAmount": "50",
+                    "commissionAmount": "0.02",
+                    "boughtCurrency": "EUR",
+                    "soldCurrency": "PLN",
+                    "commissionCurrency": "EUR",
+                    "buySell": "BUY",
+                }
+            ],
+        }
+    )
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    legs = await client.read_order_fill_legs("O1")
+    assert legs is not None
+    assert isinstance(legs, VenueOrderFillLegs)
+    assert legs.bought_amount == Decimal("10")
+    assert legs.sold_amount == Decimal("50")
+    assert legs.commission_amount == Decimal("0.02")
+    assert legs.bought_currency == "EUR"
+    assert legs.sold_currency == "PLN"
+    assert legs.commission_currency == "EUR"
+    assert legs.buy_sell == "BUY"
+
+
+@pytest.mark.asyncio()
+async def test_read_order_fill_legs_unknown_order_returns_none() -> None:
+    """Given: An order id the venue does not know (empty result list).
+
+    When: read_order_fill_legs is called,
+    Then: None is returned.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": True, "result": []})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    assert await client.read_order_fill_legs("missing") is None
+
+
+@pytest.mark.asyncio()
+async def test_read_order_fill_legs_non_success_raises() -> None:
+    """Given: A non-success market_fx/orders envelope.
+
+    When: read_order_fill_legs is called,
+    Then: RuntimeError is raised.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse({"success": False})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    with pytest.raises(RuntimeError, match="did not report success"):
+        await client.read_order_fill_legs("O1")
+
+
+def test_parse_walutomat_decimal_bare_and_suffixed() -> None:
+    """Given: Both the bare and amount-plus-currency Walutomat renderings.
+
+    When: They are parsed,
+    Then: Each yields the exact signed Decimal from the leading token.
+    """
+    assert _parse_walutomat_decimal("-999.00") == Decimal("-999.00")
+    assert _parse_walutomat_decimal("-432.43 PLN") == Decimal("-432.43")
+
+
+def test_parse_walutomat_decimal_empty_raises() -> None:
+    """Given: An empty amount string.
+
+    When: It is parsed,
+    Then: ValueError is raised.
+    """
+    with pytest.raises(ValueError, match="empty Walutomat amount"):
+        _parse_walutomat_decimal("   ")
+
+
+def test_parse_walutomat_decimal_invalid_raises() -> None:
+    """Given: A non-numeric amount token.
+
+    When: It is parsed,
+    Then: ValueError is raised.
+    """
+    with pytest.raises(ValueError, match="invalid Walutomat amount"):
+        _parse_walutomat_decimal("abc")
+
+
+def test_walutomat_operation_detail_found_and_absent() -> None:
+    """Given: A Walutomat operationDetails key/value array.
+
+    When: A present and an absent key are resolved,
+    Then: The present key returns its value and the absent key returns None.
+    """
+    details = [{"key": "orderId", "value": "O1"}, {"key": "buySell", "value": "BUY"}]
+    assert _walutomat_operation_detail(details, "orderId") == "O1"
+    assert _walutomat_operation_detail(details, "missing") is None
+
+
+def test_walutomat_operation_detail_non_list_returns_none() -> None:
+    """Given: An operationDetails value that is not an array.
+
+    When: A key is resolved,
+    Then: None is returned.
+    """
+    assert _walutomat_operation_detail("not-a-list", "orderId") is None
+
+
+def test_walutomat_operation_detail_non_string_value_returns_none() -> None:
+    """Given: An operationDetails entry whose value is not a string.
+
+    When: The key is resolved,
+    Then: None is returned rather than a coerced value.
+    """
+    assert _walutomat_operation_detail([{"key": "orderId", "value": 123}], "orderId") is None
+
+
+def test_parse_walutomat_history_item_full() -> None:
+    """Given: A complete MARKET_FX account/history row.
+
+    When: It is parsed,
+    Then: Every typed field, the order id, and the transaction id are populated.
+    """
+    item = _parse_walutomat_history_item(
+        {
+            "historyItemId": 100,
+            "operationType": "MARKET_FX",
+            "operationAmount": "6",
+            "balanceAfter": "106",
+            "currency": "EUR",
+            "transactionId": "T1",
+            "orderedBy": "API/key",
+            "operationDetails": [{"key": "orderId", "value": "O1"}],
+        }
+    )
+    assert isinstance(item, VenueAccountHistoryItem)
+    assert item.item_id == 100
+    assert item.operation_type == "MARKET_FX"
+    assert item.operation_amount == Decimal("6")
+    assert item.balance_after == Decimal("106")
+    assert item.transaction_id == "T1"
+    assert item.ordered_by == "API/key"
+    assert item.order_id == "O1"
+
+
+def test_parse_walutomat_history_item_missing_optional_fields_default() -> None:
+    """Given: A non-order row without orderedBy, transactionId, or order details.
+
+    When: It is parsed,
+    Then: ordered_by defaults empty and the ids are None (unattributed).
+    """
+    item = _parse_walutomat_history_item(
+        {
+            "historyItemId": 42,
+            "operationType": "PAYIN",
+            "operationAmount": "1000",
+            "balanceAfter": "1000",
+            "currency": "PLN",
+        }
+    )
+    assert item.transaction_id is None
+    assert item.ordered_by == ""
+    assert item.order_id is None

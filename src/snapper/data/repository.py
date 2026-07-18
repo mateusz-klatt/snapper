@@ -13668,7 +13668,15 @@ class SQLAlchemyRepository(Repository):
             raise ValueError("anchor balances must use canonical sorted decimal strings")
 
     async def record_spot_reconciliation_anchor(self, anchor: SpotReconciliationAnchorRow) -> int:
-        """Insert an immutable bootstrap anchor or accept its exact replay."""
+        """Insert an immutable bootstrap anchor or accept its exact replay.
+
+        On the INSERT path the committed execution tip is re-read inside the same
+        transaction and the anchor is refused unless its ``source_watermark``
+        still equals ``max(scope_sequence)`` for the scope, so a caller-fabricated
+        or stale watermark can never be sealed and the certified range ``(W, .]``
+        is empty at birth. An exact idempotent replay still succeeds after the tip
+        has legitimately advanced, because the re-read guards only new inserts.
+        """
         canonical_anchor = anchor.copy()
         canonical_anchor["wallet_public_id"] = _canonicalize_reconciliation_wallet_public_id(
             anchor["wallet_public_id"]
@@ -13703,6 +13711,22 @@ class SQLAlchemyRepository(Repository):
                 if self._spot_anchor_to_row(existing) != canonical_anchor:
                     raise RuntimeError("conflicting spot reconciliation bootstrap anchor")
                 return int(existing.id)
+            committed_tip = int(
+                (
+                    await s.execute(
+                        select(func.max(Execution.scope_sequence)).where(
+                            Execution.wallet_public_id == canonical_anchor["wallet_public_id"],
+                            Execution.exchange == canonical_anchor["exchange"],
+                            Execution.mode == canonical_anchor["mode"],
+                        )
+                    )
+                ).scalar()
+                or 0
+            )
+            if committed_tip != canonical_anchor["source_watermark"]:
+                raise RuntimeError(
+                    "spot reconciliation anchor watermark is not the committed execution tip"
+                )
             row = PortfolioSpotReconciliationAnchor(**canonical_anchor, known_to=KNOWN_TO_MAX)
             s.add(row)
             try:

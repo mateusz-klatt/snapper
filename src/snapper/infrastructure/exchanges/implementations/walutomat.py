@@ -34,6 +34,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
+from decimal import InvalidOperation
 from typing import Any
 from urllib.parse import urlencode
 
@@ -60,6 +62,9 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryItem
+from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
+from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
@@ -239,6 +244,87 @@ def _parse_native_balance(balance_data: dict[str, Any]) -> NativeBalanceEntry:
     )
 
 
+def _parse_walutomat_decimal(raw: str) -> Decimal:
+    """Parse a Walutomat amount string into an exact Decimal.
+
+    Walutomat renders amounts either bare (``"-999.00"``) or suffixed with the
+    currency code (``"-432.43 PLN"``); both forms appear in the v2.0.0 spec
+    examples. The leading whitespace-delimited token is the exact signed decimal,
+    parsed without any float step so the witness composition stays exact.
+
+    Args:
+        raw: The venue amount string.
+
+    Returns:
+        The exact signed amount.
+
+    Raises:
+        ValueError: If the amount is empty or its numeric token is not a decimal.
+    """
+    tokens = raw.split()
+    if not tokens:
+        raise ValueError(f"empty Walutomat amount: {raw!r}")
+    try:
+        return Decimal(tokens[0])
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid Walutomat amount: {raw!r}") from exc
+
+
+def _walutomat_operation_detail(operation_details: object, key: str) -> str | None:
+    """Return a value from a Walutomat ``operationDetails`` key/value array.
+
+    ``operationDetails`` is a flat array of ``{"key": ..., "value": ...}`` pairs
+    (not a nested object), so a linear scan resolves a key. Returns ``None`` when
+    the array is malformed, the key is absent, or its value is not a string.
+
+    Args:
+        operation_details: The raw ``operationDetails`` value from a history row.
+        key: The detail key to resolve (e.g. ``"orderId"``).
+
+    Returns:
+        The string value for the key, or ``None`` when it is absent.
+    """
+    if not isinstance(operation_details, list):
+        return None
+    for detail in operation_details:
+        if isinstance(detail, dict) and detail.get("key") == key:
+            value = detail.get("value")
+            return value if isinstance(value, str) else None
+    return None
+
+
+def _parse_walutomat_history_item(row: dict[str, Any]) -> VenueAccountHistoryItem:
+    """Parse one Walutomat ``account/history`` row into a typed history item.
+
+    ``operationAmount`` / ``balanceAfter`` are parsed exactly, tolerating both
+    the bare-decimal and amount-plus-currency renderings the v2.0.0 spec shows.
+    ``order_id`` is pulled from the flat ``operationDetails`` key/value array
+    (absent on non-order rows); ``transaction_id`` groups a fill's two currency
+    legs (absent on non-order rows).
+
+    Args:
+        row: One ``account/history`` result row.
+
+    Returns:
+        The typed account-history item.
+
+    Raises:
+        ValueError: If a required field is missing or an amount is malformed.
+    """
+    transaction_id = row.get("transactionId")
+    ordered_by = row.get("orderedBy")
+    return VenueAccountHistoryItem(
+        item_id=int(row["historyItemId"]),
+        operation_type=str(row["operationType"]),
+        operation_amount=_parse_walutomat_decimal(row["operationAmount"]),
+        balance_after=_parse_walutomat_decimal(row["balanceAfter"]),
+        currency=str(row["currency"]),
+        transaction_id=transaction_id if isinstance(transaction_id, str) else None,
+        ordered_by=ordered_by if isinstance(ordered_by, str) else "",
+        order_id=_walutomat_operation_detail(row.get("operationDetails"), "orderId"),
+    )
+
+
 class WalutomatExchangeClient(ExchangeClientBase):
     """Walutomat FX exchange client with REST API support.
 
@@ -260,6 +346,9 @@ class WalutomatExchangeClient(ExchangeClientBase):
     """Walutomat reports faithful FX cash balances via ``account/balances``."""
     position_capability = CapabilityStatus.NOT_APPLICABLE
     """FX spot venue: there are no derivatives positions to track."""
+    account_history_capability = CapabilityStatus.SUPPORTED
+    """Walutomat exposes a faithful append-only ``account/history`` ledger, the
+    substrate the spot-anchor bootstrap seals and the witness join folds."""
 
     def __init__(
         self,
@@ -1385,6 +1474,73 @@ class WalutomatExchangeClient(ExchangeClientBase):
             raise ValueError(f"Order {order_id} not found")
         return self._parse_walutomat_order(result["result"][0])
 
+    async def read_order_fill_legs(self, order_id: str) -> VenueOrderFillLegs | None:
+        """Read one order's cumulative per-leg fill totals (S4c-3 witness join).
+
+        Mirrors :meth:`get_order`'s authenticated ``GET market_fx/orders`` call
+        but returns the exact per-leg cumulative totals the witness builder folds
+        against the account-history legs, instead of the collapsed single-side
+        fill an order snapshot keeps. Every amount is parsed as exact ``Decimal``
+        from the venue's own strings. Returns ``None`` when the venue does not
+        know the order id; raises on transport or a non-success envelope so the
+        observer degrades to no-bootstrap without losing the balance snapshot.
+
+        Args:
+            order_id: Exchange order id whose cumulative fill legs are read.
+
+        Returns:
+            The order's cumulative bought/sold/commission legs, or ``None`` when
+            the venue does not know the order id.
+
+        Raises:
+            RuntimeError: If not connected, not authenticated, or the venue
+                returns a non-success envelope.
+        """
+        client = self._require_authenticated()
+        endpoint = f"/api/v2.0.0/market_fx/orders?orderId={order_id}"
+        headers = self._get_auth_headers(endpoint, "")
+        url = f"{self.api_base_url}/market_fx/orders?orderId={order_id}"
+        await self._acquire_rest_slot()
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        result = response.json()
+        if result.get("success") is not True:
+            raise RuntimeError("Walutomat order fill legs envelope did not report success")
+        rows = result.get("result")
+        if not rows:
+            return None
+        return self._parse_walutomat_order_fill_legs(rows[0])
+
+    @staticmethod
+    def _parse_walutomat_order_fill_legs(order_data: dict[str, Any]) -> VenueOrderFillLegs:
+        """Parse a Walutomat order payload into its cumulative per-leg fill totals.
+
+        Uses the venue's direct ``boughtCurrency`` / ``soldCurrency`` fields (no
+        pair inference) and parses every amount as exact ``Decimal``.
+        ``boughtAmount`` is the gross (pre-commission) cumulative the witness
+        builder folds against the account-history MARKET_FX legs; ``buy_sell``
+        tells the builder which cumulative denominates the executions' base volume.
+
+        Args:
+            order_data: Raw order object from the market_fx/orders response.
+
+        Returns:
+            The order's cumulative bought/sold/commission legs.
+
+        Raises:
+            ValueError: If a required amount field is missing or malformed.
+        """
+        return VenueOrderFillLegs(
+            order_id=str(order_data["orderId"]),
+            bought_amount=_parse_walutomat_decimal(order_data["boughtAmount"]),
+            sold_amount=_parse_walutomat_decimal(order_data["soldAmount"]),
+            commission_amount=_parse_walutomat_decimal(order_data.get("commissionAmount") or "0"),
+            bought_currency=str(order_data["boughtCurrency"]),
+            sold_currency=str(order_data["soldCurrency"]),
+            commission_currency=str(order_data.get("commissionCurrency") or ""),
+            buy_sell=str(order_data["buySell"]),
+        )
+
     async def find_order_by_client_id(
         self, client_order_id: str, symbol: str | None = None
     ) -> ExchangeOrderSnapshot | None:
@@ -1587,6 +1743,50 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 raise ValueError("Walutomat balance row is not a dict")
             entries.append(_parse_native_balance(row))
         return entries
+
+    async def read_account_history_tip(self, limit: int) -> VenueAccountHistoryTip | None:
+        """Read the newest ``account/history`` page for the spot-anchor bootstrap.
+
+        One authenticated, signed ``GET /account/history`` (this endpoint requires
+        ``X-API-Signature``, which :meth:`_get_auth_headers` supplies) with
+        ``itemLimit`` and the venue's default DESC order, so the newest item's
+        ``historyItemId`` is the tip ``H0``. The page is sorted descending here so
+        the bootstrap's balance-chain fold sees each currency's most-recent row
+        first regardless of venue order. Returns the tip and its page, or ``None``
+        when the account has no history at all (no tip to seal). Raises on
+        transport or a non-success envelope so the observer degrades to
+        no-bootstrap without losing the balance snapshot.
+
+        Args:
+            limit: Maximum number of newest history items to page (``itemLimit``).
+
+        Returns:
+            The newest tip and its descending page, or ``None`` when the account
+            history is empty.
+
+        Raises:
+            RuntimeError: If not connected, not authenticated, or the venue
+                returns a non-success envelope.
+            ValueError: If the result payload is not a list or a row is malformed.
+        """
+        client = self._require_authenticated()
+        endpoint = f"/api/v2.0.0/account/history?itemLimit={limit}"
+        headers = self._get_auth_headers(endpoint, "")
+        url = f"{self.api_base_url}/account/history?itemLimit={limit}"
+        await self._acquire_rest_slot()
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        result = response.json()
+        if result.get("success") is not True:
+            raise RuntimeError("Walutomat account history envelope did not report success")
+        rows = result.get("result")
+        if not isinstance(rows, list):
+            raise ValueError("Walutomat account history result is not a list")
+        if not rows:
+            return None
+        parsed = [_parse_walutomat_history_item(row) for row in rows]
+        items = tuple(sorted(parsed, key=lambda item: item.item_id, reverse=True))
+        return VenueAccountHistoryTip(item_id=items[0].item_id, items=items)
 
     def get_supported_pairs(self) -> list[str]:
         """Get list of available trading pairs.

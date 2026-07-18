@@ -31,6 +31,8 @@ _OTHER_WALLET = "00000000-0000-7000-8000-000000000102"
 _ALPHA_WALLET = "abcdefab-cdef-7abc-8def-abcdefabcdef"
 _ANCHOR = "00000000-0000-7000-8000-000000000301"
 _SESSION = "00000000-0000-7000-8000-000000000501"
+_SEED_INSTRUMENT = "00000000-0000-7000-8000-000000000731"
+_SEED_ORDER = "00000000-0000-7000-8000-000000000631"
 
 
 async def _repo(tmp_path: Path) -> SQLAlchemyRepository:
@@ -70,7 +72,7 @@ def _anchor(
     *,
     wallet_public_id: str = _WALLET,
     public_id: str = _ANCHOR,
-    source_watermark: int = 2_147_483_649,
+    source_watermark: int = 2,
 ) -> SpotReconciliationAnchorRow:
     """Build exact canonical anchor evidence.
 
@@ -117,7 +119,7 @@ def _evaluation(
     *,
     anchor_public_id: str | None,
     wallet_public_id: str = _WALLET,
-    source_watermark: int = 2_147_483_650,
+    source_watermark: int = 3,
     status: str = "mismatched",
     source_watermark_kind: str = "scope_sequence",
     sequence_id: int = 2,
@@ -147,9 +149,71 @@ def _evaluation(
     }
 
 
+async def _seed_scope(
+    repo: SQLAlchemyRepository,
+    count: int,
+    *,
+    wallet: str = _WALLET,
+    exchange: str = "kraken",
+    mode: str = "live",
+) -> None:
+    """Seed ``count`` committed executions so the anchor CAS finds a real tip.
+
+    Executions carry no foreign keys, so one instrument and order are seeded to
+    resolve the ingest scope, then ``insert_execution`` allocates scope_sequence
+    ``1..count`` under the per-wallet fence — the exact tip the writer re-reads.
+    """
+    instrument_public_id = _SEED_INSTRUMENT
+    order_public_id = _SEED_ORDER
+    async with repo.session() as session:
+        session.add_all(
+            [
+                Instrument(
+                    public_id=instrument_public_id,
+                    symbol_public_id=instrument_public_id,
+                    exchange=exchange,
+                    timestamp=_T0 - timedelta(days=1),
+                    session_id=_SESSION,
+                    sequence_id=1,
+                ),
+                Order(
+                    public_id=order_public_id,
+                    instrument_public_id=instrument_public_id,
+                    mode=mode,
+                    wallet_public_id=wallet,
+                    created_at=_T0 - timedelta(hours=1),
+                    timestamp=_T0 - timedelta(hours=1),
+                    side="buy",
+                    order_type="limit",
+                    price=0.1,
+                    size=1.0,
+                    status="filled",
+                    session_id=_SESSION,
+                    sequence_id=1,
+                ),
+            ]
+        )
+        await session.commit()
+    for offset in range(count):
+        await repo.insert_execution(
+            order_public_id=order_public_id,
+            wallet_public_id=wallet,
+            timestamp=_T0,
+            side="buy",
+            status="filled",
+            price=0.1,
+            size=1.0,
+            fee=0.0,
+            fee_asset="BTC",
+            session_id=_SESSION,
+            sequence_id=10 + offset,
+        )
+
+
 async def test_anchor_exact_round_trip_idempotence_and_conflict(tmp_path: Path) -> None:
     """Exact decimal strings round-trip; identical replay is idempotent."""
     repo = await _repo(tmp_path)
+    await _seed_scope(repo, 2)
     evidence = _anchor()
     first_id = await repo.record_spot_reconciliation_anchor(evidence)
     second_id = await repo.record_spot_reconciliation_anchor(evidence.copy())
@@ -189,6 +253,7 @@ async def test_anchor_read_canonicalizes_wallet_aliases(
     Then: SQLite returns the anchor under the canonical wallet identity.
     """
     repo = await _repo(tmp_path)
+    await _seed_scope(repo, 2, wallet=_ALPHA_WALLET)
     await repo.record_spot_reconciliation_anchor(_anchor(wallet_public_id=_ALPHA_WALLET))
 
     stored = await repo.get_spot_reconciliation_anchor(wallet_alias, "kraken", "live")
@@ -247,6 +312,7 @@ async def test_anchor_integrity_race_recovers_winner_or_rejects_conflict(
 ) -> None:
     """A real unique collision re-reads and compares the committed winner."""
     repo = await _repo(tmp_path)
+    await _seed_scope(repo, 2)
     requested = _anchor()
     winner = requested.copy()
     if not winner_matches:
@@ -282,7 +348,7 @@ async def test_anchor_integrity_race_recovers_winner_or_rejects_conflict(
                 match="conflicting spot reconciliation bootstrap anchor",
             ):
                 await repo.record_spot_reconciliation_anchor(requested)
-    assert execute_calls == 2
+    assert execute_calls == 3
     await repo.engine.dispose()
 
 
@@ -367,8 +433,8 @@ async def test_execution_repository_preserves_float_and_raw_decimal_evidence(
             "anchor lineage",
         ),
         (
-            _anchor(source_watermark=2_147_483_651),
-            _evaluation(anchor_public_id=_ANCHOR, source_watermark=2_147_483_650),
+            _anchor(source_watermark=4),
+            _evaluation(anchor_public_id=_ANCHOR),
             "anchor lineage",
         ),
         (
@@ -390,6 +456,7 @@ async def test_full_spot_reconciliation_rejects_missing_foreign_or_future_anchor
     """Full spot truth cannot cite absent, foreign, or later bootstrap evidence."""
     repo = await _repo(tmp_path)
     if seed is not None:
+        await _seed_scope(repo, seed["source_watermark"], wallet=seed["wallet_public_id"])
         await repo.record_spot_reconciliation_anchor(seed)
     with pytest.raises(RuntimeError, match=message):
         await repo.record_portfolio_reconciliation(evaluation)
@@ -401,6 +468,7 @@ async def test_full_spot_reconciliation_retains_real_anchor_and_nonfull_needs_no
 ) -> None:
     """Valid full spot state retains bootstrap identity; incomplete needs none."""
     repo = await _repo(tmp_path)
+    await _seed_scope(repo, 2)
     await repo.record_spot_reconciliation_anchor(_anchor())
     await repo.record_portfolio_reconciliation(
         _evaluation(anchor_public_id=None, status="incomplete")
@@ -416,5 +484,86 @@ async def test_full_spot_reconciliation_retains_real_anchor_and_nonfull_needs_no
         ).scalar_one()
     assert state.anchor_public_id == _ANCHOR
     assert state.current_evaluation_status == "mismatched"
-    assert state.source_watermark == 2_147_483_650
+    assert state.source_watermark == 3
+    await repo.engine.dispose()
+
+
+async def test_anchor_write_refuses_when_watermark_is_below_the_committed_tip(
+    tmp_path: Path,
+) -> None:
+    """The commit-time CAS refuses a caller watermark below the committed tip.
+
+    Given: A scope with three committed executions,
+    When: An anchor claiming watermark 2 is recorded,
+    Then: The re-read tip (3) refuses the stale/fabricated watermark — the shipped
+        gap-3 defect (the writer trusting source_watermark verbatim) is closed.
+    """
+    repo = await _repo(tmp_path)
+    await _seed_scope(repo, 3)
+    with pytest.raises(RuntimeError, match="not the committed execution tip"):
+        await repo.record_spot_reconciliation_anchor(_anchor(source_watermark=2))
+    await repo.engine.dispose()
+
+
+async def test_anchor_write_refuses_when_an_execution_commits_after_capture(
+    tmp_path: Path,
+) -> None:
+    """The CAS refuses when a fill commits between watermark capture and insert.
+
+    Given: An anchor captured at watermark 2, then a third execution commits,
+    When: The anchor (still claiming watermark 2) is recorded,
+    Then: The re-read tip (3) refuses — the ledger must be frozen from capture
+        through commit (O3), stronger than 'the watermark did not change'.
+    """
+    repo = await _repo(tmp_path)
+    await _seed_scope(repo, 2)
+    evidence = _anchor(source_watermark=2)
+    await repo.insert_execution(
+        order_public_id=_SEED_ORDER,
+        wallet_public_id=_WALLET,
+        timestamp=_T0,
+        side="buy",
+        status="filled",
+        price=0.1,
+        size=1.0,
+        fee=0.0,
+        fee_asset="BTC",
+        session_id=_SESSION,
+        sequence_id=99,
+    )
+    with pytest.raises(RuntimeError, match="not the committed execution tip"):
+        await repo.record_spot_reconciliation_anchor(evidence)
+    await repo.engine.dispose()
+
+
+async def test_exact_idempotent_replay_succeeds_after_the_tip_advances(
+    tmp_path: Path,
+) -> None:
+    """An exact replay still succeeds after the committed tip has moved on.
+
+    Given: An anchor recorded at watermark 2, then a third execution advances the
+        committed tip,
+    When: The identical anchor is recorded again,
+    Then: The idempotent replay returns the original id — the CAS guards only new
+        inserts, never the accepted replay of a committed anchor.
+    """
+    repo = await _repo(tmp_path)
+    await _seed_scope(repo, 2)
+    evidence = _anchor(source_watermark=2)
+    first_id = await repo.record_spot_reconciliation_anchor(evidence)
+    await repo.insert_execution(
+        order_public_id=_SEED_ORDER,
+        wallet_public_id=_WALLET,
+        timestamp=_T0,
+        side="buy",
+        status="filled",
+        price=0.1,
+        size=1.0,
+        fee=0.0,
+        fee_asset="BTC",
+        session_id=_SESSION,
+        sequence_id=98,
+    )
+    second_id = await repo.record_spot_reconciliation_anchor(evidence.copy())
+    assert first_id == second_id
     await repo.engine.dispose()

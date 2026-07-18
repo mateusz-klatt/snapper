@@ -93,6 +93,23 @@ def test_certifiable_observation_has_no_refusals() -> None:
     assert spot_anchor_bootstrap_refusals(_BASELINE) == ()
 
 
+def test_terminal_shared_witness_legs_are_deduplicated() -> None:
+    """A terminal execution sharing its predecessor's legs still certifies.
+
+    Given: A two-execution sealed prefix where the terminal (order-close)
+        execution witnesses the same fill legs as its active predecessor.
+    When: The refusals are computed.
+    Then: The shared item ids are deduplicated so the bijection holds and the
+        observation is certifiable (a zero-delta terminal never blocks an anchor).
+    """
+    observation = replace(
+        _BASELINE,
+        source_watermark=2,
+        execution_witnesses={1: frozenset({100, 99}), 2: frozenset({100, 99})},
+    )
+    assert spot_anchor_bootstrap_refusals(observation) == ()
+
+
 _REFUSAL_CASES = [
     pytest.param(replace(_BASELINE, anchor_exists=True), "anchor_already_exists", id="anchor"),
     pytest.param(

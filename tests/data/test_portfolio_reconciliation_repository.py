@@ -29,6 +29,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Instrument
+from snapper.data.models import Order
 from snapper.data.models import PortfolioDriftEpisode
 from snapper.data.models import PortfolioReconciliationMethodConfig
 from snapper.data.models import PortfolioReconciliationObservation
@@ -682,6 +684,60 @@ async def test_non_full_open_episode_retention_preserves_genuine_detail_and_reso
     assert genuine_detail.expected_json is not None
 
 
+async def _seed_spot_execution(
+    repo: SQLAlchemyRepository,
+    *,
+    wallet: str = _OTHER_WALLET,
+    exchange: str = "kraken",
+    mode: str = "live",
+) -> None:
+    """Seed one committed execution so the anchor commit-time CAS finds a tip."""
+    instrument_public_id = "00000000-0000-7000-8000-000000000731"
+    order_public_id = "00000000-0000-7000-8000-000000000631"
+    async with repo.session() as session:
+        session.add_all(
+            [
+                Instrument(
+                    public_id=instrument_public_id,
+                    symbol_public_id=instrument_public_id,
+                    exchange=exchange,
+                    timestamp=_T0 - timedelta(days=1),
+                    session_id=_SESSION,
+                    sequence_id=1,
+                ),
+                Order(
+                    public_id=order_public_id,
+                    instrument_public_id=instrument_public_id,
+                    mode=mode,
+                    wallet_public_id=wallet,
+                    created_at=_T0 - timedelta(hours=1),
+                    timestamp=_T0 - timedelta(hours=1),
+                    side="buy",
+                    order_type="limit",
+                    price=1.0,
+                    size=1.0,
+                    status="filled",
+                    session_id=_SESSION,
+                    sequence_id=1,
+                ),
+            ]
+        )
+        await session.commit()
+    await repo.insert_execution(
+        order_public_id=order_public_id,
+        wallet_public_id=wallet,
+        timestamp=_T0,
+        side="buy",
+        status="filled",
+        price=1.0,
+        size=1.0,
+        fee=0.0,
+        fee_asset="USD",
+        session_id=_SESSION,
+        sequence_id=10,
+    )
+
+
 async def test_initial_incomplete_has_no_invented_full_truth_and_reads_are_scoped(
     tmp_path: Path,
 ) -> None:
@@ -703,6 +759,7 @@ async def test_initial_incomplete_has_no_invented_full_truth_and_reads_are_scope
         _evaluation(_T0 + timedelta(milliseconds=500), "incomplete", sequence_id=2)
     )
     current = await _active_state(repo)
+    await _seed_spot_execution(repo)
     await repo.record_spot_reconciliation_anchor(_spot_anchor())
     await repo.record_portfolio_reconciliation(
         _evaluation(

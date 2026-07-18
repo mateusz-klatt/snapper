@@ -6,6 +6,7 @@ shared across all exchange implementations.
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from enum import StrEnum
 from typing import Literal
@@ -390,6 +391,68 @@ class OrderFillSummary:
     covered_qty: float
     fee_total: float | None = None
     fee_currency: str | None = None
+
+
+@dataclass(frozen=True)
+class VenueAccountHistoryItem:
+    """One faithful entry from a venue's account-history ledger (S4c-3 anchor).
+
+    Carries the raw-but-typed fields the spot-anchor bootstrap needs from a
+    single ``account/history`` row, before any normalization. ``operation_type``
+    is the venue's own event class (``MARKET_FX`` a balance-affecting FX leg,
+    ``COMMISSION`` a fee leg); ``operation_amount`` is the signed exact-decimal
+    delta for ``currency`` and ``balance_after`` the venue's own post-event
+    balance. ``transaction_id`` is shared across the two currency legs of one
+    fill (present on FX legs, absent on non-order rows), so the witness join
+    groups a fill's legs by it; ``order_id`` correlates every leg of one order
+    (from ``operationDetails``) and is absent on non-order rows. ``ordered_by``
+    attributes the event (an ``API/`` prefix marks our own key).
+    """
+
+    item_id: int
+    operation_type: str
+    operation_amount: Decimal
+    balance_after: Decimal
+    currency: str
+    transaction_id: str | None
+    ordered_by: str
+    order_id: str | None
+
+
+@dataclass(frozen=True)
+class VenueAccountHistoryTip:
+    """A venue account-history tip: the newest item id and its first page.
+
+    ``item_id`` is the highest (newest) history id at read time — the ``H0``
+    cursor the anchor seals. ``items`` is the first page in DESCENDING id order
+    (newest first), the window the bootstrap folds against the local ledger; it
+    is empty only when the account has no history.
+    """
+
+    item_id: int
+    items: tuple[VenueAccountHistoryItem, ...]
+
+
+@dataclass(frozen=True)
+class VenueOrderFillLegs:
+    """The cumulative per-leg totals a venue reports for one order (S4c-3).
+
+    The independent composition anchor for the witness join: ``bought_amount``
+    and ``sold_amount`` are the order's exact cumulative filled legs (gross,
+    denominated in ``bought_currency`` / ``sold_currency``), ``commission_amount``
+    the summed fee in ``commission_currency``. The witness builder proves the
+    per-fill ``account/history`` MARKET_FX legs sum exactly to these totals, so a
+    dropped or extra history leg is caught before any witness map is produced.
+    """
+
+    order_id: str
+    bought_amount: Decimal
+    sold_amount: Decimal
+    commission_amount: Decimal
+    bought_currency: str
+    sold_currency: str
+    commission_currency: str
+    buy_sell: str
 
 
 @dataclass

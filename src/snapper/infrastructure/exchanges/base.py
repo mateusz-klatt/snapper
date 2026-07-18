@@ -54,6 +54,8 @@ from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
+from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.exchanges.errors import RestPoolDispatchError
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
@@ -77,6 +79,8 @@ shared default executor.
 
 _NATIVE_BALANCES_UNSUPPORTED_MSG = "This exchange client does not support native balance reads"
 _NATIVE_POSITIONS_UNSUPPORTED_MSG = "This exchange client does not support native position reads"
+_ACCOUNT_HISTORY_UNSUPPORTED_MSG = "This exchange client does not support account history reads"
+_ORDER_FILL_LEGS_UNSUPPORTED_MSG = "This exchange client does not support order fill leg reads"
 
 
 class ExchangeClientBase(ABC):
@@ -97,6 +101,7 @@ class ExchangeClientBase(ABC):
     supports_websocket_executions: bool = True
     balance_capability: CapabilityStatus = CapabilityStatus.UNSUPPORTED
     position_capability: CapabilityStatus = CapabilityStatus.UNSUPPORTED
+    account_history_capability: CapabilityStatus = CapabilityStatus.UNSUPPORTED
 
     def __init__(
         self, repository: Repository | None = None, exchange_name: str = "unknown"
@@ -910,6 +915,57 @@ class ExchangeClientBase(ABC):
         """
         await asyncio.sleep(0)
         raise NotImplementedError(_NATIVE_POSITIONS_UNSUPPORTED_MSG)
+
+    async def read_account_history_tip(self, limit: int) -> VenueAccountHistoryTip | None:
+        """Read the newest account-history page for the spot-anchor bootstrap.
+
+        The bootstrap calls this ONLY when ``account_history_capability`` is
+        ``SUPPORTED``; the default therefore fail-closes by raising, so a venue
+        that advertises the capability without a faithful reader is a loud bug,
+        never a silent false anchor. A supporting implementation returns the tip
+        id and its first DESCENDING page (newest first) up to ``limit`` items, or
+        ``None`` when the read cannot be made faithfully this cycle (transport
+        error, malformed envelope) — the observer then degrades to no-bootstrap
+        and retries, never losing the balance snapshot.
+
+        Args:
+            limit: Maximum number of newest history items to return in the page.
+
+        Returns:
+            The account-history tip and its first descending page, or ``None``
+            when the read could not be completed faithfully this cycle.
+
+        Raises:
+            NotImplementedError: When the client declares no account-history
+                capability.
+        """
+        await asyncio.sleep(0)
+        raise NotImplementedError(_ACCOUNT_HISTORY_UNSUPPORTED_MSG)
+
+    async def read_order_fill_legs(self, order_id: str) -> VenueOrderFillLegs | None:
+        """Read one order's cumulative per-leg fill totals for the anchor bootstrap.
+
+        The witness join calls this per distinct order in the sealed prefix, ONLY
+        when ``account_history_capability`` is ``SUPPORTED`` (the same venue
+        contract as :meth:`read_account_history_tip`); the default fail-closes by
+        raising. A supporting implementation returns the order's exact cumulative
+        bought/sold/commission legs — the independent composition anchor the
+        witness builder proves the per-fill history legs sum to — or ``None`` when
+        the read cannot be made faithfully this cycle.
+
+        Args:
+            order_id: Exchange order id whose cumulative fill legs are read.
+
+        Returns:
+            The order's cumulative per-leg totals, or ``None`` when the read could
+            not be completed faithfully this cycle.
+
+        Raises:
+            NotImplementedError: When the client declares no account-history
+                capability.
+        """
+        await asyncio.sleep(0)
+        raise NotImplementedError(_ORDER_FILL_LEGS_UNSUPPORTED_MSG)
 
     @abstractmethod
     async def get_balance(self, currency: str | None = None) -> dict[str, AccountBalance]:
