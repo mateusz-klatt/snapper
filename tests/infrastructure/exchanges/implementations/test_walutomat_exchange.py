@@ -36,6 +36,7 @@ from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.exchanges.implementations.walutomat import _active_execution_status
 from snapper.infrastructure.exchanges.implementations.walutomat import _parse_walutomat_decimal
+from snapper.infrastructure.exchanges.implementations.walutomat import _parse_walutomat_exec_id
 from snapper.infrastructure.exchanges.implementations.walutomat import _parse_walutomat_history_item
 from snapper.infrastructure.exchanges.implementations.walutomat import _should_emit_active_execution
 from snapper.infrastructure.exchanges.implementations.walutomat import _snapshot_tracked_order
@@ -5705,3 +5706,48 @@ def test_parse_walutomat_history_item_missing_optional_fields_default() -> None:
     assert item.transaction_id is None
     assert item.ordered_by == ""
     assert item.order_id is None
+
+
+def test_parse_walutomat_exec_id_active_and_terminal() -> None:
+    """Given: Active and terminal Walutomat exec ids, including a UUID order id.
+
+    When: They are parsed,
+    Then: The order id, basis-unit cumulative, and terminal flag are recovered.
+    """
+    assert _parse_walutomat_exec_id("wal-2035e361-e672-457a-9c3c-0e86e5ff54d6-c600000000") == (
+        "2035e361-e672-457a-9c3c-0e86e5ff54d6",
+        600000000,
+        False,
+    )
+    assert _parse_walutomat_exec_id("wal-ord-9-c400000000-t") == ("ord-9", 400000000, True)
+
+
+def test_parse_walutomat_exec_id_last_c_is_the_cumulative() -> None:
+    """Given: An order id that itself contains ``-c``.
+
+    When: The exec id is parsed,
+    Then: The LAST ``-c`` (the cumulative's) splits it, not an earlier one.
+    """
+    assert _parse_walutomat_exec_id("wal-abc-c5-c100") == ("abc-c5", 100, False)
+
+
+def test_parse_walutomat_exec_id_rejects_foreign_or_malformed() -> None:
+    """Given: Non-Walutomat or malformed exec ids.
+
+    When: They are parsed,
+    Then: None is returned so they fail the witness bijection closed.
+    """
+    assert _parse_walutomat_exec_id("kraken-abc") is None
+    assert _parse_walutomat_exec_id("wal-abc") is None
+    assert _parse_walutomat_exec_id("wal--c100") is None
+    assert _parse_walutomat_exec_id("wal-ord-cXYZ") is None
+
+
+def test_parse_execution_exec_id_delegates_to_the_module_parser() -> None:
+    """Given: A Walutomat client and an active exec id.
+
+    When: parse_execution_exec_id is called,
+    Then: It returns the decoded components via the module parser.
+    """
+    client = WalutomatExchangeClient()
+    assert client.parse_execution_exec_id("wal-ord-1-c500000000") == ("ord-1", 500000000, False)

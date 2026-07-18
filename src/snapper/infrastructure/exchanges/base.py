@@ -967,6 +967,25 @@ class ExchangeClientBase(ABC):
         await asyncio.sleep(0)
         raise NotImplementedError(_ORDER_FILL_LEGS_UNSUPPORTED_MSG)
 
+    def parse_execution_exec_id(self, exec_id: str) -> tuple[str, int, bool] | None:
+        """Decode a venue exec id into ``(order_id, cumulative_basis_units, is_terminal)``.
+
+        The spot-anchor witness join calls this to recover each execution's venue
+        order and integer-basis-unit running cumulative from its stored exec id.
+        The default returns ``None`` (no venue exec-id scheme), so a venue without
+        the anchor-bootstrap contract simply never witnesses and never anchors.
+
+        Args:
+            exec_id: The stored ``Execution.exec_id``.
+
+        Returns:
+            The order id, the integer basis-unit cumulative, and whether this is
+            the terminal (order-close) emission, or ``None`` when the id does not
+            match this venue's scheme.
+        """
+        _ = exec_id
+        return None
+
     @abstractmethod
     async def get_balance(self, currency: str | None = None) -> dict[str, AccountBalance]:
         """Fetch account balances.

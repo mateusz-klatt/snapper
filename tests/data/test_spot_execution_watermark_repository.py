@@ -31,6 +31,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import event
 
+from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
 from snapper.data.models import Order
@@ -614,3 +615,39 @@ class TestSqliteFenceDegeneration:
             assert not any(
                 marker in statement for statement in [*insert_statements, *capture_statements]
             )
+
+
+@pytest.mark.asyncio
+async def test_witness_rows_return_the_contiguous_sealed_prefix(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Two committed live walutomat fills return their scope sequences in order.
+
+    Given: Two committed fills for the live walutomat scope,
+    When: The witness rows are read up to watermark 2,
+    Then: Both scope sequences and their exec ids project in ascending order.
+    """
+    await _seed_lineage(repository)
+    await _insert_fill(repository, _LIVE_ORDER, _WALLET, 1)
+    await _insert_fill(repository, _LIVE_ORDER, _WALLET, 2)
+    rows = await repository.get_spot_execution_witness_rows(_WALLET, "walutomat", "live", 2)
+    assert rows == [
+        {"scope_sequence": 1, "exec_id": None},
+        {"scope_sequence": 2, "exec_id": None},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_witness_rows_fail_closed_on_a_non_contiguous_prefix(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A gap in the sealed prefix fails closed rather than seal an unwitnessed ledger.
+
+    Given: One committed fill but a watermark of 2 (a purge or tamper gap),
+    When: The witness rows are read,
+    Then: ExecutionChainError is raised.
+    """
+    await _seed_lineage(repository)
+    await _insert_fill(repository, _LIVE_ORDER, _WALLET, 1)
+    with pytest.raises(ExecutionChainError, match="non-contiguous"):
+        await repository.get_spot_execution_witness_rows(_WALLET, "walutomat", "live", 2)

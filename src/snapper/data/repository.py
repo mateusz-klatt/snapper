@@ -311,6 +311,7 @@ from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
+from snapper.data.repository_types import SpotExecutionWitnessRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
@@ -2183,6 +2184,22 @@ class Repository(ABC):
         stored range is not contiguous (a gap is a purge or a tamper and must
         fail closed), so a verification caller converts it to a stable
         ``incomplete`` result rather than a matched verdict.
+        """
+        ...
+
+    @abstractmethod
+    async def get_spot_execution_witness_rows(
+        self, wallet_public_id: str, exchange: str, mode: str, upto_watermark: int
+    ) -> list[SpotExecutionWitnessRow]:
+        """Read the sealed prefix ``[1, upto_watermark]`` for the anchor witness join.
+
+        Returns one ``(scope_sequence, exec_id)`` row per execution in ascending
+        ``scope_sequence`` order, with no ``known_to`` filter (the total-unique
+        index gives one row per sequence value). Raises ``ExecutionChainError``
+        when the range is not contiguous (``count != upto_watermark``) — a gap is
+        a purge or a tamper and the anchor must fail closed rather than seal a
+        ledger it cannot fully witness. The read is unlocked, mirroring the
+        watermark and chain-tip reads.
         """
         ...
 
@@ -13898,6 +13915,47 @@ class SQLAlchemyRepository(Repository):
                 )
             records = [self._execution_chain_record(execution) for execution in executions]
         return extend_execution_chain(from_tip, records)
+
+    async def get_spot_execution_witness_rows(
+        self, wallet_public_id: str, exchange: str, mode: str, upto_watermark: int
+    ) -> list[SpotExecutionWitnessRow]:
+        """Read the sealed prefix ``[1, upto_watermark]`` for the anchor witness join.
+
+        See the abstract declaration. Contiguity is required (append-only, delete
+        refused through every supported path), so a missing sequence value is a
+        purge or a tamper and fails closed. Columns are read inside the session
+        before the entities detach; the projection is pure.
+        """
+        wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+        async with self.session() as s:
+            executions = (
+                (
+                    await s.execute(
+                        select(Execution)
+                        .where(
+                            Execution.wallet_public_id == wallet_public_id,
+                            Execution.exchange == exchange,
+                            Execution.mode == mode,
+                            Execution.scope_sequence >= 1,
+                            Execution.scope_sequence <= upto_watermark,
+                        )
+                        .order_by(Execution.scope_sequence.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if len(executions) != upto_watermark:
+                raise ExecutionChainError(
+                    f"non-contiguous execution prefix for scope "
+                    f"({wallet_public_id}, {exchange}, {mode}): expected {upto_watermark} row(s) "
+                    f"in [1, {upto_watermark}], found {len(executions)}"
+                )
+            rows: list[SpotExecutionWitnessRow] = [
+                {"scope_sequence": int(execution.scope_sequence), "exec_id": execution.exec_id}
+                for execution in executions
+            ]
+        return rows
 
     @staticmethod
     def _execution_chain_record(execution: Execution) -> ExecutionChainRecord:

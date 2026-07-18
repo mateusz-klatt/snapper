@@ -121,6 +121,33 @@ def _walutomat_exec_id(order_id: str, cumulative: float) -> str:
     return f"wal-{order_id}-c{int(round(cumulative * _EXEC_ID_BASIS_UNITS))}"
 
 
+def _parse_walutomat_exec_id(exec_id: str) -> tuple[str, int, bool] | None:
+    """Decode ``wal-{orderId}-c{basis_units}[-t]`` into its witness components.
+
+    Inverse of :func:`_walutomat_exec_id`. Returns ``None`` for any id that does
+    not match the scheme, so a foreign or malformed exec id is unmappable and
+    fails the witness bijection closed. The cumulative's ``-c`` is always the LAST
+    one (appended after the order id), so an order id that itself contains ``-c``
+    still parses correctly.
+
+    Args:
+        exec_id: The stored ``Execution.exec_id``.
+
+    Returns:
+        ``(order_id, cumulative_basis_units, is_terminal)`` or ``None``.
+    """
+    if not exec_id.startswith("wal-"):
+        return None
+    body = exec_id[len("wal-") :]
+    is_terminal = body.endswith("-t")
+    if is_terminal:
+        body = body[: -len("-t")]
+    order_id, separator, basis_units = body.rpartition("-c")
+    if not separator or not order_id or not basis_units.isdigit():
+        return None
+    return order_id, int(basis_units), is_terminal
+
+
 @dataclass
 class _TrackedOrder:
     """Internal state for polling-based execution tracking.
@@ -1540,6 +1567,18 @@ class WalutomatExchangeClient(ExchangeClientBase):
             commission_currency=str(order_data.get("commissionCurrency") or ""),
             buy_sell=str(order_data["buySell"]),
         )
+
+    def parse_execution_exec_id(self, exec_id: str) -> tuple[str, int, bool] | None:
+        """Decode a Walutomat exec id into its witness components (see base).
+
+        Args:
+            exec_id: The stored ``Execution.exec_id``.
+
+        Returns:
+            ``(order_id, cumulative_basis_units, is_terminal)`` or ``None`` when
+            the id is not a Walutomat exec id.
+        """
+        return _parse_walutomat_exec_id(exec_id)
 
     async def find_order_by_client_id(
         self, client_order_id: str, symbol: str | None = None

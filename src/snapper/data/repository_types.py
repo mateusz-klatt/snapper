@@ -316,6 +316,18 @@ class ExecutionRow(TypedDict):
     numeric_provenance: NotRequired[str | None]
 
 
+class SpotExecutionWitnessRow(TypedDict):
+    """One sealed-prefix execution's scope sequence and venue exec id.
+
+    Returned by ``get_spot_execution_witness_rows`` for the spot-anchor witness
+    join; ``exec_id`` is ``None`` when the venue reported no fill identity, which
+    the witness builder treats as unmappable.
+    """
+
+    scope_sequence: int
+    exec_id: str | None
+
+
 class PositionRow(TypedDict):
     """Row dict returned by get_positions."""
 

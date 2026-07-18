@@ -1564,3 +1564,14 @@ async def test_log_order_to_db_labels_non_paper_exchange_as_live_mode(
     mock_resolve.assert_awaited_once()
     insert_kwargs = mock_repo.insert_order.call_args.kwargs
     assert insert_kwargs["mode"] == "live"
+
+
+def test_parse_execution_exec_id_defaults_to_none() -> None:
+    """The base exec-id parse returns None for venues without a scheme.
+
+    Given: A venue client that does not override the exec-id parse,
+    When: parse_execution_exec_id is called,
+    Then: None is returned so an unsupported venue never witnesses.
+    """
+    client = DummyExchangeClient(repository=None)
+    assert client.parse_execution_exec_id("wal-x-c1") is None
