@@ -60,6 +60,7 @@ def test_build_witnesses_from_reads_composes_the_map() -> None:
     """
     tip = VenueAccountHistoryTip(
         item_id=102,
+        reached_genesis=True,
         items=(
             _item(102, "MARKET_FX", "4", "EUR", transaction_id="T2"),
             _item(101, "MARKET_FX", "-20", "PLN", transaction_id="T2"),
@@ -84,6 +85,7 @@ def test_build_witnesses_from_reads_passes_refusals_through() -> None:
     """
     tip = VenueAccountHistoryTip(
         item_id=100,
+        reached_genesis=True,
         items=(
             _item(100, "MARKET_FX", "6", "EUR", transaction_id="T1"),
             _item(99, "MARKET_FX", "-30", "PLN", transaction_id="T1"),
@@ -103,6 +105,7 @@ def test_venue_history_tip_from_raw_normalizes_markers() -> None:
     """
     tip = VenueAccountHistoryTip(
         item_id=100,
+        reached_genesis=True,
         items=(
             _item(100, "MARKET_FX", "6", "EUR", balance_after="106"),
             _item(99, "COMMISSION", "-0.02", "EUR", ordered_by="API/key"),
@@ -171,3 +174,65 @@ def test_parse_observed_balances_empty_is_not_venue_raw() -> None:
     assert balances == {}
     assert reserved == {}
     assert venue_raw is False
+
+
+def test_commission_items_discharge_the_fee_obligation() -> None:
+    """Given: A fill page whose COMMISSION item matches the order's reported fee.
+
+    When: The witnesses are composed from the raw reads,
+    Then: The fee evidence reconciles (unattributed commission rows count via
+        their orderId join) and the map certifies.
+    """
+    totals = _buy_totals()
+    totals["O1"] = VenueOrderFillLegs(
+        order_id="O1",
+        bought_amount=Decimal("6"),
+        sold_amount=Decimal("30"),
+        commission_amount=Decimal("0.02"),
+        bought_currency="EUR",
+        sold_currency="PLN",
+        commission_currency="EUR",
+        buy_sell="BUY",
+    )
+    tip = VenueAccountHistoryTip(
+        item_id=101,
+        reached_genesis=True,
+        items=(
+            _item(101, "COMMISSION", "-0.02", "EUR", ordered_by=""),
+            _item(100, "MARKET_FX", "6", "EUR", transaction_id="T1"),
+            _item(99, "MARKET_FX", "-30", "PLN", transaction_id="T1"),
+        ),
+    )
+    outcome = build_witnesses_from_reads(tip, [(1, "O1", 600_000_000, False)], totals)
+    assert outcome.refusals == ()
+    assert outcome.witnesses == {1: frozenset({100, 99})}
+
+
+def test_in_flight_commission_refuses_through_the_assembly() -> None:
+    """Given: An order reporting a fee whose COMMISSION item is not on the page.
+
+    When: The witnesses are composed,
+    Then: The fee-completeness cross-check refuses.
+    """
+    totals = _buy_totals()
+    totals["O1"] = VenueOrderFillLegs(
+        order_id="O1",
+        bought_amount=Decimal("6"),
+        sold_amount=Decimal("30"),
+        commission_amount=Decimal("0.02"),
+        bought_currency="EUR",
+        sold_currency="PLN",
+        commission_currency="EUR",
+        buy_sell="BUY",
+    )
+    tip = VenueAccountHistoryTip(
+        item_id=100,
+        reached_genesis=True,
+        items=(
+            _item(100, "MARKET_FX", "6", "EUR", transaction_id="T1"),
+            _item(99, "MARKET_FX", "-30", "PLN", transaction_id="T1"),
+        ),
+    )
+    outcome = build_witnesses_from_reads(tip, [(1, "O1", 600_000_000, False)], totals)
+    assert outcome.witnesses == {}
+    assert outcome.refusals == ("commission_sum_disagrees_with_order_total",)

@@ -59,6 +59,7 @@ def _totals(
     bought_currency: str = "EUR",
     sold_currency: str = "PLN",
     is_buy: bool = True,
+    commission: str = "0",
 ) -> WitnessOrderTotals:
     """Build one order's market_fx/orders cumulative totals for a test scenario."""
     return WitnessOrderTotals(
@@ -67,6 +68,7 @@ def _totals(
         bought_currency=bought_currency,
         sold_currency=sold_currency,
         is_buy=is_buy,
+        commission_amount=Decimal(commission),
     )
 
 
@@ -89,7 +91,7 @@ def test_single_fill_order_maps_the_one_fill() -> None:
     """
     legs = [_leg(100, "EUR", "6"), _leg(99, "PLN", "-30")]
     outcome = build_execution_witnesses(
-        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, 100
+        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, 100, {}
     )
     assert outcome.refusals == ()
     assert outcome.witnesses == {1: frozenset({100, 99})}
@@ -103,7 +105,7 @@ def test_two_partial_fills_partition_by_cumulative() -> None:
     """
     legs, totals = _two_fill_buy()
     outcome = build_execution_witnesses(
-        [_execution(1, "6"), _execution(2, "10")], legs, totals, 102
+        [_execution(1, "6"), _execution(2, "10")], legs, totals, 102, {}
     )
     assert outcome.refusals == ()
     assert outcome.witnesses == {1: frozenset({100, 99}), 2: frozenset({102, 101})}
@@ -116,7 +118,7 @@ def test_skipped_fill_execution_sweeps_every_fill_in_its_interval() -> None:
     Then: The single execution witnesses both fills' legs (Gemini R1).
     """
     legs, totals = _two_fill_buy()
-    outcome = build_execution_witnesses([_execution(1, "10")], legs, totals, 102)
+    outcome = build_execution_witnesses([_execution(1, "10")], legs, totals, 102, {})
     assert outcome.refusals == ()
     assert outcome.witnesses == {1: frozenset({100, 99, 102, 101})}
 
@@ -133,7 +135,7 @@ def test_sell_order_uses_the_sold_currency_as_base() -> None:
             bought="30", sold="6", bought_currency="PLN", sold_currency="EUR", is_buy=False
         )
     }
-    outcome = build_execution_witnesses([_execution(1, "6")], legs, totals, 100)
+    outcome = build_execution_witnesses([_execution(1, "6")], legs, totals, 100, {})
     assert outcome.refusals == ()
     assert outcome.witnesses == {1: frozenset({100, 99})}
 
@@ -150,6 +152,7 @@ def test_terminal_execution_shares_predecessor_legs() -> None:
         legs,
         {"O1": _totals(bought="6", sold="30")},
         100,
+        {},
     )
     assert outcome.refusals == ()
     assert outcome.witnesses == {1: frozenset({100, 99}), 2: frozenset({100, 99})}
@@ -163,7 +166,7 @@ def test_dropped_leg_makes_the_cumulative_miss_a_fill_boundary() -> None:
     """
     legs, totals = _two_fill_buy()
     outcome = build_execution_witnesses(
-        [_execution(1, "7"), _execution(2, "10")], legs, totals, 102
+        [_execution(1, "7"), _execution(2, "10")], legs, totals, 102, {}
     )
     assert outcome.witnesses == {}
     assert outcome.refusals == ("execution_cumulative_off_fill_boundary",)
@@ -176,7 +179,7 @@ def test_order_without_totals_is_refused() -> None:
     Then: The missing totals are refused.
     """
     legs = [_leg(100, "EUR", "6"), _leg(99, "PLN", "-30")]
-    outcome = build_execution_witnesses([_execution(1, "6")], legs, {}, 100)
+    outcome = build_execution_witnesses([_execution(1, "6")], legs, {}, 100, {})
     assert outcome.witnesses == {}
     assert outcome.refusals == ("execution_order_totals_missing",)
 
@@ -188,7 +191,7 @@ def test_unidentified_attributed_leg_is_refused() -> None:
     Then: The unidentified leg is refused.
     """
     legs = [_leg(100, "EUR", "6", transaction_id=None)]
-    outcome = build_execution_witnesses([], legs, {}, 100)
+    outcome = build_execution_witnesses([], legs, {}, 100, {})
     assert outcome.witnesses == {}
     assert outcome.refusals == ("history_leg_unidentified",)
 
@@ -201,7 +204,7 @@ def test_fill_missing_its_base_leg_is_refused() -> None:
     """
     legs = [_leg(100, "PLN", "-30")]
     outcome = build_execution_witnesses(
-        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, 100
+        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, 100, {}
     )
     assert outcome.witnesses == {}
     assert outcome.refusals == ("history_fill_leg_incomplete",)
@@ -215,7 +218,7 @@ def test_base_legs_not_summing_to_the_total_is_refused() -> None:
     """
     legs = [_leg(100, "EUR", "6"), _leg(99, "PLN", "-30")]
     outcome = build_execution_witnesses(
-        [_execution(1, "6")], legs, {"O1": _totals(bought="12", sold="60")}, 100
+        [_execution(1, "6")], legs, {"O1": _totals(bought="12", sold="60")}, 100, {}
     )
     assert outcome.witnesses == {}
     assert outcome.refusals == ("order_base_legs_disagree_with_total",)
@@ -228,7 +231,7 @@ def test_fill_beyond_the_last_execution_is_unassigned() -> None:
     Then: The un-ingested fill is refused as unassigned.
     """
     legs, totals = _two_fill_buy()
-    outcome = build_execution_witnesses([_execution(1, "6")], legs, totals, 102)
+    outcome = build_execution_witnesses([_execution(1, "6")], legs, totals, 102, {})
     assert outcome.witnesses == {}
     assert outcome.refusals == ("unassigned_venue_fill",)
 
@@ -245,6 +248,7 @@ def test_two_non_terminal_executions_at_one_cumulative_collide() -> None:
         legs,
         {"O1": _totals(bought="6", sold="30")},
         100,
+        {},
     )
     assert outcome.witnesses == {}
     assert outcome.refusals == ("non_terminal_cumulative_collision",)
@@ -262,7 +266,7 @@ def test_non_api_legs_are_excluded_from_the_attributed_set() -> None:
         _leg(98, "EUR", "5", transaction_id="TX", is_api_attributed=False),
     ]
     outcome = build_execution_witnesses(
-        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, 100
+        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, 100, {}
     )
     assert outcome.refusals == ()
     assert outcome.witnesses == {1: frozenset({100, 99})}
@@ -280,7 +284,7 @@ def test_legs_above_the_tip_are_excluded() -> None:
         _leg(150, "EUR", "9", transaction_id="TX"),
     ]
     outcome = build_execution_witnesses(
-        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, 100
+        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, 100, {}
     )
     assert outcome.refusals == ()
     assert outcome.witnesses == {1: frozenset({100, 99})}
@@ -303,6 +307,7 @@ def test_all_reasons_are_returned_not_first_fail() -> None:
         legs,
         {"O2": _totals(bought="12", sold="60")},
         100,
+        {},
     )
     assert outcome.witnesses == {}
     assert outcome.refusals == (
@@ -317,7 +322,7 @@ def test_no_executions_yields_an_empty_map() -> None:
     When: The witness map is built,
     Then: The map is empty with no refusals.
     """
-    outcome = build_execution_witnesses([], [], {}, 100)
+    outcome = build_execution_witnesses([], [], {}, 100, {})
     assert outcome.refusals == ()
     assert outcome.witnesses == {}
 
@@ -331,3 +336,55 @@ def test_decode_execution_cumulative_is_exact() -> None:
     assert decode_execution_cumulative(700_000_000) == Decimal("7")
     assert decode_execution_cumulative(7_000_000) == Decimal("0.07")
     assert decode_execution_cumulative(1) == Decimal("0.00000001")
+
+
+def test_fill_missing_its_quote_leg_is_refused() -> None:
+    """Given: A fill whose quote leg is absent (in flight or page-cut).
+
+    When: The witness map is built,
+    Then: The one-legged fill is refused — certifying it would seal balances
+        whose missing leg posts later as a post-cursor item replay re-applies.
+    """
+    legs = [_leg(100, "EUR", "6")]
+    outcome = build_execution_witnesses(
+        [_execution(1, "6")], legs, {"O1": _totals(bought="6", sold="30")}, 100, {}
+    )
+    assert outcome.witnesses == {}
+    assert outcome.refusals == ("history_fill_leg_incomplete",)
+
+
+def test_commission_sum_short_of_the_order_total_is_refused() -> None:
+    """Given: An order whose reported commission exceeds the witnessed fee items.
+
+    When: The witness map is built,
+    Then: The in-flight fee is refused — the fee-leg completeness obligation is
+        discharged by the exact commission-sum cross-check.
+    """
+    legs = [_leg(100, "EUR", "6"), _leg(99, "PLN", "-30")]
+    outcome = build_execution_witnesses(
+        [_execution(1, "6")],
+        legs,
+        {"O1": _totals(bought="6", sold="30", commission="0.02")},
+        100,
+        {},
+    )
+    assert outcome.witnesses == {}
+    assert outcome.refusals == ("commission_sum_disagrees_with_order_total",)
+
+
+def test_commission_sum_matching_the_order_total_certifies() -> None:
+    """Given: An order whose witnessed COMMISSION items sum to its reported fee.
+
+    When: The witness map is built,
+    Then: The composition certifies with the fee evidence complete.
+    """
+    legs = [_leg(100, "EUR", "6"), _leg(99, "PLN", "-30")]
+    outcome = build_execution_witnesses(
+        [_execution(1, "6")],
+        legs,
+        {"O1": _totals(bought="6", sold="30", commission="0.02")},
+        100,
+        {"O1": Decimal("0.02")},
+    )
+    assert outcome.refusals == ()
+    assert outcome.witnesses == {1: frozenset({100, 99})}

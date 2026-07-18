@@ -47,6 +47,7 @@ from decimal import Decimal
 from typing import Literal
 
 type WitnessRefusal = Literal[
+    "commission_sum_disagrees_with_order_total",
     "execution_cumulative_off_fill_boundary",
     "execution_order_totals_missing",
     "history_fill_leg_incomplete",
@@ -100,6 +101,10 @@ class WitnessOrderTotals:
     ``bought_amount`` / ``sold_amount`` are the exact gross cumulative legs in
     ``bought_currency`` / ``sold_currency``; ``is_buy`` selects which one
     denominates the executions' base volume (buy → bought, sell → sold).
+    ``commission_amount`` is the order's cumulative fee — the independent total
+    the witnessed COMMISSION history items must sum to exactly, which is how the
+    fee-leg completeness obligation is DISCHARGED IN CODE (an in-flight fee item
+    makes the sum fall short and the composition refuses).
     """
 
     bought_amount: Decimal
@@ -107,6 +112,7 @@ class WitnessOrderTotals:
     bought_currency: str
     sold_currency: str
     is_buy: bool
+    commission_amount: Decimal
 
 
 @dataclass(frozen=True)
@@ -130,16 +136,20 @@ class _Fill:
 
 
 def _order_fills(
-    order_legs: Sequence[WitnessHistoryLeg], base_currency: str
+    order_legs: Sequence[WitnessHistoryLeg], base_currency: str, quote_currency: str
 ) -> tuple[tuple[_Fill, ...], bool]:
     """Group one order's legs into chronological fills with running base cumulatives.
 
-    Returns the fills (ordered by item id) and whether every fill carried exactly
-    one base-currency leg; a fill missing its base leg is a composition failure.
+    Returns the fills (ordered by item id) and whether every fill carried EXACTLY
+    its two currency legs — one base and one quote. A fill missing either leg
+    (in flight, dropped, or cut off by the page window) is a composition failure:
+    certifying it would seal balances whose missing leg posts later as a
+    post-cursor item the replay would double-apply.
 
     Args:
         order_legs: The attributed MARKET_FX legs of one order.
         base_currency: The order's base currency (buy → bought, sell → sold).
+        quote_currency: The order's opposite currency (buy → sold, sell → bought).
 
     Returns:
         The ordered fills and a completeness flag.
@@ -151,7 +161,8 @@ def _order_fills(
     complete = True
     for transaction_legs in legs_by_transaction.values():
         base_legs = [leg for leg in transaction_legs if leg.currency == base_currency]
-        if len(base_legs) != 1:
+        quote_legs = [leg for leg in transaction_legs if leg.currency == quote_currency]
+        if len(base_legs) != 1 or len(quote_legs) != 1 or len(transaction_legs) != 2:
             complete = False
             continue
         base_volume = abs(base_legs[0].amount)
@@ -223,20 +234,26 @@ def build_execution_witnesses(
     legs: Sequence[WitnessHistoryLeg],
     order_totals: Mapping[str, WitnessOrderTotals],
     tip_item_id: int,
+    commission_by_order: Mapping[str, Decimal],
 ) -> WitnessOutcome:
     """Compose the sealed-prefix execution-to-history-item witness map.
 
     Runs every check; on any refusal returns an empty map with the exact ordered
     reasons, never a partial map. On success returns one witness item-id set per
-    execution ``scope_sequence`` present in ``executions``.
+    execution ``scope_sequence`` present in ``executions``. Leg completeness is
+    ENFORCED, not assumed: every fill must carry exactly its base and quote legs,
+    and every order's witnessed COMMISSION items must sum exactly to the order's
+    reported cumulative commission — an in-flight quote or fee leg refuses.
 
     Args:
         executions: The sealed-prefix executions ``[1, W]``, exec-id decoded.
         legs: The venue MARKET_FX account-history legs (pre-filtered to MARKET_FX
             by the caller); attribution and the tip bound are applied here.
         order_totals: Per venue order id, the ``market_fx/orders`` cumulative
-            totals used as the independent leg-sum cross-check.
+            totals used as the independent leg-sum cross-checks.
         tip_item_id: The venue history tip ``H0``; legs above it are excluded.
+        commission_by_order: Per venue order id, the exact sum of the COMMISSION
+            history items on the observed page (absent → zero).
 
     Returns:
         The witness map, or the ordered refusals when it cannot be composed.
@@ -263,14 +280,20 @@ def build_execution_witnesses(
             refusals.add("execution_order_totals_missing")
             continue
         base_currency = totals.bought_currency if totals.is_buy else totals.sold_currency
+        quote_currency = totals.sold_currency if totals.is_buy else totals.bought_currency
         base_total = totals.bought_amount if totals.is_buy else totals.sold_amount
-        fills, complete = _order_fills(legs_by_order.get(order_id, ()), base_currency)
+        fills, complete = _order_fills(
+            legs_by_order.get(order_id, ()), base_currency, quote_currency
+        )
         if not complete:
             refusals.add("history_fill_leg_incomplete")
             continue
         realized = fills[-1].running_cumulative if fills else Decimal(0)
         if realized != base_total:
             refusals.add("order_base_legs_disagree_with_total")
+            continue
+        if commission_by_order.get(order_id, Decimal(0)) != totals.commission_amount:
+            refusals.add("commission_sum_disagrees_with_order_total")
             continue
         order_witnesses, order_refusals = _assign_order_witnesses(order_executions, fills)
         refusals |= order_refusals

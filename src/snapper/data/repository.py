@@ -13690,9 +13690,13 @@ class SQLAlchemyRepository(Repository):
         On the INSERT path the committed execution tip is re-read inside the same
         transaction and the anchor is refused unless its ``source_watermark``
         still equals ``max(scope_sequence)`` for the scope, so a caller-fabricated
-        or stale watermark can never be sealed and the certified range ``(W, .]``
-        is empty at birth. An exact idempotent replay still succeeds after the tip
-        has legitimately advanced, because the re-read guards only new inserts.
+        or stale watermark can never be sealed. The re-read is not fenced against
+        ingest, so a fill MAY commit between it and this insert — such a fill
+        allocates ``> W`` and lands in the replay range, which is exactly where
+        it belongs; the freshness of ``W`` itself is the pure module's quiescence
+        obligation, not this guard's. An exact idempotent replay still succeeds
+        after the tip has legitimately advanced, because the re-read guards only
+        new inserts.
         """
         canonical_anchor = anchor.copy()
         canonical_anchor["wallet_public_id"] = _canonicalize_reconciliation_wallet_public_id(
@@ -13846,10 +13850,12 @@ class SQLAlchemyRepository(Repository):
         verbatim as the instant the S4c-4 replay bundle must pin its
         temporal reads to (instrument identity, specs, asset precisions),
         so the certificate's supporting evidence is read at one instant.
-        An account with no execution history yields watermark ``0`` (valid
-        per the spot anchor ``source_watermark >= 0`` CHECK). Alias UUID
-        spellings are canonicalized before filtering; malformed wallet
-        identities raise ``ValueError`` like reconciliation writers.
+        An account with no execution history yields watermark ``0`` — an
+        honest boundary the anchor plane then refuses to seal (its CHECK
+        requires ``source_watermark >= 1``; a scope must trade once before
+        it can anchor). Alias UUID spellings are canonicalized before
+        filtering; malformed wallet identities raise ``ValueError`` like
+        reconciliation writers.
         """
         wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
         async with self.session() as s:

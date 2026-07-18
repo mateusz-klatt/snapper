@@ -55,6 +55,7 @@ _BASELINE = SpotAnchorObservation(
     source_chain_tip="a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
     tip_0=VenueHistoryTip(item_id=100, page=_PAGE),
     tip_1_item_id=100,
+    history_window_reached_genesis=True,
     precision_certified={"BTC": True, "USD": True},
     margin_signal=False,
     execution_witnesses={1: frozenset({100, 99})},
@@ -276,9 +277,22 @@ def test_build_spot_anchor_produces_a_certified_row() -> None:
     assert row["venue_cursor_kind"] == "account_history_item_id"
     assert row["venue_cursor_value"] == "100"
     assert row["venue_cursor_scheme"] == _SCHEME
-    assert row["provenance"] == f"spot_anchor_bootstrap:v1:{_SCHEME}"
+    assert row["provenance"] == f"spot_anchor_bootstrap:v1:{_SCHEME}:genesis"
     assert row["balances_json"] == '{"BTC":"1.5","USD":"100"}'
     assert row["source_chain_tip"] == _BASELINE.source_chain_tip
+
+
+def test_build_spot_anchor_records_a_windowed_history_claim() -> None:
+    """A saturated history page is recorded as a window-scoped claim.
+
+    Given: The certifiable baseline whose history page did not reach genesis.
+    When: The anchor is built.
+    Then: The provenance carries the ``:windowed`` claim strength — a durable
+        per-anchor record that activity older than the page was unobserved.
+    """
+    observation = replace(_BASELINE, history_window_reached_genesis=False)
+    row = build_spot_anchor(observation)
+    assert row["provenance"] == f"spot_anchor_bootstrap:v1:{_SCHEME}:windowed"
 
 
 def test_build_spot_anchor_raises_with_the_refusal_tuple() -> None:

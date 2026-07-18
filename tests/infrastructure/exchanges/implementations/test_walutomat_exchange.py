@@ -5487,6 +5487,7 @@ async def test_read_account_history_tip_returns_descending_page_and_tip() -> Non
     assert tip is not None
     assert isinstance(tip, VenueAccountHistoryTip)
     assert tip.item_id == 100
+    assert tip.reached_genesis is True
     assert [item.item_id for item in tip.items] == [100, 99]
     assert tip.items[0].order_id == "O1"
     assert tip.items[0].operation_amount == Decimal("6")
@@ -5751,3 +5752,40 @@ def test_parse_execution_exec_id_delegates_to_the_module_parser() -> None:
     """
     client = WalutomatExchangeClient()
     assert client.parse_execution_exec_id("wal-ord-1-c500000000") == ("ord-1", 500000000, False)
+
+
+@pytest.mark.asyncio()
+async def test_read_account_history_tip_full_page_is_not_genesis() -> None:
+    """Given: A page exactly at the requested limit.
+
+    When: read_account_history_tip is called with limit 2,
+    Then: reached_genesis is False — older history may exist beyond the page.
+    """
+    client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
+    rows = [
+        {
+            "historyItemId": item_id,
+            "operationType": "PAYIN",
+            "operationAmount": "10",
+            "balanceAfter": "10",
+            "currency": "PLN",
+        }
+        for item_id in (99, 100)
+    ]
+    get_resp = StubResponse({"success": True, "result": rows})
+    client._http_client = cast(httpx.AsyncClient, StubAsyncClient(get_responses=[get_resp]))
+    tip = await client.read_account_history_tip(2)
+    assert tip is not None
+    assert tip.reached_genesis is False
+
+
+def test_parse_walutomat_decimal_grouped_amount_raises() -> None:
+    """Given: A digit-grouped amount whose tokens are all numeric.
+
+    When: It is parsed,
+    Then: ValueError is raised rather than silently truncating to the first group.
+    """
+    with pytest.raises(ValueError, match="ambiguous Walutomat amount"):
+        _parse_walutomat_decimal("1 234.56")
+    with pytest.raises(ValueError, match="ambiguous Walutomat amount"):
+        _parse_walutomat_decimal("1 234.56 PLN")

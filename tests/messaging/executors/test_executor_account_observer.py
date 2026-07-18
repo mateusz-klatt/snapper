@@ -3014,7 +3014,9 @@ def _anchor_history_item() -> VenueAccountHistoryItem:
 
 def _anchor_history_tip(item_id: int = 500) -> VenueAccountHistoryTip:
     """Return an account-history tip carrying a single MARKET_FX page item."""
-    return VenueAccountHistoryTip(item_id=item_id, items=(_anchor_history_item(),))
+    return VenueAccountHistoryTip(
+        item_id=item_id, items=(_anchor_history_item(),), reached_genesis=True
+    )
 
 
 def _cursor_capture() -> _SpotAnchorCursorCapture:
@@ -3318,6 +3320,39 @@ class TestBootstrapSpotAnchor:
         ex.repository.get_venue_account_state_version = AsyncMock(return_value=None)
         await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
         ex.repository.get_spot_asset_precision_evidence.assert_not_awaited()
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_manual_activity_on_the_window_skips_before_any_read(self) -> None:
+        """Manual MARKET_FX activity on the captured page dooms the cycle cheaply.
+
+        Given: A cursor capture whose page carries a non-API MARKET_FX leg.
+        When: The bootstrap runs.
+        Then: It returns before the state read and the order-legs fan-out — the
+            pure refusal is inevitable, so no further egress is spent.
+        """
+        ex, _ = _bootstrap_executor()
+        manual_item = VenueAccountHistoryItem(
+            item_id=489,
+            operation_type="MARKET_FX",
+            operation_amount=Decimal("5"),
+            balance_after=Decimal("5"),
+            currency="EUR",
+            transaction_id="tx-manual",
+            ordered_by="",
+            order_id=None,
+        )
+        tip = VenueAccountHistoryTip(
+            item_id=500, items=(_anchor_history_item(), manual_item), reached_genesis=True
+        )
+        capture = _SpotAnchorCursorCapture(
+            tip=tip,
+            requested_at=datetime(2026, 7, 17, 9, 58, tzinfo=UTC),
+            observed_at=datetime(2026, 7, 17, 9, 58, 0, 1000, tzinfo=UTC),
+        )
+        work = _anchor_work(boundary=_anchor_boundary(), cursor_capture=capture)
+        await ex._bootstrap_spot_anchor(work, _ANCHOR_EVALUATED_AT)
+        ex.repository.get_venue_account_state_version.assert_not_awaited()
         ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
 
     @pytest.mark.asyncio

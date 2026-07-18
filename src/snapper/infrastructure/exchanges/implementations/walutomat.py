@@ -276,8 +276,10 @@ def _parse_walutomat_decimal(raw: str) -> Decimal:
 
     Walutomat renders amounts either bare (``"-999.00"``) or suffixed with the
     currency code (``"-432.43 PLN"``); both forms appear in the v2.0.0 spec
-    examples. The leading whitespace-delimited token is the exact signed decimal,
-    parsed without any float step so the witness composition stays exact.
+    examples. Exactly one numeric token with an optional ALPHABETIC suffix is
+    accepted — any other shape (for example a digit-grouped ``"1 234.56"``)
+    raises rather than silently truncating to the first group, because a wrong
+    parsed amount would feed the anchor composition.
 
     Args:
         raw: The venue amount string.
@@ -286,11 +288,14 @@ def _parse_walutomat_decimal(raw: str) -> Decimal:
         The exact signed amount.
 
     Raises:
-        ValueError: If the amount is empty or its numeric token is not a decimal.
+        ValueError: If the amount is empty, its numeric token is not a decimal,
+            or the string has extra non-currency tokens.
     """
     tokens = raw.split()
     if not tokens:
         raise ValueError(f"empty Walutomat amount: {raw!r}")
+    if len(tokens) > 2 or (len(tokens) == 2 and not tokens[1].isalpha()):
+        raise ValueError(f"ambiguous Walutomat amount: {raw!r}")
     try:
         return Decimal(tokens[0])
     except InvalidOperation as exc:
@@ -1825,7 +1830,9 @@ class WalutomatExchangeClient(ExchangeClientBase):
             return None
         parsed = [_parse_walutomat_history_item(row) for row in rows]
         items = tuple(sorted(parsed, key=lambda item: item.item_id, reverse=True))
-        return VenueAccountHistoryTip(item_id=items[0].item_id, items=items)
+        return VenueAccountHistoryTip(
+            item_id=items[0].item_id, items=items, reached_genesis=len(rows) < limit
+        )
 
     def get_supported_pairs(self) -> list[str]:
         """Get list of available trading pairs.

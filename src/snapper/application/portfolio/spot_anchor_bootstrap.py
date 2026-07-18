@@ -23,6 +23,16 @@ anything unproven fails closed. The obligations (O1-O8) are stated in
 ``plans/map_2026_07_17_s4c3_anchor_bootstrap_v2.md``; the anchor names only what
 the venue reports (``inventory_status = 'venue_reported_full'``), never a
 full-inventory claim.
+
+CLAIM DOMAIN (window scoping, stated honestly): the un-ingested-fill and
+manual-activity checks (O6/O7) are proven over the OBSERVED history window —
+``tip_0.page`` — not over the account's whole history. Venue activity older
+than the page is unobserved; its balance effect is inside the sealed balances
+(replay never re-applies pre-cursor items, so the composed replay arithmetic
+stays coherent), but the dedicated-account falsification does not reach it.
+``history_window_reached_genesis`` records which strength was proven, and the
+anchor's ``provenance`` carries ``:genesis`` (the page held the entire history)
+or ``:windowed`` — a durable, per-anchor record of the claim actually made.
 """
 
 import json
@@ -136,6 +146,7 @@ class SpotAnchorObservation:
     source_chain_tip: str
     tip_0: VenueHistoryTip | None
     tip_1_item_id: int | None
+    history_window_reached_genesis: bool
     precision_certified: Mapping[str, bool]
     margin_signal: bool
     execution_witnesses: Mapping[int, frozenset[int]]
@@ -333,6 +344,7 @@ def build_spot_anchor(observation: SpotAnchorObservation) -> SpotReconciliationA
         separators=(",", ":"),
         sort_keys=True,
     )
+    window = "genesis" if observation.history_window_reached_genesis else "windowed"
     return {
         "public_id": observation.public_id,
         "wallet_public_id": observation.wallet_public_id,
@@ -350,7 +362,7 @@ def build_spot_anchor(observation: SpotAnchorObservation) -> SpotReconciliationA
         "boundary_status": _ANCHOR_BOUNDARY_STATUS,
         "inventory_status": _ANCHOR_INVENTORY_STATUS,
         "margin_status": _ANCHOR_MARGIN_STATUS,
-        "provenance": f"spot_anchor_bootstrap:v1:{scheme}",
+        "provenance": f"spot_anchor_bootstrap:v1:{scheme}:{window}",
         "session_id": observation.session_id,
         "sequence_id": observation.sequence_id,
         "timestamp": observation.timestamp,

@@ -3897,7 +3897,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 tip = await client.read_account_history_tip(_SPOT_ANCHOR_HISTORY_LIMIT)
                 observed_at = datetime.now(UTC)
         except Exception as exc:
-            logger.debug(f"[{exchange}] spot anchor cursor capture skipped: {exc}")
+            logger.warning(f"[{exchange}] spot anchor cursor capture failed: {exc}")
             return None
         if tip is None:
             return None
@@ -3944,11 +3944,22 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if client is None or capture is None or boundary is None:
             return
         wallet, exchange, mode, session_id, sequence_id = work.identity
+        if any(
+            item.operation_type == "MARKET_FX" and not item.ordered_by.startswith("API/")
+            for item in capture.tip.items
+        ):
+            logger.info(
+                f"[{exchange}] spot anchor skipped: manual/unattributed MARKET_FX activity "
+                f"on the history window (venue_history_manual_unattributed)"
+            )
+            return
         state_row = await repository.get_venue_account_state_version(work.state_id)
         if state_row is None or state_row["balances_json"] is None:
+            logger.info(f"[{exchange}] spot anchor skipped: account state version unavailable")
             return
         balances_1, reserved, venue_raw = parse_observed_balances(state_row["balances_json"])
         if not balances_1:
+            logger.info(f"[{exchange}] spot anchor skipped: no exact venue-raw balances")
             return
         second_request_started_at = datetime.now(UTC)
         balances_2 = {
@@ -3963,6 +3974,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         tip_1 = await client.read_account_history_tip(_SPOT_ANCHOR_HISTORY_LIMIT)
         venue_cursor_confirmed_at = datetime.now(UTC)
         if tip_1 is None:
+            logger.info(f"[{exchange}] spot anchor skipped: confirming history read unavailable")
             return
         assets = sorted(balances_1)
         evidence = await repository.get_spot_asset_precision_evidence(
@@ -3992,10 +4004,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         parsed: list[tuple[int, str, int, bool]] = []
         for row in witness_rows:
             row_exec_id = row["exec_id"]
-            if row_exec_id is None:
-                return
-            components = client.parse_execution_exec_id(row_exec_id)
+            components = client.parse_execution_exec_id(row_exec_id) if row_exec_id else None
             if components is None:
+                logger.info(
+                    f"[{exchange}] spot anchor skipped: execution at scope_sequence "
+                    f"{row['scope_sequence']} has no venue-scheme exec id "
+                    f"({row_exec_id!r}) — the sealed prefix cannot be witnessed"
+                )
                 return
             order_id, basis_units, is_terminal = components
             parsed.append((row["scope_sequence"], order_id, basis_units, is_terminal))
@@ -4003,6 +4018,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         for order_id in {entry[1] for entry in parsed}:
             legs = await client.read_order_fill_legs(order_id)
             if legs is None:
+                logger.info(
+                    f"[{exchange}] spot anchor skipped: venue does not know order {order_id}"
+                )
                 return
             order_totals[order_id] = legs
         witnesses = build_witnesses_from_reads(capture.tip, parsed, order_totals)
@@ -4038,6 +4056,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             source_chain_tip=chain_tip,
             tip_0=venue_history_tip_from_raw(capture.tip),
             tip_1_item_id=tip_1.item_id,
+            history_window_reached_genesis=capture.tip.reached_genesis,
             precision_certified=precision_certified,
             margin_signal=margin_signal,
             execution_witnesses=witnesses.witnesses,

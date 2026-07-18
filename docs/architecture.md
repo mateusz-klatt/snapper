@@ -325,6 +325,17 @@ observer's balance snapshot is never at risk), and only a fully proven
 observation is sealed — once, immutably. The anchor's `venue_cursor_value`
 (`H0`) is the left endpoint S4c-4's replay-range proof folds from.
 
+Two claim-domain facts are recorded rather than assumed. Leg completeness is
+enforced in code: every witnessed fill must carry exactly its base and quote
+legs, and each order's COMMISSION history items must sum exactly to the
+venue-reported cumulative commission, so an in-flight quote or fee leg refuses
+instead of sealing balances a later item would double-apply. And the
+un-ingested-fill / manual-activity checks are proven over the OBSERVED history
+window, not the account's whole past: activity older than the page is absorbed
+into the sealed balances (replay never re-applies pre-cursor items), and the
+anchor's `provenance` durably records the claim strength — `:genesis` when the
+page held the entire account history, `:windowed` otherwise.
+
 ### Venue reconciliation (executors)
 
 Executors can periodically poll exchange REST APIs to reconcile local

@@ -426,11 +426,16 @@ class VenueAccountHistoryTip:
     ``item_id`` is the highest (newest) history id at read time — the ``H0``
     cursor the anchor seals. ``items`` is the first page in DESCENDING id order
     (newest first), the window the bootstrap folds against the local ledger; it
-    is empty only when the account has no history.
+    is empty only when the account has no history. ``reached_genesis`` is True
+    when the page holds the account's ENTIRE history (fewer rows than the
+    requested limit): the anchor records which claim strength it certifies —
+    genesis-scoped (the whole ledger observed) or window-scoped (activity older
+    than the page is absorbed into the sealed balances, unobserved).
     """
 
     item_id: int
     items: tuple[VenueAccountHistoryItem, ...]
+    reached_genesis: bool
 
 
 @dataclass(frozen=True)

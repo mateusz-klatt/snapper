@@ -25,6 +25,7 @@ from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
 from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
 
 _MARKET_FX = "MARKET_FX"
+_COMMISSION = "COMMISSION"
 _API_PREFIX = "API/"
 
 
@@ -41,8 +42,11 @@ def build_witnesses_from_reads(
     """Compose the execution witness map from the raw venue reads.
 
     Maps the tip page's MARKET_FX rows to witness legs, the exec-id-decoded
-    prefix to witness executions (exact cumulative), and the per-order fill legs
-    to witness totals, then defers to the pure witness builder.
+    prefix to witness executions (exact cumulative), the per-order fill legs to
+    witness totals, and the page's COMMISSION items to exact per-order fee sums
+    (the fee-leg completeness evidence; commission rows carry no ``orderedBy``
+    on the venue, so the ``orderId`` join — sourced from our own order reads —
+    is their attribution), then defers to the pure witness builder.
 
     Args:
         raw_tip: The venue account-history tip and its descending page.
@@ -65,6 +69,12 @@ def build_witnesses_from_reads(
         for item in raw_tip.items
         if item.operation_type == _MARKET_FX
     ]
+    commission_by_order: dict[str, Decimal] = {}
+    for item in raw_tip.items:
+        if item.operation_type == _COMMISSION and item.order_id is not None:
+            commission_by_order[item.order_id] = (
+                commission_by_order.get(item.order_id, Decimal(0)) - item.operation_amount
+            )
     executions = [
         WitnessExecution(
             scope_sequence=scope_sequence,
@@ -81,10 +91,11 @@ def build_witnesses_from_reads(
             bought_currency=fill_legs.bought_currency,
             sold_currency=fill_legs.sold_currency,
             is_buy=fill_legs.buy_sell == "BUY",
+            commission_amount=fill_legs.commission_amount,
         )
         for order_id, fill_legs in order_totals.items()
     }
-    return build_execution_witnesses(executions, legs, totals, raw_tip.item_id)
+    return build_execution_witnesses(executions, legs, totals, raw_tip.item_id, commission_by_order)
 
 
 def venue_history_tip_from_raw(raw_tip: VenueAccountHistoryTip) -> VenueHistoryTip:
