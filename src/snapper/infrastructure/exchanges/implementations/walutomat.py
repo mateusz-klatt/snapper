@@ -218,7 +218,7 @@ def _effective_price_fields(
         if order.filled_decimal is not None
         else Decimal(str(order.filled))
     )
-    if filled_cum <= 0:
+    if filled_cum <= 0 or counter_cum <= 0:
         return None, None, None
     average_price = float(counter_cum / filled_cum)
     if previous is None:
@@ -239,7 +239,7 @@ def _effective_price_fields(
     if previous_counter is None or delta_filled <= 0:
         return None, None, average_price
     delta_counter = counter_cum - previous_counter
-    if delta_counter < 0:
+    if delta_counter <= 0:
         return None, None, average_price
     return float(delta_filled), float(delta_counter / delta_filled), average_price
 

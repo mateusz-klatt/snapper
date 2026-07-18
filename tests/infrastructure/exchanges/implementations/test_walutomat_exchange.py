@@ -6068,3 +6068,45 @@ async def test_resolve_disappeared_closed_with_counter_prices_effectively() -> N
     assert events[0].last_price == 5.10
     assert events[0].average_price == 5.07
     assert events[0].cum_cost == 50.70
+
+
+def test_effective_price_zero_counter_delta_keeps_only_average() -> None:
+    """Given: A filled delta whose counter cumulative did not advance.
+
+    When: The effective price fields are derived,
+    Then: The last fields are omitted (a zero price would poison the executor's
+        economics gate and drop the fill) and the VWAP survives.
+    """
+    previous = _TrackedOrder(
+        order_id="ord-cf",
+        cl_ord_id="cid-cf",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        amount=10.0,
+        filled=5.99,
+        price=5.10,
+        counter_filled=30.30,
+        counter_filled_decimal="30.30",
+        filled_decimal="5.99",
+    )
+    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
+        _snapshot_with_counter(), previous
+    )
+    assert last_qty is None
+    assert last_price is None
+    assert average_price == 5.05
+
+
+def test_effective_price_zero_counter_cumulative_returns_nothing() -> None:
+    """Given: A snapshot whose counter cumulative is zero despite a fill.
+
+    When: The effective price fields are derived,
+    Then: Everything is None so the caller falls back to the limit price —
+        a zero VWAP must never bypass the fallback.
+    """
+    assert walutomat_mod._effective_price_fields(_snapshot_with_counter(counter="0"), None) == (
+        None,
+        None,
+        None,
+    )
