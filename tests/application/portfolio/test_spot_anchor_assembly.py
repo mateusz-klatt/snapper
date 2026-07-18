@@ -1,8 +1,10 @@
 """Tests for the pure raw-read to witness/bootstrap mappers."""
 
+import json
 from decimal import Decimal
 
 from snapper.application.portfolio.spot_anchor_assembly import build_witnesses_from_reads
+from snapper.application.portfolio.spot_anchor_assembly import parse_observed_balances
 from snapper.application.portfolio.spot_anchor_assembly import venue_history_tip_from_raw
 from snapper.application.portfolio.spot_anchor_bootstrap import VenueHistoryItem
 from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryItem
@@ -118,3 +120,54 @@ def test_venue_history_tip_from_raw_normalizes_markers() -> None:
     )
     assert normalized.page[1].is_market_fx is False
     assert normalized.page[2].is_api_attributed is False
+
+
+def test_parse_observed_balances_venue_raw() -> None:
+    """Given: A venue-raw balances payload with exact decimal mirrors.
+
+    When: It is parsed,
+    Then: Totals and reserved amounts are exact and the read is venue-raw.
+    """
+    payload = json.dumps(
+        [
+            {
+                "currency": "BTC",
+                "total": 1.5,
+                "free": 1.0,
+                "used": 0.5,
+                "total_decimal": "1.50000000",
+                "free_decimal": "1.0",
+                "used_decimal": "0.50000000",
+                "numeric_provenance": "venue_raw",
+            }
+        ]
+    )
+    balances, reserved, venue_raw = parse_observed_balances(payload)
+    assert balances == {"BTC": Decimal("1.50000000")}
+    assert reserved == {"BTC": Decimal("0.50000000")}
+    assert venue_raw is True
+
+
+def test_parse_observed_balances_legacy_float_is_not_venue_raw() -> None:
+    """Given: A balances entry without the exact decimal mirror.
+
+    When: It is parsed,
+    Then: The entry is skipped and the read is marked not-venue-raw.
+    """
+    payload = json.dumps([{"currency": "BTC", "total": 1.5, "free": 1.0, "used": 0.5}])
+    balances, reserved, venue_raw = parse_observed_balances(payload)
+    assert balances == {}
+    assert reserved == {}
+    assert venue_raw is False
+
+
+def test_parse_observed_balances_empty_is_not_venue_raw() -> None:
+    """Given: An empty balances payload.
+
+    When: It is parsed,
+    Then: The maps are empty and the read is not venue-raw.
+    """
+    balances, reserved, venue_raw = parse_observed_balances("[]")
+    assert balances == {}
+    assert reserved == {}
+    assert venue_raw is False

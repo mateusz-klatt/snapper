@@ -8,8 +8,10 @@ live here — testable without the observer's I/O — and the observer only fill
 remaining directly-observed fields of the observation.
 """
 
+import json
 from collections.abc import Mapping
 from collections.abc import Sequence
+from decimal import Decimal
 
 from snapper.application.portfolio.spot_anchor_bootstrap import VenueHistoryItem
 from snapper.application.portfolio.spot_anchor_bootstrap import VenueHistoryTip
@@ -109,3 +111,37 @@ def venue_history_tip_from_raw(raw_tip: VenueAccountHistoryTip) -> VenueHistoryT
         for item in raw_tip.items
     )
     return VenueHistoryTip(item_id=raw_tip.item_id, page=page)
+
+
+def parse_observed_balances(
+    balances_json: str,
+) -> tuple[dict[str, Decimal], dict[str, Decimal], bool]:
+    """Parse the observer's persisted balances into exact totals and reserved.
+
+    The observer serializes each currency's total/free/used with an exact
+    ``*_decimal`` mirror when the venue reported faithful decimals. Only those
+    venue-raw entries are parsed exactly; any entry lacking the decimal mirror
+    marks the whole read not-venue-raw (which the bootstrap then refuses) and is
+    skipped, so a legacy-float balance can never seal an anchor.
+
+    Args:
+        balances_json: The persisted ``balances_json`` payload.
+
+    Returns:
+        The exact per-currency totals, the exact per-currency reserved amounts,
+        and whether every parsed entry was venue-raw.
+    """
+    entries = json.loads(balances_json)
+    balances: dict[str, Decimal] = {}
+    reserved: dict[str, Decimal] = {}
+    venue_raw = bool(entries)
+    for entry in entries:
+        total_decimal = entry.get("total_decimal")
+        used_decimal = entry.get("used_decimal")
+        if not isinstance(total_decimal, str) or not isinstance(used_decimal, str):
+            venue_raw = False
+            continue
+        currency = str(entry["currency"])
+        balances[currency] = Decimal(total_decimal)
+        reserved[currency] = Decimal(used_decimal)
+    return balances, reserved, venue_raw

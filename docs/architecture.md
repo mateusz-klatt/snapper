@@ -297,6 +297,34 @@ exchange identity. A newer complete-provenance row with `NULL` decimals is an
 explicit plane revocation; neither a sibling plane nor an older ratcheted
 maximum can restore certification.
 
+### Spot anchor bootstrap (S4c-3)
+
+The immutable `portfolio_spot_reconciliation_anchors` row is the base case of
+spot execution replay: it certifies that one venue-reported balance snapshot at
+a named venue history point `H0` corresponds exactly and completely to the
+local execution ledger's sealed prefix `[1..W]`. The account observer attempts
+the bootstrap each live cycle while an account is unanchored (gated on the
+venue's `account_history_capability`): it reads the venue history tip `H0`
+BEFORE the watermark capture, rides the capture to the reconciliation task,
+then re-reads balances and the tip (`H1`) and gathers precision, margin,
+chain-tip, and fill-witness evidence. Two pure authorities decide:
+`spot_anchor_witness.py` reconstructs each execution's venue history item ids
+by composition (the immutable exec-id cumulative partitions each order's
+`account/history` fills by monotone interval, cross-checked against the
+`market_fx/orders` cumulative totals in exact `Decimal`), and
+`spot_anchor_bootstrap.py` proves the full obligation set — quiescence
+(`H0 == H1`, equal double balance read), a reverse-coverage bijection between
+the sealed prefix and the attributed history page, per-asset precision
+certification, cash-only margin, and a ten-instant read-order chain the schema
+also CHECK-enforces. The writer (`record_spot_reconciliation_anchor`) re-reads
+the committed `max(scope_sequence)` inside its insert transaction and refuses
+unless it equals the anchor watermark, so the certified range is empty at
+birth. Everything fails closed: any missing read, unmappable exec id, witness
+inconsistency, or named refusal degrades to no-anchor-retry-next-cycle (the
+observer's balance snapshot is never at risk), and only a fully proven
+observation is sealed — once, immutably. The anchor's `venue_cursor_value`
+(`H0`) is the left endpoint S4c-4's replay-range proof folds from.
+
 ### Venue reconciliation (executors)
 
 Executors can periodically poll exchange REST APIs to reconcile local

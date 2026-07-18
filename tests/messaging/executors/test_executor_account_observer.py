@@ -11,6 +11,7 @@ import json
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 from typing import Literal
 from unittest.mock import AsyncMock
@@ -20,6 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
+from snapper.application.portfolio.spot_anchor_witness import WitnessOutcome
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
@@ -30,12 +32,17 @@ from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryItem
+from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
+from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
 from snapper.messaging.executors import base as base_module
 from snapper.messaging.executors.base import _ACCOUNT_FRESHNESS_CEILING_S
 from snapper.messaging.executors.base import _ACCOUNT_OBSERVE_INTERVAL_S
 from snapper.messaging.executors.base import _ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG
 from snapper.messaging.executors.base import _ACCOUNT_UNEXPECTED_POSITION_CAPABILITY_MSG
 from snapper.messaging.executors.base import ExchangeExecutorService
+from snapper.messaging.executors.base import _PortfolioReconciliationWork
+from snapper.messaging.executors.base import _SpotAnchorCursorCapture
 from snapper.messaging.schemas.data import AccountStateChangedEventData
 from snapper.messaging.schemas.data import PortfolioDriftEpisodeEventData
 
@@ -699,7 +706,9 @@ class TestObserveAccountOnce:
             attempt: VenueAccountAttemptRow,
             position_capability: CapabilityStatus,
             boundary: SpotReplayBoundaryCapture | None,
+            cursor_capture: _SpotAnchorCursorCapture | None,
         ) -> None:
+            assert cursor_capture is None
             assert state_id == 41
             assert attempt["wallet_public_id"] == "wallet-1"
             assert position_capability is CapabilityStatus.NOT_APPLICABLE
@@ -1707,6 +1716,7 @@ class TestSpotBoundaryCapture:
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=boundary,
+            cursor_capture=None,
         )
         with (
             patch.object(base_module, "build_portfolio_account_state", return_value=object()),
@@ -1840,6 +1850,7 @@ class TestPortfolioReconciliationOrchestration:
             attempt=_portfolio_attempt(mode="paper"),
             position_capability=CapabilityStatus.NOT_APPLICABLE,
             boundary=None,
+            cursor_capture=None,
         )
         ex._portfolio_reconciliation_dispatch_open = False
         ex._schedule_portfolio_reconciliation(
@@ -1847,6 +1858,7 @@ class TestPortfolioReconciliationOrchestration:
             attempt=_portfolio_attempt(),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         ex._run_portfolio_reconciliation.assert_not_called()
         assert ex._portfolio_reconciliation_tasks == {}
@@ -1870,12 +1882,14 @@ class TestPortfolioReconciliationOrchestration:
             attempt=attempt,
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         ex._schedule_portfolio_reconciliation(
             state_id=2,
             attempt=attempt,
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         await asyncio.wait_for(started.wait(), timeout=1.0)
         assert ex._run_portfolio_reconciliation.await_count == 1
@@ -1895,6 +1909,7 @@ class TestPortfolioReconciliationOrchestration:
             attempt=attempt,
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         first = tuple(ex._portfolio_reconciliation_tasks.values())[0]
         await first
@@ -1903,6 +1918,7 @@ class TestPortfolioReconciliationOrchestration:
             attempt=attempt,
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         second = tuple(ex._portfolio_reconciliation_tasks.values())[0]
         await second
@@ -1922,6 +1938,7 @@ class TestPortfolioReconciliationOrchestration:
                 attempt=_portfolio_attempt(),
                 position_capability=CapabilityStatus.SUPPORTED,
                 boundary=None,
+                cursor_capture=None,
             )
         assert ex._portfolio_reconciliation_failure_count == 1
         assert ex._last_portfolio_reconciliation_error == "no running loop"
@@ -1940,6 +1957,7 @@ class TestPortfolioReconciliationOrchestration:
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         with patch.object(
             base_module,
@@ -1982,6 +2000,7 @@ class TestPortfolioReconciliationOrchestration:
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         with (
             patch.object(base_module, "build_portfolio_account_state", return_value=object()),
@@ -2054,6 +2073,7 @@ class TestPortfolioReconciliationOrchestration:
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
 
         with (
@@ -2135,6 +2155,7 @@ class TestPortfolioReconciliationOrchestration:
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
 
         with (
@@ -2222,6 +2243,7 @@ class TestPortfolioReconciliationOrchestration:
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
 
         with (
@@ -2273,6 +2295,7 @@ class TestPortfolioReconciliationOrchestration:
             attempt=_portfolio_attempt(),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         task = tuple(ex._portfolio_reconciliation_tasks.values())[0]
         await task
@@ -2307,6 +2330,7 @@ class TestPortfolioReconciliationOrchestration:
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         await ex._recon_lock.acquire()
         try:
@@ -2372,6 +2396,7 @@ class TestPortfolioReconciliationOrchestration:
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         with patch.object(base_module, "build_portfolio_account_state") as build:
             await ex._run_portfolio_reconciliation(work)
@@ -2413,6 +2438,7 @@ class TestPortfolioReconciliationOrchestration:
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         dispatch_side_effect = (
             RuntimeError("dispatch failed") if failure_step == "dispatch" else None
@@ -2447,6 +2473,7 @@ class TestPortfolioReconciliationOrchestration:
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         with patch.object(base_module, "_PORTFOLIO_RECONCILIATION_TIMEOUT_S", 0.01):
             await ex._run_portfolio_reconciliation(work)
@@ -2470,6 +2497,7 @@ class TestPortfolioReconciliationOrchestration:
             identity=("wallet-1", "kraken_futures", "live", "session-1", 7),
             position_capability=CapabilityStatus.SUPPORTED,
             boundary=None,
+            cursor_capture=None,
         )
         task = asyncio.create_task(ex._run_portfolio_reconciliation(work))
         await started.wait()
@@ -2676,6 +2704,7 @@ class TestPortfolioReconciliationOrchestration:
                     attempt=_portfolio_attempt(),
                     position_capability=CapabilityStatus.NOT_APPLICABLE,
                     boundary=None,
+                    cursor_capture=None,
                 )
             await asyncio.Event().wait()
 
@@ -2962,3 +2991,494 @@ class TestPortfolioDriftNotificationEmission:
 
         assert task.cancelled()
         assert ex._portfolio_drift_notification_tasks == set()
+
+
+_ANCHOR_WALLET = "0198f0a1-2b3c-7d4e-8f90-a1b2c3d4e5f6"
+_ANCHOR_EVALUATED_AT = datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
+_VALID_WITNESSES = WitnessOutcome(witnesses={1: frozenset({100})}, refusals=())
+
+
+def _anchor_history_item() -> VenueAccountHistoryItem:
+    """Return one API-attributed MARKET_FX row for an H0 account-history page."""
+    return VenueAccountHistoryItem(
+        item_id=490,
+        operation_type="MARKET_FX",
+        operation_amount=Decimal("100.25"),
+        balance_after=Decimal("100.25"),
+        currency="EUR",
+        transaction_id="tx-1",
+        ordered_by="API/key-1",
+        order_id="O1",
+    )
+
+
+def _anchor_history_tip(item_id: int = 500) -> VenueAccountHistoryTip:
+    """Return an account-history tip carrying a single MARKET_FX page item."""
+    return VenueAccountHistoryTip(item_id=item_id, items=(_anchor_history_item(),))
+
+
+def _cursor_capture() -> _SpotAnchorCursorCapture:
+    """Return one bracketed H0 cursor capture for a bootstrap work item."""
+    requested_at = datetime(2026, 7, 17, 9, 58, tzinfo=UTC)
+    return _SpotAnchorCursorCapture(
+        tip=_anchor_history_tip(),
+        requested_at=requested_at,
+        observed_at=requested_at + timedelta(milliseconds=1),
+    )
+
+
+def _anchor_boundary() -> SpotReplayBoundaryCapture:
+    """Return one valid pre-balance boundary bound to the bootstrap identity."""
+    captured_at = datetime(2026, 7, 17, 9, 59, tzinfo=UTC)
+    return SpotReplayBoundaryCapture(
+        wallet_public_id=_ANCHOR_WALLET,
+        exchange="kraken",
+        mode="live",
+        session_id="session-1",
+        sequence_id=7,
+        source_watermark=3,
+        as_of=captured_at - timedelta(milliseconds=1),
+        watermark_captured_at=captured_at,
+        request_started_at=captured_at + timedelta(milliseconds=1),
+        request_completed_at=captured_at + timedelta(milliseconds=2),
+        watermark_after=3,
+        watermark_after_captured_at=captured_at + timedelta(milliseconds=3),
+        watermark_unchanged=True,
+    )
+
+
+def _anchor_work(
+    *,
+    boundary: SpotReplayBoundaryCapture | None,
+    cursor_capture: _SpotAnchorCursorCapture | None,
+) -> _PortfolioReconciliationWork:
+    """Return reconciliation work carrying the given cursor capture and boundary."""
+    return _PortfolioReconciliationWork(
+        state_id=41,
+        identity=(_ANCHOR_WALLET, "kraken", "live", "session-1", 7),
+        position_capability=CapabilityStatus.SUPPORTED,
+        boundary=boundary,
+        cursor_capture=cursor_capture,
+    )
+
+
+def _anchor_state_row(**overrides: str | int | None) -> dict[str, str | int | None]:
+    """Return one venue account-state version row for the bootstrap read."""
+    row: dict[str, str | int | None] = {
+        "wallet_public_id": _ANCHOR_WALLET,
+        "exchange": "kraken",
+        "mode": "live",
+        "balance_status": "observed",
+        "balances_json": json.dumps(
+            [
+                {"currency": "EUR", "total_decimal": "100.25", "used_decimal": "0.00"},
+                {"currency": "PLN", "total_decimal": "10.00", "used_decimal": "0.00"},
+            ]
+        ),
+        "public_id": "vas-1",
+        "balance_payload_source_observation_id": 55,
+        "current_attempt_observation_id": 77,
+    }
+    row.update(overrides)
+    return row
+
+
+def _bootstrap_executor() -> tuple[Any, Any]:
+    """Return an executor and client wired for a successful anchor bootstrap.
+
+    Every venue read and repository read on the ten-instant gather path is
+    stubbed to its happy-path value; individual tests override exactly one to
+    drive a single early return. ``parse_execution_exec_id`` is a synchronous
+    ``MagicMock`` (the client method is sync) so its truthy tuple result is not
+    a coroutine.
+    """
+    ex = _make_executor()
+    ex.wallet_public_id = _ANCHOR_WALLET
+    client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+    client.account_history_capability = CapabilityStatus.SUPPORTED
+    client.read_native_balances = AsyncMock(
+        return_value=[
+            NativeBalanceEntry(
+                currency="EUR", total=100.25, free=None, used=None, total_decimal="100.25"
+            ),
+            NativeBalanceEntry(currency="PLN", total=10.0, free=None, used=None),
+        ]
+    )
+    client.read_account_history_tip = AsyncMock(return_value=_anchor_history_tip(501))
+    client.parse_execution_exec_id = MagicMock(return_value=("O1", 600000000, False))
+    client.read_order_fill_legs = AsyncMock(
+        return_value=VenueOrderFillLegs(
+            order_id="O1",
+            bought_amount=Decimal("1"),
+            sold_amount=Decimal("2"),
+            commission_amount=Decimal("0"),
+            bought_currency="EUR",
+            sold_currency="PLN",
+            commission_currency="EUR",
+            buy_sell="BUY",
+        )
+    )
+    ex.exchange_client = client
+    ex.repository.get_venue_account_state_version = AsyncMock(return_value=_anchor_state_row())
+    ex.repository.get_spot_asset_precision_evidence = AsyncMock(return_value={"EUR": object()})
+    ex.repository.has_spot_margin_reconciliation_signal = AsyncMock(return_value=False)
+    ex.repository.get_spot_execution_chain_tip = AsyncMock(return_value="chain-tip")
+    ex.repository.get_spot_execution_witness_rows = AsyncMock(
+        return_value=[{"exec_id": "E1", "scope_sequence": 1}]
+    )
+    ex.repository.record_spot_reconciliation_anchor = AsyncMock(return_value=1)
+    return ex, client
+
+
+class TestCaptureSpotAnchorCursor:
+    """The observer's pre-watermark H0 cursor read for unanchored accounts."""
+
+    @pytest.mark.asyncio
+    async def test_unsupported_history_capability_skips_capture(self) -> None:
+        """A venue without the account-history contract captures no cursor.
+
+        Given: A client whose account-history capability is not SUPPORTED.
+        When: The cursor capture runs.
+        Then: It returns None without ever reading the anchor state.
+        """
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.account_history_capability = CapabilityStatus.UNSUPPORTED
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value=None)
+        result = await ex._capture_spot_anchor_cursor(ex.repository, client, "kraken", "live")
+        assert result is None
+        ex.repository.get_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_already_anchored_account_skips_capture(self) -> None:
+        """An account that already holds an anchor captures no cursor.
+
+        Given: A supported client but a persisted anchor row for the scope.
+        When: The cursor capture runs.
+        Then: It returns None without reading the venue history tip.
+        """
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.account_history_capability = CapabilityStatus.SUPPORTED
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value={"public_id": "a"})
+        client.read_account_history_tip = AsyncMock(return_value=_anchor_history_tip())
+        result = await ex._capture_spot_anchor_cursor(ex.repository, client, "kraken", "live")
+        assert result is None
+        client.read_account_history_tip.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_history_read_failure_degrades_to_no_capture(self) -> None:
+        """A failing venue tip read degrades to no capture rather than raising.
+
+        Given: An unanchored scope whose account-history read raises.
+        When: The cursor capture runs.
+        Then: The failure is swallowed and None is returned.
+        """
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.account_history_capability = CapabilityStatus.SUPPORTED
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value=None)
+        client.read_account_history_tip = AsyncMock(side_effect=RuntimeError("venue down"))
+        result = await ex._capture_spot_anchor_cursor(ex.repository, client, "kraken", "live")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_absent_history_tip_yields_no_capture(self) -> None:
+        """A venue reporting no history tip yields no cursor capture.
+
+        Given: An unanchored scope whose account-history tip read returns None.
+        When: The cursor capture runs.
+        Then: It returns None.
+        """
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.account_history_capability = CapabilityStatus.SUPPORTED
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value=None)
+        client.read_account_history_tip = AsyncMock(return_value=None)
+        result = await ex._capture_spot_anchor_cursor(ex.repository, client, "kraken", "live")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_successful_capture_brackets_the_tip_read(self) -> None:
+        """A successful read brackets the tip between request and observe instants.
+
+        Given: An unanchored scope whose account-history tip read succeeds.
+        When: The cursor capture runs.
+        Then: It returns the tip with a request instant at or before the observe
+            instant, and reads the tip at the anchor history limit.
+        """
+        ex = _make_executor()
+        client = _make_client(CapabilityStatus.SUPPORTED, CapabilityStatus.SUPPORTED)
+        client.account_history_capability = CapabilityStatus.SUPPORTED
+        ex.repository.get_spot_reconciliation_anchor = AsyncMock(return_value=None)
+        tip = _anchor_history_tip()
+        client.read_account_history_tip = AsyncMock(return_value=tip)
+        result = await ex._capture_spot_anchor_cursor(ex.repository, client, "kraken", "live")
+        assert result is not None
+        assert result.tip is tip
+        assert result.requested_at <= result.observed_at
+        client.read_account_history_tip.assert_awaited_once_with(
+            base_module._SPOT_ANCHOR_HISTORY_LIMIT
+        )
+
+
+class TestMaybeBootstrapSpotAnchor:
+    """The bounded, fully-degrading wrapper around one bootstrap attempt."""
+
+    @pytest.mark.asyncio
+    async def test_absent_cursor_capture_is_a_noop(self) -> None:
+        """Work without a cursor capture attempts no bootstrap.
+
+        Given: Reconciliation work whose cursor capture is None.
+        When: The maybe-bootstrap wrapper runs.
+        Then: The inner bootstrap is never invoked.
+        """
+        ex = _make_executor()
+        ex._bootstrap_spot_anchor = AsyncMock()
+        work = _anchor_work(boundary=_anchor_boundary(), cursor_capture=None)
+        await ex._maybe_bootstrap_spot_anchor(work, _ANCHOR_EVALUATED_AT)
+        ex._bootstrap_spot_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_absent_boundary_is_a_noop(self) -> None:
+        """Work without a boundary attempts no bootstrap.
+
+        Given: Reconciliation work whose boundary is None.
+        When: The maybe-bootstrap wrapper runs.
+        Then: The inner bootstrap is never invoked.
+        """
+        ex = _make_executor()
+        ex._bootstrap_spot_anchor = AsyncMock()
+        work = _anchor_work(boundary=None, cursor_capture=_cursor_capture())
+        await ex._maybe_bootstrap_spot_anchor(work, _ANCHOR_EVALUATED_AT)
+        ex._bootstrap_spot_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_failure_is_caught_and_degraded(self) -> None:
+        """A raising bootstrap is caught so the attempt degrades silently.
+
+        Given: Work with both a cursor capture and a boundary and a bootstrap
+            that raises.
+        When: The maybe-bootstrap wrapper runs.
+        Then: No exception propagates and the bootstrap was invoked once.
+        """
+        ex = _make_executor()
+        ex._bootstrap_spot_anchor = AsyncMock(side_effect=RuntimeError("bootstrap blew up"))
+        work = _anchor_work(boundary=_anchor_boundary(), cursor_capture=_cursor_capture())
+        await ex._maybe_bootstrap_spot_anchor(work, _ANCHOR_EVALUATED_AT)
+        ex._bootstrap_spot_anchor.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_success_completes_within_the_bound(self) -> None:
+        """A succeeding bootstrap runs to completion inside the timeout bound.
+
+        Given: Work with both a cursor capture and a boundary and a bootstrap
+            that succeeds.
+        When: The maybe-bootstrap wrapper runs.
+        Then: The bootstrap is awaited once with the work and evaluation instant.
+        """
+        ex = _make_executor()
+        ex._bootstrap_spot_anchor = AsyncMock(return_value=None)
+        work = _anchor_work(boundary=_anchor_boundary(), cursor_capture=_cursor_capture())
+        await ex._maybe_bootstrap_spot_anchor(work, _ANCHOR_EVALUATED_AT)
+        ex._bootstrap_spot_anchor.assert_awaited_once_with(work, _ANCHOR_EVALUATED_AT)
+
+
+class TestBootstrapSpotAnchor:
+    """Evidence gathering, certification, and sealing of one bootstrap anchor."""
+
+    @staticmethod
+    def _work() -> _PortfolioReconciliationWork:
+        """Return bootstrap work carrying a live boundary and cursor capture."""
+        return _anchor_work(boundary=_anchor_boundary(), cursor_capture=_cursor_capture())
+
+    @pytest.mark.asyncio
+    async def test_absent_exchange_client_returns_without_reads(self) -> None:
+        """A missing exchange client seals nothing and reads no state.
+
+        Given: An executor whose exchange client is None.
+        When: The bootstrap runs.
+        Then: It returns before reading the account-state version.
+        """
+        ex, _ = _bootstrap_executor()
+        ex.exchange_client = None
+        await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        ex.repository.get_venue_account_state_version.assert_not_awaited()
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_absent_state_row_returns(self) -> None:
+        """A vanished account-state version seals nothing.
+
+        Given: A state-version read returning None.
+        When: The bootstrap runs.
+        Then: It returns without reading precision evidence.
+        """
+        ex, _ = _bootstrap_executor()
+        ex.repository.get_venue_account_state_version = AsyncMock(return_value=None)
+        await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        ex.repository.get_spot_asset_precision_evidence.assert_not_awaited()
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_absent_balances_json_returns(self) -> None:
+        """A state row without a balances payload seals nothing.
+
+        Given: A state row whose balances_json is None.
+        When: The bootstrap runs.
+        Then: It returns without sealing an anchor.
+        """
+        ex, _ = _bootstrap_executor()
+        ex.repository.get_venue_account_state_version = AsyncMock(
+            return_value=_anchor_state_row(balances_json=None)
+        )
+        await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_parsed_balances_returns(self) -> None:
+        """A payload with no venue-raw balances seals nothing.
+
+        Given: A state row whose balances payload parses to no exact balances.
+        When: The bootstrap runs.
+        Then: It returns before the second (re-read) native-balance call.
+        """
+        ex, client = _bootstrap_executor()
+        ex.repository.get_venue_account_state_version = AsyncMock(
+            return_value=_anchor_state_row(balances_json="[]")
+        )
+        await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        client.read_native_balances.assert_not_awaited()
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_absent_confirming_tip_returns(self) -> None:
+        """A missing confirming H1 tip seals nothing.
+
+        Given: A re-read whose account-history tip returns None.
+        When: The bootstrap runs.
+        Then: It returns before reading precision evidence.
+        """
+        ex, client = _bootstrap_executor()
+        client.read_account_history_tip = AsyncMock(return_value=None)
+        await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        ex.repository.get_spot_asset_precision_evidence.assert_not_awaited()
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_witness_row_missing_exec_id_returns(self) -> None:
+        """A witness row without an exec id seals nothing.
+
+        Given: A sealed-prefix witness row whose exec_id is None, plus an asset
+            missing from the precision evidence to exercise the uncertified arm.
+        When: The bootstrap runs.
+        Then: It returns before reading order fill legs.
+        """
+        ex, client = _bootstrap_executor()
+        ex.repository.get_spot_execution_witness_rows = AsyncMock(
+            return_value=[{"exec_id": None, "scope_sequence": 1}]
+        )
+        with patch.object(base_module, "is_spot_precision_plane_certified", return_value=True):
+            await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        client.read_order_fill_legs.assert_not_awaited()
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_undecodable_exec_id_returns(self) -> None:
+        """An exec id the client cannot decode seals nothing.
+
+        Given: A witness row whose exec id decodes to None.
+        When: The bootstrap runs.
+        Then: It returns before reading order fill legs.
+        """
+        ex, client = _bootstrap_executor()
+        client.parse_execution_exec_id = MagicMock(return_value=None)
+        with patch.object(base_module, "is_spot_precision_plane_certified", return_value=True):
+            await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        client.read_order_fill_legs.assert_not_awaited()
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_absent_order_fill_legs_returns(self) -> None:
+        """A missing per-order fill-legs read seals nothing.
+
+        Given: A decodable prefix whose order fill-legs read returns None.
+        When: The bootstrap runs.
+        Then: It returns without composing witnesses.
+        """
+        ex, client = _bootstrap_executor()
+        client.read_order_fill_legs = AsyncMock(return_value=None)
+        with patch.object(base_module, "is_spot_precision_plane_certified", return_value=True):
+            await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_witness_refusals_log_and_return(self) -> None:
+        """Unresolved witnesses seal nothing and are logged by name.
+
+        Given: A witness build that returns named refusals and no map.
+        When: The bootstrap runs.
+        Then: It returns without sealing an anchor.
+        """
+        ex, _ = _bootstrap_executor()
+        with (
+            patch.object(base_module, "is_spot_precision_plane_certified", return_value=True),
+            patch.object(
+                base_module,
+                "build_witnesses_from_reads",
+                return_value=WitnessOutcome(
+                    witnesses={}, refusals=("execution_order_totals_missing",)
+                ),
+            ),
+        ):
+            await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_not_certifiable_observation_logs_and_returns(self) -> None:
+        """A pure-module refusal seals nothing and is logged by name.
+
+        Given: A composed observation (with a null payload-source observation id,
+            so the current-attempt fallback is taken) that the pure builder
+            refuses as not certifiable.
+        When: The bootstrap runs.
+        Then: It returns without sealing an anchor.
+        """
+        ex, _ = _bootstrap_executor()
+        ex.repository.get_venue_account_state_version = AsyncMock(
+            return_value=_anchor_state_row(balance_payload_source_observation_id=None)
+        )
+        with (
+            patch.object(base_module, "is_spot_precision_plane_certified", return_value=True),
+            patch.object(base_module, "build_witnesses_from_reads", return_value=_VALID_WITNESSES),
+            patch.object(
+                base_module,
+                "build_spot_anchor",
+                side_effect=base_module.SpotAnchorNotCertifiableError(
+                    ("scope_without_committed_execution",)
+                ),
+            ),
+        ):
+            await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        ex.repository.record_spot_reconciliation_anchor.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fully_proven_observation_seals_one_anchor(self) -> None:
+        """A fully proven observation seals exactly one anchor row.
+
+        Given: Every gather read yields usable data, the witness map composes,
+            and the pure builder certifies the observation.
+        When: The bootstrap runs.
+        Then: The built anchor row is recorded exactly once.
+        """
+        ex, _ = _bootstrap_executor()
+        anchor_row = {"public_id": "anchor-1"}
+        with (
+            patch.object(base_module, "is_spot_precision_plane_certified", return_value=True),
+            patch.object(base_module, "build_witnesses_from_reads", return_value=_VALID_WITNESSES),
+            patch.object(base_module, "build_spot_anchor", return_value=anchor_row),
+        ):
+            await ex._bootstrap_spot_anchor(self._work(), _ANCHOR_EVALUATED_AT)
+        ex.repository.record_spot_reconciliation_anchor.assert_awaited_once()
+        recorded = ex.repository.record_spot_reconciliation_anchor.await_args
+        assert recorded.args[0] == anchor_row

@@ -20,6 +20,7 @@ from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 from typing import Literal
 from typing import cast
@@ -32,8 +33,18 @@ from loguru import logger
 
 from snapper.application.engine.service import compute_shard_key
 from snapper.application.portfolio.account_view import build_portfolio_account_state
+from snapper.application.portfolio.execution_chain import execution_chain_genesis
 from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
 from snapper.application.portfolio.reconciliation_dispatch import dispatch_portfolio_reconciliation
+from snapper.application.portfolio.spot_anchor_assembly import build_witnesses_from_reads
+from snapper.application.portfolio.spot_anchor_assembly import parse_observed_balances
+from snapper.application.portfolio.spot_anchor_assembly import venue_history_tip_from_raw
+from snapper.application.portfolio.spot_anchor_bootstrap import SpotAnchorNotCertifiableError
+from snapper.application.portfolio.spot_anchor_bootstrap import SpotAnchorObservation
+from snapper.application.portfolio.spot_anchor_bootstrap import build_spot_anchor
+from snapper.application.portfolio.spot_precision_certification import (
+    is_spot_precision_plane_certified,
+)
 from snapper.application.portfolio.spot_precision_evidence import (
     derive_walutomat_precision_from_raw_balances,
 )
@@ -89,6 +100,8 @@ from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
+from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
@@ -280,6 +293,23 @@ _SpotPrecisionEvidenceWork = tuple[SQLAlchemyRepository, VenueAccountAttemptRow]
 
 
 @dataclass(frozen=True)
+class _SpotAnchorCursorCapture:
+    """The observer's H0 account-history tip read, bracketed for the anchor chain.
+
+    ``requested_at`` and ``observed_at`` are the conservative endpoints of the
+    ``account/history`` tip read taken BEFORE the watermark capture, so the
+    anchor's ten-instant chain has ``observed_at`` at or before the watermark's
+    ``as_of``. It travels in memory only, alongside the boundary, and is ``None``
+    whenever the account is already anchored, the venue lacks the account-history
+    contract, or the read failed — in every case the bootstrap is simply skipped.
+    """
+
+    tip: VenueAccountHistoryTip
+    requested_at: datetime
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
 class _PortfolioReconciliationWork:
     """Immutable identity, capability, and boundary from one account snapshot.
 
@@ -288,12 +318,15 @@ class _PortfolioReconciliationWork:
     (paper accounts, watermark read failure). It travels in memory only:
     crash-recovery re-evaluations rebuilt without a live boundary pass
     ``None`` and honestly stay incomplete rather than fabricating one.
+    ``cursor_capture`` is the pre-watermark ``H0`` tip read for an unanchored
+    account, or ``None`` when no spot-anchor bootstrap will be attempted.
     """
 
     state_id: int
     identity: _PortfolioReconciliationKey
     position_capability: CapabilityStatus
     boundary: SpotReplayBoundaryCapture | None
+    cursor_capture: _SpotAnchorCursorCapture | None
 
 
 @dataclass(frozen=True)
@@ -386,6 +419,10 @@ recorded as an ``error`` observation (last-good retained, stale-visible) and
 never blocks the observer loop or the order-reconciliation cycle."""
 _PORTFOLIO_RECONCILIATION_TIMEOUT_S = 60.0
 """Bound on the complete observer-side portfolio reconciliation branch."""
+_SPOT_ANCHOR_HISTORY_LIMIT = 100
+"""Page size for the anchor bootstrap's account-history tip reads (OQ-3). The
+local execution tip must be on the page or the bootstrap refuses, so the page
+must reach back to the sealed prefix; 100 covers a quiescent account's tail."""
 _SPOT_PRECISION_EVIDENCE_TIMEOUT_S = 3.0
 """Bound on one detached balance-precision persistence observation."""
 _ACCOUNT_UNEXPECTED_BALANCE_CAPABILITY_MSG = (
@@ -3353,6 +3390,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         attempt: VenueAccountAttemptRow,
         position_capability: CapabilityStatus,
         boundary: SpotReplayBoundaryCapture | None,
+        cursor_capture: _SpotAnchorCursorCapture | None,
     ) -> None:
         """Schedule one live snapshot evaluation without delaying its observer."""
         try:
@@ -3373,6 +3411,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 identity=key,
                 position_capability=position_capability,
                 boundary=boundary,
+                cursor_capture=cursor_capture,
             )
             runner = self._run_portfolio_reconciliation(work)
             try:
@@ -3808,6 +3847,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 mode=cast(ExecutionMode, evaluation["mode"]),
                 kind="reconciliation",
             )
+            await self._maybe_bootstrap_spot_anchor(work, evaluated_at)
         except asyncio.CancelledError:
             raise
         except TimeoutError as exc:
@@ -3819,6 +3859,209 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as exc:
             self._record_portfolio_reconciliation_failure(exc)
             logger.exception(f"[{exchange}] portfolio reconciliation failed: {exc}")
+
+    async def _capture_spot_anchor_cursor(
+        self,
+        repository: SQLAlchemyRepository,
+        client: ExchangeClientBase,
+        exchange: str,
+        mode: str,
+    ) -> _SpotAnchorCursorCapture | None:
+        """Read the venue history tip ``H0`` for an unanchored account, or ``None``.
+
+        Runs BEFORE the watermark capture so the anchor's ten-instant chain holds
+        (``observed_at`` precedes the watermark's ``as_of``). Gated on the venue's
+        account-history capability and on the account being unanchored, and fully
+        wrapped so any failure degrades to no-bootstrap and NEVER breaks the
+        balance observation.
+
+        Args:
+            repository: The durable repository.
+            client: The account's exchange client.
+            exchange: The account's exchange scope.
+            mode: The account's mode scope.
+
+        Returns:
+            The bracketed ``H0`` tip capture, or ``None`` when no bootstrap applies.
+        """
+        if client.account_history_capability != CapabilityStatus.SUPPORTED:
+            return None
+        try:
+            async with asyncio.timeout(_ACCOUNT_FETCH_TIMEOUT_S):
+                existing = await repository.get_spot_reconciliation_anchor(
+                    self.wallet_public_id, exchange, mode
+                )
+                if existing is not None:
+                    return None
+                requested_at = datetime.now(UTC)
+                tip = await client.read_account_history_tip(_SPOT_ANCHOR_HISTORY_LIMIT)
+                observed_at = datetime.now(UTC)
+        except Exception as exc:
+            logger.debug(f"[{exchange}] spot anchor cursor capture skipped: {exc}")
+            return None
+        if tip is None:
+            return None
+        return _SpotAnchorCursorCapture(tip=tip, requested_at=requested_at, observed_at=observed_at)
+
+    async def _maybe_bootstrap_spot_anchor(
+        self, work: _PortfolioReconciliationWork, evaluated_at: datetime
+    ) -> None:
+        """Attempt a spot-anchor bootstrap, degrading (log, no anchor) on any failure.
+
+        Isolated from the reconciliation it follows: the whole attempt is bounded
+        and every failure is caught here, so a bootstrap error can never fail the
+        reconciliation or the observation.
+
+        Args:
+            work: The reconciliation work carrying the ``H0`` capture and boundary.
+            evaluated_at: The reconciliation instant, reused as the anchor timestamp.
+        """
+        if work.cursor_capture is None or work.boundary is None:
+            return
+        try:
+            async with asyncio.timeout(_PORTFOLIO_RECONCILIATION_TIMEOUT_S):
+                await self._bootstrap_spot_anchor(work, evaluated_at)
+        except Exception as exc:
+            logger.warning(f"[{work.identity[1]}] spot anchor bootstrap degraded: {exc}")
+
+    async def _bootstrap_spot_anchor(
+        self, work: _PortfolioReconciliationWork, evaluated_at: datetime
+    ) -> None:
+        """Gather the remaining evidence, certify, and seal one bootstrap anchor.
+
+        Every read that yields no usable data returns early (no anchor, retry next
+        cycle); a witness or pure-module refusal is logged with its named reasons.
+        Only a fully proven observation is sealed.
+
+        Args:
+            work: The reconciliation work carrying the ``H0`` capture and boundary.
+            evaluated_at: The reconciliation instant, reused as the anchor timestamp.
+        """
+        repository = self._require_sqlalchemy_repository()
+        client = self.exchange_client
+        capture = work.cursor_capture
+        boundary = work.boundary
+        if client is None or capture is None or boundary is None:
+            return
+        wallet, exchange, mode, session_id, sequence_id = work.identity
+        state_row = await repository.get_venue_account_state_version(work.state_id)
+        if state_row is None or state_row["balances_json"] is None:
+            return
+        balances_1, reserved, venue_raw = parse_observed_balances(state_row["balances_json"])
+        if not balances_1:
+            return
+        second_request_started_at = datetime.now(UTC)
+        balances_2 = {
+            entry.currency: (
+                Decimal(entry.total_decimal)
+                if entry.total_decimal is not None
+                else Decimal(str(entry.total))
+            )
+            for entry in await client.read_native_balances()
+        }
+        second_request_completed_at = datetime.now(UTC)
+        tip_1 = await client.read_account_history_tip(_SPOT_ANCHOR_HISTORY_LIMIT)
+        venue_cursor_confirmed_at = datetime.now(UTC)
+        if tip_1 is None:
+            return
+        assets = sorted(balances_1)
+        evidence = await repository.get_spot_asset_precision_evidence(
+            exchange, assets, evaluated_at
+        )
+        precision_certified = {
+            asset: asset in evidence
+            and is_spot_precision_plane_certified(
+                exchange, asset, "balance", evidence[asset], evaluated_at
+            )
+            for asset in assets
+        }
+        margin_signal = await repository.has_spot_margin_reconciliation_signal(
+            wallet, exchange, mode, evaluated_at
+        )
+        chain_tip = await repository.get_spot_execution_chain_tip(
+            wallet,
+            exchange,
+            mode,
+            0,
+            execution_chain_genesis(wallet, exchange, mode),
+            boundary.source_watermark,
+        )
+        witness_rows = await repository.get_spot_execution_witness_rows(
+            wallet, exchange, mode, boundary.source_watermark
+        )
+        parsed: list[tuple[int, str, int, bool]] = []
+        for row in witness_rows:
+            row_exec_id = row["exec_id"]
+            if row_exec_id is None:
+                return
+            components = client.parse_execution_exec_id(row_exec_id)
+            if components is None:
+                return
+            order_id, basis_units, is_terminal = components
+            parsed.append((row["scope_sequence"], order_id, basis_units, is_terminal))
+        order_totals: dict[str, VenueOrderFillLegs] = {}
+        for order_id in {entry[1] for entry in parsed}:
+            legs = await client.read_order_fill_legs(order_id)
+            if legs is None:
+                return
+            order_totals[order_id] = legs
+        witnesses = build_witnesses_from_reads(capture.tip, parsed, order_totals)
+        if witnesses.refusals:
+            logger.info(f"[{exchange}] spot anchor witness unresolved: {list(witnesses.refusals)}")
+            return
+        anchor_timestamp = datetime.now(UTC)
+        observation = SpotAnchorObservation(
+            public_id=str(uuid7()),
+            wallet_public_id=wallet,
+            exchange=exchange,
+            mode=mode,
+            anchor_exists=False,
+            balance_status=state_row["balance_status"],
+            balances_are_venue_raw=venue_raw,
+            balance_read_bound_to_scope=(
+                state_row["wallet_public_id"] == wallet
+                and state_row["exchange"] == exchange
+                and state_row["mode"] == mode
+            ),
+            venue_account_state_public_id=state_row["public_id"],
+            balance_observation_id=(
+                state_row["balance_payload_source_observation_id"]
+                or state_row["current_attempt_observation_id"]
+            ),
+            session_id=session_id,
+            sequence_id=sequence_id,
+            balances_1=balances_1,
+            balances_2=balances_2,
+            balances_reserved=reserved,
+            source_watermark=boundary.source_watermark,
+            watermark_unchanged=boundary.watermark_unchanged,
+            source_chain_tip=chain_tip,
+            tip_0=venue_history_tip_from_raw(capture.tip),
+            tip_1_item_id=tip_1.item_id,
+            precision_certified=precision_certified,
+            margin_signal=margin_signal,
+            execution_witnesses=witnesses.witnesses,
+            venue_cursor_requested_at=capture.requested_at,
+            venue_cursor_observed_at=capture.observed_at,
+            venue_cursor_confirmed_at=venue_cursor_confirmed_at,
+            source_watermark_requested_at=boundary.as_of,
+            source_watermark_captured_at=boundary.watermark_captured_at,
+            first_request_started_at=boundary.request_started_at,
+            first_request_completed_at=boundary.request_completed_at,
+            second_request_started_at=second_request_started_at,
+            second_request_completed_at=second_request_completed_at,
+            timestamp=anchor_timestamp,
+        )
+        try:
+            anchor_row = build_spot_anchor(observation)
+        except SpotAnchorNotCertifiableError as exc:
+            logger.info(f"[{exchange}] spot anchor not certifiable: {list(exc.refusals)}")
+            return
+        await repository.record_spot_reconciliation_anchor(anchor_row)
+        logger.info(
+            f"[{exchange}] spot reconciliation anchor sealed at watermark "
+            f"{boundary.source_watermark}"
+        )
 
     async def _account_observer_handler(self) -> None:
         """Supervised loop that observes and persists venue account truth (Phase 3).
@@ -3871,7 +4114,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
         mode = self._account_mode()
         capture_before: tuple[int, datetime, datetime] | None = None
+        cursor_capture: _SpotAnchorCursorCapture | None = None
         if mode == "live":
+            cursor_capture = await self._capture_spot_anchor_cursor(
+                repository, client, exchange_name, mode
+            )
             capture_before = await self._capture_spot_execution_watermark(
                 repository, exchange_name, mode
             )
@@ -3937,6 +4184,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             attempt=attempt,
             position_capability=client.position_capability,
             boundary=boundary,
+            cursor_capture=cursor_capture,
         )
         self._schedule_account_state_changed(
             wallet_public_id=attempt["wallet_public_id"],
