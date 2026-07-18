@@ -9,6 +9,7 @@ which upgrades dependencies to the latest available versions.
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -21,6 +22,8 @@ IS_WINDOWS = sys.platform == "win32"
 COREPACK_PACKAGE = "corepack"
 PNPM_PACKAGE = "pnpm"
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?")
+
+os.environ.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
 
 
 def read_package_json(package_json: Path) -> dict[str, Any]:
