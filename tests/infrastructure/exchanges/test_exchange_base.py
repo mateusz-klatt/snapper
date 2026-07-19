@@ -1023,6 +1023,46 @@ async def test_log_execution_to_db_counter_only_row_is_venue_raw() -> None:
     assert call_args["numeric_provenance"] == "venue_raw"
 
 
+async def test_log_execution_to_db_drops_counter_when_a_gap_is_absorbed() -> None:
+    """An absorbed publish gap drops the exact counter, not pairs it with a full size.
+
+    Given: A fill whose executor-resolved size (2.5) spans more than the venue's
+        per-poll last_qty (1.0) because an earlier fill's publish was absorbed,
+        while the counter amount is only that single poll's amount,
+    When: _log_execution_to_db persists it,
+    Then: The counter is dropped (its poll-scoped amount would understate the
+        quote leg against the gap-absorbing size), so the replay falls back to
+        the tolerant size-times-price fold rather than an exact wrong quote.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.insert_execution = AsyncMock()
+    client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
+    execution = ExecutionUpdate(
+        order_id="order_123",
+        exec_type="trade",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.FILLED,
+        timestamp=datetime.now(UTC),
+        last_price=50000.0,
+        last_qty=1.0,
+        fee_usd_equiv=10.0,
+        counter_amount_decimal="50000.30",
+    )
+    await client._log_execution_to_db(
+        order_public_id="order-pub-1",
+        wallet_public_id="",
+        execution=execution,
+        delta_size=2.5,
+    )
+    mock_repo.insert_execution.assert_called_once()
+    call_args = mock_repo.insert_execution.call_args[1]
+    assert call_args["counter_amount_decimal"] is None
+    assert call_args["numeric_provenance"] == "legacy_float"
+
+
 @pytest.mark.asyncio()
 async def test_log_execution_to_db_uses_fallback_values() -> None:
     """Log execution uses fallback for missing fields.

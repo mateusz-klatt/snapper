@@ -1285,6 +1285,15 @@ class ExchangeClientBase(ABC):
         they are used instead of re-deriving from raw execution fields.
         This ensures DB records match published ExecutionData.
 
+        The exact ``counter_amount_decimal`` is retained ONLY when the resolved
+        (executor-watermarked) fill size equals the venue's per-poll ``last_qty``
+        — i.e. no earlier fill was absorbed into this delta. An absorbed publish
+        gap makes the resolved size span more than the venue's per-poll delta,
+        while the counter amount is that single poll's amount; pairing them would
+        understate the quote leg with no tolerance. When they diverge the counter
+        is dropped and the reconciliation replay falls back to the tolerant
+        ``size * price`` fold for that row (the pre-Phase-2 behaviour).
+
         Failure containment: a database error AND a fail-closed scope
         resolution refusal (``ExecutionScopeResolutionError`` — the
         repository refuses a fill whose wallet identity is malformed or
@@ -1382,7 +1391,13 @@ class ExchangeClientBase(ABC):
             and resolved_fee == execution.cum_fee
         ):
             fee_decimal = execution.cum_fee_decimal
-        counter_amount_decimal = execution.counter_amount_decimal
+        counter_amount_decimal = (
+            execution.counter_amount_decimal
+            if execution.counter_amount_decimal is not None
+            and execution.last_qty is not None
+            and resolved_size == execution.last_qty
+            else None
+        )
         numeric_provenance = (
             "venue_raw"
             if any(
