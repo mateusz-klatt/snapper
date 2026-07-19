@@ -26,6 +26,7 @@ import zmq
 
 import snapper.application.process_manager.launcher as launcher_module
 import snapper.messaging.executors.base as base_module
+from snapper.core.types import FillStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
@@ -909,14 +910,16 @@ async def test_execution_handler_runtime_error_propagates(
 
 
 @pytest.mark.asyncio
-async def test_process_execution_default_filled_and_removes_pending(
+async def test_process_execution_terminal_status_frame_removes_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test execution processing removes pending orders on fill.
+    """Test a terminal-status frame publishes and removes the pending order.
 
     Given: An executor with a pending order and client_by_exchange mapping,
-    When: Execution update with default filled status is received,
-    Then: Fill is published and order is removed from pending.
+    When: A quantity-less frame carrying a TERMINAL venue status is received,
+    Then: The terminal frame is published and the order is removed. A
+        non-terminal quantity-less acknowledgement instead takes the
+        lifecycle-ack path (see the resting-ack tests) and is NOT removed.
     """
     ex: Any = MergedDummyExecutor()
     ex.running = True
@@ -928,7 +931,7 @@ async def test_process_execution_default_filled_and_removes_pending(
         order_id="ex1",
         exec_type="trade",
         exec_id=None,
-        order_status=None,
+        order_status=ExchangeOrderStatusEnum.CLOSED,
         cum_qty=None,
         average_price=None,
         fee_usd_equiv=None,
@@ -7703,13 +7706,14 @@ class TestFillDedupe:
         last_qty: float | None,
         cum_qty: float | None,
         last_price: float | None = 100.0,
+        order_status: Any = None,
     ) -> SimpleNamespace:
         """Build a minimal execution frame correlated to ex1."""
         return SimpleNamespace(
             order_id="ex1",
             exec_type="trade",
             exec_id=exec_id,
-            order_status=None,
+            order_status=order_status,
             cum_qty=cum_qty,
             average_price=None,
             fee_usd_equiv=None,
@@ -7766,10 +7770,17 @@ class TestFillDedupe:
 
     @pytest.mark.asyncio
     async def test_status_only_frame_passes_despite_seen_exec_id(self) -> None:
-        """Status frames carry no quantity and are never deduped."""
+        """Terminal status frames carry no quantity and are never deduped.
+
+        The frame carries a TERMINAL venue status so it reaches the fill path
+        (a non-terminal quantity-less ack is intercepted as a lifecycle
+        acknowledgement upstream and never reaches dedup).
+        """
         ex, _order = self._executor()
         await ex._process_execution(self._fill("a1", 0.5, 0.5))
-        await ex._process_execution(self._fill("a1", None, None))
+        await ex._process_execution(
+            self._fill("a1", None, None, order_status=ExchangeOrderStatusEnum.CLOSED)
+        )
         assert ex._publish_execution.await_count == 2
 
     @pytest.mark.asyncio
@@ -7828,19 +7839,22 @@ class TestFillDedupe:
 
     @pytest.mark.asyncio
     async def test_status_only_frame_writes_no_zero_size_row(self) -> None:
-        """A status-only frame publishes but never writes a zero-size fill row.
+        """A terminal status frame publishes but never writes a zero-size fill row.
 
-        Given: a real fill followed by a status-only frame (no last_qty,
+        Given: a real fill followed by a terminal-status frame (no last_qty,
             no cum_qty — zero durable size),
         When: both are processed,
-        Then: both publish (status reaches the engine) but only the real
-            fill writes a durable row — the zero-size status frame is
+        Then: both publish (the terminal status reaches the engine) but only
+            the real fill writes a durable row — the zero-size status frame is
             suppressed so recovery never sees a malformed zero-size fill
-            (S5.4 P0-4 Guard 2).
+            (S5.4 P0-4 Guard 2). A non-terminal quantity-less ack instead takes
+            the lifecycle-ack path and publishes nothing.
         """
         ex, _order = self._executor()
         await ex._process_execution(self._fill("a1", 0.5, 0.5))
-        await ex._process_execution(self._fill("a1", None, None))
+        await ex._process_execution(
+            self._fill("a1", None, None, order_status=ExchangeOrderStatusEnum.CLOSED)
+        )
         assert ex._publish_execution.await_count == 2
         assert ex._record_venue_event.await_count == 1
 
@@ -8082,6 +8096,292 @@ class TestFillDedupe:
         await ex._process_execution(self._fill("z1", 0.0, None))
         assert ex.pending_orders[order.client_order_id].last_seen_cum_qty == 0.0
         assert ex._publish_execution.await_count == 1
+
+
+class TestOrderRowTerminalGate:
+    """The order row projects CLOSED only when a fill affirmatively closes it.
+
+    Regression for the live UAT (2026-07-19): a resting Kraken limit order's
+    ``new`` acknowledgement normalizes to OPEN with no cumulative, so
+    :func:`to_fill_status` defaults it to FILLED. Booking that as terminal
+    projected the order row CLOSED with zero filled while the order rested on
+    the venue reserving funds, and dropped it from tracking. The row must stay
+    OPEN and tracked until the venue reports a real fill or a cancel.
+    """
+
+    @staticmethod
+    def _terminal(status: str, order_status: Any, persisted_cum: float, expected: float) -> bool:
+        """Invoke the static terminal gate with SimpleNamespace stand-ins."""
+        fill = SimpleNamespace(status=status)
+        execution = SimpleNamespace(order_status=order_status)
+        return base_module.ExchangeExecutorService._fill_terminalizes_order(
+            fill, execution, persisted_cum, expected
+        )
+
+    def test_zero_fill_open_ack_does_not_terminalize(self) -> None:
+        """A FILLED verdict with zero persisted cum on an OPEN order is not terminal."""
+        assert (
+            self._terminal(FillStatusEnum.FILLED, ExchangeOrderStatusEnum.OPEN, 0.0, 10.0) is False
+        )
+
+    def test_quantity_complete_terminalizes(self) -> None:
+        """A FILLED verdict whose persisted cum reached the order quantity is terminal."""
+        assert (
+            self._terminal(FillStatusEnum.FILLED, ExchangeOrderStatusEnum.OPEN, 10.0, 10.0) is True
+        )
+
+    def test_venue_terminal_status_terminalizes_short_cum(self) -> None:
+        """A FILLED verdict with a terminal venue status closes even a short cum."""
+        assert (
+            self._terminal(FillStatusEnum.FILLED, ExchangeOrderStatusEnum.CLOSED, 0.0, 10.0) is True
+        )
+
+    def test_partial_never_terminalizes(self) -> None:
+        """A PARTIAL verdict never closes the order row."""
+        assert (
+            self._terminal(FillStatusEnum.PARTIAL, ExchangeOrderStatusEnum.CLOSED, 10.0, 10.0)
+            is False
+        )
+
+    def _executor_with_db_order(self) -> tuple[Any, Any]:
+        """Build a running executor whose pending order carries a db_order_id."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.repository = None
+        order = make_order(quantity=10.0)
+        pending = base_module.PendingOrderState(request=order)
+        pending.db_order_id = 1
+        pending.order_public_id = None
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex1"] = order.client_order_id
+        ex.exchange_client = AsyncMock()
+        ex.exchange_client._log_order_update_to_db = AsyncMock(return_value=2)
+        return ex, order
+
+    @staticmethod
+    def _fill(status: str, size: float) -> Any:
+        """Build a minimal fill payload for the persist path."""
+        return SimpleNamespace(
+            status=status, size=size, last_size=None, last_price=None, fee=0.0, fee_asset=""
+        )
+
+    @pytest.mark.asyncio
+    async def test_resting_ack_projects_open_and_keeps_tracking(self) -> None:
+        """A zero-fill FILLED ack on a tracked order writes OPEN and stays tracked.
+
+        Given: A tracked order (db_order_id set) and a resting-order ack —
+            FILLED status, zero size, OPEN venue status, no cumulative,
+        When: the fill is persisted and the removal decision applied,
+        Then: the order row is written OPEN (never CLOSED), the persist call
+            returns False, and the order remains in both tracking maps so a
+            real later fill is still correlated.
+        """
+        ex, order = self._executor_with_db_order()
+        fill = self._fill(FillStatusEnum.FILLED, 0.0)
+        execution = SimpleNamespace(
+            order_status=ExchangeOrderStatusEnum.OPEN, cum_qty=None, average_price=None
+        )
+
+        order_terminal = await ex._persist_correlated_fill(
+            execution, fill, order.client_order_id, "wallet-1"
+        )
+        ex._remove_filled_order(order_terminal, order.client_order_id, "ex1", "kraken")
+
+        assert order_terminal is False
+        call = ex.exchange_client._log_order_update_to_db.await_args
+        assert call.kwargs["status"] == ExchangeOrderStatusEnum.OPEN
+        assert order.client_order_id in ex.pending_orders
+        assert "ex1" in ex.client_by_exchange
+
+    @pytest.mark.asyncio
+    async def test_full_fill_projects_closed_and_removes_tracking(self) -> None:
+        """A fill reaching the order quantity writes CLOSED and drops tracking."""
+        ex, order = self._executor_with_db_order()
+        fill = self._fill(FillStatusEnum.FILLED, 10.0)
+        execution = SimpleNamespace(
+            order_status=ExchangeOrderStatusEnum.OPEN, cum_qty=10.0, average_price=0.8
+        )
+
+        order_terminal = await ex._persist_correlated_fill(
+            execution, fill, order.client_order_id, "wallet-1"
+        )
+        ex._remove_filled_order(order_terminal, order.client_order_id, "ex1", "kraken")
+
+        assert order_terminal is True
+        call = ex.exchange_client._log_order_update_to_db.await_args
+        assert call.kwargs["status"] == ExchangeOrderStatusEnum.CLOSED
+        assert order.client_order_id not in ex.pending_orders
+        assert "ex1" not in ex.client_by_exchange
+
+    @pytest.mark.asyncio
+    async def test_untracked_order_preserves_legacy_removal(self) -> None:
+        """With no db_order_id, the terminal decision falls back to the FILLED verdict."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(quantity=10.0)
+        pending = base_module.PendingOrderState(request=order)
+        pending.order_public_id = None
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex1"] = order.client_order_id
+        ex.exchange_client = AsyncMock()
+
+        order_terminal = await ex._persist_correlated_fill(
+            SimpleNamespace(order_status=ExchangeOrderStatusEnum.OPEN, cum_qty=None),
+            self._fill(FillStatusEnum.FILLED, 0.0),
+            order.client_order_id,
+            "wallet-1",
+        )
+
+        assert order_terminal is True
+
+    @pytest.mark.asyncio
+    async def test_no_pending_returns_filled_verdict(self) -> None:
+        """A persist for an untracked cid returns the bare FILLED verdict."""
+        ex: Any = MergedDummyExecutor()
+        ex.exchange_client = AsyncMock()
+
+        order_terminal = await ex._persist_correlated_fill(
+            SimpleNamespace(order_status=ExchangeOrderStatusEnum.CLOSED, cum_qty=1.0),
+            self._fill(FillStatusEnum.PARTIAL, 1.0),
+            "missing-cid",
+            "wallet-1",
+        )
+
+        assert order_terminal is False
+
+
+class TestLifecycleAck:
+    """A resting-order acknowledgement is projected OPEN, never booked as a fill.
+
+    Regression for the live UAT (2026-07-19): a resting Kraken limit order's
+    quantity-less ``new`` acknowledgement must not be published as a
+    lifecycle-terminal FILLED event — that releases the engine's in-flight
+    guard and retires the command while the order still rests reserving funds.
+    """
+
+    @staticmethod
+    def _ack(order_status: Any) -> Any:
+        """Build a quantity-less acknowledgement frame correlated to ex1."""
+        return SimpleNamespace(
+            order_id="ex1",
+            exec_type="new",
+            exec_id=None,
+            order_status=order_status,
+            cum_qty=None,
+            last_qty=None,
+            average_price=None,
+            fee_usd_equiv=None,
+            fees=None,
+            last_price=None,
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            side=SimpleNamespace(value="buy"),
+            trade_id=None,
+        )
+
+    def _executor(self, *, db_order_id: int | None = 1) -> tuple[Any, Any]:
+        """Build a running executor tracking one resting order."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(quantity=10.0)
+        pending = base_module.PendingOrderState(request=order)
+        pending.db_order_id = db_order_id
+        pending.order_public_id = None
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex1"] = order.client_order_id
+        ex._publish_execution = AsyncMock()
+        ex._record_venue_event = AsyncMock()
+        ex.exchange_client = AsyncMock()
+        ex.exchange_client._log_order_update_to_db = AsyncMock(return_value=2)
+        return ex, order
+
+    @pytest.mark.asyncio
+    async def test_open_ack_projects_open_publishes_nothing_keeps_tracking(self) -> None:
+        """An OPEN ack writes OPEN, publishes nothing, and stays tracked.
+
+        Given: A tracked resting order and a quantity-less OPEN acknowledgement,
+        When: it is processed,
+        Then: the order row is written OPEN, no EXECUTED is published (so the
+            engine guard is not released), and the order stays tracked.
+        """
+        ex, order = self._executor()
+
+        await ex._process_execution(self._ack(ExchangeOrderStatusEnum.OPEN))
+
+        ex._publish_execution.assert_not_awaited()
+        call = ex.exchange_client._log_order_update_to_db.await_args
+        assert call.kwargs["status"] == ExchangeOrderStatusEnum.OPEN
+        assert order.client_order_id in ex.pending_orders
+        assert ex.pending_orders[order.client_order_id].open_row_projected is True
+
+    @pytest.mark.asyncio
+    async def test_repeated_ack_is_idempotent(self) -> None:
+        """A second OPEN ack does not re-write the order row."""
+        ex, _order = self._executor()
+
+        await ex._process_execution(self._ack(ExchangeOrderStatusEnum.OPEN))
+        await ex._process_execution(self._ack(ExchangeOrderStatusEnum.OPEN))
+
+        assert ex.exchange_client._log_order_update_to_db.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_ack_without_db_row_keeps_tracking(self) -> None:
+        """An ack for a tracked order whose row insert failed keeps it tracked.
+
+        Given: A live order whose db_order_id is None (post-accept persistence
+            failure) and an OPEN acknowledgement,
+        When: it is processed,
+        Then: no order-row write is attempted and the order stays tracked, so a
+            real later fill is still correlated rather than orphaned.
+        """
+        ex, order = self._executor(db_order_id=None)
+
+        await ex._process_execution(self._ack(ExchangeOrderStatusEnum.OPEN))
+
+        ex.exchange_client._log_order_update_to_db.assert_not_awaited()
+        ex._publish_execution.assert_not_awaited()
+        assert order.client_order_id in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_ack_for_untracked_cid_is_absorbed(self) -> None:
+        """A lifecycle ack for an unknown cid is handled without a write.
+
+        The dedicated ``pending is None`` guard is reached only by a direct
+        call: ``_process_execution`` already drops an uncorrelated frame at the
+        holder lookup before the lifecycle branch runs.
+        """
+        ex, _order = self._executor()
+
+        handled = await ex._handle_lifecycle_ack(
+            self._ack(ExchangeOrderStatusEnum.OPEN), "ghost-cid", "kraken"
+        )
+
+        assert handled is True
+        ex.exchange_client._log_order_update_to_db.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ack_tolerates_missing_successor_row_id(self) -> None:
+        """A None successor id leaves db_order_id intact but marks the row projected."""
+        ex, order = self._executor()
+        ex.exchange_client._log_order_update_to_db = AsyncMock(return_value=None)
+
+        await ex._process_execution(self._ack(ExchangeOrderStatusEnum.OPEN))
+
+        pending = ex.pending_orders[order.client_order_id]
+        assert pending.db_order_id == 1
+        assert pending.open_row_projected is True
+
+    @pytest.mark.asyncio
+    async def test_handle_lifecycle_ack_returns_false_for_a_fill(self) -> None:
+        """A frame carrying quantity is not a lifecycle ack and falls through."""
+        ex, _order = self._executor()
+
+        handled = await ex._handle_lifecycle_ack(
+            SimpleNamespace(order_status=ExchangeOrderStatusEnum.OPEN, cum_qty=5.0, last_qty=5.0),
+            _order.client_order_id,
+            "kraken",
+        )
+
+        assert handled is False
 
 
 class TestExecutionHandlerStreamClose:

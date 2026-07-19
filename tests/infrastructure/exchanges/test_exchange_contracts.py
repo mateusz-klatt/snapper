@@ -2,6 +2,7 @@
 
 from datetime import UTC
 from datetime import datetime
+from typing import Any
 
 import pytest
 
@@ -11,6 +12,8 @@ from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
+from snapper.infrastructure.exchanges.contracts import is_lifecycle_only
+from snapper.infrastructure.exchanges.contracts import order_status_is_terminal
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenCandleSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenOhlcEventEnvelope
@@ -152,6 +155,81 @@ class TestToFillStatus:
         """
         execution = self._make_execution(ExchangeOrderStatusEnum.OPEN, cum_qty=None)
         assert to_fill_status(execution) == "filled"
+
+
+class TestOrderStatusIsTerminal:
+    """Tests for the terminal-order-status predicate."""
+
+    def test_terminal_statuses(self) -> None:
+        """Closed, canceled, and expired are terminal.
+
+        Given: The three terminal order statuses,
+        When: order_status_is_terminal is called,
+        Then: Each returns True.
+        """
+        assert order_status_is_terminal(ExchangeOrderStatusEnum.CLOSED) is True
+        assert order_status_is_terminal(ExchangeOrderStatusEnum.CANCELED) is True
+        assert order_status_is_terminal(ExchangeOrderStatusEnum.EXPIRED) is True
+
+    def test_non_terminal_statuses(self) -> None:
+        """Open and pre-fill statuses are not terminal.
+
+        Given: Non-terminal order statuses,
+        When: order_status_is_terminal is called,
+        Then: Each returns False, so a resting acknowledgement never
+            projects the order row closed.
+        """
+        assert order_status_is_terminal(ExchangeOrderStatusEnum.OPEN) is False
+        assert order_status_is_terminal(ExchangeOrderStatusEnum.PENDING) is False
+        assert order_status_is_terminal(ExchangeOrderStatusEnum.PENDING_NEW) is False
+        assert order_status_is_terminal(ExchangeOrderStatusEnum.NEW) is False
+        assert order_status_is_terminal(ExchangeOrderStatusEnum.PARTIALLY_FILLED) is False
+
+
+class TestIsLifecycleOnly:
+    """Tests for the resting-order lifecycle-acknowledgement predicate."""
+
+    @staticmethod
+    def _execution(order_status: ExchangeOrderStatusEnum, **overrides: Any) -> ExecutionUpdate:
+        """Build an ExecutionUpdate for a lifecycle-ack scenario."""
+        fields: dict[str, Any] = {
+            "order_id": "ex1",
+            "exec_type": "new",
+            "symbol": "XRP-EUR",
+            "side": OrderSideEnum.BUY,
+            "order_type": ExchangeOrderTypeEnum.LIMIT,
+            "order_status": order_status,
+            "cum_qty": None,
+            "last_qty": None,
+            "timestamp": datetime.now(UTC),
+        }
+        fields.update(overrides)
+        return ExecutionUpdate(**fields)
+
+    def test_true_for_quantityless_non_terminal_ack(self) -> None:
+        """A NEW ack normalizes to OPEN with no quantity and is lifecycle-only.
+
+        Given: A quantity-less NEW acknowledgement (normalized OPEN),
+        When: is_lifecycle_only is called,
+        Then: Returns True so it is not booked or published as a fill.
+        """
+        assert is_lifecycle_only(self._execution(ExchangeOrderStatusEnum.NEW)) is True
+
+    def test_false_when_cumulative_present(self) -> None:
+        """A frame carrying a cumulative quantity is a fill, not a lifecycle ack."""
+        assert (
+            is_lifecycle_only(self._execution(ExchangeOrderStatusEnum.OPEN, cum_qty=1.0)) is False
+        )
+
+    def test_false_when_last_quantity_present(self) -> None:
+        """A frame carrying a last quantity is a fill, not a lifecycle ack."""
+        assert (
+            is_lifecycle_only(self._execution(ExchangeOrderStatusEnum.OPEN, last_qty=0.5)) is False
+        )
+
+    def test_false_when_status_is_terminal(self) -> None:
+        """A quantity-less terminal frame is a legitimate terminal publish, not an ack."""
+        assert is_lifecycle_only(self._execution(ExchangeOrderStatusEnum.CLOSED)) is False
 
 
 class TestFundingRateSnapshot:

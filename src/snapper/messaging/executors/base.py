@@ -105,6 +105,8 @@ from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
 from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
+from snapper.infrastructure.exchanges.contracts import is_lifecycle_only
+from snapper.infrastructure.exchanges.contracts import order_status_is_terminal
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
@@ -621,6 +623,9 @@ class PendingOrderState:
             without the clear, periodic republish would keep
             refreshing the engine's in-flight window and starve the
             timeout valve.
+        open_row_projected: True once a lifecycle acknowledgement advanced
+            the order row to OPEN; guards SCD2 version churn from repeated
+            resting-order status frames.
         fill_lock: Serializes fill booking for this order across the live
             stream task and the recon task — dedupe gate, delta build,
             durable write, publish, and committed-cumulative advance form
@@ -644,6 +649,7 @@ class PendingOrderState:
     interlock_blocked_pending: bool = field(default=False)
     interlock_blocked_reason: str = field(default=_INTERLOCK_REASON_MODE_UNAVAILABLE)
     adopted_accept_publish_pending: bool = field(default=False)
+    open_row_projected: bool = field(default=False)
     fill_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -6387,6 +6393,59 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         return True
 
+    async def _handle_lifecycle_ack(
+        self,
+        execution: ExecutionUpdate,
+        client_order_id: str,
+        exchange_name: OrderExchange,
+    ) -> bool:
+        """Project a resting-order acknowledgement as OPEN without booking a fill.
+
+        A venue ``new``/``pending_new``/``status`` frame for a freshly placed
+        RESTING order carries no traded quantity and a non-terminal normalized
+        status. Booking it as a fill (the pre-fix behaviour) projected the order
+        row terminal-CLOSED with zero filled, dropped the still-live order from
+        tracking so real later fills orphaned, and — worse — published a
+        zero-delta EXECUTED carrying a lifecycle-terminal ``FILLED`` status that
+        releases the engine's in-flight guard, retires the command, and lets a
+        duplicate order through while the original still rests reserving funds.
+        Intercepting here advances the order row ``pending`` to ``OPEN`` exactly
+        once (idempotent via ``open_row_projected``), keeps the order tracked
+        even when its row insert failed (``db_order_id is None``), and publishes
+        NOTHING — the order genuinely rests and nothing has filled.
+
+        Args:
+            execution: Execution update from the exchange stream.
+            client_order_id: Client-assigned order ID.
+            exchange_name: Exchange name for logging.
+
+        Returns:
+            True when the frame was a lifecycle acknowledgement handled here;
+            False when it must fall through to fill booking.
+        """
+        if not is_lifecycle_only(execution):
+            return False
+        pending = self.pending_orders.get(client_order_id)
+        if pending is None:
+            return True
+        if (
+            self.exchange_client is not None
+            and pending.db_order_id is not None
+            and not pending.open_row_projected
+        ):
+            new_db_order_id = await self.exchange_client._log_order_update_to_db(
+                db_order_id=pending.db_order_id,
+                status=ExchangeOrderStatusEnum.OPEN,
+            )
+            if new_db_order_id is not None:
+                pending.db_order_id = new_db_order_id
+            pending.open_row_projected = True
+            logger.info(
+                f"[{exchange_name}] Order {client_order_id} acknowledged resting on venue "
+                f"(exec_type={execution.exec_type}); projected OPEN"
+            )
+        return True
+
     @staticmethod
     def _resolve_fill_quantities(
         execution: ExecutionUpdate,
@@ -6481,6 +6540,37 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         return (
             FillStatusEnum.FILLED if qty_complete or exchange_terminal else FillStatusEnum.PARTIAL
         )
+
+    @staticmethod
+    def _fill_terminalizes_order(
+        fill: ExecutionData,
+        execution: ExecutionUpdate,
+        persisted_cum: float,
+        expected_qty: float,
+    ) -> bool:
+        """Return whether a fill affirmatively closes the order row.
+
+        A ``FILLED`` fill-status verdict alone is insufficient to project the
+        order row terminal: the venue must evidence terminality — the persisted
+        cumulative reached the order quantity, or the venue's normalized status
+        is terminal (closed/canceled/expired). This stops a quantity-less
+        acknowledgement that :func:`to_fill_status` defaults to ``FILLED`` from
+        closing a still-resting order.
+
+        Args:
+            fill: The projected fill event.
+            execution: The originating execution update.
+            persisted_cum: Durable cumulative filled quantity after this fill.
+            expected_qty: Absolute expected order quantity.
+
+        Returns:
+            Whether the order row should be projected CLOSED.
+        """
+        if fill.status != FillStatusEnum.FILLED:
+            return False
+        tolerance = max(1e-12, abs(expected_qty) * 1e-6)
+        quantity_complete = persisted_cum > 0 and persisted_cum >= abs(expected_qty) - tolerance
+        return quantity_complete or order_status_is_terminal(execution.order_status)
 
     @staticmethod
     def _resolve_fee(execution: ExecutionUpdate) -> tuple[float, str]:
@@ -6698,6 +6788,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     execution, exchange_order_id, client_order_id, exchange_name
                 ):
                     return
+                if await self._handle_lifecycle_ack(execution, client_order_id, exchange_name):
+                    return
                 await self._book_correlated_fill(
                     execution, exchange_order_id, client_order_id, original_order, exchange_name
                 )
@@ -6777,8 +6869,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         self._advance_committed_fill_watermark(client_order_id, fill, accounting)
         self._register_fill_exec_id(execution, accounting)
-        await self._persist_correlated_fill(execution, fill, client_order_id, self.wallet_public_id)
-        self._remove_filled_order(fill, client_order_id, exchange_order_id, exchange_name)
+        order_terminal = await self._persist_correlated_fill(
+            execution, fill, client_order_id, self.wallet_public_id
+        )
+        self._remove_filled_order(order_terminal, client_order_id, exchange_order_id, exchange_name)
 
     @staticmethod
     def _fill_economics_sound(size: float, price: float, side: str) -> bool:
@@ -6965,7 +7059,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         fill: ExecutionData,
         client_order_id: str,
         wallet_public_id: str,
-    ) -> None:
+    ) -> bool:
         """Persist execution and order status rows after a successful publish.
 
         Fill truth (PnL Phase 1): the order-row update forwards the
@@ -6977,10 +7071,20 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         from tracking, so a stale id would make the second partial's
         SCD2 update collide with the active-unique index and silently
         fail.
+
+        The order row is projected CLOSED only when the fill AFFIRMATIVELY
+        terminalizes it (:meth:`_fill_terminalizes_order`), not merely on a
+        ``FILLED`` verdict: a quantity-less acknowledgement that
+        :func:`to_fill_status` defaults to ``FILLED`` must leave a resting
+        order OPEN. The returned bool is that terminal decision and drives
+        whether the caller drops the order from tracking.
+
+        Returns:
+            Whether the fill closed the order row (drives removal from tracking).
         """
         pending = self.pending_orders.get(client_order_id)
         if pending is None or self.exchange_client is None:
-            return
+            return fill.status == FillStatusEnum.FILLED
         if pending.order_public_id is not None:
             await self.exchange_client._log_execution_to_db(
                 order_public_id=pending.order_public_id,
@@ -6993,23 +7097,25 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 fee_asset=fill.fee_asset,
                 status=fill.status,
             )
-        if pending.db_order_id is not None:
-            db_status = (
-                ExchangeOrderStatusEnum.CLOSED
-                if fill.status == FillStatusEnum.FILLED
-                else ExchangeOrderStatusEnum.OPEN
-            )
-            persisted_cum = await self._resolve_persisted_cumulative(
-                execution, fill, client_order_id, pending
-            )
-            new_db_order_id = await self.exchange_client._log_order_update_to_db(
-                db_order_id=pending.db_order_id,
-                status=db_status,
-                filled_size=persisted_cum,
-                average_price=execution.average_price,
-            )
-            if new_db_order_id is not None:
-                pending.db_order_id = new_db_order_id
+        if pending.db_order_id is None:
+            return fill.status == FillStatusEnum.FILLED
+        expected_qty = abs(float(pending.request.quantity))
+        persisted_cum = await self._resolve_persisted_cumulative(
+            execution, fill, client_order_id, pending
+        )
+        order_terminal = self._fill_terminalizes_order(fill, execution, persisted_cum, expected_qty)
+        db_status = (
+            ExchangeOrderStatusEnum.CLOSED if order_terminal else ExchangeOrderStatusEnum.OPEN
+        )
+        new_db_order_id = await self.exchange_client._log_order_update_to_db(
+            db_order_id=pending.db_order_id,
+            status=db_status,
+            filled_size=persisted_cum,
+            average_price=execution.average_price,
+        )
+        if new_db_order_id is not None:
+            pending.db_order_id = new_db_order_id
+        return order_terminal
 
     async def _resolve_persisted_cumulative(
         self,
@@ -7065,13 +7171,27 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
     def _remove_filled_order(
         self,
-        fill: ExecutionData,
+        order_terminal: bool,
         client_order_id: str,
         exchange_order_id: str,
         exchange_name: OrderExchange,
     ) -> None:
-        """Drop tracking maps after a filled status has been published and persisted."""
-        if fill.status == FillStatusEnum.FILLED:
+        """Drop tracking maps only when the fill affirmatively closed the order.
+
+        Keyed on the persist-side terminal decision
+        (:meth:`_persist_correlated_fill`), not on a bare ``FILLED`` verdict, so
+        a ``FILLED``-labelled frame that did not actually close the order (a
+        resting-order acknowledgement, a short-cumulative fill) keeps in-memory
+        tracking alive to correlate the real fills still to come — preventing
+        the orphaned-fill loss the pre-fix drop caused.
+
+        Args:
+            order_terminal: Whether the fill closed the order row.
+            client_order_id: Order correlation id.
+            exchange_order_id: Venue-assigned order id.
+            exchange_name: Exchange name for logging.
+        """
+        if order_terminal:
             self.pending_orders.pop(client_order_id, None)
             self.client_by_exchange.pop(exchange_order_id, None)
             logger.info(f"[{exchange_name}] Order {client_order_id} filled, removed from pending")

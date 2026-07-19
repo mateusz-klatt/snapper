@@ -140,6 +140,53 @@ def normalize_order_status(status: ExchangeOrderStatusEnum) -> ExchangeOrderStat
     return normalization_map.get(status, status)
 
 
+_TERMINAL_ORDER_STATUSES: frozenset[ExchangeOrderStatusEnum] = frozenset(
+    {
+        ExchangeOrderStatusEnum.CLOSED,
+        ExchangeOrderStatusEnum.CANCELED,
+        ExchangeOrderStatusEnum.EXPIRED,
+    }
+)
+
+
+def order_status_is_terminal(status: ExchangeOrderStatusEnum) -> bool:
+    """Return whether a normalized order status is terminal.
+
+    Args:
+        status: A normalized :class:`ExchangeOrderStatusEnum`.
+
+    Returns:
+        Whether the status is closed, canceled, or expired.
+    """
+    return status in _TERMINAL_ORDER_STATUSES
+
+
+def is_lifecycle_only(execution: ExecutionUpdate) -> bool:
+    """Return whether a frame is a quantity-less, non-terminal lifecycle ack.
+
+    A venue ``new``/``pending_new``/``status`` frame for a freshly placed
+    RESTING order carries no traded quantity — its zero cumulative is coerced
+    to ``None`` by the adapter's ``_optional_float`` — and a non-terminal
+    normalized status (``NEW``/``PENDING_NEW`` map to ``OPEN`` via
+    :func:`normalize_order_status`). Such a frame confirms the order is resting
+    on the venue; it is NOT a fill and must not be booked or PUBLISHED as one:
+    :func:`to_fill_status` would default it to ``FILLED``, and even a
+    zero-delta publish carries a lifecycle-terminal ``FILLED`` status that
+    releases the engine's in-flight guard and retires the command. A frame that
+    carries any cumulative or last quantity, or whose normalized status is
+    terminal (a legitimate zero-delta terminal publish), is not lifecycle-only.
+
+    Args:
+        execution: Execution update from an exchange WebSocket or REST read.
+
+    Returns:
+        Whether the frame is a resting-order acknowledgement rather than a fill.
+    """
+    if execution.cum_qty is not None or execution.last_qty is not None:
+        return False
+    return not order_status_is_terminal(execution.order_status)
+
+
 @dataclass
 class TickerSnapshot:
     """Snapshot of ticker data for a trading symbol."""
@@ -251,6 +298,8 @@ type ExecType = Literal[
 type LiquidityIndicator = Literal["m", "t"]
 __all__ = [
     "to_fill_status",
+    "order_status_is_terminal",
+    "is_lifecycle_only",
     "OrderSideEnum",
     "ExchangeOrderTypeEnum",
     "ExchangeOrderStatusEnum",
