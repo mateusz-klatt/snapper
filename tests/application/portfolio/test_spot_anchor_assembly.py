@@ -10,6 +10,7 @@ from snapper.application.portfolio.spot_anchor_bootstrap import VenueHistoryItem
 from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryItem
 from snapper.infrastructure.exchanges.contracts import VenueAccountHistoryTip
 from snapper.infrastructure.exchanges.contracts import VenueOrderFillLegs
+from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 
 
 def _item(
@@ -94,6 +95,43 @@ def test_build_witnesses_from_reads_passes_refusals_through() -> None:
     outcome = build_witnesses_from_reads(tip, [(1, "O1", 600_000_000, False)], _buy_totals())
     assert outcome.witnesses == {}
     assert outcome.refusals == ("order_base_legs_disagree_with_total",)
+
+
+def test_committed_recon_exec_id_composes_a_clean_witness() -> None:
+    """Given: The frozen production ``recon-`` id of a fast walutomat fill and its legs.
+
+    When: The id is decoded via the client and its execution witnessed,
+    Then: The witness composes with no refusals — proving the append-only recon row
+        seals the anchor exactly as a streamed ``wal-`` fill would (S4c-5 UAT
+        regression: a marketable-limit that fills inside one poll interval is booked
+        by the executor's corrective path and must stay anchor-witnessable).
+    """
+    order_id = "060903a6-8bdf-4adb-8108-97e09e7030a6"
+    components = WalutomatExchangeClient().parse_execution_exec_id(f"recon-{order_id}-c20.04")
+    assert components == (order_id, 2004000000, False)
+    tip = VenueAccountHistoryTip(
+        item_id=100,
+        reached_genesis=True,
+        items=(
+            _item(100, "MARKET_FX", "20.04", "EUR", order_id=order_id, transaction_id="T1"),
+            _item(99, "MARKET_FX", "-87.68", "PLN", order_id=order_id, transaction_id="T1"),
+        ),
+    )
+    totals = {
+        order_id: VenueOrderFillLegs(
+            order_id=order_id,
+            bought_amount=Decimal("20.04"),
+            sold_amount=Decimal("87.68"),
+            commission_amount=Decimal("0"),
+            bought_currency="EUR",
+            sold_currency="PLN",
+            commission_currency="EUR",
+            buy_sell="BUY",
+        )
+    }
+    outcome = build_witnesses_from_reads(tip, [(1, *components)], totals)
+    assert outcome.refusals == ()
+    assert outcome.witnesses == {1: frozenset({100, 99})}
 
 
 def test_venue_history_tip_from_raw_normalizes_markers() -> None:

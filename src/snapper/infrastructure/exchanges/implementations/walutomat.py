@@ -148,6 +148,46 @@ def _parse_walutomat_exec_id(exec_id: str) -> tuple[str, int, bool] | None:
     return order_id, int(basis_units), is_terminal
 
 
+def _parse_walutomat_recon_exec_id(exec_id: str) -> tuple[str, int, bool] | None:
+    """Decode the executor's legacy corrective ``recon-{orderId}-c{cumulative!r}``.
+
+    The venue-agnostic reconciliation backstop
+    (``ExchangeExecutorService._build_corrective_fill``) books a gap fill with
+    ``exec_id = f"recon-{oid}-c{filled!r}"`` — the cumulative is a Python float repr
+    (e.g. ``20.04``), NOT the basis-unit integer the streamed ``wal-`` scheme uses. A
+    Walutomat marketable-limit that fills inside one poll interval never surfaces on
+    the active-orders endpoint, so the adapter emits no ``wal-`` fill and this
+    corrective is the sole committed execution; its cumulative is still the venue's
+    own reported base volume, identical in meaning to :func:`_walutomat_exec_id`.
+    Re-quantizing that float with the SAME ``int(round(value * _EXEC_ID_BASIS_UNITS))``
+    expression makes a recon id and a hypothetical ``wal-`` id for the same fill decode
+    to identical basis units, so the witness lands on the same account/history fill
+    boundary. A corrective is always an active fill, never the disappeared-order ``-t``
+    terminal, so ``is_terminal`` is ``False``. Fails closed (``None``) on any
+    non-``recon-`` id, an empty order id or tail, or a non-numeric, non-finite,
+    negative, or non-canonical-repr tail, preserving the foreign-id contract.
+
+    Args:
+        exec_id: The stored ``Execution.exec_id``.
+
+    Returns:
+        ``(order_id, cumulative_basis_units, is_terminal)`` or ``None``.
+    """
+    if not exec_id.startswith("recon-"):
+        return None
+    body = exec_id[len("recon-") :]
+    order_id, separator, cumulative_repr = body.rpartition("-c")
+    if not separator or not order_id or not cumulative_repr:
+        return None
+    try:
+        cumulative = float(cumulative_repr)
+    except ValueError:
+        return None
+    if not math.isfinite(cumulative) or cumulative < 0 or repr(cumulative) != cumulative_repr:
+        return None
+    return order_id, int(round(cumulative * _EXEC_ID_BASIS_UNITS)), False
+
+
 @dataclass
 class _TrackedOrder:
     """Internal state for polling-based execution tracking.
@@ -1688,14 +1728,27 @@ class WalutomatExchangeClient(ExchangeClientBase):
     def parse_execution_exec_id(self, exec_id: str) -> tuple[str, int, bool] | None:
         """Decode a Walutomat exec id into its witness components (see base).
 
+        Accepts BOTH the streamed ``wal-{orderId}-c{basis_units}[-t]`` scheme and the
+        executor's legacy corrective ``recon-{orderId}-c{cumulative!r}`` scheme; both
+        decode to ``(order_id, cumulative_basis_units, is_terminal)`` with identical
+        basis units for the same fill, so a corrective-booked instant fill witnesses
+        exactly as a streamed fill would. A Walutomat marketable-limit that fills
+        inside one poll interval never surfaces on the active-orders endpoint, so the
+        adapter emits no ``wal-`` fill and the executor's reconciliation backstop books
+        the sole execution with a ``recon-`` id; without this dual decode that frozen,
+        append-only row would leave the scope permanently un-anchorable.
+
         Args:
             exec_id: The stored ``Execution.exec_id``.
 
         Returns:
-            ``(order_id, cumulative_basis_units, is_terminal)`` or ``None`` when
-            the id is not a Walutomat exec id.
+            ``(order_id, cumulative_basis_units, is_terminal)`` or ``None`` when the id
+            matches neither Walutomat scheme.
         """
-        return _parse_walutomat_exec_id(exec_id)
+        streamed = _parse_walutomat_exec_id(exec_id)
+        if streamed is not None:
+            return streamed
+        return _parse_walutomat_recon_exec_id(exec_id)
 
     async def find_order_by_client_id(
         self, client_order_id: str, symbol: str | None = None

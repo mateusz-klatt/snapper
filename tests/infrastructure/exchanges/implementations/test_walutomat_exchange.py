@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from loguru import logger
 
 import snapper.infrastructure.exchanges.implementations.walutomat as walutomat_mod
+from snapper.application.portfolio.spot_anchor_witness import decode_execution_cumulative
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -38,9 +39,13 @@ from snapper.infrastructure.exchanges.implementations.walutomat import _active_e
 from snapper.infrastructure.exchanges.implementations.walutomat import _parse_walutomat_decimal
 from snapper.infrastructure.exchanges.implementations.walutomat import _parse_walutomat_exec_id
 from snapper.infrastructure.exchanges.implementations.walutomat import _parse_walutomat_history_item
+from snapper.infrastructure.exchanges.implementations.walutomat import (
+    _parse_walutomat_recon_exec_id,
+)
 from snapper.infrastructure.exchanges.implementations.walutomat import _should_emit_active_execution
 from snapper.infrastructure.exchanges.implementations.walutomat import _snapshot_tracked_order
 from snapper.infrastructure.exchanges.implementations.walutomat import _TrackedOrder
+from snapper.infrastructure.exchanges.implementations.walutomat import _walutomat_exec_id
 from snapper.infrastructure.exchanges.implementations.walutomat import _walutomat_operation_detail
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
@@ -5752,6 +5757,74 @@ def test_parse_execution_exec_id_delegates_to_the_module_parser() -> None:
     """
     client = WalutomatExchangeClient()
     assert client.parse_execution_exec_id("wal-ord-1-c500000000") == ("ord-1", 500000000, False)
+
+
+def test_parse_walutomat_recon_exec_id_decodes_live_and_variants() -> None:
+    """Given: The executor's corrective ``recon-{oid}-c{cumulative!r}`` ids.
+
+    When: They are parsed,
+    Then: The order id and basis-unit cumulative are recovered, never terminal, with
+        the LAST ``-c`` splitting an order id that itself contains ``-c``.
+    """
+    assert _parse_walutomat_recon_exec_id("recon-060903a6-8bdf-4adb-8108-97e09e7030a6-c20.04") == (
+        "060903a6-8bdf-4adb-8108-97e09e7030a6",
+        2004000000,
+        False,
+    )
+    assert _parse_walutomat_recon_exec_id("recon-ord-c2.0") == ("ord", 200000000, False)
+    assert _parse_walutomat_recon_exec_id("recon-ord-c1e-08") == ("ord", 1, False)
+    assert _parse_walutomat_recon_exec_id("recon-aaaa-c111-bbbb-c20.04") == (
+        "aaaa-c111-bbbb",
+        2004000000,
+        False,
+    )
+
+
+def test_parse_walutomat_recon_exec_id_fails_closed() -> None:
+    """Given: Foreign or malformed recon ids.
+
+    When: They are parsed,
+    Then: None is returned so a corrupt or non-canonical id fails the bijection closed.
+    """
+    assert _parse_walutomat_recon_exec_id("wal-x-c1") is None
+    assert _parse_walutomat_recon_exec_id("x") is None
+    assert _parse_walutomat_recon_exec_id("recon-oid") is None
+    assert _parse_walutomat_recon_exec_id("recon--c5.0") is None
+    assert _parse_walutomat_recon_exec_id("recon-oid-c") is None
+    assert _parse_walutomat_recon_exec_id("recon-oid-cabc") is None
+    assert _parse_walutomat_recon_exec_id("recon-oid-cinf") is None
+    assert _parse_walutomat_recon_exec_id("recon-oid-cnan") is None
+    assert _parse_walutomat_recon_exec_id("recon-oid-c-5.0") is None
+    assert _parse_walutomat_recon_exec_id("recon-oid-c20.040") is None
+
+
+def test_parse_execution_exec_id_accepts_both_wal_and_recon_schemes() -> None:
+    """Given: A Walutomat client and ids from both emission schemes.
+
+    When: parse_execution_exec_id is called,
+    Then: Streamed ``wal-`` and corrective ``recon-`` ids both decode, foreign ids do
+        not, so a corrective-booked instant fill witnesses like a streamed one.
+    """
+    client = WalutomatExchangeClient()
+    assert client.parse_execution_exec_id("wal-ord-1-c500000000") == ("ord-1", 500000000, False)
+    assert client.parse_execution_exec_id("recon-ord-2-c20.04") == ("ord-2", 2004000000, False)
+    assert client.parse_execution_exec_id("kraken-abc") is None
+
+
+def test_recon_and_streamed_ids_decode_to_identical_witness_components() -> None:
+    """Given: The same fill expressed as a committed recon id and a streamed wal id.
+
+    When: Both are decoded,
+    Then: They yield identical witness components and the basis units round-trip to the
+        venue's reported base volume — the frozen recon row seals exactly as a streamed
+        fill would.
+    """
+    order_id = "060903a6-8bdf-4adb-8108-97e09e7030a6"
+    client = WalutomatExchangeClient()
+    streamed = _parse_walutomat_exec_id(_walutomat_exec_id(order_id, 20.04))
+    assert client.parse_execution_exec_id(f"recon-{order_id}-c20.04") == streamed
+    assert streamed == (order_id, 2004000000, False)
+    assert decode_execution_cumulative(2004000000) == Decimal("20.04")
 
 
 @pytest.mark.asyncio()
