@@ -29,11 +29,13 @@ Design constraints:
 import asyncio
 import contextlib
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from typing import Final
+from typing import Literal
 
 import zmq
 import zmq.asyncio
@@ -75,6 +77,60 @@ _TARGET_TOPIC_SUFFIX = ".candles.1m"
 """Python-side suffix gate so the SUB socket can use the cheap
 ``market.`` byte prefix without parsing every tick / trade payload."""
 
+_PREWARM_MAX_CONCURRENCY: Final = 4
+"""Concurrent prewarm slices, following the house pattern in
+``messaging/publishers/base.py``.
+
+Sized against the API container, which is the only one that builds a
+:class:`MarketCacheService` and which runs the SQLAlchemy default pool
+of 5 with 10 overflow. It is deliberately NOT sized against the clamped
+feed / strategies / notify containers (``DB_POOL_SIZE=2``), which never
+prewarm. Four leaves a connection free for the rest of lifespan startup
+while staying well inside the pool, which matters because
+``pool_timeout`` is configured nowhere in this codebase: exhaustion
+would stall 30 s per slice and surface as a swallowed ``TimeoutError``
+rather than a hard failure. Lower this to 2 if the API container ever
+inherits the clamp."""
+
+_PREWARM_INSTRUMENT_SLICE: Final = 64
+"""Instruments read per session. Bounds both the blast radius of a
+slice-level failure and the work re-done when a slice falls back to
+the per-instrument path."""
+
+_PREWARM_LOOKBACK: Final = timedelta(days=2)
+"""First-pass ``open_at`` floor, mirroring
+``repository._CANDLE_ID_CACHE_LOOKBACK``. ``_CACHE_CANDLE_LIMIT`` 1m
+bars span 100 minutes, so two days leaves ~29x slack for any
+instrument with recent trading. Instruments the floored pass leaves
+short are re-read with NO floor, so the bound can never shrink
+coverage."""
+
+_PREWARM_DEADLINE_S: Final = 60.0
+"""Hard wall-clock ceiling on the whole prewarm phase.
+
+Prewarm sits on the lifespan critical path, so its cost is startup
+latency and the container's healthcheck budget is finite. Once this
+elapses, remaining reads are abandoned and the cache warms from live
+ingest instead. Without it a systemically unavailable database turns
+every read into a 30 s pool timeout and prewarm degrades into a
+multi-hour stall — the exact failure this batching work exists to
+prevent, only worse."""
+
+_PREWARM_SLICE_FAILURE_BUDGET: Final = 3
+"""Slice failures tolerated before the per-instrument fallback stops.
+
+The fallback exists so ONE poisoned symbol cannot cost its whole slice.
+It is the wrong response to a dead database, where it would multiply a
+single failed batch read into ``_PREWARM_INSTRUMENT_SLICE`` further
+failing reads. Past this many failed slices the failure is treated as
+systemic and remaining slices fail fast."""
+
+PrewarmOutcome = Literal["warmed", "empty", "failed"]
+"""Per-instrument prewarm result. ``"empty"`` (no 1m history) and
+``"failed"`` (the DB call raised) were previously conflated into a
+single ``False``, which is why an observed warmed-vs-configured gap
+could not be interpreted."""
+
 
 @dataclass(frozen=True, slots=True)
 class CandleSnap:
@@ -100,6 +156,51 @@ class CandleSnap:
     low: float
     close: float
     volume: float
+
+
+@dataclass(slots=True)
+class _PrewarmBudget:
+    """Shared time and failure budget bounding one prewarm run.
+
+    Both bounds exist to keep a degraded database from converting
+    prewarm into an unbounded startup stall: the deadline caps total
+    wall time, and the failure counter stops the per-instrument fallback
+    once failures look systemic rather than symbol-specific.
+
+    Attributes:
+        deadline: Event-loop time after which no further read starts.
+        slice_failures: Slice-level failures observed so far.
+    """
+
+    deadline: float
+    slice_failures: int = 0
+
+    def exhausted(self, now: float) -> bool:
+        """Return whether prewarm must stop starting new reads.
+
+        Args:
+            now: Current event-loop time.
+
+        Returns:
+            Whether either bound has been reached.
+        """
+        return now >= self.deadline or self.slice_failures >= _PREWARM_SLICE_FAILURE_BUDGET
+
+
+@dataclass(frozen=True, slots=True)
+class _PrewarmTarget:
+    """One resolved instrument queued for prewarm.
+
+    Attributes:
+        exchange: Source exchange identifier.
+        native_symbol: Native-format symbol (never the literal ``"*"``).
+        instrument_public_id: Public ID resolved in batch per exchange,
+            so the candle read never re-resolves the symbol.
+    """
+
+    exchange: AllExchange
+    native_symbol: str
+    instrument_public_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,9 +472,114 @@ class MarketCacheService:
         implementation called ``repository.get_candles(instrument="*")``
         verbatim and trivially matched zero rows. Wildcards now route
         through the per-exchange symbol enumeration.
+
+        Symbols resolve to instrument public IDs ONCE per exchange
+        instead of once per instrument: the per-instrument read used to
+        re-derive, through ``get_candles``, an instrument this method had
+        already enumerated, costing one pooled checkout plus a
+        ``Symbol``-to-``Instrument`` join per symbol. Candle reads then
+        run in slices of ``_PREWARM_INSTRUMENT_SLICE`` instruments per
+        session, at most ``_PREWARM_MAX_CONCURRENCY`` slices at a time.
+
+        Reads run in two passes. The first bounds ``open_at`` at
+        ``_PREWARM_LOOKBACK``, which turns a backward index walk only
+        ``LIMIT`` could terminate into a two-column range descent; the
+        second re-reads only the instruments the first left short of
+        ``_CACHE_CANDLE_LIMIT``, with NO floor. Dropping the floor can
+        only add rows, and under ``ORDER BY open_at DESC LIMIT n`` the
+        top-n of a superset contains the top-n of the floored set, so the
+        second pass's result supersedes the first and final coverage is
+        identical to an unfloored read. The floor is therefore a pure
+        optimisation that cannot drop an instrument from the cache.
+
+        Prewarm stays inline, ahead of the SUB socket, so
+        :meth:`_apply_prewarm_rows` can assign deques wholesale without
+        racing live ingest.
+
+        The completion tally is derived from the BEST row count each
+        instrument reached across both passes, never from the last pass
+        to touch it. A second-pass read that raises leaves the first
+        pass's rows installed in the deque, so reporting that instrument
+        as ``failed`` would contradict the cache's actual contents; an
+        instrument counts as ``failed`` only when it ends with no rows
+        AND some pass raised for it.
         """
+        started = asyncio.get_event_loop().time()
         as_of = datetime.now(UTC)
-        warmed = 0
+        targets, unresolved, skipped_exchanges = await self._collect_prewarm_targets(as_of)
+        semaphore = asyncio.Semaphore(_PREWARM_MAX_CONCURRENCY)
+        budget = _PrewarmBudget(deadline=started + _PREWARM_DEADLINE_S)
+        counts: dict[tuple[AllExchange, str], int] = {}
+        raised: set[tuple[AllExchange, str]] = set()
+        for open_at_floor in (as_of - _PREWARM_LOOKBACK, None):
+            pending = [
+                target
+                for target in targets
+                if counts.get((target.exchange, target.native_symbol), 0) < _CACHE_CANDLE_LIMIT
+            ]
+            if not pending or budget.exhausted(asyncio.get_event_loop().time()):
+                break
+            slices = [
+                pending[index : index + _PREWARM_INSTRUMENT_SLICE]
+                for index in range(0, len(pending), _PREWARM_INSTRUMENT_SLICE)
+            ]
+            results = await asyncio.gather(
+                *(
+                    self._prewarm_slice(chunk, as_of, open_at_floor, semaphore, budget)
+                    for chunk in slices
+                )
+            )
+            for result in results:
+                for key, (outcome, count) in result.items():
+                    counts[key] = max(counts.get(key, 0), count)
+                    if outcome == "failed":
+                        raised.add(key)
+        warmed = sum(1 for count in counts.values() if count)
+        empty = sum(1 for key, count in counts.items() if not count and key not in raised)
+        failed = sum(1 for key, count in counts.items() if not count and key in raised)
+        elapsed = asyncio.get_event_loop().time() - started
+        logger.info(
+            "MarketCacheService prewarm complete: {} warmed, {} empty, {} unresolved, "
+            "{} failed, {} exchanges skipped in {:.1f}s",
+            warmed,
+            empty,
+            unresolved,
+            failed,
+            skipped_exchanges,
+            elapsed,
+        )
+        if failed or skipped_exchanges:
+            logger.warning(
+                "MarketCacheService prewarm degraded: {} instruments failed, "
+                "{} exchanges skipped",
+                failed,
+                skipped_exchanges,
+            )
+
+    async def _collect_prewarm_targets(
+        self, as_of: datetime
+    ) -> tuple[list[_PrewarmTarget], int, int]:
+        """Expand the persist set to resolved instruments, batched per exchange.
+
+        Wildcard expansion keeps its own per-exchange guard so the
+        2026-05-24 behaviour and its blast-radius ceiling are unchanged.
+        Symbol resolution then runs ONCE per exchange through
+        :meth:`Repository.get_instrument_public_ids_by_symbols`, which
+        applies the identical ``where_active`` pair the per-instrument
+        read used to apply one symbol at a time. Symbols absent from the
+        returned mapping are alias-only rows with no active instrument;
+        they are dropped before any candle read and warm zero rows,
+        exactly as before.
+
+        Args:
+            as_of: Snapshot time threading the temporal queries.
+
+        Returns:
+            Tuple of the resolved targets, the count of symbols that did
+            not resolve, and the count of exchanges skipped entirely.
+        """
+        by_exchange: dict[AllExchange, set[str]] = {}
+        skipped_exchanges = 0
         for exchange, native_symbol in self.persist_policy.iter_persisted_instruments("candles"):
             if native_symbol == "*":
                 try:
@@ -386,61 +592,183 @@ class MarketCacheService:
                         exchange,
                         exc,
                     )
+                    skipped_exchanges += 1
                     continue
             else:
                 expanded = [native_symbol]
-            for symbol in expanded:
-                if await self._prewarm_one(exchange, symbol, as_of):
-                    warmed += 1
-        logger.info("MarketCacheService prewarm complete: {} instruments warmed", warmed)
+            by_exchange.setdefault(exchange, set()).update(expanded)
+        targets: list[_PrewarmTarget] = []
+        unresolved = 0
+        for exchange, symbols in by_exchange.items():
+            try:
+                mapping = await self.repository.get_instrument_public_ids_by_symbols(
+                    symbols, str(exchange), as_of
+                )
+            except Exception as exc:
+                logger.warning(
+                    "MarketCacheService prewarm instrument resolve failed for {}: {}",
+                    exchange,
+                    exc,
+                )
+                skipped_exchanges += 1
+                continue
+            unresolved += len(symbols) - len(mapping)
+            targets.extend(
+                _PrewarmTarget(exchange, symbol, instrument_public_id)
+                for symbol, instrument_public_id in mapping.items()
+            )
+        return targets, unresolved, skipped_exchanges
 
-    async def _prewarm_one(
-        self,
-        exchange: AllExchange,
-        native_symbol: str,
-        as_of: datetime,
-    ) -> bool:
-        """Backfill the cache for a single instrument.
+    async def _apply_prewarm_rows(
+        self, exchange: AllExchange, native_symbol: str, rows: Sequence[CandleRow]
+    ) -> int:
+        """Seed one instrument's deque from DESC-ordered DB rows.
+
+        Wholesale assignment is safe because :meth:`start` awaits prewarm
+        BEFORE creating the SUB socket, so no ingest task exists and no
+        live bar can already be in the deque. If prewarm is ever moved
+        off the lifespan critical path, this MUST become a merge that
+        folds DB snaps UNDER existing live snaps by ``open_at_ms``: a
+        live frame promoted by :meth:`_dispatch_candle` would otherwise
+        be silently discarded when prewarm reaches that symbol.
 
         Args:
             exchange: Source exchange identifier.
-            native_symbol: Native-format symbol resolved by the
-                persist policy (never the literal ``"*"``).
-            as_of: Snapshot time threading the temporal query.
+            native_symbol: Native-format symbol.
+            rows: Candle rows in DESCENDING ``open_at`` order.
 
         Returns:
-            ``True`` when at least one candle row seeded the deque;
-            ``False`` when the symbol has no 1m history or the DB
-            call failed (warning is logged before returning False).
+            Number of snaps installed; ``0`` when ``rows`` is empty.
         """
-        try:
-            rows = await self.repository.get_candles(
-                instrument=native_symbol,
-                timeframe=_TARGET_TIMEFRAME,
-                start=None,
-                end=None,
-                exchange=exchange,
-                as_of=as_of,
-                limit=_CACHE_CANDLE_LIMIT,
-                order="desc",
-            )
-        except Exception as exc:
-            logger.warning(
-                "MarketCacheService prewarm failed for {} {}: {}",
-                exchange,
-                native_symbol,
-                exc,
-            )
-            return False
         if not rows:
-            return False
-        chronological: Iterable[CandleRow] = reversed(rows)
-        snaps = [_snap_from_candle_row(row) for row in chronological]
+            return 0
+        snaps = [_snap_from_candle_row(row) for row in reversed(rows)]
         key = (exchange, native_symbol)
         async with self._lock:
             self._candles[key] = deque(snaps, maxlen=_CACHE_CANDLE_LIMIT)
             self._last_seen_at[key] = asyncio.get_event_loop().time()
-        return True
+        return len(snaps)
+
+    async def _prewarm_slice(
+        self,
+        targets: Sequence[_PrewarmTarget],
+        as_of: datetime,
+        open_at_floor: datetime | None,
+        semaphore: asyncio.Semaphore,
+        budget: _PrewarmBudget,
+    ) -> dict[tuple[AllExchange, str], tuple[PrewarmOutcome, int]]:
+        """Read and install one slice of instruments under the concurrency cap.
+
+        The guard spans BOTH the repository call and the apply loop: an
+        exception escaping here would propagate out of :meth:`_prewarm`
+        and out of :meth:`start` while ``_listener_lock`` is held,
+        aborting the lifespan and turning "slow to bind" into "never
+        binds". A slice-level failure degrades to the per-instrument
+        path so one bad symbol still cannot block warmup.
+
+        That fallback is deliberately budgeted. It answers "one poisoned
+        symbol", not "the database is gone": unbudgeted, an unreachable
+        database would turn each failed batch read into
+        ``_PREWARM_INSTRUMENT_SLICE`` further reads that each wait out
+        the pool timeout, and with both passes retrying every
+        zero-count target the phase would stall for hours behind an
+        unbound port. The shared :class:`_PrewarmBudget` therefore fails
+        the slice fast once failures look systemic or the deadline has
+        passed.
+
+        Args:
+            targets: Instruments in this slice.
+            as_of: Snapshot time threading the temporal query.
+            open_at_floor: Inclusive ``open_at`` bound, or ``None``.
+            semaphore: Bounds concurrent slices against the DB pool.
+            budget: Shared deadline and slice-failure budget.
+
+        Returns:
+            Mapping from cache key to the outcome and installed count.
+        """
+        async with semaphore:
+            outcomes: dict[tuple[AllExchange, str], tuple[PrewarmOutcome, int]] = {}
+            if budget.exhausted(asyncio.get_event_loop().time()):
+                for target in targets:
+                    outcomes[(target.exchange, target.native_symbol)] = ("failed", 0)
+                return outcomes
+            try:
+                by_public_id = await self.repository.get_latest_candles_for_instruments(
+                    [target.instrument_public_id for target in targets],
+                    _TARGET_TIMEFRAME,
+                    as_of,
+                    _CACHE_CANDLE_LIMIT,
+                    open_at_floor,
+                )
+                for target in targets:
+                    count = await self._apply_prewarm_rows(
+                        target.exchange,
+                        target.native_symbol,
+                        by_public_id.get(target.instrument_public_id, []),
+                    )
+                    outcomes[(target.exchange, target.native_symbol)] = (
+                        "warmed" if count else "empty",
+                        count,
+                    )
+            except Exception as exc:
+                budget.slice_failures += 1
+                logger.warning(
+                    "MarketCacheService prewarm slice failed for {} instruments on {} "
+                    "({} pass), failure {} of {}: {}",
+                    len(targets),
+                    ", ".join(sorted({str(target.exchange) for target in targets})),
+                    "floored" if open_at_floor is not None else "unfloored",
+                    budget.slice_failures,
+                    _PREWARM_SLICE_FAILURE_BUDGET,
+                    exc,
+                )
+                for target in targets:
+                    key = (target.exchange, target.native_symbol)
+                    if budget.exhausted(asyncio.get_event_loop().time()):
+                        outcomes[key] = ("failed", 0)
+                        continue
+                    outcomes[key] = await self._prewarm_one_fallback(target, as_of)
+            return outcomes
+
+    async def _prewarm_one_fallback(
+        self, target: _PrewarmTarget, as_of: datetime
+    ) -> tuple[PrewarmOutcome, int]:
+        """Prewarm one instrument after its slice read failed.
+
+        Preserves the pre-batch failure isolation and, critically, the
+        per-symbol WARNING that is the only operator-visible record of
+        which symbol failed. Passes no ``open_at_floor``: if the slice
+        already failed, the floor is not worth also risking.
+
+        Args:
+            target: The instrument to read.
+            as_of: Snapshot time threading the temporal query.
+
+        Returns:
+            The outcome and the installed row count.
+        """
+        try:
+            by_public_id = await self.repository.get_latest_candles_for_instruments(
+                [target.instrument_public_id],
+                _TARGET_TIMEFRAME,
+                as_of,
+                _CACHE_CANDLE_LIMIT,
+                None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "MarketCacheService prewarm failed for {} {}: {}",
+                target.exchange,
+                target.native_symbol,
+                exc,
+            )
+            return "failed", 0
+        count = await self._apply_prewarm_rows(
+            target.exchange,
+            target.native_symbol,
+            by_public_id.get(target.instrument_public_id, []),
+        )
+        return "warmed" if count else "empty", count
 
     async def _ingest_loop(self) -> None:
         """Consume market.* frames, filter to closed 1m candles, dispatch."""

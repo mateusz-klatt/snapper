@@ -12,6 +12,7 @@ each have their own assertion.
 
 import asyncio
 import contextlib
+from collections.abc import Sequence
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -22,6 +23,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from snapper.application.services.market_cache import _PREWARM_INSTRUMENT_SLICE
+from snapper.application.services.market_cache import _PREWARM_MAX_CONCURRENCY
+from snapper.application.services.market_cache import _PREWARM_SLICE_FAILURE_BUDGET
 from snapper.application.services.market_cache import MarketCacheService
 from snapper.application.services.market_cache import PairStats
 from snapper.application.services.market_cache import _format_stale_age
@@ -87,16 +91,30 @@ def _row(
     )
 
 
+def _pid(native_symbol: str) -> str:
+    """Return the fake instrument public ID the test resolver assigns."""
+    return f"pid-{native_symbol}"
+
+
 def _build_service(
     *,
     persist_pairs: list[tuple[Any, str]] | None = None,
     candles_by_instrument: dict[str, list[CandleRow]] | None = None,
     instruments_by_exchange: dict[str, list[str]] | None = None,
+    unresolvable_symbols: set[str] | None = None,
 ) -> tuple[MarketCacheService, MagicMock, MagicMock]:
-    """Build a :class:`MarketCacheService` against AsyncMock repo + stub policy."""
+    """Build a :class:`MarketCacheService` against AsyncMock repo + stub policy.
+
+    The repository fakes model the batched prewarm path: symbols resolve
+    to ``pid-<symbol>`` unless listed in ``unresolvable_symbols`` (the
+    alias-only case), and the batch candle reader honours
+    ``open_at_floor`` so the two-pass floor logic is exercised for real
+    rather than stubbed away.
+    """
     repo = MagicMock()
     candles_by_instrument = candles_by_instrument or {}
     instruments_by_exchange = instruments_by_exchange or {}
+    unresolvable_symbols = unresolvable_symbols or set()
 
     async def _fake_get_candles(*, instrument: str, **kwargs: Any) -> list[CandleRow]:
         del kwargs
@@ -106,8 +124,36 @@ def _build_service(
         del kwargs
         return list(instruments_by_exchange.get(exchange, []))
 
+    async def _fake_resolve(
+        native_symbols: set[str], exchange: str, as_of: datetime
+    ) -> dict[str, str]:
+        del exchange, as_of
+        return {
+            symbol: _pid(symbol) for symbol in native_symbols if symbol not in unresolvable_symbols
+        }
+
+    async def _fake_batch_candles(
+        instrument_public_ids: Sequence[str],
+        timeframe: str,
+        as_of: datetime,
+        limit_per_instrument: int,
+        open_at_floor: datetime | None = None,
+    ) -> dict[str, list[CandleRow]]:
+        del timeframe, as_of
+        batch: dict[str, list[CandleRow]] = {}
+        for instrument_public_id in instrument_public_ids:
+            rows = candles_by_instrument.get(instrument_public_id.removeprefix("pid-"), [])
+            if open_at_floor is not None:
+                rows = [row for row in rows if row["open_at"] >= open_at_floor]
+            rows = rows[:limit_per_instrument]
+            if rows:
+                batch[instrument_public_id] = rows
+        return batch
+
     repo.get_candles = AsyncMock(side_effect=_fake_get_candles)
     repo.get_exchange_instruments = AsyncMock(side_effect=_fake_get_exchange_instruments)
+    repo.get_instrument_public_ids_by_symbols = AsyncMock(side_effect=_fake_resolve)
+    repo.get_latest_candles_for_instruments = AsyncMock(side_effect=_fake_batch_candles)
     policy = MagicMock()
     policy.iter_persisted_instruments.return_value = iter(persist_pairs or [])
     service = MarketCacheService(
@@ -258,7 +304,7 @@ class TestPrewarm:
 
         result = await service.get_1m_candles(ExchangeEnum.KRAKEN, "BTC-USD", limit=100)
         assert [s.close for s in result] == [1.0, 2.0, 3.0]
-        repo.get_candles.assert_awaited_once()
+        repo.get_candles.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_prewarm_empty_result_skips_instrument(self) -> None:
@@ -274,14 +320,29 @@ class TestPrewarm:
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_prewarm_repo_failure_skips_instrument(self) -> None:
-        """A repository raise is logged + skipped; remaining instruments warm."""
+    async def test_prewarm_slice_failure_falls_back_per_instrument(self) -> None:
+        """A slice-level raise degrades to the per-instrument path.
 
-        async def _fail_then_succeed(*, instrument: str, **kwargs: Any) -> list[CandleRow]:
-            del kwargs
-            if instrument == "BAD":
+        Given: A batch reader that raises whenever a bad instrument is in
+            the slice but succeeds for a single-instrument read of the
+            good one,
+        When: prewarm runs,
+        Then: The bad symbol stays cold, the good symbol still warms, and
+            the failure never escapes ``_prewarm``.
+        """
+        row = _row(open_at=datetime(2026, 5, 13, 10, 0, tzinfo=UTC), close=5.0)
+
+        async def _fail_on_bad(
+            instrument_public_ids: Sequence[str],
+            timeframe: str,
+            as_of: datetime,
+            limit_per_instrument: int,
+            open_at_floor: datetime | None = None,
+        ) -> dict[str, list[CandleRow]]:
+            del timeframe, as_of, limit_per_instrument, open_at_floor
+            if _pid("BAD") in instrument_public_ids:
                 raise RuntimeError("DB hiccup")
-            return [_row(open_at=datetime(2026, 5, 13, 10, 0, tzinfo=UTC), close=5.0)]
+            return {_pid("GOOD"): [row]}
 
         service, repo, _ = _build_service(
             persist_pairs=[
@@ -289,7 +350,7 @@ class TestPrewarm:
                 (ExchangeEnum.KRAKEN, "GOOD"),
             ],
         )
-        repo.get_candles = AsyncMock(side_effect=_fail_then_succeed)
+        repo.get_latest_candles_for_instruments = AsyncMock(side_effect=_fail_on_bad)
 
         await service._prewarm()
 
@@ -297,6 +358,279 @@ class TestPrewarm:
         good = await service.get_1m_candles(ExchangeEnum.KRAKEN, "GOOD", limit=10)
         assert bad == []
         assert len(good) == 1
+
+    @pytest.mark.asyncio
+    async def test_prewarm_never_raises_out_of_start(self) -> None:
+        """Every prewarm failure path is contained inside ``start``.
+
+        Given: A repository whose resolve raises for one exchange while
+            the other resolves normally, and whose batch candle read and
+            per-instrument fallback then both raise,
+        When: ``start`` runs with no broker address,
+        Then: It returns normally and still spawns the prune loop, so a
+            prewarm fault degrades the cache instead of aborting the
+            application lifespan.
+
+        The resolve failure is scoped to ONE exchange deliberately: if it
+        raised for every exchange no target would survive, the batch
+        reader would never be awaited, and this test would silently stop
+        exercising the candle-read failure path it exists to cover.
+        """
+
+        async def _resolve(
+            native_symbols: set[str], exchange: str, as_of: datetime
+        ) -> dict[str, str]:
+            del as_of
+            if exchange == ExchangeEnum.KRAKEN:
+                raise RuntimeError("resolve exploded")
+            return {symbol: _pid(symbol) for symbol in native_symbols}
+
+        service, repo, _ = _build_service(
+            persist_pairs=[
+                (ExchangeEnum.KRAKEN, "BTC-USD"),
+                (ExchangeEnum.WALUTOMAT, "EUR-PLN"),
+            ],
+        )
+        repo.get_instrument_public_ids_by_symbols = AsyncMock(side_effect=_resolve)
+        repo.get_latest_candles_for_instruments = AsyncMock(
+            side_effect=RuntimeError("batch exploded")
+        )
+
+        await service.start("")
+
+        assert repo.get_latest_candles_for_instruments.await_count > 0
+        assert service._prune_task is not None
+        await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_prewarm_unresolved_symbol_never_queries_candles(self) -> None:
+        """Alias-only symbols are dropped before any candle read.
+
+        Given: Two persisted symbols of which one has no active instrument,
+        When: prewarm runs,
+        Then: The unresolved symbol's public ID never reaches the batch
+            candle reader and it warms nothing.
+        """
+        row = _row(open_at=datetime(2026, 5, 13, 10, 0, tzinfo=UTC), close=7.0)
+        service, repo, _ = _build_service(
+            persist_pairs=[
+                (ExchangeEnum.KRAKEN, "REAL"),
+                (ExchangeEnum.KRAKEN, "ALIAS-ONLY"),
+            ],
+            candles_by_instrument={"REAL": [row], "ALIAS-ONLY": [row]},
+            unresolvable_symbols={"ALIAS-ONLY"},
+        )
+
+        await service._prewarm()
+
+        queried = {
+            instrument_public_id
+            for call in repo.get_latest_candles_for_instruments.await_args_list
+            for instrument_public_id in call.args[0]
+        }
+        assert _pid("ALIAS-ONLY") not in queried
+        assert await service.get_1m_candles(ExchangeEnum.KRAKEN, "ALIAS-ONLY", limit=10) == []
+        assert len(await service.get_1m_candles(ExchangeEnum.KRAKEN, "REAL", limit=10)) == 1
+
+    @pytest.mark.asyncio
+    async def test_prewarm_issues_one_resolve_query_per_exchange(self) -> None:
+        """The batched path is O(1) per exchange, not O(n) per instrument.
+
+        Given: Two exchanges each wildcard-expanding to 80 symbols,
+        When: prewarm runs,
+        Then: Resolution costs one call per exchange, the per-instrument
+            ``get_candles`` path is never used, and every batch candle
+            read carries more than one instrument. This is the guard that
+            would have caught the 2948-sequential-query startup stall.
+        """
+        base = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+        kraken = [f"K{index}" for index in range(80)]
+        walutomat = [f"W{index}" for index in range(80)]
+        service, repo, _ = _build_service(
+            persist_pairs=[
+                (ExchangeEnum.KRAKEN, "*"),
+                (ExchangeEnum.WALUTOMAT, "*"),
+            ],
+            instruments_by_exchange={
+                ExchangeEnum.KRAKEN: kraken,
+                ExchangeEnum.WALUTOMAT: walutomat,
+            },
+            candles_by_instrument={
+                symbol: [_row(open_at=base, close=1.0)] for symbol in kraken + walutomat
+            },
+        )
+
+        await service._prewarm()
+
+        assert repo.get_exchange_instruments.await_count == 2
+        assert repo.get_instrument_public_ids_by_symbols.await_count == 2
+        repo.get_candles.assert_not_awaited()
+        assert all(
+            len(call.args[0]) > 1
+            for call in repo.get_latest_candles_for_instruments.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_prewarm_second_pass_is_unfloored_and_preserves_coverage(self) -> None:
+        """An instrument outside the floor window is still warmed.
+
+        Given: A symbol whose only rows predate the first pass's
+            ``open_at`` floor,
+        When: prewarm runs,
+        Then: The floored pass returns nothing, a second pass runs with no
+            floor, and the rows land in the deque — the floor is a pure
+            optimisation and can never shrink cache coverage.
+        """
+        stale = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+        service, repo, _ = _build_service(
+            persist_pairs=[(ExchangeEnum.KRAKEN, "OLD")],
+            candles_by_instrument={"OLD": [_row(open_at=stale, close=9.0)]},
+        )
+
+        await service._prewarm()
+
+        calls = repo.get_latest_candles_for_instruments.await_args_list
+        assert len(calls) == 2
+        assert calls[0].args[4] is not None
+        assert calls[1].args[4] is None
+        warmed = await service.get_1m_candles(ExchangeEnum.KRAKEN, "OLD", limit=10)
+        assert [s.close for s in warmed] == [9.0]
+
+    @pytest.mark.asyncio
+    async def test_prewarm_failing_second_pass_keeps_first_pass_rows_and_status(self) -> None:
+        """A failing unfloored pass must not disown rows the floored pass installed.
+
+        Given: An instrument the floored pass warms with 40 bars, whose
+            unfloored re-read then raises in both the slice and the
+            per-instrument fallback,
+        When: prewarm runs,
+        Then: The deque still holds the 40 bars and the instrument is
+            tallied as warmed, not failed — the completion log must
+            describe the cache's actual contents.
+        """
+        recent = datetime.now(UTC)
+        rows = [_row(open_at=recent - timedelta(minutes=index)) for index in range(40)]
+
+        async def _floored_only(
+            instrument_public_ids: Sequence[str],
+            timeframe: str,
+            as_of: datetime,
+            limit_per_instrument: int,
+            open_at_floor: datetime | None = None,
+        ) -> dict[str, list[CandleRow]]:
+            del timeframe, as_of, limit_per_instrument
+            if open_at_floor is None:
+                raise RuntimeError("statement timeout on the unfloored read")
+            return dict.fromkeys(instrument_public_ids, rows)
+
+        service, repo, _ = _build_service(persist_pairs=[(ExchangeEnum.KRAKEN, "PART")])
+        repo.get_latest_candles_for_instruments = AsyncMock(side_effect=_floored_only)
+
+        await service._prewarm()
+
+        cached = await service.get_1m_candles(ExchangeEnum.KRAKEN, "PART", limit=100)
+        assert len(cached) == 40
+        assert await service.instruments_cached() == 1
+
+    @pytest.mark.asyncio
+    async def test_prewarm_skips_second_pass_when_first_fills_every_deque(self) -> None:
+        """A fully-warmed first pass short-circuits the unfloored re-read."""
+        recent = datetime.now(UTC)
+        rows = [_row(open_at=recent - timedelta(minutes=index)) for index in range(100)]
+        service, repo, _ = _build_service(
+            persist_pairs=[(ExchangeEnum.KRAKEN, "FULL")],
+            candles_by_instrument={"FULL": rows},
+        )
+
+        await service._prewarm()
+
+        assert repo.get_latest_candles_for_instruments.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_prewarm_stops_falling_back_when_failures_look_systemic(self) -> None:
+        """A dead database must not multiply into thousands of retries.
+
+        Given: 400 resolved instruments and a batch reader that raises
+            for every call, as an unreachable database would,
+        When: prewarm runs,
+        Then: The per-instrument fallback stops once the slice-failure
+            budget is spent, so total reads stay bounded instead of
+            degenerating into one timing-out read per instrument per
+            pass — which would block the port far longer than the
+            sequential startup this change replaces.
+        """
+        symbols = [f"D{index}" for index in range(400)]
+        service, repo, _ = _build_service(
+            persist_pairs=[(ExchangeEnum.KRAKEN, "*")],
+            instruments_by_exchange={ExchangeEnum.KRAKEN: symbols},
+        )
+        repo.get_latest_candles_for_instruments = AsyncMock(
+            side_effect=RuntimeError("connection refused")
+        )
+
+        await service._prewarm()
+
+        slices = -(-len(symbols) // _PREWARM_INSTRUMENT_SLICE)
+        ceiling = slices + _PREWARM_SLICE_FAILURE_BUDGET * _PREWARM_INSTRUMENT_SLICE
+        assert repo.get_latest_candles_for_instruments.await_count <= ceiling
+        assert repo.get_latest_candles_for_instruments.await_count < len(symbols)
+
+    @pytest.mark.asyncio
+    async def test_prewarm_bounds_slice_concurrency(self) -> None:
+        """Concurrent slices never exceed the configured pool-safe cap."""
+        base = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+        symbols = [f"S{index}" for index in range(400)]
+        in_flight = 0
+        peak = 0
+
+        async def _tracking_batch(
+            instrument_public_ids: Sequence[str],
+            timeframe: str,
+            as_of: datetime,
+            limit_per_instrument: int,
+            open_at_floor: datetime | None = None,
+        ) -> dict[str, list[CandleRow]]:
+            del timeframe, as_of, limit_per_instrument, open_at_floor
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return {pid: [_row(open_at=base)] for pid in instrument_public_ids}
+
+        service, repo, _ = _build_service(
+            persist_pairs=[(ExchangeEnum.KRAKEN, "*")],
+            instruments_by_exchange={ExchangeEnum.KRAKEN: symbols},
+        )
+        repo.get_latest_candles_for_instruments = AsyncMock(side_effect=_tracking_batch)
+
+        await service._prewarm()
+
+        assert peak <= _PREWARM_MAX_CONCURRENCY
+
+    @pytest.mark.asyncio
+    async def test_prewarm_dedupes_wildcard_and_explicit_symbol(self) -> None:
+        """A symbol configured both explicitly and via `*` is read once per pass.
+
+        Without the dedupe set the two persist entries would become two
+        concurrent identical reads of the same instrument inside a single
+        pass, which under fan-out is wasted pool capacity rather than the
+        harmless sequential repeat it used to be.
+        """
+        base = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+        service, repo, _ = _build_service(
+            persist_pairs=[
+                (ExchangeEnum.KRAKEN, "*"),
+                (ExchangeEnum.KRAKEN, "BTC-USD"),
+            ],
+            instruments_by_exchange={ExchangeEnum.KRAKEN: ["BTC-USD"]},
+            candles_by_instrument={"BTC-USD": [_row(open_at=base, close=4.0)]},
+        )
+
+        await service._prewarm()
+
+        first_pass = list(repo.get_latest_candles_for_instruments.await_args_list[0].args[0])
+        assert first_pass.count(_pid("BTC-USD")) == 1
 
     @pytest.mark.asyncio
     async def test_prewarm_expands_wildcard_via_exchange_instruments(self) -> None:
@@ -321,6 +655,34 @@ class TestPrewarm:
         eth = await service.get_1m_candles(ExchangeEnum.KRAKEN, "ETH-USD", limit=10)
         assert [s.close for s in btc] == [10.0]
         assert [s.close for s in eth] == [10.0]
+
+    @pytest.mark.asyncio
+    async def test_prewarm_instrument_resolve_failure_skips_exchange(self) -> None:
+        """A resolve DB error skips that exchange and still warms the others."""
+        base = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+
+        async def _resolve(
+            native_symbols: set[str], exchange: str, as_of: datetime
+        ) -> dict[str, str]:
+            del as_of
+            if exchange == ExchangeEnum.KRAKEN:
+                raise RuntimeError("resolve failed")
+            return {symbol: _pid(symbol) for symbol in native_symbols}
+
+        service, repo, _ = _build_service(
+            persist_pairs=[
+                (ExchangeEnum.KRAKEN, "BTC-USD"),
+                (ExchangeEnum.WALUTOMAT, "EUR-PLN"),
+            ],
+            candles_by_instrument={"EUR-PLN": [_row(open_at=base, close=30.0)]},
+        )
+        repo.get_instrument_public_ids_by_symbols = AsyncMock(side_effect=_resolve)
+
+        await service._prewarm()
+
+        assert await service.get_1m_candles(ExchangeEnum.KRAKEN, "BTC-USD", limit=10) == []
+        walutomat = await service.get_1m_candles(ExchangeEnum.WALUTOMAT, "EUR-PLN", limit=10)
+        assert [s.close for s in walutomat] == [30.0]
 
     @pytest.mark.asyncio
     async def test_prewarm_wildcard_expansion_failure_skips_exchange(self) -> None:

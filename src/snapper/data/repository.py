@@ -93,6 +93,7 @@ from uuid import uuid7
 
 from loguru import logger
 from sqlalchemy import ColumnElement
+from sqlalchemy import Row
 from sqlalchemy import Select
 from sqlalchemy import Table
 from sqlalchemy import TableClause
@@ -730,6 +731,45 @@ def where_active(model: type[Any], at: datetime) -> tuple[Any, Any]:
         Tuple of two filter clauses: (timestamp <= t, known_to > t).
     """
     return model.timestamp <= at, model.known_to > at
+
+
+def _candle_row_from_result(r: Row[Any]) -> CandleRow:
+    """Project one candles SELECT result row to a :class:`CandleRow`.
+
+    The caller's SELECT MUST project exactly the fifteen columns below,
+    in this order. ``Row[Any]`` sits in the permitted
+    SQLAlchemy-expression-internals boundary for ``Any``.
+
+    Deliberately NOT wired into :meth:`SQLAlchemyRepository.get_candles`,
+    whose identical inline projection is left untouched: that method
+    serves ``/api/candles``, the MCP tool surface and the candle-coverage
+    verifier, and the prewarm change set does not modify any production
+    read path. Folding the two together is a safe follow-up once the
+    startup fix has been observed on a real cold start.
+
+    Args:
+        r: Result row projecting the fifteen candle columns.
+
+    Returns:
+        The typed candle row.
+    """
+    return {
+        "open_at": r.open_at,
+        "timeframe": r.timeframe,
+        "open": r.open,
+        "high": r.high,
+        "low": r.low,
+        "close": r.close,
+        "volume": r.volume,
+        "vwap": r.vwap,
+        "trades": r.trades,
+        "source": r.source,
+        "complete": r.complete,
+        "public_id": r.public_id,
+        "timestamp": r.timestamp,
+        "session_id": r.session_id,
+        "sequence_id": r.sequence_id,
+    }
 
 
 def where_active_now(model: type[Any]) -> tuple[Any, Any]:
@@ -1594,6 +1634,54 @@ class Repository(ABC):
         provisional intermediate persists), so latest-N reads return
         an exact count of complete bars; ``None`` applies no
         completeness predicate (legacy behavior).
+        """
+        ...
+
+    @abstractmethod
+    async def get_latest_candles_for_instruments(
+        self,
+        instrument_public_ids: Sequence[str],
+        timeframe: str,
+        as_of: datetime,
+        limit_per_instrument: int,
+        open_at_floor: datetime | None = None,
+    ) -> dict[str, list[CandleRow]]:
+        """Latest-N active candles for several instruments in one session.
+
+        The predicate is identical to :meth:`get_candles` latest-as-of
+        mode — ``instrument_public_id`` equality, ``timeframe`` equality,
+        and the ``where_active`` pair ``(timestamp <= as_of,
+        known_to > as_of)``. SCD2 semantics and ``as_of`` threading are
+        unchanged.
+
+        ``open_at_floor`` adds ``open_at >= floor`` so each per-instrument
+        read is a two-column range descent of
+        ``ix_candle_instrument_open (instrument_public_id, open_at)``
+        rather than a backward walk only ``LIMIT`` can terminate — the
+        same bounding technique, on the same index, as
+        ``_CANDLE_ID_CACHE_LOOKBACK`` in :meth:`get_latest_candle_ids`.
+        ``None`` disables the bound and reproduces :meth:`get_candles`
+        exactly, which is what makes a floored first pass followed by an
+        unfloored second pass coverage-preserving: the unfloored result
+        is a strict superset under ``ORDER BY open_at DESC LIMIT n``.
+
+        Every statement runs inside ONE session, so the caller pays one
+        pooled checkout and one ``pool_pre_ping`` round-trip per call,
+        not per instrument.
+
+        Args:
+            instrument_public_ids: Instruments to read. Empty is valid.
+            timeframe: Candle timeframe (the cache passes ``"1m"``).
+            as_of: Snapshot time threading the temporal query.
+            limit_per_instrument: Max rows per instrument.
+            open_at_floor: Inclusive lower bound on ``open_at``; ``None``
+                for an unbounded read.
+
+        Returns:
+            Mapping from instrument public ID to rows in DESCENDING
+            ``open_at`` order (matching ``get_candles(order="desc")``).
+            Instruments with no qualifying row are OMITTED, never mapped
+            to an empty list.
         """
         ...
 
@@ -7690,6 +7778,71 @@ class SQLAlchemyRepository(Repository):
                 }
                 for r in rows
             ]
+
+    async def get_latest_candles_for_instruments(
+        self,
+        instrument_public_ids: Sequence[str],
+        timeframe: str,
+        as_of: datetime,
+        limit_per_instrument: int,
+        open_at_floor: datetime | None = None,
+    ) -> dict[str, list[CandleRow]]:
+        """Latest-N active candles for several instruments in one session.
+
+        Reuses the exact ``get_candles`` latest-as-of predicate, including
+        the ``where_active`` SCD2 pair, so temporal semantics are
+        unchanged. The optional ``open_at_floor`` bounds the index descent
+        the same way ``_CANDLE_ID_CACHE_LOOKBACK`` bounds
+        :meth:`get_latest_candle_ids`; ``None`` reproduces the unbounded
+        read exactly.
+
+        Args:
+            instrument_public_ids: Instruments to read. Empty is valid.
+            timeframe: Candle timeframe.
+            as_of: Snapshot time threading the temporal query.
+            limit_per_instrument: Max rows per instrument.
+            open_at_floor: Inclusive lower bound on ``open_at``; ``None``
+                for an unbounded read.
+
+        Returns:
+            Mapping from instrument public ID to rows in DESCENDING
+            ``open_at`` order. Instruments with no qualifying row are
+            omitted rather than mapped to an empty list.
+        """
+        if not instrument_public_ids:
+            return {}
+        result: dict[str, list[CandleRow]] = {}
+        async with self.session() as s:
+            for instrument_public_id in instrument_public_ids:
+                q = select(
+                    Candle.open_at,
+                    Candle.timeframe,
+                    Candle.open,
+                    Candle.high,
+                    Candle.low,
+                    Candle.close,
+                    Candle.volume,
+                    Candle.vwap,
+                    Candle.trades,
+                    Candle.source,
+                    Candle.complete,
+                    Candle.public_id,
+                    Candle.timestamp,
+                    Candle.session_id,
+                    Candle.sequence_id,
+                ).where(
+                    Candle.instrument_public_id == instrument_public_id,
+                    Candle.timeframe == timeframe,
+                    Candle.timestamp <= as_of,
+                    Candle.known_to > as_of,
+                )
+                if open_at_floor is not None:
+                    q = q.where(Candle.open_at >= open_at_floor)
+                q = q.order_by(Candle.open_at.desc()).limit(limit_per_instrument)
+                rows = (await s.execute(q)).all()
+                if rows:
+                    result[instrument_public_id] = [_candle_row_from_result(r) for r in rows]
+        return result
 
     async def get_ticks(
         self,
