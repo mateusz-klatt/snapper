@@ -1382,9 +1382,13 @@ class ExchangeClientBase(ABC):
             and resolved_fee == execution.cum_fee
         ):
             fee_decimal = execution.cum_fee_decimal
+        counter_amount_decimal = execution.counter_amount_decimal
         numeric_provenance = (
             "venue_raw"
-            if any(value is not None for value in (price_decimal, size_decimal, fee_decimal))
+            if any(
+                value is not None
+                for value in (price_decimal, size_decimal, fee_decimal, counter_amount_decimal)
+            )
             else "legacy_float"
         )
         try:
@@ -1408,6 +1412,7 @@ class ExchangeClientBase(ABC):
                 price_decimal=price_decimal,
                 size_decimal=size_decimal,
                 fee_decimal=fee_decimal,
+                counter_amount_decimal=counter_amount_decimal,
                 numeric_provenance=numeric_provenance,
             )
         except ExecutionScopeResolutionError as e:

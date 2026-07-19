@@ -958,6 +958,7 @@ async def test_log_execution_to_db_logs_successfully() -> None:
         last_price_decimal="50000.000000000000000005",
         last_qty_decimal="1.000000000000000005",
         fee_usd_equiv_decimal="10.000000000000000005",
+        counter_amount_decimal="50000.000000000000000005",
     )
     await client._log_execution_to_db(
         order_public_id="order-pub-1",
@@ -977,6 +978,48 @@ async def test_log_execution_to_db_logs_successfully() -> None:
     assert call_args["price_decimal"] == "50000.000000000000000005"
     assert call_args["size_decimal"] == "1.000000000000000005"
     assert call_args["fee_decimal"] == "10.000000000000000005"
+    assert call_args["counter_amount_decimal"] == "50000.000000000000000005"
+    assert call_args["numeric_provenance"] == "venue_raw"
+
+
+@pytest.mark.asyncio()
+async def test_log_execution_to_db_counter_only_row_is_venue_raw() -> None:
+    """A fill carrying only the exact counter amount still stamps venue_raw.
+
+    Given: An execution whose only raw evidence is the counter amount decimal
+        (no matching price, size, or fee decimal),
+    When: _log_execution_to_db is called,
+    Then: The counter amount is persisted verbatim and provenance is venue_raw
+        because at least one exact raw field is present.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.insert_execution = AsyncMock()
+    client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
+    execution = ExecutionUpdate(
+        order_id="order_123",
+        exec_type="trade",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.FILLED,
+        timestamp=datetime.now(UTC),
+        last_price=50000.0,
+        last_qty=1.0,
+        fee_usd_equiv=10.0,
+        counter_amount_decimal="50000.30",
+    )
+    await client._log_execution_to_db(
+        order_public_id="order-pub-1",
+        wallet_public_id="",
+        execution=execution,
+    )
+    mock_repo.insert_execution.assert_called_once()
+    call_args = mock_repo.insert_execution.call_args[1]
+    assert call_args["price_decimal"] is None
+    assert call_args["size_decimal"] is None
+    assert call_args["fee_decimal"] is None
+    assert call_args["counter_amount_decimal"] == "50000.30"
     assert call_args["numeric_provenance"] == "venue_raw"
 
 

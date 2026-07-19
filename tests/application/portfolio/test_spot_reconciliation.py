@@ -1536,6 +1536,22 @@ def test_replay_boundary_rejects_bad_ordering_clocks_and_cursor_certificate(
         (_execution(fee=-1.0, fee_decimal="-1"), "malformed_decimal"),
         (_execution(side="hold"), "invalid_execution_side"),
         (_execution(fee_asset="", fee=0.01), "missing_fee_asset"),
+        (
+            _execution(
+                counter_amount_decimal="1",
+                numeric_provenance="legacy_float",
+                price_decimal=None,
+                size_decimal=None,
+                fee_decimal=None,
+            ),
+            "raw_numeric_provenance_conflict",
+        ),
+        (_execution(counter_amount_decimal="0"), "invalid_execution_economics"),
+        (_execution(counter_amount_decimal="abc"), "malformed_decimal"),
+        (
+            _execution(counter_amount_decimal="1." + "0" * 300),
+            "non_finite_or_unbounded_decimal",
+        ),
     ],
 )
 def test_invalid_execution_identity_scope_and_economics_fail_closed(
@@ -1551,6 +1567,91 @@ def test_invalid_execution_identity_scope_and_economics_fail_closed(
     result = _evaluate(replay=[row])
     assert result["evaluation_status"] == "incomplete"
     assert result["error"] == reason
+
+
+def _improved_fill_account() -> PortfolioAccountState:
+    """Build venue totals for a price-improved buy folded by the exact counter.
+
+    The anchor holds BTC 1 and USD 100; a 0.1 BTC buy whose exact quote cost is
+    0.95 (an effective 9.5 versus the 10 limit) leaves BTC 1.1 and USD 99.05.
+    """
+    return _account(
+        [
+            AccountBalanceEntry(
+                currency="BTC",
+                total=1.1,
+                total_decimal="1.1",
+                numeric_provenance="venue_raw",
+            ),
+            AccountBalanceEntry(
+                currency="USD",
+                total=99.05,
+                total_decimal="99.05",
+                numeric_provenance="venue_raw",
+            ),
+        ]
+    )
+
+
+def test_exact_counter_amount_folds_quote_without_price_tick_tolerance() -> None:
+    """The exact counter folds the quote leg with no price-improvement tolerance.
+
+    Given: A price-improved buy whose exact quote cost (0.95) is better than the
+        size-times-limit approximation (1.00),
+    When: The fill carries the exact counter amount versus when it does not,
+    Then: The exact fold reconciles USD precisely with only the cost precision
+        floor, while the legacy size-times-price fold drifts past tolerance into
+        a full mismatch.
+    """
+    account = _improved_fill_account()
+    exact = _evaluate(
+        account=account,
+        replay=[_execution(counter_amount_decimal="0.95", fee=0.0, fee_decimal="0")],
+    )
+    assert exact["evaluation_status"] == "matched"
+    expected = json.loads(cast(str, exact["expected_json"]))
+    assert expected["assets"]["USD"]["replay_delta"] == "-0.95"
+    tolerance = json.loads(cast(str, exact["tolerance_json"]))
+    assert Decimal(tolerance["assets"]["USD"]["absolute_tolerance"]) == Decimal("0.01")
+    assert tolerance["assets"]["USD"]["legacy_term_count"] == 0
+    assert not any(
+        source.startswith("price_tick_contribution")
+        for source in tolerance["assets"]["USD"]["precision_sources"]
+    )
+    legacy = _evaluate(
+        account=account,
+        replay=[_execution(fee=0.0, fee_decimal="0")],
+    )
+    assert legacy["evaluation_status"] == "mismatched"
+
+
+def test_exact_counter_amount_with_legacy_size_still_bounds_the_base_leg() -> None:
+    """The exact counter fold keeps the base quantity's legacy-float tolerance.
+
+    Given: A price-improved buy carrying the exact counter amount but only a
+        legacy-float base quantity (no size decimal),
+    When: The fixed range is replayed,
+    Then: The quote leg folds exactly with no price tolerance while the base leg
+        still accrues the half-quantum legacy-conversion bound.
+    """
+    account = _improved_fill_account()
+    result = _evaluate(
+        account=account,
+        replay=[
+            _execution(
+                counter_amount_decimal="0.95",
+                fee=0.0,
+                fee_decimal="0",
+                size_decimal=None,
+                price_decimal=None,
+            )
+        ],
+    )
+    assert result["evaluation_status"] == "matched"
+    tolerance = json.loads(cast(str, result["tolerance_json"]))
+    assert Decimal(tolerance["assets"]["BTC"]["absolute_tolerance"]) == Decimal("0.015")
+    assert tolerance["assets"]["BTC"]["legacy_term_count"] == 1
+    assert Decimal(tolerance["assets"]["USD"]["absolute_tolerance"]) == Decimal("0.01")
 
 
 def test_execution_duplicates_missing_specs_and_beyond_watermark_handling() -> None:

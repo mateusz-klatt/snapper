@@ -41,7 +41,7 @@ from datetime import UTC
 from datetime import datetime
 from uuid import UUID
 
-EXECUTION_CHAIN_DOMAIN = b"snapper:spot-execution-chain:v1"
+EXECUTION_CHAIN_DOMAIN = b"snapper:spot-execution-chain:v2"
 _GENESIS_TAG = b"\x00"
 _LINK_TAG = b"\x01"
 _ABSENT = b"\x00"
@@ -90,6 +90,7 @@ class ExecutionChainRecord:
     price_decimal: str | None
     size_decimal: str | None
     fee_decimal: str | None
+    counter_amount_decimal: str | None
     numeric_provenance: str | None
     liquidity_role: str
     timestamp: datetime
@@ -191,6 +192,7 @@ def canonical_execution_record(record: ExecutionChainRecord) -> bytes:
             _optional_string_field(record.price_decimal),
             _optional_string_field(record.size_decimal),
             _optional_string_field(record.fee_decimal),
+            _optional_string_field(record.counter_amount_decimal),
             _optional_string_field(record.numeric_provenance),
             _string_field(record.liquidity_role),
             _datetime_field(record.timestamp),

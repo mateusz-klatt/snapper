@@ -43,6 +43,7 @@ def _record(
     price_decimal: str | None = "1.25",
     size_decimal: str | None = "2.0",
     fee_decimal: str | None = "0.1",
+    counter_amount_decimal: str | None = "2.5",
     numeric_provenance: str | None = "venue_raw",
     liquidity_role: str = "maker",
     timestamp: datetime = _TS,
@@ -65,6 +66,7 @@ def _record(
         price_decimal=price_decimal,
         size_decimal=size_decimal,
         fee_decimal=fee_decimal,
+        counter_amount_decimal=counter_amount_decimal,
         numeric_provenance=numeric_provenance,
         liquidity_role=liquidity_role,
         timestamp=timestamp,
@@ -113,6 +115,8 @@ _FIELD_MUTATIONS = [
     pytest.param(_record(size_decimal="2.1"), id="size_decimal"),
     pytest.param(_record(fee_decimal=None), id="fee_decimal_absent"),
     pytest.param(_record(fee_decimal="0.2"), id="fee_decimal"),
+    pytest.param(_record(counter_amount_decimal=None), id="counter_amount_decimal_absent"),
+    pytest.param(_record(counter_amount_decimal="2.6"), id="counter_amount_decimal"),
     pytest.param(_record(numeric_provenance=None), id="numeric_provenance_absent"),
     pytest.param(_record(numeric_provenance="legacy_float"), id="numeric_provenance"),
     pytest.param(_record(liquidity_role="taker"), id="liquidity_role"),
@@ -274,11 +278,11 @@ def test_record_matches_the_specified_byte_layout() -> None:
 
     Given a record whose every field holds a distinct value,
     When its canonical serialization is hashed,
-    Then it equals the frozen v1 layout digest (any reorder or encoder change breaks it).
+    Then it equals the frozen v2 layout digest (any reorder or encoder change breaks it).
     """
     golden = _record(executed_at=datetime(2026, 7, 17, 8, 0, 1, tzinfo=UTC))
     digest = hashlib.sha256(canonical_execution_record(golden)).hexdigest()
-    assert digest == "5d82e9822525064e2349cb6c48545679321161da075d1ed7b4fcf41df894b28c"
+    assert digest == "d288353adef065dd131cd6f8bb7caf758c1db6210f602c2d8e08a1eded908cc3"
 
 
 def test_uuid_spelling_and_case_do_not_change_the_tip() -> None:

@@ -63,6 +63,7 @@ class _Fill:
     price_decimal: str | None = "1.25"
     size_decimal: str | None = "2.0"
     fee_decimal: str | None = "0.1"
+    counter_amount_decimal: str | None = "3.75"
     numeric_provenance: str | None = "venue_raw"
     liquidity_role: str = "maker"
     timestamp: datetime = _TS
@@ -89,6 +90,7 @@ class _Fill:
             price_decimal=self.price_decimal,
             size_decimal=self.size_decimal,
             fee_decimal=self.fee_decimal,
+            counter_amount_decimal=self.counter_amount_decimal,
             numeric_provenance=self.numeric_provenance,
             liquidity_role=self.liquidity_role,
             session_id=_SESSION,
@@ -116,6 +118,7 @@ class _Fill:
             price_decimal=self.price_decimal,
             size_decimal=self.size_decimal,
             fee_decimal=self.fee_decimal,
+            counter_amount_decimal=self.counter_amount_decimal,
             numeric_provenance=self.numeric_provenance,
             liquidity_role=self.liquidity_role,
             timestamp=self.timestamp,

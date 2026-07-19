@@ -247,6 +247,7 @@ class ExecutionInsertRow(TypedDict):
     price_decimal: NotRequired[str | None]
     size_decimal: NotRequired[str | None]
     fee_decimal: NotRequired[str | None]
+    counter_amount_decimal: NotRequired[str | None]
     numeric_provenance: NotRequired[str | None]
 
 
@@ -313,6 +314,7 @@ class ExecutionRow(TypedDict):
     price_decimal: NotRequired[str | None]
     size_decimal: NotRequired[str | None]
     fee_decimal: NotRequired[str | None]
+    counter_amount_decimal: NotRequired[str | None]
     numeric_provenance: NotRequired[str | None]
 
 
@@ -1240,6 +1242,7 @@ class SpotReplayExecutionSourceRow(TypedDict):
     price_decimal: str | None
     size_decimal: str | None
     fee_decimal: str | None
+    counter_amount_decimal: str | None
     numeric_provenance: str | None
 
 

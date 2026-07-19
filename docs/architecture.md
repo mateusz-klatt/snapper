@@ -334,7 +334,16 @@ guarded by anchor epoch. The bundle also re-derives the execution hash chain
 from the anchor's sealed tip through the newest matched checkpoint to the
 boundary (regression, divergence, or a broken fold refuse by name), and every
 full verdict durably records its boundary tip as the next cycle's anti-rollback
-checkpoint. Real balance divergence therefore fires `mismatched` immediately, and
+checkpoint. Walutomat permits price improvement, so the execution price is never the limit
+price: each fill carries the venue's EXACT opposite-currency amount
+(`counter_amount_decimal`), which the replay folds verbatim for the quote leg
+(dropping the half-tick price-improvement tolerance the `size * price`
+approximation required) — without it every improved fill produced a permanent
+false `mismatched`. That exact amount is sealed into the execution hash chain
+(bumped to `v2`); the extension was made while `W = 0`, before any chain tip is
+sealed, so no committed tip is invalidated.
+
+Real balance divergence therefore fires `mismatched` immediately, and
 `matched` is gated behind the venue-cursor certificate (S4c-4b): for an
 anchored account the observer additionally captures the history tip `H_E`
 before the watermark, then — after the snapshot commits — the fill legs of

@@ -7521,6 +7521,7 @@ class SQLAlchemyRepository(Repository):
         price_decimal = execution_row.get("price_decimal")
         size_decimal = execution_row.get("size_decimal")
         fee_decimal = execution_row.get("fee_decimal")
+        counter_amount_decimal = execution_row.get("counter_amount_decimal")
         numeric_provenance = execution_row.get("numeric_provenance", "legacy_float")
         async with self.session() as s:
             await self._begin_execution_insert_transaction(s)
@@ -7558,6 +7559,7 @@ class SQLAlchemyRepository(Repository):
                 price_decimal=price_decimal,
                 size_decimal=size_decimal,
                 fee_decimal=fee_decimal,
+                counter_amount_decimal=counter_amount_decimal,
                 numeric_provenance=numeric_provenance,
                 session_id=execution_row["session_id"],
                 sequence_id=execution_row["sequence_id"],
@@ -8664,6 +8666,7 @@ class SQLAlchemyRepository(Repository):
                     "price_decimal": exe.price_decimal,
                     "size_decimal": exe.size_decimal,
                     "fee_decimal": exe.fee_decimal,
+                    "counter_amount_decimal": exe.counter_amount_decimal,
                     "numeric_provenance": exe.numeric_provenance,
                 }
                 for exe, order, inst, sym in result.all()
@@ -8731,6 +8734,7 @@ class SQLAlchemyRepository(Repository):
                     "price_decimal": exe.price_decimal,
                     "size_decimal": exe.size_decimal,
                     "fee_decimal": exe.fee_decimal,
+                    "counter_amount_decimal": exe.counter_amount_decimal,
                     "numeric_provenance": exe.numeric_provenance,
                 }
                 for exe, order, inst, sym in result.all()
@@ -8889,6 +8893,7 @@ class SQLAlchemyRepository(Repository):
                     "price_decimal": exe.price_decimal,
                     "size_decimal": exe.size_decimal,
                     "fee_decimal": exe.fee_decimal,
+                    "counter_amount_decimal": exe.counter_amount_decimal,
                     "numeric_provenance": exe.numeric_provenance,
                 }
                 for exe, order, inst, sym in result.all()
@@ -14269,6 +14274,7 @@ class SQLAlchemyRepository(Repository):
                         "price_decimal": execution.price_decimal,
                         "size_decimal": execution.size_decimal,
                         "fee_decimal": execution.fee_decimal,
+                        "counter_amount_decimal": execution.counter_amount_decimal,
                         "numeric_provenance": execution.numeric_provenance,
                     }
                 )
@@ -14415,6 +14421,7 @@ class SQLAlchemyRepository(Repository):
             price_decimal=execution.price_decimal,
             size_decimal=execution.size_decimal,
             fee_decimal=execution.fee_decimal,
+            counter_amount_decimal=execution.counter_amount_decimal,
             numeric_provenance=execution.numeric_provenance,
             liquidity_role=execution.liquidity_role,
             timestamp=execution.timestamp,

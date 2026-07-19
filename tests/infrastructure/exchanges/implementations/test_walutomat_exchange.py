@@ -5862,12 +5862,13 @@ def test_effective_price_first_emission_prices_from_zero() -> None:
     Then: The delta covers the whole cumulative and the price is exact
         counter/filled — better than the 5.10 limit.
     """
-    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
-        _snapshot_with_counter(), None
+    last_qty, last_price, average_price, counter_amount_decimal = (
+        walutomat_mod._effective_price_fields(_snapshot_with_counter(), None)
     )
     assert last_qty == 6.0
     assert last_price == 5.05
     assert average_price == 5.05
+    assert counter_amount_decimal == "30.30"
 
 
 def test_effective_price_second_delta_prices_the_increment() -> None:
@@ -5889,12 +5890,15 @@ def test_effective_price_second_delta_prices_the_increment() -> None:
         counter_filled_decimal="30.30",
         filled_decimal="6",
     )
-    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
-        _snapshot_with_counter(filled="10", counter="50.70"), previous
+    last_qty, last_price, average_price, counter_amount_decimal = (
+        walutomat_mod._effective_price_fields(
+            _snapshot_with_counter(filled="10", counter="50.70"), previous
+        )
     )
     assert last_qty == 4.0
     assert last_price == 5.10
     assert average_price == 5.07
+    assert counter_amount_decimal == "20.40"
 
 
 def test_effective_price_zero_delta_terminal_omits_last_fields() -> None:
@@ -5917,12 +5921,13 @@ def test_effective_price_zero_delta_terminal_omits_last_fields() -> None:
         counter_filled_decimal="30.30",
         filled_decimal="6",
     )
-    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
-        _snapshot_with_counter(), previous
+    last_qty, last_price, average_price, counter_amount_decimal = (
+        walutomat_mod._effective_price_fields(_snapshot_with_counter(), previous)
     )
     assert last_qty is None
     assert last_price is None
     assert average_price == 5.05
+    assert counter_amount_decimal is None
 
 
 def test_effective_price_without_counter_returns_nothing() -> None:
@@ -5932,6 +5937,7 @@ def test_effective_price_without_counter_returns_nothing() -> None:
     Then: Everything is None so the caller falls back to the limit price.
     """
     assert walutomat_mod._effective_price_fields(_snapshot_with_counter(counter=None), None) == (
+        None,
         None,
         None,
         None,
@@ -5946,7 +5952,7 @@ def test_effective_price_zero_filled_returns_nothing() -> None:
     """
     assert walutomat_mod._effective_price_fields(
         _snapshot_with_counter(filled="0", counter="0"), None
-    ) == (None, None, None)
+    ) == (None, None, None, None)
 
 
 def test_effective_price_previous_without_counter_keeps_only_average() -> None:
@@ -5966,12 +5972,13 @@ def test_effective_price_previous_without_counter_keeps_only_average() -> None:
         filled=3.0,
         price=5.10,
     )
-    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
-        _snapshot_with_counter(), previous
+    last_qty, last_price, average_price, counter_amount_decimal = (
+        walutomat_mod._effective_price_fields(_snapshot_with_counter(), previous)
     )
     assert last_qty is None
     assert last_price is None
     assert average_price == 5.05
+    assert counter_amount_decimal is None
 
 
 def test_effective_price_negative_counter_delta_keeps_only_average() -> None:
@@ -5993,12 +6000,13 @@ def test_effective_price_negative_counter_delta_keeps_only_average() -> None:
         counter_filled_decimal="40.0",
         filled_decimal="3",
     )
-    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
-        _snapshot_with_counter(), previous
+    last_qty, last_price, average_price, counter_amount_decimal = (
+        walutomat_mod._effective_price_fields(_snapshot_with_counter(), previous)
     )
     assert last_qty is None
     assert last_price is None
     assert average_price == 5.05
+    assert counter_amount_decimal is None
 
 
 def test_active_execution_update_emits_effective_prices() -> None:
@@ -6016,6 +6024,7 @@ def test_active_execution_update_emits_effective_prices() -> None:
     assert update.cum_cost == 30.30
     assert update.limit_price == 5.10
     assert update.average_price_decimal is None
+    assert update.counter_amount_decimal == "30.30"
 
 
 def test_active_execution_update_falls_back_to_limit_price_with_warning() -> None:
@@ -6029,6 +6038,7 @@ def test_active_execution_update_falls_back_to_limit_price_with_warning() -> Non
     assert update.last_qty is None
     assert update.last_price is None
     assert update.average_price == 5.10
+    assert update.counter_amount_decimal is None
 
 
 @pytest.mark.asyncio()
@@ -6068,6 +6078,46 @@ async def test_resolve_disappeared_closed_with_counter_prices_effectively() -> N
     assert events[0].last_price == 5.10
     assert events[0].average_price == 5.07
     assert events[0].cum_cost == 50.70
+    assert events[0].counter_amount_decimal == "20.40"
+
+
+@pytest.mark.asyncio()
+async def test_resolve_disappeared_canceled_partial_carries_counter() -> None:
+    """Given: A disappeared order that canceled after a new partial fill delta.
+
+    When: The terminal is resolved,
+    Then: The PARTIALLY_FILLED trade event carries the exact per-fill counter
+        amount while the trailing CANCELED event carries no economics.
+    """
+    client = WalutomatExchangeClient()
+    final = _snapshot_with_counter(
+        filled="10", counter="50.70", status=ExchangeOrderStatusEnum.CANCELED
+    )
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return final
+
+    client.get_order = mock_get_order
+    tracked = _TrackedOrder(
+        order_id="ord-cf",
+        cl_ord_id="cid-cf",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        amount=10.0,
+        filled=6.0,
+        price=5.10,
+        counter_filled=30.30,
+        counter_filled_decimal="30.30",
+        filled_decimal="6",
+    )
+    events = [event async for event in client._resolve_disappeared("ord-cf", tracked)]
+    assert len(events) == 2
+    assert events[0].exec_type == "trade"
+    assert events[0].last_qty == 4.0
+    assert events[0].counter_amount_decimal == "20.40"
+    assert events[1].exec_type == "canceled"
+    assert events[1].counter_amount_decimal is None
 
 
 def test_effective_price_zero_counter_delta_keeps_only_average() -> None:
@@ -6090,12 +6140,13 @@ def test_effective_price_zero_counter_delta_keeps_only_average() -> None:
         counter_filled_decimal="30.30",
         filled_decimal="5.99",
     )
-    last_qty, last_price, average_price = walutomat_mod._effective_price_fields(
-        _snapshot_with_counter(), previous
+    last_qty, last_price, average_price, counter_amount_decimal = (
+        walutomat_mod._effective_price_fields(_snapshot_with_counter(), previous)
     )
     assert last_qty is None
     assert last_price is None
     assert average_price == 5.05
+    assert counter_amount_decimal is None
 
 
 def test_effective_price_zero_counter_cumulative_returns_nothing() -> None:
@@ -6106,6 +6157,7 @@ def test_effective_price_zero_counter_cumulative_returns_nothing() -> None:
         a zero VWAP must never bypass the fallback.
     """
     assert walutomat_mod._effective_price_fields(_snapshot_with_counter(counter="0"), None) == (
+        None,
         None,
         None,
         None,

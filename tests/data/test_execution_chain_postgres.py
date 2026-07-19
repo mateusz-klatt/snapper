@@ -84,6 +84,7 @@ def _pair(
     price_decimal: str | None = "1.25",
     size_decimal: str | None = "2.0",
     fee_decimal: str | None = "0.1",
+    counter_amount_decimal: str | None = "3.75",
     numeric_provenance: str | None = "venue_raw",
     executed_at: datetime | None = _TS + timedelta(seconds=1),
 ) -> tuple[Execution, ExecutionChainRecord]:
@@ -109,6 +110,7 @@ def _pair(
         price_decimal=price_decimal,
         size_decimal=size_decimal,
         fee_decimal=fee_decimal,
+        counter_amount_decimal=counter_amount_decimal,
         numeric_provenance=numeric_provenance,
         liquidity_role="maker",
         session_id=_SESSION,
@@ -133,6 +135,7 @@ def _pair(
         price_decimal=price_decimal,
         size_decimal=size_decimal,
         fee_decimal=fee_decimal,
+        counter_amount_decimal=counter_amount_decimal,
         numeric_provenance=numeric_provenance,
         liquidity_role="maker",
         timestamp=_TS,
@@ -170,6 +173,7 @@ async def test_absent_optionals_round_trip_identically_on_postgresql(
         price_decimal=None,
         size_decimal=None,
         fee_decimal=None,
+        counter_amount_decimal=None,
         numeric_provenance=None,
         executed_at=None,
     )

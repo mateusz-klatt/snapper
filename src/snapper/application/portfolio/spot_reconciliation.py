@@ -57,6 +57,7 @@ class SpotReplayExecutionRow:
     price_decimal: str | None = None
     size_decimal: str | None = None
     fee_decimal: str | None = None
+    counter_amount_decimal: str | None = None
     numeric_provenance: str | None = "legacy_float"
 
 
@@ -509,24 +510,32 @@ def _replay_executions(
         if sign is None:
             raise _IncompleteError("invalid_execution_side")
         delta[base] = delta.get(base, Decimal(0)) + sign * size.value
-        delta[quote] = delta.get(quote, Decimal(0)) - sign * size.value * price.value
         _add_floor(tolerances, base, qty_quantum, "quantity")
         _add_floor(tolerances, quote, cost_quantum, "cost")
-        _add_floor(tolerances, quote, abs(size.value) * tick, "price_tick_contribution")
         if size.legacy:
             size_error = qty_quantum / 2
             _add_error(tolerances, base, size_error)
         else:
             size_error = Decimal(0)
-        price_error = tick / 2 if price.legacy else Decimal(0)
-        if size.legacy or price.legacy:
-            notional_error = (
-                abs(price.value) * size_error
-                + abs(size.value) * price_error
-                + size_error * price_error
-                + cost_quantum / 2
-            )
-            _add_error(tolerances, quote, notional_error)
+        if row.counter_amount_decimal is not None:
+            if row.numeric_provenance != "venue_raw":
+                raise _IncompleteError("raw_numeric_provenance_conflict")
+            counter = _finite_decimal_string(row.counter_amount_decimal)
+            if counter <= 0:
+                raise _IncompleteError("invalid_execution_economics")
+            delta[quote] = delta.get(quote, Decimal(0)) - sign * counter
+        else:
+            delta[quote] = delta.get(quote, Decimal(0)) - sign * size.value * price.value
+            _add_floor(tolerances, quote, abs(size.value) * tick, "price_tick_contribution")
+            price_error = tick / 2 if price.legacy else Decimal(0)
+            if size.legacy or price.legacy:
+                notional_error = (
+                    abs(price.value) * size_error
+                    + abs(size.value) * price_error
+                    + size_error * price_error
+                    + cost_quantum / 2
+                )
+                _add_error(tolerances, quote, notional_error)
         if fee.value != 0:
             fee_asset = _canonical_asset(row.fee_asset, "missing_fee_asset")
             delta[fee_asset] = delta.get(fee_asset, Decimal(0)) - fee.value

@@ -189,17 +189,20 @@ def _snapshot_tracked_order(order: ExchangeOrderSnapshot) -> _TrackedOrder:
 
 def _effective_price_fields(
     order: ExchangeOrderSnapshot, previous: _TrackedOrder | None
-) -> tuple[float | None, float | None, float | None]:
-    """Derive ``(last_qty, last_price, average_price)`` from two-sided cumulatives.
+) -> tuple[float | None, float | None, float | None, str | None]:
+    """Derive the effective per-fill economics from two-sided cumulatives.
 
     Walutomat permits price improvement, so the execution price is NEVER the
     limit price: the cumulative effective price is ``counter_cum / filled_cum``
     and the per-delta effective price is ``Δcounter / Δfilled`` between poll
     snapshots, computed in exact ``Decimal`` from the venue's own strings and
-    floated only at the boundary. Returns ``(None, None, None)`` when the
-    snapshot carries no counter cumulative (the caller falls back to the legacy
-    limit-price shape with a warning); omits the ``last_*`` pair when the fill
-    delta is not positive (a zero-delta terminal is a status-only frame) or the
+    floated only at the boundary. The EXACT per-fill counter amount ``Δcounter``
+    is returned verbatim as a decimal string so the reconciliation replay can
+    fold the true quote movement without the half-tick price-improvement
+    tolerance. Returns all-``None`` when the snapshot carries no counter
+    cumulative (the caller falls back to the legacy limit-price shape with a
+    warning); omits the ``last_*`` pair and the exact counter (a zero-delta
+    terminal is a status-only frame) when the fill delta is not positive or the
     previous snapshot lacks counter data to delta against.
 
     Args:
@@ -207,11 +210,13 @@ def _effective_price_fields(
         previous: The last tracked snapshot, or ``None`` on the first emission.
 
     Returns:
-        The per-delta quantity and price (both ``None`` when not derivable) and
-        the cumulative effective average price (``None`` without counter data).
+        The per-delta quantity and price (both ``None`` when not derivable), the
+        cumulative effective average price (``None`` without counter data), and
+        the exact per-fill counter amount decimal string (``None`` unless a
+        positive fill delta was derived).
     """
     if order.counter_filled_decimal is None:
-        return None, None, None
+        return None, None, None, None
     counter_cum = Decimal(order.counter_filled_decimal)
     filled_cum = (
         Decimal(order.filled_decimal)
@@ -219,7 +224,7 @@ def _effective_price_fields(
         else Decimal(str(order.filled))
     )
     if filled_cum <= 0 or counter_cum <= 0:
-        return None, None, None
+        return None, None, None, None
     average_price = float(counter_cum / filled_cum)
     if previous is None:
         previous_filled = Decimal(0)
@@ -237,11 +242,16 @@ def _effective_price_fields(
         )
     delta_filled = filled_cum - previous_filled
     if previous_counter is None or delta_filled <= 0:
-        return None, None, average_price
+        return None, None, average_price, None
     delta_counter = counter_cum - previous_counter
     if delta_counter <= 0:
-        return None, None, average_price
-    return float(delta_filled), float(delta_counter / delta_filled), average_price
+        return None, None, average_price, None
+    return (
+        float(delta_filled),
+        float(delta_counter / delta_filled),
+        average_price,
+        str(delta_counter),
+    )
 
 
 def _should_emit_active_execution(
@@ -1177,7 +1187,9 @@ class WalutomatExchangeClient(ExchangeClientBase):
         (exact repair would need a committed counter-cumulative anchor —
         deferred, documented).
         """
-        last_qty, last_price, average_price = _effective_price_fields(order, previous)
+        last_qty, last_price, average_price, counter_amount_decimal = _effective_price_fields(
+            order, previous
+        )
         if average_price is None:
             logger.warning(
                 f"Walutomat order {order.id}: no counter cumulative on snapshot — "
@@ -1202,6 +1214,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             last_qty=last_qty,
             last_price=last_price,
             average_price=average_price,
+            counter_amount_decimal=counter_amount_decimal,
             cum_fee=order.fee if order.fee and order.fee_currency else None,
             cum_fee_decimal=order.fee_decimal if order.fee and order.fee_currency else None,
             cum_fee_currency=order.fee_currency if order.fee and order.fee_currency else None,
@@ -1276,7 +1289,9 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     oid,
                 )
                 return
-            last_qty, last_price, average_price = _effective_price_fields(final, tracked)
+            last_qty, last_price, average_price, counter_amount_decimal = _effective_price_fields(
+                final, tracked
+            )
             if average_price is None:
                 logger.warning(
                     f"Walutomat order {final.id}: no counter cumulative on terminal "
@@ -1302,6 +1317,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     last_qty=last_qty,
                     last_price=last_price,
                     average_price=average_price,
+                    counter_amount_decimal=counter_amount_decimal,
                     cum_fee=cum_fee,
                     cum_fee_decimal=final.fee_decimal if cum_fee is not None else None,
                     cum_fee_currency=cum_fee_currency,
@@ -1326,6 +1342,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                         last_qty=last_qty,
                         last_price=last_price,
                         average_price=average_price,
+                        counter_amount_decimal=counter_amount_decimal,
                         cum_fee=cum_fee,
                         cum_fee_decimal=final.fee_decimal if cum_fee is not None else None,
                         cum_fee_currency=cum_fee_currency,

@@ -201,6 +201,7 @@ async def _seed_executions(
     *,
     wallet: str = _WALLET,
     start_sequence_id: int = 10,
+    counter_amount_decimal: str | None = None,
 ) -> None:
     """Ingest ``count`` executions through the production scope-counter path."""
     for offset in range(count):
@@ -214,6 +215,7 @@ async def _seed_executions(
             size=1.0,
             fee=0.0,
             fee_asset="BTC",
+            counter_amount_decimal=counter_amount_decimal,
             session_id=_SESSION,
             sequence_id=start_sequence_id + offset,
         )
@@ -383,6 +385,7 @@ async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_seven_sets
         "price_decimal": None,
         "size_decimal": None,
         "fee_decimal": None,
+        "counter_amount_decimal": None,
         "numeric_provenance": "legacy_float",
     }
     assert bundle.instruments_by_public_id == {
@@ -433,6 +436,32 @@ async def test_bundle_empty_range_is_complete_and_returns_the_anchor_tip(
     assert bundle.range_complete is True
     assert bundle.boundary_chain_tip == anchor["source_chain_tip"]
     assert bundle.previously_confirmed_assets == frozenset({"BTC", "USD"})
+    await repo.engine.dispose()
+
+
+async def test_bundle_replay_source_row_carries_the_exact_counter_amount(
+    tmp_path: Path,
+) -> None:
+    """The exact per-fill counter amount round-trips into the replay source row.
+
+    Given: An anchored scope whose later fill was ingested with an exact
+        counter amount decimal,
+    When: The bundle is read across the replay range,
+    Then: The replay source row projects the persisted counter amount verbatim.
+    """
+    repo = await _repo(tmp_path)
+    await _seed_market(repo, with_spec=True)
+    await _seed_executions(repo, 2)
+    await _record_real_anchor(repo)
+    await _seed_executions(repo, 1, start_sequence_id=20, counter_amount_decimal="0.099")
+
+    bundle = await repo.get_spot_reconciliation_bundle(
+        _WALLET, "kraken", "live", _AS_OF, 3, frozenset()
+    )
+
+    assert bundle.error is None
+    assert [row["scope_sequence"] for row in bundle.replay] == [3]
+    assert bundle.replay[0]["counter_amount_decimal"] == "0.099"
     await repo.engine.dispose()
 
 

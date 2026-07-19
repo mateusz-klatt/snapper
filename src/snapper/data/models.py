@@ -1015,6 +1015,7 @@ class Execution(TemporalMixin, Base):
     price_decimal: Mapped[str | None] = mapped_column(Text, nullable=True)
     size_decimal: Mapped[str | None] = mapped_column(Text, nullable=True)
     fee_decimal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    counter_amount_decimal: Mapped[str | None] = mapped_column(Text, nullable=True)
     numeric_provenance: Mapped[str | None] = mapped_column(String(16), nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(TZDateTime())
     liquidity_role: Mapped[str] = mapped_column(String(16), default="unknown")

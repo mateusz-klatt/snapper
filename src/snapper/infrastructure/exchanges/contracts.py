@@ -511,6 +511,7 @@ class ExecutionUpdate:
     cum_qty_decimal: str | None = None
     average_price_decimal: str | None = None
     cum_fee_decimal: str | None = None
+    counter_amount_decimal: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize the instance after initialization."""
