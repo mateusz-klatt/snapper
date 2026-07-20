@@ -174,8 +174,10 @@ class TestGetPnlTimelineExecutions:
         """The first row carries the execution economics and lineage keys."""
         rows = await repository.get_pnl_timeline_executions(_WALLET, "live", _NOW)
         first = rows[0]
+        assert first["public_id"]
         assert first["order_public_id"] == _ORDER_I1
         assert first["side"] == "buy"
+        assert first["status"] == "filled"
         assert first["size"] == 2.0
         assert first["price"] == 100.0
         assert first["fee"] == 0.5

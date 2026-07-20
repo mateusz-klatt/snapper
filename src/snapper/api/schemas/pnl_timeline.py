@@ -1,4 +1,4 @@
-"""Strict response schemas for the P&L timeline series API (Phase 5A).
+"""Strict response schemas for the P&L timeline series and marker APIs.
 
 Models the ``GET /api/portfolio/pnl/series`` response: a per-point
 Net-P&L-since-activation series with a realized / fee / accrual / unrealized /
@@ -18,6 +18,9 @@ from snapper.api.schemas.base import StrictDataSchema
 
 type PnlValuationStatus = Literal["complete", "incomplete"]
 """Whether a point's mark-to-market valuation is trustworthy or withheld."""
+
+type PnlMarkerOutcome = Literal["executed", "rejected", "no_fill"]
+"""Observable execution outcome carried by a timeline decision marker."""
 
 
 class PnlInstrumentContributionData(StrictBody):
@@ -53,16 +56,59 @@ class PnlTimelinePointData(StrictBody):
     per_instrument: list[PnlInstrumentContributionData]
 
 
-class PnlSeriesData(StrictDataSchema[Literal["pnl_series"]]):
-    """The P&L timeline series payload with its provenance envelope.
+class PnlFillMarkerData(StrictBody):
+    """One execution marker projected from the immutable fill ledger."""
 
-    Carries the requested scope and window echoed back for the client, the
-    valuation currency and mark source that value the series (checklist #10 —
-    currency is explicit, never assumed), the reconstruction ``calc_version``,
-    and the ordered points at the requested granularity.
-    """
+    kind: Literal["fill"] = "fill"
+    marker_time: datetime
+    instrument_public_id: str
+    side: str
+    size: float
+    price: float
+    execution_public_id: str
+    order_public_id: str
+    outcome: Literal["executed"] = "executed"
+    status: str
 
-    type: Literal["pnl_series"] = "pnl_series"
+
+class PnlSignalMarkerData(StrictBody):
+    """One source signal, including signals that never produced an execution."""
+
+    kind: Literal["signal"] = "signal"
+    marker_time: datetime
+    instrument_public_id: str
+    side: str
+    strategy_name: str | None
+    strength: float
+    reason: str
+    price: float | None
+    signal_public_id: str
+    outcome: Literal["executed", "no_fill"]
+    status: Literal["executed", "no_fill"]
+
+
+class PnlAiDecisionMarkerData(StrictBody):
+    """One append-only AI decision event, whether executed or declined."""
+
+    kind: Literal["ai_decision"] = "ai_decision"
+    marker_time: datetime
+    instrument_public_id: str
+    strategy_public_id: str
+    review_public_id: str
+    event_public_id: str
+    decision: str | None
+    rationale: str | None
+    outcome: PnlMarkerOutcome
+    status: str
+
+
+type PnlTimelineMarkerData = PnlFillMarkerData | PnlSignalMarkerData | PnlAiDecisionMarkerData
+"""Strict marker union distinguished by each model's literal ``kind`` field."""
+
+
+class _PnlSeriesFields[TypeT: str](StrictDataSchema[TypeT]):
+    """Fields shared by series-only and marker-bearing timeline payloads."""
+
     wallet_public_id: str
     mode: str
     granularity: str
@@ -75,7 +121,34 @@ class PnlSeriesData(StrictDataSchema[Literal["pnl_series"]]):
     points: list[PnlTimelinePointData]
 
 
+class PnlSeriesData(_PnlSeriesFields[Literal["pnl_series"]]):
+    """The P&L timeline series payload with its provenance envelope.
+
+    Carries the requested scope and window echoed back for the client, the
+    valuation currency and mark source that value the series (checklist #10 —
+    currency is explicit, never assumed), the reconstruction ``calc_version``,
+    and the ordered points at the requested granularity.
+    """
+
+    type: Literal["pnl_series"] = "pnl_series"
+
+
 class PnlSeriesResponse(PayloadResponse[Literal["pnl_series"], PnlSeriesData]):
     """Singleton REST response wrapping one P&L timeline series."""
 
     type: Literal["pnl_series"] = "pnl_series"
+
+
+class PnlTimelineData(_PnlSeriesFields[Literal["pnl_timeline"]]):
+    """Series payload augmented with bounded, explicitly disclosed markers."""
+
+    type: Literal["pnl_timeline"] = "pnl_timeline"
+    marker_limit: int
+    markers_truncated: bool
+    markers: list[PnlTimelineMarkerData]
+
+
+class PnlTimelineResponse(PayloadResponse[Literal["pnl_timeline"], PnlTimelineData]):
+    """Singleton REST response wrapping a series and its decision markers."""
+
+    type: Literal["pnl_timeline"] = "pnl_timeline"

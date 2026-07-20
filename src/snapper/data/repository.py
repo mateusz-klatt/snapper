@@ -297,8 +297,10 @@ from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
 from snapper.data.repository_types import PnlTimelineAccrualRow
+from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
 from snapper.data.repository_types import PnlTimelineExecutionRow
+from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 from snapper.data.repository_types import PortfolioDriftEpisodeRow
 from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
@@ -2131,6 +2133,71 @@ class Repository(ABC):
 
         Returns:
             Execution rows ordered by ``(exchange, scope_sequence)`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_timeline_signals(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        from_time: datetime,
+        to_time: datetime,
+        as_of: datetime,
+        limit: int,
+    ) -> list[PnlTimelineSignalMarkerRow]:
+        """Retrieve bounded signals for one wallet and trading-mode scope.
+
+        Signals are selected independently of executions so never-executed
+        decisions remain visible. Trading mode is derived from the active
+        Instrument: ``paper`` only for the paper exchange and ``live`` for
+        every non-paper exchange. ``has_execution`` follows the signal through
+        sentinel-active TradeCommand and Order lineage to an append-only active
+        Execution.
+
+        Args:
+            wallet_public_id: Exact wallet scope to read.
+            mode: Trading mode scope, ``live`` or ``paper``.
+            from_time: Inclusive lower bound on ``fired_at``.
+            to_time: Inclusive upper bound on ``fired_at``.
+            as_of: Point-in-time for Signal and Instrument temporal reads.
+            limit: Maximum number of marker rows to return.
+
+        Returns:
+            Signal markers ordered by ``fired_at`` then ``public_id``, both
+            descending.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_timeline_ai_decisions(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        from_time: datetime,
+        to_time: datetime,
+        as_of: datetime,
+        limit: int,
+    ) -> list[PnlTimelineAiDecisionMarkerRow]:
+        """Retrieve bounded append-only AI decision events for one scope.
+
+        Decision events are selected independently of executions so rejected
+        and otherwise unfilled decisions remain visible. Trading mode is
+        derived from the active Instrument. ``has_execution`` follows the
+        joined AiReview through sentinel-active TradeCommand and Order lineage
+        to an append-only active Execution.
+
+        Args:
+            wallet_public_id: Exact wallet scope to read.
+            mode: Trading mode scope, ``live`` or ``paper``.
+            from_time: Inclusive lower bound on ``occurred_at``.
+            to_time: Inclusive upper bound on ``occurred_at``.
+            as_of: Point-in-time for the Instrument temporal read.
+            limit: Maximum number of marker rows to return.
+
+        Returns:
+            AI decision markers ordered by ``occurred_at`` then event public
+            ID, both descending.
         """
         ...
 
@@ -9269,11 +9336,13 @@ class SQLAlchemyRepository(Repository):
             result = await s.execute(query)
             return [
                 {
+                    "public_id": exe.public_id,
                     "instrument_public_id": instrument_public_id,
                     "exchange": exe.exchange,
                     "scope_sequence": int(exe.scope_sequence),
                     "order_public_id": exe.order_public_id,
                     "side": exe.side,
+                    "status": exe.status,
                     "size": exe.size,
                     "price": exe.price,
                     "fee": exe.fee,
@@ -9284,6 +9353,164 @@ class SQLAlchemyRepository(Repository):
                     "trade_id": exe.trade_id,
                 }
                 for exe, instrument_public_id in result.all()
+            ]
+
+    async def get_pnl_timeline_signals(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        from_time: datetime,
+        to_time: datetime,
+        as_of: datetime,
+        limit: int,
+    ) -> list[PnlTimelineSignalMarkerRow]:
+        """Retrieve bounded signal markers for one wallet and mode scope."""
+        has_execution = exists(
+            select(1)
+            .select_from(TradeCommand)
+            .join(
+                Order,
+                and_(
+                    TradeCommand.client_order_id == Order.client_order_id,
+                    TradeCommand.wallet_public_id == Order.wallet_public_id,
+                    TradeCommand.mode == Order.mode,
+                    Order.instrument_public_id == Signal.instrument_public_id,
+                    Order.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .join(
+                Execution,
+                and_(
+                    Execution.order_public_id == Order.public_id,
+                    Execution.wallet_public_id == Order.wallet_public_id,
+                    Execution.mode == Order.mode,
+                    Execution.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .where(
+                TradeCommand.signal_public_id == Signal.public_id,
+                TradeCommand.wallet_public_id == Signal.wallet_public_id,
+                TradeCommand.mode == mode,
+                TradeCommand.known_to == KNOWN_TO_MAX,
+            )
+            .correlate(Signal)
+        )
+        async with self.session() as s:
+            query = (
+                select(Signal, has_execution)
+                .join(
+                    Instrument,
+                    and_(
+                        Signal.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .where(
+                    Signal.wallet_public_id == wallet_public_id,
+                    Signal.fired_at >= from_time,
+                    Signal.fired_at <= to_time,
+                    *where_active(Signal, as_of),
+                )
+            )
+            if mode == "paper":
+                query = query.where(Instrument.exchange == "paper")
+            else:
+                query = query.where(Instrument.exchange != "paper")
+            query = query.order_by(Signal.fired_at.desc(), Signal.public_id.desc()).limit(limit)
+            result = await s.execute(query)
+            return [
+                {
+                    "public_id": signal.public_id,
+                    "instrument_public_id": signal.instrument_public_id,
+                    "fired_at": signal.fired_at,
+                    "side": signal.side,
+                    "strategy_name": signal.strategy_name,
+                    "strength": signal.strength,
+                    "reason": signal.reason,
+                    "price": signal.price,
+                    "has_execution": bool(executed),
+                }
+                for signal, executed in result.all()
+            ]
+
+    async def get_pnl_timeline_ai_decisions(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        from_time: datetime,
+        to_time: datetime,
+        as_of: datetime,
+        limit: int,
+    ) -> list[PnlTimelineAiDecisionMarkerRow]:
+        """Retrieve bounded AI decision markers for one wallet and mode scope."""
+        has_execution = exists(
+            select(1)
+            .select_from(TradeCommand)
+            .join(
+                Order,
+                and_(
+                    TradeCommand.client_order_id == Order.client_order_id,
+                    TradeCommand.wallet_public_id == Order.wallet_public_id,
+                    TradeCommand.mode == Order.mode,
+                    Order.instrument_public_id == AiReview.instrument_public_id,
+                    Order.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .join(
+                Execution,
+                and_(
+                    Execution.order_public_id == Order.public_id,
+                    Execution.wallet_public_id == Order.wallet_public_id,
+                    Execution.mode == Order.mode,
+                    Execution.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .where(
+                TradeCommand.ai_review_public_id == AiReview.public_id,
+                TradeCommand.wallet_public_id == AiReview.wallet_public_id,
+                TradeCommand.mode == mode,
+                TradeCommand.known_to == KNOWN_TO_MAX,
+            )
+            .correlate(AiReview)
+        )
+        async with self.session() as s:
+            query = (
+                select(AiReviewEvent, AiReview, has_execution)
+                .join(AiReview, AiReviewEvent.review_public_id == AiReview.public_id)
+                .join(
+                    Instrument,
+                    and_(
+                        AiReview.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .where(
+                    AiReview.wallet_public_id == wallet_public_id,
+                    AiReviewEvent.event_type == "decision_recorded",
+                    AiReviewEvent.occurred_at >= from_time,
+                    AiReviewEvent.occurred_at <= to_time,
+                )
+            )
+            if mode == "paper":
+                query = query.where(Instrument.exchange == "paper")
+            else:
+                query = query.where(Instrument.exchange != "paper")
+            query = query.order_by(
+                AiReviewEvent.occurred_at.desc(), AiReviewEvent.public_id.desc()
+            ).limit(limit)
+            result = await s.execute(query)
+            return [
+                {
+                    "event_public_id": event.public_id,
+                    "review_public_id": review.public_id,
+                    "instrument_public_id": review.instrument_public_id,
+                    "strategy_public_id": review.strategy_public_id,
+                    "occurred_at": event.occurred_at,
+                    "new_status": event.new_status,
+                    "payload": event.payload,
+                    "has_execution": bool(executed),
+                }
+                for event, review, executed in result.all()
             ]
 
     async def get_accruals_for_pnl(

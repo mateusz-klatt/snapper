@@ -1,4 +1,4 @@
-"""Tests for the P&L timeline series route (Phase 5A).
+"""Tests for the P&L timeline series and decision-marker routes.
 
 Exercises the ``GET /api/portfolio/pnl/series`` endpoint end to end with a mocked
 repository: the happy path and response shape, every 400 parameter guard, the
@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARKER_LIMIT
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
@@ -77,11 +78,13 @@ def _seeded_repo() -> AsyncMock:
     repo.get_pnl_timeline_executions = AsyncMock(
         return_value=[
             {
+                "public_id": "execution-1",
                 "instrument_public_id": "i1",
                 "exchange": "kraken",
                 "scope_sequence": 1,
                 "order_public_id": "o1",
                 "side": "buy",
+                "status": "filled",
                 "size": 1.0,
                 "price": 100.0,
                 "fee": 0.5,
@@ -90,6 +93,35 @@ def _seeded_repo() -> AsyncMock:
                 "timestamp": t0,
                 "exec_id": "e1",
                 "trade_id": "t1",
+            }
+        ]
+    )
+    repo.get_pnl_timeline_signals = AsyncMock(
+        return_value=[
+            {
+                "public_id": "signal-1",
+                "instrument_public_id": "i1",
+                "fired_at": t0 + timedelta(seconds=10),
+                "side": "buy",
+                "strategy_name": "momentum",
+                "strength": 0.8,
+                "reason": "breakout",
+                "price": 101.0,
+                "has_execution": False,
+            }
+        ]
+    )
+    repo.get_pnl_timeline_ai_decisions = AsyncMock(
+        return_value=[
+            {
+                "event_public_id": "ai-event-1",
+                "review_public_id": "ai-review-1",
+                "instrument_public_id": "i1",
+                "strategy_public_id": "strategy-1",
+                "occurred_at": t0 + timedelta(seconds=20),
+                "new_status": "resolved_rejected",
+                "payload": {"decision": "reject", "rationale": "risk too high"},
+                "has_execution": False,
             }
         ]
     )
@@ -161,6 +193,11 @@ def _url(**params: str) -> str:
     base.update(params)
     query = "&".join(f"{k}={v}" for k, v in base.items())
     return f"/api/portfolio/pnl/series?{query}"
+
+
+def _timeline_url(**params: str) -> str:
+    """Build the marker-bearing timeline URL with the given query params."""
+    return _url(**params).replace("/pnl/series?", "/pnl/timeline?")
 
 
 class TestHappyPath:
@@ -237,6 +274,110 @@ class TestHappyPath:
         points = response.json()["payload"]["points"]
         assert len(points) == 1
         assert points[0]["net_pnl"] == 19.5
+
+
+class TestMarkerTimeline:
+    """Cover the marker-bearing endpoint response and failure disclosure."""
+
+    def test_returns_all_marker_kinds_with_no_fill_and_rejection(self) -> None:
+        """Independent signal and AI reads preserve decisions without fills."""
+        repo = _seeded_repo()
+        client = _create_client(repo)
+        before = datetime.now(UTC)
+        response = client.get(_timeline_url())
+        after = datetime.now(UTC)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["type"] == "pnl_timeline"
+        payload = body["payload"]
+        assert payload["wallet_public_id"] == _WALLET
+        assert payload["granularity"] == "1m"
+        assert payload["marker_limit"] == PNL_TIMELINE_MARKER_LIMIT
+        assert payload["markers_truncated"] is False
+        assert len(payload["points"]) == 3
+        markers = {marker["kind"]: marker for marker in payload["markers"]}
+        assert set(markers) == {"fill", "signal", "ai_decision"}
+        assert markers["fill"]["execution_public_id"] == "execution-1"
+        assert markers["fill"]["order_public_id"] == "o1"
+        assert markers["fill"]["status"] == "filled"
+        assert markers["fill"]["outcome"] == "executed"
+        assert markers["signal"]["signal_public_id"] == "signal-1"
+        assert markers["signal"]["outcome"] == "no_fill"
+        assert markers["signal"]["status"] == "no_fill"
+        assert markers["ai_decision"]["event_public_id"] == "ai-event-1"
+        assert markers["ai_decision"]["decision"] == "reject"
+        assert markers["ai_decision"]["rationale"] == "risk too high"
+        assert markers["ai_decision"]["outcome"] == "rejected"
+        response_as_of = datetime.fromisoformat(payload["as_of"])
+        assert before <= response_as_of <= after
+        repo.get_pnl_timeline_executions.assert_awaited_once()
+        assert repo.get_pnl_timeline_executions.await_args.args[2] == response_as_of
+        assert repo.get_pnl_timeline_signals.await_args.args[4] == response_as_of
+        assert repo.get_pnl_timeline_ai_decisions.await_args.args[4] == response_as_of
+        assert repo.get_pnl_timeline_signals.await_args.args[5] == 2_001
+        assert repo.get_pnl_timeline_ai_decisions.await_args.args[5] == 2_001
+
+    def test_marker_truncation_is_disclosed_and_latest_are_retained(self) -> None:
+        """A busy response states truncation and deterministically drops oldest."""
+        repo = _seeded_repo()
+        t0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+        repo.get_pnl_timeline_signals = AsyncMock(
+            return_value=[
+                {
+                    "public_id": f"signal-{index:04d}",
+                    "instrument_public_id": "i1",
+                    "fired_at": t0,
+                    "side": "buy",
+                    "strategy_name": None,
+                    "strength": 0.5,
+                    "reason": "test",
+                    "price": None,
+                    "has_execution": False,
+                }
+                for index in reversed(range(PNL_TIMELINE_MARKER_LIMIT + 1))
+            ]
+        )
+        repo.get_pnl_timeline_ai_decisions = AsyncMock(return_value=[])
+        response = _create_client(repo).get(_timeline_url(**{"to": _FROM}))
+        assert response.status_code == 200
+        payload = response.json()["payload"]
+        assert payload["marker_limit"] == PNL_TIMELINE_MARKER_LIMIT
+        assert payload["markers_truncated"] is True
+        assert len(payload["markers"]) == PNL_TIMELINE_MARKER_LIMIT
+        assert payload["markers"][0]["signal_public_id"] == "signal-0001"
+        assert payload["markers"][-1]["signal_public_id"] == "signal-2000"
+
+    def test_work_budget_error_matches_series_validation(self) -> None:
+        """Timeline requests surface excessive reconstruction work as 400."""
+        repo = _seeded_repo()
+        response = _create_client(repo).get(
+            _timeline_url(
+                **{
+                    "from": "2020-01-01T00:00:00Z",
+                    "to": "2026-01-01T00:00:00Z",
+                }
+            )
+        )
+        assert response.status_code == 400
+        assert "minute-instrument work units" in response.json()["detail"]
+        repo.get_pnl_timeline_signals.assert_not_awaited()
+        repo.get_pnl_timeline_ai_decisions.assert_not_awaited()
+
+    def test_unexpected_marker_read_failure_is_wrapped_as_500(self) -> None:
+        """An unexpected independent marker-read error gets a stable 500."""
+        repo = _seeded_repo()
+        repo.get_pnl_timeline_signals = AsyncMock(side_effect=RuntimeError("boom"))
+        response = _create_client(repo).get(_timeline_url())
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Failed to build P&L timeline"
+
+    def test_invalid_mode_uses_the_same_request_guard(self) -> None:
+        """The marker endpoint shares the exact live/paper mode validation."""
+        repo = _seeded_repo()
+        response = _create_client(repo).get(_timeline_url(mode="LIVE"))
+        assert response.status_code == 400
+        assert "expected 'live' or 'paper'" in response.json()["detail"]
+        repo.list_active_wallets.assert_not_awaited()
 
 
 class TestParameterGuards:

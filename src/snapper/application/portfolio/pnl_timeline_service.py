@@ -34,9 +34,12 @@ WITHHELD (untrusted) point, which is the honest outcome.
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from datetime import timedelta
 from typing import Final
+from typing import Literal
 
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import PnlInstrumentContribution
@@ -49,8 +52,10 @@ from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
 from snapper.data.repository import Repository
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
+from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
 from snapper.data.repository_types import PnlTimelineExecutionRow
+from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
@@ -70,6 +75,77 @@ The budget preserves the former 91-day allowance for one instrument while
 making multi-instrument requests pay for their actual grid fan-out. Empty scopes
 use a factor of one because the pure builder still materialises the raw grid.
 """
+
+PNL_TIMELINE_MARKER_LIMIT: Final[int] = 2_000
+"""Maximum markers returned, retaining the latest markers deterministically.
+
+Marker reads request one extra row from each independently bounded decision
+source. The response exposes both this limit and whether older markers were
+omitted, so a busy window never looks indistinguishable from a complete one.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class PnlFillMarker:
+    """One immutable execution projected as an executed timeline marker."""
+
+    marker_time: datetime
+    instrument_public_id: str
+    side: str
+    size: float
+    price: float
+    execution_public_id: str
+    order_public_id: str
+    status: str
+    kind: Literal["fill"] = field(default="fill", init=False)
+    outcome: Literal["executed"] = field(default="executed", init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PnlSignalMarker:
+    """One source signal with its independently established fill outcome."""
+
+    marker_time: datetime
+    instrument_public_id: str
+    side: str
+    strategy_name: str | None
+    strength: float
+    reason: str
+    price: float | None
+    signal_public_id: str
+    outcome: Literal["executed", "no_fill"]
+    status: Literal["executed", "no_fill"]
+    kind: Literal["signal"] = field(default="signal", init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PnlAiDecisionMarker:
+    """One append-only AI decision event and its observable outcome."""
+
+    marker_time: datetime
+    instrument_public_id: str
+    strategy_public_id: str
+    review_public_id: str
+    event_public_id: str
+    decision: str | None
+    rationale: str | None
+    outcome: Literal["executed", "rejected", "no_fill"]
+    status: str
+    kind: Literal["ai_decision"] = field(default="ai_decision", init=False)
+
+
+type PnlTimelineMarker = PnlFillMarker | PnlSignalMarker | PnlAiDecisionMarker
+"""Service-layer marker union emitted in chronological chart order."""
+
+
+@dataclass(frozen=True, slots=True)
+class PnlWalletTimelineResult:
+    """One reconstructed series with a bounded marker overlay."""
+
+    series: PnlTimelineResult
+    markers: tuple[PnlTimelineMarker, ...]
+    marker_limit: int
+    markers_truncated: bool
 
 
 class PnlTimelineWorkBudgetError(ValueError):
@@ -294,6 +370,7 @@ async def build_wallet_pnl_series(
     granularity: str,
     as_of: datetime,
     valuation_ccy: str = "USD",
+    execution_rows: Sequence[PnlTimelineExecutionRow] | None = None,
 ) -> PnlTimelineResult:
     """Reconstruct one wallet/mode scope's Net-P&L-since-activation series.
 
@@ -316,6 +393,8 @@ async def build_wallet_pnl_series(
         granularity: One of ``'1m'``, ``'5m'``, ``'1h'``, ``'1d'``.
         as_of: Snapshot time threading the accrual and candle reads.
         valuation_ccy: Currency the series components are expressed in.
+        execution_rows: Optional preloaded execution prefix used by the marker
+            endpoint to avoid issuing the same scope read twice.
 
     Returns:
         The built :class:`PnlTimelineResult` at the requested granularity.
@@ -327,15 +406,21 @@ async def build_wallet_pnl_series(
             the pure builder).
     """
     fill_gap = await _scope_has_fill_gap(repo, wallet_public_id, mode, as_of)
-    execution_rows = await repo.get_pnl_timeline_executions(wallet_public_id, mode, as_of)
+    loaded_execution_rows = (
+        await repo.get_pnl_timeline_executions(wallet_public_id, mode, as_of)
+        if execution_rows is None
+        else list(execution_rows)
+    )
     accrual_rows = await repo.get_accruals_for_pnl(wallet_public_id, mode, as_of)
-    instrument_ids = list(dict.fromkeys(row["instrument_public_id"] for row in execution_rows))
+    instrument_ids = list(
+        dict.fromkeys(row["instrument_public_id"] for row in loaded_execution_rows)
+    )
     work_instrument_ids = set(instrument_ids)
     work_instrument_ids.update(row["instrument_public_id"] for row in accrual_rows)
     _enforce_total_work_budget(from_time, to_time, len(work_instrument_ids))
     refs = await repo.get_instrument_symbol_refs(instrument_ids, as_of)
     marks = await build_marks(repo, refs, from_time, to_time, as_of, valuation_ccy)
-    executions = [_to_timeline_execution(row, valuation_ccy) for row in execution_rows]
+    executions = [_to_timeline_execution(row, valuation_ccy) for row in loaded_execution_rows]
     accruals = [_to_timeline_accrual(row, valuation_ccy) for row in accrual_rows]
     window = TimelineWindow(
         from_time=from_time,
@@ -347,3 +432,159 @@ async def build_wallet_pnl_series(
     if fill_gap:
         return _withhold_series_for_fill_gap(result)
     return result
+
+
+def _fill_marker(row: PnlTimelineExecutionRow) -> PnlFillMarker:
+    """Project one execution row into a fill marker."""
+    return PnlFillMarker(
+        marker_time=row["timestamp"],
+        instrument_public_id=row["instrument_public_id"],
+        side=row["side"],
+        size=row["size"],
+        price=row["price"],
+        execution_public_id=row["public_id"],
+        order_public_id=row["order_public_id"],
+        status=row["status"],
+    )
+
+
+def _signal_marker(row: PnlTimelineSignalMarkerRow) -> PnlSignalMarker:
+    """Project one signal row without inferring existence from fills alone."""
+    outcome: Literal["executed", "no_fill"] = "executed" if row["has_execution"] else "no_fill"
+    return PnlSignalMarker(
+        marker_time=row["fired_at"],
+        instrument_public_id=row["instrument_public_id"],
+        side=row["side"],
+        strategy_name=row["strategy_name"],
+        strength=row["strength"],
+        reason=row["reason"],
+        price=row["price"],
+        signal_public_id=row["public_id"],
+        outcome=outcome,
+        status=outcome,
+    )
+
+
+def _payload_string(row: PnlTimelineAiDecisionMarkerRow, key: str) -> str | None:
+    """Return one event-payload string without coercing arbitrary JSON."""
+    value = row["payload"].get(key)
+    return value if isinstance(value, str) else None
+
+
+def _ai_decision_marker(row: PnlTimelineAiDecisionMarkerRow) -> PnlAiDecisionMarker:
+    """Project one AI decision, preserving reject and no-fill outcomes."""
+    decision = _payload_string(row, "decision")
+    if decision == "reject" or row["new_status"] == "resolved_rejected":
+        outcome: Literal["executed", "rejected", "no_fill"] = "rejected"
+    elif row["has_execution"]:
+        outcome = "executed"
+    else:
+        outcome = "no_fill"
+    return PnlAiDecisionMarker(
+        marker_time=row["occurred_at"],
+        instrument_public_id=row["instrument_public_id"],
+        strategy_public_id=row["strategy_public_id"],
+        review_public_id=row["review_public_id"],
+        event_public_id=row["event_public_id"],
+        decision=decision,
+        rationale=_payload_string(row, "rationale"),
+        outcome=outcome,
+        status=row["new_status"],
+    )
+
+
+def _marker_source_public_id(marker: PnlTimelineMarker) -> str:
+    """Return the source identity used to break marker-order ties."""
+    if isinstance(marker, PnlFillMarker):
+        return marker.execution_public_id
+    if isinstance(marker, PnlSignalMarker):
+        return marker.signal_public_id
+    return marker.event_public_id
+
+
+def _marker_sort_key(marker: PnlTimelineMarker) -> tuple[datetime, str, str]:
+    """Build the deterministic chronological marker ordering key."""
+    return marker.marker_time, marker.kind, _marker_source_public_id(marker)
+
+
+async def build_wallet_pnl_timeline(
+    repo: Repository,
+    wallet_public_id: str,
+    mode: str,
+    from_time: datetime,
+    to_time: datetime,
+    granularity: str,
+    as_of: datetime,
+    valuation_ccy: str = "USD",
+) -> PnlWalletTimelineResult:
+    """Build a wallet series plus independently sourced decision markers.
+
+    The execution prefix is loaded once and reused by the existing series
+    builder. Signals and append-only AI decision events are read independently,
+    which retains declined decisions and signals that never reached an order.
+    Each independent marker read asks for ``limit + 1`` newest rows. All marker
+    kinds are merged by ``(time, kind, source id)``; if the combined set exceeds
+    the public cap, only the latest markers remain and ``markers_truncated`` is
+    set so the omission is never silent.
+
+    Args:
+        repo: Repository providing series inputs and marker reads.
+        wallet_public_id: Wallet scope to reconstruct.
+        mode: Trading mode scope.
+        from_time: Inclusive series and marker window start.
+        to_time: Inclusive series and marker window end.
+        granularity: Requested P&L point granularity.
+        as_of: Current read horizon shared by every repository read.
+        valuation_ccy: Currency the series components are expressed in.
+
+    Returns:
+        The existing P&L series and its capped marker overlay.
+
+    Raises:
+        PnlTimelineWorkBudgetError: When the series work budget is exceeded.
+        ValueError: When the pure builder rejects the requested window.
+    """
+    execution_rows = await repo.get_pnl_timeline_executions(wallet_public_id, mode, as_of)
+    series = await build_wallet_pnl_series(
+        repo,
+        wallet_public_id,
+        mode,
+        from_time,
+        to_time,
+        granularity,
+        as_of,
+        valuation_ccy=valuation_ccy,
+        execution_rows=execution_rows,
+    )
+    read_limit = PNL_TIMELINE_MARKER_LIMIT + 1
+    signal_rows = await repo.get_pnl_timeline_signals(
+        wallet_public_id,
+        mode,
+        from_time,
+        to_time,
+        as_of,
+        read_limit,
+    )
+    ai_decision_rows = await repo.get_pnl_timeline_ai_decisions(
+        wallet_public_id,
+        mode,
+        from_time,
+        to_time,
+        as_of,
+        read_limit,
+    )
+    markers: list[PnlTimelineMarker] = [
+        _fill_marker(row) for row in execution_rows if from_time <= row["timestamp"] <= to_time
+    ]
+    markers.extend(_signal_marker(row) for row in signal_rows)
+    markers.extend(_ai_decision_marker(row) for row in ai_decision_rows)
+    markers.sort(key=_marker_sort_key)
+    markers_truncated = len(markers) > PNL_TIMELINE_MARKER_LIMIT
+    if markers_truncated:
+        markers = markers[-PNL_TIMELINE_MARKER_LIMIT:]
+    return PnlWalletTimelineResult(
+        series=series,
+        markers=tuple(markers),
+        marker_limit=PNL_TIMELINE_MARKER_LIMIT,
+        markers_truncated=markers_truncated,
+    )

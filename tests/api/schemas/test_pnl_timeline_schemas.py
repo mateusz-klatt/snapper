@@ -11,10 +11,15 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
+from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
+from snapper.api.schemas.pnl_timeline import PnlFillMarkerData
 from snapper.api.schemas.pnl_timeline import PnlInstrumentContributionData
 from snapper.api.schemas.pnl_timeline import PnlSeriesData
 from snapper.api.schemas.pnl_timeline import PnlSeriesResponse
+from snapper.api.schemas.pnl_timeline import PnlSignalMarkerData
+from snapper.api.schemas.pnl_timeline import PnlTimelineData
 from snapper.api.schemas.pnl_timeline import PnlTimelinePointData
+from snapper.api.schemas.pnl_timeline import PnlTimelineResponse
 from snapper.api.schemas.pnl_timeline import PnlValuationStatus
 
 _NOW = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
@@ -70,6 +75,63 @@ def _series_data() -> PnlSeriesData:
         mark_source="finalized_1m_candle_close",
         calc_version="5A.1",
         points=[_point()],
+    )
+
+
+def _timeline_data() -> PnlTimelineData:
+    """Build a valid marker-bearing timeline payload."""
+    return PnlTimelineData(
+        public_id="timeline-1",
+        timestamp=_NOW,
+        session_id="s1",
+        sequence_id=3,
+        wallet_public_id="w1",
+        mode="live",
+        granularity="1m",
+        valuation_ccy="USD",
+        from_time=_NOW,
+        to_time=_NOW,
+        as_of=_NOW,
+        mark_source="finalized_1m_candle_close",
+        calc_version="5A.2",
+        points=[_point()],
+        marker_limit=2_000,
+        markers_truncated=False,
+        markers=[
+            PnlFillMarkerData(
+                marker_time=_NOW,
+                instrument_public_id="i1",
+                side="buy",
+                size=1.0,
+                price=100.0,
+                execution_public_id="execution-1",
+                order_public_id="order-1",
+                status="filled",
+            ),
+            PnlSignalMarkerData(
+                marker_time=_NOW,
+                instrument_public_id="i1",
+                side="buy",
+                strategy_name=None,
+                strength=0.8,
+                reason="breakout",
+                price=None,
+                signal_public_id="signal-1",
+                outcome="no_fill",
+                status="no_fill",
+            ),
+            PnlAiDecisionMarkerData(
+                marker_time=_NOW,
+                instrument_public_id="i1",
+                strategy_public_id="strategy-1",
+                review_public_id="review-1",
+                event_public_id="event-1",
+                decision="reject",
+                rationale=None,
+                outcome="rejected",
+                status="resolved_rejected",
+            ),
+        ],
     )
 
 
@@ -134,3 +196,47 @@ class TestStrictContract:
         }
         with pytest.raises(ValidationError):
             PnlTimelinePointData.model_validate(payload)
+
+    def test_marker_timeline_response_round_trips_all_kinds(self) -> None:
+        """The timeline envelope preserves each typed marker discriminator."""
+        response = PnlTimelineResponse(
+            public_id="envelope-1",
+            timestamp=_NOW,
+            session_id="s1",
+            sequence_id=4,
+            payload=_timeline_data(),
+        )
+        assert response.type == "pnl_timeline"
+        assert response.payload.marker_limit == 2_000
+        assert response.payload.markers_truncated is False
+        assert [marker.kind for marker in response.payload.markers] == [
+            "fill",
+            "signal",
+            "ai_decision",
+        ]
+        assert response.payload.markers[1].outcome == "no_fill"
+        assert response.payload.markers[2].outcome == "rejected"
+
+    def test_unknown_marker_discriminator_is_rejected(self) -> None:
+        """Only fill, signal, and AI-decision marker kinds are accepted."""
+        payload = _timeline_data().model_dump()
+        payload["markers"] = [
+            {
+                "kind": "order",
+                "marker_time": _NOW,
+                "instrument_public_id": "i1",
+            }
+        ]
+        with pytest.raises(ValidationError):
+            PnlTimelineData.model_validate(payload)
+
+    def test_marker_models_reject_unknown_fields_and_outcomes(self) -> None:
+        """Marker bodies remain strict and their outcomes are closed literals."""
+        fill = _timeline_data().markers[0].model_dump()
+        fill["surprise"] = True
+        with pytest.raises(ValidationError):
+            PnlFillMarkerData.model_validate(fill)
+        signal = _timeline_data().markers[1].model_dump()
+        signal["outcome"] = "rejected"
+        with pytest.raises(ValidationError):
+            PnlSignalMarkerData.model_validate(signal)

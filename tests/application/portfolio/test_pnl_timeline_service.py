@@ -15,16 +15,23 @@ import pytest
 
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
+from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARKER_LIMIT
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MAX_WORK_UNITS
+from snapper.application.portfolio.pnl_timeline_service import PnlAiDecisionMarker
+from snapper.application.portfolio.pnl_timeline_service import PnlFillMarker
+from snapper.application.portfolio.pnl_timeline_service import PnlSignalMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_accrual
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_execution
 from snapper.application.portfolio.pnl_timeline_service import build_marks
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
+from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_timeline
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
+from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
 from snapper.data.repository_types import PnlTimelineExecutionRow
+from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 
 _T0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
 _I1 = "00000000-0000-7000-8000-000000000b01"
@@ -49,11 +56,13 @@ def _exec_row(
 ) -> PnlTimelineExecutionRow:
     """Build one execution row as ``get_pnl_timeline_executions`` returns it."""
     return {
+        "public_id": f"execution-{instrument}-{scope}",
         "instrument_public_id": instrument,
         "exchange": exchange,
         "scope_sequence": scope,
         "order_public_id": f"order-{instrument}-{scope}",
         "side": side,
+        "status": "filled",
         "size": size,
         "price": price,
         "fee": fee,
@@ -62,6 +71,46 @@ def _exec_row(
         "timestamp": _m(minute),
         "exec_id": f"exec-{scope}",
         "trade_id": f"trade-{scope}",
+    }
+
+
+def _signal_row(
+    public_id: str,
+    marker_time: datetime,
+    has_execution: bool,
+) -> PnlTimelineSignalMarkerRow:
+    """Build one independently sourced signal-marker row."""
+    return {
+        "public_id": public_id,
+        "instrument_public_id": _I1,
+        "fired_at": marker_time,
+        "side": "buy",
+        "strategy_name": "momentum",
+        "strength": 0.8,
+        "reason": "breakout",
+        "price": 101.0,
+        "has_execution": has_execution,
+    }
+
+
+def _ai_decision_row(
+    public_id: str,
+    marker_time: datetime,
+    decision: str | int | None,
+    new_status: str,
+    has_execution: bool,
+    rationale: str | int | None = "reviewed",
+) -> PnlTimelineAiDecisionMarkerRow:
+    """Build one append-only AI decision-event marker row."""
+    return {
+        "event_public_id": public_id,
+        "review_public_id": f"review-{public_id}",
+        "instrument_public_id": _I1,
+        "strategy_public_id": "strategy-1",
+        "occurred_at": marker_time,
+        "new_status": new_status,
+        "payload": {"decision": decision, "rationale": rationale},
+        "has_execution": has_execution,
     }
 
 
@@ -120,6 +169,8 @@ class FakeRepo:
         accruals: Sequence[PnlTimelineAccrualRow] = (),
         refs: Sequence[InstrumentSymbolRefRow] = (),
         candles: Sequence[PnlTimelineCandleRow] = (),
+        signals: Sequence[PnlTimelineSignalMarkerRow] = (),
+        ai_decisions: Sequence[PnlTimelineAiDecisionMarkerRow] = (),
         fill_shard_keys: Sequence[str] = (),
         gapped_shards: set[str] | None = None,
     ) -> None:
@@ -128,6 +179,8 @@ class FakeRepo:
         self._accruals = list(accruals)
         self._refs = list(refs)
         self._candles = list(candles)
+        self._signals = list(signals)
+        self._ai_decisions = list(ai_decisions)
         self._fill_shard_keys = list(fill_shard_keys)
         self._gapped_shards = gapped_shards or set()
         self.symbol_ref_calls: list[list[str]] = []
@@ -136,6 +189,11 @@ class FakeRepo:
         ] = []
         self.fill_scope_calls: list[tuple[str, str]] = []
         self.fill_gap_calls: list[tuple[str, datetime]] = []
+        self.execution_calls: list[tuple[str, str, datetime]] = []
+        self.accrual_calls: list[tuple[str, str, datetime]] = []
+        self.symbol_ref_as_of_calls: list[datetime] = []
+        self.signal_calls: list[tuple[str, str, datetime, datetime, datetime, int]] = []
+        self.ai_decision_calls: list[tuple[str, str, datetime, datetime, datetime, int]] = []
 
     async def get_fill_shard_keys_for_scope(self, wallet_public_id: str, mode: str) -> list[str]:
         """Record the exact scope and return its fill-bearing shards."""
@@ -151,12 +209,40 @@ class FakeRepo:
         self, wallet_public_id: str, mode: str, as_of: datetime
     ) -> list[PnlTimelineExecutionRow]:
         """Return the canned execution rows."""
+        self.execution_calls.append((wallet_public_id, mode, as_of))
         return list(self._executions)
+
+    async def get_pnl_timeline_signals(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        from_time: datetime,
+        to_time: datetime,
+        as_of: datetime,
+        limit: int,
+    ) -> list[PnlTimelineSignalMarkerRow]:
+        """Record one bounded signal read and return its newest rows."""
+        self.signal_calls.append((wallet_public_id, mode, from_time, to_time, as_of, limit))
+        return list(self._signals[:limit])
+
+    async def get_pnl_timeline_ai_decisions(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        from_time: datetime,
+        to_time: datetime,
+        as_of: datetime,
+        limit: int,
+    ) -> list[PnlTimelineAiDecisionMarkerRow]:
+        """Record one bounded AI-event read and return its newest rows."""
+        self.ai_decision_calls.append((wallet_public_id, mode, from_time, to_time, as_of, limit))
+        return list(self._ai_decisions[:limit])
 
     async def get_accruals_for_pnl(
         self, wallet_public_id: str, mode: str, as_of: datetime
     ) -> list[PnlTimelineAccrualRow]:
         """Return the canned accrual rows."""
+        self.accrual_calls.append((wallet_public_id, mode, as_of))
         return list(self._accruals)
 
     async def get_instrument_symbol_refs(
@@ -164,6 +250,7 @@ class FakeRepo:
     ) -> list[InstrumentSymbolRefRow]:
         """Record the requested ids and return the matching refs."""
         self.symbol_ref_calls.append(list(instrument_public_ids))
+        self.symbol_ref_as_of_calls.append(as_of)
         requested = set(instrument_public_ids)
         return [ref for ref in self._refs if ref["instrument_public_id"] in requested]
 
@@ -293,7 +380,8 @@ class TestBuildWalletPnlSeries:
             candles=candles,
             fill_shard_keys=["clean-shard"],
         )
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(2), "1m", _T0)
+        as_of = _m(3)
+        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(2), "1m", as_of)
         assert result.granularity == "1m"
         assert result.valuation_ccy == "USD"
         assert [p.valuation_status for p in result.points] == ["complete"] * 3
@@ -304,7 +392,11 @@ class TestBuildWalletPnlSeries:
         assert result.points[2].unrealized_pnl == 20.0
         assert result.points[2].net_pnl == 19.5
         assert repo.fill_scope_calls == [("w1", "live")]
-        assert repo.fill_gap_calls == [("clean-shard", _T0)]
+        assert repo.fill_gap_calls == [("clean-shard", as_of)]
+        assert repo.execution_calls == [("w1", "live", as_of)]
+        assert repo.accrual_calls == [("w1", "live", as_of)]
+        assert repo.symbol_ref_as_of_calls == [as_of]
+        assert repo.candle_calls[0][3] == as_of
 
     async def test_empty_asset_zero_fee_keeps_the_series_complete(self) -> None:
         """A fee-free production fill cannot poison an otherwise complete series."""
@@ -422,7 +514,10 @@ class TestBuildWalletPnlSeries:
         result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(1), "1m", _T0)
         assert result.granularity == "1m"
         assert result.valuation_ccy == "USD"
-        assert repo.fill_gap_calls == [("clean-shard", _T0), ("gapped-shard", _T0)]
+        assert repo.fill_gap_calls == [
+            ("clean-shard", _T0),
+            ("gapped-shard", _T0),
+        ]
         for point in result.points:
             assert point.valuation_status == "incomplete"
             assert point.realized_pnl is None
@@ -479,6 +574,157 @@ class TestBuildWalletPnlSeries:
         assert repo.symbol_ref_calls == [[]]
 
 
+class TestBuildWalletPnlTimeline:
+    """Cover independent marker sourcing, outcomes, ordering, and capping."""
+
+    async def test_emits_all_marker_kinds_and_preserves_no_fill_decisions(self) -> None:
+        """Rejected and never-executed decisions survive without fill lineage."""
+        executions = [
+            _exec_row(_I1, 1, -1, "buy", 1.0, 99.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 1, "buy", 1.0, 100.0, 0.0, "USD"),
+        ]
+        signals = [
+            _signal_row("signal-no-fill", _m(0), False),
+            _signal_row("signal-executed", _m(2), True),
+        ]
+        ai_decisions = [
+            _ai_decision_row(
+                "ai-reject",
+                _m(0),
+                "reject",
+                "resolved_rejected",
+                False,
+            ),
+            _ai_decision_row(
+                "ai-status-reject",
+                _m(0) + timedelta(seconds=1),
+                7,
+                "resolved_rejected",
+                True,
+                rationale=9,
+            ),
+            _ai_decision_row(
+                "ai-executed",
+                _m(1),
+                "approve",
+                "resolved_approved",
+                True,
+            ),
+            _ai_decision_row(
+                "ai-no-fill",
+                _m(1) + timedelta(seconds=1),
+                "approve",
+                "resolved_approved",
+                False,
+                rationale=None,
+            ),
+        ]
+        refs = [_ref(_I1, "BTC-USD", "USD")]
+        candles = [
+            _candle(_m(-1), 100.0),
+            _candle(_m(0), 101.0),
+            _candle(_m(1), 102.0),
+        ]
+        repo = FakeRepo(
+            executions=executions,
+            signals=signals,
+            ai_decisions=ai_decisions,
+            refs=refs,
+            candles=candles,
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _m(3),
+        )
+        assert result.marker_limit == PNL_TIMELINE_MARKER_LIMIT
+        assert result.markers_truncated is False
+        assert len(result.series.points) == 3
+        assert repo.execution_calls == [("w1", "live", _m(3))]
+        assert repo.signal_calls == [
+            ("w1", "live", _T0, _m(2), _m(3), PNL_TIMELINE_MARKER_LIMIT + 1)
+        ]
+        assert repo.ai_decision_calls == [
+            ("w1", "live", _T0, _m(2), _m(3), PNL_TIMELINE_MARKER_LIMIT + 1)
+        ]
+        assert [marker.marker_time for marker in result.markers] == sorted(
+            marker.marker_time for marker in result.markers
+        )
+        fills = [marker for marker in result.markers if isinstance(marker, PnlFillMarker)]
+        assert len(fills) == 1
+        assert fills[0].execution_public_id == f"execution-{_I1}-2"
+        assert fills[0].order_public_id == f"order-{_I1}-2"
+        assert fills[0].status == "filled"
+        assert fills[0].outcome == "executed"
+        signal_markers = {
+            marker.signal_public_id: marker
+            for marker in result.markers
+            if isinstance(marker, PnlSignalMarker)
+        }
+        assert signal_markers["signal-no-fill"].outcome == "no_fill"
+        assert signal_markers["signal-no-fill"].status == "no_fill"
+        assert signal_markers["signal-executed"].outcome == "executed"
+        assert signal_markers["signal-executed"].status == "executed"
+        ai_markers = {
+            marker.event_public_id: marker
+            for marker in result.markers
+            if isinstance(marker, PnlAiDecisionMarker)
+        }
+        assert ai_markers["ai-reject"].outcome == "rejected"
+        assert ai_markers["ai-status-reject"].outcome == "rejected"
+        assert ai_markers["ai-status-reject"].decision is None
+        assert ai_markers["ai-status-reject"].rationale is None
+        assert ai_markers["ai-executed"].outcome == "executed"
+        assert ai_markers["ai-no-fill"].outcome == "no_fill"
+        assert ai_markers["ai-no-fill"].rationale is None
+
+    async def test_exact_cap_is_complete_and_over_cap_keeps_latest(self) -> None:
+        """The exact cap is complete; one extra drops the oldest with disclosure."""
+        exact_rows = [
+            _signal_row(f"signal-{index:04d}", _T0, False)
+            for index in reversed(range(PNL_TIMELINE_MARKER_LIMIT))
+        ]
+        exact = await build_wallet_pnl_timeline(
+            FakeRepo(signals=exact_rows),
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+        )
+        assert len(exact.markers) == PNL_TIMELINE_MARKER_LIMIT
+        assert exact.markers_truncated is False
+        over_rows = [
+            _signal_row(f"signal-{index:04d}", _T0, False)
+            for index in reversed(range(PNL_TIMELINE_MARKER_LIMIT + 1))
+        ]
+        over_repo = FakeRepo(signals=over_rows)
+        over = await build_wallet_pnl_timeline(
+            over_repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+        )
+        assert len(over.markers) == PNL_TIMELINE_MARKER_LIMIT
+        assert over.markers_truncated is True
+        first = over.markers[0]
+        last = over.markers[-1]
+        assert isinstance(first, PnlSignalMarker)
+        assert isinstance(last, PnlSignalMarker)
+        assert first.signal_public_id == "signal-0001"
+        assert last.signal_public_id == f"signal-{PNL_TIMELINE_MARKER_LIMIT:04d}"
+        assert over_repo.signal_calls[0][-1] == PNL_TIMELINE_MARKER_LIMIT + 1
+        assert over_repo.ai_decision_calls[0][-1] == PNL_TIMELINE_MARKER_LIMIT + 1
+
+
 def test_provenance_constants_are_stable() -> None:
     """Pin the public reconstruction provenance and work-budget constants.
 
@@ -489,3 +735,4 @@ def test_provenance_constants_are_stable() -> None:
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
     assert PNL_TIMELINE_CALC_VERSION == "5A.2"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
+    assert PNL_TIMELINE_MARKER_LIMIT == 2_000

@@ -337,16 +337,19 @@ class PnlTimelineExecutionRow(TypedDict):
     ordered by ``(exchange, scope_sequence)`` ascending. ``instrument_public_id``
     is the fill's active Order lineage (the pool key); ``exchange`` and
     ``scope_sequence`` come from the immutable ``Execution`` row and define the
-    per-scope accumulation order. ``timestamp`` is the time AXIS the builder
-    grids on; ``executed_at`` is the nullable venue domain time, advisory only
-    (checklist #2 — never the accumulation key).
+    per-scope accumulation order. ``public_id`` and ``status`` preserve the
+    execution's API identity and fill state. ``timestamp`` is the time AXIS the
+    builder grids on; ``executed_at`` is the nullable venue domain time,
+    advisory only (checklist #2 — never the accumulation key).
     """
 
+    public_id: str
     instrument_public_id: str
     exchange: str
     scope_sequence: int
     order_public_id: str
     side: str
+    status: str
     size: float
     price: float
     fee: float
@@ -355,6 +358,42 @@ class PnlTimelineExecutionRow(TypedDict):
     timestamp: datetime
     exec_id: str | None
     trade_id: str | None
+
+
+class PnlTimelineSignalMarkerRow(TypedDict):
+    """One signal projected for a scoped P&L timeline marker read.
+
+    ``has_execution`` is true only when the signal lineage reaches an
+    append-only execution through active TradeCommand and Order rows. A false
+    value preserves independent signals that never produced an order or fill.
+    """
+
+    public_id: str
+    instrument_public_id: str
+    fired_at: datetime
+    side: str
+    strategy_name: str | None
+    strength: float
+    reason: str
+    price: float | None
+    has_execution: bool
+
+
+class PnlTimelineAiDecisionMarkerRow(TypedDict):
+    """One append-only AI decision event projected for a timeline marker.
+
+    The event payload and transition status carry the recorded decision even
+    when ``has_execution`` is false, including rejected decisions.
+    """
+
+    event_public_id: str
+    review_public_id: str
+    instrument_public_id: str
+    strategy_public_id: str
+    occurred_at: datetime
+    new_status: str
+    payload: JsonObject
+    has_execution: bool
 
 
 class PnlTimelineAccrualRow(TypedDict):
