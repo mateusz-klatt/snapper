@@ -377,6 +377,39 @@ class PnlTimelineAccrualRow(TypedDict):
     amount_asset: str
 
 
+class InstrumentSymbolRefRow(TypedDict):
+    """Symbol reference for one instrument, for P&L timeline mark resolution.
+
+    Returned by ``get_instrument_symbol_refs`` for the distinct instruments a
+    P&L timeline reconstruction touches. ``exchange`` is the canonical candle
+    venue: ``Instrument.source_exchange`` when present, otherwise the
+    instrument's own exchange. Together, ``native_symbol`` and ``exchange``
+    identify the finalized 1m candle series used for marks while the original
+    ``instrument_public_id`` remains the mark-map key. ``quote_currency`` is the
+    nullable ``Symbol.quote`` asset that decides whether the close is already
+    denominated in the valuation currency (checklist #13 — no FX conversion in
+    v1).
+    """
+
+    instrument_public_id: str
+    native_symbol: str
+    exchange: str
+    quote_currency: str | None
+
+
+class PnlTimelineCandleRow(TypedDict):
+    """Finalized one-minute candle close projected for P&L marks.
+
+    Returned by ``get_pnl_timeline_candles``. The instrument identity is copied
+    from the requested symbol reference, including for PAPER instruments whose
+    candle row belongs to a canonical source-venue instrument.
+    """
+
+    instrument_public_id: str
+    open_at: datetime
+    close: float
+
+
 class PositionRow(TypedDict):
     """Row dict returned by get_positions."""
 

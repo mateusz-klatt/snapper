@@ -275,6 +275,7 @@ from snapper.data.repository_types import InstrumentOrderCapabilityRow
 from snapper.data.repository_types import InstrumentRelatedRow
 from snapper.data.repository_types import InstrumentSourceResolution
 from snapper.data.repository_types import InstrumentSpecRow
+from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import InstrumentSymbolRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import MarketDataCoverageRow
@@ -296,6 +297,7 @@ from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
 from snapper.data.repository_types import PnlTimelineAccrualRow
+from snapper.data.repository_types import PnlTimelineCandleRow
 from snapper.data.repository_types import PnlTimelineExecutionRow
 from snapper.data.repository_types import PortfolioDriftEpisodeRow
 from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
@@ -2155,6 +2157,98 @@ class Repository(ABC):
 
         Returns:
             Accrual rows ordered by ``accrued_at`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def get_instrument_symbol_refs(
+        self,
+        instrument_public_ids: Sequence[str],
+        as_of: datetime,
+    ) -> list[InstrumentSymbolRefRow]:
+        """Resolve instruments to their symbol references for mark valuation.
+
+        Joins each active :class:`Instrument` to its active :class:`Symbol`
+        version at ``as_of`` and projects the ``(native_symbol, canonical candle
+        venue, quote)`` triple the P&L timeline mark builder needs. The candle
+        venue is ``Instrument.source_exchange`` when present, otherwise the
+        instrument's own exchange, so a PAPER identity reads its source venue's
+        finalized 1m series. ``quote_currency`` decides whether that close is
+        already denominated in the valuation currency or must be left unmarked
+        (checklist #13 — no historical FX in v1).
+
+        Args:
+            instrument_public_ids: Instruments to resolve; an empty sequence
+                returns an empty list without a query.
+            as_of: Snapshot time threading both temporal joins.
+
+        Returns:
+            One row per instrument that has an active symbol version at
+            ``as_of``. Instruments with no active symbol are omitted.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_timeline_candles(
+        self,
+        refs: Sequence[InstrumentSymbolRefRow],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlTimelineCandleRow]:
+        """Load finalized one-minute mark candles for several references.
+
+        Resolves every distinct ``(native_symbol, exchange)`` pair from
+        ``refs`` in one bounded range query. The projected
+        ``instrument_public_id`` is always the identity from the reference,
+        not the source instrument that owns the candle, so PAPER positions stay
+        keyed by their own instrument identity while reading source-venue marks.
+
+        Args:
+            refs: Typed instrument references whose canonical candle venue is
+                carried in ``exchange``. Empty input returns without a query.
+            start: Inclusive lower candle-open bound.
+            end: Inclusive upper candle-open bound.
+            as_of: Snapshot time threading the instrument, symbol, and candle
+                temporal predicates.
+
+        Returns:
+            Rows ordered by candle open time and requested instrument identity.
+        """
+        ...
+
+    @abstractmethod
+    async def get_fill_shard_keys_for_scope(
+        self,
+        wallet_public_id: str,
+        mode: str,
+    ) -> list[str]:
+        """Return fill-bearing shard keys for one exact wallet/mode scope.
+
+        Reads append-only ``fill_observed`` venue evidence directly so a scope
+        with zero consumed execution rows still exposes its shards to the gap
+        check. Full wallet identity and explicit mode columns provide the scope;
+        callers never need to parse the deliberately lossy shard string.
+
+        Args:
+            wallet_public_id: Full wallet identity to match.
+            mode: Exact execution mode to match.
+
+        Returns:
+            Distinct shard keys in ascending order.
+        """
+        ...
+
+    @abstractmethod
+    async def shard_has_fill_gap(self, shard_key: str, as_of: datetime) -> bool:
+        """Return whether recorded fill quantity exceeds consumed executions.
+
+        Args:
+            shard_key: Exact fill-bearing shard to evaluate.
+            as_of: Temporal anchor for consumed order and execution rows.
+
+        Returns:
+            True when durable recorded quantity is provably unconsumed.
         """
         ...
 
@@ -9235,6 +9329,167 @@ class SQLAlchemyRepository(Repository):
                 }
                 for al in result.scalars().all()
             ]
+
+    async def get_instrument_symbol_refs(
+        self,
+        instrument_public_ids: Sequence[str],
+        as_of: datetime,
+    ) -> list[InstrumentSymbolRefRow]:
+        """Resolve instruments to their symbol references for mark valuation.
+
+        See the abstract declaration for the join and projection contract. An
+        empty ``instrument_public_ids`` short-circuits without opening a session.
+
+        Args:
+            instrument_public_ids: Instruments to resolve.
+            as_of: Snapshot time threading both temporal joins.
+
+        Returns:
+            One :class:`InstrumentSymbolRefRow` per instrument with an active
+            symbol version at ``as_of``.
+        """
+        if not instrument_public_ids:
+            return []
+        async with self.session() as s:
+            query = (
+                select(
+                    Instrument.public_id,
+                    Symbol.native_symbol,
+                    func.coalesce(
+                        Instrument.source_exchange,
+                        Instrument.exchange,
+                    ),
+                    Symbol.quote,
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    Instrument.public_id.in_(instrument_public_ids),
+                    *where_active(Instrument, as_of),
+                )
+            )
+            result = await s.execute(query)
+            return [
+                {
+                    "instrument_public_id": public_id,
+                    "native_symbol": native_symbol,
+                    "exchange": exchange,
+                    "quote_currency": quote,
+                }
+                for public_id, native_symbol, exchange, quote in result.all()
+            ]
+
+    async def get_pnl_timeline_candles(
+        self,
+        refs: Sequence[InstrumentSymbolRefRow],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlTimelineCandleRow]:
+        """Load finalized one-minute mark candles in one range query.
+
+        See the abstract declaration for the PAPER identity and source-venue
+        contract. Each distinct source series is queried once, then its rows are
+        projected for every requested instrument identity sharing that series.
+
+        Args:
+            refs: Instrument identities and canonical source series.
+            start: Inclusive lower candle-open bound.
+            end: Inclusive upper candle-open bound.
+            as_of: Snapshot time for all temporal predicates.
+
+        Returns:
+            Finalized candle closes keyed by requested instrument identity.
+        """
+        if not refs:
+            return []
+        instrument_ids_by_series: dict[tuple[str, str], set[str]] = {}
+        for ref in refs:
+            series = (ref["native_symbol"], ref["exchange"])
+            instrument_ids_by_series.setdefault(series, set()).add(ref["instrument_public_id"])
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    Symbol.native_symbol,
+                    Instrument.exchange,
+                    Candle.open_at,
+                    Candle.close,
+                )
+                .select_from(Candle)
+                .join(
+                    Instrument,
+                    and_(
+                        Candle.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    tuple_(Symbol.native_symbol, Instrument.exchange).in_(
+                        list(instrument_ids_by_series)
+                    ),
+                    Candle.timeframe == "1m",
+                    Candle.open_at >= start,
+                    Candle.open_at <= end,
+                    Candle.complete.is_(True),
+                    *where_active(Candle, as_of),
+                )
+            )
+            candles: list[PnlTimelineCandleRow] = []
+            for native_symbol, exchange, open_at, close in result.all():
+                for instrument_public_id in instrument_ids_by_series[(native_symbol, exchange)]:
+                    candles.append(
+                        {
+                            "instrument_public_id": instrument_public_id,
+                            "open_at": open_at,
+                            "close": close,
+                        }
+                    )
+            candles.sort(
+                key=lambda row: (
+                    row["open_at"],
+                    row["instrument_public_id"],
+                )
+            )
+            return candles
+
+    async def get_fill_shard_keys_for_scope(
+        self,
+        wallet_public_id: str,
+        mode: str,
+    ) -> list[str]:
+        """Return fill-bearing shards for an exact wallet/mode scope.
+
+        Args:
+            wallet_public_id: Full wallet identity to match.
+            mode: Exact execution mode to match.
+
+        Returns:
+            Distinct shard keys in ascending order.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(VenueEvent.shard_key)
+                .where(
+                    VenueEvent.event_type == "fill_observed",
+                    VenueEvent.wallet_public_id == wallet_public_id,
+                    VenueEvent.mode == mode,
+                )
+                .distinct()
+                .order_by(VenueEvent.shard_key.asc())
+            )
+            return list(result.scalars().all())
 
     async def get_positions(
         self,

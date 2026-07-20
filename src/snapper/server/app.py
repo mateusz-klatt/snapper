@@ -241,6 +241,7 @@ from snapper.server.metrics_routes import router as metrics_router
 from snapper.server.operator_routes import router as operator_router
 from snapper.server.order_routes import router as order_router
 from snapper.server.paired_execution_routes import router as paired_execution_router
+from snapper.server.portfolio_timeline_routes import router as portfolio_timeline_router
 from snapper.server.position_cycle_routes import router as position_cycle_router
 from snapper.server.process_routes import router as process_router
 from snapper.server.provenance_middleware import ClientProvenanceMiddleware
@@ -1215,6 +1216,7 @@ def create_app() -> FastAPI:
     app.include_router(order_router, prefix=API_PREFIX)
     app.include_router(execution_plan_router, prefix=API_PREFIX)
     app.include_router(position_cycle_router, prefix=API_PREFIX)
+    app.include_router(portfolio_timeline_router, prefix=API_PREFIX)
     app.include_router(trailing_stop_router, prefix=API_PREFIX)
     app.include_router(backtest_router, prefix=API_PREFIX)
     app.include_router(device_router, prefix=API_PREFIX)
