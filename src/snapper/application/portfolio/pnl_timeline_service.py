@@ -41,6 +41,9 @@ from datetime import timedelta
 from typing import Final
 from typing import Literal
 
+from snapper.application.portfolio.fx_rates import FxRateMap
+from snapper.application.portfolio.fx_rates import convert_amount
+from snapper.application.portfolio.fx_rates import required_pairs
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import PnlInstrumentContribution
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
@@ -51,6 +54,7 @@ from snapper.application.portfolio.pnl_timeline import TimelineWindow
 from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
 from snapper.data.repository import Repository
 from snapper.data.repository_types import InstrumentSymbolRefRow
+from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
@@ -152,24 +156,71 @@ class PnlTimelineWorkBudgetError(ValueError):
     """The requested raw grid and instrument fan-out exceed the work budget."""
 
 
-def _to_timeline_execution(row: PnlTimelineExecutionRow, valuation_ccy: str) -> TimelineExecution:
+def _rate_minute(moment: datetime) -> datetime:
+    """Return the grid minute whose closing bar prices a flow at ``moment``.
+
+    Flooring to the minute selects the bar that CLOSED at that instant — the last
+    finalized evidence available when the flow happened — matching the mark
+    convention exactly, so a fee and the position it belongs to are valued off the
+    same bar and neither can look ahead.
+
+    Args:
+        moment: Event time of the flow being converted.
+
+    Returns:
+        The minute key to look the rate up under.
+    """
+    return moment.replace(second=0, microsecond=0)
+
+
+def build_fx_rates(rows: Sequence[PnlFxRateRow]) -> FxRateMap:
+    """Fold FX candle rows into the minute-keyed rate map.
+
+    Several venues list the same pair, so the FIRST row for a
+    ``(base, quote, minute)`` wins and later ones are ignored. The read returns
+    rows sorted by ``(open_at, base, quote, exchange)``, which makes that winner
+    the alphabetically-first venue — deterministic, so the same request always
+    returns the same money instead of depending on row order.
+
+    Args:
+        rows: Finalized 1m closes from ``get_pnl_fx_rate_candles``.
+
+    Returns:
+        Rate map keyed by ``(base, quote, minute)`` where the minute is the
+        instant the bar closed.
+    """
+    rates: dict[tuple[str, str, datetime], float] = {}
+    for row in rows:
+        rates.setdefault(
+            (row["base"], row["quote"], row["open_at"] + timedelta(minutes=1)), row["close"]
+        )
+    return rates
+
+
+def _to_timeline_execution(
+    row: PnlTimelineExecutionRow, valuation_ccy: str, rates: FxRateMap
+) -> TimelineExecution:
     """Map a repository execution row onto the pure builder's input.
 
     Exact zero passes through regardless of asset because zero is
-    currency-invariant. A nonzero fee passes through only when it is denominated
-    in ``valuation_ccy``. A nonzero fee in another asset is UNKNOWN (its
-    conversion is the deferred FX work), so it is passed as ``NaN`` and the
-    builder withholds the point. ``event_time`` is the row's ``timestamp`` (the
+    currency-invariant. A nonzero foreign fee is CONVERTED at the flow's own
+    minute using our finalized 1m candles; only when no direct or inverse pair
+    covers that minute does it stay UNKNOWN and pass as ``NaN``, which makes the
+    builder withhold rather than understate a real cost. ``event_time`` is the row's ``timestamp`` (the
     time axis), never the nullable ``executed_at``.
 
     Args:
         row: One ``get_pnl_timeline_executions`` row.
-        valuation_ccy: Currency the fee must already be denominated in to count.
+        valuation_ccy: Currency the series is valued in.
+        rates: Minute-keyed FX rates used to convert a foreign-denominated fee.
 
     Returns:
         The equivalent :class:`TimelineExecution`.
     """
-    fee = row["fee"] if row["fee"] == 0.0 or row["fee_asset"] == valuation_ccy else math.nan
+    converted = convert_amount(
+        row["fee"], row["fee_asset"], valuation_ccy, _rate_minute(row["timestamp"]), rates
+    )
+    fee = math.nan if converted is None else converted
     return TimelineExecution(
         instrument_public_id=row["instrument_public_id"],
         exchange=row["exchange"],
@@ -183,23 +234,28 @@ def _to_timeline_execution(row: PnlTimelineExecutionRow, valuation_ccy: str) -> 
     )
 
 
-def _to_timeline_accrual(row: PnlTimelineAccrualRow, valuation_ccy: str) -> TimelineAccrual:
+def _to_timeline_accrual(
+    row: PnlTimelineAccrualRow, valuation_ccy: str, rates: FxRateMap
+) -> TimelineAccrual:
     """Map a repository accrual row onto the pure builder's input.
 
     Exact zero passes through regardless of asset because it needs no currency
-    conversion. A nonzero amount in another asset is UNKNOWN and maps to
-    ``NaN``, allowing the builder to withhold the affected cumulatives.
+    conversion. A nonzero foreign amount is CONVERTED at the accrual's own minute
+    from our finalized 1m candles, and only an unresolvable pair leaves it as
+    ``NaN`` so the builder withholds the affected cumulatives.
 
     Args:
         row: One ``get_accruals_for_pnl`` row.
-        valuation_ccy: Currency a nonzero amount must already use.
+        valuation_ccy: Currency the series is valued in.
+        rates: Minute-keyed FX rates used to convert a foreign-denominated amount.
 
     Returns:
         The equivalent :class:`TimelineAccrual`.
     """
-    amount = (
-        row["amount"] if row["amount"] == 0.0 or row["amount_asset"] == valuation_ccy else math.nan
+    converted = convert_amount(
+        row["amount"], row["amount_asset"], valuation_ccy, _rate_minute(row["accrued_at"]), rates
     )
+    amount = math.nan if converted is None else converted
     return TimelineAccrual(
         instrument_public_id=row["instrument_public_id"],
         accrued_at=row["accrued_at"],
@@ -427,8 +483,19 @@ async def build_wallet_pnl_series(
     _enforce_total_work_budget(from_time, to_time, len(work_instrument_ids))
     refs = await repo.get_instrument_symbol_refs(instrument_ids, as_of)
     marks = await build_marks(repo, refs, from_time, to_time, as_of, valuation_ccy)
-    executions = [_to_timeline_execution(row, valuation_ccy) for row in loaded_execution_rows]
-    accruals = [_to_timeline_accrual(row, valuation_ccy) for row in accrual_rows]
+    flow_currencies = frozenset(
+        [row["fee_asset"] for row in loaded_execution_rows]
+        + [row["amount_asset"] for row in accrual_rows]
+    )
+    pairs = required_pairs(flow_currencies, valuation_ccy)
+    rate_rows = await repo.get_pnl_fx_rate_candles(
+        sorted(pairs), from_time - timedelta(minutes=1), to_time, as_of
+    )
+    rates = build_fx_rates(rate_rows)
+    executions = [
+        _to_timeline_execution(row, valuation_ccy, rates) for row in loaded_execution_rows
+    ]
+    accruals = [_to_timeline_accrual(row, valuation_ccy, rates) for row in accrual_rows]
     window = TimelineWindow(
         from_time=from_time,
         to_time=to_time,

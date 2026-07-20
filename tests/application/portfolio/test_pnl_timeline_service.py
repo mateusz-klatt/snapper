@@ -27,6 +27,7 @@ from snapper.application.portfolio.pnl_timeline_service import build_marks
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_timeline
 from snapper.data.repository_types import InstrumentSymbolRefRow
+from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
@@ -160,6 +161,19 @@ def _candle(
     }
 
 
+def _fx_row(
+    base: str, quote: str, minute: int, close: float, exchange: str = "kraken"
+) -> PnlFxRateRow:
+    """Build one FX candle row whose bar CLOSES at grid minute ``minute``."""
+    return {
+        "base": base,
+        "quote": quote,
+        "exchange": exchange,
+        "open_at": _m(minute - 1),
+        "close": close,
+    }
+
+
 class FakeRepo:
     """Minimal repository double exposing only the reads the service uses."""
 
@@ -173,6 +187,7 @@ class FakeRepo:
         ai_decisions: Sequence[PnlTimelineAiDecisionMarkerRow] = (),
         fill_shard_keys: Sequence[str] = (),
         gapped_shards: set[str] | None = None,
+        fx_rows: Sequence[PnlFxRateRow] | None = None,
     ) -> None:
         """Store the canned read results and record the calls made."""
         self._executions = list(executions)
@@ -183,6 +198,8 @@ class FakeRepo:
         self._ai_decisions = list(ai_decisions)
         self._fill_shard_keys = list(fill_shard_keys)
         self._gapped_shards = gapped_shards or set()
+        self._fx_rows: list[PnlFxRateRow] = list(fx_rows or [])
+        self.fx_pair_calls: list[list[tuple[str, str]]] = []
         self.symbol_ref_calls: list[list[str]] = []
         self.candle_calls: list[
             tuple[list[InstrumentSymbolRefRow], datetime, datetime, datetime]
@@ -278,6 +295,18 @@ class FakeRepo:
         requested = {ref["instrument_public_id"] for ref in refs}
         return [candle for candle in self._candles if candle["instrument_public_id"] in requested]
 
+    async def get_pnl_fx_rate_candles(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Record the requested pairs and return the canned FX candles."""
+        self.fx_pair_calls.append(list(pairs))
+        requested = set(pairs)
+        return [row for row in self._fx_rows if (row["base"], row["quote"]) in requested]
+
 
 class TestToTimelineExecution:
     """Cover the execution row mapping and fee currency discipline."""
@@ -285,7 +314,7 @@ class TestToTimelineExecution:
     def test_maps_fields_and_uses_timestamp_as_event_time(self) -> None:
         """Row fields map through and ``event_time`` is the timestamp axis."""
         row = _exec_row(_I1, 1, 3, "buy", 2.0, 100.0, 0.5, "USD")
-        mapped = _to_timeline_execution(row, "USD")
+        mapped = _to_timeline_execution(row, "USD", {})
         assert mapped.instrument_public_id == _I1
         assert mapped.event_time == _m(3)
         assert mapped.size == 2.0
@@ -301,14 +330,14 @@ class TestToTimelineExecution:
         withheld instead (the deferred-FX stance).
         """
         row = _exec_row(_I2, 1, 3, "buy", 2.0, 100.0, 0.9, "EUR")
-        mapped = _to_timeline_execution(row, "USD")
+        mapped = _to_timeline_execution(row, "USD", {})
         assert math.isnan(mapped.fee)
         assert mapped.fee_asset == "EUR"
 
     def test_exact_zero_fee_is_currency_invariant_with_empty_asset(self) -> None:
         """Production's fee-free empty asset maps to a real zero, not NaN."""
         row = _exec_row(_I1, 1, 3, "buy", 2.0, 100.0, 0.0, "")
-        mapped = _to_timeline_execution(row, "USD")
+        mapped = _to_timeline_execution(row, "USD", {})
         assert mapped.fee == 0.0
         assert mapped.fee_asset == ""
 
@@ -318,19 +347,19 @@ class TestToTimelineAccrual:
 
     def test_valuation_currency_amount_maps_through(self) -> None:
         """A nonzero valuation-currency accrual remains finite."""
-        mapped = _to_timeline_accrual(_accrual_row(_I1, 1, 3.0, "USD"), "USD")
+        mapped = _to_timeline_accrual(_accrual_row(_I1, 1, 3.0, "USD"), "USD", {})
         assert mapped.instrument_public_id == _I1
         assert mapped.accrued_at == _m(1)
         assert mapped.amount_usd == 3.0
 
     def test_exact_zero_is_currency_invariant(self) -> None:
         """A zero accrual needs no FX conversion even with a foreign asset."""
-        mapped = _to_timeline_accrual(_accrual_row(_I1, 1, 0.0, "EUR"), "USD")
+        mapped = _to_timeline_accrual(_accrual_row(_I1, 1, 0.0, "EUR"), "USD", {})
         assert mapped.amount_usd == 0.0
 
     def test_nonzero_foreign_amount_is_unknown(self) -> None:
         """A nonzero foreign accrual maps to NaN for builder withholding."""
-        mapped = _to_timeline_accrual(_accrual_row(_I1, 1, 3.0, "EUR"), "USD")
+        mapped = _to_timeline_accrual(_accrual_row(_I1, 1, 3.0, "EUR"), "USD", {})
         assert math.isnan(mapped.amount_usd)
 
 
@@ -747,3 +776,55 @@ def test_provenance_constants_are_stable() -> None:
     assert PNL_TIMELINE_CALC_VERSION == "5A.2"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
+
+
+class TestForeignFeeConversion:
+    """Cover the live-UAT blocker: a foreign fee must convert, not poison."""
+
+    def _repo(self, fx_rows: list[PnlFxRateRow]) -> FakeRepo:
+        """Build a USD-quoted scope whose single fill charges a EUR fee."""
+        return FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.04, "EUR")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0), _candle(_m(0), 100.0)],
+            fx_rows=fx_rows,
+        )
+
+    async def test_foreign_fee_converts_and_keeps_the_series_complete(self) -> None:
+        """A EUR fee priced by a EUR-USD candle no longer withholds the series.
+
+        This is the exact production case found in live UAT: a 0.04 EUR fee on a
+        USD-valued series withheld 1432 of 1441 points because the flow was
+        unconvertible. With the pair available the fee becomes real money and the
+        point is complete again.
+        """
+        repo = self._repo([_fx_row("EUR", "USD", 0, 1.25)])
+        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        point = result.points[0]
+        assert point.valuation_status == "complete"
+        assert point.fee_pnl == pytest.approx(-0.05)
+        assert point.realized_pnl == 0.0
+        assert repo.fx_pair_calls[0] == [("EUR", "USD"), ("USD", "EUR")]
+
+    async def test_inverse_pair_also_converts(self) -> None:
+        """Only a USD-EUR listing still prices the fee, by reciprocal."""
+        repo = self._repo([_fx_row("USD", "EUR", 0, 0.8)])
+        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        assert result.points[0].fee_pnl == pytest.approx(-0.05)
+
+    async def test_unresolvable_pair_still_withholds(self) -> None:
+        """With no pair at all the fee stays unknown and the point is withheld.
+
+        The conversion must not silently substitute a zero or a stale rate — an
+        unpriceable cost is still unknown, and saying so is the whole point.
+        """
+        repo = self._repo([])
+        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        assert result.points[0].valuation_status == "incomplete"
+        assert result.points[0].fee_pnl is None
+
+    async def test_rate_from_another_minute_is_not_borrowed(self) -> None:
+        """A rate that only covers a later minute cannot price an earlier fee."""
+        repo = self._repo([_fx_row("EUR", "USD", 3, 1.25)])
+        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        assert result.points[0].valuation_status == "incomplete"
