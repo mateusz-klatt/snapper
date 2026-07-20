@@ -330,6 +330,53 @@ class SpotExecutionWitnessRow(TypedDict):
     exec_id: str | None
 
 
+class PnlTimelineExecutionRow(TypedDict):
+    """One execution projected for the P&L timeline reconstruction.
+
+    Returned by ``get_pnl_timeline_executions`` for a ``(wallet, mode)`` scope,
+    ordered by ``(exchange, scope_sequence)`` ascending. ``instrument_public_id``
+    is the fill's active Order lineage (the pool key); ``exchange`` and
+    ``scope_sequence`` come from the immutable ``Execution`` row and define the
+    per-scope accumulation order. ``timestamp`` is the time AXIS the builder
+    grids on; ``executed_at`` is the nullable venue domain time, advisory only
+    (checklist #2 — never the accumulation key).
+    """
+
+    instrument_public_id: str
+    exchange: str
+    scope_sequence: int
+    order_public_id: str
+    side: str
+    size: float
+    price: float
+    fee: float
+    fee_asset: str
+    executed_at: datetime | None
+    timestamp: datetime
+    exec_id: str | None
+    trade_id: str | None
+
+
+class PnlTimelineAccrualRow(TypedDict):
+    """One funding accrual projected for the P&L timeline reconstruction.
+
+    Returned by ``get_accruals_for_pnl`` for a ``(wallet, mode)`` scope, ordered
+    by ``accrued_at`` ascending. ``amount`` is the NATIVE accrual amount in
+    ``amount_asset`` (the notional asset); the API layer converts it into the
+    valuation currency before feeding the pure builder's signed ``amount_usd``
+    input. Live spot data currently carries no funding, so this read is normally
+    empty.
+    """
+
+    instrument_public_id: str
+    exchange: str
+    mode: str
+    accrual_type: str
+    accrued_at: datetime
+    amount: float
+    amount_asset: str
+
+
 class PositionRow(TypedDict):
     """Row dict returned by get_positions."""
 

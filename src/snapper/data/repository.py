@@ -295,6 +295,8 @@ from snapper.data.repository_types import PairedExecutionLegFieldUpdate
 from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
+from snapper.data.repository_types import PnlTimelineAccrualRow
+from snapper.data.repository_types import PnlTimelineExecutionRow
 from snapper.data.repository_types import PortfolioDriftEpisodeRow
 from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
@@ -2079,6 +2081,80 @@ class Repository(ABC):
         Returns:
             Execution dicts ordered by timestamp ASC for replay,
             denormalized with order, instrument and symbol info.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_timeline_executions(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+        since_scope_sequence: int | None = None,
+    ) -> list[PnlTimelineExecutionRow]:
+        """Retrieve a scope's executions for P&L timeline reconstruction.
+
+        Returns the CONTIGUOUS append-only execution prefix for
+        ``(wallet_public_id, mode)``, joined to its sentinel-active Order lineage
+        for ``instrument_public_id`` (the pool key), ordered by ``(exchange,
+        scope_sequence)`` ascending — the immutable per-scope accumulation order
+        the timeline replays through the shared average-cost kernel. The time
+        axis is carried as ``timestamp``; ``executed_at`` is nullable and never
+        the accumulation key.
+
+        CLOCK-FREE, like ``get_active_orders_for_recovery``: executions are an
+        append-only ledger (never SCD2-superseded), so ``as_of`` is deliberately
+        NOT used to filter them. A caller-clock ``timestamp <= as_of`` window
+        would break the scope-sequence PREFIX property — dropping a lower-scope
+        fill whose commit clock ran ahead while keeping a higher-scope one — and
+        replay of that non-prefix would MANUFACTURE a fictitious position and P&L.
+        The Order lineage is joined on the sentinel-active version because
+        ``instrument_public_id`` is immutable across Order SCD2 versions, so a
+        committed execution is never dropped when its Order's clock ran ahead of
+        ``as_of``. The emitted SERIES is instead bounded by the builder's grid
+        window (``to_time``); strict historical-knowledge bounding of the prefix
+        is deferred to the completeness gate.
+
+        Args:
+            wallet_public_id: Wallet scope to reconstruct.
+            mode: Trading mode scope (``live``, ``paper``).
+            as_of: Retained for interface parity and deliberately unused; the
+                append-only prefix is clock-free (see above).
+            since_scope_sequence: Optional EXCLUSIVE lower bound on
+                ``scope_sequence`` — the activation-anchor replay watermark. A
+                single scalar bound is applied uniformly across every exchange in
+                the scope; the per-exchange watermark MAP is deferred to the
+                Phase-5B anchor writer, so pass ``None`` for a full replay when
+                the scope spans more than one exchange.
+
+        Returns:
+            Execution rows ordered by ``(exchange, scope_sequence)`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def get_accruals_for_pnl(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> list[PnlTimelineAccrualRow]:
+        """Retrieve a scope's funding accruals for the P&L timeline.
+
+        Every active accrual for ``(wallet_public_id, mode)`` with
+        ``accrued_at <= as_of``, ordered by ``accrued_at`` ascending. The native
+        ``amount``/``amount_asset`` pass through unconverted — the caller
+        resolves the valuation-currency amount before feeding the pure builder.
+        Live spot data carries no funding, so this read is normally empty.
+
+        Args:
+            wallet_public_id: Wallet scope to reconstruct.
+            mode: Trading mode scope (``live``, ``paper``).
+            as_of: Point-in-time for the temporal query; also the inclusive
+                ``accrued_at`` upper bound.
+
+        Returns:
+            Accrual rows ordered by ``accrued_at`` ascending.
         """
         ...
 
@@ -9050,6 +9126,114 @@ class SQLAlchemyRepository(Repository):
                     "numeric_provenance": exe.numeric_provenance,
                 }
                 for exe, order, inst, sym in result.all()
+            ]
+
+    async def get_pnl_timeline_executions(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+        since_scope_sequence: int | None = None,
+    ) -> list[PnlTimelineExecutionRow]:
+        """Retrieve a scope's executions for P&L timeline reconstruction.
+
+        Clock-free append-only prefix: joins each execution to its sentinel-active
+        Order lineage to project ``instrument_public_id`` (immutable across Order
+        versions). ``as_of`` is deliberately unused so a caller-clock window can
+        never break the scope-sequence prefix (see the abstract declaration).
+
+        Args:
+            wallet_public_id: Wallet scope to reconstruct.
+            mode: Trading mode scope.
+            as_of: Retained for interface parity and deliberately unused.
+            since_scope_sequence: Optional exclusive ``scope_sequence`` lower
+                bound applied uniformly across exchanges.
+
+        Returns:
+            Execution rows ordered by ``(exchange, scope_sequence)`` ascending.
+        """
+        del as_of
+        async with self.session() as s:
+            query = (
+                select(Execution, Order.instrument_public_id)
+                .join(
+                    Order,
+                    and_(
+                        Execution.order_public_id == Order.public_id,
+                        Order.known_to == KNOWN_TO_MAX,
+                    ),
+                )
+                .where(
+                    Execution.wallet_public_id == wallet_public_id,
+                    Execution.mode == mode,
+                    Execution.known_to == KNOWN_TO_MAX,
+                )
+            )
+            if since_scope_sequence is not None:
+                query = query.where(Execution.scope_sequence > since_scope_sequence)
+            query = query.order_by(Execution.exchange.asc(), Execution.scope_sequence.asc())
+            result = await s.execute(query)
+            return [
+                {
+                    "instrument_public_id": instrument_public_id,
+                    "exchange": exe.exchange,
+                    "scope_sequence": int(exe.scope_sequence),
+                    "order_public_id": exe.order_public_id,
+                    "side": exe.side,
+                    "size": exe.size,
+                    "price": exe.price,
+                    "fee": exe.fee,
+                    "fee_asset": exe.fee_asset,
+                    "executed_at": exe.executed_at,
+                    "timestamp": exe.timestamp,
+                    "exec_id": exe.exec_id,
+                    "trade_id": exe.trade_id,
+                }
+                for exe, instrument_public_id in result.all()
+            ]
+
+    async def get_accruals_for_pnl(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> list[PnlTimelineAccrualRow]:
+        """Retrieve a scope's funding accruals for the P&L timeline.
+
+        See the abstract declaration for the ordering and conversion contract.
+        The native ``amount``/``amount_asset`` pass through unconverted.
+
+        Args:
+            wallet_public_id: Wallet scope to reconstruct.
+            mode: Trading mode scope.
+            as_of: Point-in-time and inclusive ``accrued_at`` upper bound.
+
+        Returns:
+            Accrual rows ordered by ``accrued_at`` ascending.
+        """
+        async with self.session() as s:
+            stmt = (
+                select(AccrualLedger)
+                .where(
+                    AccrualLedger.wallet_public_id == wallet_public_id,
+                    AccrualLedger.mode == mode,
+                    AccrualLedger.accrued_at <= as_of,
+                    *where_active(AccrualLedger, as_of),
+                )
+                .order_by(AccrualLedger.accrued_at.asc())
+            )
+            result = await s.execute(stmt)
+            return [
+                {
+                    "instrument_public_id": al.instrument_public_id,
+                    "exchange": al.exchange,
+                    "mode": al.mode,
+                    "accrual_type": al.accrual_type,
+                    "accrued_at": al.accrued_at,
+                    "amount": al.amount,
+                    "amount_asset": al.amount_asset,
+                }
+                for al in result.scalars().all()
             ]
 
     async def get_positions(

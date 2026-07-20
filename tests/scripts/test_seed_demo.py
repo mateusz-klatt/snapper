@@ -358,6 +358,7 @@ WALLET_SCOPED_SCHEMA_TABLES = frozenset(
         "paired_execution_halts",
         "paired_execution_legs",
         "portfolio_drift_episodes",
+        "portfolio_pnl_points",
         "portfolio_reconciliation_method_configs",
         "portfolio_reconciliation_observations",
         "portfolio_reconciliation_states",
