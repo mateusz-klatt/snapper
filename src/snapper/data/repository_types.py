@@ -453,6 +453,23 @@ class PnlTimelineCandleRow(TypedDict):
     close: float
 
 
+class PnlFxRateRow(TypedDict):
+    """One finalized one-minute close of a currency pair, for FX conversion.
+
+    Returned by ``get_pnl_fx_rate_candles``. ``base``/``quote`` are the symbol's
+    own currency legs, so the close reads as "one unit of ``base`` costs ``close``
+    units of ``quote``". ``exchange`` is carried because several venues list the
+    same pair; the caller resolves that collision deterministically rather than
+    letting row order decide which venue's rate wins.
+    """
+
+    base: str
+    quote: str
+    exchange: str
+    open_at: datetime
+    close: float
+
+
 class PositionRow(TypedDict):
     """Row dict returned by get_positions."""
 

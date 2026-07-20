@@ -296,6 +296,7 @@ from snapper.data.repository_types import PairedExecutionLegFieldUpdate
 from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
+from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
@@ -2283,6 +2284,40 @@ class Repository(ABC):
 
         Returns:
             Rows ordered by candle open time and requested instrument identity.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_fx_rate_candles(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Load finalized one-minute closes for the requested currency pairs.
+
+        The P&L timeline converts a flow denominated in one currency into the
+        series valuation currency using our OWN candle plane, so a fee recorded
+        in EUR on a USD-valued series is priced by the same evidence the marks
+        come from rather than an external feed.
+
+        Each pair is matched on the symbol's own ``base``/``quote`` legs, so the
+        caller can request both orientations and satisfy the conversion with
+        whichever one a venue actually lists. Several venues may list the same
+        pair; every match is returned WITH its exchange so the caller resolves
+        the collision deterministically instead of depending on row order.
+
+        Args:
+            pairs: Distinct ``(base, quote)`` currency legs to resolve. Empty
+                input returns without a query.
+            start: Inclusive lower candle-open bound.
+            end: Inclusive upper candle-open bound.
+            as_of: Snapshot time threading the instrument, symbol, and candle
+                temporal predicates, so a corrected candle is seen AS KNOWN then.
+
+        Returns:
+            Rows ordered by ``(open_at, base, quote, exchange)``.
         """
         ...
 
@@ -9795,6 +9830,76 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             return candles
+
+    async def get_pnl_fx_rate_candles(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Load finalized one-minute closes for currency pairs in one query.
+
+        See the abstract declaration for the pair-matching and multi-venue
+        contract. Rows are sorted so a caller folding them into a rate map gets a
+        stable, reproducible winner when two venues quote the same minute.
+
+        Args:
+            pairs: Distinct ``(base, quote)`` currency legs to resolve.
+            start: Inclusive lower candle-open bound.
+            end: Inclusive upper candle-open bound.
+            as_of: Snapshot time threading the temporal predicates.
+
+        Returns:
+            Rows ordered by ``(open_at, base, quote, exchange)``.
+        """
+        if not pairs:
+            return []
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    Symbol.base,
+                    Symbol.quote,
+                    Instrument.exchange,
+                    Candle.open_at,
+                    Candle.close,
+                )
+                .select_from(Candle)
+                .join(
+                    Instrument,
+                    and_(
+                        Candle.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    tuple_(Symbol.base, Symbol.quote).in_(list(dict.fromkeys(pairs))),
+                    Candle.timeframe == "1m",
+                    Candle.open_at >= start,
+                    Candle.open_at <= end,
+                    Candle.complete.is_(True),
+                    *where_active(Candle, as_of),
+                )
+            )
+            rows: list[PnlFxRateRow] = [
+                {
+                    "base": base,
+                    "quote": quote,
+                    "exchange": exchange,
+                    "open_at": open_at,
+                    "close": close,
+                }
+                for base, quote, exchange, open_at, close in result.all()
+            ]
+            rows.sort(key=lambda row: (row["open_at"], row["base"], row["quote"], row["exchange"]))
+            return rows
 
     async def get_fill_shard_keys_for_scope(
         self,
