@@ -1096,6 +1096,104 @@ class Position(TemporalMixin, Base):
     source_venue_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+_CK_PNL_POINT_KIND = "point_kind IN ('anchor', 'sample')"
+_CK_PNL_VALUATION_STATUS = "valuation_status IN ('complete', 'incomplete')"
+_CK_PNL_ANCHOR_ZERO = (
+    "point_kind != 'anchor' OR "
+    "(realized_pnl = 0 AND fee_pnl = 0 AND accrual_pnl = 0 AND "
+    "external_flow_adjustment = 0 AND opening_basket_json IS NOT NULL)"
+)
+_CK_PNL_VALUATION_COMPLETE = (
+    "(valuation_status = 'complete' AND unrealized_pnl IS NOT NULL AND "
+    "mark_source IS NOT NULL AND mark_time IS NOT NULL) OR "
+    "(valuation_status = 'incomplete' AND unrealized_pnl IS NULL)"
+)
+
+
+class PortfolioPnlPoint(TemporalMixin, Base):
+    """Canonical P&L series point per (wallet, mode, valuation_ccy, point_time).
+
+    PnL Phase 5. One SCD2 active row per identity; late fills / corrected
+    candles supersede the affected minute via close-and-reinsert. The series is
+    epoch-relative: ``realized_pnl`` / ``fee_pnl`` / ``accrual_pnl`` are the
+    cumulative price-realized, fee, and funding-accrual components since the
+    epoch's t0 anchor (all exactly zero on the ``anchor`` row itself), kept as
+    SEPARATE components so funding never double-counts against the funding-
+    inclusive ``Position.realized_pnl``. ``unrealized_pnl`` is the mark-to-market
+    value at ``point_time`` (the anchor stores the OPENING unrealized value at
+    t0, so consumers plot component CHANGES and pre-activation P&L never leaks).
+
+    ``point_kind`` is ``anchor`` (the durable activation seed carrying the frozen
+    opening basket, legacy unattributed weights, and per-exchange scope watermark
+    map in ``opening_basket_json`` / ``watermarks_json``) or ``sample`` (a Phase-5B
+    continuous 1m point). v1 writes only the anchor; the on-demand timeline
+    reconstructs samples from the anchor plus the immutable execution ledger.
+
+    Valuation is honest: a minute with a missing mark is ``valuation_status =
+    incomplete`` with ``unrealized_pnl`` NULL — never a carried-forward mark. USD
+    cash / position-value / equity and ``drawdown`` are Phase-5B fields that stay
+    NULL until the persisted forward-only snapshotter and complete-basket
+    valuation exist; the net P&L delta and equity aggregates are derived, not
+    stored, so no cross-column consistency invariant can drift.
+    """
+
+    __tablename__ = "portfolio_pnl_points"
+    __table_args__ = (
+        Index(
+            "uq_portfolio_pnl_points_identity",
+            "wallet_public_id",
+            "mode",
+            "valuation_ccy",
+            "point_time",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_portfolio_pnl_points_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_portfolio_pnl_points_series",
+            "wallet_public_id",
+            "mode",
+            "epoch_public_id",
+            "point_time",
+        ),
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_portfolio_pnl_points_mode"),
+        CheckConstraint(_CK_PNL_POINT_KIND, name="ck_portfolio_pnl_points_kind"),
+        CheckConstraint(_CK_PNL_VALUATION_STATUS, name="ck_portfolio_pnl_points_valuation_status"),
+        CheckConstraint(_CK_PNL_ANCHOR_ZERO, name="ck_portfolio_pnl_points_anchor_zero"),
+        CheckConstraint(
+            _CK_PNL_VALUATION_COMPLETE, name="ck_portfolio_pnl_points_valuation_complete"
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
+    valuation_ccy: Mapped[str] = mapped_column(String(16))
+    point_time: Mapped[datetime] = mapped_column(TZDateTime())
+    point_kind: Mapped[str] = mapped_column(String(16))
+    epoch_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    calc_version: Mapped[str] = mapped_column(String(16))
+    valuation_status: Mapped[str] = mapped_column(String(16))
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    fee_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    accrual_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    unrealized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    external_flow_adjustment: Mapped[float] = mapped_column(Float, default=0.0)
+    cash_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    position_value_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mark_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    mark_time: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    watermarks_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    opening_basket_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contributions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class VenueAccountObservation(TemporalMixin, Base):
     """Append-only log of every venue account-observation ATTEMPT (Phase 3).
 

@@ -17,11 +17,13 @@ from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from typing import Final
-from typing import Literal
 from typing import TypedDict
 
 from loguru import logger
 
+from snapper.application.portfolio.average_cost import CycleTransition
+from snapper.application.portfolio.average_cost import apply_fill
+from snapper.application.portfolio.average_cost import classify_transition
 from snapper.core.types import FillStatusEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.core.types import TradeSideEnum
@@ -515,36 +517,20 @@ class TradeService:
         return True
 
     @staticmethod
-    def _detect_cycle_transition(
-        old_qty: float, new_qty: float
-    ) -> Literal["open", "close", "flip", "scale_up"] | None:
+    def _detect_cycle_transition(old_qty: float, new_qty: float) -> CycleTransition | None:
         """Classify a shard position change into a cycle lifecycle transition.
 
-        Pure helper with no side effects — the trader uses the result to
-        decide which ``position_cycles`` repository call to issue on a
-        given fill, keeping TradeService free of any DB awareness.
+        Thin delegator to :func:`snapper.application.portfolio.average_cost.
+        classify_transition` — the trader uses the result to decide which
+        ``position_cycles`` repository call to issue on a given fill, keeping
+        TradeService free of any DB awareness.
 
-        ``open``: a flat position became non-flat (``|old| < eps`` and
-        ``|new| >= eps``). A new cycle row must be inserted.
-
-        ``close``: a non-flat position returned to zero (``|old| >= eps``
-        and ``|new| < eps``). The active cycle must be SCD2-closed.
-
-        ``flip``: direction reversed in a single fill — both sides are
-        non-flat but with opposite signs. The existing cycle is closed
-        and a new one is opened in the same transaction.
-
-        ``scale_up``: direction was preserved (neither end was flat, same
-        sign) and the new absolute quantity strictly exceeds the old
-        one. Only the peak needs to move; the cycle row stays the same.
-
-        ``None``: all other cases — flat-to-flat, scale-down / hold
-        where ``|new| <= |old|``, or any shape that does not require a
-        DB write. The trader should treat this as a no-op.
-
-        The epsilon is ``1e-12`` to match the zero-snap used by
-        :meth:`_update_position` — quantities below this threshold are
-        indistinguishable from flat in the existing position math.
+        ``open``: a flat position became non-flat. ``close``: a non-flat
+        position returned to zero. ``flip``: direction reversed in a single
+        fill. ``scale_up``: same direction with strictly larger absolute
+        quantity. ``None``: flat-to-flat, scale-down / hold, or any shape that
+        needs no DB write. The epsilon matches the zero-snap used by
+        :meth:`_update_position`.
 
         Args:
             old_qty: Signed position quantity before the fill.
@@ -554,21 +540,7 @@ class TradeService:
             One of ``"open"``, ``"close"``, ``"flip"``, ``"scale_up"``,
             or ``None``.
         """
-        eps = 1e-12
-        old_flat = abs(old_qty) < eps
-        new_flat = abs(new_qty) < eps
-        if old_flat and new_flat:
-            return None
-        if old_flat:
-            return "open"
-        if new_flat:
-            return "close"
-        same_sign = (old_qty > 0.0) == (new_qty > 0.0)
-        if not same_sign:
-            return "flip"
-        if abs(new_qty) > abs(old_qty):
-            return "scale_up"
-        return None
+        return classify_transition(old_qty, new_qty)
 
     def _update_position(
         self,
@@ -578,7 +550,14 @@ class TradeService:
         fill_price: float,
         event_time: datetime,
     ) -> None:
-        """Update position quantity and entry price for a fill.
+        """Update position quantity, entry price and realized PnL for a fill.
+
+        Delegates the volume-weighted average-cost math to the shared
+        :func:`snapper.application.portfolio.average_cost.apply_fill` kernel and
+        applies the TradeService-specific side effects: accumulating realized
+        PnL and stamping ``position_opened_at`` at every zero-crossing so the
+        funding accrual loop can clamp catch-up boundaries to the current open
+        cycle.
 
         Args:
             pos: Position projection to mutate in place.
@@ -587,69 +566,17 @@ class TradeService:
             fill_size: Unsigned fill quantity.
             fill_price: Fill execution price.
             event_time: Venue (or fallback bus) timestamp at which the
-                fill occurred. Stamped onto ``position_opened_at`` at
-                every zero-crossing so the funding accrual loop can
-                clamp catch-up boundaries to the current open cycle.
+                fill occurred, stamped onto ``position_opened_at`` when the
+                fill opens a fresh side.
         """
-        is_increasing = (pos.position_qty >= 0 and signed_qty > 0) or (
-            pos.position_qty <= 0 and signed_qty < 0
-        )
-        if is_increasing:
-            self._increase_position(pos, fill_size, fill_price, event_time)
-        else:
-            self._decrease_position(pos, fill_size, fill_price, event_time)
-
-        pos.position_qty += signed_qty
-        if abs(pos.position_qty) < 1e-12:
-            pos.position_qty = 0.0
-            pos.entry_price = None
+        outcome = apply_fill(pos.position_qty, pos.entry_price, signed_qty, fill_size, fill_price)
+        pos.position_qty = outcome.position_qty
+        pos.entry_price = outcome.entry_price
+        pos.realized_pnl += outcome.realized_delta
+        if outcome.opened_new_side:
+            pos.position_opened_at = event_time
+        if outcome.position_qty == 0.0:
             pos.position_opened_at = None
-
-    @staticmethod
-    def _increase_position(
-        pos: PositionProjection,
-        fill_size: float,
-        fill_price: float,
-        event_time: datetime,
-    ) -> None:
-        """Recalculate weighted-average entry price for a position-increasing fill.
-
-        When the helper is called from a flat position (``entry_price``
-        is None), it stamps ``position_opened_at`` with ``event_time``.
-        VWAP-only updates (adding to an existing same-direction
-        position) preserve the original ``position_opened_at``.
-        """
-        old_qty = abs(pos.position_qty)
-        new_qty = old_qty + fill_size
-        if pos.entry_price is not None and old_qty > 0 and new_qty > 0:
-            pos.entry_price = (old_qty * pos.entry_price + fill_size * fill_price) / new_qty
-        else:
-            pos.entry_price = fill_price
-            pos.position_opened_at = event_time
-
-    @staticmethod
-    def _decrease_position(
-        pos: PositionProjection,
-        fill_size: float,
-        fill_price: float,
-        event_time: datetime,
-    ) -> None:
-        """Realize PnL and handle overshoot for a position-decreasing fill.
-
-        On overshoot (flip transition: long-to-short or short-to-long),
-        the helper resets ``position_opened_at`` to ``event_time``
-        because the new opposite-side position opens at the fill.
-        """
-        close_qty = min(fill_size, abs(pos.position_qty))
-        overshoot = fill_size - close_qty
-        if pos.entry_price is not None and close_qty > 0:
-            pnl_per_unit = fill_price - pos.entry_price
-            if pos.position_qty < 0:
-                pnl_per_unit = pos.entry_price - fill_price
-            pos.realized_pnl += close_qty * pnl_per_unit
-        if overshoot > 1e-12:
-            pos.entry_price = fill_price
-            pos.position_opened_at = event_time
 
     @staticmethod
     def _update_cash(shard: ShardState, side: str, notional: float, fee: float) -> None:
