@@ -254,7 +254,7 @@ after the picker moves.
 
 Cross-asset strategies observe market data on one venue / instrument
 and emit signals that execute on a *different* venue / instrument
-(for example `TradFiObserveCryptoExecute` observes MNQU6-CME candles
+(for example `TradFiObserveCryptoExecute` observes MNQM6-CME candles
 on `kraken_equities` and emits BUY/SELL signals on `BTC-USD` / `kraken`).
 The backtest engine supports this through a single config field.
 
@@ -267,14 +267,14 @@ module to the strategies package root and decorate it with
 current registry is queryable at
 `GET /api/backtests/strategy-classes`, which returns the sorted
 `StrategyFactory` keys accepted as `strategy_class` values (see
-[api.md](api.md#get-apibacktestsstrategy-classes)):
+[api.md](api.md)):
 
 ```python
 BacktestConfig(
     strategy_class="TradFiObserveCryptoExecute",
     instruments={
-        "kraken_equities": ["<MNQU6-CME-public-id>"],
-        "kraken": ["<BTC-USD-public-id>"],
+        "kraken_equities": ["MNQM6-CME"],
+        "kraken": ["BTC-USD"],
     },
     target_execution_exchange="kraken",
     start_date=..., end_date=...,

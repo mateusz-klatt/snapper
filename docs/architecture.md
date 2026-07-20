@@ -615,6 +615,16 @@ Business logic:
 - **Updaters** (`updaters/`) — Data updates (symbols, historical)
 - **Risk** (`risk/`) — Risk defaults and sizing models
 - **Portfolio** (`portfolio/`) — Signed long/short portfolio accounting
+- **Retention** (`retention/`) — Periodic archive-and-purge scheduler
+  (`RetentionScheduler`, `scheduler.py`) started by the FastAPI lifespan
+  (a lifespan task, not a Process Manager process). Each
+  `RETENTION_INTERVAL_SECONDS` tick (default 3600) drives the event
+  archivers per the declarative `RETENTION_POLICIES` (v1: `telemetry`
+  only, 1-day residency), exporting rows under `RETENTION_OUTPUT_DIR`
+  before purge. `RETENTION_DISABLED` skips the eager run and the loop
+  (the `/api/metrics/retention` route stays mounted, reporting disabled);
+  `RETENTION_DRY_RUN` forces export-without-purge; `executions`
+  is rejected at import (append-only — the archiver refuses its purge)
 
 ### Infrastructure (`src/snapper/infrastructure/`)
 
@@ -897,7 +907,7 @@ owned by that coordinator. Executor heartbeat venue-health metadata
 can also halt known real shard keys for an exchange/wallet scope and
 drop new cold-path signals for that scope.
 
-Four order-safety layers sit on the dispatch path:
+Five order-safety layers sit on the dispatch path:
 
 - **Dispatch max-age TTL** (`TRADE_COMMAND_DISPATCH_TTL_S`, default
   30 s): the outbox CAS-expires a stale `CREATED` create/submit
@@ -912,9 +922,10 @@ Four order-safety layers sit on the dispatch path:
   outbox replays of an already-evidenced `client_order_id` (live
   pending entry, unhealed-accept queue, or a durable venue-event
   evidence probe) — fail-closed on probe failure, publishing nothing.
-  A replay whose evidence includes a breaker-open event instead
-  reruns the breaker disposition (below) so a crash between the
-  evidence write and the REJECTED publish cannot strand engine intent.
+  A replay whose evidence includes a breaker-open or interlock-blocked
+  event instead reruns that terminal disposition (below) so a crash
+  between the evidence write and the REJECTED publish cannot strand
+  engine intent.
 - **UNKNOWN submit state**: when a venue submit outcome is ambiguous
   (timeout, connection drop mid-send), the executor parks the order
   as non-terminal `OrderEventEnum.UNKNOWN` instead of fabricating a
@@ -941,6 +952,18 @@ Four order-safety layers sit on the dispatch path:
   publishes REJECTED with reason `circuit_breaker_open` so the engine
   releases intent. Any step failing parks the entry and the recon loop
   reruns the sequence until it completes.
+- **Live-trading interlock** (operator kill-switch): every non-paper
+  submit reads the durable `live_trading_mode` setting fresh from the DB
+  (2 s timeout, fail-closed to blocked) via
+  `_is_live_trading_interlocked` (`messaging/executors/base.py`). Only
+  `enabled` proceeds; `halted` and `reduce_only` both block (in Phase 0
+  `reduce_only` blocks like `halted`, differing only in the
+  observability reason), and an unreadable/missing/unrecognized mode
+  blocks as `live_trading_mode_unavailable`. Paper venues always pass. A
+  block runs a redispatch-safe disposition mirroring the breaker-open
+  path — a durable `order_interlock_blocked` terminal event, CAS the
+  command row to terminal `FAILED`, then publish REJECTED — so a frame
+  replayed after the mode later flips to `enabled` can never execute.
 
 The executor also gates order-type vocabulary before any venue send.
 The durable command plane (`trade_commands`, `OrderRequestData`)

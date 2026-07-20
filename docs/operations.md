@@ -306,12 +306,17 @@ go/no-go):
   `long_only` strategies in `signals` scoped to the soak window.
 - Consult admission succeeds each heartbeat window while the delegate
   watch is connected; missed windows are gating.
+- The live-trading kill switch (`live_trading_mode` DB setting) stays
+  `halted` for the entire soak; LIVE arming is the explicit, separate
+  act of setting it `enabled` — only that value admits non-paper
+  submits (`reduce_only` and any unreadable/unknown value also block).
 - Transient SQLite `database is locked` noise is acceptable ONLY if all
   drills, heartbeats and signal writes heal in-window (a SQLite soak
   does not validate Postgres contention).
 - Still OPEN by design before LIVE: venue-truth reconciliation,
   strategy target-state recovery after restart, proprietary parlay/spy
-  exit conversion, Postgres for prod, migration 0015 applied in prod.
+  exit conversion, Postgres for prod, migration head applied in prod
+  (`0034` as of 2026-07-20; `0015` was current at the 2026-07-03 drill).
 
 ## Verified environments
 
@@ -646,10 +651,11 @@ Two executor/outbox gates close the remaining order-flow loss windows:
   re-publishes the same `client_order_id`. The executor now drops such
   replays silently: an entry already pending, an accepted order
   awaiting its durable-event heal, or durable venue-event evidence
-  (accepted/fill/terminal/unknown/breaker-open — rejections excluded
-  so legitimate retries still flow) all block the re-submit before any
-  venue call. A replay carrying breaker-open evidence is the one
-  exception to the silent drop: it reruns the breaker disposition
+  (accepted/fill/terminal/unknown/breaker-open/interlock-blocked —
+  rejections excluded so legitimate retries still flow) all block the
+  re-submit before the venue order-placement call. Two evidence kinds
+  are exceptions to the silent drop: a replay carrying breaker-open OR
+  `order_interlock_blocked` evidence reruns its own terminal disposition
   (above) so a crash mid-disposition cannot leave engine intent held.
   A failed evidence check drops FAIL-CLOSED.
 - **Dispatch max-age TTL** (`TRADE_COMMAND_DISPATCH_TTL_S`, default

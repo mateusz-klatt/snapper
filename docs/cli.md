@@ -1146,6 +1146,11 @@ snapper trade-zmq
 SERVER_API_ONLY=true snapper server
 ```
 
+Starting all services does NOT enable live trading. The `live_trading_mode`
+DB setting is seeded `halted` and gates every non-paper submit; live orders
+require the explicit operator action of setting it to `enabled` (see
+[configuration.md](configuration.md#live-trading-interlock-kill-switch)).
+
 ### Historical Data Backfill
 
 Backfilling Polygon candles is a two-step workflow: download to the CSV

@@ -164,7 +164,7 @@ underlying snapshots and the retention window math.
 | `SYSTEM_METRICS_DISK_MOUNT_PATH` | `/` | Mount path sampled for disk-pressure REST metrics and host/disk heartbeats |
 | `RETENTION_INTERVAL_SECONDS` | `3600` | Cadence for the retention archive+purge tick |
 | `RETENTION_DISABLED` | `false` | Disable the retention loop entirely (still allow on-demand archive via CLI) |
-| `RETENTION_DRY_RUN` | `false` | Compute the window and counts but skip writes/purges |
+| `RETENTION_DRY_RUN` | `false` | Compute the window and still export CSV archives, but skip the purge (deletion) step |
 | `RETENTION_OUTPUT_DIR` | `data` | Base directory for archive CSV writes (matches the CLI `--output-dir` default) |
 | `DB_METRICS_INTERVAL_SECONDS` | `60` | Cadence for the per-table SCD2 row-count sampler |
 | `DB_METRICS_DISABLED` | `false` | Disable the DB stats sampler |
@@ -358,6 +358,33 @@ pre-acceptance events — a failed persist raises before the executor
 acknowledges the venue event; once the venue has accepted an order, a
 failed `order_accepted` persist no longer aborts the flow and the
 executor's recon loop retries the durable write each cycle.
+
+### Live-Trading Interlock (Kill Switch)
+
+A DB-backed kill switch gates every live (non-paper) order submit. It is
+a `settings` row, not an env var, seeded `halted` under category `risk`.
+
+| Key | Default | Description |
+| --- | ------- | ----------- |
+| `live_trading_mode` | `halted` | Live-trading interlock: `halted`, `reduce_only`, or `enabled`. Only `enabled` admits non-paper submits. |
+
+The executor interlock (`src/snapper/messaging/executors/base.py`) reads
+this setting fresh from the database on every non-paper submit — never
+the ZMQ-refreshed cache, so a lost `system.settings` broadcast can never
+leave a stale kill switch — under a hard 2 s read timeout so a wedged
+database cannot starve the serialized per-wallet handler. Paper venues
+are exempt and always pass (the discriminator is the executor's venue,
+never the caller-supplied `order.mode`). The read is fail-closed: any
+failure mode — no settings service, timeout, query/decrypt error, a
+duplicate active row, a missing row, or a value that is not exactly one
+of the three accepted strings — blocks the submit with reason
+`live_trading_mode_unavailable`, a blocking sentinel distinct from a
+deliberate `halted`. In the current phase `reduce_only` blocks like
+`halted` (differing only in the observability reason). A blocked submit
+gets a durable `order_interlock_blocked` disposition and is then
+REJECTED, so a replayed frame can never execute after the mode later
+flips to `enabled`. Flipping to `enabled` is an explicit operator
+money-risk action.
 
 ### Market Persist Policy
 

@@ -1045,20 +1045,22 @@ Executor:
 3.  Executes order via exchange API
 4.  Persists `VenueEvent` rows for accepted (`order_accepted`), fill
     (`fill_observed`), terminal (`order_terminal`), rejected
-    (`order_rejected`), ambiguous-submit (`order_submit_unknown`), and
-    breaker-open (`order_breaker_open`) observations
+    (`order_rejected`), ambiguous-submit (`order_submit_unknown`),
+    breaker-open (`order_breaker_open`), and interlock-blocked
+    (`order_interlock_blocked`) observations
 5.  Publishes `ExecutionData`, `OrderData`, or lightweight `OrderEventData`
 
-Before any venue call, each submit passes two gates. The duplicate-submit
-guard drops outbox replays of an already-evidenced `client_order_id`,
-checking the live pending entry, the unhealed-accept queue, and the durable
-`has_order_submit_evidence` probe (which excludes `order_rejected` rows so
-a legitimate retry after a definitive reject still flows). A failed durable
-probe is fail-closed — the command is dropped as if duplicate — and dropped
-duplicates publish nothing, with one exception: a replay whose durable
-evidence includes `order_breaker_open` reruns the breaker-open disposition
-described below instead of dropping silently, so an executor crash
-mid-disposition cannot leave the engine's intent held forever. The
+Before the venue order-placement call, each submit passes the pre-placement
+safety checks. The duplicate-submit guard drops outbox replays of an
+already-evidenced `client_order_id`, checking the live pending entry, the
+unhealed-accept queue, and the durable `has_order_submit_evidence` probe
+(which excludes `order_rejected` rows so a legitimate retry after a
+definitive reject still flows). A failed durable probe is fail-closed — the
+command is dropped as if duplicate — and dropped duplicates publish nothing,
+with two exceptions: a replay whose durable evidence includes
+`order_breaker_open` or `order_interlock_blocked` reruns that terminal
+disposition described below instead of dropping silently, so an executor
+crash mid-disposition cannot leave the engine's intent held forever. The
 staleness gate then handles commands older than the dispatch TTL
 (`TRADE_COMMAND_DISPATCH_TTL_S`, default 30 s,
 measured from the published frame's `signaled_at`, which the outbox derives
@@ -1091,6 +1093,24 @@ can distinguish the local infrastructure refusal from a venue rejection.
 If any step fails, the pending entry is parked and the reconciliation loop
 reruns the sequence; the engine releases its in-flight intent only on the
 confirmed publish.
+
+A live-trading interlock gates every non-paper submit before the venue
+order-placement call (`snapper.messaging.executors.base`). The discriminator is the
+executor's own venue — never the caller-supplied `order.mode`, which a
+client could forge — so paper venues always pass. For any other venue the
+`live_trading_mode` DB setting is read **fresh per submit** (deliberately
+bypassing the ZMQ-refreshed settings cache, so a lost `system.settings`
+broadcast cannot leave a stale kill-switch): only `enabled` proceeds,
+while `halted`, `reduce_only` (which blocks like `halted` today), and a
+missing or unreadable value (surfaced as `live_trading_mode_unavailable`)
+all fail closed. A block runs a distinct disposition mirroring the
+breaker-open path — a durable `order_interlock_blocked` venue event
+(counted as duplicate-submit evidence; a redispatch reruns this terminal
+disposition instead of reaching order placement), the
+durable command CASed to FAILED, and only then a published `rejected` — so
+a replayed frame can never execute after the mode later flips to
+`enabled`. If any step fails the entry is parked for the reconciliation
+loop to rerun.
 
 Fills arrive on the venue's private execution WebSocket stream. A
 supervisor task owns the stream's lifecycle: any termination — SDK

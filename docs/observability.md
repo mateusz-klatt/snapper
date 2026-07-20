@@ -427,7 +427,9 @@ The shipped default policy:
 ## Roll-out checklist for a new high-volume policy
 
 1. Add the new `RetentionPolicy` entry to `RETENTION_POLICIES` in
-   `src/snapper/application/retention/policies.py`.
+   `src/snapper/application/retention/policies.py`. The `table` must be
+   a key in `EVENT_TABLES` except `executions` (append-only — the
+   archiver refuses its purge); an invalid policy fails at module import.
 2. Set `RETENTION_DRY_RUN=true` for one full interval and inspect
    `GET /api/metrics/retention` — check that the `day_start` /
    `day_end` window matches expectations and `archived_rows` is
@@ -470,10 +472,13 @@ alphabetical).
 | Started but no sample yet (cold-start) | 503 | `DB metrics snapshotter has not completed a sample yet` | `<interval_seconds>` |
 | Healthy | 200 | — | — |
 
-The cold-start window lasts up to `DB_METRICS_INTERVAL_SECONDS`
-(default 60s) — by design, the sampler does NOT block lifespan
-startup on the first sample. Frontend dashboards must
-poll-with-backoff using the `Retry-After` header.
+The cold-start 503 window opens at lifespan start and closes only after
+the first full sampling pass completes: the sampler sleeps one
+`DB_METRICS_INTERVAL_SECONDS` (default 60s) and THEN samples every table
+sequentially (30s per-table timeout), so a degraded first pass can run
+well past a single interval. By design the sampler does NOT block
+lifespan startup on that first sample. `Retry-After` is a polling hint
+for frontend dashboards, not an upper-bound SLA — poll-with-backoff.
 
 ## Snapshot fields
 
@@ -570,4 +575,5 @@ full table scan over a high-volume audit table. The
 of the consolidated `0001_init` migration
 (`src/snapper/data/migrations/versions/0001_init.py`), so both
 Cluster B's counter and Cluster C's existing retention scan run
-in `O(log n)` from the first deployed schema.
+in `O(log n + k)` (an index-assisted seek plus a scan of the `k`
+matching entries) from the first deployed schema.

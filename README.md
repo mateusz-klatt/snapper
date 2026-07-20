@@ -193,6 +193,20 @@ the command FAILED, and publishes a rejection with reason
 if any step fails, the order is parked and the reconciliation loop
 reruns the disposition.
 
+A durable `live_trading_mode` kill-switch setting gates every
+non-paper submit, read fresh per order by the executor interlock
+(`src/snapper/messaging/executors/base.py`): only `enabled` proceeds,
+`halted` blocks, `reduce_only` currently blocks like `halted` (Phase
+0), and an unreadable, missing, or invalid value fails closed as
+`live_trading_mode_unavailable`. Paper venues — discriminated by the
+executor's own venue, never the caller-supplied order mode — always
+pass. A blocked submit runs a distinct interlock disposition: a
+durable `order_interlock_blocked` terminal, then the command marked
+FAILED, then a REJECTED publish so the engine releases intent — so a
+frame replayed after the mode later flips to `enabled` can never
+execute; if the disposition cannot complete, the entry is parked for
+the reconciliation loop to rerun.
+
 Private fill streams are supervised: a dead venue execution stream is
 respawned with capped backoff, each respawn reconciles fills missed
 during the dark window before resubscribing, and executor startup
