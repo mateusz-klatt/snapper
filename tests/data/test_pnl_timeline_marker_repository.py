@@ -449,3 +449,221 @@ async def test_ai_decision_markers_preserve_rejections_and_scope(
         _OTHER_WALLET, "live", _FROM, _TO, _AS_OF, 100
     )
     assert [row["event_public_id"] for row in other] == [_AI_OTHER]
+
+
+async def test_signal_execution_outcome_uses_the_scope_prefix(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Marker outcomes include a skewed low sequence and exclude a later fill."""
+    signal_ids = [
+        "00000000-0000-7000-8000-000000000421",
+        "00000000-0000-7000-8000-000000000422",
+        "00000000-0000-7000-8000-000000000423",
+    ]
+    command_ids = [
+        "00000000-0000-7000-8000-000000000821",
+        "00000000-0000-7000-8000-000000000822",
+        "00000000-0000-7000-8000-000000000823",
+    ]
+    order_ids = [
+        "00000000-0000-7000-8000-000000000831",
+        "00000000-0000-7000-8000-000000000832",
+        "00000000-0000-7000-8000-000000000833",
+    ]
+    execution_ids = [
+        "00000000-0000-7000-8000-000000000841",
+        "00000000-0000-7000-8000-000000000842",
+        "00000000-0000-7000-8000-000000000843",
+    ]
+    client_ids = ["prefix-cid-3", "prefix-cid-4", "prefix-cid-5"]
+    signals = [
+        _signal(
+            signal_id,
+            _LIVE_INSTRUMENT,
+            _WALLET,
+            _TO - timedelta(minutes=40 + index),
+            60 + index,
+        )
+        for index, signal_id in enumerate(signal_ids)
+    ]
+    commands = [
+        _trade_command(
+            command_ids[index],
+            client_ids[index],
+            _WALLET,
+            signal_ids[index],
+            None,
+            70 + index,
+        )
+        for index in range(3)
+    ]
+    orders = [
+        _order(order_ids[index], client_ids[index], _WALLET, 80 + index) for index in range(3)
+    ]
+    executions = [
+        _execution(execution_ids[index], order_ids[index], _WALLET, 3 + index) for index in range(3)
+    ]
+    executions[0].timestamp = _AS_OF + timedelta(minutes=5)
+    executions[1].timestamp = _AS_OF - timedelta(seconds=1)
+    executions[2].timestamp = _AS_OF + timedelta(minutes=10)
+    commands[0].created_at = _AS_OF + timedelta(minutes=5)
+    commands[0].timestamp = _AS_OF + timedelta(minutes=5)
+    orders[0].created_at = _AS_OF + timedelta(minutes=5)
+    orders[0].timestamp = _AS_OF + timedelta(minutes=5)
+    async with repository.session() as session:
+        session.add_all([*signals, *commands, *orders, *executions])
+        await session.commit()
+    rows = await repository.get_pnl_timeline_signals(
+        _WALLET,
+        "live",
+        _FROM,
+        _TO,
+        _AS_OF,
+        100,
+    )
+    by_id = {row["public_id"]: row["has_execution"] for row in rows}
+    assert [by_id[signal_id] for signal_id in signal_ids] == [True, True, False]
+
+
+async def test_signal_marker_uses_the_version_known_at_as_of(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A later signal correction cannot replace its historical marker version."""
+    public_id = "00000000-0000-7000-8000-000000000424"
+    correction_at = _AS_OF + timedelta(minutes=5)
+    original = _signal(public_id, _LIVE_INSTRUMENT, _WALLET, _TO - timedelta(minutes=5), 90)
+    original.reason = "reason known at horizon"
+    original.known_to = correction_at
+    corrected = _signal(public_id, _LIVE_INSTRUMENT, _WALLET, _TO - timedelta(minutes=5), 91)
+    corrected.reason = "later correction"
+    corrected.timestamp = correction_at
+    async with repository.session() as session:
+        session.add_all([original, corrected])
+        await session.commit()
+    rows = await repository.get_pnl_timeline_signals(
+        _WALLET,
+        "live",
+        _TO - timedelta(minutes=5),
+        _TO - timedelta(minutes=5),
+        _AS_OF,
+        100,
+    )
+    row = next(item for item in rows if item["public_id"] == public_id)
+    assert row["reason"] == "reason known at horizon"
+
+
+async def test_ai_events_use_event_time_without_review_creation_clock_filter(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The audit event owns time while mutable review identity remains joinable."""
+    known_review_id = "00000000-0000-7000-8000-000000000521"
+    future_review_id = "00000000-0000-7000-8000-000000000522"
+    known_event_id = "00000000-0000-7000-8000-000000000523"
+    future_event_id = "00000000-0000-7000-8000-000000000524"
+    known_review = _review(known_review_id, _LIVE_INSTRUMENT, _WALLET, 100, "approve")
+    known_review.created_at = _AS_OF + timedelta(minutes=5)
+    future_review = _review(future_review_id, _LIVE_INSTRUMENT, _WALLET, 101, "approve")
+    known_event = _ai_event(
+        known_event_id,
+        known_review_id,
+        _AS_OF - timedelta(seconds=1),
+        "approve",
+    )
+    future_event = _ai_event(
+        future_event_id,
+        future_review_id,
+        _AS_OF + timedelta(seconds=1),
+        "approve",
+    )
+    async with repository.session() as session:
+        session.add_all([known_review, future_review, known_event, future_event])
+        await session.commit()
+    rows = await repository.get_pnl_timeline_ai_decisions(
+        _WALLET,
+        "live",
+        _FROM,
+        _AS_OF + timedelta(minutes=1),
+        _AS_OF,
+        100,
+    )
+    event_ids = {row["event_public_id"] for row in rows}
+    assert known_event_id in event_ids
+    assert future_event_id not in event_ids
+
+
+async def test_ai_execution_outcome_uses_the_scope_prefix(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """AI outcomes keep a skewed prefix execution and reject a later one."""
+    review_ids = [
+        "00000000-0000-7000-8000-000000000531",
+        "00000000-0000-7000-8000-000000000532",
+        "00000000-0000-7000-8000-000000000533",
+    ]
+    event_ids = [
+        "00000000-0000-7000-8000-000000000541",
+        "00000000-0000-7000-8000-000000000542",
+        "00000000-0000-7000-8000-000000000543",
+    ]
+    command_ids = [
+        "00000000-0000-7000-8000-000000000851",
+        "00000000-0000-7000-8000-000000000852",
+        "00000000-0000-7000-8000-000000000853",
+    ]
+    order_ids = [
+        "00000000-0000-7000-8000-000000000861",
+        "00000000-0000-7000-8000-000000000862",
+        "00000000-0000-7000-8000-000000000863",
+    ]
+    execution_ids = [
+        "00000000-0000-7000-8000-000000000871",
+        "00000000-0000-7000-8000-000000000872",
+        "00000000-0000-7000-8000-000000000873",
+    ]
+    client_ids = ["ai-prefix-cid-3", "ai-prefix-cid-4", "ai-prefix-cid-5"]
+    reviews = [
+        _review(review_id, _LIVE_INSTRUMENT, _WALLET, 110 + index, "approve")
+        for index, review_id in enumerate(review_ids)
+    ]
+    events = [
+        _ai_event(
+            event_ids[index],
+            review_ids[index],
+            _TO - timedelta(minutes=40 + index),
+            "approve",
+        )
+        for index in range(3)
+    ]
+    commands = [
+        _trade_command(
+            command_ids[index],
+            client_ids[index],
+            _WALLET,
+            None,
+            review_ids[index],
+            120 + index,
+        )
+        for index in range(3)
+    ]
+    orders = [
+        _order(order_ids[index], client_ids[index], _WALLET, 130 + index) for index in range(3)
+    ]
+    executions = [
+        _execution(execution_ids[index], order_ids[index], _WALLET, 3 + index) for index in range(3)
+    ]
+    executions[0].timestamp = _AS_OF + timedelta(minutes=5)
+    executions[1].timestamp = _AS_OF - timedelta(seconds=1)
+    executions[2].timestamp = _AS_OF + timedelta(minutes=10)
+    async with repository.session() as session:
+        session.add_all([*reviews, *events, *commands, *orders, *executions])
+        await session.commit()
+    rows = await repository.get_pnl_timeline_ai_decisions(
+        _WALLET,
+        "live",
+        _FROM,
+        _TO,
+        _AS_OF,
+        100,
+    )
+    by_id = {row["event_public_id"]: row["has_execution"] for row in rows}
+    assert [by_id[event_id] for event_id in event_ids] == [True, True, False]

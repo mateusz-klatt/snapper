@@ -219,13 +219,12 @@ class TestGetPnlTimelineExecutions:
         assert rows == []
 
     async def test_clock_skew_prefix_is_not_dropped(self, repository: SQLAlchemyRepository) -> None:
-        """A future-timestamped fill and its future-timestamped Order still return.
+        """The watermark map preserves skewed prefixes and excludes later commits.
 
-        Executions are an append-only prefix, so a caller-clock ``timestamp <=
-        as_of`` window must never drop a fill (or its Order lineage) whose commit
-        clock ran ahead of ``as_of``: dropping the lower-scope fill while keeping
-        the higher-scope one would break the scope-sequence prefix and let replay
-        manufacture a fictitious position and P&L.
+        Kraken seq 1 is after ``as_of`` while seq 2 is before it, so the seq-2
+        watermark must retain both rows. Kraken seq 3 remains excluded. Zonda's
+        independent watermark retains only its seq 1. The future-stamped Order
+        also proves immutable sentinel-current lineage cannot erase a prefix.
         """
         future = _NOW + timedelta(hours=1)
         skew_wallet = "0000face-0000-7000-8000-0000000000c9"
@@ -238,10 +237,20 @@ class TestGetPnlTimelineExecutions:
             exe1.timestamp = future
             exe2 = _execution(skew_order, skew_wallet, "live", "kraken", 2, "sell", 1.0, 110.0, 0.0)
             exe2.timestamp = _TS
-            s.add_all([order, exe1, exe2])
+            exe3 = _execution(skew_order, skew_wallet, "live", "kraken", 3, "buy", 1.0, 120.0, 0.0)
+            exe3.timestamp = future + timedelta(minutes=1)
+            zonda1 = _execution(skew_order, skew_wallet, "live", "zonda", 1, "buy", 1.0, 50.0, 0.0)
+            zonda1.timestamp = _TS
+            zonda2 = _execution(skew_order, skew_wallet, "live", "zonda", 2, "sell", 1.0, 55.0, 0.0)
+            zonda2.timestamp = future
+            s.add_all([order, exe1, exe2, exe3, zonda1, zonda2])
             await s.commit()
         rows = await repository.get_pnl_timeline_executions(skew_wallet, "live", _NOW)
-        assert [r["scope_sequence"] for r in rows] == [1, 2]
+        assert [(r["exchange"], r["scope_sequence"]) for r in rows] == [
+            ("kraken", 1),
+            ("kraken", 2),
+            ("zonda", 1),
+        ]
 
 
 class TestGetAccrualsForPnl:

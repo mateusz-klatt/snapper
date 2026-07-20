@@ -337,10 +337,12 @@ class PnlTimelineExecutionRow(TypedDict):
     ordered by ``(exchange, scope_sequence)`` ascending. ``instrument_public_id``
     is the fill's active Order lineage (the pool key); ``exchange`` and
     ``scope_sequence`` come from the immutable ``Execution`` row and define the
-    per-scope accumulation order. ``public_id`` and ``status`` preserve the
-    execution's API identity and fill state. ``timestamp`` is the time AXIS the
-    builder grids on; ``executed_at`` is the nullable venue domain time,
-    advisory only (checklist #2 — never the accumulation key).
+    per-scope accumulation order. An as-of read returns the whole contiguous
+    prefix through the per-exchange commit-order watermark, never a row-level
+    timestamp slice. ``public_id`` and ``status`` preserve the execution's API
+    identity and fill state. ``timestamp`` is the time AXIS the builder grids
+    on; ``executed_at`` is the nullable venue domain time, advisory only
+    (checklist #2 — never the accumulation key).
     """
 
     public_id: str
@@ -363,9 +365,9 @@ class PnlTimelineExecutionRow(TypedDict):
 class PnlTimelineSignalMarkerRow(TypedDict):
     """One signal projected for a scoped P&L timeline marker read.
 
-    ``has_execution`` is true only when the signal lineage reaches an
-    append-only execution through active TradeCommand and Order rows. A false
-    value preserves independent signals that never produced an order or fill.
+    ``has_execution`` is true only when sentinel-current immutable lineage
+    reaches an execution in the per-exchange prefix known at ``as_of``. A false
+    value preserves independent signals that never produced a known fill.
     """
 
     public_id: str
@@ -382,8 +384,10 @@ class PnlTimelineSignalMarkerRow(TypedDict):
 class PnlTimelineAiDecisionMarkerRow(TypedDict):
     """One append-only AI decision event projected for a timeline marker.
 
-    The event payload and transition status carry the recorded decision even
-    when ``has_execution`` is false, including rejected decisions.
+    The append-only event uses its own ``occurred_at`` horizon. Mutable review
+    state contributes immutable identity only, while ``has_execution`` is
+    bounded by the per-exchange execution watermark. The payload and transition
+    status remain visible when no fill was known, including rejections.
     """
 
     event_public_id: str

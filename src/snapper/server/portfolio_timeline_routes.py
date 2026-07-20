@@ -94,7 +94,7 @@ class _ValidatedTimelineRequest:
     granularity: str
     window_from: datetime
     window_to: datetime
-    processing_as_of: datetime
+    as_of: datetime
 
 
 def _parse_utc_query_datetime(value: str, parameter_name: str) -> datetime:
@@ -169,6 +169,7 @@ async def _validate_timeline_request(
     granularity: str,
     from_time: str | None,
     to_time: str | None,
+    as_of: str | None,
 ) -> _ValidatedTimelineRequest:
     """Validate and authorize the request shared by both P&L endpoints.
 
@@ -181,9 +182,10 @@ async def _validate_timeline_request(
         granularity: Requested series granularity.
         from_time: Raw inclusive ISO window start.
         to_time: Raw inclusive ISO window end.
+        as_of: Optional raw ISO knowledge horizon.
 
     Returns:
-        Normalized UTC values and one current read horizon shared by all reads.
+        Normalized UTC values and one effective read horizon shared by all reads.
 
     Raises:
         HTTPException: 400 for invalid scope/window values or 403 when wallet
@@ -211,26 +213,38 @@ async def _validate_timeline_request(
         )
     window_from = _parse_utc_query_datetime(from_time, "from")
     window_to = _parse_utc_query_datetime(to_time, "to")
+    effective_as_of = (
+        datetime.now(UTC) if as_of is None else _parse_utc_query_datetime(as_of, "as_of")
+    )
     if window_to < window_from:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="to must be greater than or equal to from",
         )
-    if window_from < _MIN_SAFE_WINDOW_FROM or window_to > _MAX_SAFE_WINDOW_TO:
+    if (
+        window_from < _MIN_SAFE_WINDOW_FROM
+        or window_to > _MAX_SAFE_WINDOW_TO
+        or effective_as_of < _MIN_SAFE_WINDOW_FROM
+        or effective_as_of > _MAX_SAFE_WINDOW_TO
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Requested window is outside the safely representable timeline range",
+            detail="Requested window or as_of is outside the safely representable timeline range",
         )
-    processing_as_of = datetime.now(UTC)
+    if window_to > effective_as_of:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="to must be less than or equal to as_of; shorten the window or move as_of forward",
+        )
     await resolve_target_wallets(auth, repo, operator_public_id, wallet_public_id)
-    await _require_matching_wallet_mode(repo, wallet_public_id, mode, processing_as_of)
+    await _require_matching_wallet_mode(repo, wallet_public_id, mode, effective_as_of)
     return _ValidatedTimelineRequest(
         wallet_public_id=wallet_public_id,
         mode=mode,
         granularity=granularity,
         window_from=window_from,
         window_to=window_to,
-        processing_as_of=processing_as_of,
+        as_of=effective_as_of,
     )
 
 
@@ -303,7 +317,7 @@ def _marker_data(marker: PnlTimelineMarker) -> PnlTimelineMarkerData:
 @router.get(
     "/pnl/series",
     responses={
-        400: {"description": "Missing or invalid scope/window parameters"},
+        400: {"description": "Missing or invalid scope/window/horizon parameters"},
         500: {"description": _INTERNAL_ERROR_DETAIL},
     },
 )
@@ -322,12 +336,15 @@ async def get_pnl_series(
     to_time: Annotated[
         str | None, Query(alias="to", description="Inclusive window end (ISO, UTC)")
     ] = None,
+    as_of: Annotated[
+        str | None,
+        Query(description="Knowledge horizon for the bitemporal read (ISO, UTC)"),
+    ] = None,
 ) -> PnlSeriesResponse:
     """Reconstruct one wallet/mode scope's Net-P&L-since-activation series.
 
-    Version 1 deliberately serves current truth only. Historical-knowledge
-    time travel is out of scope, so the read horizon is captured internally and
-    cannot be supplied by the caller.
+    The optional ``as_of`` value selects the historical knowledge horizon. When
+    omitted, one current UTC horizon is captured and shared by every input read.
 
     Args:
         request: FastAPI request (provides the REST tracker for provenance).
@@ -340,14 +357,16 @@ async def get_pnl_series(
         granularity: One of ``1m`` / ``5m`` / ``1h`` / ``1d``.
         from_time: Required inclusive window start (ISO datetime).
         to_time: Required inclusive window end (ISO datetime).
+        as_of: Optional bitemporal knowledge horizon (ISO datetime).
 
     Returns:
         A :class:`PnlSeriesResponse` wrapping the decomposed series.
 
     Raises:
-        HTTPException: 400 when a required parameter is missing or the window /
-            granularity is invalid; 403 when the wallet is outside the caller's
-            accessible set; 500 on an unexpected reconstruction failure.
+        HTTPException: 400 when a required parameter is missing or the window,
+            horizon, or granularity is invalid; 403 when the wallet is outside
+            the caller's accessible set; 500 on an unexpected reconstruction
+            failure.
     """
     validated = await _validate_timeline_request(
         _auth,
@@ -358,6 +377,7 @@ async def get_pnl_series(
         granularity,
         from_time,
         to_time,
+        as_of,
     )
     try:
         result = await build_wallet_pnl_series(
@@ -367,7 +387,7 @@ async def get_pnl_series(
             validated.window_from,
             validated.window_to,
             validated.granularity,
-            validated.processing_as_of,
+            validated.as_of,
         )
         tracker: SequenceTracker = request.app.state.rest_tracker
         sid = tracker.session_id
@@ -384,7 +404,7 @@ async def get_pnl_series(
             valuation_ccy=result.valuation_ccy,
             from_time=validated.window_from,
             to_time=validated.window_to,
-            as_of=validated.processing_as_of,
+            as_of=validated.as_of,
             mark_source=PNL_TIMELINE_MARK_SOURCE,
             calc_version=PNL_TIMELINE_CALC_VERSION,
             points=_point_data(result),
@@ -412,7 +432,7 @@ async def get_pnl_series(
 @router.get(
     "/pnl/timeline",
     responses={
-        400: {"description": "Missing or invalid scope/window parameters"},
+        400: {"description": "Missing or invalid scope/window/horizon parameters"},
         500: {"description": _INTERNAL_TIMELINE_ERROR_DETAIL},
     },
 )
@@ -431,13 +451,17 @@ async def get_pnl_timeline(
     to_time: Annotated[
         str | None, Query(alias="to", description="Inclusive window end (ISO, UTC)")
     ] = None,
+    as_of: Annotated[
+        str | None,
+        Query(description="Knowledge horizon for the bitemporal read (ISO, UTC)"),
+    ] = None,
 ) -> PnlTimelineResponse:
     """Reconstruct a wallet P&L series with bounded decision markers.
 
-    The endpoint serves current truth only and uses the same required wallet,
-    mode consistency, authorization, safe-window, granularity, and total-work
-    rules as the series-only endpoint. Its read horizon is captured once and
-    passed unchanged through the series, signal, and AI-event reads.
+    The endpoint uses the same required wallet, mode consistency,
+    authorization, safe-window, granularity, and total-work rules as the
+    series-only endpoint. Its effective ``as_of`` horizon is passed unchanged
+    through the series, signal, and AI-event reads.
 
     Args:
         request: FastAPI request providing REST sequence provenance.
@@ -450,13 +474,15 @@ async def get_pnl_timeline(
         granularity: Requested P&L point granularity.
         from_time: Required inclusive ISO window start.
         to_time: Required inclusive ISO window end.
+        as_of: Optional bitemporal knowledge horizon (ISO datetime).
 
     Returns:
         A flat :class:`PnlTimelineResponse` with series fields and markers.
 
     Raises:
-        HTTPException: 400 for invalid scope/window or excessive work, 403 for
-            inaccessible wallet scope, and 500 for unexpected read failures.
+        HTTPException: 400 for invalid scope/window/horizon or excessive work,
+            403 for inaccessible wallet scope, and 500 for unexpected read
+            failures.
     """
     validated = await _validate_timeline_request(
         _auth,
@@ -467,6 +493,7 @@ async def get_pnl_timeline(
         granularity,
         from_time,
         to_time,
+        as_of,
     )
     try:
         result = await build_wallet_pnl_timeline(
@@ -476,7 +503,7 @@ async def get_pnl_timeline(
             validated.window_from,
             validated.window_to,
             validated.granularity,
-            validated.processing_as_of,
+            validated.as_of,
         )
         tracker: SequenceTracker = request.app.state.rest_tracker
         sid = tracker.session_id
@@ -493,7 +520,7 @@ async def get_pnl_timeline(
             valuation_ccy=result.series.valuation_ccy,
             from_time=validated.window_from,
             to_time=validated.window_to,
-            as_of=validated.processing_as_of,
+            as_of=validated.as_of,
             mark_source=PNL_TIMELINE_MARK_SOURCE,
             calc_version=PNL_TIMELINE_CALC_VERSION,
             points=_point_data(result.series),

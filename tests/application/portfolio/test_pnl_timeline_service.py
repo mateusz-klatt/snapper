@@ -187,22 +187,33 @@ class FakeRepo:
         self.candle_calls: list[
             tuple[list[InstrumentSymbolRefRow], datetime, datetime, datetime]
         ] = []
-        self.fill_scope_calls: list[tuple[str, str]] = []
-        self.fill_gap_calls: list[tuple[str, datetime]] = []
+        self.fill_scope_calls: list[tuple[str, str, datetime]] = []
+        self.fill_gap_calls: list[tuple[str, str, str, datetime]] = []
         self.execution_calls: list[tuple[str, str, datetime]] = []
         self.accrual_calls: list[tuple[str, str, datetime]] = []
         self.symbol_ref_as_of_calls: list[datetime] = []
         self.signal_calls: list[tuple[str, str, datetime, datetime, datetime, int]] = []
         self.ai_decision_calls: list[tuple[str, str, datetime, datetime, datetime, int]] = []
 
-    async def get_fill_shard_keys_for_scope(self, wallet_public_id: str, mode: str) -> list[str]:
+    async def get_fill_shard_keys_for_scope(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> list[str]:
         """Record the exact scope and return its fill-bearing shards."""
-        self.fill_scope_calls.append((wallet_public_id, mode))
+        self.fill_scope_calls.append((wallet_public_id, mode, as_of))
         return list(self._fill_shard_keys)
 
-    async def shard_has_fill_gap(self, shard_key: str, as_of: datetime) -> bool:
+    async def pnl_timeline_shard_has_fill_gap(
+        self,
+        shard_key: str,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> bool:
         """Record the evidence lookup and return its canned gap status."""
-        self.fill_gap_calls.append((shard_key, as_of))
+        self.fill_gap_calls.append((shard_key, wallet_public_id, mode, as_of))
         return shard_key in self._gapped_shards
 
     async def get_pnl_timeline_executions(
@@ -391,8 +402,8 @@ class TestBuildWalletPnlSeries:
         assert result.points[0].net_pnl == 4.5
         assert result.points[2].unrealized_pnl == 20.0
         assert result.points[2].net_pnl == 19.5
-        assert repo.fill_scope_calls == [("w1", "live")]
-        assert repo.fill_gap_calls == [("clean-shard", as_of)]
+        assert repo.fill_scope_calls == [("w1", "live", as_of)]
+        assert repo.fill_gap_calls == [("clean-shard", "w1", "live", as_of)]
         assert repo.execution_calls == [("w1", "live", as_of)]
         assert repo.accrual_calls == [("w1", "live", as_of)]
         assert repo.symbol_ref_as_of_calls == [as_of]
@@ -515,8 +526,8 @@ class TestBuildWalletPnlSeries:
         assert result.granularity == "1m"
         assert result.valuation_ccy == "USD"
         assert repo.fill_gap_calls == [
-            ("clean-shard", _T0),
-            ("gapped-shard", _T0),
+            ("clean-shard", "w1", "live", _T0),
+            ("gapped-shard", "w1", "live", _T0),
         ]
         for point in result.points:
             assert point.valuation_status == "incomplete"

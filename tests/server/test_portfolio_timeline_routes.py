@@ -2,7 +2,7 @@
 
 Exercises the ``GET /api/portfolio/pnl/series`` endpoint end to end with a mocked
 repository: the happy path and response shape, every 400 parameter guard, the
-total-work budget, current-only horizon, timezone coercion, wallet/mode
+total-work budget, bitemporal horizon, timezone coercion, wallet/mode
 consistency, extreme datetime handling, wallet-scope 403, and the 500 wrapper on
 an unexpected reconstruction failure.
 """
@@ -29,6 +29,7 @@ from snapper.server.app import get_repository_dependency
 
 _FROM = "2026-07-20T10:00:00Z"
 _TO = "2026-07-20T10:02:00Z"
+_AS_OF = "2026-07-20T10:02:30Z"
 _WALLET = "0000face-0000-7000-8000-0000000000a1"
 
 
@@ -244,18 +245,32 @@ class TestHappyPath:
         assert len(points) == 1
         assert points[0]["point_time"] == _FROM
 
-    def test_read_horizon_is_current_and_cannot_be_overridden(self) -> None:
-        """An ``as_of`` query value is not part of v1 and cannot time-travel the read."""
+    def test_explicit_as_of_is_shared_and_exposed(self) -> None:
+        """An explicit knowledge horizon is used by every series input read."""
+        repo = _seeded_repo()
+        client = _create_client(repo)
+        response = client.get(_url(as_of=_AS_OF))
+        assert response.status_code == 200
+        response_as_of = datetime.fromisoformat(response.json()["payload"]["as_of"])
+        assert response_as_of == datetime.fromisoformat(_AS_OF)
+        assert repo.list_active_wallets.await_args.args[0] == response_as_of
+        assert repo.get_pnl_timeline_executions.await_args.args[2] == response_as_of
+        assert repo.get_accruals_for_pnl.await_args.args[2] == response_as_of
+        assert repo.get_instrument_symbol_refs.await_args.args[1] == response_as_of
+        assert repo.get_pnl_timeline_candles.await_args.args[3] == response_as_of
+
+    def test_default_read_horizon_remains_current(self) -> None:
+        """Omitting ``as_of`` captures one current UTC horizon as before."""
         repo = _seeded_repo()
         client = _create_client(repo)
         before = datetime.now(UTC)
-        response = client.get(_url(as_of="2000-01-01T00:00:00Z"))
+        response = client.get(_url())
         after = datetime.now(UTC)
         assert response.status_code == 200
         response_as_of = datetime.fromisoformat(response.json()["payload"]["as_of"])
         assert before <= response_as_of <= after
-        execution_as_of = repo.get_pnl_timeline_executions.await_args.args[2]
-        assert execution_as_of == response_as_of
+        assert repo.list_active_wallets.await_args.args[0] == response_as_of
+        assert repo.get_pnl_timeline_executions.await_args.args[2] == response_as_of
 
     def test_paper_mode_accepts_a_paper_wallet(self) -> None:
         """A paper request succeeds when the active wallet is also paper."""
@@ -279,13 +294,25 @@ class TestHappyPath:
 class TestMarkerTimeline:
     """Cover the marker-bearing endpoint response and failure disclosure."""
 
-    def test_returns_all_marker_kinds_with_no_fill_and_rejection(self) -> None:
-        """Independent signal and AI reads preserve decisions without fills."""
+    def test_default_read_horizon_remains_current(self) -> None:
+        """The marker endpoint keeps live behavior when ``as_of`` is omitted."""
         repo = _seeded_repo()
         client = _create_client(repo)
         before = datetime.now(UTC)
         response = client.get(_timeline_url())
         after = datetime.now(UTC)
+        assert response.status_code == 200
+        response_as_of = datetime.fromisoformat(response.json()["payload"]["as_of"])
+        assert before <= response_as_of <= after
+        assert repo.get_pnl_timeline_executions.await_args.args[2] == response_as_of
+        assert repo.get_pnl_timeline_signals.await_args.args[4] == response_as_of
+        assert repo.get_pnl_timeline_ai_decisions.await_args.args[4] == response_as_of
+
+    def test_returns_all_marker_kinds_with_no_fill_and_rejection(self) -> None:
+        """Independent signal and AI reads preserve decisions without fills."""
+        repo = _seeded_repo()
+        client = _create_client(repo)
+        response = client.get(_timeline_url(as_of=_AS_OF))
         assert response.status_code == 200
         body = response.json()
         assert body["type"] == "pnl_timeline"
@@ -309,7 +336,7 @@ class TestMarkerTimeline:
         assert markers["ai_decision"]["rationale"] == "risk too high"
         assert markers["ai_decision"]["outcome"] == "rejected"
         response_as_of = datetime.fromisoformat(payload["as_of"])
-        assert before <= response_as_of <= after
+        assert response_as_of == datetime.fromisoformat(_AS_OF)
         repo.get_pnl_timeline_executions.assert_awaited_once()
         assert repo.get_pnl_timeline_executions.await_args.args[2] == response_as_of
         assert repo.get_pnl_timeline_signals.await_args.args[4] == response_as_of
@@ -458,6 +485,42 @@ class TestParameterGuards:
         response = client.get(_url(**{"from": "not-a-datetime"}))
         assert response.status_code == 400
         assert "supported ISO-8601 datetime" in response.json()["detail"]
+
+    def test_malformed_as_of_is_rejected_as_400(self) -> None:
+        """A malformed knowledge horizon is a route-level 400 rather than a 422."""
+        client = _create_client(_seeded_repo())
+        response = client.get(_url(as_of="not-a-datetime"))
+        assert response.status_code == 400
+        assert response.json()["detail"] == "as_of is not a supported ISO-8601 datetime"
+
+    def test_as_of_before_safe_range_is_rejected_as_400(self) -> None:
+        """The minimum UTC minute is rejected as an unsafe knowledge horizon."""
+        client = _create_client(_seeded_repo())
+        response = client.get(_url(as_of="0001-01-01T00:00:00Z"))
+        assert response.status_code == 400
+        assert "window or as_of" in response.json()["detail"]
+
+    def test_as_of_after_safe_range_is_rejected_as_400(self) -> None:
+        """The final UTC minute is rejected as an unsafe knowledge horizon."""
+        client = _create_client(_seeded_repo())
+        response = client.get(_url(as_of="9999-12-31T23:59:59Z"))
+        assert response.status_code == 400
+        assert "window or as_of" in response.json()["detail"]
+
+    def test_window_cannot_extend_past_as_of(self) -> None:
+        """Both endpoints reject a window past the knowledge horizon actionably."""
+        repo = _seeded_repo()
+        client = _create_client(repo)
+        responses = [
+            client.get(_url(as_of="2026-07-20T10:01:59Z")),
+            client.get(_timeline_url(as_of="2026-07-20T10:01:59Z")),
+        ]
+        assert [response.status_code for response in responses] == [400, 400]
+        assert {response.json()["detail"] for response in responses} == {
+            "to must be less than or equal to as_of; shorten the window or move as_of forward"
+        }
+        repo.list_active_wallets.assert_not_awaited()
+        repo.get_pnl_timeline_executions.assert_not_awaited()
 
     def test_offset_normalization_underflow_is_rejected_as_400(self) -> None:
         """A representable local datetime that underflows in UTC returns 400."""

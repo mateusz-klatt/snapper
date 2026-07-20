@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import event as sa_event
 
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.models import Instrument
 from snapper.data.models import Symbol
@@ -252,6 +253,30 @@ class TestGetPnlTimelineCandles:
         assert [row["open_at"] for row in rows] == sorted(row["open_at"] for row in rows)
         assert all(set(row) == {"instrument_public_id", "open_at", "close"} for row in rows)
 
+    async def test_returns_candle_version_known_at_as_of(
+        self,
+        repository: SQLAlchemyRepository,
+    ) -> None:
+        """A correction learned after the horizon cannot rewrite an as-of mark."""
+        open_at = _NOW - timedelta(minutes=1)
+        correction_at = _NOW + timedelta(hours=2)
+        horizon = _NOW + timedelta(hours=1)
+        candle_public_id = "00000000-0000-7000-8000-000000000d01"
+        original = _candle(_INST_USD, open_at, 100.0)
+        original.public_id = candle_public_id
+        original.known_to = correction_at
+        corrected = _candle(_INST_USD, open_at, 125.0)
+        corrected.public_id = candle_public_id
+        corrected.timestamp = correction_at
+        corrected.known_to = KNOWN_TO_MAX
+        corrected.sequence_id = 2
+        async with repository.session() as session:
+            session.add_all([original, corrected])
+            await session.commit()
+        refs = await repository.get_instrument_symbol_refs([_INST_USD], horizon)
+        rows = await repository.get_pnl_timeline_candles(refs, open_at, open_at, horizon)
+        assert [(row["open_at"], row["close"]) for row in rows] == [(open_at, 100.0)]
+
 
 class TestGetFillShardKeysForScope:
     """Cover exact wallet/mode fill-evidence discovery."""
@@ -272,5 +297,5 @@ class TestGetFillShardKeysForScope:
                 ]
             )
             await session.commit()
-        rows = await repository.get_fill_shard_keys_for_scope(_WALLET, "live")
+        rows = await repository.get_fill_shard_keys_for_scope(_WALLET, "live", _NOW)
         assert rows == ["shard-a", "shard-b"]

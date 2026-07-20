@@ -260,10 +260,11 @@ async def _scope_has_fill_gap(
 ) -> bool:
     """Consult durable gap evidence for every fill-bearing shard in the scope.
 
-    The exact full-wallet and mode lookup includes venue-only shards with zero
-    consumed executions, which cannot be discovered from the execution prefix.
-    Each returned key is then evaluated by the existing recorded-quantity versus
-    consumed-executions evidence read.
+    Each shared shard cursor derives its venue prefix at ``as_of``; exact wallet
+    and mode filters then expose venue-only shards with zero consumed
+    executions. Each returned key is evaluated against the matching exact-scope
+    execution prefix. The recovery gap read is intentionally not reused because
+    it describes current state rather than historical P&L completeness.
 
     Args:
         repo: Repository providing scoped shard keys and gap evidence.
@@ -274,9 +275,14 @@ async def _scope_has_fill_gap(
     Returns:
         ``True`` as soon as any scoped shard has a proven fill gap.
     """
-    shard_keys = await repo.get_fill_shard_keys_for_scope(wallet_public_id, mode)
+    shard_keys = await repo.get_fill_shard_keys_for_scope(wallet_public_id, mode, as_of)
     for shard_key in shard_keys:
-        if await repo.shard_has_fill_gap(shard_key, as_of):
+        if await repo.pnl_timeline_shard_has_fill_gap(
+            shard_key,
+            wallet_public_id,
+            mode,
+            as_of,
+        ):
             return True
     return False
 
@@ -391,7 +397,8 @@ async def build_wallet_pnl_series(
         from_time: Inclusive series window start.
         to_time: Inclusive series window end.
         granularity: One of ``'1m'``, ``'5m'``, ``'1h'``, ``'1d'``.
-        as_of: Snapshot time threading the accrual and candle reads.
+        as_of: Effective knowledge horizon for the execution commit watermark,
+            accrual SCD2 versions, and candle SCD2 versions.
         valuation_ccy: Currency the series components are expressed in.
         execution_rows: Optional preloaded execution prefix used by the marker
             endpoint to avoid issuing the same scope read twice.
@@ -534,7 +541,8 @@ async def build_wallet_pnl_timeline(
         from_time: Inclusive series and marker window start.
         to_time: Inclusive series and marker window end.
         granularity: Requested P&L point granularity.
-        as_of: Current read horizon shared by every repository read.
+        as_of: Effective knowledge horizon shared by the series, signals, and
+            AI decision reads.
         valuation_ccy: Currency the series components are expressed in.
 
     Returns:

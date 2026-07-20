@@ -2106,30 +2106,28 @@ class Repository(ABC):
         axis is carried as ``timestamp``; ``executed_at`` is nullable and never
         the accumulation key.
 
-        CLOCK-FREE, like ``get_active_orders_for_recovery``: executions are an
-        append-only ledger (never SCD2-superseded), so ``as_of`` is deliberately
-        NOT used to filter them. A caller-clock ``timestamp <= as_of`` window
-        would break the scope-sequence PREFIX property — dropping a lower-scope
-        fill whose commit clock ran ahead while keeping a higher-scope one — and
-        replay of that non-prefix would MANUFACTURE a fictitious position and P&L.
-        The Order lineage is joined on the sentinel-active version because
-        ``instrument_public_id`` is immutable across Order SCD2 versions, so a
-        committed execution is never dropped when its Order's clock ran ahead of
-        ``as_of``. The emitted SERIES is instead bounded by the builder's grid
-        window (``to_time``); strict historical-knowledge bounding of the prefix
-        is deferred to the completeness gate.
+        The historical bound is a per-exchange COMMIT-ORDER WATERMARK MAP. For
+        each ``(wallet, exchange, mode)`` scope it finds the greatest
+        ``scope_sequence`` whose bus timestamp is at or before ``as_of``, then
+        returns the entire contiguous prefix through that sequence. A direct
+        row predicate ``Execution.timestamp <= as_of`` is unsound: commit-clock
+        skew can put a lower sequence after the horizon and a higher sequence
+        before it, so filtering rows would drop the lower fill, keep the higher
+        fill, and manufacture a fictitious position and P&L. The watermark
+        retains the skewed lower sequence while excluding every sequence above
+        the commit position known at the horizon. Order is joined on its
+        sentinel-active version because ``instrument_public_id`` is immutable
+        lineage and its own clock must not erase a prefix execution.
 
         Args:
             wallet_public_id: Wallet scope to reconstruct.
             mode: Trading mode scope (``live``, ``paper``).
-            as_of: Retained for interface parity and deliberately unused; the
-                append-only prefix is clock-free (see above).
+            as_of: Inclusive bus-time horizon used only to derive each
+                per-exchange commit-order watermark.
             since_scope_sequence: Optional EXCLUSIVE lower bound on
                 ``scope_sequence`` — the activation-anchor replay watermark. A
-                single scalar bound is applied uniformly across every exchange in
-                the scope; the per-exchange watermark MAP is deferred to the
-                Phase-5B anchor writer, so pass ``None`` for a full replay when
-                the scope spans more than one exchange.
+                single scalar lower bound is applied uniformly across every
+                exchange and combined with the per-exchange as-of watermark map.
 
         Returns:
             Execution rows ordered by ``(exchange, scope_sequence)`` ascending.
@@ -2151,9 +2149,11 @@ class Repository(ABC):
         Signals are selected independently of executions so never-executed
         decisions remain visible. Trading mode is derived from the active
         Instrument: ``paper`` only for the paper exchange and ``live`` for
-        every non-paper exchange. ``has_execution`` follows the signal through
-        sentinel-active TradeCommand and Order lineage to an append-only active
-        Execution.
+        every non-paper exchange. Signal and Instrument use their SCD2 versions
+        active at ``as_of``. ``has_execution`` follows sentinel-current
+        TradeCommand and Order rows only for immutable lineage, then bounds the
+        append-only Execution membership by the per-exchange commit-order
+        watermark map at ``as_of``.
 
         Args:
             wallet_public_id: Exact wallet scope to read.
@@ -2183,9 +2183,11 @@ class Repository(ABC):
 
         Decision events are selected independently of executions so rejected
         and otherwise unfilled decisions remain visible. Trading mode is
-        derived from the active Instrument. ``has_execution`` follows the
-        joined AiReview through sentinel-active TradeCommand and Order lineage
-        to an append-only active Execution.
+        derived from the active Instrument. The append-only event is bounded by
+        its own ``occurred_at`` because it has no contiguous commit sequence;
+        mutable AiReview contributes immutable identity only. ``has_execution``
+        follows sentinel-current TradeCommand and Order lineage to an Execution
+        bounded by the per-exchange commit-order watermark map at ``as_of``.
 
         Args:
             wallet_public_id: Exact wallet scope to read.
@@ -2289,20 +2291,45 @@ class Repository(ABC):
         self,
         wallet_public_id: str,
         mode: str,
+        as_of: datetime,
     ) -> list[str]:
-        """Return fill-bearing shard keys for one exact wallet/mode scope.
+        """Return fill-bearing shard keys from each exact as-of venue prefix.
 
-        Reads append-only ``fill_observed`` venue evidence directly so a scope
-        with zero consumed execution rows still exposes its shards to the gap
-        check. Full wallet identity and explicit mode columns provide the scope;
-        callers never need to parse the deliberately lossy shard string.
+        VenueEvent ``id`` is the shared per-shard commit position. The highest
+        id anywhere in a shard whose bus timestamp is within the horizon seals
+        the whole shard prefix. Exact wallet and mode filters are applied only
+        to the evidence inside that prefix because suffix-twin wallets can share
+        a shard cursor. Venue-only shards with zero executions remain
+        discoverable.
 
         Args:
             wallet_public_id: Full wallet identity to match.
             mode: Exact execution mode to match.
+            as_of: Knowledge horizon for each shared shard watermark.
 
         Returns:
             Distinct shard keys in ascending order.
+        """
+        ...
+
+    @abstractmethod
+    async def pnl_timeline_shard_has_fill_gap(
+        self,
+        shard_key: str,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> bool:
+        """Compare historical venue and execution prefixes for one P&L shard.
+
+        Args:
+            shard_key: Exact fill-bearing shard to evaluate.
+            wallet_public_id: Full wallet identity to match.
+            mode: Exact execution mode to match.
+            as_of: Knowledge horizon for both append-only ledgers.
+
+        Returns:
+            True when durable recorded quantity is provably unconsumed.
         """
         ...
 
@@ -9298,25 +9325,46 @@ class SQLAlchemyRepository(Repository):
     ) -> list[PnlTimelineExecutionRow]:
         """Retrieve a scope's executions for P&L timeline reconstruction.
 
-        Clock-free append-only prefix: joins each execution to its sentinel-active
-        Order lineage to project ``instrument_public_id`` (immutable across Order
-        versions). ``as_of`` is deliberately unused so a caller-clock window can
-        never break the scope-sequence prefix (see the abstract declaration).
+        Derives one commit-order watermark per exchange at ``as_of`` and joins
+        the whole execution prefix through each watermark in the same round
+        trip. A direct timestamp filter is unsound because clock skew can remove
+        a lower sequence while retaining a higher one. Sentinel-active Order
+        supplies immutable instrument lineage without imposing its own clock.
 
         Args:
             wallet_public_id: Wallet scope to reconstruct.
             mode: Trading mode scope.
-            as_of: Retained for interface parity and deliberately unused.
+            as_of: Inclusive horizon used to derive each exchange watermark.
             since_scope_sequence: Optional exclusive ``scope_sequence`` lower
                 bound applied uniformly across exchanges.
 
         Returns:
             Execution rows ordered by ``(exchange, scope_sequence)`` ascending.
         """
-        del as_of
+        watermark_map = (
+            select(
+                Execution.exchange.label("exchange"),
+                func.max(Execution.scope_sequence).label("scope_sequence"),
+            )
+            .where(
+                Execution.wallet_public_id == wallet_public_id,
+                Execution.mode == mode,
+                Execution.known_to == KNOWN_TO_MAX,
+                Execution.timestamp <= as_of,
+            )
+            .group_by(Execution.exchange)
+            .subquery()
+        )
         async with self.session() as s:
             query = (
                 select(Execution, Order.instrument_public_id)
+                .join(
+                    watermark_map,
+                    and_(
+                        Execution.exchange == watermark_map.c.exchange,
+                        Execution.scope_sequence <= watermark_map.c.scope_sequence,
+                    ),
+                )
                 .join(
                     Order,
                     and_(
@@ -9364,7 +9412,28 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         limit: int,
     ) -> list[PnlTimelineSignalMarkerRow]:
-        """Retrieve bounded signal markers for one wallet and mode scope."""
+        """Retrieve bitemporally bounded signal markers for one scope.
+
+        Signal and Instrument versions are selected at ``as_of``. Execution
+        membership uses the per-exchange commit-order watermark map; filtering
+        execution rows directly by timestamp would break a clock-skewed prefix.
+        Sentinel-current TradeCommand and Order rows contribute only immutable
+        lineage IDs, so their clocks cannot erase a prefix execution.
+        """
+        watermark_map = (
+            select(
+                Execution.exchange.label("exchange"),
+                func.max(Execution.scope_sequence).label("scope_sequence"),
+            )
+            .where(
+                Execution.wallet_public_id == wallet_public_id,
+                Execution.mode == mode,
+                Execution.known_to == KNOWN_TO_MAX,
+                Execution.timestamp <= as_of,
+            )
+            .group_by(Execution.exchange)
+            .subquery()
+        )
         has_execution = exists(
             select(1)
             .select_from(TradeCommand)
@@ -9385,6 +9454,13 @@ class SQLAlchemyRepository(Repository):
                     Execution.wallet_public_id == Order.wallet_public_id,
                     Execution.mode == Order.mode,
                     Execution.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .join(
+                watermark_map,
+                and_(
+                    Execution.exchange == watermark_map.c.exchange,
+                    Execution.scope_sequence <= watermark_map.c.scope_sequence,
                 ),
             )
             .where(
@@ -9442,7 +9518,28 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         limit: int,
     ) -> list[PnlTimelineAiDecisionMarkerRow]:
-        """Retrieve bounded AI decision markers for one wallet and mode scope."""
+        """Retrieve bitemporally bounded AI decision markers for one scope.
+
+        Append-only decision events use their own event time because this audit
+        stream has no contiguous commit sequence. The mutable review contributes
+        only immutable identity fields. Execution membership uses the
+        per-exchange commit-order watermark map, with sentinel-current
+        TradeCommand and Order versions used only for immutable lineage IDs.
+        """
+        watermark_map = (
+            select(
+                Execution.exchange.label("exchange"),
+                func.max(Execution.scope_sequence).label("scope_sequence"),
+            )
+            .where(
+                Execution.wallet_public_id == wallet_public_id,
+                Execution.mode == mode,
+                Execution.known_to == KNOWN_TO_MAX,
+                Execution.timestamp <= as_of,
+            )
+            .group_by(Execution.exchange)
+            .subquery()
+        )
         has_execution = exists(
             select(1)
             .select_from(TradeCommand)
@@ -9463,6 +9560,13 @@ class SQLAlchemyRepository(Repository):
                     Execution.wallet_public_id == Order.wallet_public_id,
                     Execution.mode == Order.mode,
                     Execution.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .join(
+                watermark_map,
+                and_(
+                    Execution.exchange == watermark_map.c.exchange,
+                    Execution.scope_sequence <= watermark_map.c.scope_sequence,
                 ),
             )
             .where(
@@ -9489,6 +9593,7 @@ class SQLAlchemyRepository(Repository):
                     AiReviewEvent.event_type == "decision_recorded",
                     AiReviewEvent.occurred_at >= from_time,
                     AiReviewEvent.occurred_at <= to_time,
+                    AiReviewEvent.occurred_at <= as_of,
                 )
             )
             if mode == "paper":
@@ -9695,28 +9800,171 @@ class SQLAlchemyRepository(Repository):
         self,
         wallet_public_id: str,
         mode: str,
+        as_of: datetime,
     ) -> list[str]:
-        """Return fill-bearing shards for an exact wallet/mode scope.
+        """Return fill-bearing shards from each shared as-of event prefix.
 
         Args:
             wallet_public_id: Full wallet identity to match.
             mode: Exact execution mode to match.
+            as_of: Knowledge horizon for each shared shard watermark.
 
         Returns:
             Distinct shard keys in ascending order.
         """
+        watermark_map = (
+            select(
+                VenueEvent.shard_key.label("shard_key"),
+                func.max(VenueEvent.id).label("event_id"),
+            )
+            .where(
+                VenueEvent.known_to == KNOWN_TO_MAX,
+                VenueEvent.timestamp <= as_of,
+            )
+            .group_by(VenueEvent.shard_key)
+            .subquery()
+        )
         async with self.session() as s:
             result = await s.execute(
                 select(VenueEvent.shard_key)
+                .join(
+                    watermark_map,
+                    and_(
+                        VenueEvent.shard_key == watermark_map.c.shard_key,
+                        VenueEvent.id <= watermark_map.c.event_id,
+                    ),
+                )
                 .where(
                     VenueEvent.event_type == "fill_observed",
                     VenueEvent.wallet_public_id == wallet_public_id,
                     VenueEvent.mode == mode,
+                    VenueEvent.known_to == KNOWN_TO_MAX,
                 )
                 .distinct()
                 .order_by(VenueEvent.shard_key.asc())
             )
             return list(result.scalars().all())
+
+    async def pnl_timeline_shard_has_fill_gap(
+        self,
+        shard_key: str,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> bool:
+        """Compare a shared venue prefix with an exact execution prefix.
+
+        The highest event ``id`` anywhere in the shard within the horizon seals
+        its shared prefix; exact wallet and mode filters apply to evidence after
+        that bound. Consumed fills use the highest per-exchange
+        ``scope_sequence`` within the same horizon and retain that whole prefix.
+        Direct timestamp predicates on either ledger are unsound under clock
+        skew. Sentinel-current Order versions contribute only immutable
+        ``client_order_id`` lineage, so their clocks cannot drop prefix rows.
+
+        Args:
+            shard_key: Exact fill-bearing shard to evaluate.
+            wallet_public_id: Full wallet identity to match.
+            mode: Exact execution mode to match.
+            as_of: Knowledge horizon for both append-only ledgers.
+
+        Returns:
+            True when recorded gross fill quantity exceeds consumed quantity.
+        """
+        async with self.session() as s:
+            venue_watermark = (
+                await s.execute(
+                    select(func.max(VenueEvent.id)).where(
+                        VenueEvent.shard_key == shard_key,
+                        VenueEvent.known_to == KNOWN_TO_MAX,
+                        VenueEvent.timestamp <= as_of,
+                    )
+                )
+            ).scalar()
+            if venue_watermark is None:
+                return False
+            exchange = (
+                await s.execute(
+                    select(VenueEvent.exchange)
+                    .where(
+                        VenueEvent.shard_key == shard_key,
+                        VenueEvent.wallet_public_id == wallet_public_id,
+                        VenueEvent.mode == mode,
+                        VenueEvent.event_type == "fill_observed",
+                        VenueEvent.known_to == KNOWN_TO_MAX,
+                        VenueEvent.id <= venue_watermark,
+                    )
+                    .order_by(VenueEvent.id.asc())
+                    .limit(1)
+                )
+            ).scalar()
+            if exchange is None:
+                return False
+            recorded_per_identity = (
+                select(func.max(VenueEvent.fill_size).label("size"))
+                .where(
+                    VenueEvent.shard_key == shard_key,
+                    VenueEvent.wallet_public_id == wallet_public_id,
+                    VenueEvent.mode == mode,
+                    VenueEvent.event_type == "fill_observed",
+                    VenueEvent.fill_size.isnot(None),
+                    VenueEvent.known_to == KNOWN_TO_MAX,
+                    VenueEvent.id <= venue_watermark,
+                )
+                .group_by(venue_event_fill_identity())
+                .subquery()
+            )
+            recorded_total = (
+                await s.execute(select(func.coalesce(func.sum(recorded_per_identity.c.size), 0.0)))
+            ).scalar() or 0.0
+            shard_client_order_ids = (
+                select(VenueEvent.client_order_id)
+                .where(
+                    VenueEvent.shard_key == shard_key,
+                    VenueEvent.wallet_public_id == wallet_public_id,
+                    VenueEvent.mode == mode,
+                    VenueEvent.event_type == "fill_observed",
+                    VenueEvent.client_order_id.isnot(None),
+                    VenueEvent.known_to == KNOWN_TO_MAX,
+                    VenueEvent.id <= venue_watermark,
+                )
+                .distinct()
+            )
+            execution_watermark = (
+                select(func.max(Execution.scope_sequence))
+                .where(
+                    Execution.wallet_public_id == wallet_public_id,
+                    Execution.exchange == exchange,
+                    Execution.mode == mode,
+                    Execution.known_to == KNOWN_TO_MAX,
+                    Execution.timestamp <= as_of,
+                )
+                .scalar_subquery()
+            )
+            consumed_total = (
+                await s.execute(
+                    select(func.coalesce(func.sum(Execution.size), 0.0))
+                    .select_from(Execution)
+                    .join(
+                        Order,
+                        and_(
+                            Execution.order_public_id == Order.public_id,
+                            Order.known_to == KNOWN_TO_MAX,
+                        ),
+                    )
+                    .where(
+                        Order.client_order_id.in_(shard_client_order_ids),
+                        Order.wallet_public_id == wallet_public_id,
+                        Order.mode == mode,
+                        Execution.wallet_public_id == wallet_public_id,
+                        Execution.exchange == exchange,
+                        Execution.mode == mode,
+                        Execution.known_to == KNOWN_TO_MAX,
+                        Execution.scope_sequence <= execution_watermark,
+                    )
+                )
+            ).scalar() or 0.0
+            return recorded_total - consumed_total > 1e-9
 
     async def get_positions(
         self,
