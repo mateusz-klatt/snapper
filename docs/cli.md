@@ -844,7 +844,10 @@ snapper kraken-futures-backfill-candles [OPTIONS]
 
 Backfills historical OHLCV candles for Kraken Equities (TradFi FCM)
 contracts via the internal `iapi.kraken.com` ticker-history endpoint.
-Response is ~10-minute delayed per FCM policy. Per-chunk upstream
+Response is ~10-minute delayed per FCM policy. This REST backfill path is
+independent of `kraken_equities_realtime_ws_enabled`: enabling the
+authenticated realtime WS makes the *live* tick/candle feed realtime but
+does not change what this endpoint returns. Per-chunk upstream
 failures raise `RuntimeError` so outages are distinguishable from
 legitimately-empty candle windows.
 

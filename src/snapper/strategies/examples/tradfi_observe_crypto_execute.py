@@ -15,11 +15,16 @@ How to activate a copy of this strategy
 4. Point ``exchange`` at the execution venue (for example
    ``ExchangeEnum.KRAKEN``).
 Safety rails
-The 10-minute FCM delay on ``kraken_equities`` ticks propagates onto
-  every ``TickData.is_delayed=True``. Any tick-driven variant of this
-  pattern MUST gate on that flag. Candle-driven variants (this example)
-  do not see ``is_delayed`` but still have the same effective latency
-  document the implicit ~10 minute lag in the live runbook.
+Feed latency on ``kraken_equities`` is conditional, not a fixed lag.
+  The publisher uses the authenticated realtime WS when the
+  ``kraken_equities_realtime_ws_enabled`` DB setting is on and token mint
+  succeeds, and otherwise falls back to the public delayed feed. In both
+  modes ``TickData.is_delayed`` carries the venue's own per-frame envelope
+  flag (see ``parse_kraken_equities_ticker``), so the flag is authoritative
+  and no delay figure should be assumed. Any tick-driven variant of this
+  pattern MUST gate on that flag rather than on a hardcoded latency.
+  Candle-driven variants (this example) never observe ``is_delayed``, so
+  confirm which feed mode is active before relying on candle freshness.
 Emitting a signal with ``instrument`` that is ``can_trade=False``
   would be rejected by the order-entry capability guard
   (``require_tradable`` in ``src/snapper/server/_capability_guard.py``)
