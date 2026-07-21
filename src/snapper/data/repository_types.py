@@ -485,10 +485,12 @@ type PnlFxRatePlane = tuple[str, str, str]
 class PnlFxRateRow(TypedDict):
     """One finalized one-minute close of a currency pair, for FX conversion.
 
-    Returned by ``get_pnl_fx_rate_candles``. ``base``/``quote`` are the symbol's
-    own currency legs, so the close reads as "one unit of ``base`` costs ``close``
-    units of ``quote``". ``exchange`` identifies one candidate venue plane;
-    rows from a rival venue cannot enter the same consumer's conversion map.
+    Returned by ``get_pnl_fx_rate_candles`` only after every Symbol version known
+    at the response horizon agrees on ``base``/``quote``. The close therefore
+    reads as "one unit of ``base`` costs ``close`` units of ``quote``" without
+    choosing between disputed labels. ``exchange`` identifies one candidate
+    venue plane; rows from a rival venue cannot enter the same consumer's
+    conversion map.
     """
 
     base: str

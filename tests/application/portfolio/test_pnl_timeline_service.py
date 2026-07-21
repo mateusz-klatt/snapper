@@ -6,12 +6,15 @@ budgeting, durable fill-gap withholding, and end-to-end orchestration.
 """
 
 import math
+from collections.abc import AsyncIterator
 from collections.abc import Sequence
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
 
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
@@ -30,6 +33,11 @@ from snapper.application.portfolio.pnl_timeline_service import build_fx_rates
 from snapper.application.portfolio.pnl_timeline_service import build_marks
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_timeline
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Candle
+from snapper.data.models import Instrument
+from snapper.data.models import Symbol
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
@@ -43,11 +51,85 @@ from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 _T0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
 _I1 = "00000000-0000-7000-8000-000000000b01"
 _I2 = "00000000-0000-7000-8000-000000000b02"
+_FX_SESSION = "00000000-0000-7000-8000-000000000b03"
 
 
 def _m(minute: int) -> datetime:
     """Return the grid minute ``_T0 + minute``."""
     return _T0 + timedelta(minutes=minute)
+
+
+@pytest.fixture()
+async def conflicting_fx_repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
+    """Create one pre-revision GBP-PLN rate whose later quote conflicts."""
+    db_path = tmp_path / "pnl-service-fx.db"
+    schema_engine = create_engine(f"sqlite:///{db_path}")
+    Symbol.__table__.create(schema_engine)
+    Instrument.__table__.create(schema_engine)
+    Candle.__table__.create(schema_engine)
+    schema_engine.dispose()
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    revision_at = _m(1)
+    async with repository.session() as session:
+        session.add_all(
+            [
+                Symbol(
+                    public_id="sym-gbpx-service",
+                    native_symbol="GBP-X",
+                    base="GBP",
+                    quote="PLN",
+                    asset_type="forex",
+                    created_at=_m(-2),
+                    timestamp=_m(-2),
+                    known_to=revision_at,
+                    session_id=_FX_SESSION,
+                    sequence_id=1,
+                ),
+                Symbol(
+                    public_id="sym-gbpx-service",
+                    native_symbol="GBP-X",
+                    base="GBP",
+                    quote="USD",
+                    asset_type="forex",
+                    created_at=_m(-2),
+                    timestamp=revision_at,
+                    known_to=KNOWN_TO_MAX,
+                    session_id=_FX_SESSION,
+                    sequence_id=2,
+                ),
+                Instrument(
+                    public_id="ins-gbpx-service",
+                    symbol_public_id="sym-gbpx-service",
+                    exchange="walutomat",
+                    requires_ai_review=False,
+                    timestamp=_m(-2),
+                    known_to=KNOWN_TO_MAX,
+                    session_id=_FX_SESSION,
+                    sequence_id=1,
+                ),
+                Candle(
+                    instrument_public_id="ins-gbpx-service",
+                    open_at=_m(-1),
+                    timeframe="1m",
+                    open=5.0,
+                    high=5.0,
+                    low=5.0,
+                    close=5.0,
+                    volume=1.0,
+                    source="native",
+                    complete=True,
+                    timestamp=_m(-1),
+                    known_to=KNOWN_TO_MAX,
+                    session_id=_FX_SESSION,
+                    sequence_id=1,
+                ),
+            ]
+        )
+        await session.commit()
+    try:
+        yield repository
+    finally:
+        await repository.engine.dispose()
 
 
 def _exec_row(
@@ -224,6 +306,7 @@ class FakeRepo:
         fill_shard_keys: Sequence[str] = (),
         gapped_shards: set[str] | None = None,
         fx_rows: Sequence[PnlFxRateRow] | None = None,
+        fx_repository: SQLAlchemyRepository | None = None,
     ) -> None:
         """Store the canned read results and record the calls made."""
         self._executions = list(executions)
@@ -236,6 +319,7 @@ class FakeRepo:
         self._fill_shard_keys = list(fill_shard_keys)
         self._gapped_shards = gapped_shards or set()
         self._fx_rows: list[PnlFxRateRow] = list(fx_rows or [])
+        self._fx_repository = fx_repository
         self.fx_pair_calls: list[list[tuple[str, str]]] = []
         self.fx_plane_calls: list[list[PnlFxRatePlane]] = []
         self.fx_candidate_pair_calls: list[list[tuple[str, str]]] = []
@@ -357,6 +441,13 @@ class FakeRepo:
         """Discover venue-qualified FX planes with bounded canned evidence."""
         self.fx_candidate_pair_calls.append(list(pairs))
         self.fx_candidate_range_calls.append((start, end))
+        if self._fx_repository is not None:
+            return await self._fx_repository.get_pnl_fx_rate_exchanges(
+                pairs,
+                start,
+                end,
+                as_of,
+            )
         requested = set(pairs)
         return sorted(
             {
@@ -378,6 +469,13 @@ class FakeRepo:
         self.fx_plane_calls.append(plane_list)
         self.fx_pair_calls.append([(base, quote) for base, quote, _ in plane_list])
         self.fx_range_calls.append((start, end))
+        if self._fx_repository is not None:
+            return await self._fx_repository.get_pnl_fx_rate_candles(
+                planes,
+                start,
+                end,
+                as_of,
+            )
         requested = set(planes)
         return [
             row
@@ -3301,7 +3399,7 @@ def test_provenance_constants_are_stable() -> None:
     Then: The documented source, version, and total-work limit remain stable.
     """
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
-    assert PNL_TIMELINE_CALC_VERSION == "5A.8"
+    assert PNL_TIMELINE_CALC_VERSION == "5A.9"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
 
@@ -3353,6 +3451,65 @@ class TestForeignFeeConversion:
         result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
         assert result.points[0].valuation_status == "incomplete"
         assert result.points[0].fee_pnl is None
+
+    async def test_conflicting_rate_denomination_withholds_nonzero_fee(
+        self,
+        conflicting_fx_repository: SQLAlchemyRepository,
+    ) -> None:
+        """A quote conflict known after authoring turns a proven fee unknown."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.04, "GBP")],
+            refs=[_ref(_I1, "BTC-PLN", "PLN")],
+            candles=[_candle(_m(-1), 100.0)],
+            fx_repository=conflicting_fx_repository,
+        )
+        before = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(0),
+            valuation_ccy="PLN",
+        )
+        before_point = before.points[0]
+        assert before_point.valuation_status == "complete"
+        assert (
+            before_point.realized_pnl,
+            before_point.fee_pnl,
+            before_point.accrual_pnl,
+            before_point.unrealized_pnl,
+            before_point.net_pnl,
+        ) == (0.0, -0.2, 0.0, 0.0, -0.2)
+        assert [
+            (
+                source.base_currency,
+                source.quote_currency,
+                source.exchange,
+            )
+            for source in before.rate_sources
+        ] == [("GBP", "PLN", "walutomat")]
+        after = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(2),
+            valuation_ccy="PLN",
+        )
+        after_point = after.points[0]
+        assert after_point.valuation_status == "incomplete"
+        assert (
+            after_point.realized_pnl,
+            after_point.fee_pnl,
+            after_point.accrual_pnl,
+            after_point.unrealized_pnl,
+            after_point.net_pnl,
+        ) == (None, None, None, None, None)
+        assert after.rate_sources == ()
 
     async def test_rate_from_another_minute_is_not_borrowed(self) -> None:
         """A rate that only covers a later minute cannot price an earlier fee."""

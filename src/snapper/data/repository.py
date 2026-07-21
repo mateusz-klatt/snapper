@@ -757,6 +757,58 @@ def where_active(model: type[Any], at: datetime) -> tuple[Any, Any]:
     return model.timestamp <= at, model.known_to > at
 
 
+def _pnl_fx_symbol_proof_filters(as_of: datetime) -> list[ColumnElement[bool]]:
+    """Prove one FX symbol's denomination and spot classification at a horizon.
+
+    The outer ``Symbol`` row identifies candle ownership at the candle version's
+    authoring time. Every version of that same logical symbol known by ``as_of``
+    must agree with its base and quote, while any known version may supply the
+    denomination-irrelevant ``forex`` classification.
+
+    Comparing every known version against the outer row equals D3's mutual
+    unanimity only while the outer row is itself known by ``as_of``. Callers
+    that bound ``Candle.timestamp <= as_of`` before the author-time join get
+    that transitively, but the ``Symbol.timestamp <= as_of`` filter is asserted
+    here directly so the proof stays sound for any future caller regardless of
+    its candle-scoping discipline.
+
+    The base/quote comparison uses null-safe distinctness for defence in depth,
+    though the null branch is unreachable on this path: ``forex_evidence``
+    admits only spot-FX symbols, and ``ck_symbol_quote_required`` forbids a null
+    quote on any non-metadata asset type, so a considered version always carries
+    a real quote. The null-safe form costs nothing and keeps the proof correct
+    if that constraint is ever relaxed.
+
+    Args:
+        as_of: Knowledge horizon for all Symbol versions considered.
+
+    Returns:
+        Correlated filters establishing a non-null unanimous quote and spot-FX
+        classification for the outer Symbol identity.
+    """
+    known_version = aliased(Symbol)
+    forex_version = aliased(Symbol)
+    denomination_conflict = exists().where(
+        known_version.public_id == Symbol.public_id,
+        known_version.timestamp <= as_of,
+        or_(
+            known_version.base.is_distinct_from(Symbol.base),
+            known_version.quote.is_distinct_from(Symbol.quote),
+        ),
+    )
+    forex_evidence = exists().where(
+        forex_version.public_id == Symbol.public_id,
+        forex_version.timestamp <= as_of,
+        forex_version.asset_type == "forex",
+    )
+    return [
+        Symbol.timestamp <= as_of,
+        Symbol.quote.is_not(None),
+        ~denomination_conflict,
+        forex_evidence,
+    ]
+
+
 def _candle_row_from_result(r: Row[Any]) -> CandleRow:
     """Project one candles SELECT result row to a :class:`CandleRow`.
 
@@ -2352,9 +2404,11 @@ class Repository(ABC):
         """Discover spot-FX venue planes with evidence in a bounded window.
 
         Each candidate is backed by at least one finalized one-minute forex
-        candle in the requested range. Instrument and Symbol ownership resolve
-        at the candle version's own authoring timestamp, preserving the same
-        denomination and venue identity used by the subsequent rate read.
+        candle in the requested range. Author-time joins identify its owning
+        Instrument and logical Symbol only. The Symbol's base and non-null quote
+        must be unanimous across every version known by ``as_of``; disagreement
+        withholds every disputed label. A ``forex`` classification in any
+        version known by that horizon admits metadata-only classification churn.
 
         Args:
             pairs: Distinct ``(base, quote)`` currency legs to discover. Empty
@@ -2380,16 +2434,17 @@ class Repository(ABC):
 
         The P&L timeline converts a flow denominated in one currency into the
         series valuation currency using our OWN candle plane. Each candle is
-        joined to the Instrument and Symbol identity valid at that candle
-        version's own authoring timestamp, so a later metadata revision cannot
-        relabel an earlier rate. A fee recorded in EUR on a USD-valued series is
-        therefore priced by the same evidence the marks
-        come from rather than an external feed.
+        joined to its author-time Instrument and logical Symbol for mechanical
+        ownership. Denomination is proven independently: every Symbol version
+        known by ``as_of`` must agree on one base and one non-null quote. A later
+        conflict therefore withholds the candle under both labels rather than
+        preserving or retroactively changing either unproven denomination.
 
         Each plane is matched on the symbol's own ``base``/``quote`` legs and
-        the owning Instrument's exact exchange. Only symbols classified as
-        ``forex`` can certify a rate, so a future or perpetual carrying matching
-        currency-leg text cannot enter the conversion plane.
+        the owning Instrument's exact exchange. At least one Symbol version
+        known by ``as_of`` must classify it as ``forex``, so asset-type churn
+        cannot exclude a spot pair while a perpetual that is never ``forex``
+        still cannot enter the conversion plane.
 
         Args:
             planes: Pinned ``(base, quote, exchange)`` planes to load. Empty
@@ -10223,8 +10278,8 @@ class SQLAlchemyRepository(Repository):
     ) -> list[PnlFxRatePlane]:
         """Discover bounded spot-FX venue planes in one query.
 
-        See the abstract declaration for the candidate evidence and author-time
-        identity contract.
+        See the abstract declaration for bounded candidate evidence and the
+        as-of denomination proof layered over mechanical author-time ownership.
 
         Args:
             pairs: Distinct ``(base, quote)`` currency legs to discover.
@@ -10263,7 +10318,7 @@ class SQLAlchemyRepository(Repository):
                 )
                 .where(
                     tuple_(Symbol.base, Symbol.quote).in_(list(dict.fromkeys(pairs))),
-                    Symbol.asset_type == "forex",
+                    *_pnl_fx_symbol_proof_filters(as_of),
                     Candle.timeframe == "1m",
                     Candle.open_at >= start,
                     Candle.open_at <= end,
@@ -10285,8 +10340,8 @@ class SQLAlchemyRepository(Repository):
         """Load finalized one-minute closes for pinned FX planes in one query.
 
         See the abstract declaration for exact plane matching and spot-FX
-        classification. Instrument and Symbol ownership resolve at each candle
-        version's own authoring timestamp.
+        classification. Author-time joins resolve ownership, while the shared
+        as-of Symbol proof establishes denomination and classification.
 
         Args:
             planes: Pinned ``(base, quote, exchange)`` planes to load.
@@ -10329,7 +10384,7 @@ class SQLAlchemyRepository(Repository):
                     tuple_(Symbol.base, Symbol.quote, Instrument.exchange).in_(
                         list(dict.fromkeys(planes))
                     ),
-                    Symbol.asset_type == "forex",
+                    *_pnl_fx_symbol_proof_filters(as_of),
                     Candle.timeframe == "1m",
                     Candle.open_at >= start,
                     Candle.open_at <= end,

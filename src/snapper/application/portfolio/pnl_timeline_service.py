@@ -79,7 +79,7 @@ from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.8"
+PNL_TIMELINE_CALC_VERSION = "5A.9"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, or mark-resolution semantics

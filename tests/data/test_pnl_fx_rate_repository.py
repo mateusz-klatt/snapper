@@ -2,7 +2,7 @@
 
 Pins the read that prices a foreign-currency flow off our own candle plane:
 forex-only venue discovery, exact pinned-plane filtering, both orientations,
-the finalized/timeframe/window filters, and author-time denomination identity.
+the finalized/timeframe/window filters, and as-of denomination proof.
 """
 
 from collections.abc import AsyncIterator
@@ -272,11 +272,13 @@ class TestGetPnlFxRateCandles:
         )
         assert [row["open_at"] for row in rows] == sorted(row["open_at"] for row in rows)
 
-    async def test_rate_candle_uses_identity_valid_at_its_authoring_time(
+    async def test_rate_candle_requires_as_of_denomination_unanimity(
         self, repository: SQLAlchemyRepository
     ) -> None:
-        """A later quote revision cannot turn a PLN candle into a USD rate."""
+        """A known quote conflict withholds both labels while metadata churn passes."""
         revised_at = _M + timedelta(minutes=30)
+        crypto_at = _M - timedelta(seconds=20)
+        forex_at = _M + timedelta(seconds=20)
         async with repository.session() as session:
             session.add_all(
                 [
@@ -296,19 +298,71 @@ class TestGetPnlFxRateCandles:
                     ),
                     _instrument("ins-gbpx", "sym-gbpx", "walutomat"),
                     _candle("ins-gbpx", _M, 5.0),
+                    _symbol(
+                        "sym-audx",
+                        "AUD-X",
+                        "AUD",
+                        "USD",
+                        known_to=crypto_at,
+                    ),
+                    _symbol(
+                        "sym-audx",
+                        "AUD-X",
+                        "AUD",
+                        "USD",
+                        "crypto",
+                        timestamp=crypto_at,
+                        known_to=forex_at,
+                    ),
+                    _symbol(
+                        "sym-audx",
+                        "AUD-X",
+                        "AUD",
+                        "USD",
+                        timestamp=forex_at,
+                    ),
+                    _instrument("ins-audx", "sym-audx", "walutomat"),
+                    _candle("ins-audx", _M, 0.65),
                 ]
             )
             await session.commit()
-        historical = await repository.get_pnl_fx_rate_candles(
-            [("GBP", "PLN", "walutomat")], _M, _M, _NOW
+        before_revision = revised_at - timedelta(seconds=1)
+        before_planes = await repository.get_pnl_fx_rate_exchanges(
+            [("GBP", "PLN"), ("GBP", "USD")],
+            _M,
+            _M,
+            before_revision,
         )
-        relabeled = await repository.get_pnl_fx_rate_candles(
-            [("GBP", "USD", "walutomat")], _M, _M, _NOW
+        before_rows = await repository.get_pnl_fx_rate_candles(
+            [("GBP", "PLN", "walutomat"), ("GBP", "USD", "walutomat")],
+            _M,
+            _M,
+            before_revision,
         )
-        assert [(row["base"], row["quote"], row["close"]) for row in historical] == [
+        assert before_planes == [("GBP", "PLN", "walutomat")]
+        assert [(row["base"], row["quote"], row["close"]) for row in before_rows] == [
             ("GBP", "PLN", 5.0)
         ]
-        assert relabeled == []
+        after_planes = await repository.get_pnl_fx_rate_exchanges(
+            [("GBP", "PLN"), ("GBP", "USD")], _M, _M, _NOW
+        )
+        old_label_rows = await repository.get_pnl_fx_rate_candles(
+            [("GBP", "PLN", "walutomat")], _M, _M, _NOW
+        )
+        new_label_rows = await repository.get_pnl_fx_rate_candles(
+            [("GBP", "USD", "walutomat")], _M, _M, _NOW
+        )
+        assert after_planes == []
+        assert old_label_rows == []
+        assert new_label_rows == []
+        churn_planes = await repository.get_pnl_fx_rate_exchanges([("AUD", "USD")], _M, _M, _NOW)
+        churn_rows = await repository.get_pnl_fx_rate_candles(
+            [("AUD", "USD", "walutomat")], _M, _M, _NOW
+        )
+        assert churn_planes == [("AUD", "USD", "walutomat")]
+        assert [(row["base"], row["quote"], row["close"]) for row in churn_rows] == [
+            ("AUD", "USD", 0.65)
+        ]
 
     async def test_perpetual_is_rejected_even_when_explicitly_requested(
         self, repository: SQLAlchemyRepository
