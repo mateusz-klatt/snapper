@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
+from scripts.refresh_python_deps import _default_root
 from scripts.refresh_python_deps import build_command
 from scripts.refresh_python_deps import direct_dependency_names
 from scripts.refresh_python_deps import exactly_pinned_dependencies
@@ -193,8 +194,6 @@ class TestUncoveredEdges:
 
     def test_default_root_is_the_repository_root(self) -> None:
         """The script locates the repo as its own parent directory."""
-        from scripts.refresh_python_deps import _default_root
-
         root = _default_root()
         assert (root / "scripts" / "refresh_python_deps.py").is_file()
 
