@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 from scripts.sync_submodule_gitlinks import _align_mirrors
+from scripts.sync_submodule_gitlinks import _checkout_target
 from scripts.sync_submodule_gitlinks import _default_root
 from scripts.sync_submodule_gitlinks import _git
 from scripts.sync_submodule_gitlinks import main
@@ -104,17 +105,14 @@ class TestSyncSubmodule:
         """A gitlink behind origin/master is moved and staged in the parent."""
         root = self._prepare(tmp_path)
         git = MagicMock(
-            side_effect=[
-                (0, ""),
-                (0, "canonical"),
-                (0, "stale"),
-                (0, "origin"),
-                (0, ""),
-                (0, ""),
-            ]
+            side_effect=[(0, ""), (0, "canonical"), (0, "stale"), (0, "origin"), (0, "")]
         )
-        with patch("scripts.sync_submodule_gitlinks._git", git):
+        with (
+            patch("scripts.sync_submodule_gitlinks._git", git),
+            patch("scripts.sync_submodule_gitlinks._checkout_target") as checkout,
+        ):
             assert sync_submodule(root, "frontend") is True
+        checkout.assert_called_once()
 
     def test_unreachable_remote_is_skipped(self, tmp_path: Path) -> None:
         """A submodule whose origin cannot be fetched is reported, not guessed."""
@@ -228,3 +226,33 @@ class TestPrimitives:
     def test_git_returns_status_and_trimmed_stdout(self) -> None:
         """The wrapper surfaces the exit status and strips trailing whitespace."""
         assert _git(_default_root(), "rev-parse", "--is-inside-work-tree") == (0, "true")
+
+
+class TestCheckoutTarget:
+    """Cover staying on a branch versus detaching."""
+
+    def test_fast_forwardable_branch_stays_checked_out(self) -> None:
+        """A master that can fast-forward is moved, not detached.
+
+        Detaching here is hostile in a submodule people commit in: the next
+        commit lands on a detached HEAD and `git push <remote> HEAD` then fails.
+        """
+        git = MagicMock(side_effect=[(0, "master"), (0, ""), (0, "")])
+        with patch("scripts.sync_submodule_gitlinks._git", git):
+            _checkout_target(Path("."), "canonical")
+        assert [c for c in git.call_args_list if "merge" in c.args]
+        assert not [c for c in git.call_args_list if "--detach" in c.args]
+
+    def test_branch_with_unmerged_work_detaches_instead(self) -> None:
+        """A branch holding commits the target lacks is preserved by detaching."""
+        git = MagicMock(side_effect=[(0, "master"), (1, ""), (0, "")])
+        with patch("scripts.sync_submodule_gitlinks._git", git):
+            _checkout_target(Path("."), "canonical")
+        assert [c for c in git.call_args_list if "--detach" in c.args]
+
+    def test_already_detached_head_detaches_to_target(self) -> None:
+        """A submodule already detached simply moves to the canonical commit."""
+        git = MagicMock(side_effect=[(0, "HEAD"), (0, "")])
+        with patch("scripts.sync_submodule_gitlinks._git", git):
+            _checkout_target(Path("."), "canonical")
+        assert [c for c in git.call_args_list if "--detach" in c.args]

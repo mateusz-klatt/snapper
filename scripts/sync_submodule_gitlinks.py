@@ -120,6 +120,30 @@ def _align_mirrors(root: Path, path: str, target: str) -> None:
         print(f"  {path}: {verb} {remote}/{_BRANCH} (identical tree)")
 
 
+def _checkout_target(root: Path, target: str) -> None:
+    """Move the submodule to the canonical commit, staying on its branch if safe.
+
+    A bare ``checkout --detach`` is the conventional submodule state, but it is
+    hostile in a submodule people actually commit in: the next commit lands on a
+    detached HEAD and ``git push <remote> HEAD`` then fails outright, needing a
+    fully-qualified refspec. So when the local branch can simply fast-forward onto
+    the target it is moved there and kept checked out; only a branch carrying work
+    the canonical commit does not contain falls back to detaching, which preserves
+    that work rather than silently discarding it.
+
+    Args:
+        root: Submodule working directory.
+        target: Canonical commit to land on.
+    """
+    status, branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    if status == 0 and branch == _BRANCH:
+        ancestor, _ = _git(root, "merge-base", "--is-ancestor", "HEAD", target)
+        if ancestor == 0:
+            _git(root, "merge", "--quiet", "--ff-only", target)
+            return
+    _git(root, "checkout", "--quiet", "--detach", target)
+
+
 def sync_submodule(root: Path, path: str) -> bool:
     """Sync one submodule's gitlink and mirrors to its canonical commit.
 
@@ -147,7 +171,7 @@ def sync_submodule(root: Path, path: str) -> bool:
     if current == target:
         print(f"  {path}: already at {target[:7]}")
         return False
-    _git(sub_root, "checkout", "--quiet", "--detach", target)
+    _checkout_target(sub_root, target)
     _git(root, "add", path)
     print(f"  {path}: gitlink {current[:7]} -> {target[:7]}")
     return True
