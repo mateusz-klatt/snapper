@@ -192,17 +192,19 @@ class TestRoleCategorySecurityMatrix:
         assert categories == {"market", "ai_research"}
         assert topics == ["ai_research.", "market."]
 
-    def test_viewer_gets_market_system_backtest_and_trade_events(self) -> None:
+    def test_viewer_gets_read_only_categories_including_signals(self) -> None:
         """VIEWER role receives read-only categories.
 
         Given: A VIEWER role,
         When: Getting allowed categories,
-        Then: market, system, backtest, trade_events, account_state, and the
-            2026-05-14 ``strategies_read`` are allowed (no trade,
-            strategy, admin, processes_admin). ``trade_events`` is the
-            v0.7.0 split for live ``orders.events.*`` streams — gated
-            by ``READ_ORDERS`` so VIEWER's WebSocket access mirrors the
-            REST `/api/orders` snapshot they already see.
+        Then: market, signals, system, backtest, trade_events, account_state,
+            and the 2026-05-14 ``strategies_read`` are allowed (no trade,
+            strategy, admin, processes_admin). ``signals`` is gated by
+            ``READ_SIGNALS`` so viewers can inspect trading intent.
+            ``trade_events`` is the v0.7.0 split for live
+            ``orders.events.*`` streams — gated by ``READ_ORDERS`` so
+            VIEWER's WebSocket access mirrors the REST `/api/orders`
+            snapshot they already see.
             ``strategies_read`` is gated by ``READ_STRATEGIES`` so the
             Strategies dropdown stays live for viewers without granting
             ``START_STRATEGIES``.
@@ -213,6 +215,7 @@ class TestRoleCategorySecurityMatrix:
             "system",
             "backtest",
             "trade_events",
+            "signals",
             "strategies_read",
             "notifications",
             "account_state",
@@ -305,16 +308,16 @@ class TestRoleCategorySecurityMatrix:
         Given: A VIEWER role,
         When: Getting allowed topics,
         Then: ``orders.commands.`` (write intent — CREATE_ORDERS gate)
-            is absent, ``signals.`` is absent. ``orders.events.``
-            (read-side echo — READ_ORDERS gate, v0.7.0 trade_events
-            split) IS present so VIEWER's WS surface mirrors the REST
-            ``/api/orders`` they already see. ``portfolio.accounts.`` is
-            present under the same READ_ACCOUNT_STATE permission as the REST
-            account page.
+            is absent while ``signals.`` is present under READ_SIGNALS.
+            ``orders.events.`` (read-side echo — READ_ORDERS gate, v0.7.0
+            trade_events split) IS present so VIEWER's WS surface mirrors
+            the REST ``/api/orders`` they already see.
+            ``portfolio.accounts.`` is present under the same
+            READ_ACCOUNT_STATE permission as the REST account page.
         """
         topics = get_allowed_topics_for_role(UserRole.VIEWER)
         assert "orders.commands." not in topics
-        assert "signals." not in topics
+        assert "signals." in topics
         assert "orders.events." in topics
         assert "portfolio.accounts." in topics
 

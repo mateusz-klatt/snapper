@@ -541,11 +541,12 @@ class TestSecureWebSocketViewer:
     """Tests for viewer role WebSocket access."""
 
     def test_viewer_limited_topics(self, test_client: Any) -> None:
-        """Viewer role has limited topic access.
+        """Viewer role has read-only trading topic access.
 
         Given: An authenticated viewer user,
         When: Completing WebSocket handshake,
-        Then: Only market and heartbeat topics available, not signals or orders.
+        Then: Market, heartbeat, signals, and order events are available while
+            order commands remain unavailable.
         """
         ws_token = _prepare_ws_token(
             test_client,
@@ -558,15 +559,16 @@ class TestSecureWebSocketViewer:
             topics = set(cast(list[str], auth_response["available_topics"]))
             assert "market." in topics
             assert "system.heartbeats." in topics
-            assert "signals." not in topics
-            assert "orders" not in topics
+            assert "signals." in topics
+            assert "orders.events." in topics
+            assert "orders.commands." not in topics
 
-    def test_viewer_subscription_filtering(self, test_client: Any) -> None:
-        """Viewer subscriptions are filtered by permissions.
+    def test_viewer_signal_subscription_access(self, test_client: Any) -> None:
+        """Viewer subscriptions include market data and trading signals.
 
         Given: An authenticated viewer user,
         When: Subscribing to market and signals topics,
-        Then: Market granted but signals denied with partial status.
+        Then: Both topics are granted with subscribed status and no denials.
         """
         ws_token = _prepare_ws_token(
             test_client,
@@ -592,9 +594,12 @@ class TestSecureWebSocketViewer:
             )
             response = _receive_json(websocket)
             assert response["type"] == "subscription_success"
-            assert response["status"] == "partial"
-            assert "market.kraken.BTC-USD.candles.1m" in response["topics"]
-            assert "signals.kraken.BTC-USD.live" in response["denied_topics"]
+            assert response["status"] == "subscribed"
+            assert response["topics"] == [
+                "market.kraken.BTC-USD.candles.1m",
+                "signals.kraken.BTC-USD.live",
+            ]
+            assert response["denied_topics"] == []
 
 
 class TestSecureWebSocketAdmin:
@@ -705,12 +710,12 @@ def test_get_subscriptions_initial_state(test_client: Any) -> None:
         assert response["total_available"] > 0
 
 
-def test_viewer_subscribe_partial_permissions(test_client: Any) -> None:
-    """Viewer subscribe returns partial when some topics denied.
+def test_viewer_subscribe_trading_topics(test_client: Any) -> None:
+    """Viewer subscribe grants market data and trading signals.
 
     Given: An authenticated viewer,
     When: Subscribing to market and signals topics,
-    Then: Market granted, signals denied with partial status.
+    Then: Both topics are granted with subscribed status and no denials.
     """
     ws_token, _ = _prepare_ws_token_v2(
         test_client,
@@ -733,9 +738,12 @@ def test_viewer_subscribe_partial_permissions(test_client: Any) -> None:
         )
         response = _receive_json(websocket)
         assert response["type"] == "subscription_success"
-        assert response["status"] == "partial"
-        assert "market.kraken.BTC-USD.candles.1m" in response["topics"]
-        assert "signals.kraken.BTC-USD.live" in response["denied_topics"]
+        assert response["status"] == "subscribed"
+        assert response["topics"] == [
+            "market.kraken.BTC-USD.candles.1m",
+            "signals.kraken.BTC-USD.live",
+        ]
+        assert response["denied_topics"] == []
 
 
 def test_order_permission_checks(test_client: Any) -> None:
@@ -2435,12 +2443,12 @@ async def test_handle_subscribe_reports_invalid_topics() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_subscribe_success_partial() -> None:
-    """Subscribe returns partial when some topics allowed.
+async def test_handle_subscribe_success_for_viewer_signals() -> None:
+    """Subscribe grants all requested viewer trading topics.
 
     Given: A viewer requesting market and signals topics,
     When: Handling subscribe,
-    Then: Returns partial status with market allowed.
+    Then: Returns subscribed status with both topics allowed and no denials.
     """
     websocket = WebSocketStub()
     manager = ManagerStub()
@@ -2471,10 +2479,14 @@ async def test_handle_subscribe_success_partial() -> None:
             AuthPrincipal(username="u", role=UserRole.VIEWER),
         )
     response = json.loads(websocket.sent[-1])
-    assert response["status"] == "partial"
+    assert response["status"] == "subscribed"
+    assert response["denied_topics"] == []
     assert manager.zmq_bridge.added
     _, topics_added = manager.zmq_bridge.added[-1]
-    assert topics_added == ["market.kraken.BTC-USD.candles.1m"]
+    assert topics_added == [
+        "market.kraken.BTC-USD.candles.1m",
+        "signals.kraken.BTC-USD.live",
+    ]
 
 
 @pytest.mark.asyncio

@@ -1387,7 +1387,7 @@ class TestGenerateIosPermissions:
         output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
         content = output.read_text()
         assert '"overview": [.aiResearcher, .aiDelegate, .viewer, .operatorRole, .admin]' in content
-        assert '"signals": [.aiDelegate, .operatorRole, .admin]' in content
+        assert '"signals": [.aiDelegate, .viewer, .operatorRole, .admin]' in content
         assert '"admin": [.admin]' in content
         assert '"settings": [.admin]' in content
         assert '"processes": [.operatorRole, .admin]' in content
@@ -2515,7 +2515,7 @@ class TestGeneratePermissions:
         assert (
             "'overview': ['ai_researcher', 'ai_delegate', 'viewer', 'operator', 'admin']" in content
         )
-        assert "'signals': ['ai_delegate', 'operator', 'admin']" in content
+        assert "'signals': ['ai_delegate', 'viewer', 'operator', 'admin']" in content
         assert "'admin': ['admin']" in content
         assert "'settings': ['admin']" in content
         assert "'processes': ['operator', 'admin']" in content

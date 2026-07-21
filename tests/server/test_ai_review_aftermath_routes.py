@@ -60,11 +60,11 @@ def _operator_principal() -> AuthPrincipal:
     )
 
 
-def _viewer_principal() -> AuthPrincipal:
-    """Return a viewer who lacks the AI-review read permission."""
+def _researcher_principal() -> AuthPrincipal:
+    """Return an AI researcher who lacks the AI-review read permission."""
     return AuthPrincipal(
-        username="viewer",
-        role=UserRole.VIEWER,
+        username="researcher",
+        role=UserRole.AI_RESEARCHER,
         user_public_id="user-3",
         operator_public_ids=["operator-1"],
         primary_operator_public_id="operator-1",
@@ -267,17 +267,18 @@ class TestAiReviewAftermathRoute:
         assert response.json()["detail"]["error_code"] == "not_a_delegate"
         repo.get_ai_review.assert_not_awaited()
 
-    def test_viewer_without_read_signals_returns_403(self) -> None:
-        """Role permission gate rejects a viewer before route execution.
+    def test_ai_researcher_without_read_signals_returns_403(self) -> None:
+        """Role permission gate rejects an AI researcher before route execution.
 
-        Given a viewer who has position access but lacks ``READ_SIGNALS``,
+        Given an AI researcher whose role lacks ``READ_SIGNALS``,
         When the aftermath route is requested,
         Then FastAPI returns 403 and no review row is loaded.
         """
         review = _review()
         repo = _repository_mock(review=review, aftermath=_aftermath(review))
-        response = _client(repo, _viewer_principal()).get("/api/ai-reviews/review-1/aftermath")
+        response = _client(repo, _researcher_principal()).get("/api/ai-reviews/review-1/aftermath")
         assert response.status_code == 403
+        assert response.json()["detail"] == "Permission 'read:signals' required"
         repo.get_ai_review.assert_not_awaited()
 
     def test_projection_disappearance_returns_404(self) -> None:

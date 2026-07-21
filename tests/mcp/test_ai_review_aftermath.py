@@ -338,18 +338,19 @@ async def test_get_ai_review_aftermath_fails_closed_if_projection_disappears() -
 
 
 @pytest.mark.asyncio
-async def test_get_ai_review_aftermath_requires_read_signals() -> None:
-    """Viewer with position access cannot read the AI-review projection.
+async def test_get_ai_review_aftermath_rejects_ai_researcher_without_read_signals() -> None:
+    """AI researcher cannot read the trading-intent aftermath projection.
 
-    Given a viewer whose role lacks ``READ_SIGNALS``,
+    Given an AI researcher whose role lacks ``READ_SIGNALS``,
     When the aftermath tool is dispatched,
     Then the canonical permission-denied envelope returns before repository use.
     """
     repo = _repository(review=_review())
-    result = await _server(repo, _claims(UserRole.VIEWER))._tool_manager.call_tool(
+    result = await _server(repo, _claims(UserRole.AI_RESEARCHER))._tool_manager.call_tool(
         "get_ai_review_aftermath", {"review_public_id": "review-1"}
     )
     envelope = _decode_result(result)
+    assert envelope["success"] is False
     assert envelope["error_code"] == "permission_denied"
     repo.get_ai_delegate_by_user_public_id.assert_not_awaited()
 

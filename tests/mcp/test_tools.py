@@ -2856,28 +2856,25 @@ class TestListRecentSignalsTool:
         repo.get_signals.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_role_without_read_signals_returns_permission_denied(self) -> None:
-        """VIEWER without READ_SIGNALS → permission_denied envelope."""
+    async def test_ai_researcher_without_read_signals_returns_permission_denied(self) -> None:
+        """AI researcher cannot read recent trading signals.
+
+        Given: An AI researcher whose role lacks ``READ_SIGNALS``,
+        When: The recent-signals tool is dispatched,
+        Then: It returns ``permission_denied`` before querying the repository.
+        """
         repo = self._build_repo_with_signals([])
-        saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
-        ROLE_PERMISSIONS[UserRole.VIEWER] = set()
-        server = FastMCP("test")
-        register_mcp_tools(
-            server,
-            repository_getter=lambda: repo,
-            caps_enforcer_getter=lambda: None,
-            claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
+        server = _build_server(
+            repository=repo,
+            claims=_make_claims(role=UserRole.AI_RESEARCHER),
         )
-        try:
-            result = await server._tool_manager.call_tool(
-                "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
-            )
-            envelope = _decode_envelope(result)
-            assert envelope["success"] is False
-            assert envelope["error_code"] == "permission_denied"
-        finally:
-            if saved is not None:
-                ROLE_PERMISSIONS[UserRole.VIEWER] = saved
+        result = await server._tool_manager.call_tool(
+            "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "permission_denied"
+        repo.get_signals.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
