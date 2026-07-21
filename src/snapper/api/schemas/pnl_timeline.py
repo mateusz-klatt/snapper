@@ -2,11 +2,12 @@
 
 Models the ``GET /api/portfolio/pnl/series`` response: a per-point
 Net-P&L-since-activation series with a realized / fee / accrual / unrealized /
-net decomposition, plus each point's per-instrument contributions and the
-series-level provenance (granularity, valuation currency, mark source, and the
-reconstruction ``calc_version``). Every monetary field is ``float | None`` so an
-incomplete point (a missing mark, or untrusted cumulatives) is transported
-honestly as ``null`` rather than a fabricated zero (checklist #7 / #10).
+net decomposition, plus each point's per-instrument and origin/strategy
+attribution contributions and the series-level provenance (granularity,
+valuation currency, mark source, and the reconstruction ``calc_version``).
+Every monetary field is ``float | None`` so an incomplete point (a missing mark,
+or untrusted cumulatives) is transported honestly as ``null`` rather than a
+fabricated zero (checklist #7 / #10).
 """
 
 from datetime import datetime
@@ -18,6 +19,9 @@ from snapper.api.schemas.base import StrictDataSchema
 
 type PnlValuationStatus = Literal["complete", "incomplete"]
 """Whether a point's mark-to-market valuation is trustworthy or withheld."""
+
+type PnlAttributionOrigin = Literal["manual", "plan", "system", "unattributed"]
+"""Proven initiating origin for one composite attribution bucket."""
 
 type PnlMarkerOutcome = Literal["executed", "rejected", "no_fill"]
 """Observable execution outcome carried by a timeline decision marker."""
@@ -38,12 +42,30 @@ class PnlInstrumentContributionData(StrictBody):
     unrealized_pnl: float | None
 
 
+class PnlAttributionContributionData(StrictBody):
+    """One composite origin/strategy contribution to a series point.
+
+    ``strategy_name`` is ``None`` when no stable signal strategy identity was
+    proven. Every monetary field is withheld when the point's cumulatives are
+    untrusted, matching both the aggregate and per-instrument projections.
+    """
+
+    origin: PnlAttributionOrigin
+    strategy_name: str | None
+    realized_pnl: float | None
+    fee_pnl: float | None
+    accrual_pnl: float | None
+    unrealized_pnl: float | None
+
+
 class PnlTimelinePointData(StrictBody):
     """One point on the P&L series.
 
     ``realized_pnl`` / ``fee_pnl`` / ``accrual_pnl`` are cumulative since
     activation; ``unrealized_pnl`` and ``net_pnl`` are the mark-dependent stocks
     that go ``None`` on an incomplete point. ``valuation_status`` names why.
+    ``attribution`` carries composite origin/strategy buckets whose components
+    reconcile with the point totals.
     """
 
     point_time: datetime
@@ -54,6 +76,7 @@ class PnlTimelinePointData(StrictBody):
     net_pnl: float | None
     valuation_status: PnlValuationStatus
     per_instrument: list[PnlInstrumentContributionData]
+    attribution: list[PnlAttributionContributionData]
 
 
 class PnlFillMarkerData(StrictBody):

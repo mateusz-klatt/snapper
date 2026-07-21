@@ -630,7 +630,7 @@ class PlanExecutorService(RegisterableProcess):
             order_type=order_type,
             quantity=Decimal(str(quantity)) if quantity is not None else None,
             price=None,
-            source_surface="rest",
+            source_surface="strategy",
             idempotency_key=row.get("idempotency_key"),
         )
         if user_public_id is not None:
@@ -882,6 +882,7 @@ class PlanExecutorService(RegisterableProcess):
                     exchange_order_id=None,
                     idempotency_key=f"{plan['public_id']}:{idx}",
                     supersedes_command_id=None,
+                    source_surface="strategy",
                 )
                 await self._emit_trade_command(
                     row,

@@ -33,6 +33,7 @@ from fastapi import status
 from loguru import logger
 
 from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
+from snapper.api.schemas.pnl_timeline import PnlAttributionContributionData
 from snapper.api.schemas.pnl_timeline import PnlFillMarkerData
 from snapper.api.schemas.pnl_timeline import PnlInstrumentContributionData
 from snapper.api.schemas.pnl_timeline import PnlSeriesData
@@ -75,7 +76,6 @@ Validated by SHAPE rather than against a fixed allowlist: the resolvable set is
 whatever our own candle plane can price, and that grows as venues are added. A
 well-formed but unpriceable currency is answered with honest withheld points
 rather than a 400, so the response still shows everything that IS known."""
-"""Trading modes accepted by the v1 reconstruction endpoint."""
 
 _MIN_SAFE_WINDOW_FROM: Final[datetime] = datetime.min.replace(tzinfo=UTC) + timedelta(minutes=1)
 """Earliest start whose leading candle minute is representable."""
@@ -287,6 +287,17 @@ def _point_data(result: PnlTimelineResult) -> list[PnlTimelinePointData]:
                     unrealized_pnl=contribution.unrealized_pnl,
                 )
                 for contribution in point.per_instrument
+            ],
+            attribution=[
+                PnlAttributionContributionData(
+                    origin=contribution.origin,
+                    strategy_name=contribution.strategy_name,
+                    realized_pnl=contribution.realized_pnl,
+                    fee_pnl=contribution.fee_pnl,
+                    accrual_pnl=contribution.accrual_pnl,
+                    unrealized_pnl=contribution.unrealized_pnl,
+                )
+                for contribution in point.attribution
             ],
         )
         for point in result.points

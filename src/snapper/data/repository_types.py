@@ -362,6 +362,24 @@ class PnlTimelineExecutionRow(TypedDict):
     trade_id: str | None
 
 
+class PnlTimelineExecutionLineageRow(TypedDict):
+    """One order's candidate initiating lineage for P&L attribution.
+
+    Returned by ``get_pnl_timeline_execution_lineage`` for execution order
+    identities. An order with no safely scoped ``create`` or ``submit``
+    command is retained with nullable lineage fields. Multiple qualifying
+    commands are retained as separate rows so callers can withhold ambiguous
+    attribution instead of selecting one candidate.
+    """
+
+    order_public_id: str
+    source_surface: str | None
+    plan_public_id: str | None
+    signal_public_id: str | None
+    origin: str | None
+    strategy_name: str | None
+
+
 class PnlTimelineSignalMarkerRow(TypedDict):
     """One signal projected for a scoped P&L timeline marker read.
 

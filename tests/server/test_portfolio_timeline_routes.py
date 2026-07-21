@@ -98,6 +98,18 @@ def _seeded_repo() -> AsyncMock:
             }
         ]
     )
+    repo.get_pnl_timeline_execution_lineage = AsyncMock(
+        return_value=[
+            {
+                "order_public_id": "o1",
+                "source_surface": "strategy",
+                "plan_public_id": None,
+                "signal_public_id": "signal-1",
+                "origin": "live",
+                "strategy_name": "momentum",
+            }
+        ]
+    )
     repo.get_pnl_timeline_signals = AsyncMock(
         return_value=[
             {
@@ -167,7 +179,7 @@ def _seeded_repo() -> AsyncMock:
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
     repo.list_active_wallets = AsyncMock(return_value=[_wallet_row()])
     repo.get_fill_shard_keys_for_scope = AsyncMock(return_value=[])
-    repo.shard_has_fill_gap = AsyncMock(return_value=False)
+    repo.pnl_timeline_shard_has_fill_gap = AsyncMock(return_value=False)
     return repo
 
 
@@ -219,7 +231,7 @@ class TestHappyPath:
         assert payload["granularity"] == "1m"
         assert payload["valuation_ccy"] == "USD"
         assert payload["mark_source"] == "finalized_1m_candle_close"
-        assert payload["calc_version"] == "5A.2"
+        assert payload["calc_version"] == "5A.3"
         points = payload["points"]
         assert len(points) == 3
         assert points[0]["valuation_status"] == "complete"
@@ -227,6 +239,16 @@ class TestHappyPath:
         assert points[0]["unrealized_pnl"] == 5.0
         assert points[0]["net_pnl"] == 4.5
         assert points[0]["per_instrument"][0]["instrument_public_id"] == "i1"
+        assert points[0]["attribution"] == [
+            {
+                "origin": "system",
+                "strategy_name": "momentum",
+                "realized_pnl": 0.0,
+                "fee_pnl": -0.5,
+                "accrual_pnl": 0.0,
+                "unrealized_pnl": 5.0,
+            }
+        ]
         repo.get_pnl_timeline_candles.assert_awaited_once()
         repo.get_candles.assert_not_awaited()
 
@@ -256,6 +278,7 @@ class TestHappyPath:
         assert response_as_of == datetime.fromisoformat(_AS_OF)
         assert repo.list_active_wallets.await_args.args[0] == response_as_of
         assert repo.get_pnl_timeline_executions.await_args.args[2] == response_as_of
+        assert repo.get_pnl_timeline_execution_lineage.await_args.args[1] == response_as_of
         assert repo.get_accruals_for_pnl.await_args.args[2] == response_as_of
         assert repo.get_instrument_symbol_refs.await_args.args[1] == response_as_of
         assert repo.get_pnl_timeline_candles.await_args.args[3] == response_as_of
@@ -290,6 +313,31 @@ class TestHappyPath:
         points = response.json()["payload"]["points"]
         assert len(points) == 1
         assert points[0]["net_pnl"] == 19.5
+
+    def test_fill_gap_withholds_attribution_components(self) -> None:
+        """A proven untrusted prefix transports bucket values as null."""
+        repo = _seeded_repo()
+        repo.get_fill_shard_keys_for_scope = AsyncMock(return_value=["shard-1"])
+        repo.pnl_timeline_shard_has_fill_gap = AsyncMock(return_value=True)
+        response = _create_client(repo).get(_url())
+        assert response.status_code == 200
+        point = response.json()["payload"]["points"][0]
+        assert point["valuation_status"] == "incomplete"
+        assert point["realized_pnl"] is None
+        assert point["fee_pnl"] is None
+        assert point["accrual_pnl"] is None
+        assert point["unrealized_pnl"] is None
+        assert point["net_pnl"] is None
+        assert point["attribution"] == [
+            {
+                "origin": "system",
+                "strategy_name": "momentum",
+                "realized_pnl": None,
+                "fee_pnl": None,
+                "accrual_pnl": None,
+                "unrealized_pnl": None,
+            }
+        ]
 
 
 class TestMarkerTimeline:

@@ -300,6 +300,7 @@ from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
+from snapper.data.repository_types import PnlTimelineExecutionLineageRow
 from snapper.data.repository_types import PnlTimelineExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 from snapper.data.repository_types import PortfolioDriftEpisodeRow
@@ -2132,6 +2133,38 @@ class Repository(ABC):
 
         Returns:
             Execution rows ordered by ``(exchange, scope_sequence)`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_timeline_execution_lineage(
+        self,
+        order_public_ids: Sequence[str],
+        as_of: datetime,
+    ) -> list[PnlTimelineExecutionLineageRow]:
+        """Retrieve candidate initiating lineage for execution orders.
+
+        Sentinel-current Order, Instrument, and TradeCommand rows contribute
+        immutable linkage fields without imposing their independent clocks on
+        an execution prefix. Order-to-command matching is scoped by client
+        order ID, wallet, mode, and instrument exchange. Only ``create`` and
+        ``submit`` commands qualify because cancel and replace commands can
+        deliberately reuse the initiating client order ID. Signal strategy
+        names use the Signal version active at ``as_of``.
+
+        Missing command lineage is represented by one row whose lineage fields
+        are null. A legacy REST-default command without a human actor has a null
+        surface whether it is planless or plan-linked because its initiating
+        origin is conflicting. Multiple command candidates remain separate rows
+        so the caller can fail closed. Results are ordered by order public ID
+        and then command public ID.
+
+        Args:
+            order_public_ids: Execution order identities to resolve.
+            as_of: Point-in-time for the versioned Signal strategy label.
+
+        Returns:
+            Deterministically ordered candidate lineage rows.
         """
         ...
 
@@ -9436,6 +9469,114 @@ class SQLAlchemyRepository(Repository):
                     "trade_id": exe.trade_id,
                 }
                 for exe, instrument_public_id in result.all()
+            ]
+
+    async def get_pnl_timeline_execution_lineage(
+        self,
+        order_public_ids: Sequence[str],
+        as_of: datetime,
+    ) -> list[PnlTimelineExecutionLineageRow]:
+        """Retrieve safely scoped initiating lineage for execution orders.
+
+        Immutable Order, Instrument, and TradeCommand linkage comes from each
+        table's sentinel-current version, matching the timeline prefix reads.
+        The instrument exchange closes the remaining client-order-ID scope
+        without coupling stable instrument identity to mutable symbol spelling.
+        Signal supplies only its versioned strategy label at ``as_of``.
+
+        A REST command lacking a user is conflicting lineage: historical
+        strategy rows inherited the REST database default on status transitions,
+        both with and without a linked plan, while a real REST command carries
+        its authenticated user. Returning a null surface for that legacy shape
+        makes attribution fail closed instead of silently calling automation
+        manual.
+
+        Orders without a qualifying command remain visible with null lineage,
+        while multiple candidates remain separate for fail-closed handling.
+        """
+        if not order_public_ids:
+            return []
+        async with self.session() as s:
+            resolved_source_surface = case(
+                (
+                    and_(
+                        TradeCommand.source_surface == "rest",
+                        TradeCommand.user_public_id.is_(None),
+                    ),
+                    None,
+                ),
+                else_=TradeCommand.source_surface,
+            )
+            query = (
+                select(
+                    Order.public_id,
+                    resolved_source_surface,
+                    TradeCommand.plan_public_id,
+                    TradeCommand.signal_public_id,
+                    TradeCommand.origin,
+                    Signal.strategy_name,
+                )
+                .select_from(Order)
+                .outerjoin(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        Instrument.known_to == KNOWN_TO_MAX,
+                    ),
+                )
+                .outerjoin(
+                    TradeCommand,
+                    and_(
+                        Order.client_order_id == TradeCommand.client_order_id,
+                        Order.wallet_public_id == TradeCommand.wallet_public_id,
+                        Order.mode == TradeCommand.mode,
+                        Order.operator_public_id.is_not_distinct_from(
+                            TradeCommand.operator_public_id
+                        ),
+                        Instrument.exchange == TradeCommand.exchange,
+                        TradeCommand.command_type.in_(("create", "submit")),
+                        TradeCommand.known_to == KNOWN_TO_MAX,
+                    ),
+                )
+                .outerjoin(
+                    Signal,
+                    and_(
+                        TradeCommand.signal_public_id == Signal.public_id,
+                        Order.instrument_public_id == Signal.instrument_public_id,
+                        Order.wallet_public_id == Signal.wallet_public_id,
+                        Order.operator_public_id.is_not_distinct_from(Signal.operator_public_id),
+                        *where_active(Signal, as_of),
+                    ),
+                )
+                .where(
+                    Order.public_id.in_(order_public_ids),
+                    Order.known_to == KNOWN_TO_MAX,
+                )
+                .order_by(
+                    Order.public_id.asc(),
+                    TradeCommand.public_id.asc(),
+                    Signal.timestamp.asc(),
+                    Signal.id.asc(),
+                )
+            )
+            result = await s.execute(query)
+            return [
+                {
+                    "order_public_id": order_public_id,
+                    "source_surface": source_surface,
+                    "plan_public_id": plan_public_id,
+                    "signal_public_id": signal_public_id,
+                    "origin": origin,
+                    "strategy_name": strategy_name,
+                }
+                for (
+                    order_public_id,
+                    source_surface,
+                    plan_public_id,
+                    signal_public_id,
+                    origin,
+                    strategy_name,
+                ) in result.all()
             ]
 
     async def get_pnl_timeline_signals(

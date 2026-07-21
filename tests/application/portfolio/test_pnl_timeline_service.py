@@ -21,6 +21,7 @@ from snapper.application.portfolio.pnl_timeline_service import PnlAiDecisionMark
 from snapper.application.portfolio.pnl_timeline_service import PnlFillMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlSignalMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
+from snapper.application.portfolio.pnl_timeline_service import _build_execution_lineage
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_accrual
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_execution
 from snapper.application.portfolio.pnl_timeline_service import build_marks
@@ -31,6 +32,7 @@ from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
+from snapper.data.repository_types import PnlTimelineExecutionLineageRow
 from snapper.data.repository_types import PnlTimelineExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 
@@ -72,6 +74,25 @@ def _exec_row(
         "timestamp": _m(minute),
         "exec_id": f"exec-{scope}",
         "trade_id": f"trade-{scope}",
+    }
+
+
+def _lineage_row(
+    order_public_id: str,
+    source_surface: str | None,
+    plan_public_id: str | None = None,
+    signal_public_id: str | None = None,
+    origin: str | None = "live",
+    strategy_name: str | None = None,
+) -> PnlTimelineExecutionLineageRow:
+    """Build one row as the exact execution-lineage read returns it."""
+    return {
+        "order_public_id": order_public_id,
+        "source_surface": source_surface,
+        "plan_public_id": plan_public_id,
+        "signal_public_id": signal_public_id,
+        "origin": origin,
+        "strategy_name": strategy_name,
     }
 
 
@@ -185,6 +206,7 @@ class FakeRepo:
         candles: Sequence[PnlTimelineCandleRow] = (),
         signals: Sequence[PnlTimelineSignalMarkerRow] = (),
         ai_decisions: Sequence[PnlTimelineAiDecisionMarkerRow] = (),
+        lineage: Sequence[PnlTimelineExecutionLineageRow] = (),
         fill_shard_keys: Sequence[str] = (),
         gapped_shards: set[str] | None = None,
         fx_rows: Sequence[PnlFxRateRow] | None = None,
@@ -196,6 +218,7 @@ class FakeRepo:
         self._candles = list(candles)
         self._signals = list(signals)
         self._ai_decisions = list(ai_decisions)
+        self._lineage = list(lineage)
         self._fill_shard_keys = list(fill_shard_keys)
         self._gapped_shards = gapped_shards or set()
         self._fx_rows: list[PnlFxRateRow] = list(fx_rows or [])
@@ -208,6 +231,7 @@ class FakeRepo:
         self.fill_scope_calls: list[tuple[str, str, datetime]] = []
         self.fill_gap_calls: list[tuple[str, str, str, datetime]] = []
         self.execution_calls: list[tuple[str, str, datetime]] = []
+        self.lineage_calls: list[tuple[list[str], datetime]] = []
         self.accrual_calls: list[tuple[str, str, datetime]] = []
         self.symbol_ref_as_of_calls: list[datetime] = []
         self.signal_calls: list[tuple[str, str, datetime, datetime, datetime, int]] = []
@@ -240,6 +264,16 @@ class FakeRepo:
         """Return the canned execution rows."""
         self.execution_calls.append((wallet_public_id, mode, as_of))
         return list(self._executions)
+
+    async def get_pnl_timeline_execution_lineage(
+        self,
+        order_public_ids: Sequence[str],
+        as_of: datetime,
+    ) -> list[PnlTimelineExecutionLineageRow]:
+        """Record the exact order scope and return its canned lineage rows."""
+        requested = set(order_public_ids)
+        self.lineage_calls.append((list(order_public_ids), as_of))
+        return [row for row in self._lineage if row["order_public_id"] in requested]
 
     async def get_pnl_timeline_signals(
         self,
@@ -318,6 +352,7 @@ class TestToTimelineExecution:
         row = _exec_row(_I1, 1, 3, "buy", 2.0, 100.0, 0.5, "USD")
         mapped = _to_timeline_execution(row, "USD", {})
         assert mapped.instrument_public_id == _I1
+        assert mapped.order_public_id == f"order-{_I1}-1"
         assert mapped.event_time == _m(3)
         assert mapped.size == 2.0
         assert mapped.price == 100.0
@@ -342,6 +377,52 @@ class TestToTimelineExecution:
         mapped = _to_timeline_execution(row, "USD", {})
         assert mapped.fee == 0.0
         assert mapped.fee_asset == ""
+
+
+class TestBuildExecutionLineage:
+    """Cover fail-closed projection of repository lineage candidates."""
+
+    def test_maps_each_unique_order_candidate(self) -> None:
+        """A unique row preserves every raw discriminator for the pure engine."""
+        manual_order = f"order-{_I1}-1"
+        system_order = f"order-{_I1}-2"
+        mapped = _build_execution_lineage(
+            [
+                _lineage_row(manual_order, "rest", plan_public_id="manual-plan"),
+                _lineage_row(
+                    system_order,
+                    "strategy",
+                    signal_public_id="signal-1",
+                    strategy_name="momentum",
+                ),
+            ]
+        )
+        assert set(mapped) == {manual_order, system_order}
+        assert mapped[manual_order].source_surface == "rest"
+        assert mapped[manual_order].plan_public_id == "manual-plan"
+        assert mapped[manual_order].signal_public_id is None
+        assert mapped[manual_order].origin == "live"
+        assert mapped[manual_order].strategy_name is None
+        assert mapped[system_order].source_surface == "strategy"
+        assert mapped[system_order].signal_public_id == "signal-1"
+        assert mapped[system_order].strategy_name == "momentum"
+
+    def test_omits_every_repeated_order_candidate(self) -> None:
+        """Duplicate rows never acquire lineage through first-row selection."""
+        ambiguous_order = f"order-{_I1}-1"
+        mapped = _build_execution_lineage(
+            [
+                _lineage_row(ambiguous_order, "rest", plan_public_id="plan-1"),
+                _lineage_row(
+                    ambiguous_order,
+                    "strategy",
+                    signal_public_id="signal-1",
+                    strategy_name="momentum",
+                ),
+                _lineage_row(ambiguous_order, "rest", plan_public_id="plan-1"),
+            ]
+        )
+        assert mapped == {}
 
 
 class TestToTimelineAccrual:
@@ -414,10 +495,19 @@ class TestBuildWalletPnlSeries:
     async def test_end_to_end_series_with_marks(self) -> None:
         """A single USD instrument produces complete points with the expected net."""
         executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.5, "USD")]
+        lineage = [
+            _lineage_row(
+                executions[0]["order_public_id"],
+                "strategy",
+                signal_public_id="signal-1",
+                strategy_name="momentum",
+            )
+        ]
         refs = [_ref(_I1, "BTC-USD", "USD")]
         candles = [_candle(_m(-1), 105.0), _candle(_m(0), 110.0), _candle(_m(1), 120.0)]
         repo = FakeRepo(
             executions=executions,
+            lineage=lineage,
             refs=refs,
             candles=candles,
             fill_shard_keys=["clean-shard"],
@@ -433,9 +523,16 @@ class TestBuildWalletPnlSeries:
         assert result.points[0].net_pnl == 4.5
         assert result.points[2].unrealized_pnl == 20.0
         assert result.points[2].net_pnl == 19.5
+        assert len(result.points[0].attribution) == 1
+        attribution = result.points[0].attribution[0]
+        assert attribution.origin == "system"
+        assert attribution.strategy_name == "momentum"
+        assert attribution.fee_pnl == -0.5
+        assert attribution.unrealized_pnl == 5.0
         assert repo.fill_scope_calls == [("w1", "live", as_of)]
         assert repo.fill_gap_calls == [("clean-shard", "w1", "live", as_of)]
         assert repo.execution_calls == [("w1", "live", as_of)]
+        assert repo.lineage_calls == [([executions[0]["order_public_id"]], as_of)]
         assert repo.accrual_calls == [("w1", "live", as_of)]
         assert repo.symbol_ref_as_of_calls == [as_of]
         assert repo.candle_calls[0][3] == as_of
@@ -548,6 +645,13 @@ class TestBuildWalletPnlSeries:
         candles = [_candle(_m(-1), 105.0), _candle(_m(0), 110.0)]
         repo = FakeRepo(
             executions=executions,
+            lineage=[
+                _lineage_row(
+                    executions[0]["order_public_id"],
+                    "rest",
+                    plan_public_id="manual-once-plan",
+                )
+            ],
             refs=refs,
             candles=candles,
             fill_shard_keys=["clean-shard", "gapped-shard", "unreached-shard"],
@@ -574,6 +678,59 @@ class TestBuildWalletPnlSeries:
             assert contribution.fee_pnl is None
             assert contribution.accrual_pnl is None
             assert contribution.unrealized_pnl is None
+            assert len(point.attribution) == 1
+            attribution = point.attribution[0]
+            assert attribution.origin == "manual"
+            assert attribution.strategy_name is None
+            assert attribution.realized_pnl is None
+            assert attribution.fee_pnl is None
+            assert attribution.accrual_pnl is None
+            assert attribution.unrealized_pnl is None
+
+    async def test_ambiguous_lineage_falls_back_to_unattributed(self) -> None:
+        """Conflicting command candidates are omitted instead of choosing one."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.5, "USD")]
+        order_public_id = executions[0]["order_public_id"]
+        repo = FakeRepo(
+            executions=executions,
+            lineage=[
+                _lineage_row(order_public_id, "rest", plan_public_id="manual-plan"),
+                _lineage_row(
+                    order_public_id,
+                    "strategy",
+                    signal_public_id="signal-1",
+                    strategy_name="momentum",
+                ),
+            ],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0)],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+        )
+        assert len(result.points[0].attribution) == 1
+        attribution = result.points[0].attribution[0]
+        assert attribution.origin == "unattributed"
+        assert attribution.strategy_name is None
+        assert attribution.fee_pnl == -0.5
+        assert repo.lineage_calls == [([order_public_id], _m(1))]
+
+    async def test_lineage_read_uses_distinct_execution_orders_and_as_of(self) -> None:
+        """The read receives only deduplicated order ids from the replay prefix."""
+        first = _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")
+        second = _exec_row(_I1, 2, 0, "buy", 1.0, 100.0, 0.0, "USD")
+        third = _exec_row(_I1, 3, 0, "buy", 1.0, 100.0, 0.0, "USD")
+        second["order_public_id"] = first["order_public_id"]
+        as_of = _m(4)
+        repo = FakeRepo(executions=[first, second, third])
+        await build_wallet_pnl_series(repo, "w1", "live", _T0, _T0, "1m", as_of)
+        assert repo.lineage_calls == [([first["order_public_id"], third["order_public_id"]], as_of)]
 
     async def test_total_work_budget_counts_execution_and_accrual_instruments(self) -> None:
         """Two instruments halve the permitted raw minute span and fail actionably."""
@@ -775,7 +932,7 @@ def test_provenance_constants_are_stable() -> None:
     Then: The documented source, version, and total-work limit remain stable.
     """
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
-    assert PNL_TIMELINE_CALC_VERSION == "5A.2"
+    assert PNL_TIMELINE_CALC_VERSION == "5A.3"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
 

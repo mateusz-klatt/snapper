@@ -12,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
+from snapper.api.schemas.pnl_timeline import PnlAttributionContributionData
 from snapper.api.schemas.pnl_timeline import PnlFillMarkerData
 from snapper.api.schemas.pnl_timeline import PnlInstrumentContributionData
 from snapper.api.schemas.pnl_timeline import PnlSeriesData
@@ -36,6 +37,18 @@ def _contribution() -> PnlInstrumentContributionData:
     )
 
 
+def _attribution() -> PnlAttributionContributionData:
+    """Build a fully-null attribution bucket for an untrusted point."""
+    return PnlAttributionContributionData(
+        origin="unattributed",
+        strategy_name=None,
+        realized_pnl=None,
+        fee_pnl=None,
+        accrual_pnl=None,
+        unrealized_pnl=None,
+    )
+
+
 def _point(status: PnlValuationStatus = "complete") -> PnlTimelinePointData:
     """Build one valued point with the given valuation status."""
     return PnlTimelinePointData(
@@ -49,6 +62,16 @@ def _point(status: PnlValuationStatus = "complete") -> PnlTimelinePointData:
         per_instrument=[
             PnlInstrumentContributionData(
                 instrument_public_id="i1",
+                realized_pnl=1.0,
+                fee_pnl=-0.5,
+                accrual_pnl=0.0,
+                unrealized_pnl=2.0,
+            )
+        ],
+        attribution=[
+            PnlAttributionContributionData(
+                origin="system",
+                strategy_name="momentum",
                 realized_pnl=1.0,
                 fee_pnl=-0.5,
                 accrual_pnl=0.0,
@@ -150,6 +173,8 @@ class TestStrictContract:
         assert response.type == "pnl_series"
         assert response.payload.calc_version == "5A.1"
         assert response.payload.points[0].valuation_status == "complete"
+        assert response.payload.points[0].attribution[0].origin == "system"
+        assert response.payload.points[0].attribution[0].strategy_name == "momentum"
 
     def test_null_pnl_fields_are_allowed(self) -> None:
         """An incomplete point carries null monetary fields honestly."""
@@ -162,9 +187,11 @@ class TestStrictContract:
             net_pnl=None,
             valuation_status="incomplete",
             per_instrument=[_contribution()],
+            attribution=[_attribution()],
         )
         assert point.net_pnl is None
         assert point.per_instrument[0].realized_pnl is None
+        assert point.attribution[0].realized_pnl is None
 
     def test_unknown_field_is_rejected(self) -> None:
         """Extra fields are forbidden on the strict point schema."""
@@ -177,6 +204,7 @@ class TestStrictContract:
             "net_pnl": 1.0,
             "valuation_status": "complete",
             "per_instrument": [],
+            "attribution": [],
             "surprise": 1,
         }
         with pytest.raises(ValidationError):
@@ -193,9 +221,21 @@ class TestStrictContract:
             "net_pnl": 1.0,
             "valuation_status": "partial",
             "per_instrument": [],
+            "attribution": [],
         }
         with pytest.raises(ValidationError):
             PnlTimelinePointData.model_validate(payload)
+
+    def test_attribution_rejects_unknown_fields_and_origins(self) -> None:
+        """Attribution bodies are strict and their origin is a closed literal."""
+        attribution = _point().attribution[0].model_dump()
+        attribution["surprise"] = True
+        with pytest.raises(ValidationError):
+            PnlAttributionContributionData.model_validate(attribution)
+        attribution.pop("surprise")
+        attribution["origin"] = "replay"
+        with pytest.raises(ValidationError):
+            PnlAttributionContributionData.model_validate(attribution)
 
     def test_marker_timeline_response_round_trips_all_kinds(self) -> None:
         """The timeline envelope preserves each typed marker discriminator."""

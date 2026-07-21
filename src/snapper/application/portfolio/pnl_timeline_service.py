@@ -45,11 +45,13 @@ from snapper.application.portfolio.fx_rates import FxRateMap
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import required_pairs
 from snapper.application.portfolio.pnl_timeline import MarkMap
+from snapper.application.portfolio.pnl_timeline import PnlAttributionContribution
 from snapper.application.portfolio.pnl_timeline import PnlInstrumentContribution
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline import PnlTimelineResult
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
+from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
 from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
 from snapper.data.repository import Repository
@@ -58,13 +60,14 @@ from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
+from snapper.data.repository_types import PnlTimelineExecutionLineageRow
 from snapper.data.repository_types import PnlTimelineExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.2"
+PNL_TIMELINE_CALC_VERSION = "5A.3"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, or mark-resolution semantics
@@ -222,6 +225,7 @@ def _to_timeline_execution(
     )
     fee = math.nan if converted is None else converted
     return TimelineExecution(
+        order_public_id=row["order_public_id"],
         instrument_public_id=row["instrument_public_id"],
         exchange=row["exchange"],
         scope_sequence=row["scope_sequence"],
@@ -232,6 +236,45 @@ def _to_timeline_execution(
         fee=fee,
         fee_asset=row["fee_asset"],
     )
+
+
+def _build_execution_lineage(
+    rows: Sequence[PnlTimelineExecutionLineageRow],
+) -> dict[str, TimelineExecutionLineage]:
+    """Build a fail-closed order-lineage lookup from repository candidates.
+
+    Exactly one row is required for an order to carry resolved lineage into the
+    pure engine. Repeated rows are ambiguous even when their projected values
+    happen to match, so the order is removed from the lookup instead of choosing
+    a winner. A missing map entry is intentionally classified as unattributed by
+    the builder.
+
+    Args:
+        rows: Candidate initiating-command lineage rows keyed by order public id.
+
+    Returns:
+        Unique lineage keyed by order public id, excluding every duplicate key.
+    """
+    lineage: dict[str, TimelineExecutionLineage] = {}
+    seen: set[str] = set()
+    ambiguous: set[str] = set()
+    for row in rows:
+        order_public_id = row["order_public_id"]
+        if order_public_id in seen:
+            ambiguous.add(order_public_id)
+            lineage.pop(order_public_id, None)
+            continue
+        seen.add(order_public_id)
+        lineage[order_public_id] = TimelineExecutionLineage(
+            source_surface=row["source_surface"],
+            plan_public_id=row["plan_public_id"],
+            signal_public_id=row["signal_public_id"],
+            origin=row["origin"],
+            strategy_name=row["strategy_name"],
+        )
+    for order_public_id in ambiguous:
+        lineage.pop(order_public_id, None)
+    return lineage
 
 
 def _to_timeline_accrual(
@@ -268,8 +311,8 @@ def _withhold_series_for_fill_gap(result: PnlTimelineResult) -> PnlTimelineResul
 
     A recorded-versus-consumed fill mismatch means no cumulative monetary value
     is defensible, including values from minutes before the visible execution
-    prefix. Every aggregate and per-instrument monetary field is therefore
-    withheld while timestamps and contributing instrument identities remain
+    prefix. Every aggregate, per-instrument, and attribution monetary field is
+    therefore withheld while timestamps and contributing identities remain
     available. A machine-readable incompleteness reason is a valuable follow-up,
     but it requires an approved pure-engine contract change and is outside v1.
 
@@ -297,6 +340,17 @@ def _withhold_series_for_fill_gap(result: PnlTimelineResult) -> PnlTimelineResul
                     unrealized_pnl=None,
                 )
                 for contribution in point.per_instrument
+            ),
+            attribution=tuple(
+                PnlAttributionContribution(
+                    origin=contribution.origin,
+                    strategy_name=contribution.strategy_name,
+                    realized_pnl=None,
+                    fee_pnl=None,
+                    accrual_pnl=None,
+                    unrealized_pnl=None,
+                )
+                for contribution in point.attribution
             ),
         )
         for point in result.points
@@ -502,15 +556,17 @@ async def build_wallet_pnl_series(
 ) -> PnlTimelineResult:
     """Reconstruct one wallet/mode scope's Net-P&L-since-activation series.
 
-    Reads the scope's append-only execution prefix and funding accruals, resolves
-    direct marks from finalized 1m candles, and calls the pure builder with
-    ``opening=None`` (no activation anchor is written in v1, so the replay starts
-    from empty pools with a zero opening unrealized value). Exact-zero fees and
-    accruals pass through independent of asset; nonzero foreign flows become
-    ``NaN``. Before calling the pure builder, durable fill-gap evidence is
-    consulted for every fill-bearing shard in the exact wallet/mode scope. A
-    proven gap causes an explicit post-transform that withholds the entire built
-    series.
+    Reads the scope's append-only execution prefix, exact order lineage, and
+    funding accruals, resolves direct marks from finalized 1m candles, and calls
+    the pure builder with ``opening=None`` (no activation anchor is written in
+    v1, so the replay starts from empty pools with a zero opening unrealized
+    value). Lineage is accepted only when exactly one candidate row resolves an
+    execution order; missing or repeated rows are omitted so the builder assigns
+    the fill to unattributed. Exact-zero fees and accruals pass through
+    independent of asset; nonzero foreign flows become ``NaN``. Before calling
+    the pure builder, durable fill-gap evidence is consulted for every
+    fill-bearing shard in the exact wallet/mode scope. A proven gap causes an
+    explicit post-transform that withholds the entire built series.
 
     Args:
         repo: Repository providing the scope reads and candle marks.
@@ -540,6 +596,9 @@ async def build_wallet_pnl_series(
         if execution_rows is None
         else list(execution_rows)
     )
+    order_public_ids = list(dict.fromkeys(row["order_public_id"] for row in loaded_execution_rows))
+    lineage_rows = await repo.get_pnl_timeline_execution_lineage(order_public_ids, as_of)
+    lineage = _build_execution_lineage(lineage_rows)
     accrual_rows = await repo.get_accruals_for_pnl(wallet_public_id, mode, as_of)
     instrument_ids = list(
         dict.fromkeys(row["instrument_public_id"] for row in loaded_execution_rows)
@@ -561,7 +620,14 @@ async def build_wallet_pnl_series(
         granularity=granularity,
         valuation_ccy=valuation_ccy,
     )
-    result = build_pnl_timeline(executions, accruals, marks, window, opening=None)
+    result = build_pnl_timeline(
+        executions,
+        accruals,
+        marks,
+        window,
+        opening=None,
+        lineage=lineage,
+    )
     if fill_gap:
         return _withhold_series_for_fill_gap(result)
     return result

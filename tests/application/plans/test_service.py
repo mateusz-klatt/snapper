@@ -1715,6 +1715,7 @@ class TestDispatchCommands:
         assert inserted["reduce_only"] is True
         assert inserted["plan_public_id"] == "plan-1"
         assert inserted["strategy_id"] == "manual_once"
+        assert inserted["source_surface"] == "strategy"
         mock_repo.revise_execution_plan_params.assert_awaited_once()
 
     @pytest.mark.asyncio

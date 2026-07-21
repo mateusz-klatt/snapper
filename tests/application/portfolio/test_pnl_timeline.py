@@ -8,6 +8,7 @@ seeded entries, the event-time regression shadow guard, the flow/stock
 downsampling reduction, and the degenerate empty and invalid-granularity edges.
 """
 
+import math
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -15,12 +16,18 @@ from datetime import timedelta
 import pytest
 
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
+from snapper.application.portfolio.pnl_timeline import AttributionKey
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import OpeningPosition
+from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
+from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
 from snapper.application.portfolio.pnl_timeline import TimelineOpening
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
+from snapper.application.portfolio.pnl_timeline import _allocate_by_weights
+from snapper.application.portfolio.pnl_timeline import _reconcile_weights
+from snapper.application.portfolio.pnl_timeline import _values_with_residue
 from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
 
 _T0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
@@ -52,6 +59,7 @@ def _exec(
         price=price,
         fee=fee,
         fee_asset="USD",
+        order_public_id=f"order-{instrument}-{scope}",
     )
 
 
@@ -67,6 +75,415 @@ def _window(
         granularity=granularity,
         valuation_ccy="USD",
     )
+
+
+def _assert_exact_attribution_sums(point: PnlTimelinePoint) -> None:
+    """Assert every exposed attribution component exactly equals its aggregate."""
+    realized = [contribution.realized_pnl for contribution in point.attribution]
+    fees = [contribution.fee_pnl for contribution in point.attribution]
+    accruals = [contribution.accrual_pnl for contribution in point.attribution]
+    unrealized = [contribution.unrealized_pnl for contribution in point.attribution]
+    assert None not in realized
+    assert None not in fees
+    assert None not in accruals
+    assert None not in unrealized
+    assert sum(value for value in realized if value is not None) == point.realized_pnl
+    assert sum(value for value in fees if value is not None) == point.fee_pnl
+    assert sum(value for value in accruals if value is not None) == point.accrual_pnl
+    assert sum(value for value in unrealized if value is not None) == point.unrealized_pnl
+
+
+class TestAttribution:
+    """Prove composite origin/strategy allocation and fail-closed lineage."""
+
+    def _lineage(self) -> dict[str, TimelineExecutionLineage]:
+        """Return manual, system, and non-manual plan lineage for one cycle."""
+        return {
+            "order-I1-1": TimelineExecutionLineage(
+                source_surface="rest",
+                plan_public_id="manual-once-plan",
+                signal_public_id=None,
+                origin="live",
+                strategy_name=None,
+            ),
+            "order-I1-2": TimelineExecutionLineage(
+                source_surface="strategy",
+                plan_public_id=None,
+                signal_public_id="signal-1",
+                origin="live",
+                strategy_name="momentum",
+            ),
+            "order-I1-3": TimelineExecutionLineage(
+                source_surface="strategy",
+                plan_public_id="plan-1",
+                signal_public_id=None,
+                origin="live",
+                strategy_name=None,
+            ),
+            "order-I1-4": TimelineExecutionLineage(
+                source_surface="strategy",
+                plan_public_id="plan-1",
+                signal_public_id=None,
+                origin="live",
+                strategy_name=None,
+            ),
+        }
+
+    def _cycle(self) -> tuple[TimelineExecution, ...]:
+        """Return a mixed-origin add, reduce, flip, and full-close cycle."""
+        return (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, fee=0.1),
+            _exec("I1", 2, 1, "buy", 2.0, 110.0, fee=0.2),
+            _exec("I1", 3, 2, "sell", 1.0, 120.0, fee=0.3),
+            _exec("I1", 4, 3, "sell", 3.0, 125.0, fee=0.7),
+            _exec("I1", 5, 4, "buy", 1.0, 115.0, fee=0.2),
+        )
+
+    def test_manual_once_precedes_its_plan_and_signal_uses_strategy_name(self) -> None:
+        """REST manual_once stays manual while a signal fill is system-labelled."""
+        marks: MarkMap = {
+            ("I1", _m(0)): 100.0,
+            ("I1", _m(1)): 110.0,
+            ("I1", _m(2)): 120.0,
+            ("I1", _m(3)): 120.0,
+        }
+        accruals = (TimelineAccrual("I1", _m(1), 0.1),)
+        result = build_pnl_timeline(
+            self._cycle(), accruals, marks, _window(0, 4), lineage=self._lineage()
+        )
+        opening_buckets = result.points[0].attribution
+        assert [(bucket.origin, bucket.strategy_name) for bucket in opening_buckets] == [
+            ("manual", None)
+        ]
+        second_buckets = result.points[1].attribution
+        assert ("manual", None) in {
+            (bucket.origin, bucket.strategy_name) for bucket in second_buckets
+        }
+        assert ("system", "momentum") in {
+            (bucket.origin, bucket.strategy_name) for bucket in second_buckets
+        }
+
+    def test_reduce_flip_and_full_close_allocate_and_sum_exactly(self) -> None:
+        """Every flow and stock sums exactly after reduction, flip, and close."""
+        marks: MarkMap = {
+            ("I1", _m(0)): 100.0,
+            ("I1", _m(1)): 110.0,
+            ("I1", _m(2)): 120.0,
+            ("I1", _m(3)): 120.0,
+        }
+        accruals = (TimelineAccrual("I1", _m(1), 0.1),)
+        result = build_pnl_timeline(
+            self._cycle(), accruals, marks, _window(0, 4), lineage=self._lineage()
+        )
+        reduced = result.points[2]
+        flipped = result.points[3]
+        closed = result.points[4]
+        for point in (reduced, flipped, closed):
+            _assert_exact_attribution_sums(point)
+        reduced_plan = next(bucket for bucket in reduced.attribution if bucket.origin == "plan")
+        assert reduced_plan.realized_pnl == 0.0
+        assert reduced_plan.fee_pnl == 0.0
+        flipped_plan = next(bucket for bucket in flipped.attribution if bucket.origin == "plan")
+        assert flipped_plan.unrealized_pnl == pytest.approx(5.0)
+        assert flipped_plan.fee_pnl == pytest.approx(-0.7 / 3.0)
+        assert closed.unrealized_pnl == 0.0
+        assert all(bucket.unrealized_pnl == 0.0 for bucket in closed.attribution)
+        assert ("unattributed", None) in {
+            (bucket.origin, bucket.strategy_name) for bucket in closed.attribution
+        }
+
+    def test_missing_unknown_and_replay_lineage_are_unattributed(self) -> None:
+        """A plan id alone, absent row, and replay provenance never get guessed."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0),
+            _exec("I2", 2, 0, "buy", 1.0, 100.0),
+            _exec("I3", 3, 0, "buy", 1.0, 100.0),
+        )
+        lineage = {
+            "order-I1-1": TimelineExecutionLineage(
+                source_surface=None,
+                plan_public_id="plan-alone",
+                signal_public_id="signal-unknown-source",
+                origin="live",
+                strategy_name="linked-only",
+            ),
+            "order-I2-2": TimelineExecutionLineage(
+                source_surface="rest",
+                plan_public_id="manual-plan",
+                signal_public_id="signal-replay",
+                origin="replay",
+                strategy_name="replay-strategy",
+            ),
+        }
+        marks: MarkMap = {
+            ("I1", _m(0)): 100.0,
+            ("I2", _m(0)): 100.0,
+            ("I3", _m(0)): 100.0,
+        }
+        point = build_pnl_timeline(executions, (), marks, _window(0, 0), lineage=lineage).points[0]
+        assert {bucket.origin for bucket in point.attribution} == {"unattributed"}
+        assert {bucket.strategy_name for bucket in point.attribution} == {
+            None,
+            "linked-only",
+            "replay-strategy",
+        }
+        _assert_exact_attribution_sums(point)
+
+    def test_null_surface_planless_legacy_lineage_is_unattributed(self) -> None:
+        """A fail-closed legacy command cannot be reclassified as manual."""
+        execution = _exec("I1", 1, 0, "buy", 1.0, 100.0)
+        lineage = {
+            execution.order_public_id: TimelineExecutionLineage(
+                source_surface=None,
+                plan_public_id=None,
+                signal_public_id=None,
+                origin="live",
+                strategy_name=None,
+            )
+        }
+        marks: MarkMap = {("I1", _m(0)): 110.0}
+        point = build_pnl_timeline((execution,), (), marks, _window(0, 0), lineage=lineage).points[
+            0
+        ]
+        assert {bucket.origin for bucket in point.attribution} == {"unattributed"}
+        assert point.attribution[0].unrealized_pnl == 10.0
+        _assert_exact_attribution_sums(point)
+
+    def test_invalid_weight_pool_falls_back_to_unattributed(self) -> None:
+        """An unusable internal weight pool never fabricates a proven owner."""
+        reconciled = _reconcile_weights(
+            {("manual", None): float("nan"), ("system", None): -1.0}, 2.0
+        )
+        assert reconciled == {("unattributed", None): 2.0}
+        assert _reconcile_weights({}, 2.0) == {("unattributed", None): 2.0}
+
+    def test_mixed_finite_and_nonfinite_weights_fail_closed_as_one_pool(self) -> None:
+        """One invalid owner invalidates the map instead of inflating a survivor."""
+        weights: dict[AttributionKey, float] = {
+            ("manual", None): 1.0,
+            ("system", None): math.inf,
+        }
+        assert _allocate_by_weights(2.0, weights) == {("unattributed", None): 2.0}
+        assert _reconcile_weights(weights, 2.0) == {("unattributed", None): 2.0}
+
+    def test_nonfinite_pro_rata_allocations_fail_closed(self) -> None:
+        """Every non-finite direct or final allocation collapses the whole map."""
+        assert _allocate_by_weights(
+            math.inf,
+            {("manual", None): 1.0, ("system", None): 1.0},
+        ) == {("unattributed", None): math.inf}
+        assert _allocate_by_weights(math.inf, {("manual", None): 1.0}) == {
+            ("unattributed", None): math.inf
+        }
+
+    def test_finite_weight_total_full_overflow_fails_closed(self) -> None:
+        """A finite map whose total overflows cannot prove any surviving owner."""
+        weights: dict[AttributionKey, float] = {
+            ("manual", None): 1e308,
+            ("system", None): 1e308,
+        }
+        assert _allocate_by_weights(2.0, weights) == {("unattributed", None): 2.0}
+        assert _reconcile_weights(weights, 1e308) == {("unattributed", None): 1e308}
+
+    def test_unrepresentable_positive_weights_fall_back_to_unattributed(self) -> None:
+        """Quantity residue cannot turn a tiny proven ownership weight negative."""
+        reconciled = _reconcile_weights(
+            {
+                ("manual", None): 1e16,
+                ("plan", None): 1.0,
+                ("system", None): 1.0,
+            },
+            1e16,
+        )
+        assert reconciled == {("unattributed", None): 1e16}
+
+    def test_near_epsilon_close_assigns_all_fee_to_pre_fill_weights(self) -> None:
+        """A snap-to-flat close is not a flip even when the kernel reports overshoot."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0),
+            _exec("I1", 2, 0, "sell", 1.0 + FLAT_EPSILON / 2.0, 110.0, fee=1.0),
+        )
+        lineage = {
+            "order-I1-1": TimelineExecutionLineage("rest", None, None, "live", None),
+            "order-I1-2": TimelineExecutionLineage(
+                "strategy", None, "signal-1", "live", "momentum"
+            ),
+        }
+        point = build_pnl_timeline(executions, (), {}, _window(0, 0), lineage=lineage).points[0]
+        buckets = {(bucket.origin, bucket.strategy_name): bucket for bucket in point.attribution}
+        assert point.valuation_status == "complete"
+        assert buckets[("manual", None)].fee_pnl == -1.0
+        assert buckets[("system", "momentum")].fee_pnl == 0.0
+        assert buckets[("manual", None)].realized_pnl == pytest.approx(10.0)
+        assert buckets[("system", "momentum")].realized_pnl == 0.0
+        _assert_exact_attribution_sums(point)
+
+    def test_dust_pool_overshoot_assigns_new_side_to_incoming_fill(self) -> None:
+        """A kernel ``open`` that closes dust still splits old and new ownership."""
+        opening = TimelineOpening(
+            positions={
+                "I1": OpeningPosition(
+                    position_qty=FLAT_EPSILON / 2.0,
+                    entry_price=100.0,
+                )
+            },
+            opening_unrealized_value=0.0,
+            t0=_m(0),
+        )
+        execution = _exec("I1", 1, 0, "sell", 1.0, 110.0, fee=1.0)
+        lineage = {
+            execution.order_public_id: TimelineExecutionLineage(
+                "strategy", None, "signal-1", "live", "momentum"
+            )
+        }
+        point = build_pnl_timeline(
+            (execution,),
+            (),
+            {("I1", _m(0)): 100.0},
+            _window(0, 0),
+            opening,
+            lineage,
+        ).points[0]
+        buckets = {(bucket.origin, bucket.strategy_name): bucket for bucket in point.attribution}
+        unattributed = buckets[("unattributed", None)]
+        system = buckets[("system", "momentum")]
+        assert unattributed.realized_pnl == pytest.approx(5e-12)
+        assert unattributed.fee_pnl == pytest.approx(-FLAT_EPSILON / 2.0)
+        assert unattributed.unrealized_pnl == 0.0
+        assert system.realized_pnl == 0.0
+        assert system.fee_pnl == pytest.approx(-(1.0 - FLAT_EPSILON / 2.0))
+        assert system.unrealized_pnl == pytest.approx(10.0 * (1.0 - FLAT_EPSILON / 2.0))
+        _assert_exact_attribution_sums(point)
+
+    def test_unrepresentable_float_residue_withholds_the_point(self) -> None:
+        """A complete point never exposes buckets that cannot equal their aggregate."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 0.0, 100.0, fee=-1e20),
+            _exec("I2", 2, 0, "buy", 0.0, 100.0, fee=1e20),
+            _exec("I3", 3, 0, "buy", 0.0, 100.0, fee=-1.0),
+        )
+        lineage = {
+            "order-I1-1": TimelineExecutionLineage("rest", None, None, "live", None),
+            "order-I2-2": TimelineExecutionLineage(
+                "strategy", None, "signal-1", "live", "momentum"
+            ),
+            "order-I3-3": TimelineExecutionLineage(
+                "strategy", None, "signal-1", "live", "momentum"
+            ),
+        }
+        point = build_pnl_timeline(executions, (), {}, _window(0, 0), lineage=lineage).points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.fee_pnl is None
+        assert all(bucket.realized_pnl is None for bucket in point.attribution)
+        assert all(bucket.fee_pnl is None for bucket in point.attribution)
+        assert all(bucket.accrual_pnl is None for bucket in point.attribution)
+        assert all(bucket.unrealized_pnl is None for bucket in point.attribution)
+
+    def test_reversed_cancellation_cannot_transport_fee_residue(self) -> None:
+        """Large cancellation cannot fabricate a zero-fee final bucket."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 0.0, 100.0, fee=1e20),
+            _exec("I2", 2, 0, "buy", 0.0, 100.0, fee=5000.0),
+            _exec("I3", 3, 0, "buy", 0.0, 100.0, fee=-1e20),
+            _exec("I4", 4, 0, "buy", 0.0, 100.0, fee=0.0),
+        )
+        lineage = {
+            "order-I1-1": TimelineExecutionLineage("strategy", "plan-1", None, "live", None),
+            "order-I2-2": TimelineExecutionLineage("rest", None, None, "live", None),
+            "order-I3-3": TimelineExecutionLineage("strategy", "plan-1", None, "live", None),
+            "order-I4-4": TimelineExecutionLineage("strategy", None, None, "live", None),
+        }
+        point = build_pnl_timeline(executions, (), {}, _window(0, 0), lineage=lineage).points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.fee_pnl is None
+        assert all(bucket.fee_pnl is None for bucket in point.attribution)
+
+    def test_unrepresentable_unrealized_residue_withholds_the_point(self) -> None:
+        """Unrealized attribution also fails closed under catastrophic cancellation."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 0.0),
+            _exec("I2", 2, 0, "buy", 1.0, 0.0),
+            _exec("I3", 3, 0, "buy", 1.0, 0.0),
+        )
+        lineage = {
+            "order-I1-1": TimelineExecutionLineage("rest", None, None, "live", None),
+            "order-I2-2": TimelineExecutionLineage(
+                "strategy", None, "signal-1", "live", "momentum"
+            ),
+            "order-I3-3": TimelineExecutionLineage(
+                "strategy", None, "signal-1", "live", "momentum"
+            ),
+        }
+        marks: MarkMap = {
+            ("I1", _m(0)): 1e20,
+            ("I2", _m(0)): -1e20,
+            ("I3", _m(0)): 1.0,
+        }
+        point = build_pnl_timeline(executions, (), marks, _window(0, 0), lineage=lineage).points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.unrealized_pnl is None
+        assert all(bucket.unrealized_pnl is None for bucket in point.attribution)
+
+    def test_adjacent_final_float_can_absorb_residue_exactly(self) -> None:
+        """The final key takes a one-ULP correction when direct subtraction differs."""
+        keys: list[AttributionKey] = [("manual", None), ("plan", None), ("system", None)]
+        values = {
+            keys[0]: -552.6911013183604,
+            keys[1]: -647.3623389539209,
+            keys[2]: 619.8804889202258,
+        }
+        total = 0.0
+        for key in keys:
+            total += values[key]
+        reconciled = _values_with_residue(values, keys, total)
+        assert reconciled is not None
+        assert reconciled[keys[-1]] == math.nextafter(values[keys[-1]], -math.inf)
+        assert sum(reconciled[key] for key in keys) == total
+
+    def test_nonfinite_direct_residue_cannot_be_reconciled(self) -> None:
+        """An overflowing final subtraction is rejected rather than transported."""
+        keys: list[AttributionKey] = [("manual", None), ("system", None)]
+        values = {keys[0]: -1e308, keys[1]: 0.0}
+        assert _values_with_residue(values, keys, 1e308) is None
+
+    @pytest.mark.parametrize(
+        ("values", "total"),
+        (
+            ({("manual", None): 0.0}, math.inf),
+            ({("manual", None): math.inf}, 0.0),
+        ),
+    )
+    def test_nonfinite_total_or_final_value_cannot_be_reconciled(
+        self,
+        values: dict[AttributionKey, float],
+        total: float,
+    ) -> None:
+        """Neither side of reconciliation may contain a non-finite value."""
+        assert _values_with_residue(values, [("manual", None)], total) is None
+
+    def test_large_pro_rata_reduction_preserves_each_proven_owner(self) -> None:
+        """Representable shares survive multiply-first intermediate overflow."""
+        weight = 1e200
+        executions = (
+            _exec("I1", 1, 0, "buy", weight, 1.0),
+            _exec("I1", 2, 0, "buy", 1.0, 1.0),
+            _exec("I1", 3, 0, "buy", weight, 1.0),
+            _exec("I1", 4, 0, "sell", weight, 1.0),
+        )
+        lineage = {
+            "order-I1-1": TimelineExecutionLineage("strategy", None, None, "live", None),
+            "order-I1-2": TimelineExecutionLineage("strategy", "plan-1", None, "live", None),
+            "order-I1-3": TimelineExecutionLineage("rest", None, None, "live", None),
+            "order-I1-4": TimelineExecutionLineage("rest", None, None, "live", None),
+        }
+        marks: MarkMap = {("I1", _m(0)): 2.0}
+        point = build_pnl_timeline(executions, (), marks, _window(0, 0), lineage=lineage).points[0]
+        buckets = {(bucket.origin, bucket.strategy_name): bucket for bucket in point.attribution}
+        assert point.valuation_status == "complete"
+        assert buckets[("manual", None)].unrealized_pnl == pytest.approx(weight / 2.0)
+        assert buckets[("plan", None)].unrealized_pnl == pytest.approx(0.5)
+        assert buckets[("system", None)].unrealized_pnl == pytest.approx(weight / 2.0)
+        _assert_exact_attribution_sums(point)
 
 
 class TestRoundTrip:
@@ -139,6 +556,10 @@ class TestIncompleteMarks:
         assert point.net_pnl is None
         assert point.fee_pnl == pytest.approx(-0.5)
         assert point.realized_pnl == 0.0
+        assert point.attribution[0].realized_pnl == 0.0
+        assert point.attribution[0].fee_pnl == pytest.approx(-0.5)
+        assert point.attribution[0].accrual_pnl == 0.0
+        assert point.attribution[0].unrealized_pnl is None
 
     def test_none_valued_mark_is_treated_as_absent(self) -> None:
         """An explicit ``None`` mark is the same as a missing one."""
@@ -432,6 +853,12 @@ class TestUntrustedEdgeCases:
         assert point.valuation_status == "incomplete"
         assert point.realized_pnl is None
         assert point.fee_pnl is None
+        assert len(point.attribution) == 1
+        assert point.attribution[0].origin == "unattributed"
+        assert point.attribution[0].realized_pnl is None
+        assert point.attribution[0].fee_pnl is None
+        assert point.attribution[0].accrual_pnl is None
+        assert point.attribution[0].unrealized_pnl is None
 
     def test_nan_entry_price_is_mark_incomplete(self) -> None:
         """A position opened at a NaN price withholds only its unrealized."""
@@ -562,3 +989,27 @@ class TestCorruptInputGuards:
         assert point.valuation_status == "incomplete"
         assert point.fee_pnl is None
         assert all(contribution.fee_pnl is None for contribution in point.per_instrument)
+
+    def test_per_attribution_fee_overflow_is_untrusted(self) -> None:
+        """Composite overflow is caught even when instrument and total fees stay finite."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 0.0, 100.0, fee=-1e308),
+            _exec("I2", 2, 0, "buy", 0.0, 100.0, fee=1e308),
+            _exec("I3", 3, 0, "buy", 0.0, 100.0, fee=-1e308),
+            _exec("I4", 4, 0, "buy", 0.0, 100.0, fee=1e308),
+        )
+        lineage = {
+            "order-I1-1": TimelineExecutionLineage("rest", None, None, "live", None),
+            "order-I2-2": TimelineExecutionLineage(
+                "strategy", None, "signal-1", "live", "momentum"
+            ),
+            "order-I3-3": TimelineExecutionLineage("rest", None, None, "live", None),
+            "order-I4-4": TimelineExecutionLineage(
+                "strategy", None, "signal-1", "live", "momentum"
+            ),
+        }
+        point = build_pnl_timeline(executions, (), {}, _window(0, 0), lineage=lineage).points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.fee_pnl is None
+        assert {bucket.origin for bucket in point.attribution} == {"manual", "system"}
+        assert all(bucket.fee_pnl is None for bucket in point.attribution)
