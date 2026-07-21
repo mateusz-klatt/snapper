@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-gitlinks sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -28,6 +28,7 @@ help:
 	$(info cov                       Run tests with coverage [parallel, 100% required, isolated SQLite dev.db])
 	$(info cov-serial                Run tests with coverage [sequential, isolated SQLite dev.db])
 	$(info cov-xml                   Run tests with coverage + export XML [for SonarCloud])
+	$(info sync-gitlinks             Point submodule gitlinks at their reviewed origin/master)
 	$(info migrate-dev-sqlite        Rebuild ./data/dev.db SQLite fixture used by test/cov)
 	$(info                           override TEST_DB_URL to opt into Postgres test runs [staging only])
 	$(info check                     Backend quality checks [fmt + lint + typecheck])
@@ -207,22 +208,13 @@ mcp-pat:
 	$(info Minting MCP access token (admin creds from seed: data/ -> proprietary/ -> bundled OSS; mcp profile -> dev fallback)...)
 	$(PYRUN) snapper dev-mint-pat
 
-# Dependencies whose constraint must NOT be auto-bumped by `poetry up --latest`.
-# ccxt pins aiohttp to an EXACT version (4.5.67 -> aiohttp==3.14.1), so raising
-# aiohttp's floor to the newest release makes the solver unsatisfiable:
-#   "because snapper depends on both aiohttp (^3.14.2) and ccxt (^4.5.67),
-#    version solving failed".
-# The floor stays at whatever ccxt currently allows; drop the exclusion once
-# ccxt relaxes its aiohttp pin.
-PY_REFRESH_EXCLUDES := --exclude aiohttp
-
 py-refresh:
 	$(info Upgrading local Poetry tool...)
 	$(PYRUN) pip install --upgrade poetry
 	$(info Clearing Poetry cache...)
 	-$(PYRUN) poetry cache clear --all -n .
 	$(info Bumping Python dependency constraints to latest available versions...)
-	-$(PYRUN) poetry up --latest $(PY_REFRESH_EXCLUDES)
+	$(VENV_PY) scripts/refresh_python_deps.py
 	$(info Refreshing Python lock file within the current constraints...)
 	$(PYRUN) poetry update
 	$(info Python dependencies refreshed!)
@@ -237,6 +229,9 @@ actions-refresh:
 
 refresh: py-refresh ui-refresh mcp-refresh actions-refresh pre-refresh
 	$(info All dependencies refreshed!)
+
+sync-gitlinks:
+	$(VENV_PY) scripts/sync_submodule_gitlinks.py
 
 sync-docker-tool-pins:
 	$(VENV_PY) scripts/update_tool_pins.py
