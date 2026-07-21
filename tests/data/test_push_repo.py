@@ -27,6 +27,10 @@ from sqlalchemy import update as _update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.tokens import TokenManager
 from snapper.data import repository as repository_module
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AlertDelivery
@@ -164,7 +168,6 @@ class TestNotificationDeviceRepo:
 
         active = await repo.list_active_notification_devices_for_user("user-b")
         async with repo.session() as s:
-
             all_rows = (
                 (
                     await s.execute(
@@ -777,7 +780,6 @@ class TestAlertEventRepo:
             )
         anchor = AlertListCursor(timestamp=_ts(2), public_id=public_ids[2])
         async with repo.session() as s:
-
             await s.execute(
                 AlertEvent.__table__.update()
                 .where(AlertEvent.public_id == public_ids[2])
@@ -1056,6 +1058,52 @@ class TestListUsersWithPermission:
         result = await repo.list_users_with_permission("read:system_status")
 
         assert set(result) == {"admin-user", "viewer-user"}
+
+    @pytest.mark.asyncio
+    async def test_downscoped_token_does_not_suppress_role_fan_out(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Notification recipients remain principal-wide when one token is narrow.
+
+        Given: An admin principal holding an access token scoped only to
+            ``READ_MARKET_DATA``,
+        When: Notification fan-out resolves users whose roles grant
+            ``READ_SYSTEM_STATUS``,
+        Then: The admin remains a recipient despite that credential excluding
+            the fan-out permission.
+        """
+        async with repo.session() as s:
+            s.add(
+                User(
+                    public_id="downscoped-admin-user",
+                    username="downscoped-admin",
+                    email="downscoped-admin@example.test",
+                    password_hash="x",
+                    role=UserRole.ADMIN.value,
+                    created_at=_ts(),
+                    session_id="seed",
+                    sequence_id=1,
+                    timestamp=_ts(),
+                    known_to=KNOWN_TO_MAX,
+                )
+            )
+            await s.commit()
+        token_manager = TokenManager()
+        principal = AuthPrincipal(
+            username="downscoped-admin",
+            role=UserRole.ADMIN,
+            user_public_id="downscoped-admin-user",
+        )
+        token_pair = token_manager.create_tokens(
+            principal,
+            permissions=[Permission.READ_MARKET_DATA],
+        )
+        token_claims = token_manager.decode_fresh_token(token_pair.access_token)
+
+        recipients = await repo.list_users_with_permission(Permission.READ_SYSTEM_STATUS.value)
+
+        assert token_claims.permissions == [Permission.READ_MARKET_DATA.value]
+        assert recipients == ["downscoped-admin-user"]
 
     @pytest.mark.asyncio
     async def test_excludes_deactivated_users(self, repo: SQLAlchemyRepository) -> None:
@@ -1855,7 +1903,6 @@ class TestConcurrencyInvariants:
         )
 
         async with repo.session() as s:
-
             rows = (
                 (
                     await s.execute(
@@ -1914,7 +1961,6 @@ class TestConcurrencyInvariants:
         )
 
         async with repo.session() as s:
-
             rows = (
                 (
                     await s.execute(
@@ -1963,7 +2009,6 @@ class TestConcurrencyInvariants:
         )
 
         async with repo.session() as s:
-
             rows = (
                 (
                     await s.execute(

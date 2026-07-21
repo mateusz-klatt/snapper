@@ -37,8 +37,10 @@ from snapper.application.ai_delegates.service import DelegateOperatorBindingErro
 from snapper.application.ai_delegates.service import DelegateProliferationError
 from snapper.application.ai_delegates.service import DelegateService
 from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import hash_token
 from snapper.core.ids import is_uuid7
@@ -130,7 +132,6 @@ class TestCreateDelegate:
         assert payload.delegate.caps.max_daily_notional_usd is not None
         assert abs(payload.delegate.caps.max_daily_notional_usd - 1000.0) < 1e-9
         async with repo.session() as s:
-
             users = (
                 (await s.execute(_sel(User).where(User.public_id == payload.delegate.public_id)))
                 .scalars()
@@ -181,7 +182,6 @@ class TestCreateDelegate:
         body = DelegateCreateBody(label="Null Bot", caps=DelegateCapsBody())
         payload = await service.create_delegate(owner=_make_owner_principal(), body=body)
         async with repo.session() as s:
-
             caps = (
                 (
                     await s.execute(
@@ -213,6 +213,89 @@ class TestCreateDelegate:
         outcome = await manager.verify_token_with_reason(payload.access_token, repo)
         assert outcome.claims is not None
         assert outcome.rejection_reason is None
+
+    @pytest.mark.asyncio
+    async def test_delegate_access_token_uses_requested_narrow_scope(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """The operator-selected delegate grant becomes the PAT's actual scope."""
+        await _seed_owner(repo, public_id="owner-scope", username="owner-scope")
+        manager = _fresh_manager()
+        service = DelegateService(repository=repo, token_manager=manager)
+        body = DelegateCreateBody(
+            label="Research Only",
+            permissions=[Permission.READ_MARKET_DATA, Permission.READ_SIGNALS],
+        )
+
+        payload = await service.create_delegate(
+            owner=_make_owner_principal("owner-scope"),
+            body=body,
+        )
+
+        claims = manager.decode_fresh_token(payload.access_token)
+        assert claims.permissions == [
+            Permission.READ_MARKET_DATA.value,
+            Permission.READ_SIGNALS.value,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_delegate_scope_cannot_exceed_ai_delegate_role(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A known permission outside the delegate role is rejected explicitly."""
+        await _seed_owner(repo, public_id="owner-superset", username="owner-superset")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        body = DelegateCreateBody(
+            label="Invalid Scope",
+            permissions=[Permission.MANAGE_USERS],
+        )
+
+        with pytest.raises(PermissionScopeError, match="manage:users"):
+            await service.create_delegate(
+                owner=_make_owner_principal("owner-superset"),
+                body=body,
+            )
+
+    @pytest.mark.asyncio
+    async def test_create_route_maps_permission_superset_to_422(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The mint API reports an invalid role superset as an operator error."""
+
+        class _InvalidScopeService:
+            async def create_delegate(
+                self, owner: AuthPrincipal, body: DelegateCreateBody
+            ) -> DelegateCreatedPayload:
+                raise PermissionScopeError("Permissions [manage:users] exceed the role grant.")
+
+        monkeypatch.setattr(
+            ai_delegate_routes,
+            "_build_service",
+            lambda _repo: _InvalidScopeService(),
+        )
+        request = _make_rest_request()
+        body = DelegateCreateRequest(
+            session_id="s",
+            sequence_id=1,
+            public_id="p",
+            timestamp=datetime.now(UTC),
+            payload=DelegateCreateBody(
+                label="invalid",
+                permissions=[Permission.MANAGE_USERS],
+            ),
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            await ai_delegate_routes.create_delegate(
+                request=request,
+                body=body,
+                owner=_make_owner_principal(),
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc.value.status_code == 422
+        assert "manage:users" in exc.value.detail
 
 
 class TestDelegateOperatorBinding:
@@ -487,7 +570,6 @@ class TestUpdateCaps:
         )
         assert updated.caps.max_open_orders == 42
         async with repo.session() as s:
-
             all_caps = (
                 (
                     await s.execute(
@@ -768,7 +850,6 @@ class TestDelegateProliferationCap:
                 body=DelegateCreateBody(label=f"f-{i}", caps=DelegateCapsBody()),
             )
         async with repo.session() as s:
-
             await s.execute(
                 _up(User).where(User.public_id == first.delegate.public_id).values(is_active=False)
             )

@@ -153,8 +153,11 @@ async def validate_origin(
     return True
 
 
-def role_allowed_categories(role: UserRole) -> set[str]:
-    """Get topic categories allowed for a user role.
+def role_allowed_categories(
+    role: UserRole,
+    token_permissions: list[str] | None = None,
+) -> set[str]:
+    """Get topic categories allowed for a role-bounded token grant.
 
     Delegates to ``get_role_allowed_categories`` which derives categories
     from ``ROLE_PERMISSIONS`` and ``CATEGORY_PERMISSIONS`` (single source
@@ -162,23 +165,30 @@ def role_allowed_categories(role: UserRole) -> set[str]:
 
     Args:
         role: User role to check.
+        token_permissions: Permission strings carried by the JWT, or
+            ``None`` for the backward-compatible full-role grant.
 
     Returns:
         Set of allowed category names.
     """
-    return get_role_allowed_categories(role)
+    return get_role_allowed_categories(role, token_permissions)
 
 
-def get_allowed_topics_for_role(role: UserRole) -> list[str]:
-    """Get list of topic names allowed for a user role.
+def get_allowed_topics_for_role(
+    role: UserRole,
+    token_permissions: list[str] | None = None,
+) -> list[str]:
+    """Get topic patterns allowed for a role-bounded token grant.
 
     Args:
         role: User role to check.
+        token_permissions: Permission strings carried by the JWT, or
+            ``None`` for the backward-compatible full-role grant.
 
     Returns:
         Sorted list of allowed topic names.
     """
-    allowed_categories = role_allowed_categories(role)
+    allowed_categories = role_allowed_categories(role, token_permissions)
     topics: list[str] = []
     for category in allowed_categories:
         schemas = get_topics_by_category(category)

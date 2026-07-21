@@ -34,6 +34,8 @@ from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.tokens import BLACKLIST_CLEANUP_BATCH_SIZE
 from snapper.auth.tokens import BLACKLIST_GRACE_PERIOD_SECONDS
+from snapper.auth.tokens import PERMISSION_SCOPE_VERSION
+from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import WebSocketTokenRotator
 from snapper.auth.tokens import get_token_manager
@@ -671,8 +673,51 @@ class TestTokenManager:
         )
         assert refresh_payload["sub"] == user.username
         assert refresh_payload["username"] == user.username
-        assert refresh_payload["permissions"] == []
+        assert set(refresh_payload["permissions"]) == {
+            permission.value for permission in ROLE_PERMISSIONS[user.role]
+        }
+        assert refresh_payload["permission_scope_version"] == PERMISSION_SCOPE_VERSION
         assert refresh_payload["jti"].startswith("refresh_")
+
+    def test_create_tokens_enforces_requested_scope_and_role_ceiling(self) -> None:
+        """A requested grant is preserved exactly and cannot exceed the role.
+
+        Given: An operator and a requested read-only permission scope,
+        When: A token pair is minted and a role-external permission is tried,
+        Then: Both JWTs carry only the requested grant and the invalid request
+            is rejected instead of silently dropping the extra permission.
+        """
+        token_manager = TokenManager()
+        user = AuthPrincipal(username="scoped", role=UserRole.OPERATOR)
+
+        token_pair = token_manager.create_tokens(
+            user,
+            permissions=[Permission.READ_MARKET_DATA],
+        )
+        access_claims = token_manager.decode_fresh_token(token_pair.access_token)
+        refresh_claims = token_manager.decode_fresh_token(token_pair.refresh_token)
+
+        assert access_claims.permissions == [Permission.READ_MARKET_DATA.value]
+        assert refresh_claims.permissions == [Permission.READ_MARKET_DATA.value]
+        assert refresh_claims.permission_scope_version == PERMISSION_SCOPE_VERSION
+        with pytest.raises(PermissionScopeError, match="manage:users"):
+            token_manager.create_tokens(
+                user,
+                permissions=[Permission.READ_MARKET_DATA, Permission.MANAGE_USERS],
+            )
+
+    def test_create_tokens_accepts_explicit_empty_scope(self) -> None:
+        """An intentionally empty token grant remains distinguishable from omission."""
+        token_manager = TokenManager()
+        user = AuthPrincipal(username="empty-scope", role=UserRole.ADMIN)
+
+        token_pair = token_manager.create_tokens(user, permissions=[])
+
+        access_claims = token_manager.decode_fresh_token(token_pair.access_token)
+        refresh_claims = token_manager.decode_fresh_token(token_pair.refresh_token)
+        assert access_claims.permissions == []
+        assert refresh_claims.permissions == []
+        assert refresh_claims.permission_scope_version == PERMISSION_SCOPE_VERSION
 
     def test_create_tokens_remember_me(self) -> None:
         """Verify remember_me extends refresh token expiration.
@@ -835,6 +880,36 @@ class TestTokenManager:
         )
         assert token_manager.verify_token(malformed_token) is None
 
+    def test_verify_token_accepts_legacy_token_without_permissions_claim(self) -> None:
+        """A legacy access token with no permissions claim remains decodable.
+
+        Given: A correctly signed access token minted before the claim existed,
+        When: The token manager verifies it,
+        Then: Claims decode with ``permissions=None`` so authorization can use
+            the backward-compatible full-role fallback.
+        """
+        token_manager = TokenManager()
+        now = datetime.now(UTC)
+        payload: dict[str, str | int] = {
+            "sub": "legacy-user",
+            "username": "legacy-user",
+            "role": UserRole.VIEWER.value,
+            "sid": "legacy-session",
+            "exp": int((now + timedelta(hours=1)).timestamp()),
+            "iat": int(now.timestamp()),
+            "jti": "legacy-jti",
+        }
+        token = jwt.encode(
+            payload,
+            token_manager.settings.auth_secret_key,
+            algorithm=token_manager.settings.auth_algorithm,
+        )
+
+        claims = token_manager.verify_token(token)
+
+        assert claims is not None
+        assert claims.permissions is None
+
     def test_verify_token_expired(self) -> None:
         """Verify verify_token returns None for expired token.
 
@@ -945,6 +1020,60 @@ class TestTokenManager:
         assert new_access_data.sub == user.username
         old_refresh_result = token_manager.verify_token(initial_tokens.refresh_token)
         assert old_refresh_result is not None
+
+    def test_refresh_tokens_preserves_narrow_and_empty_scopes(self) -> None:
+        """Refresh rotation never restores permissions omitted by the token grant."""
+        token_manager = TokenManager()
+        user = AuthPrincipal(username="scoped-refresh", role=UserRole.ADMIN)
+
+        narrow_pair = token_manager.create_tokens(
+            user,
+            permissions=[Permission.READ_MARKET_DATA],
+        )
+        empty_pair = token_manager.create_tokens(user, permissions=[])
+        refreshed_narrow = token_manager.refresh_tokens(narrow_pair.refresh_token)
+        refreshed_empty = token_manager.refresh_tokens(empty_pair.refresh_token)
+
+        assert refreshed_narrow is not None
+        assert refreshed_empty is not None
+        narrow_claims = token_manager.decode_fresh_token(refreshed_narrow.access_token)
+        empty_claims = token_manager.decode_fresh_token(refreshed_empty.access_token)
+        assert narrow_claims.permissions == [Permission.READ_MARKET_DATA.value]
+        assert empty_claims.permissions == []
+
+    def test_refresh_tokens_legacy_empty_claim_falls_back_to_full_role(self) -> None:
+        """An in-flight legacy refresh token retains its historical semantics.
+
+        Given: A pre-version refresh JWT whose permissions list is empty,
+        When: It rotates after scoped-token support is deployed,
+        Then: The successor receives the complete role grant because the old
+            empty list did not represent an intentional empty access scope.
+        """
+        token_manager = TokenManager()
+        now = datetime.now(UTC)
+        payload: dict[str, str | int | list[str]] = {
+            "sub": "legacy-refresh-user",
+            "username": "legacy-refresh-user",
+            "role": UserRole.OPERATOR.value,
+            "permissions": [],
+            "sid": "legacy-refresh-session",
+            "exp": int((now + timedelta(hours=1)).timestamp()),
+            "iat": int(now.timestamp()),
+            "jti": "refresh_legacy-jti",
+        }
+        refresh_token = jwt.encode(
+            payload,
+            token_manager.settings.auth_secret_key,
+            algorithm=token_manager.settings.auth_algorithm,
+        )
+
+        successor = token_manager.refresh_tokens(refresh_token)
+
+        assert successor is not None
+        successor_claims = token_manager.decode_fresh_token(successor.access_token)
+        assert set(successor_claims.permissions or []) == {
+            permission.value for permission in ROLE_PERMISSIONS[UserRole.OPERATOR]
+        }
 
     def test_refresh_tokens_invalid_token(self) -> None:
         """Verify refresh_tokens returns None for invalid token.
@@ -1499,6 +1628,7 @@ class TestGetCurrentUser:
             assert result is not None
             assert result.username == "testuser"
             assert result.role == UserRole.OPERATOR
+            assert result.permissions == ["read:market_data", "create:orders"]
             assert request.state.user == result
             assert request.state.token_data == token_data
             mock_token_manager.verify_token_with_db.assert_awaited_once_with("valid_token", repo)
@@ -1714,6 +1844,38 @@ class TestRequirePermission:
             assert exc_info.value.status_code == 403
             assert "Permission 'manage:processes' required" in exc_info.value.detail
 
+    async def test_require_permission_enforces_narrow_token_scope(self) -> None:
+        """A role permission omitted from the token grant is denied.
+
+        Given: An operator token scoped to market-data reads only,
+        When: A REST dependency requires order creation,
+        Then: The role ceiling does not restore the omitted permission.
+        """
+        user = AuthPrincipal(
+            username="scoped-operator",
+            role=UserRole.OPERATOR,
+            permissions=[Permission.READ_MARKET_DATA.value],
+        )
+        permission_checker = require_permission(Permission.CREATE_ORDERS)
+
+        with pytest.raises(HTTPException) as exc_info:
+            permission_checker(user)
+
+        assert exc_info.value.status_code == 403
+
+    async def test_require_permission_legacy_absent_claim_uses_full_role(self) -> None:
+        """An absent legacy claim retains the role's complete permission grant."""
+        user = AuthPrincipal(
+            username="legacy-operator",
+            role=UserRole.OPERATOR,
+            permissions=None,
+        )
+        permission_checker = require_permission(Permission.CREATE_ORDERS)
+
+        result = permission_checker(user)
+
+        assert result == user
+
 
 class TestResourcePermissions:
     """Tests for RESOURCE_PERMISSIONS mapping."""
@@ -1910,6 +2072,34 @@ class TestRequireRole:
             role_checker(user)
         assert exc_info.value.status_code == 403
         assert "Role 'admin' or higher required" in exc_info.value.detail
+
+    async def test_require_role_with_permission_enforces_token_scope(self) -> None:
+        """A role-qualified request is still denied when its scope omits the action."""
+        user = AuthPrincipal(
+            username="scoped-operator",
+            role=UserRole.OPERATOR,
+            permissions=[Permission.READ_MARKET_DATA.value],
+        )
+        role_checker = require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)
+
+        with pytest.raises(HTTPException) as exc_info:
+            role_checker(user)
+
+        assert exc_info.value.status_code == 403
+        assert "Permission 'manage:processes' required" in exc_info.value.detail
+
+    async def test_require_role_with_permission_accepts_retained_grant(self) -> None:
+        """A token retaining the role-gated action permission is admitted."""
+        user = AuthPrincipal(
+            username="scoped-operator",
+            role=UserRole.OPERATOR,
+            permissions=[Permission.MANAGE_PROCESSES.value],
+        )
+        role_checker = require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)
+
+        result = role_checker(user)
+
+        assert result == user
 
 
 class TestCSRFManager:

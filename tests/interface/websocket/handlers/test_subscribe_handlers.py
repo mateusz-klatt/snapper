@@ -20,11 +20,17 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 def _principal(
-    role: UserRole, active_wallet_public_id: str | None = None, username: str = "test"
+    role: UserRole,
+    active_wallet_public_id: str | None = None,
+    username: str = "test",
+    permissions: list[str] | None = None,
 ) -> AuthPrincipal:
     """Build a minimal AuthPrincipal for subscribe-handler tests."""
     return AuthPrincipal(
-        username=username, role=role, active_wallet_public_id=active_wallet_public_id
+        username=username,
+        role=role,
+        active_wallet_public_id=active_wallet_public_id,
+        permissions=permissions,
     )
 
 
@@ -144,12 +150,15 @@ class TestHandleSubscribeEdgeCases:
             sequence_id=0,
             topics=[valid_topic],
         )
-        with patch(
-            "snapper.interface.websocket.handlers.subscribe.get_allowed_topics_for_role",
-            return_value=[valid_topic],
-        ), patch(
-            "snapper.interface.websocket.handlers.subscribe.filter_topics",
-            return_value=([valid_topic], []),
+        with (
+            patch(
+                "snapper.interface.websocket.handlers.subscribe.get_allowed_topics_for_role",
+                return_value=[valid_topic],
+            ),
+            patch(
+                "snapper.interface.websocket.handlers.subscribe.filter_topics",
+                return_value=([valid_topic], []),
+            ),
         ):
             await handle_subscribe(
                 mock_websocket, message, mock_manager, _principal(UserRole.ADMIN)
@@ -232,6 +241,39 @@ class TestAdminCategorySubscription:
         assert response["type"] == "subscription_success"
         assert response["status"] == "denied"
         assert "admin.users" in response["denied_topics"]
+
+    @pytest.mark.asyncio
+    async def test_operator_token_scope_denies_role_allowed_market_category(
+        self, mock_websocket: AsyncMock, mock_manager: MagicMock
+    ) -> None:
+        """A token grant narrower than OPERATOR denies an excluded category.
+
+        Given: An OPERATOR token carrying only ``READ_SYSTEM_STATUS``,
+        When: It requests both the market root and a concrete market topic,
+        Then: Both subscriptions are denied despite the role granting market reads.
+        """
+        topics = ["market.", "market.kraken.BTC-USD.candles.1m"]
+        message = WSSubscribeRequest(
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=topics,
+        )
+        principal = _principal(
+            UserRole.OPERATOR,
+            permissions=["read:system_status"],
+        )
+
+        await handle_subscribe(mock_websocket, message, mock_manager, principal)
+
+        mock_websocket.send_text.assert_called_once()
+        response = json.loads(mock_websocket.send_text.call_args[0][0])
+        assert response["status"] == "denied"
+        assert response["topics"] == []
+        assert response["denied_topics"] == topics
+        mock_manager.subscribe_client.assert_not_called()
+        mock_manager.zmq_bridge.add_subscription.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_admin_subscribes_to_admin_root_pattern(

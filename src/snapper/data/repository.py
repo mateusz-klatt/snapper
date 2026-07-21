@@ -5090,6 +5090,12 @@ class Repository(ABC):
         "admin" (adding / removing roles remains a pure permissions
         change, no sidecar re-plumbing).
 
+        This fan-out is deliberately principal-wide and role-derived.
+        JWT permission scope governs requests made with one credential;
+        it must not suppress notifications for the same principal merely
+        because one concurrently held token is downscoped. Recipient
+        selection therefore never consults token claims.
+
         Args:
             permission: ``snapper.auth.domain.permissions.Permission``
                 value (string form — ``Permission.READ_SYSTEM_STATUS``
@@ -21976,7 +21982,12 @@ class SQLAlchemyRepository(Repository):
         Role → permissions mapping is read from
         ``snapper.auth.domain.permissions.ROLE_PERMISSIONS``; the
         matched role names are then used to filter the ``users`` SCD2
-        table on its ``role`` column. "Active" means BOTH the current
+        table on its ``role`` column. This is intentionally different
+        from request authorization: token scope limits actions attempted
+        through one credential, while notification fan-out applies to the
+        principal across every concurrently held credential. A downscoped
+        token therefore cannot suppress notifications, and this lookup
+        never consults token claims. "Active" means BOTH the current
         SCD2 row (``known_to`` sentinel) AND ``is_active`` TRUE — a
         deactivated user keeps a current row but must not receive
         alert fan-out (they can no longer log in to act on it, and

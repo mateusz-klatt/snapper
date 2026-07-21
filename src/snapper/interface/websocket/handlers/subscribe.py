@@ -70,8 +70,7 @@ def _invalid_registry_root_error(topic: str) -> str | None:
         return None
     registry_roots = ", ".join(sorted(REGISTRY_ROOTS))
     return (
-        f"Prefix '{topic}' is not a registry root. "
-        f"Allowed prefix subscriptions: {registry_roots}"
+        f"Prefix '{topic}' is not a registry root. Allowed prefix subscriptions: {registry_roots}"
     )
 
 
@@ -267,9 +266,9 @@ async def handle_subscribe(
     )
     if ai_delegate_denied:
         wallet_denied = [*wallet_denied, *ai_delegate_denied]
-    allowed_topics = get_allowed_topics_for_role(role)
+    allowed_topics = get_allowed_topics_for_role(role, principal.permissions)
     allowed_set = set(allowed_topics)
-    allowed_categories = role_allowed_categories(role)
+    allowed_categories = role_allowed_categories(role, principal.permissions)
     allowed, denied = filter_topics(topics, allowed_set, allowed_categories)
     if wallet_denied:
         denied = [*denied, *wallet_denied]
@@ -396,7 +395,10 @@ async def handle_unsubscribe(
 
 
 async def handle_get_subscriptions(
-    websocket: WebSocket, manager: WebSocketConnectionManager, role: UserRole
+    websocket: WebSocket,
+    manager: WebSocketConnectionManager,
+    role: UserRole,
+    token_permissions: list[str] | None = None,
 ) -> None:
     """Handle get subscriptions request.
 
@@ -406,8 +408,10 @@ async def handle_get_subscriptions(
         websocket: The WebSocket connection.
         manager: WebSocket connection manager.
         role: User's role for available topics.
+        token_permissions: Permission strings carried by the JWT, or
+            ``None`` for the backward-compatible full-role grant.
     """
-    allowed_topics = get_allowed_topics_for_role(role)
+    allowed_topics = get_allowed_topics_for_role(role, token_permissions)
     response = WSSubscriptionsListResponse(
         subscriptions=list(manager.get_client_subscriptions(websocket)),
         available_topics=allowed_topics,

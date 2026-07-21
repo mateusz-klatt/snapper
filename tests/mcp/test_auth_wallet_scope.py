@@ -30,7 +30,7 @@ def _claims(
         sub="u1",
         username="u1",
         role=role,
-        permissions=[],
+        permissions=None,
         exp=now + 3600,
         iat=now,
         jti="jti",

@@ -152,19 +152,55 @@ one-line change, and ``get_role_allowed_categories`` already handles it.
 """
 
 
-def get_role_allowed_categories(role: UserRole) -> set[str]:
-    """Derive allowed WS topic categories from ROLE_PERMISSIONS.
+def get_effective_permissions(
+    role: UserRole,
+    token_permissions: list[str] | None = None,
+) -> set[Permission]:
+    """Return the permission grant enforced for one authenticated token.
 
-    A role is allowed a category when it holds every permission
-    listed in ``CATEGORY_PERMISSIONS`` for that category.
+    The role mapping is always the authorization ceiling. An absent token
+    permissions claim preserves the historical full-role grant for older
+    tokens, while a supplied claim can only narrow that role grant.
+
+    Args:
+        role: Authenticated principal's role.
+        token_permissions: Permission strings carried by the JWT, or
+            ``None`` when the claim was absent.
+
+    Returns:
+        Role permissions intersected with the supplied token grant, or the
+        full role set when the claim was absent.
+    """
+    role_permissions = ROLE_PERMISSIONS.get(role, set())
+    if token_permissions is None:
+        return set(role_permissions)
+    token_permission_values = set(token_permissions)
+    return {
+        permission for permission in role_permissions if permission.value in token_permission_values
+    }
+
+
+def get_role_allowed_categories(
+    role: UserRole,
+    token_permissions: list[str] | None = None,
+) -> set[str]:
+    """Derive allowed WS topic categories from effective permissions.
+
+    A token is allowed a category when its role-bounded effective grant
+    holds every permission listed in ``CATEGORY_PERMISSIONS`` for that
+    category.
 
     Args:
         role: User role to check.
+        token_permissions: Permission strings carried by the JWT, or
+            ``None`` for the backward-compatible full-role grant.
 
     Returns:
         Set of allowed WS topic category names.
     """
-    role_perms = ROLE_PERMISSIONS.get(role, set())
+    effective_permissions = get_effective_permissions(role, token_permissions)
     return {
-        category for category, required in CATEGORY_PERMISSIONS.items() if required <= role_perms
+        category
+        for category, required in CATEGORY_PERMISSIONS.items()
+        if required <= effective_permissions
     }

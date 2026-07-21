@@ -12,6 +12,7 @@ import json as json_mod
 import secrets
 import uuid
 from collections.abc import Callable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -30,6 +31,8 @@ from snapper.auth.deactivation_fallback import run_deactivation_fallback_loop
 from snapper.auth.deactivation_fallback import start_deactivation_fallback_task
 from snapper.auth.deactivation_fallback import stop_deactivation_fallback_task
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.schemas.tokens import TokenPair
@@ -152,6 +155,46 @@ because a ten-year default lifetime is excessive — revocation works
 but a ten-year default is a liability for tokens that may live in CI
 secret stores or IDE config.
 """
+
+PERMISSION_SCOPE_VERSION: Final[int] = 1
+"""Version marker for refresh tokens carrying an intentional access scope."""
+
+
+class PermissionScopeError(ValueError):
+    """Raised when a requested token scope exceeds its role ceiling."""
+
+
+def _resolve_permission_scope(
+    role: UserRole,
+    requested_permissions: Iterable[Permission | str] | None,
+) -> list[Permission]:
+    """Validate and resolve the permission grant for a newly minted token.
+
+    Args:
+        role: Role whose permissions form the immutable grant ceiling.
+        requested_permissions: Optional narrower permission selection. An
+            omitted selection resolves to the role's complete grant.
+
+    Returns:
+        Deduplicated requested permissions, or the full role grant when the
+        selection is omitted.
+
+    Raises:
+        PermissionScopeError: If the selection contains a permission the
+            role does not hold.
+        ValueError: If a permission string is not a known permission value.
+    """
+    role_permissions = ROLE_PERMISSIONS.get(role, set())
+    if requested_permissions is None:
+        return list(role_permissions)
+    requested = list(dict.fromkeys(Permission(value) for value in requested_permissions))
+    invalid = set(requested) - role_permissions
+    if invalid:
+        values = ", ".join(sorted(permission.value for permission in invalid))
+        raise PermissionScopeError(
+            f"Permissions [{values}] are not granted to role '{role.value}'."
+        )
+    return requested
 
 
 @dataclass(slots=True, frozen=True)
@@ -290,6 +333,7 @@ class TokenManager:
         remember_me: bool = False,
         *,
         session_id: str | None = None,
+        permissions: Iterable[Permission | str] | None = None,
     ) -> TokenPair:
         """Create access and refresh token pair.
 
@@ -297,10 +341,15 @@ class TokenManager:
             user: User profile to create tokens for.
             remember_me: If True, extends refresh token lifetime.
             session_id: Optional session ID for token rotation.
+            permissions: Optional access-token grant. When omitted, the
+                complete role grant is used. A supplied grant must be a
+                subset of the role grant.
 
         Returns:
             TokenPair containing access and refresh tokens.
         """
+        permission_scope = _resolve_permission_scope(user.role, permissions)
+        permission_values = [permission.value for permission in permission_scope]
         now = datetime.now(UTC)
         issued_at = int(now.timestamp()) - 1
         jti = str(uuid.uuid4())
@@ -310,7 +359,8 @@ class TokenManager:
             sub=user.username,
             username=user.username,
             role=user.role,
-            permissions=[p.value for p in ROLE_PERMISSIONS[user.role]],
+            permissions=permission_values,
+            permission_scope_version=PERMISSION_SCOPE_VERSION,
             exp=int((now + access_token_expires).timestamp()),
             iat=issued_at,
             jti=jti,
@@ -330,7 +380,8 @@ class TokenManager:
             sub=user.username,
             username=user.username,
             role=user.role,
-            permissions=[],
+            permissions=permission_values,
+            permission_scope_version=PERMISSION_SCOPE_VERSION,
             exp=int((now + refresh_token_expires).timestamp()),
             iat=issued_at,
             jti=f"refresh_{jti}",
@@ -363,6 +414,7 @@ class TokenManager:
         issued_at: datetime,
         *,
         session_id: str | None = None,
+        permissions: Iterable[Permission | str] | None = None,
     ) -> LongLivedTokenResult:
         """Mint a long-lived (PAT-style) AI delegate access token.
 
@@ -383,19 +435,22 @@ class TokenManager:
 
         Args:
             user: The delegate principal the token is issued to.
-                ``permissions`` is populated from the role map
-                identically to :meth:`create_tokens`.
             issued_at: UTC boundary time supplied by the caller.
                 Drives the ``iat`` claim and the ``exp`` derivation.
             session_id: Optional session identifier to carry through
                 to the ``sid`` claim; defaults to a fresh uuid4 when
                 absent.
+            permissions: Optional access-token grant. When omitted, the
+                complete delegate role grant is used. A supplied grant must
+                be a subset of that role grant.
 
         Returns:
             :class:`LongLivedTokenResult` with the JWT, the UTC
             ``expires_at`` datetime, the JTI, and the lifetime in
             seconds (for REST envelope ``expires_in``).
         """
+        permission_scope = _resolve_permission_scope(user.role, permissions)
+        permission_values = [permission.value for permission in permission_scope]
         jti = str(uuid.uuid4())
         session_identifier = session_id or str(uuid.uuid4())
         expires_at = issued_at + timedelta(days=LONG_LIVED_TOKEN_EXPIRE_DAYS)
@@ -405,7 +460,8 @@ class TokenManager:
             sub=user.username,
             username=user.username,
             role=user.role,
-            permissions=[p.value for p in ROLE_PERMISSIONS[user.role]],
+            permissions=permission_values,
+            permission_scope_version=PERMISSION_SCOPE_VERSION,
             exp=exp,
             iat=iat,
             jti=jti,
@@ -1129,8 +1185,16 @@ class TokenManager:
             operator_public_ids=token_data.operator_public_ids,
             primary_operator_public_id=token_data.primary_operator_public_id,
             active_wallet_public_id=token_data.active_wallet_public_id,
+            permissions=token_data.permissions,
         )
-        new_tokens = self.create_tokens(principal, session_id=token_data.sid)
+        permissions: Iterable[Permission | str] | None = None
+        if token_data.permission_scope_version is not None:
+            permissions = token_data.permissions or []
+        new_tokens = self.create_tokens(
+            principal,
+            session_id=token_data.sid,
+            permissions=permissions,
+        )
         logger.info(f"Refreshed tokens for user {principal.username}")
         return new_tokens
 

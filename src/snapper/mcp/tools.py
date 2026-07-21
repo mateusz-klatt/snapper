@@ -59,8 +59,8 @@ from snapper.application.portfolio.reconciliation_view import build_portfolio_re
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
-from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import get_effective_permissions
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -201,25 +201,24 @@ def _is_unique_constraint_violation(exc: IntegrityError) -> bool:
 def _require_permission(claims: TokenClaims, permission: Permission) -> None:
     """Raise :class:`PermissionError` if the caller lacks ``permission``.
 
-    Tools call this before performing the action. The role→permission
-    mapping is the same one used by :func:`require_permission` on REST
-    routes, so MCP-initiated and REST-initiated paths apply the same
-    permission matrix.
+    Tools call this before performing the action. Effective permissions
+    intersect the role ceiling with the token's actual grant, matching
+    :func:`require_permission` on REST routes.
 
     Args:
         claims: Verified :class:`TokenClaims` of the MCP caller.
         permission: Required permission for the tool action.
 
     Raises:
-        PermissionError: when the caller's role does not include the
-            required permission. Caught by FastMCP and returned to the
-            MCP client as a tool-error response.
+        PermissionError: when the caller's effective token scope does
+            not include the required permission. Caught by FastMCP and
+            returned to the MCP client as a tool-error response.
     """
-    role_permissions = ROLE_PERMISSIONS.get(claims.role, set())
-    if permission not in role_permissions:
+    effective_permissions = get_effective_permissions(claims.role, claims.permissions)
+    if permission not in effective_permissions:
         raise PermissionError(
             f"Tool requires permission '{permission.value}' which is not "
-            f"granted to role '{claims.role.value}'."
+            f"granted to this '{claims.role.value}' token."
         )
 
 
@@ -278,22 +277,23 @@ def _envelope_for_permission_check(
     """Envelope wrapper for the permission check.
 
     Returns the structured ``permission_denied`` envelope when the
-    caller's role does not include ``permission``; ``None`` when the
-    check passes and the caller proceeds with the tool body.
+    caller's effective token scope does not include ``permission``;
+    ``None`` when the check passes and the caller proceeds with the
+    tool body.
     :func:`_require_permission` is the raising-path helper used by the
     original tools (``list_instruments``, ``submit_manual_order``,
     ``submit_ai_review_decision``); envelope-first tools wrap the
     check here at their entry point so clients receive the canonical
     envelope.
     """
-    role_permissions = ROLE_PERMISSIONS.get(claims.role, set())
-    if permission not in role_permissions:
+    effective_permissions = get_effective_permissions(claims.role, claims.permissions)
+    if permission not in effective_permissions:
         return to_call_tool_result(
             success=False,
             error_code="permission_denied",
             message=(
                 f"Tool requires permission '{permission.value}' which is not "
-                f"granted to role '{claims.role.value}'."
+                f"granted to this '{claims.role.value}' token."
             ),
             details={},
         )
@@ -972,6 +972,7 @@ def _build_cancel_principal(claims: TokenClaims) -> AuthPrincipal:
         user_public_id=claims.user_public_id or claims.username,
         operator_public_ids=list(claims.operator_public_ids),
         primary_operator_public_id=claims.primary_operator_public_id or "",
+        permissions=claims.permissions,
     )
 
 
@@ -1500,8 +1501,7 @@ async def _cancel_order_tool(
             success=False,
             error_code="service_unavailable",
             message=(
-                "Caps enforcer not yet initialized; MCP cancel "
-                "dispatched before lifespan startup."
+                "Caps enforcer not yet initialized; MCP cancel dispatched before lifespan startup."
             ),
             details=sanitize_output({}),
         )

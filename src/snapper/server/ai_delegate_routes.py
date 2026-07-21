@@ -2,7 +2,8 @@
 
 Mounted at ``/api/ai-delegates``. Only operators (OPERATOR /
 ADMIN) can create + manage delegates; the role hierarchy
-gates access via ``require_role``. Delegates themselves are
+and ``MANAGE_PROCESSES`` effective permission gate access via
+``require_role``. Delegates themselves are
 AI_DELEGATE users and cannot manage other delegates — the
 ``role_hierarchy`` dict in ``require_role`` puts AI_DELEGATE
 below VIEWER.
@@ -45,8 +46,10 @@ from snapper.application.ai_delegates.service import DelegateService
 from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
 from snapper.auth.dependencies import require_role
 from snapper.auth.dependencies import validate_csrf_token
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
 from snapper.data.repository import Repository
@@ -161,7 +164,10 @@ def _build_service(repository: Repository) -> DelegateService:
 async def create_delegate(
     request: Request,
     body: Annotated[DelegateCreateRequest, Depends(json_body(DelegateCreateRequest))],
-    owner: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
+    owner: Annotated[
+        AuthPrincipal,
+        Depends(require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)),
+    ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
@@ -206,6 +212,11 @@ async def create_delegate(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
+    except PermissionScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
     except DelegateProliferationError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -229,7 +240,10 @@ async def create_delegate(
 @router.get("")
 async def list_delegates(
     request: Request,
-    owner: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
+    owner: Annotated[
+        AuthPrincipal,
+        Depends(require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)),
+    ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
 ) -> DelegateListResponse:
@@ -260,7 +274,10 @@ async def list_delegates(
 async def get_delegate(
     request: Request,
     delegate_public_id: str,
-    owner: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
+    owner: Annotated[
+        AuthPrincipal,
+        Depends(require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)),
+    ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
 ) -> DelegateResponse:
@@ -302,7 +319,10 @@ async def update_delegate_caps(
     request: Request,
     delegate_public_id: str,
     body: Annotated[DelegateCapsUpdateRequest, Depends(json_body(DelegateCapsUpdateRequest))],
-    owner: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
+    owner: Annotated[
+        AuthPrincipal,
+        Depends(require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)),
+    ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
@@ -345,7 +365,10 @@ async def deactivate_delegate(
         DelegateDeactivateRequest | None,
         Depends(optional_json_body(DelegateDeactivateRequest)),
     ],
-    owner: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
+    owner: Annotated[
+        AuthPrincipal,
+        Depends(require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)),
+    ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,

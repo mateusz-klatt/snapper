@@ -62,7 +62,7 @@ def _valid_claims() -> TokenClaims:
         sub="user-contract",
         username="delegate-contract",
         role=UserRole.AI_DELEGATE,
-        permissions=[],
+        permissions=None,
         exp=now + 3600,
         iat=now,
         jti="jti-contract",

@@ -53,7 +53,7 @@ def _make_claims(
         sub=user_public_id,
         username=username,
         role=role,
-        permissions=[],
+        permissions=None,
         exp=now + 3600,
         iat=now,
         jti="jti",

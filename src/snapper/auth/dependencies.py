@@ -18,8 +18,8 @@ from fastapi import Request
 from fastapi import status
 
 from snapper.application.services.settings import SettingsService
-from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import get_effective_permissions
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -114,6 +114,7 @@ async def get_current_user(
         operator_public_ids=token_data.operator_public_ids,
         primary_operator_public_id=token_data.primary_operator_public_id,
         active_wallet_public_id=token_data.active_wallet_public_id,
+        permissions=token_data.permissions,
         delegate_public_id=delegate_public_id,
     )
     request.state.user = principal
@@ -157,7 +158,10 @@ def require_permission(permission: Permission) -> Any:
     def permission_checker(
         current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
     ) -> AuthPrincipal:
-        user_permissions = ROLE_PERMISSIONS.get(current_user.role, set())
+        user_permissions = get_effective_permissions(
+            current_user.role,
+            current_user.permissions,
+        )
         if permission not in user_permissions:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -168,11 +172,13 @@ def require_permission(permission: Permission) -> Any:
     return permission_checker
 
 
-def require_role(role: UserRole) -> Any:
-    """Create dependency that requires minimum role level.
+def require_role(role: UserRole, permission: Permission | None = None) -> Any:
+    """Create dependency requiring a role and optional effective permission.
 
     Args:
         role: Minimum required role.
+        permission: Optional permission the presented token must retain in
+            addition to satisfying the identity-role hierarchy.
 
     Returns:
         Dependency function that validates role hierarchy.
@@ -191,6 +197,14 @@ def require_role(role: UserRole) -> Any:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Role '{role.value}' or higher required",
+            )
+        if permission is not None and permission not in get_effective_permissions(
+            current_user.role,
+            current_user.permissions,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission '{permission.value}' required",
             )
         return current_user
 

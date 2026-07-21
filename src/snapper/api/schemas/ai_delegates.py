@@ -23,6 +23,7 @@ from snapper.api.schemas.base import PayloadListResponse
 from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictBody
+from snapper.auth.domain.permissions import Permission
 from snapper.core.json_types import JsonObject
 
 
@@ -83,6 +84,9 @@ class DelegateCreateBody(StrictBody):
             must be in the caller's claim set. ``None`` defers
             to the caller's primary operator so simple callers
             don't need to know their membership set.
+        permissions: Optional narrower permission grant for the delegate
+            access token. Omission retains the complete AI delegate role
+            grant.
     """
 
     label: str = Field(..., min_length=1, max_length=48, description="Delegate label")
@@ -94,6 +98,12 @@ class DelegateCreateBody(StrictBody):
         description=(
             "Operator the delegate is bound to — must be in the caller's claim set. "
             "Null defers to the caller's primary operator."
+        ),
+    )
+    permissions: list[Permission] | None = Field(
+        None,
+        description=(
+            "Optional token permission scope. Every value must be granted to the AI delegate role."
         ),
     )
 

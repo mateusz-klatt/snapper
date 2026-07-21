@@ -24,8 +24,8 @@ from snapper.auth.dependencies import get_csrf_manager
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
-from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import get_effective_permissions
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.requests import AdminResetPasswordRequest
@@ -46,6 +46,7 @@ from snapper.auth.schemas.responses import UserResponse
 from snapper.auth.schemas.responses import WsTokenData
 from snapper.auth.schemas.responses import WsTokenResponse
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
 from snapper.data.repository import Repository
@@ -202,7 +203,16 @@ async def login(
     clear_failed_login_attempts(request, login_data.payload.username)
     token_manager = get_token_manager()
     principal = await user_service.build_auth_principal(user)
-    token_pair = token_manager.create_tokens(principal)
+    try:
+        token_pair = token_manager.create_tokens(
+            principal,
+            permissions=login_data.payload.permissions,
+        )
+    except PermissionScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
     await token_manager.persist_tokens(token_pair, principal.user_public_id, repo)
     csrf_manager = get_csrf_manager()
     csrf_token = csrf_manager.generate_token()
@@ -401,9 +411,16 @@ async def refresh_token(
     )
     payload = RefreshTokenPayload() if body is None else body.payload
     principal = await _apply_wallet_hint(payload, principal, repo)
+    refresh_permissions: set[Permission] | None = None
+    if token_data.permission_scope_version is not None:
+        refresh_permissions = get_effective_permissions(
+            principal.role,
+            token_data.permissions or [],
+        )
     new_token_pair = token_manager.create_tokens(
         principal,
         session_id=token_data.sid,
+        permissions=refresh_permissions,
     )
     rotated_pair = await token_manager.rotate_tokens(
         new_token_pair,
@@ -943,7 +960,10 @@ async def change_user_password(
     """
     user_service = get_user_service()
     if user_id != current_user.username:
-        user_permissions = ROLE_PERMISSIONS.get(current_user.role, set())
+        user_permissions = get_effective_permissions(
+            current_user.role,
+            current_user.permissions,
+        )
         if Permission.MANAGE_USERS not in user_permissions:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

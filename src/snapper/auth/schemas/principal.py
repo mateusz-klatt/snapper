@@ -37,6 +37,9 @@ class AuthPrincipal(StrictBody):
     - ``active_wallet_public_id`` is the last-selected wallet (UI state)
       passed back through token claims so a refresh preserves the user's
       working context. ``None`` when the user has not yet picked a wallet.
+    - ``permissions`` is the permission grant carried by the presented
+      access token. ``None`` identifies a legacy token with no claim and
+      therefore falls back to the full role grant at authorization time.
 
     The wallet-level scope set is intentionally NOT stored on the
     principal — it is derived on demand from
@@ -52,6 +55,8 @@ class AuthPrincipal(StrictBody):
         operator_public_ids: Operators this user may act AS.
         primary_operator_public_id: Default operator at login.
         active_wallet_public_id: Last-selected wallet UI state.
+        permissions: Permission strings granted by the presented token,
+            or ``None`` when the legacy claim is absent.
         delegate_public_id: For ``role=AI_DELEGATE`` principals only,
             the ``ai_delegates.public_id`` UUID7 (operational
             side-table FK to ``users.public_id``). Used by reconnect
@@ -73,4 +78,5 @@ class AuthPrincipal(StrictBody):
     operator_public_ids: list[str] = Field(default=[])
     primary_operator_public_id: str = ""
     active_wallet_public_id: str | None = None
+    permissions: list[str] | None = None
     delegate_public_id: str | None = None

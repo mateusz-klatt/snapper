@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 from collections.abc import Generator
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -54,6 +55,7 @@ from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.schemas.websocket import WebSocketAuthMessage
 from snapper.auth.schemas.websocket import WebSocketAuthResponse
+from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
 from snapper.auth.websocket_auth import AuthConnectionStats
@@ -2152,7 +2154,12 @@ async def test_ws_endpoint_success_and_reauth_flow(
     endpoint, auth_stub, token_stub = endpoint_factory(manager)
     now_exp = int(datetime.now(UTC).timestamp())
     auth_stub.session_result = (
-        SimpleNamespace(id="user-7", role=UserRole.ADMIN, username="u7"),
+        SimpleNamespace(
+            id="user-7",
+            role=UserRole.ADMIN,
+            username="u7",
+            permissions=None,
+        ),
         SimpleNamespace(sid="sid-7"),
     )
     auth_stub.expiration = datetime_from_timestamp(now_exp)
@@ -3267,6 +3274,8 @@ class StubTokenManager:
         self.invalidated_tokens: list[str] = []
         self.blacklisted: list[str] = []
         self.last_created_user: AuthPrincipal | None = None
+        self.last_permissions: set[Permission | str] | None = None
+        self.create_tokens_error: PermissionScopeError | None = None
         self.last_verified_token: str | None = None
         self.last_session_id: str | None = None
         self.persisted_pairs: list[tuple[TokenPair, str]] = []
@@ -3278,10 +3287,14 @@ class StubTokenManager:
         remember_me: bool = False,
         *,
         session_id: str | None = None,
+        permissions: Iterable[Permission | str] | None = None,
     ) -> TokenPair:
         """Create access and refresh tokens."""
+        if self.create_tokens_error is not None:
+            raise self.create_tokens_error
         self.last_created_user = user
         self.last_session_id = session_id
+        self.last_permissions = None if permissions is None else set(permissions)
         return self.create_tokens_response
 
     async def persist_tokens(
@@ -3539,6 +3552,79 @@ def test_login_success_sets_cookies(
     assert token_manager.rotated_old_jtis == []
 
 
+def test_login_forwards_operator_selected_permission_scope(
+    auth_app: AuthAppFixture,
+) -> None:
+    """Login exposes an optional permission selector for same-principal tokens."""
+    client, user_service, token_manager, _csrf_manager = auth_app
+    user_service.authenticated_user = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="operator-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="operator",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+
+    response = client.post(
+        "/auth/login?return_tokens=true",
+        json={
+            "type": "login_request",
+            "session_id": "",
+            "sequence_id": 0,
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "payload": {
+                "username": "operator",
+                "password": "secret",
+                "permissions": [Permission.READ_MARKET_DATA.value],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert token_manager.last_permissions == {Permission.READ_MARKET_DATA}
+
+
+def test_login_rejects_permission_scope_outside_role(
+    auth_app: AuthAppFixture,
+) -> None:
+    """The login mint surface maps a role-superset request to HTTP 422."""
+    client, user_service, token_manager, _csrf_manager = auth_app
+    user_service.authenticated_user = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="operator-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="operator",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+    token_manager.create_tokens_error = PermissionScopeError(
+        "Permissions [manage:users] are not granted to role 'operator'."
+    )
+
+    response = client.post(
+        "/auth/login",
+        json={
+            "type": "login_request",
+            "session_id": "",
+            "sequence_id": 0,
+            "public_id": "test-pid",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "payload": {
+                "username": "operator",
+                "password": "secret",
+                "permissions": [Permission.MANAGE_USERS.value],
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "manage:users" in response.json()["detail"]
+
+
 def test_login_failure_returns_401(
     auth_app: AuthAppFixture,
 ) -> None:
@@ -3629,6 +3715,39 @@ def test_refresh_token_success(
     assert rotated_pair.access_token == "rotated-access"
     assert rotated_pair.refresh_token == "rotated-refresh"
     assert rotated_user_id == token_manager.last_created_user.user_public_id
+
+
+def test_refresh_token_preserves_versioned_permission_scope(
+    auth_app: AuthAppFixture,
+) -> None:
+    """Production refresh forwards the narrowed grant into its successor pair."""
+    client, user_service, token_manager, _csrf_manager = auth_app
+    token_manager.verify_response = TokenClaims(
+        sub="123",
+        username="bob",
+        role=UserRole.OPERATOR,
+        permissions=[Permission.READ_MARKET_DATA.value],
+        permission_scope_version=1,
+        exp=999999999,
+        iat=123456,
+        jti="refresh_scoped_jti",
+        sid="session-scoped",
+    )
+    user_service.user_by_id = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="bob",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+    client.cookies.set("refresh_token", "scoped-refresh")
+
+    response = client.post("/auth/refresh")
+
+    assert response.status_code == 200
+    assert token_manager.last_permissions == {Permission.READ_MARKET_DATA}
 
 
 def test_get_current_user_profile_returns_user(
@@ -4508,6 +4627,42 @@ async def test_change_user_password_admin_for_other_user(monkeypatch: Any) -> No
     )
     assert result.payload == "Password changed successfully"
     assert stub_service.change_password_calls == [("target", "irrelevant", "new-password")]
+
+
+@pytest.mark.asyncio()
+async def test_change_user_password_downscoped_admin_cannot_change_other_user(
+    monkeypatch: Any,
+) -> None:
+    """The direct cross-user password gate honors the presented token scope."""
+    stub_service = StubUserService()
+    monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
+    pwd_request = ChangePasswordRequest(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        payload=ChangePasswordBody(
+            current_password="irrelevant",
+            new_password="new-password",
+        ),
+    )
+    principal = AuthPrincipal(
+        username="admin",
+        role=UserRole.ADMIN,
+        permissions=[Permission.READ_MARKET_DATA.value],
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await routes.change_user_password(
+            request=_make_rest_request(),
+            user_id="target",
+            password_data=pwd_request,
+            current_user=principal,
+            _csrf=None,
+        )
+
+    assert exc.value.status_code == 403
+    assert stub_service.change_password_calls == []
 
 
 def test_admin_reset_password_route_registered() -> None:

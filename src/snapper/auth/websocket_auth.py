@@ -299,6 +299,7 @@ class WebSocketAuthManager:
             operator_public_ids=token_data.operator_public_ids,
             primary_operator_public_id=token_data.primary_operator_public_id,
             active_wallet_public_id=token_data.active_wallet_public_id,
+            permissions=token_data.permissions,
             delegate_public_id=delegate_public_id,
         )
         return user, token_data

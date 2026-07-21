@@ -508,7 +508,10 @@ async def get_ai_review_aftermath_route(
     },
 )
 async def list_ai_reviews_route(
-    principal: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
+    principal: Annotated[
+        AuthPrincipal,
+        Depends(require_role(UserRole.OPERATOR, Permission.READ_SIGNALS)),
+    ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     status_filter: Annotated[str | None, Query(alias="status")] = None,

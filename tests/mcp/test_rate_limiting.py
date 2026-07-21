@@ -52,7 +52,7 @@ def _claims(user_public_id: str = "user-ratelimit", sub: str = "user-ratelimit")
         sub=sub,
         username="delegate-rl",
         role=UserRole.AI_DELEGATE,
-        permissions=[],
+        permissions=None,
         exp=now + 3600,
         iat=now,
         jti="jti-rl",

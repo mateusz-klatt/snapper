@@ -28,7 +28,11 @@ class TokenClaims(StrictBody):
         sub: Subject (user ID).
         username: User's username.
         role: User's role.
-        permissions: List of permission strings (empty for refresh tokens).
+        permissions: Permission strings granted to the access token, or
+            ``None`` when the claim is absent on a legacy token.
+        permission_scope_version: Marker distinguishing refresh tokens that
+            carry an intentional permission scope from legacy refresh tokens
+            whose empty ``permissions`` list did not encode access scope.
         exp: Expiration timestamp (Unix epoch).
         iat: Issued at timestamp (Unix epoch).
         jti: JWT ID (unique token identifier).
@@ -42,7 +46,8 @@ class TokenClaims(StrictBody):
     sub: str
     username: str
     role: UserRole
-    permissions: list[str]
+    permissions: list[str] | None = None
+    permission_scope_version: int | None = None
     exp: int
     iat: int
     jti: str

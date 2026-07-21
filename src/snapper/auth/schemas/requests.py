@@ -16,6 +16,7 @@ from pydantic import model_validator
 
 from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import StrictBody
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.core.ids import is_uuid7
 from snapper.i18n.supported_languages import SUPPORTED_LANGUAGES
@@ -28,11 +29,14 @@ class LoginBody(StrictBody):
         username: User's login name.
         password: User's password.
         remember_me: If True, extends refresh token lifetime.
+        permissions: Optional narrower permission grant for this token pair.
+            Omission retains the complete role grant.
     """
 
     username: str
     password: str
     remember_me: bool = False
+    permissions: list[Permission] | None = None
 
 
 class LoginRequest(PayloadRequest[Literal["login_request"], LoginBody]):

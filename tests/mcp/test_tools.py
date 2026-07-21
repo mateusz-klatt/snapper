@@ -35,6 +35,7 @@ from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.core.ids import is_uuid7
@@ -58,6 +59,7 @@ def _make_claims(
     user_public_id: str = "user-1",
     username: str = "delegate-1",
     operator_public_ids: list[str] | None = None,
+    permissions: list[str] | None = None,
 ) -> TokenClaims:
     """Build a :class:`TokenClaims` for tool-permission tests."""
     now = int(datetime.now(UTC).timestamp())
@@ -68,7 +70,7 @@ def _make_claims(
         sub=user_public_id,
         username=username,
         role=role,
-        permissions=[],
+        permissions=permissions,
         exp=now + 3600,
         iat=now,
         jti="jti",
@@ -207,6 +209,23 @@ class TestListInstrumentsTool:
         finally:
             if saved is not None:
                 ROLE_PERMISSIONS[UserRole.VIEWER] = saved
+
+    @pytest.mark.asyncio
+    async def test_narrow_token_denies_role_granted_read_permission(self) -> None:
+        """Explicit token scope can remove a permission retained by the role.
+
+        Given: An AI delegate role that grants READ_MARKET_DATA but a
+            token scoped only to READ_ORDERS,
+        When: The raising-path list-instruments tool checks permission,
+        Then: FastMCP returns a permission error before repository access.
+        """
+        repo = AsyncMock()
+        claims = _make_claims(permissions=[Permission.READ_ORDERS.value])
+        server = _build_server(repository=repo, claims=claims)
+        with pytest.raises(ToolError) as exc:
+            await server._tool_manager.call_tool("list_instruments", {"exchange": "kraken"})
+        assert Permission.READ_MARKET_DATA.value in str(exc.value)
+        repo.get_exchange_instruments.assert_not_awaited()
 
 
 def _stub_mcp_guard() -> Guard:
@@ -1415,6 +1434,24 @@ class TestListOrdersTool:
         finally:
             if saved is not None:
                 ROLE_PERMISSIONS[UserRole.VIEWER] = saved
+
+    @pytest.mark.asyncio
+    async def test_narrow_token_returns_permission_denied_envelope(self) -> None:
+        """Envelope path enforces a token grant narrower than its role.
+
+        Given: An AI delegate role that grants READ_ORDERS but a token
+            scoped only to READ_MARKET_DATA,
+        When: The list-orders tool checks its effective permission,
+        Then: It returns permission_denied without querying orders.
+        """
+        repo = self._build_repo_with_orders([], total=0)
+        claims = _make_claims(permissions=[Permission.READ_MARKET_DATA.value])
+        server = _build_server(repository=repo, claims=claims)
+        result = await server._tool_manager.call_tool("list_orders", {})
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "permission_denied"
+        repo.get_orders.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:

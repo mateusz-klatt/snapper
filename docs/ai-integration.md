@@ -89,6 +89,15 @@ curl -X POST http://localhost:8000/api/ai-delegates \
     "payload": {
       "label": "Claude Desktop",
       "operator_public_id": "<operator-public-id>",
+      "permissions": [
+        "read:market_data",
+        "read:orders",
+        "read:positions",
+        "read:strategies",
+        "read:signals",
+        "read:system_status",
+        "read:backtests"
+      ],
       "caps": {
         "max_open_orders": 3,
         "max_daily_notional_usd": 1000.0,
@@ -107,6 +116,13 @@ operator bypass and may bind explicitly to any operator. The minted
 delegate token inherits scope from that bound operator, so later scope
 grant changes for that operator control which wallets/instruments the
 delegate can act on.
+
+`payload.permissions` independently downscopes what that credential may do.
+The consult-only example above omits order creation, cancellation, and
+position management even though the `ai_delegate` role holds them. The server
+enforces the intersection of the role and token grants and returns 422 if the
+request includes a permission outside the role. Omit `permissions` to retain
+the historical full-role token behavior.
 
 The response is **one-shot**. Copy the token out of the HTTP session
 immediately — Snapper never re-serves it:

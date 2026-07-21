@@ -313,7 +313,11 @@ class DelegateService:
                 operator_public_ids=[bound_operator_public_id],
                 primary_operator_public_id=bound_operator_public_id,
             )
-            pat = self.token_manager.create_delegate_access_token(delegate_principal, issued_at=now)
+            pat = self.token_manager.create_delegate_access_token(
+                delegate_principal,
+                issued_at=now,
+                permissions=body.permissions,
+            )
             session.add(
                 UserActiveToken(
                     public_id=str(uuid.uuid7()),

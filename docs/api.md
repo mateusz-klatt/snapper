@@ -30,6 +30,13 @@ Multi-tenant permissions (ADMIN only): ``read:wallet_credentials``,
 ``manage:wallet_credentials``, ``manage:scope_grants``,
 ``impersonate:operator``.
 
+JWT access is the intersection of the role grant and the token's optional
+`permissions` claim. The role remains an immutable ceiling: a token may remove
+permissions but cannot add one the role lacks. Tokens minted without an
+explicit scope retain the complete role grant. For compatibility, an older
+access token with no `permissions` claim also receives the complete role
+grant until it expires.
+
 ### POST /api/auth/login
 
 Authenticate and create a session. Sets `access_token`, `refresh_token`,
@@ -53,7 +60,12 @@ Content-Type: application/json
     "payload": {
         "username": "admin",
         "password": "password123",
-        "remember_me": false
+        "remember_me": false,
+        "permissions": [
+            "read:market_data",
+            "read:orders",
+            "read:positions"
+        ]
     }
 }
 ```
@@ -115,6 +127,12 @@ both carry the standard provenance fields (`type`, `sequence_id`, `public_id`,
 `timestamp`, `session_id`, `topic`). `access_token` and `refresh_token` are
 `null` in the cookie flow; they are populated only when the caller passes
 `?return_tokens=true` for headless integrations.
+
+`payload.permissions` is optional. When supplied, every value must already
+belong to the authenticated user's role; otherwise login returns 422 rather
+than silently dropping the invalid permission. Omit the field for the existing
+full-role behavior. A refresh preserves the selected scope, including an
+intentionally empty list, and cannot re-broaden it.
 
 `remember_me` is currently accepted for compatibility but is not wired into
 `/api/auth/login`: refresh JWTs use `auth_refresh_token_expire_days`, and
@@ -2630,8 +2648,8 @@ creation.
 Create an AI delegate owned by the authenticated operator and mint a long-lived
 access JWT.
 
-**Permission:** `operator` role or higher. CSRF token required for
-cookie-authenticated requests.
+**Permission:** `operator` role or higher with `manage:processes` retained in
+the token scope. CSRF token required for cookie-authenticated requests.
 
 **Body (`DelegateCreateRequest` envelope):**
 
@@ -2645,6 +2663,15 @@ cookie-authenticated requests.
     "payload": {
         "label": "research-agent",
         "operator_public_id": null,
+        "permissions": [
+            "read:market_data",
+            "read:orders",
+            "read:positions",
+            "read:strategies",
+            "read:signals",
+            "read:system_status",
+            "read:backtests"
+        ],
         "caps": {
             "max_order_quantity_per_instrument": null,
             "max_open_orders": 2,
@@ -2659,6 +2686,10 @@ cookie-authenticated requests.
 uses the caller's primary operator. All caps are optional; `null` means the
 delegate inherits the Snapper-wide fallback for that cap.
 
+`permissions` is optional and chooses the delegate access token's actual
+grant. Omission keeps the complete `ai_delegate` role grant. Every requested
+permission must belong to that role; the server rejects a superset with 422.
+
 **Response (200):** `DelegateCreatedResponse` with the delegate projection and
 one-shot `access_token`. List and detail endpoints never re-serve the token.
 
@@ -2666,13 +2697,14 @@ one-shot `access_token`. List and detail endpoints never re-serve the token.
 owner has reached the per-owner delegate cap.
 
 **Response (422):** The requested operator binding is outside the caller's
-claim set.
+claim set, or the requested token permission scope exceeds the delegate role.
 
 ### GET /api/ai-delegates
 
 List the caller's active delegates. Deactivated delegates are omitted.
 
-**Permission:** `operator` role or higher.
+**Permission:** `operator` role or higher with `manage:processes` retained in
+the token scope.
 
 **Response (200):** `DelegateListResponse` with `DelegateRead` payload items.
 
@@ -2680,7 +2712,8 @@ List the caller's active delegates. Deactivated delegates are omitted.
 
 Fetch one active delegate owned by the caller.
 
-**Permission:** `operator` role or higher.
+**Permission:** `operator` role or higher with `manage:processes` retained in
+the token scope.
 
 **Response (200):** `DelegateResponse`.
 
@@ -2691,8 +2724,8 @@ Fetch one active delegate owned by the caller.
 Replace a delegate's trading caps while preserving username and label
 immutability. The write is SCD2-preserved so cap history remains auditable.
 
-**Permission:** `operator` role or higher. CSRF token required for
-cookie-authenticated requests.
+**Permission:** `operator` role or higher with `manage:processes` retained in
+the token scope. CSRF token required for cookie-authenticated requests.
 
 **Body (`DelegateCapsUpdateRequest` envelope):**
 
@@ -2724,8 +2757,8 @@ Deactivate a delegate using the shared user kill-switch flow. The server closes
 the active delegate row, revokes active tokens, and publishes the same
 deactivation event used by admin user deactivation.
 
-**Permission:** `operator` role or higher. CSRF token required for
-cookie-authenticated requests.
+**Permission:** `operator` role or higher with `manage:processes` retained in
+the token scope. CSRF token required for cookie-authenticated requests.
 
 **Body:** Optional `DelegateDeactivateRequest` envelope with
 `payload.reason` for audit context.
