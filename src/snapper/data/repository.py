@@ -5429,6 +5429,50 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def has_live_ai_delegate(
+        self,
+        *,
+        heartbeat_window_seconds: int,
+        as_of: datetime,
+    ) -> bool:
+        """Return whether any active AI delegate is live globally.
+
+        This is the global delegate-candidate half of
+        :meth:`list_eligible_delegates_for_ai_review`: active
+        ``ai_delegate`` user, active operator membership with at least
+        one active scope grant, and the same strict
+        ``last_seen_at > as_of - heartbeat_window`` predicate.
+        Tuple-specific wallet/instrument grant authorization remains in
+        review admission because the global watchdog has no request tuple.
+
+        Args:
+            heartbeat_window_seconds: Strict liveness window in seconds.
+            as_of: Wall clock for heartbeat and temporal-row filtering.
+
+        Returns:
+            ``True`` when at least one delegate satisfies the filters.
+        """
+        ...
+
+    @abstractmethod
+    async def count_ai_review_timeouts_since(
+        self,
+        *,
+        since: datetime,
+        as_of: datetime,
+    ) -> int:
+        """Count recent ``timeout_no_response`` review resolutions.
+
+        Args:
+            since: Inclusive lower bound on ``resolved_at``.
+            as_of: Inclusive upper bound on ``resolved_at``.
+
+        Returns:
+            Number of matching rows in the closed time window.
+        """
+        ...
+
+    @abstractmethod
     async def list_eligible_delegates_for_ai_review(
         self,
         *,
@@ -22660,6 +22704,56 @@ class SQLAlchemyRepository(Repository):
                 .values(last_seen_at=last_seen_at, updated_at=last_seen_at)
             )
             await s.commit()
+
+    async def has_live_ai_delegate(
+        self,
+        *,
+        heartbeat_window_seconds: int,
+        as_of: datetime,
+    ) -> bool:
+        """Return whether the global delegate-candidate set is non-empty."""
+        threshold = as_of - timedelta(seconds=heartbeat_window_seconds)
+        candidate = (
+            select(AiDelegate.id)
+            .join(User, User.public_id == AiDelegate.user_public_id)
+            .join(
+                UserOperatorMembership,
+                UserOperatorMembership.user_public_id == AiDelegate.user_public_id,
+            )
+            .join(
+                WalletOperatorScopeGrant,
+                WalletOperatorScopeGrant.operator_public_id
+                == UserOperatorMembership.operator_public_id,
+            )
+            .where(
+                User.role == UserRole.AI_DELEGATE.value,
+                User.is_active.is_(True),
+                AiDelegate.last_seen_at.is_not(None),
+                AiDelegate.last_seen_at > threshold,
+                *where_active(User, as_of),
+                *where_active(UserOperatorMembership, as_of),
+                *where_active(WalletOperatorScopeGrant, as_of),
+            )
+            .limit(1)
+        )
+        async with self.session() as s:
+            return bool(await s.scalar(select(exists(candidate))))
+
+    async def count_ai_review_timeouts_since(
+        self,
+        *,
+        since: datetime,
+        as_of: datetime,
+    ) -> int:
+        """Count timeout resolutions by their atomic ``resolved_at`` stamp."""
+        statement = select(func.count(AiReview.id)).where(
+            AiReview.resolution_mode == "timeout_no_response",
+            AiReview.resolved_at >= since,
+            AiReview.resolved_at <= as_of,
+        )
+        async with self.session() as s:
+            count = await s.scalar(statement)
+            return int(count or 0)
 
     async def list_eligible_delegates_for_ai_review(
         self,

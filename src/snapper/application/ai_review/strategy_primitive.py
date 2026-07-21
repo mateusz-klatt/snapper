@@ -15,7 +15,12 @@ issue + await an AI-delegate CONSULT round:
     elif decision.status is AiReviewStatusEnum.RESOLVED_REJECTED:
         ...  # VETO — abort, no trade
     else:
-        ...  # timeout / superseded -> fall through to non-AI decision
+        ...  # LIVE timeout: VETO and skip; paper/advisory may fall through
+
+For LIVE trading intent, a timeout is a VETO: the strategy skips the
+window and does not proceed to a non-AI decision. Only paper or
+advisory strategies may treat timeout or superseded outcomes as a
+policy-controlled fall-through.
 
 The primitive composes :meth:`AiReviewService.create_review` with the
 await loop:

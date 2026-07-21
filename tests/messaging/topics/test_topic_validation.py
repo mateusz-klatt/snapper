@@ -1265,6 +1265,46 @@ class TestSystemTopicValidation:
         assert not valid
         assert "Unknown market feed exchange" in _err
 
+    def test_hierarchical_heartbeat_ai_delegate_global_is_valid(self) -> None:
+        """The AI-delegate watchdog's global heartbeat is accepted.
+
+        Given: The fixed global AI-delegate watchdog topic,
+        When: The publisher topic contract validates it,
+        Then: Validation succeeds without an error string.
+        """
+        valid, error = validate_topic("system.heartbeats.ai_delegate.global")
+        assert valid
+        assert error == ""
+
+    def test_hierarchical_heartbeat_ai_delegate_rejects_other_scope(self) -> None:
+        """Only the implemented single-operator global scope is accepted.
+
+        Given: An AI-delegate heartbeat with another scope,
+        When: The publisher topic contract validates it,
+        Then: Validation fails with the global-scope contract.
+        """
+        valid, error = validate_topic("system.heartbeats.ai_delegate.operator")
+        assert not valid
+        assert "only the global scope" in error
+
+    @pytest.mark.parametrize(
+        "topic",
+        [
+            "system.heartbeats.ai_delegate",
+            "system.heartbeats.ai_delegate.global.extra",
+        ],
+    )
+    def test_hierarchical_heartbeat_ai_delegate_requires_four_segments(self, topic: str) -> None:
+        """AI-delegate watchdog topics require the exact topic shape.
+
+        Given: Topics with too few or too many segments,
+        When: The publisher topic contract validates them,
+        Then: Validation fails and names the four-segment requirement.
+        """
+        valid, error = validate_topic(topic)
+        assert not valid
+        assert "exactly 4 segments" in error
+
     @pytest.mark.parametrize(
         "topic",
         [

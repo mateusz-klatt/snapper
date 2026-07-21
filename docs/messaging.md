@@ -139,6 +139,7 @@ Malformed frames and topic/payload wallet mismatches fail closed.
 | `system.heartbeats.strategy.{name}` | Strategy heartbeat (e.g. `strategy.rsi_btc_1h`) |
 | `system.heartbeats.feed.{exchange}` | Feed heartbeat (e.g. `feed.kraken`, `feed.paper.kraken`) |
 | `system.heartbeats.marketdata.{exchange}` | Synthetic exchange-silence heartbeat from the API-side market-data watchdog; WARNING bursts on whole-exchange candle silence drive the `critical_system_error` alert pipeline (distinct from `feed` on purpose so its WARNING frames satisfy the 3-consecutive gate) |
+| `system.heartbeats.ai_delegate.global` | Synthetic AI-delegate liveness and response heartbeat; WARNING bursts report no live delegate or a recent unanswered review through the existing `critical_system_error` pipeline |
 | `system.heartbeats.host.disk` | API host disk-pressure heartbeat from `SystemMetricsSnapshotter` |
 | `system.egress.snapshot` | Read-only process-local egress pool snapshot for API aggregation |
 | `system.egress.transfer` | Read-only snapper-egress WireGuard transfer samples for API route load |
@@ -147,7 +148,8 @@ Malformed frames and topic/payload wallet mismatches fail closed.
 
 Heartbeat `component` values use dot notation matching the topic path after
 `system.heartbeats.`: `executor.kraken`, `executor.kraken.019d6ca45f2e`,
-`strategy.rsi_btc_1h`, `feed.kraken`, `feed.paper.kraken`, `marketdata.kraken`, `host.disk`.
+`strategy.rsi_btc_1h`, `feed.kraken`, `feed.paper.kraken`, `marketdata.kraken`,
+`ai_delegate.global`, `host.disk`.
 The per-wallet executor heartbeat envelope additionally carries
 `meta.wallet_public_id` so
 subscribers that prefix-match the 4-segment parent topic can still

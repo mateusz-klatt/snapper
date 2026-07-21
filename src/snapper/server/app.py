@@ -114,6 +114,7 @@ from snapper.api.schemas.process import SystemStatusData
 from snapper.api.schemas.process import SystemStatusResponse
 from snapper.application.ai_review.service import AiReviewService
 from snapper.application.ai_review.service import get_ai_review_service
+from snapper.application.ai_review.watchdog import AiDelegateWatchdog
 from snapper.application.db_stats.snapshotter import DbStatsSnapshotter
 from snapper.application.db_stats.snapshotter import (
     resolve_disabled as _resolve_db_metrics_disabled,
@@ -574,6 +575,47 @@ async def _stop_market_data_watchdog(app: FastAPI) -> None:
     await watchdog.stop()
 
 
+async def _start_ai_delegate_watchdog(
+    app: FastAPI,
+    *,
+    db_url: str,
+    msg_publisher: MessagePublisher | None = None,
+) -> None:
+    """Build and start the :class:`AiDelegateWatchdog`.
+
+    The state attribute is assigned only after startup succeeds. A
+    failure is logged without blocking the rest of the API lifespan.
+
+    Args:
+        app: FastAPI application whose state holds the watchdog.
+        db_url: SQLAlchemy URL for the watchdog repository.
+        msg_publisher: Shared publisher for synthetic heartbeats.
+    """
+    try:
+        watchdog = AiDelegateWatchdog(
+            repo=get_repository(db_url),
+            msg_publisher=msg_publisher,
+        )
+        await watchdog.start()
+    except Exception:
+        logger.exception("AiDelegateWatchdog startup failed — AI delegate alerting is offline")
+        return
+    app.state.ai_delegate_watchdog = watchdog
+    logger.info("AiDelegateWatchdog started")
+
+
+async def _stop_ai_delegate_watchdog(app: FastAPI) -> None:
+    """Stop the :class:`AiDelegateWatchdog` when attached.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    watchdog: AiDelegateWatchdog | None = getattr(app.state, "ai_delegate_watchdog", None)
+    if watchdog is None:
+        return
+    await watchdog.stop()
+
+
 async def _start_remote_summary_cache(
     app: FastAPI, *, own_coordinator: str, zmq_broker_xpub: str
 ) -> None:
@@ -930,6 +972,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.retention_scheduler = None
     app.state.db_stats_snapshotter = None
     app.state.market_data_watchdog = None
+    app.state.ai_delegate_watchdog = None
     app.state.market_persist_policy = None
     app.state.market_cache = None
     app.state.market_stats_worker = None
@@ -1039,6 +1082,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             app, db_url=settings.db_url, msg_publisher=user_publisher
         )
         await _start_market_data_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
+        await _start_ai_delegate_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_retention_scheduler(app, db_url=settings.db_url)
         await _start_db_stats_snapshotter(app, db_url=settings.db_url)
         await _start_remote_summary_cache(
@@ -1092,6 +1136,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _stop_command_ack_registry(app)
         await _stop_db_stats_snapshotter(app)
         await _stop_retention_scheduler(app)
+        await _stop_ai_delegate_watchdog(app)
         await _stop_market_data_watchdog(app)
         await _stop_system_metrics_snapshotter(app)
         await _shutdown_zmq_bridge(app)

@@ -91,6 +91,29 @@ parks the watchdog entirely. Detection runs level-triggered — an
 exchange that stays silent keeps re-bursting each tick, so a notify
 sidecar restart cannot permanently miss an ongoing outage.
 
+### AI-delegate watchdog
+
+The API lifespan also runs `AiDelegateWatchdog`
+(`application/ai_review/watchdog.py`) for the single-operator AI review
+plane. It waits one 60-second poll interval at startup so a healthy
+delegate can reconnect before strict liveness is evaluated. Every 60
+seconds thereafter it performs two database reads: delegate
+liveness across active AI-delegate users whose operator membership has
+an active scope grant, using the same strict 15-second heartbeat boundary
+as `AiReviewService.create_review`, and the count of reviews resolved as
+`timeout_no_response` during the preceding hour. No live delegate, or one
+or more recent unanswered reviews, publishes a synthetic three-frame
+WARNING burst on `system.heartbeats.ai_delegate.global`. A healthy tick
+publishes one HEALTHY frame to reset the alert rule's rolling state.
+
+The existing `critical_system_error` rule owns the three-frame gate,
+rolling one-hour cooldown, hour-bucket deduplication, permission-based
+fan-out, localization, and APNs delivery. The one-timeout threshold is
+intentional: a single unanswered LIVE consult already vetoes a trading
+window, while the existing cooldown prevents repeated pages. The
+one-hour lookback keeps that failure visible across a notify-sidecar or
+API restart.
+
 ### Failure contract
 
 If the snapshotter singleton failed to start at lifespan time, the

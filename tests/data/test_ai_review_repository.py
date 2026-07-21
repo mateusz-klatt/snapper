@@ -14,6 +14,7 @@ from typing import Any as _Any
 from uuid import uuid7
 
 import pytest
+from sqlalchemy import update as sqlalchemy_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Update
 from sqlalchemy.sql.expression import Select
@@ -2144,3 +2145,148 @@ async def test_combined_supersede_rowcount_zero_rolls_back_and_returns_none(
     counter, decremented = await _fetch_delegate_counter(repo, delegate_pid=delegate_pid)
     assert counter == 1
     assert decremented is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_has_live_ai_delegate_uses_strict_admission_boundary(
+    tmp_path: Path,
+) -> None:
+    """Global liveness matches the admission query's strict boundary.
+
+    Given: An empty repository followed by one fully eligible delegate,
+    When: Its heartbeat moves from now to exactly 15 seconds old,
+    Then: Liveness changes from false to true and back to false.
+    """
+    repo = await _build_repo(tmp_path, "ai_watchdog_liveness.db")
+    as_of = _now()
+    assert not await repo.has_live_ai_delegate(
+        heartbeat_window_seconds=15,
+        as_of=as_of,
+    )
+    ids = await _seed_user_operator_wallet_instrument(repo, as_of=as_of)
+    await _seed_user_row(
+        repo,
+        user_public_id=ids["user_public_id"],
+        role="ai_delegate",
+        as_of=as_of,
+    )
+    await _add_membership(
+        repo,
+        user_public_id=ids["user_public_id"],
+        operator_public_id=ids["operator_public_id"],
+        as_of=as_of,
+    )
+    ids["delegate_public_id"] = await _seed_live_delegate(
+        repo,
+        user_public_id=ids["user_public_id"],
+        last_seen_at=as_of,
+        creation_time=as_of,
+    )
+    assert not await repo.has_live_ai_delegate(
+        heartbeat_window_seconds=15,
+        as_of=as_of,
+    )
+    await _add_instrument_grant(
+        repo,
+        operator_public_id=ids["operator_public_id"],
+        wallet_public_id=ids["wallet_public_id"],
+        instrument_public_id=ids["instrument_public_id"],
+        granted_by_user_public_id=ids["user_public_id"],
+        as_of=as_of,
+    )
+    assert await repo.has_live_ai_delegate(
+        heartbeat_window_seconds=15,
+        as_of=as_of,
+    )
+
+    async with repo.session() as session:
+        await session.execute(
+            sqlalchemy_update(AiDelegate)
+            .where(AiDelegate.public_id == ids["delegate_public_id"])
+            .values(last_seen_at=as_of - timedelta(seconds=15))
+        )
+        await session.commit()
+
+    assert not await repo.has_live_ai_delegate(
+        heartbeat_window_seconds=15,
+        as_of=as_of,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_count_ai_review_timeouts_uses_closed_resolution_window(
+    tmp_path: Path,
+) -> None:
+    """Timeout counting keys off the atomic resolution timestamp.
+
+    Given: A pending review and an initially empty resolution window,
+    When: The review times out exactly on both inclusive boundaries,
+    Then: It counts once in that window and not outside either bound.
+    """
+    repo = await _build_repo(tmp_path, "ai_watchdog_timeouts.db")
+    as_of = _now()
+    review_public_id, _delegate_public_id = await _seed_pending_with_active_counter(
+        repo,
+        as_of=as_of,
+    )
+    assert (
+        await repo.count_ai_review_timeouts_since(
+            since=as_of - timedelta(hours=1),
+            as_of=as_of,
+        )
+        == 0
+    )
+    result = await repo.atomic_timeout_review_with_audit_and_counter(
+        review_public_id=review_public_id,
+        audit_event=_audit_event_for(
+            review_pid=review_public_id,
+            event_type="timeout_marked",
+            new_status="timeout",
+            actor_delegate_public_id=None,
+            payload={"trigger": "watchdog_test"},
+            occurred_at=as_of,
+        ),
+        now=as_of,
+    )
+    assert result is not None
+    assert await repo.count_ai_review_timeouts_since(since=as_of, as_of=as_of) == 1
+    approved_review_public_id, approved_delegate_public_id = (
+        await _seed_pending_with_active_counter(
+            repo,
+            as_of=as_of,
+        )
+    )
+    approved = await repo.atomic_resolve_review_with_audit_and_counter(
+        review_public_id=approved_review_public_id,
+        decision="approve",
+        responding_delegate_public_id=approved_delegate_public_id,
+        rationale=None,
+        new_status="resolved_approved",
+        audit_event=_audit_event_for(
+            review_pid=approved_review_public_id,
+            event_type="decision_recorded",
+            new_status="resolved_approved",
+            actor_delegate_public_id=approved_delegate_public_id,
+            payload={"decision": "approve"},
+            occurred_at=as_of,
+        ),
+        now=as_of,
+    )
+    assert approved is not None
+    assert await repo.count_ai_review_timeouts_since(since=as_of, as_of=as_of) == 1
+    assert (
+        await repo.count_ai_review_timeouts_since(
+            since=as_of + timedelta(microseconds=1),
+            as_of=as_of + timedelta(seconds=1),
+        )
+        == 0
+    )
+    assert (
+        await repo.count_ai_review_timeouts_since(
+            since=as_of - timedelta(seconds=1),
+            as_of=as_of - timedelta(microseconds=1),
+        )
+        == 0
+    )

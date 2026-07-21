@@ -642,12 +642,34 @@ def _validate_marketdata_heartbeat(segments: list[str]) -> tuple[bool, str]:
     return _validate_market_source(segments[3])
 
 
+def _validate_ai_delegate_heartbeat(segments: list[str]) -> tuple[bool, str]:
+    """Validate the global AI-delegate watchdog heartbeat topic.
+
+    Args:
+        segments: Split topic segments starting with
+            ``system.heartbeats.ai_delegate``.
+
+    Returns:
+        Tuple of validation success and an explanatory error string.
+    """
+    if len(segments) != 4:
+        return (
+            False,
+            "system.heartbeats.ai_delegate requires exactly 4 segments: "
+            "system.heartbeats.ai_delegate.global",
+        )
+    if segments[3] != "global":
+        return False, "system.heartbeats.ai_delegate supports only the global scope"
+    return True, ""
+
+
 _HEARTBEAT_COMPONENT_VALIDATORS: dict[str, Callable[[list[str]], tuple[bool, str]]] = {
     "strategy": _validate_strategy_heartbeat,
     "executor": _validate_executor_heartbeat,
     "host": _validate_host_heartbeat,
     "feed": _validate_feed_heartbeat,
     "marketdata": _validate_marketdata_heartbeat,
+    "ai_delegate": _validate_ai_delegate_heartbeat,
 }
 
 
@@ -670,6 +692,8 @@ def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
       :func:`_validate_feed_heartbeat`.
     - ``system.heartbeats.marketdata.{exchange}`` (4 seg) — synthetic
       exchange-silence heartbeats from the API market-data watchdog.
+    - ``system.heartbeats.ai_delegate.global`` (4 seg) — synthetic
+      liveness and response heartbeats from the API AI-delegate watchdog.
 
     Args:
         segments: Split topic segments (first two are 'system.heartbeats').

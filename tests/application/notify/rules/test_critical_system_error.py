@@ -108,6 +108,38 @@ class TestCriticalSystemErrorRule:
         assert dedup_key.startswith("sys_error.host.disk.")
 
     @pytest.mark.asyncio
+    async def test_ai_delegate_warning_burst_uses_existing_alert_path(self) -> None:
+        """AI-delegate heartbeats need no dedicated alert rule or type.
+
+        Given: Three AI-delegate WARNING frames and one permitted user,
+        When: The existing critical-system-error rule evaluates them,
+        Then: It emits the existing localized alert keyed to the global scope.
+        """
+        rule = CriticalSystemErrorRule()
+        repo = MagicMock()
+        repo.list_users_with_permission = AsyncMock(return_value=["admin-1"])
+        repo.list_alert_events_with_dedup_key = AsyncMock(return_value=[])
+        now = _base_now()
+        topic = "system.heartbeats.ai_delegate.global"
+        payload = _heartbeat(component="ai_delegate.global")
+
+        await rule.evaluate(topic, payload, repo, now)
+        await rule.evaluate(topic, payload, repo, now + timedelta(seconds=2))
+        rows = await rule.evaluate(topic, payload, repo, now + timedelta(seconds=4))
+
+        assert len(rows) == 1
+        assert rows[0]["alert_type"] == "critical_system_error"
+        assert rows[0]["payload"] is not None
+        assert rows[0]["payload"]["body_loc_args"] == [
+            "ai_delegate",
+            "global",
+            "warning",
+            3,
+        ]
+        assert rows[0]["dedup_key"] is not None
+        assert rows[0]["dedup_key"].startswith("sys_error.ai_delegate.global.")
+
+    @pytest.mark.asyncio
     async def test_healthy_heartbeat_resets_window(self) -> None:
         """Any HEALTHY clears the rolling window — next WARNING returns to ``1``."""
         rule = CriticalSystemErrorRule()

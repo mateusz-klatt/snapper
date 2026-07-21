@@ -259,6 +259,8 @@ class TestLifespan:
                 _stop_system_metrics_snapshotter=AsyncMock(),
                 _start_market_data_watchdog=AsyncMock(),
                 _stop_market_data_watchdog=AsyncMock(),
+                _start_ai_delegate_watchdog=AsyncMock(),
+                _stop_ai_delegate_watchdog=AsyncMock(),
                 _start_retention_scheduler=AsyncMock(),
                 _stop_retention_scheduler=AsyncMock(),
                 _start_db_stats_snapshotter=AsyncMock(),
