@@ -3555,7 +3555,12 @@ def test_login_success_sets_cookies(
 def test_login_forwards_operator_selected_permission_scope(
     auth_app: AuthAppFixture,
 ) -> None:
-    """Login exposes an optional permission selector for same-principal tokens."""
+    """Login exposes an optional permission selector for same-principal tokens.
+
+    Given: A login request naming a permission scope within the caller's role,
+    When: Minting the token pair,
+    Then: The selected scope is forwarded onto the issued access token.
+    """
     client, user_service, token_manager, _csrf_manager = auth_app
     user_service.authenticated_user = UserProfile(
         session_id="test-sid",
@@ -3590,7 +3595,12 @@ def test_login_forwards_operator_selected_permission_scope(
 def test_login_rejects_permission_scope_outside_role(
     auth_app: AuthAppFixture,
 ) -> None:
-    """The login mint surface maps a role-superset request to HTTP 422."""
+    """The login mint surface maps a role-superset request to HTTP 422.
+
+    Given: A login request naming a permission outside the caller's role ceiling,
+    When: Minting the token pair,
+    Then: The request is refused with HTTP 422 rather than silently narrowed.
+    """
     client, user_service, token_manager, _csrf_manager = auth_app
     user_service.authenticated_user = UserProfile(
         session_id="test-sid",
@@ -3720,7 +3730,12 @@ def test_refresh_token_success(
 def test_refresh_token_preserves_versioned_permission_scope(
     auth_app: AuthAppFixture,
 ) -> None:
-    """Production refresh forwards the narrowed grant into its successor pair."""
+    """Production refresh forwards the narrowed grant into its successor pair.
+
+    Given: A refresh token carrying a previously narrowed permission scope,
+    When: Refreshing the pair,
+    Then: The successor tokens preserve that same versioned scope.
+    """
     client, user_service, token_manager, _csrf_manager = auth_app
     token_manager.verify_response = TokenClaims(
         sub="123",
@@ -4633,7 +4648,12 @@ async def test_change_user_password_admin_for_other_user(monkeypatch: Any) -> No
 async def test_change_user_password_downscoped_admin_cannot_change_other_user(
     monkeypatch: Any,
 ) -> None:
-    """The direct cross-user password gate honors the presented token scope."""
+    """The direct cross-user password gate honors the presented token scope.
+
+    Given: An admin whose presented token was downscoped below manage:users,
+    When: Changing another user's password,
+    Then: The gate refuses the change despite the underlying admin role.
+    """
     stub_service = StubUserService()
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     pwd_request = ChangePasswordRequest(
