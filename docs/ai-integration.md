@@ -431,6 +431,31 @@ supply UUID7 `ai_review_user_public_id` and `ai_review_strategy_public_id`
 params plus a scoped wallet/operator pair whose grant covers the output
 instrument.
 
+Every `HeartbeatConsult` envelope also attempts to include a `macro`
+cross-asset snapshot built at consult time from complete persisted 1m
+`kraken_equities` candles. `macro_contract_symbol` selects the quarterly
+CME equity-index contract and defaults to `MNQU6-CME` (the September 2026
+Micro Nasdaq-100 future); rotate this parameter as part of the operator's
+quarterly contract-roll runbook. `macro_stale_after_minutes` defaults to
+`10.0`. The snapshot carries `symbol`, `as_of`, server-computed
+`age_minutes`, `session`, `change_1h_pct`,
+`change_since_session_open_pct`, and `realized_vol_24h_pct`. The change
+fields use the latest complete print against the print at least one hour
+earlier and the current CME session's opening price, while realized
+volatility is the population standard deviation of one-minute simple
+returns from the 24 wall-clock hours ending at the last print.
+
+Session state reuses the shared CME calendar. A fresh open-session feed
+reports `session: "open"`. If CME is open but the newest candle is older
+than the configured threshold, it reports `session: "halted"`, adds the
+presence-only `stale: true` key, and sets all three derived values to
+`null`. Scheduled daily, weekend, and holiday closures instead report
+`session: "closed"` without a `stale` key: the last print remains the
+calculation anchor and its honest age and available values remain in the
+envelope. No proxy series is substituted during a closure. Macro and
+traded-market snapshot failures are independent and fail-soft, so either
+section may be omitted without preventing the consult.
+
 Operator steps to arm the wake surface:
 
 1. Mint a delegate (`POST /api/ai-delegates`) and grant it scope on

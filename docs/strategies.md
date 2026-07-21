@@ -449,8 +449,31 @@ Each consult's `signal_envelope` carries the proposed action plus a
 self-contained `market` snapshot (SMA 20/50, Wilder RSI 14, 1-bar and
 24-bar percent changes, 24-bar high/low, 24-bar realized volatility)
 computed from the trailing 200 complete persisted bars bounded at the
-trigger window, so the delegate can decide without follow-up lookups;
-`null` fields mean the history is still warming up.
+trigger window; `null` market fields mean that indicator is still
+warming up. A sibling `macro` snapshot reads complete persisted 1m
+`kraken_equities` candles for the configured CME equity-index contract
+at the same consult-time `as_of` anchor. It carries exactly `symbol`,
+`as_of`, `age_minutes`, `session`, `change_1h_pct`,
+`change_since_session_open_pct`, and `realized_vol_24h_pct`, with a
+presence-only `stale: true` field on an incident. The percentage fields
+compare the latest complete print with the print at least one hour
+earlier and with the current CME session's opening price; realized
+volatility is the population standard deviation of one-minute simple
+returns from the 24 wall-clock hours ending at the last print.
+`age_minutes` is computed at envelope-build time from the newest candle's
+persisted bus timestamp, never copied from stored metadata.
+
+The shared CME calendar classifies the macro session as `open`, `closed`,
+or `halted`. When CME is open and `age_minutes` exceeds
+`macro_stale_after_minutes`, the snapshot reports `session: "halted"`,
+adds `stale: true`, and sets all three percentage/volatility values to
+`null`. During the daily break, weekend, or a scheduled holiday closure,
+it instead reports `session: "closed"` without a `stale` key and keeps
+the old last print as the calculation anchor, its honest age, and all
+available derived values. The configured contract is never replaced by
+a crypto proxy during a closure. Market and macro construction are
+independently fail-soft, so a read or calculation error omits only the
+affected section and never prevents the consult.
 
 **Parameters:**
 
@@ -460,6 +483,8 @@ trigger window, so the delegate can decide without follow-up lookups;
 | `ai_review_strategy_public_id` | `""` | Stable UUID7 identifying this strategy instance; seeded-once (minted fill-if-empty), never label-resolved. |
 | `ai_review_deadline_seconds` | `25` | Per-round decision deadline, bounded `[5, 300]`. |
 | `heartbeat_signal_strength` | `0.0` | Approved-round emit strength, bounded `[0.0, 1.0]`; `0.0` = target-flat. |
+| `macro_contract_symbol` | `"MNQU6-CME"` | Native quarterly CME contract used for the macro snapshot. The default is the September 2026 Micro Nasdaq-100 future; update this parameter during the operator's quarterly contract roll. |
+| `macro_stale_after_minutes` | `10.0` | Maximum healthy age for the newest complete 1m candle while CME is open. Exceeding it marks the session halted and suppresses derived values; scheduled closures are exempt. |
 
 ```python
 from snapper.strategies.heartbeat_consult import HeartbeatConsult

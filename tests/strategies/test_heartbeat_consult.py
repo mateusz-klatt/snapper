@@ -6,7 +6,8 @@ fail-fast validation (paper-only, scoped config, UUID7 identity params,
 deadline bounds), one-consult-per-window dedup, DETACHED consult rounds
 (``on_candle`` returns immediately; ``stop``/``reset`` cancel the
 in-flight round), approved-outcome emission with AI-review attribution,
-the self-contained market snapshot in the consult envelope, and fail-soft
+the self-contained traded-market and CME macro snapshots in the consult
+envelope, honest open/closed/halted freshness semantics, and fail-soft
 behavior for every consult error mode. The AI-review service and
 repository are mocked — the end-to-end DB path lives in the ai_review
 test suites.
@@ -19,27 +20,38 @@ import statistics
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from datetime import tzinfo
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import uuid7
 
 import pytest
 
+from snapper.application.ai_review.service import MAX_SIGNAL_ENVELOPE_BYTES
 from snapper.application.ai_review.service import AiReviewCreateRequest
 from snapper.application.ai_review.service import AiReviewDecisionOutcome
 from snapper.application.ai_review.service import DelegateBusyError
 from snapper.application.ai_review.service import NoLiveDelegateError
+from snapper.application.ai_review.service import _serialize_signal_envelope_canonical
 from snapper.application.services.signals.service import signal_service
 from snapper.core.types import AiReviewStatusEnum
+from snapper.core.types import AllExchange
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import TradeSideEnum
+from snapper.data.repository_types import CandleRow
 from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.heartbeat_consult import CONSULT_SEQUENCE_STREAM
 from snapper.strategies.heartbeat_consult import DAY_BARS
 from snapper.strategies.heartbeat_consult import DEFAULT_CONSULT_DEADLINE_SECONDS
+from snapper.strategies.heartbeat_consult import DEFAULT_MACRO_CONTRACT_SYMBOL
+from snapper.strategies.heartbeat_consult import DEFAULT_MACRO_STALE_AFTER_MINUTES
+from snapper.strategies.heartbeat_consult import MACRO_SNAPSHOT_BARS
+from snapper.strategies.heartbeat_consult import MACRO_SNAPSHOT_TIMEFRAME
 from snapper.strategies.heartbeat_consult import SNAPSHOT_BARS
 from snapper.strategies.heartbeat_consult import SNAPSHOT_RANGE_START
 from snapper.strategies.heartbeat_consult import HeartbeatConsult
+from snapper.strategies.heartbeat_consult import _build_macro_snapshot
 from snapper.strategies.heartbeat_consult import _build_market_snapshot
 from snapper.strategies.heartbeat_consult import _finite_or_none
 from snapper.strategies.heartbeat_consult import _pct_change
@@ -48,6 +60,18 @@ from snapper.strategies.heartbeat_consult import _rsi
 from snapper.strategies.heartbeat_consult import _sma
 
 _OPEN_AT = datetime(2026, 7, 3, 12, 0, tzinfo=UTC)
+_CONSULT_AS_OF = datetime(2026, 7, 21, 15, 2, tzinfo=UTC)
+
+
+class _FixedConsultClock:
+    """Deterministic wall clock patched into consult request tests."""
+
+    @staticmethod
+    def now(timezone: tzinfo | None = None) -> datetime:
+        """Return the fixed consult anchor in the requested timezone."""
+        if timezone is None:
+            return _CONSULT_AS_OF.replace(tzinfo=None)
+        return _CONSULT_AS_OF.astimezone(timezone)
 
 
 @pytest.fixture(autouse=True)
@@ -140,22 +164,77 @@ async def _drain_round(strategy: HeartbeatConsult) -> None:
         await task
 
 
-def _desc_rows(closes: list[float], last_open_at: datetime) -> list[dict[str, Any]]:
+def _desc_rows(closes: list[float], last_open_at: datetime) -> list[CandleRow]:
     """Build repository candle rows NEWEST-FIRST (the ``order='desc'`` contract).
 
     The newest row carries ``last_open_at``; each older row steps back
     one hour. Highs sit one above the close, lows one below.
     """
-    ordered = [
+    ordered: list[CandleRow] = [
         {
             "open_at": last_open_at - timedelta(hours=len(closes) - 1 - index),
+            "timeframe": "1h",
+            "open": close - 0.5,
             "close": close,
             "high": close + 1.0,
             "low": close - 1.0,
+            "volume": 1.0,
+            "vwap": close,
+            "trades": 1,
+            "source": "native",
+            "complete": True,
+            "public_id": f"market-{index}",
+            "timestamp": last_open_at - timedelta(hours=len(closes) - 2 - index),
+            "session_id": "market-session",
+            "sequence_id": index,
         }
         for index, close in enumerate(closes)
     ]
     return list(reversed(ordered))
+
+
+def _macro_desc_rows(
+    candles: list[tuple[datetime, float, float]], latest_timestamp: datetime
+) -> list[CandleRow]:
+    """Build complete macro rows newest-first with an explicit latest bus time."""
+    ordered: list[CandleRow] = [
+        {
+            "open_at": open_at,
+            "timeframe": MACRO_SNAPSHOT_TIMEFRAME,
+            "open": open_price,
+            "high": max(open_price, close) + 1.0,
+            "low": min(open_price, close) - 1.0,
+            "close": close,
+            "volume": 1.0,
+            "vwap": close,
+            "trades": 1,
+            "source": "native",
+            "complete": True,
+            "public_id": f"macro-{index}",
+            "timestamp": (
+                latest_timestamp if index == len(candles) - 1 else open_at + timedelta(minutes=1)
+            ),
+            "session_id": "macro-session",
+            "sequence_id": index,
+        }
+        for index, (open_at, open_price, close) in enumerate(candles)
+    ]
+    return list(reversed(ordered))
+
+
+def _fresh_macro_rows() -> list[CandleRow]:
+    """Build deterministic fresh macro history for consult-envelope tests."""
+    candles = [
+        (datetime(2026, 7, 20, 14, 59, tzinfo=UTC), 97.0, 98.0),
+        (datetime(2026, 7, 20, 22, 0, tzinfo=UTC), 99.0, 100.0),
+        (datetime(2026, 7, 21, 14, 0, tzinfo=UTC), 101.0, 102.0),
+        (datetime(2026, 7, 21, 14, 59, tzinfo=UTC), 102.0, 103.0),
+        (datetime(2026, 7, 21, 15, 0, tzinfo=UTC), 104.0, 105.0),
+    ]
+    return _macro_desc_rows(
+        candles,
+        latest_timestamp=datetime(2026, 7, 21, 15, 1, tzinfo=UTC),
+    )
 
 
 class _BlockedConsult:
@@ -460,6 +539,204 @@ class TestBuildMarketSnapshot:
         assert snapshot["last_close"] == 50000.0
 
 
+class TestBuildMacroSnapshot:
+    """Cross-asset snapshot assembly and CME session semantics."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_open_session_computes_requested_fields(self) -> None:
+        """A fresh open-session print produces the complete macro context.
+
+        Given: Complete one-minute Nasdaq futures candles spanning the
+            session open, one-hour reference, and 24-hour boundary,
+        When: The macro snapshot is built during an open CME session,
+        Then: It reports server-computed age and all requested changes
+            without adding an inactive stale flag.
+        """
+        as_of = datetime(2026, 7, 21, 15, 2, tzinfo=UTC)
+        candles = [
+            (datetime(2026, 7, 20, 14, 59, tzinfo=UTC), 97.0, 98.0),
+            (datetime(2026, 7, 20, 22, 0, tzinfo=UTC), 99.0, 100.0),
+            (datetime(2026, 7, 21, 14, 0, tzinfo=UTC), 101.0, 102.0),
+            (datetime(2026, 7, 21, 14, 59, tzinfo=UTC), 102.0, 103.0),
+            (datetime(2026, 7, 21, 15, 0, tzinfo=UTC), 104.0, 105.0),
+        ]
+        repo = AsyncMock()
+        repo.get_candles = AsyncMock(
+            return_value=_macro_desc_rows(
+                candles,
+                latest_timestamp=datetime(2026, 7, 21, 15, 1, tzinfo=UTC),
+            )
+        )
+        snapshot = await _build_macro_snapshot(
+            repo,
+            DEFAULT_MACRO_CONTRACT_SYMBOL,
+            as_of,
+            DEFAULT_MACRO_STALE_AFTER_MINUTES,
+        )
+        expected_returns = [2.0 / 98.0, 2.0 / 100.0, 1.0 / 102.0, 2.0 / 103.0]
+        expected_vol = round(statistics.pstdev(expected_returns) * 100.0, 4)
+        assert snapshot == {
+            "symbol": DEFAULT_MACRO_CONTRACT_SYMBOL,
+            "as_of": as_of.isoformat(),
+            "age_minutes": 1.0,
+            "session": "open",
+            "change_1h_pct": 2.9412,
+            "change_since_session_open_pct": 6.0606,
+            "realized_vol_24h_pct": expected_vol,
+        }
+        repo.get_candles.assert_awaited_once_with(
+            DEFAULT_MACRO_CONTRACT_SYMBOL,
+            MACRO_SNAPSHOT_TIMEFRAME,
+            SNAPSHOT_RANGE_START,
+            as_of,
+            ExchangeEnum.KRAKEN_EQUITIES,
+            as_of,
+            limit=MACRO_SNAPSHOT_BARS,
+            order="desc",
+            complete=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_weekend_closure_preserves_old_print_and_values(self) -> None:
+        """A structural weekend gap remains useful and is never stale.
+
+        Given: Saturday consult time and Friday's legitimate last print,
+        When: The shared CME calendar classifies the venue closed,
+        Then: The large age and derived values remain present with no
+            stale flag or proxy substitution.
+        """
+        as_of = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+        candles = [
+            (datetime(2026, 7, 16, 22, 0, tzinfo=UTC), 99.0, 100.0),
+            (datetime(2026, 7, 17, 19, 59, tzinfo=UTC), 101.0, 102.0),
+            (datetime(2026, 7, 17, 20, 59, tzinfo=UTC), 103.0, 104.0),
+        ]
+        repo = AsyncMock()
+        repo.get_candles = AsyncMock(
+            return_value=_macro_desc_rows(
+                candles,
+                latest_timestamp=datetime(2026, 7, 17, 21, 0, tzinfo=UTC),
+            )
+        )
+        snapshot = await _build_macro_snapshot(
+            repo,
+            DEFAULT_MACRO_CONTRACT_SYMBOL,
+            as_of,
+            DEFAULT_MACRO_STALE_AFTER_MINUTES,
+        )
+        expected_vol = round(statistics.pstdev([2.0 / 100.0, 2.0 / 102.0]) * 100.0, 4)
+        assert snapshot == {
+            "symbol": DEFAULT_MACRO_CONTRACT_SYMBOL,
+            "as_of": as_of.isoformat(),
+            "age_minutes": 900.0,
+            "session": "closed",
+            "change_1h_pct": 1.9608,
+            "change_since_session_open_pct": 5.0505,
+            "realized_vol_24h_pct": expected_vol,
+        }
+
+    @pytest.mark.asyncio
+    async def test_open_session_old_print_is_halted_and_values_are_nulled(self) -> None:
+        """An old print while the calendar is open is a feed incident.
+
+        Given: An open CME session whose latest persisted bus timestamp
+            is eleven minutes old,
+        When: The ten-minute threshold is evaluated,
+        Then: Session is halted, stale is present and true, and every
+            decision value is null even though references are available.
+        """
+        as_of = datetime(2026, 7, 21, 15, 2, tzinfo=UTC)
+        candles = [
+            (datetime(2026, 7, 20, 22, 0, tzinfo=UTC), 99.0, 100.0),
+            (datetime(2026, 7, 21, 13, 50, tzinfo=UTC), 101.0, 102.0),
+            (datetime(2026, 7, 21, 14, 50, tzinfo=UTC), 103.0, 104.0),
+        ]
+        repo = AsyncMock()
+        repo.get_candles = AsyncMock(
+            return_value=_macro_desc_rows(
+                candles,
+                latest_timestamp=datetime(2026, 7, 21, 14, 51, tzinfo=UTC),
+            )
+        )
+        snapshot = await _build_macro_snapshot(
+            repo,
+            DEFAULT_MACRO_CONTRACT_SYMBOL,
+            as_of,
+            DEFAULT_MACRO_STALE_AFTER_MINUTES,
+        )
+        assert snapshot == {
+            "symbol": DEFAULT_MACRO_CONTRACT_SYMBOL,
+            "as_of": as_of.isoformat(),
+            "age_minutes": 11.0,
+            "session": "halted",
+            "change_1h_pct": None,
+            "change_since_session_open_pct": None,
+            "realized_vol_24h_pct": None,
+            "stale": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_threshold_is_strict_and_missing_references_are_null(self) -> None:
+        """Exactly-threshold age stays open without inventing references.
+
+        Given: A recently versioned pre-weekend print exactly ten minutes
+            old just after the Sunday reopen,
+        When: No current-session or one-hour reference candle exists,
+        Then: Age derives from bus timestamp rather than old event time,
+            session stays open, and all unavailable values are null.
+        """
+        as_of = datetime(2026, 7, 19, 22, 5, tzinfo=UTC)
+        repo = AsyncMock()
+        repo.get_candles = AsyncMock(
+            return_value=_macro_desc_rows(
+                [(datetime(2026, 7, 17, 20, 59, tzinfo=UTC), 103.0, 104.0)],
+                latest_timestamp=datetime(2026, 7, 19, 21, 55, tzinfo=UTC),
+            )
+        )
+        snapshot = await _build_macro_snapshot(
+            repo,
+            DEFAULT_MACRO_CONTRACT_SYMBOL,
+            as_of,
+            DEFAULT_MACRO_STALE_AFTER_MINUTES,
+        )
+        assert snapshot == {
+            "symbol": DEFAULT_MACRO_CONTRACT_SYMBOL,
+            "as_of": as_of.isoformat(),
+            "age_minutes": 10.0,
+            "session": "open",
+            "change_1h_pct": None,
+            "change_since_session_open_pct": None,
+            "realized_vol_24h_pct": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_qualifying_complete_candle_raises(self) -> None:
+        """Defensive future-row filtering turns missing history into failure.
+
+        Given: Rows whose event time or bus timestamp is after the anchor,
+        When: The snapshot defensively filters repository output,
+        Then: ValueError lets the consult's fail-soft boundary omit macro.
+        """
+        as_of = datetime(2026, 7, 21, 15, 2, tzinfo=UTC)
+        future_event = _macro_desc_rows(
+            [(as_of + timedelta(minutes=1), 100.0, 101.0)],
+            latest_timestamp=as_of,
+        )
+        future_bus = _macro_desc_rows(
+            [(as_of - timedelta(minutes=1), 100.0, 101.0)],
+            latest_timestamp=as_of + timedelta(minutes=1),
+        )
+        repo = AsyncMock()
+        repo.get_candles = AsyncMock(return_value=future_event + future_bus)
+        with pytest.raises(ValueError, match="No complete macro candles"):
+            await _build_macro_snapshot(
+                repo,
+                DEFAULT_MACRO_CONTRACT_SYMBOL,
+                as_of,
+                DEFAULT_MACRO_STALE_AFTER_MINUTES,
+            )
+
+
 class TestHeartbeatConsultConstruction:
     """Fail-fast validation at construction time."""
 
@@ -476,7 +753,47 @@ class TestHeartbeatConsultConstruction:
         assert strategy.consult_strategy_public_id == config.params["ai_review_strategy_public_id"]
         assert strategy.consult_deadline_seconds == DEFAULT_CONSULT_DEADLINE_SECONDS
         assert strategy.consult_signal_strength == 0.0
+        assert strategy.macro_contract_symbol == DEFAULT_MACRO_CONTRACT_SYMBOL
+        assert strategy.macro_stale_after_minutes == DEFAULT_MACRO_STALE_AFTER_MINUTES
         assert strategy._consult_task is None
+
+    def test_macro_parameters_override_defaults(self) -> None:
+        """Verify quarterly symbol rotation and threshold are config-driven.
+
+        Given: Params naming a different CME contract and threshold,
+        When: HeartbeatConsult is instantiated,
+        Then: Both macro settings bind without a code change.
+        """
+        params = _consult_params(
+            macro_contract_symbol="MESZ6-CME",
+            macro_stale_after_minutes=12.5,
+        )
+        strategy = HeartbeatConsult(_config(params=params))
+        assert strategy.macro_contract_symbol == "MESZ6-CME"
+        assert strategy.macro_stale_after_minutes == 12.5
+
+    def test_empty_macro_contract_rejected(self) -> None:
+        """Verify a blank macro symbol cannot silently disable context.
+
+        Given: A whitespace-only macro contract parameter,
+        When: HeartbeatConsult is instantiated,
+        Then: ValueError names the invalid parameter.
+        """
+        params = _consult_params(macro_contract_symbol="   ")
+        with pytest.raises(ValueError, match="macro_contract_symbol"):
+            HeartbeatConsult(_config(params=params))
+
+    @pytest.mark.parametrize("threshold", [0.0, math.inf])
+    def test_invalid_macro_stale_threshold_rejected(self, threshold: float) -> None:
+        """Verify the incident threshold must be finite and positive.
+
+        Given: A zero or infinite macro staleness threshold,
+        When: HeartbeatConsult is instantiated,
+        Then: ValueError names the invalid parameter.
+        """
+        params = _consult_params(macro_stale_after_minutes=threshold)
+        with pytest.raises(ValueError, match="macro_stale_after_minutes"):
+            HeartbeatConsult(_config(params=params))
 
     def test_non_paper_exchange_rejected(self) -> None:
         """Verify a live exchange is rejected.
@@ -965,22 +1282,43 @@ class TestHeartbeatConsultConsult:
         *,
         instrument_public_id: str | None,
         primitive: AsyncMock,
-        candle_rows: list[dict[str, Any]] | None = None,
+        candle_rows: list[CandleRow] | None = None,
+        macro_rows: list[CandleRow] | None = None,
         candles_error: Exception | None = None,
+        macro_error: Exception | None = None,
     ) -> AsyncMock:
         """Patch repository + primitive for a consult round, return the repo mock."""
         repo = AsyncMock()
         repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=instrument_public_id)
-        if candles_error is not None:
-            repo.get_candles = AsyncMock(side_effect=candles_error)
-        else:
-            repo.get_candles = AsyncMock(return_value=candle_rows or [])
+
+        async def read_candles(
+            instrument: str,
+            timeframe: str,
+            start: datetime | None,
+            end: datetime | None,
+            exchange: AllExchange,
+            as_of: datetime,
+            limit: int | None = None,
+            order: str = "asc",
+            complete: bool | None = None,
+        ) -> list[CandleRow]:
+            """Return market and macro fixtures through the repository signature."""
+            if exchange == ExchangeEnum.KRAKEN_EQUITIES:
+                if macro_error is not None:
+                    raise macro_error
+                return macro_rows or []
+            if candles_error is not None:
+                raise candles_error
+            return candle_rows or []
+
+        repo.get_candles = AsyncMock(side_effect=read_candles)
         monkeypatch.setattr(
             "snapper.strategies.heartbeat_consult.get_repository", lambda db_url: repo
         )
         monkeypatch.setattr(
             "snapper.strategies.heartbeat_consult.create_ai_review_and_await", primitive
         )
+        monkeypatch.setattr("snapper.strategies.heartbeat_consult.datetime", _FixedConsultClock)
         return repo
 
     @pytest.mark.asyncio
@@ -1005,6 +1343,7 @@ class TestHeartbeatConsultConsult:
             monkeypatch,
             instrument_public_id=instrument_public_id,
             primitive=primitive,
+            macro_rows=_fresh_macro_rows(),
         )
         candle = _candle()
         result = await strategy._consult("BTC-USD", candle)
@@ -1020,6 +1359,10 @@ class TestHeartbeatConsultConsult:
         assert request.instrument_public_id == instrument_public_id
         assert request.deadline_seconds == DEFAULT_CONSULT_DEADLINE_SECONDS
         assert request.session_id == strategy._tracker.session_id
+        expected_macro_vol = round(
+            statistics.pstdev([2.0 / 98.0, 2.0 / 100.0, 1.0 / 102.0, 2.0 / 103.0]) * 100.0,
+            4,
+        )
         assert request.signal_envelope == {
             "kind": "heartbeat",
             "open_at": candle.open_at.isoformat(),
@@ -1039,20 +1382,57 @@ class TestHeartbeatConsultConsult:
                 "low_24_bar": None,
                 "realized_vol_24_bar_pct": None,
             },
+            "macro": {
+                "symbol": DEFAULT_MACRO_CONTRACT_SYMBOL,
+                "as_of": _CONSULT_AS_OF.isoformat(),
+                "age_minutes": 1.0,
+                "session": "open",
+                "change_1h_pct": 2.9412,
+                "change_since_session_open_pct": 6.0606,
+                "realized_vol_24h_pct": expected_macro_vol,
+            },
         }
         assert request.instrument_metadata == {"last_price": candle.close}
         assert primitive.await_args.kwargs["deadline_seconds"] == DEFAULT_CONSULT_DEADLINE_SECONDS
+        assert (
+            len(_serialize_signal_envelope_canonical(request.signal_envelope))
+            < MAX_SIGNAL_ENVELOPE_BYTES
+        )
 
     @pytest.mark.asyncio
-    async def test_snapshot_failure_downgrades_envelope(
+    async def test_configured_macro_contract_drives_repository_read(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Verify a snapshot failure downgrades the envelope, not the round.
+        """Verify quarterly contract rotation reaches the candle query.
 
-        Given: A candle read raising mid-snapshot,
+        Given: A strategy configured with the December S&P micro contract,
+        When: A consult builds its cross-asset snapshot,
+        Then: The repository read and resulting envelope use that symbol.
+        """
+        params = _consult_params(macro_contract_symbol="MESZ6-CME")
+        strategy = HeartbeatConsult(_config(params=params))
+        primitive = AsyncMock(return_value=_approved_outcome())
+        repo = self._wire(
+            monkeypatch,
+            instrument_public_id=str(uuid7()),
+            primitive=primitive,
+            macro_rows=_fresh_macro_rows(),
+        )
+        await strategy._consult("BTC-USD", _candle())
+        assert repo.get_candles.await_args_list[1].args[0] == "MESZ6-CME"
+        assert primitive.await_args is not None
+        envelope = primitive.await_args.args[0].signal_envelope
+        assert envelope["macro"]["symbol"] == "MESZ6-CME"
+
+    @pytest.mark.asyncio
+    async def test_market_snapshot_failure_keeps_macro_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify a traded-market snapshot failure cannot erase macro.
+
+        Given: The traded candle read fails while macro candles are healthy,
         When: _consult runs,
-        Then: The request still goes out with the minimal envelope and
-            no 'market' section.
+        Then: The request still goes out without market and retains macro.
         """
         strategy = HeartbeatConsult(_config())
         outcome = _approved_outcome()
@@ -1062,14 +1442,41 @@ class TestHeartbeatConsultConsult:
             instrument_public_id=str(uuid7()),
             primitive=primitive,
             candles_error=RuntimeError("candle store down"),
+            macro_rows=_fresh_macro_rows(),
         )
         candle = _candle()
         assert await strategy._consult("BTC-USD", candle) is outcome
         assert primitive.await_args is not None
         envelope = primitive.await_args.args[0].signal_envelope
         assert "market" not in envelope
+        assert envelope["macro"]["symbol"] == DEFAULT_MACRO_CONTRACT_SYMBOL
         assert envelope["kind"] == "heartbeat"
         assert envelope["proposed_side"] == "buy"
+
+    @pytest.mark.asyncio
+    async def test_macro_snapshot_failure_keeps_market_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify macro failure omits only macro and never breaks consult.
+
+        Given: A healthy traded-market read and failing macro read,
+        When: _consult runs,
+        Then: The request is created with market and without macro.
+        """
+        strategy = HeartbeatConsult(_config())
+        outcome = _approved_outcome()
+        primitive = AsyncMock(return_value=outcome)
+        self._wire(
+            monkeypatch,
+            instrument_public_id=str(uuid7()),
+            primitive=primitive,
+            macro_error=RuntimeError("macro candle store down"),
+        )
+        assert await strategy._consult("BTC-USD", _candle()) is outcome
+        assert primitive.await_args is not None
+        envelope = primitive.await_args.args[0].signal_envelope
+        assert "market" in envelope
+        assert "macro" not in envelope
 
     @pytest.mark.asyncio
     async def test_consult_sequence_uses_named_stream(

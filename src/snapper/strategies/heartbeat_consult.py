@@ -34,13 +34,15 @@ Two design points matter for reviewers of this module:
   flags (a permanent stop flag, a reset-scoped flag) so a reset
   unwound by a concurrent stop can never reopen the stop's gate.
 - **Self-contained decision envelope.** Every consult carries a
-  ``market`` snapshot (trailing SMA/RSI/range/volatility computed from
-  the persisted candle history) plus the proposed action, so the
-  delegate can decide without any follow-up lookups inside the decision
-  deadline. The MCP surface (``get_ohlcv``, ``list_positions``, ...)
-  remains available for deeper context when the delegate has time.
-  Snapshot construction is fail-soft: on any error the consult still
-  runs with the minimal legacy envelope.
+  ``market`` snapshot (trailing SMA/RSI/range/volatility for the traded
+  instrument) and a ``macro`` snapshot (freshness, session state, and
+  movement in a configured CME equity-index future) computed from
+  persisted candles. The delegate can therefore distinguish an isolated
+  crypto move from a broad risk move without follow-up lookups inside the
+  decision deadline. The MCP surface (``get_ohlcv``, ``list_positions``,
+  ...) remains available for deeper context when the delegate has time.
+  Each snapshot is independently fail-soft: an error omits only that
+  section and never breaks the consult.
 
 Identity requirements: the outbound ``ai_reviews.{user}.{strategy}.request``
 frame topic validates both ids as UUID7 at publish time while the review
@@ -56,6 +58,7 @@ import statistics
 from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import ClassVar
 
 from loguru import logger
@@ -68,6 +71,8 @@ from snapper.application.ai_review.strategy_primitive import create_ai_review_an
 from snapper.config.settings import get_bootstrap_settings
 from snapper.core.ids import is_uuid7
 from snapper.core.json_types import JsonObject
+from snapper.core.market_hours import is_cme_closed
+from snapper.core.market_hours import last_cme_reopen
 from snapper.core.types import AiReviewStatusEnum
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import TradeSideEnum
@@ -144,6 +149,36 @@ DAY_BARS = 24
 With the default 1h input, ``DAY_BARS`` spans one day — the 24-bar
 change / range / volatility fields read as daily context.
 """
+
+DEFAULT_MACRO_CONTRACT_SYMBOL = "MNQU6-CME"
+"""Default CME macro proxy: the September 2026 Micro Nasdaq-100 future.
+
+The strategy parameter carrying this value absorbs quarterly contract
+rotation without a code change. Nasdaq exposure is the more direct
+equity-index risk proxy for BTC, while the micro and full-size contracts
+have equivalent percentage movement.
+"""
+
+DEFAULT_MACRO_STALE_AFTER_MINUTES = 10.0
+"""Open-session freshness threshold for classifying the macro feed halted.
+
+Complete one-minute candles normally persist within roughly two minutes.
+Ten minutes leaves operational headroom while matching the platform's
+whole-exchange incident threshold. Scheduled CME closures never use this
+threshold to label an old last print faulty.
+"""
+
+MACRO_SNAPSHOT_TIMEFRAME = "1m"
+MACRO_SNAPSHOT_BARS = 1500
+"""Persisted macro history read per consult.
+
+The depth covers a complete 24-hour wall-time volatility window plus its
+preceding return anchor at one-minute resolution. Only derived scalars
+enter the canonical JSON envelope.
+"""
+
+MACRO_ONE_HOUR = timedelta(hours=1)
+MACRO_ONE_DAY = timedelta(hours=24)
 
 
 def _finite_or_none(value: float) -> float | None:
@@ -319,6 +354,110 @@ async def _build_market_snapshot(
     }
 
 
+async def _build_macro_snapshot(
+    repo: Repository,
+    symbol: str,
+    as_of: datetime,
+    stale_after_minutes: float,
+) -> JsonObject:
+    """Compute cross-asset CME regime context for one consult round.
+
+    Reads complete persisted one-minute candles for the configured
+    quarterly contract at the same temporal anchor as the consult's
+    traded-market snapshot. Price horizons use candle event time while
+    ``age_minutes`` is recomputed from the newest candle's bus timestamp
+    and ``as_of``. The shared CME calendar separates structural daily,
+    weekend, and holiday gaps from an open-session feed incident.
+
+    ``session="halted"`` and the presence-only ``stale=True`` flag mean
+    the calendar says open but the newest print exceeds the configured
+    threshold; all three derived value fields are then ``None``. During a
+    scheduled closure, the last print, its honest age, and its derived
+    values remain available with ``session="closed"`` and no stale flag.
+
+    Args:
+        repo: Repository handle for the candle read.
+        symbol: Native quarterly CME contract symbol.
+        as_of: Temporal read and freshness anchor shared by the consult.
+        stale_after_minutes: Maximum healthy candle age while CME is open.
+
+    Returns:
+        The ``macro`` envelope section.
+
+    Raises:
+        ValueError: No complete macro candle exists at the read anchor.
+    """
+    rows = await repo.get_candles(
+        symbol,
+        MACRO_SNAPSHOT_TIMEFRAME,
+        SNAPSHOT_RANGE_START,
+        as_of,
+        ExchangeEnum.KRAKEN_EQUITIES,
+        as_of,
+        limit=MACRO_SNAPSHOT_BARS,
+        order="desc",
+        complete=True,
+    )
+    ordered = [
+        row for row in reversed(rows) if row["open_at"] <= as_of and row["timestamp"] <= as_of
+    ]
+    if not ordered:
+        raise ValueError(f"No complete macro candles available for {symbol}")
+
+    latest = ordered[-1]
+    latest_close = float(latest["close"])
+    raw_age_minutes = (as_of - latest["timestamp"]).total_seconds() / 60.0
+    age_minutes = round(raw_age_minutes, 2)
+    scheduled_closed = is_cme_closed(as_of)
+    stale = not scheduled_closed and raw_age_minutes > stale_after_minutes
+    session = "closed" if scheduled_closed else "halted" if stale else "open"
+
+    one_hour_cutoff = latest["open_at"] - MACRO_ONE_HOUR
+    one_hour_reference = next(
+        (float(row["close"]) for row in reversed(ordered) if row["open_at"] <= one_hour_cutoff),
+        None,
+    )
+    session_open = last_cme_reopen(as_of)
+    session_open_row = next(
+        (row for row in ordered if session_open <= row["open_at"] <= latest["open_at"]),
+        None,
+    )
+    volatility_cutoff = latest["open_at"] - MACRO_ONE_DAY
+    volatility_rows = [row for row in ordered if row["open_at"] >= volatility_cutoff]
+    volatility_anchor = next(
+        (row for row in reversed(ordered) if row["open_at"] < volatility_cutoff),
+        None,
+    )
+    if volatility_anchor is not None:
+        volatility_rows.insert(0, volatility_anchor)
+    volatility_closes = [float(row["close"]) for row in volatility_rows]
+    realized_vol = (
+        _realized_vol_pct(volatility_closes, len(volatility_closes) - 1)
+        if len(volatility_closes) >= 2
+        else None
+    )
+    snapshot: JsonObject = {
+        "symbol": symbol,
+        "as_of": as_of.isoformat(),
+        "age_minutes": age_minutes,
+        "session": session,
+        "change_1h_pct": (
+            None
+            if stale or one_hour_reference is None
+            else _pct_change(latest_close, one_hour_reference)
+        ),
+        "change_since_session_open_pct": (
+            None
+            if stale or session_open_row is None
+            else _pct_change(latest_close, float(session_open_row["open"]))
+        ),
+        "realized_vol_24h_pct": None if stale else realized_vol,
+    }
+    if stale:
+        snapshot["stale"] = True
+    return snapshot
+
+
 @register_strategy("HeartbeatConsult")
 @create_strategy_process(
     process_name="strategy_heartbeat_consult_btc_1h",
@@ -332,6 +471,8 @@ async def _build_market_snapshot(
             "ai_review_strategy_public_id": "",
             "ai_review_deadline_seconds": DEFAULT_CONSULT_DEADLINE_SECONDS,
             "heartbeat_signal_strength": DEFAULT_HEARTBEAT_SIGNAL_STRENGTH,
+            "macro_contract_symbol": DEFAULT_MACRO_CONTRACT_SYMBOL,
+            "macro_stale_after_minutes": DEFAULT_MACRO_STALE_AFTER_MINUTES,
         },
     },
 )
@@ -361,6 +502,10 @@ class HeartbeatConsult(BaseStrategy):
         consult_signal_strength: Emit strength for an approved round in
             ``[0.0, 1.0]``; 0.0 (default) stays target-flat, higher opens
             an actionable paper long.
+        macro_contract_symbol: Native quarterly CME contract used for
+            the cross-asset regime snapshot.
+        macro_stale_after_minutes: Open-session age threshold after which
+            macro values are suppressed and the session reads halted.
     """
 
     REFERENCE_IDENTITY_PARAMS: ClassVar[Mapping[str, str]] = {"ai_review_user_public_id": "user"}
@@ -375,12 +520,14 @@ class HeartbeatConsult(BaseStrategy):
                 ``ai_review_strategy_public_id`` params plus a sane
                 ``ai_review_deadline_seconds`` and an optional
                 ``heartbeat_signal_strength`` in ``[0.0, 1.0]``
-                (default 0.0 = target-flat).
+                (default 0.0 = target-flat), plus optional macro contract
+                and staleness parameters.
 
         Raises:
             ValueError: Non-paper exchange, missing/non-UUID7 identity
                 params, an out-of-range deadline, or an out-of-range
-                ``heartbeat_signal_strength``.
+                ``heartbeat_signal_strength``; an empty macro symbol or
+                non-positive/non-finite macro staleness threshold.
         """
         super().__init__(config)
         if config.exchange != ExchangeEnum.PAPER:
@@ -426,10 +573,27 @@ class HeartbeatConsult(BaseStrategy):
                 f"[{MIN_HEARTBEAT_SIGNAL_STRENGTH}, {MAX_HEARTBEAT_SIGNAL_STRENGTH}] "
                 f"(downstream SignalData enforces the same bound), got {signal_strength}"
             )
+        macro_contract_symbol = str(
+            self.params.get("macro_contract_symbol", DEFAULT_MACRO_CONTRACT_SYMBOL)
+        ).strip()
+        if not macro_contract_symbol:
+            raise ValueError(
+                f"Strategy {config.name}: param 'macro_contract_symbol' must not be empty"
+            )
+        macro_stale_after_minutes = float(
+            self.params.get("macro_stale_after_minutes", DEFAULT_MACRO_STALE_AFTER_MINUTES)
+        )
+        if not math.isfinite(macro_stale_after_minutes) or macro_stale_after_minutes <= 0.0:
+            raise ValueError(
+                f"Strategy {config.name}: param 'macro_stale_after_minutes' must be finite "
+                f"and positive, got {macro_stale_after_minutes}"
+            )
         self.consult_user_public_id = user_public_id
         self.consult_strategy_public_id = strategy_public_id
         self.consult_deadline_seconds = deadline_seconds
         self.consult_signal_strength = signal_strength
+        self.macro_contract_symbol = macro_contract_symbol
+        self.macro_stale_after_minutes = macro_stale_after_minutes
         self._last_consult_open_at: datetime | None = None
         self._consult_task: asyncio.Task[None] | None = None
         self._consult_stopped = False
@@ -561,11 +725,11 @@ class HeartbeatConsult(BaseStrategy):
         exchange (paper configs subscribe live-venue topics, and
         instrument rows live under the source venue), builds the
         :class:`AiReviewCreateRequest` with the validated identity
-        params and the self-contained market snapshot, and drives
-        ``create_ai_review_and_await``. Uses the process-wide cached
-        repository exactly like DB warmup does and never disposes it.
-        A snapshot failure downgrades the envelope to the minimal
-        legacy form instead of skipping the round.
+        params and independently fail-soft traded-market and macro
+        snapshots, and drives ``create_ai_review_and_await``. Uses the
+        process-wide cached repository exactly like DB warmup does and
+        never disposes it. A snapshot failure omits only that section
+        instead of skipping the round.
 
         Args:
             instrument: The instrument symbol from the candle topic.
@@ -601,6 +765,15 @@ class HeartbeatConsult(BaseStrategy):
                 )
             except Exception as exc:
                 logger.warning(f"Strategy {self.name}: market snapshot unavailable — {exc}")
+            try:
+                signal_envelope["macro"] = await _build_macro_snapshot(
+                    repo,
+                    self.macro_contract_symbol,
+                    now,
+                    self.macro_stale_after_minutes,
+                )
+            except Exception as exc:
+                logger.warning(f"Strategy {self.name}: macro snapshot unavailable — {exc}")
             request = AiReviewCreateRequest(
                 user_public_id=self.consult_user_public_id,
                 operator_public_id=self.config.operator_public_id,
