@@ -458,7 +458,7 @@ async def get_ai_review_aftermath_route(
                 "details": {"review_public_id": review_public_id},
             },
         )
-    scope_ok = await repo.has_grant_for_delegate(
+    scope_ok = await get_scope_grant_service().has_grant_for_delegate(
         delegate_public_id=principal.delegate_public_id,
         wallet_public_id=review["wallet_public_id"],
         instrument_public_id=review["instrument_public_id"],

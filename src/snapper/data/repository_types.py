@@ -2737,6 +2737,40 @@ class AiReviewPositionCycleTransitionRow(TypedDict):
     closing_command_public_id: str | None
 
 
+class AiReviewAftermathExecutionRow(TypedDict):
+    """One execution with stable order and account-scope lineage."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    trade_id: str | None
+    exec_id: str | None
+    order_public_id: str
+    instrument_public_id: str
+    exchange_order_id: str | None
+    client_order_id: str | None
+    instrument: str
+    exchange: str
+    mode: str
+    scope_sequence: int
+    side: str
+    size: float
+    price: float
+    fee: float
+    fee_asset: str
+    status: str
+    executed_at: datetime
+    wallet_public_id: str | None
+    operator_public_id: str | None
+    liquidity_role: str
+    price_decimal: str | None
+    size_decimal: str | None
+    fee_decimal: str | None
+    counter_amount_decimal: str | None
+    numeric_provenance: str | None
+
+
 class AiReviewAftermathRow(TypedDict):
     """Read-only terminal-review aftermath projection at one temporal anchor."""
 
@@ -2744,7 +2778,7 @@ class AiReviewAftermathRow(TypedDict):
     window_started_at: datetime
     as_of: datetime
     orders: list[OrderRow]
-    executions: list[ExecutionRow]
+    executions: list[AiReviewAftermathExecutionRow]
     position_cycle_transitions: list[AiReviewPositionCycleTransitionRow]
     current_positions: list[PositionRow]
 

@@ -368,8 +368,9 @@ to `caps_enforcer_getter` at registration.
     registered AI delegate, and a currently active grant for that exact
     wallet and instrument. Unknown and out-of-scope reviews both return
     `review_not_found`; pending and fanout-dispatched rows return
-    `review_not_terminal`. The tool never changes review state or emits an
-    audit event.
+    `review_not_terminal`. Executions include stable order, instrument, mode,
+    and scope-sequence lineage even when the order itself predates the window.
+    The tool never changes review state or emits an audit event.
 
 - **`submit_manual_order(exchange, instrument, instrument_public_id,
     side, order_type, quantity, idempotency_key, wallet_public_id?,

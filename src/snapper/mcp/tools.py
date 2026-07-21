@@ -1431,7 +1431,7 @@ async def _get_ai_review_aftermath_tool(
             message="No terminal review with that id was found in the caller's scope.",
             details=sanitize_output({"review_public_id": review_public_id}),
         )
-    scope_ok = await access.repo.has_grant_for_delegate(
+    scope_ok = await get_scope_grant_service().has_grant_for_delegate(
         delegate_public_id=delegate["public_id"],
         wallet_public_id=review["wallet_public_id"],
         instrument_public_id=review["instrument_public_id"],

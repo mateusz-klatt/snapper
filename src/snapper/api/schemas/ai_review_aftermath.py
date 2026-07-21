@@ -74,10 +74,14 @@ class AiReviewAftermathExecution(StrictBody):
     sequence_id: int
     trade_id: str | None
     exec_id: str | None
+    order_public_id: str
+    instrument_public_id: str
     exchange_order_id: str | None
-    client_order_id: str
+    client_order_id: str | None
     instrument: str
     exchange: str
+    mode: str
+    scope_sequence: int
     side: str
     size: float
     price: float

@@ -1,18 +1,22 @@
 """REST contract tests for terminal AI-review aftermath reads."""
 
 from collections.abc import AsyncGenerator
+from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import cast
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.scope_grant_service import ScopeGrantService
+from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AiReviewAftermathRow
 from snapper.data.repository_types import AiReviewRow
@@ -146,7 +150,16 @@ def _repository_mock(
     repo.get_ai_review = AsyncMock(return_value=review)
     repo.has_grant_for_delegate = AsyncMock(return_value=scope_ok)
     repo.get_ai_review_aftermath = AsyncMock(return_value=aftermath)
+    get_scope_grant_service().repository = cast(Repository, repo)
     return repo
+
+
+@pytest.fixture(autouse=True)
+def _clear_scope_grant_service() -> Generator[None]:
+    """Reset the scope-policy singleton around each route case."""
+    ScopeGrantService.clear_instance()
+    yield
+    ScopeGrantService.clear_instance()
 
 
 def _client(repo: AsyncMock, principal: AuthPrincipal) -> TestClient:

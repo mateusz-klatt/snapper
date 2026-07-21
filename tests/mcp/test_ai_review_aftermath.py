@@ -1,6 +1,7 @@
 """MCP contract tests for the read-only AI-review aftermath tool."""
 
 import json
+from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -14,6 +15,8 @@ from mcp.types import TextContent
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.scope_grant_service import ScopeGrantService
+from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 from snapper.data.repository import Repository
@@ -141,7 +144,16 @@ def _repository(
     repo.get_ai_review = AsyncMock(return_value=review)
     repo.has_grant_for_delegate = AsyncMock(return_value=scope_ok)
     repo.get_ai_review_aftermath = AsyncMock(return_value=aftermath)
+    get_scope_grant_service().repository = cast(Repository, repo)
     return repo
+
+
+@pytest.fixture(autouse=True)
+def _clear_scope_grant_service() -> Generator[None]:
+    """Reset the scope-policy singleton around each MCP case."""
+    ScopeGrantService.clear_instance()
+    yield
+    ScopeGrantService.clear_instance()
 
 
 def _server(repository: AsyncMock | None, claims: TokenClaims) -> FastMCP:

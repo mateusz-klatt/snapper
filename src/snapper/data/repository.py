@@ -238,6 +238,7 @@ from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import AiDelegateRow
+from snapper.data.repository_types import AiReviewAftermathExecutionRow
 from snapper.data.repository_types import AiReviewAftermathRow
 from snapper.data.repository_types import AiReviewEventInsertRow
 from snapper.data.repository_types import AiReviewInsertRow
@@ -22677,10 +22678,13 @@ class SQLAlchemyRepository(Repository):
         """Project exact-scope activity from review creation through ``as_of``.
 
         Orders, executions, cycles, instruments, symbols, and positions use
-        the established temporal-active predicate at the same anchor. Cycle
-        lifecycle events are derived from the active-as-of row's retained
-        ``opened_at`` and ``closed_at`` values so max-quantity revisions are
-        not misreported as state transitions.
+        the established temporal-active predicate at the same anchor. An
+        execution's sentinel-current parent order supplies only immutable
+        wallet and instrument lineage, while a separate active-as-of order
+        supplies its optional display identifiers. Cycle lifecycle events are
+        derived from the active-as-of row's retained ``opened_at`` and
+        ``closed_at`` values so max-quantity revisions are not misreported as
+        state transitions.
 
         Args:
             review_public_id: Review whose wallet and instrument key the read.
@@ -22758,23 +22762,39 @@ class SQLAlchemyRepository(Repository):
                 for order, instrument, symbol in order_rows
             ]
 
+            visible_order = aliased(Order)
             execution_query = (
-                select(Execution, Order, Instrument, Symbol)
+                select(
+                    Execution,
+                    Order.instrument_public_id,
+                    visible_order.client_order_id,
+                    visible_order.exchange_order_id,
+                    Symbol.native_symbol,
+                )
                 .join(
                     Order,
                     and_(
                         Execution.order_public_id == Order.public_id,
-                        *where_active(Order, as_of),
+                        Order.known_to == KNOWN_TO_MAX,
+                        Order.wallet_public_id == wallet_public_id,
+                        Order.instrument_public_id == instrument_public_id,
                     ),
                 )
-                .join(
+                .outerjoin(
+                    visible_order,
+                    and_(
+                        Execution.order_public_id == visible_order.public_id,
+                        *where_active(visible_order, as_of),
+                    ),
+                )
+                .outerjoin(
                     Instrument,
                     and_(
                         Order.instrument_public_id == Instrument.public_id,
                         *where_active(Instrument, as_of),
                     ),
                 )
-                .join(
+                .outerjoin(
                     Symbol,
                     and_(
                         Instrument.symbol_public_id == Symbol.public_id,
@@ -22783,7 +22803,6 @@ class SQLAlchemyRepository(Repository):
                 )
                 .where(
                     Execution.wallet_public_id == wallet_public_id,
-                    Order.instrument_public_id == instrument_public_id,
                     Execution.timestamp >= window_started_at,
                     Execution.timestamp <= as_of,
                     *where_active(Execution, as_of),
@@ -22796,7 +22815,7 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             execution_rows = (await s.execute(execution_query)).all()
-            executions: list[ExecutionRow] = [
+            executions: list[AiReviewAftermathExecutionRow] = [
                 {
                     "public_id": execution.public_id,
                     "timestamp": execution.timestamp,
@@ -22804,10 +22823,14 @@ class SQLAlchemyRepository(Repository):
                     "sequence_id": execution.sequence_id,
                     "trade_id": execution.trade_id,
                     "exec_id": execution.exec_id,
-                    "exchange_order_id": order.exchange_order_id,
-                    "client_order_id": order.client_order_id or "",
-                    "instrument": symbol.native_symbol,
-                    "exchange": instrument.exchange,
+                    "order_public_id": execution.order_public_id,
+                    "instrument_public_id": execution_instrument_public_id,
+                    "exchange_order_id": exchange_order_id,
+                    "client_order_id": client_order_id,
+                    "instrument": native_symbol or execution_instrument_public_id,
+                    "exchange": execution.exchange,
+                    "mode": execution.mode,
+                    "scope_sequence": execution.scope_sequence,
                     "side": execution.side,
                     "size": execution.size,
                     "price": execution.price,
@@ -22824,7 +22847,13 @@ class SQLAlchemyRepository(Repository):
                     "counter_amount_decimal": execution.counter_amount_decimal,
                     "numeric_provenance": execution.numeric_provenance,
                 }
-                for execution, order, instrument, symbol in execution_rows
+                for (
+                    execution,
+                    execution_instrument_public_id,
+                    client_order_id,
+                    exchange_order_id,
+                    native_symbol,
+                ) in execution_rows
             ]
 
             cycle_query = (
@@ -22886,6 +22915,8 @@ class SQLAlchemyRepository(Repository):
                     PositionCycle.public_id.label("position_cycle_public_id"),
                 )
                 .where(
+                    PositionCycle.wallet_public_id == wallet_public_id,
+                    PositionCycle.instrument_public_id == instrument_public_id,
                     PositionCycle.status == "open",
                     *where_active(PositionCycle, as_of),
                     ~(

@@ -3820,11 +3820,15 @@ delegate identity returns `422` with `error_code="not_a_delegate"`.
 
 `review` is the complete persisted `ai_reviews` row. Orders and executions are
 the versions active at `as_of`, ordered oldest first and bounded by the review
-window. Each position-cycle transition is an explicit `opened`, `closed`, or
-`liquidated` event derived from lifecycle timestamps retained by the cycle
-version active at `as_of`. `current_positions` is a list because the review row
-does not carry a mode and more than one mode-specific position may exist; an
-instrument with no position returns an empty list.
+window. Every execution carries `order_public_id`, `instrument_public_id`,
+`exchange`, `mode`, and `scope_sequence` so fills whose orders predate the
+window remain attributable. Its `client_order_id` and `exchange_order_id` are
+nullable when the parent order was not yet visible at `as_of`. Each
+position-cycle transition is an explicit `opened`, `closed`, or `liquidated`
+event derived from lifecycle timestamps retained by the cycle version active
+at `as_of`. `current_positions` is a list because the review row does not carry
+a mode and more than one mode-specific position may exist; an instrument with
+no position returns an empty list.
 
 ### GET /api/ai-reviews
 

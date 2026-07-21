@@ -9,6 +9,7 @@ from uuid import uuid7
 
 import pytest
 
+from snapper.api.schemas.ai_review_aftermath import AiReviewAftermathResponse
 from snapper.data.models import AiReview
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
@@ -237,7 +238,7 @@ async def _seed_projection_scope(
     repo: SQLAlchemyRepository,
     *,
     created_at: datetime,
-) -> tuple[_ScopeIds, PositionCycle, datetime]:
+) -> tuple[_ScopeIds, PositionCycle, Order, datetime]:
     """Seed exact-scope, out-of-scope, and out-of-window aftermath data.
 
     Args:
@@ -245,7 +246,8 @@ async def _seed_projection_scope(
         created_at: Review creation and inclusive window start.
 
     Returns:
-        Scope identities, the current open cycle, and the full ``as_of``.
+        Scope identities, the current open cycle, one future-stamped execution
+        parent, and the full ``as_of``.
     """
     ids: _ScopeIds = {
         "review": _uuid(),
@@ -295,6 +297,14 @@ async def _seed_projection_scope(
         client_order_id="future",
         sequence_id=14,
     )
+    future_stamped_parent = _order(
+        instrument_public_id=ids["instrument"],
+        wallet_public_id=ids["wallet"],
+        created_at=created_at + timedelta(seconds=5),
+        client_order_id="future-stamped-parent",
+        sequence_id=15,
+    )
+    future_stamped_parent.timestamp = as_of + timedelta(seconds=1)
     opened_and_closed = _cycle(
         ids=ids,
         status="closed",
@@ -382,6 +392,7 @@ async def _seed_projection_scope(
                 wrong_wallet_order,
                 wrong_instrument_order,
                 future_order,
+                future_stamped_parent,
                 _execution(
                     order=exact_order,
                     wallet_public_id=ids["wallet"],
@@ -393,6 +404,12 @@ async def _seed_projection_scope(
                     wallet_public_id=ids["wallet"],
                     timestamp=created_at + timedelta(seconds=7),
                     scope_sequence=2,
+                ),
+                _execution(
+                    order=future_stamped_parent,
+                    wallet_public_id=ids["wallet"],
+                    timestamp=created_at + timedelta(seconds=9),
+                    scope_sequence=3,
                 ),
                 opened_and_closed,
                 closed_in_window,
@@ -418,7 +435,7 @@ async def _seed_projection_scope(
             ]
         )
         await session.commit()
-    return ids, current_cycle, as_of
+    return ids, current_cycle, future_stamped_parent, as_of
 
 
 @pytest.mark.asyncio
@@ -478,14 +495,16 @@ async def test_get_ai_review_aftermath_filters_scope_and_replays_as_of(
 ) -> None:
     """One anchor deterministically bounds exact-scope aftermath evidence.
 
-    Given exact-scope activity plus wrong-wallet, wrong-instrument, old, and
-        future rows,
+    Given exact-scope activity plus wrong-wallet, wrong-instrument, old,
+        future, and clock-skewed lineage rows,
     When the projection is read at an early anchor and at the full anchor,
     Then only inclusive exact-scope evidence known at each anchor is returned.
     """
     repo = await _build_repo(tmp_path, "aftermath-full.db")
     created_at = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
-    ids, current_cycle, as_of = await _seed_projection_scope(repo, created_at=created_at)
+    ids, current_cycle, future_stamped_parent, as_of = await _seed_projection_scope(
+        repo, created_at=created_at
+    )
 
     early = await repo.get_ai_review_aftermath(ids["review"], created_at + timedelta(seconds=7))
     assert early is not None
@@ -505,8 +524,17 @@ async def test_get_ai_review_aftermath_filters_scope_and_replays_as_of(
     assert [order["client_order_id"] for order in result["orders"]] == ["exact"]
     assert [execution["client_order_id"] for execution in result["executions"]] == [
         "older",
+        None,
         "exact",
     ]
+    skewed_execution = result["executions"][1]
+    assert skewed_execution["order_public_id"] == future_stamped_parent.public_id
+    assert skewed_execution["instrument_public_id"] == ids["instrument"]
+    assert skewed_execution["instrument"] == "BTC-USD"
+    assert skewed_execution["exchange"] == "kraken"
+    assert skewed_execution["mode"] == "live"
+    assert skewed_execution["scope_sequence"] == 3
+    assert skewed_execution["exchange_order_id"] is None
     assert [row["transition"] for row in result["position_cycle_transitions"]] == [
         "opened",
         "closed",
@@ -520,3 +548,5 @@ async def test_get_ai_review_aftermath_filters_scope_and_replays_as_of(
     assert position["quantity"] == 2.5
     assert position["position_cycle_public_id"] == current_cycle.public_id
     assert position["instrument_public_id"] == ids["instrument"]
+    response = AiReviewAftermathResponse.model_validate(result)
+    assert response.executions[1].order_public_id == future_stamped_parent.public_id
