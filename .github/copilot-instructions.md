@@ -47,6 +47,19 @@ the complete quality gate using the consolidated Makefile targets before creatin
 - Maintain Markdown using a strict CommonMark-compatible structure (indent nested content by four spaces, keep required blank lines) so the Python `markdown` renderer produces correct HTML/PDF output.
 - Exception: translation catalog files under `frontend/src/locales/**/*.json` and `ios/Snapper/Resources/Localization/Localizable.xcstrings` are exempt — they contain UI copy for all supported locales. Polish (and any future-locale) characters must be stored as UTF-8 codepoints, not Unicode escapes.
 
+## Project Memory and Plans (MANDATORY)
+
+When the `proprietary/` submodule is present, it holds all durable project notes:
+
+- Memory (feedback, project notes, references) lives in `proprietary/memory/`, indexed by
+    `proprietary/memory/MEMORY.md`. Read that index at the start of a session, and add a one-line pointer to it
+    for every new memory file.
+- Implementation plans live in `proprietary/plans/`.
+
+Never write these to an assistant's private or default location (for example `~/.claude/projects/*/memory/`,
+`~/.claude/plans/`, or any tool-specific scratch directory). They must be committed with the repository so that
+every agent, every session, and every host sees the same notes.
+
 ## Checklist (ALWAYS run before finishing tasks or creating PR)
 
 **Primary Quality Gate (REQUIRED):**
