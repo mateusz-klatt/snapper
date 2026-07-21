@@ -130,6 +130,7 @@ def test_ai_delegate_has_canonical_permission_set() -> None:
     """
     expected: set[Permission] = {
         Permission.READ_MARKET_DATA,
+        Permission.READ_MARKET_VIEWS,
         Permission.READ_ORDERS,
         Permission.CREATE_ORDERS,
         Permission.CANCEL_ORDERS,

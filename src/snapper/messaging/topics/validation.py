@@ -1270,6 +1270,7 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
         "portfolio",
         "plans",
         "ai_reviews",
+        "ai_research",
         "bus",
         "processes",
         "strategies",

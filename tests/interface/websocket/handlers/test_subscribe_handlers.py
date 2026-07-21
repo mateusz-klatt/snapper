@@ -10,11 +10,14 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.types import SubscriptionStatusEnum
 from snapper.interface.websocket.handlers.subscribe import handle_subscribe
 from snapper.interface.websocket.handlers.subscribe import handle_unsubscribe
 from snapper.interface.websocket.schemas import WSSubscribeRequest
+from snapper.interface.websocket.schemas import WSSubscriptionSuccessResponse
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
@@ -32,6 +35,94 @@ def _principal(
         active_wallet_public_id=active_wallet_public_id,
         permissions=permissions,
     )
+
+
+def _research_subscription_mocks() -> tuple[AsyncMock, MagicMock]:
+    """Build WebSocket and manager mocks for research subscription tests.
+
+    Returns:
+        WebSocket mock followed by a connection-manager mock with a bridge.
+    """
+    websocket = AsyncMock()
+    websocket.send_text = AsyncMock()
+    manager = MagicMock()
+    manager.get_client_subscriptions = MagicMock(return_value=set())
+    manager.subscribe_client = MagicMock()
+    manager.zmq_bridge = MagicMock()
+    manager.zmq_bridge.add_subscription = AsyncMock()
+    type(manager).tracker = PropertyMock(return_value=SequenceTracker())
+    return websocket, manager
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    [None, [Permission.SUBMIT_MARKET_VIEW.value]],
+    ids=["full-role-grant", "narrow-submit-grant"],
+)
+@pytest.mark.asyncio
+async def test_ai_researcher_subscribes_to_ai_research_root(
+    permissions: list[str] | None,
+) -> None:
+    """Verify full and narrowed researcher tokens reach research wakes.
+
+    Given: An AI_RESEARCHER token with its full grant or only SUBMIT_MARKET_VIEW.
+    When: It subscribes to the ``ai_research.`` registry root.
+    Then: The handler registers the subscription with the WebSocket bridge.
+    """
+    websocket, manager = _research_subscription_mocks()
+    message = WSSubscribeRequest(
+        public_id="test-pid",
+        timestamp=datetime(2026, 7, 21, tzinfo=UTC),
+        session_id="",
+        sequence_id=0,
+        topics=["ai_research."],
+    )
+    principal = _principal(UserRole.AI_RESEARCHER, permissions=permissions)
+
+    await handle_subscribe(websocket, message, manager, principal)
+
+    response = WSSubscriptionSuccessResponse.model_validate_json(
+        str(websocket.send_text.call_args.args[0])
+    )
+    assert response.status == SubscriptionStatusEnum.SUBSCRIBED
+    assert response.topics == ["ai_research."]
+    assert response.denied_topics == []
+    manager.subscribe_client.assert_called_once_with(websocket, "ai_research.")
+    manager.zmq_bridge.add_subscription.assert_awaited_once_with(websocket, ["ai_research."])
+
+
+@pytest.mark.asyncio
+async def test_ai_researcher_cannot_subscribe_to_ai_reviews_root() -> None:
+    """Verify the researcher cannot receive consult or trading-intent frames.
+
+    Given: An AI_RESEARCHER principal without READ_SIGNALS or CREATE_ORDERS.
+    When: It subscribes to the ``ai_reviews.`` registry root.
+    Then: The handler denies the topic and leaves the bridge untouched.
+    """
+    websocket, manager = _research_subscription_mocks()
+    message = WSSubscribeRequest(
+        public_id="test-pid",
+        timestamp=datetime(2026, 7, 21, tzinfo=UTC),
+        session_id="",
+        sequence_id=0,
+        topics=["ai_reviews."],
+    )
+
+    await handle_subscribe(
+        websocket,
+        message,
+        manager,
+        _principal(UserRole.AI_RESEARCHER),
+    )
+
+    response = WSSubscriptionSuccessResponse.model_validate_json(
+        str(websocket.send_text.call_args.args[0])
+    )
+    assert response.status == SubscriptionStatusEnum.DENIED
+    assert response.topics == []
+    assert response.denied_topics == ["ai_reviews."]
+    manager.subscribe_client.assert_not_called()
+    manager.zmq_bridge.add_subscription.assert_not_awaited()
 
 
 class TestHandleSubscribeEdgeCases:

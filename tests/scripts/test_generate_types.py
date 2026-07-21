@@ -1353,21 +1353,23 @@ class TestGenerateIosPermissions:
         assert "manage:users" in content
         captured = capsys.readouterr()
         assert "Generated" in captured.out
-        assert "25 permissions" in captured.out
-        assert "4 roles" in captured.out
+        assert "27 permissions" in captured.out
+        assert "5 roles" in captured.out
         assert "15 resources" in captured.out
 
     def test_includes_all_roles(self, tmp_path: Path) -> None:
-        """Generated file includes viewer, operatorRole, and admin roles.
+        """Generated file includes every service and human role.
 
         Given: Backend ROLE_PERMISSIONS,
         When: generate_ios_permissions is called,
-        Then: all three role case names appear in rolePermissions.
+        Then: all five role case names appear in rolePermissions.
         """
         generate_ios_permissions(tmp_path)
 
         output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
         content = output.read_text()
+        assert ".aiResearcher:" in content
+        assert ".aiDelegate:" in content
         assert ".viewer:" in content
         assert ".operatorRole:" in content
         assert ".admin:" in content
@@ -1384,7 +1386,8 @@ class TestGenerateIosPermissions:
 
         output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
         content = output.read_text()
-        assert '"overview": [.aiDelegate, .viewer, .operatorRole, .admin]' in content
+        assert '"overview": [.aiResearcher, .aiDelegate, .viewer, .operatorRole, .admin]' in content
+        assert '"signals": [.aiDelegate, .operatorRole, .admin]' in content
         assert '"admin": [.admin]' in content
         assert '"settings": [.admin]' in content
         assert '"processes": [.operatorRole, .admin]' in content
@@ -2481,16 +2484,18 @@ class TestGeneratePermissions:
         assert "manage:users" in content
         captured = capsys.readouterr()
         assert "Generated" in captured.out
-        assert "25 permissions" in captured.out
-        assert "4 roles" in captured.out
+        assert "27 permissions" in captured.out
+        assert "5 roles" in captured.out
         assert "15 resources" in captured.out
 
     def test_includes_all_roles(self, tmp_path: Path) -> None:
-        """Generated file includes viewer, operator, and admin roles."""
+        """Generated file includes every service and human role."""
         generate_permissions(tmp_path)
 
         output = tmp_path / "frontend" / "src" / "types" / "permissions.generated.ts"
         content = output.read_text()
+        assert "ai_researcher:" in content
+        assert "ai_delegate:" in content
         assert "viewer:" in content
         assert "operator:" in content
         assert "admin:" in content
@@ -2507,7 +2512,10 @@ class TestGeneratePermissions:
 
         output = tmp_path / "frontend" / "src" / "types" / "permissions.generated.ts"
         content = output.read_text()
-        assert "'overview': ['ai_delegate', 'viewer', 'operator', 'admin']" in content
+        assert (
+            "'overview': ['ai_researcher', 'ai_delegate', 'viewer', 'operator', 'admin']" in content
+        )
+        assert "'signals': ['ai_delegate', 'operator', 'admin']" in content
         assert "'admin': ['admin']" in content
         assert "'settings': ['admin']" in content
         assert "'processes': ['operator', 'admin']" in content

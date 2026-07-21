@@ -25,6 +25,8 @@ class Permission(StrEnum):
     """
 
     READ_MARKET_DATA = "read:market_data"
+    READ_MARKET_VIEWS = "read:market_views"
+    SUBMIT_MARKET_VIEW = "submit:market_view"
     READ_ORDERS = "read:orders"
     CREATE_ORDERS = "create:orders"
     CANCEL_ORDERS = "cancel:orders"
@@ -59,7 +61,7 @@ RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
     "orders": Permission.READ_ORDERS,
     "positions": Permission.READ_POSITIONS,
     "accounts": Permission.READ_ACCOUNT_STATE,
-    "signals": Permission.READ_MARKET_DATA,
+    "signals": Permission.READ_SIGNALS,
     "health": Permission.READ_SYSTEM_STATUS,
     "admin": Permission.MANAGE_USERS,
     "settings": Permission.CONFIGURE_SYSTEM,
@@ -71,8 +73,14 @@ RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
 
 
 ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
+    UserRole.AI_RESEARCHER: {
+        Permission.READ_MARKET_DATA,
+        Permission.READ_MARKET_VIEWS,
+        Permission.SUBMIT_MARKET_VIEW,
+    },
     UserRole.AI_DELEGATE: {
         Permission.READ_MARKET_DATA,
+        Permission.READ_MARKET_VIEWS,
         Permission.READ_ORDERS,
         Permission.CREATE_ORDERS,
         Permission.CANCEL_ORDERS,
@@ -89,6 +97,8 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_POSITIONS,
         Permission.READ_ACCOUNT_STATE,
         Permission.READ_STRATEGIES,
+        Permission.READ_SIGNALS,
+        Permission.READ_MARKET_VIEWS,
         Permission.READ_SYSTEM_STATUS,
         Permission.READ_BACKTESTS,
         Permission.READ_NOTIFICATIONS,
@@ -96,6 +106,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
     },
     UserRole.OPERATOR: {
         Permission.READ_MARKET_DATA,
+        Permission.READ_MARKET_VIEWS,
         Permission.READ_ORDERS,
         Permission.CREATE_ORDERS,
         Permission.CANCEL_ORDERS,
@@ -131,6 +142,7 @@ CATEGORY_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "backtest": frozenset({Permission.READ_BACKTESTS}),
     "account_state": frozenset({Permission.READ_ACCOUNT_STATE}),
     "ai_reviews": frozenset({Permission.READ_SIGNALS, Permission.CREATE_ORDERS}),
+    "ai_research": frozenset({Permission.SUBMIT_MARKET_VIEW}),
     "notifications": frozenset({Permission.READ_NOTIFICATIONS}),
 }
 """Permission sets required for each WS topic category.

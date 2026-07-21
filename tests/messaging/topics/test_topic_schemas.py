@@ -195,6 +195,19 @@ class TestTopicUtilities:
         assert results[0].throttle_ms == 500
         assert results[0].throttle_per_topic is True
 
+    def test_ai_research_registry_entry_exists(self) -> None:
+        """Verify the research wake root has its dedicated zero-throttle category.
+
+        Given: The WebSocket topic registry.
+        When: The ``ai_research`` category is queried.
+        Then: Its sole root is ``ai_research.`` with no bridge throttle.
+        """
+        results = get_topics_by_category("ai_research")
+
+        assert len(results) == 1
+        assert results[0].pattern == "ai_research."
+        assert results[0].throttle_ms == 0
+
 
 class TestProcessesAndStrategiesTopics:
     """Tests for the 2026-05-14 process/strategy WS event topic registrations.

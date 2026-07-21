@@ -141,7 +141,7 @@ class VerifyOutcome:
 
 
 LONG_LIVED_TOKEN_EXPIRE_DAYS: Final[int] = 90
-"""Access-token lifetime for long-lived (PAT-style) delegate tokens.
+"""Access-token lifetime for long-lived AI service-principal tokens.
 
 Ninety days matches the industry default for fine-grained personal
 access tokens (GitHub, GitLab, Azure app secrets). Operators who need
@@ -199,7 +199,7 @@ def _resolve_permission_scope(
 
 @dataclass(slots=True, frozen=True)
 class LongLivedTokenResult:
-    """Result of minting a long-lived (PAT-style) delegate access token.
+    """Result of minting a long-lived AI service-principal access token.
 
     Returned by :meth:`TokenManager.create_delegate_access_token`.
     Distinct from :class:`~snapper.auth.schemas.tokens.TokenPair`
@@ -416,7 +416,7 @@ class TokenManager:
         session_id: str | None = None,
         permissions: Iterable[Permission | str] | None = None,
     ) -> LongLivedTokenResult:
-        """Mint a long-lived (PAT-style) AI delegate access token.
+        """Mint a long-lived access token for an AI service principal.
 
         Distinct from :meth:`create_tokens` in three ways:
         (1) no refresh token is issued;
@@ -428,21 +428,21 @@ class TokenManager:
             (e.g. :meth:`refresh_tokens`) never match on it.
 
         Boundary time is passed in (not minted inside the helper)
-        for timestamp discipline — the ``DelegateService``
-        already computes ``now`` at the transaction boundary and
-        threads it into this helper so every inserted row, audit
-        entry, and token claim agrees on the same instant.
+        for timestamp discipline. Provisioning services compute ``now``
+        at their transaction boundary and thread it into this helper so
+        every inserted row, audit entry, and token claim agrees on the
+        same instant.
 
         Args:
-            user: The delegate principal the token is issued to.
+            user: The AI service principal the token is issued to.
             issued_at: UTC boundary time supplied by the caller.
                 Drives the ``iat`` claim and the ``exp`` derivation.
             session_id: Optional session identifier to carry through
                 to the ``sid`` claim; defaults to a fresh uuid4 when
                 absent.
             permissions: Optional access-token grant. When omitted, the
-                complete delegate role grant is used. A supplied grant must
-                be a subset of that role grant.
+                complete role grant is used. A supplied grant must be a
+                subset of that role grant.
 
         Returns:
             :class:`LongLivedTokenResult` with the JWT, the UTC

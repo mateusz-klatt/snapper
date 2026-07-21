@@ -1060,7 +1060,7 @@ Fetch venue fee schedules. Requires `read:market_data`.
 
 ### GET /api/signals
 
-Fetch trading signals with optional filtering. Requires `read:market_data`
+Fetch trading signals with optional filtering. Requires `read:signals`
 permission.
 
 **Request:**
@@ -1730,7 +1730,7 @@ fields and this object under `payload`.
     "zmq_bridge": {
         "active_topics": 12,
         "subscriber_tasks": 12,
-        "available_topics": ["market.", "signals.", "system.egress.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "portfolio.accounts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
+        "available_topics": ["market.", "signals.", "system.egress.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "portfolio.accounts.", "plans.decisions.", "ai_reviews.", "ai_research.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
     },
     "connections": {
         "active_connections": 5,
@@ -1794,7 +1794,7 @@ fields and this object under `payload`.
         "active_connections": 5
     },
     "config": {
-        "available_topics": ["market.", "signals.", "system.egress.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "portfolio.accounts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
+        "available_topics": ["market.", "signals.", "system.egress.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "portfolio.accounts.", "plans.decisions.", "ai_reviews.", "ai_research.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
     },
     "connections": {
         "active_connections": 5,
@@ -3036,6 +3036,7 @@ Client-originated control frames (`authenticate`, `reauth`,
     "timestamp": "2026-01-18T12:00:00Z",
     "topic": null,
     "available_topics": [
+        "ai_research.",
         "ai_reviews.",
         "alerts.",
         "backtest.",
@@ -3213,6 +3214,7 @@ If the client does not reauthenticate in time:
     "topic": null,
     "subscriptions": ["signals.paper.BTC-USD.rsi_btc_1h"],
     "available_topics": [
+        "ai_research.",
         "ai_reviews.",
         "alerts.",
         "backtest.",
@@ -3493,6 +3495,7 @@ the scoped prefixes documented in the WebSocket auth section above.
 #### Alerts and Reviews
 
 - `alerts.{user_public_id}.{alert_type}` -- Notification stream
+- `ai_research.` -- Research-round wake subscription root, gated by `submit:market_view`
 - `plans.decisions.{plan_public_id}` -- Execution-plan decision events
 - `ai_reviews.{user_public_id}.{strategy_public_id}.{suffix}` -- AI delegate review frames
 - `accruals.{exchange}.{instrument}.{accrual_type}` -- Funding, rollover, and borrow accruals (internal ZMQ bus topic; not currently subscribable over the WebSocket -- no role's category set includes `accruals`)
@@ -4096,6 +4099,27 @@ On create, omitted `operator_public_id` binds to the caller's
 Non-admin callers that supply `operator_public_id` must choose one of
 their authenticated operators; ADMIN callers may bind explicitly using
 the admin operator bypass.
+
+## AI Researchers
+
+Researcher provisioning shares the `ai_integration_enabled` feature gate but
+uses a separate principal role and cap from AI delegates.
+
+| Route | Description |
+| ----- | ----------- |
+| `POST /api/ai-researchers` | Create a research-only principal and return its 90-day access JWT once |
+
+The route requires `OPERATOR` or higher with `manage:processes` retained in
+the caller token, plus CSRF for cookie authentication. The request is a
+`ResearcherCreateRequest` envelope whose payload contains `label` and an
+optional narrower `permissions` list. The role ceiling is exactly
+`read:market_data`, `read:market_views`, and `submit:market_view`; a requested
+permission outside that set returns 422.
+
+At most two active researchers may be provisioned per owner. Researcher
+creation writes only the user identity and access-token inventory: it creates
+no trading caps, operator membership, or `ai_delegates` runtime row, and
+therefore cannot consume a delegate slot or enter consult admission accounting.
 
 ## Paired Execution (operator surface)
 

@@ -1928,6 +1928,15 @@ class TestResourcePermissions:
         """
         assert RESOURCE_PERMISSIONS["accounts"] == Permission.READ_ACCOUNT_STATE
 
+    def test_signals_requires_read_signals(self) -> None:
+        """Trading-signal resources require the signal-specific grant.
+
+        Given: The resource permission mapping used to generate client access.
+        When: The signals entry is inspected.
+        Then: It requires READ_SIGNALS rather than general market-data access.
+        """
+        assert RESOURCE_PERMISSIONS["signals"] == Permission.READ_SIGNALS
+
     def test_overview_requires_no_permission(self) -> None:
         """Overview resource is accessible without any specific permission.
 

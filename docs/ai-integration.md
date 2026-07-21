@@ -11,14 +11,15 @@ This doc covers:
 
 1. [Feature flag](#feature-flag)
 2. [Creating an AI delegate](#creating-an-ai-delegate)
-3. [Token model](#token-model)
-4. [Client configuration examples](#client-configuration-examples)
-5. [Available tools](#available-tools)
-6. [Safety caps](#safety-caps)
-7. [Kill switch + deactivation](#kill-switch--deactivation)
-8. [Rate limits](#rate-limits)
-9. [Error catalog](#error-catalog)
-10. [Security model](#security-model)
+3. [Creating an AI researcher](#creating-an-ai-researcher)
+4. [Token model](#token-model)
+5. [Client configuration examples](#client-configuration-examples)
+6. [Available tools](#available-tools)
+7. [Safety caps](#safety-caps)
+8. [Kill switch + deactivation](#kill-switch--deactivation)
+9. [Rate limits](#rate-limits)
+10. [Error catalog](#error-catalog)
+11. [Security model](#security-model)
 
 ---
 
@@ -48,8 +49,9 @@ The `/api/mcp` sub-app is always mounted and gated by the
     navigation entry are role/permission-gated. After authentication,
     the AI Integration page reads `GET /api/settings/features` and
     renders the enabled or disabled state. The MCP endpoint and
-    `/api/ai-delegates/*` return `503 feature_disabled` only when the
-    flag is explicitly set to `false`.
+    `/api/ai-delegates/*` and `/api/ai-researchers` return
+    `503 feature_disabled` only when the flag is explicitly set to
+    `false`.
 
 3. When the flag is on, the MCP endpoint requires every request to
     carry a valid `Authorization: Bearer <jwt>` header; anonymous
@@ -166,11 +168,51 @@ Other endpoints on `/api/ai-delegates`:
 
 ---
 
+## Creating an AI researcher
+
+An **AI researcher** is a dedicated `AI_RESEARCHER` principal for contexts
+that ingest hostile third-party material. Its role grant is exactly:
+
+- `read:market_data`
+- `read:market_views`
+- `submit:market_view`
+
+It does not receive signal, order, position, or system-status permissions.
+Consequently it cannot subscribe to `ai_reviews.` or call the order-,
+position-, signal-, and review-shaped MCP tools. It can subscribe to the
+`ai_research.` wake root when its token retains `submit:market_view`.
+
+Create one via `POST /api/ai-researchers` with a
+`ResearcherCreateRequest` envelope:
+
+```json
+{
+  "type": "researcher_create_request",
+  "sequence_id": 1,
+  "public_id": "<client-uuid7>",
+  "timestamp": "2026-07-21T00:00:00Z",
+  "session_id": "cli",
+  "payload": {
+    "label": "Macro Research",
+    "permissions": ["read:market_data", "submit:market_view"]
+  }
+}
+```
+
+The response returns the researcher projection and its long-lived access token
+once. Each owner may have at most two active researchers, independently of the
+five-delegate cap. Provisioning persists only `users` and
+`user_active_tokens` rows: no `user_trading_caps`, operator membership, or
+`ai_delegates` row is created, so researchers never enter consult admission
+accounting.
+
+---
+
 ## Token model
 
-Each AI delegate mints a single long-lived (~3-month) access JWT.
+Each AI delegate or researcher mints a single long-lived (~3-month) access JWT.
 The same token authenticates both the proxy MCP server and the
-optional push-wakeup watch monitor. Revocation is server-side:
+optional push-wakeup watch monitor. Delegate revocation is server-side:
 `POST /api/ai-delegates/{id}/deactivate` flips
 `users.is_active=False`, revokes the delegate's `user_active_tokens`
 row, publishes `admin.user_deactivated` on the bus, and each
@@ -180,6 +222,11 @@ uses a 10-second grace window for requests that raced the kill
 switch. The 90-day `exp` is a ceiling, not a commitment; operators
 are expected to rotate delegate tokens on the cadence that fits
 their key-management hygiene.
+
+Researcher tokens use the same active-token inventory and shared user
+deactivation enforcement. The dedicated researcher surface currently provisions
+principals only; an administrator uses the standard user deactivation route to
+revoke one.
 
 ---
 

@@ -221,6 +221,7 @@ from snapper.server._locale_utils import resolve_caller_default_language
 from snapper.server.ai_delegate_routes import AiIntegrationDisabledError
 from snapper.server.ai_delegate_routes import ai_integration_disabled_handler
 from snapper.server.ai_delegate_routes import router as ai_delegate_router
+from snapper.server.ai_researcher_routes import router as ai_researcher_router
 from snapper.server.ai_review_routes import router as ai_review_router
 from snapper.server.alert_default_routes import router as alert_default_router
 from snapper.server.alerts_routes import router as alerts_router
@@ -1247,6 +1248,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix=API_PREFIX)
     app.include_router(settings_router, prefix=API_PREFIX)
     app.include_router(ai_delegate_router, prefix=API_PREFIX)
+    app.include_router(ai_researcher_router, prefix=API_PREFIX)
     app.include_router(ai_review_router, prefix=API_PREFIX)
     app.include_router(process_router, prefix=API_PREFIX)
     app.include_router(strategy_router, prefix=API_PREFIX)
@@ -2082,7 +2084,7 @@ def _create_candles_signals_router() -> APIRouter:
     @router.get("/signals", responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}})
     async def get_signals(
         request: Request,
-        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_SIGNALS))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         instrument: Annotated[str | None, Query(description="Filter by instrument")] = None,
@@ -2098,7 +2100,7 @@ def _create_candles_signals_router() -> APIRouter:
 
         Args:
             request: FastAPI request (provides REST tracker for provenance).
-            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _auth: Authenticated user with READ_SIGNALS permission.
             _csrf: CSRF token validation.
             repo: Database repository.
             instrument: Optional instrument symbol filter.

@@ -12,6 +12,10 @@ class UserRole(StrEnum):
 
     Defines the available roles in the system with hierarchical
     access levels
+    AI_RESEARCHER: Research-only AI integration user that can observe
+      market data and persist market views without signal or trading
+      authority. Ordinally below AI_DELEGATE and VIEWER so role-level
+      guards cannot elevate a researcher into either surface.
     AI_DELEGATE: Narrow permission set for AI-integration users
       (observe market/signals/orders, submit/cancel trades via MCP).
       **Ordinally below VIEWER** in the role_hierarchy dicts consulted
@@ -27,6 +31,7 @@ class UserRole(StrEnum):
     ADMIN: Full system access including user management.
     """
 
+    AI_RESEARCHER = "ai_researcher"
     AI_DELEGATE = "ai_delegate"
     VIEWER = "viewer"
     OPERATOR = "operator"

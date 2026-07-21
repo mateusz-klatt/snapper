@@ -327,7 +327,7 @@ through the Settings API/UI:
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
-| `ai_integration_enabled` | `true` | Feature gate for `/api/mcp` and `/api/ai-delegates/*`; `false` returns `503 {"error_code":"feature_disabled"}` from `/api/mcp` and hides AI integration in the frontend |
+| `ai_integration_enabled` | `true` | Feature gate for `/api/mcp`, `/api/ai-delegates/*`, and `/api/ai-researchers`; `false` returns `503 {"error_code":"feature_disabled"}` from `/api/mcp` and hides AI integration in the frontend |
 | `feed_egress_enabled` | `false` | Route feed publishers through their own process-local egress pools at startup |
 | `kraken_equities_realtime_ws_enabled` | `false` | Use Kraken Equities authenticated realtime market-data WS when token mint succeeds; fallback remains the public delayed feed |
 | `kraken_equities_realtime_wallet_public_id` | `""` | Optional wallet pin whose `exchange='kraken'` Spot API key/secret mints Kraken Equities realtime WS tokens: a wallet public id used verbatim, or `label:<wallet-label>` resolved at runtime to the single matching live wallet (fails closed to the delayed feed on zero/multiple matches); empty auto-selects an active Kraken Spot `api_key_secret` wallet |

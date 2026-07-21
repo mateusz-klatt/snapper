@@ -179,6 +179,19 @@ class TestRoleCategorySecurityMatrix:
     and topic patterns, with no over- or under-provisioning.
     """
 
+    def test_ai_researcher_gets_only_market_and_research_categories(self) -> None:
+        """Verify researcher WebSocket discovery excludes all trading intent.
+
+        Given: The exact AI_RESEARCHER permission grant.
+        When: Allowed categories and registry roots are derived.
+        Then: Only market data and the research wake root are exposed.
+        """
+        categories = role_allowed_categories(UserRole.AI_RESEARCHER)
+        topics = get_allowed_topics_for_role(UserRole.AI_RESEARCHER)
+
+        assert categories == {"market", "ai_research"}
+        assert topics == ["ai_research.", "market."]
+
     def test_viewer_gets_market_system_backtest_and_trade_events(self) -> None:
         """VIEWER role receives read-only categories.
 
@@ -242,9 +255,9 @@ class TestRoleCategorySecurityMatrix:
 
         Given: An ADMIN role,
         When: Getting allowed categories,
-        Then: All thirteen categories defined in
+        Then: All fourteen categories defined in
             :data:`CATEGORY_PERMISSIONS` are allowed — every category
-            from OPERATOR plus ``admin``. The 2026-05-14
+            from OPERATOR plus ``admin`` and ``ai_research``. The 2026-05-14
             ``strategies_read`` and ``processes_admin`` lift to ADMIN
             naturally because ADMIN holds every permission.
         """
@@ -259,6 +272,7 @@ class TestRoleCategorySecurityMatrix:
             "admin",
             "backtest",
             "ai_reviews",
+            "ai_research",
             "strategies_read",
             "processes_admin",
             "notifications",

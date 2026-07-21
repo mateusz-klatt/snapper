@@ -315,6 +315,15 @@ discriminators above. The payload must include string
 `wallet_public_id` and `instrument_public_id` values so the bridge can
 check the delegate's grant before forwarding.
 
+### AI Research
+
+`ai_research.` is the registered WebSocket subscription root for research-round
+wakes. It belongs to its own `ai_research` authorization category and requires
+`submit:market_view`. An `AI_RESEARCHER` can subscribe to this root but cannot
+subscribe to `ai_reviews.`, whose combined `read:signals` and `create:orders`
+gate remains reserved for decision-capable principals. Concrete research frame
+shape and persistence are defined with the research-round domain model.
+
 ### Backtest
 
 Per-run lifecycle and progress events.

@@ -608,7 +608,7 @@ Detailed documentation in [docs/](docs/) directory:
 - [Messaging](docs/messaging.md) — ZeroMQ architecture
 - [Operations](docs/operations.md) — Multi-instance coordinator runbook
 - [Observability](docs/observability.md) — Process, notification, retention, and DB table metrics surface
-- [AI integration](docs/ai-integration.md) — MCP endpoint and AI delegate tokens
+- [AI integration](docs/ai-integration.md) — MCP endpoint and AI service-principal tokens
 - [Development](docs/development.md) — Developer guidelines (incl. [Internationalization](docs/development.md#internationalization))
 - [Paired execution](docs/paired-execution.md) — Multi-leg guard operator runbook
 - [Egress](docs/snapper-egress.md) — WireGuard + SOCKS5 egress sidecar runbook

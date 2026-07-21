@@ -4370,6 +4370,21 @@ class TestAiReviewsTopicValidation:
         assert frozenset({"request", "decision_ack", "caps_violation"}) == _AI_REVIEW_FRAME_SUFFIXES
 
 
+class TestAiResearchTopicValidation:
+    """Tests for the research wake subscription root."""
+
+    def test_subscription_prefix_accepted(self) -> None:
+        """Verify the subscriber-side validator accepts the research registry root.
+
+        Given: The dedicated ``ai_research.`` subscription prefix.
+        When: The shared subscription validator checks it.
+        Then: The prefix is accepted for WebSocket registration.
+        """
+        valid, error = validate_subscription_pattern("ai_research.")
+
+        assert valid, error
+
+
 class TestBusTopicValidation:
     """Tests for ``_validate_bus_topic`` (internal cross-service event bus).
 
