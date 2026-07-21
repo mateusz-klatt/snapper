@@ -2269,16 +2269,17 @@ class Repository(ABC):
         instrument_public_ids: Sequence[str],
         as_of: datetime,
     ) -> list[InstrumentSymbolRefRow]:
-        """Resolve instruments to their symbol references for mark valuation.
+        """Resolve known historical instrument-symbol reference intervals.
 
-        Joins each active :class:`Instrument` to its active :class:`Symbol`
-        version at ``as_of`` and projects the ``(native_symbol, canonical candle
-        venue, quote)`` triple the P&L timeline mark builder needs. The candle
-        venue is ``Instrument.source_exchange`` when present, otherwise the
-        instrument's own exchange, so a PAPER identity reads its source venue's
-        finalized 1m series. ``quote_currency`` decides whether that close is
-        already denominated in the valuation currency or must be left unmarked
-        (checklist #13 — no historical FX in v1).
+        Joins every overlapping :class:`Instrument` and :class:`Symbol` version
+        whose knowledge interval begins by ``as_of``. Each projected row carries
+        the intersection's inclusive ``valid_from`` and exclusive ``valid_to``.
+        Callers must treat quote revisions across all versions known at the
+        horizon as ambiguous because this axis cannot distinguish a correction
+        from a market re-denomination. The candle venue is
+        ``Instrument.source_exchange`` when present, otherwise the instrument's
+        own exchange. ``instrument_exchange`` separately preserves the owning
+        venue for comparison with immutable execution lineage.
 
         Args:
             instrument_public_ids: Instruments to resolve; an empty sequence
@@ -2286,8 +2287,8 @@ class Repository(ABC):
             as_of: Snapshot time threading both temporal joins.
 
         Returns:
-            One row per instrument that has an active symbol version at
-            ``as_of``. Instruments with no active symbol are omitted.
+            Every overlapping reference interval known by ``as_of``. Instruments
+            without such an interval are omitted.
         """
         ...
 
@@ -2301,19 +2302,23 @@ class Repository(ABC):
     ) -> list[PnlTimelineCandleRow]:
         """Load finalized one-minute mark candles for several references.
 
-        Resolves every distinct ``(native_symbol, exchange)`` pair from
-        ``refs`` in one bounded range query. The projected
-        ``instrument_public_id`` is always the identity from the reference,
-        not the source instrument that owns the candle, so PAPER positions stay
-        keyed by their own instrument identity while reading source-venue marks.
+        Resolves every distinct ``(native_symbol, exchange, quote_currency)``
+        triple from ``refs`` in one bounded range query. Candle ownership is
+        joined to the Instrument and Symbol versions present at the candle
+        version's own authoring timestamp, whose resolved tuple must match the
+        requested tuple. The projected ``instrument_public_id`` is always the
+        identity from the reference, not the source instrument that owns the
+        candle, so PAPER positions stay keyed by their own instrument identity
+        while reading source-venue marks. Reference intervals prove fill prices;
+        they do not bound the independent mark window.
 
         Args:
             refs: Typed instrument references whose canonical candle venue is
                 carried in ``exchange``. Empty input returns without a query.
             start: Inclusive lower candle-open bound.
             end: Inclusive upper candle-open bound.
-            as_of: Snapshot time threading the instrument, symbol, and candle
-                temporal predicates.
+            as_of: Snapshot time selecting the candle version known at the
+                horizon.
 
         Returns:
             Rows ordered by candle open time and requested instrument identity.
@@ -2331,8 +2336,11 @@ class Repository(ABC):
         """Load finalized one-minute closes for the requested currency pairs.
 
         The P&L timeline converts a flow denominated in one currency into the
-        series valuation currency using our OWN candle plane, so a fee recorded
-        in EUR on a USD-valued series is priced by the same evidence the marks
+        series valuation currency using our OWN candle plane. Each candle is
+        joined to the Instrument and Symbol identity valid at that candle
+        version's own authoring timestamp, so a later metadata revision cannot
+        relabel an earlier rate. A fee recorded in EUR on a USD-valued series is
+        therefore priced by the same evidence the marks
         come from rather than an external feed.
 
         Each pair is matched on the symbol's own ``base``/``quote`` legs, so the
@@ -9843,7 +9851,7 @@ class SQLAlchemyRepository(Repository):
         instrument_public_ids: Sequence[str],
         as_of: datetime,
     ) -> list[InstrumentSymbolRefRow]:
-        """Resolve instruments to their symbol references for mark valuation.
+        """Resolve known historical instrument-symbol reference intervals.
 
         See the abstract declaration for the join and projection contract. An
         empty ``instrument_public_ids`` short-circuits without opening a session.
@@ -9853,8 +9861,8 @@ class SQLAlchemyRepository(Repository):
             as_of: Snapshot time threading both temporal joins.
 
         Returns:
-            One :class:`InstrumentSymbolRefRow` per instrument with an active
-            symbol version at ``as_of``.
+            Every overlapping reference interval whose version starts by
+            ``as_of``.
         """
         if not instrument_public_ids:
             return []
@@ -9867,30 +9875,62 @@ class SQLAlchemyRepository(Repository):
                         Instrument.source_exchange,
                         Instrument.exchange,
                     ),
+                    Instrument.exchange,
                     Symbol.quote,
+                    Instrument.timestamp,
+                    Instrument.known_to,
+                    Symbol.timestamp,
+                    Symbol.known_to,
                 )
                 .join(
                     Symbol,
                     and_(
                         Instrument.symbol_public_id == Symbol.public_id,
-                        *where_active(Symbol, as_of),
+                        Symbol.timestamp < Instrument.known_to,
+                        Instrument.timestamp < Symbol.known_to,
+                        Symbol.timestamp <= as_of,
                     ),
                 )
                 .where(
                     Instrument.public_id.in_(instrument_public_ids),
-                    *where_active(Instrument, as_of),
+                    Instrument.timestamp <= as_of,
                 )
             )
             result = await s.execute(query)
-            return [
+            refs: list[InstrumentSymbolRefRow] = [
                 {
                     "instrument_public_id": public_id,
                     "native_symbol": native_symbol,
                     "exchange": exchange,
+                    "instrument_exchange": instrument_exchange,
                     "quote_currency": quote,
+                    "valid_from": max(instrument_from, symbol_from),
+                    "valid_to": min(instrument_to, symbol_to),
                 }
-                for public_id, native_symbol, exchange, quote in result.all()
+                for (
+                    public_id,
+                    native_symbol,
+                    exchange,
+                    instrument_exchange,
+                    quote,
+                    instrument_from,
+                    instrument_to,
+                    symbol_from,
+                    symbol_to,
+                ) in result.all()
             ]
+            refs.sort(
+                key=lambda row: (
+                    row["instrument_public_id"],
+                    row["valid_from"],
+                    row["valid_to"],
+                    row["native_symbol"],
+                    row["exchange"],
+                    row["instrument_exchange"],
+                    row["quote_currency"] or "",
+                )
+            )
+            return refs
 
     async def get_pnl_timeline_candles(
         self,
@@ -9916,15 +9956,16 @@ class SQLAlchemyRepository(Repository):
         """
         if not refs:
             return []
-        instrument_ids_by_series: dict[tuple[str, str], set[str]] = {}
+        refs_by_series: dict[tuple[str, str, str | None], list[InstrumentSymbolRefRow]] = {}
         for ref in refs:
-            series = (ref["native_symbol"], ref["exchange"])
-            instrument_ids_by_series.setdefault(series, set()).add(ref["instrument_public_id"])
+            series = (ref["native_symbol"], ref["exchange"], ref["quote_currency"])
+            refs_by_series.setdefault(series, []).append(ref)
         async with self.session() as s:
             result = await s.execute(
                 select(
                     Symbol.native_symbol,
                     Instrument.exchange,
+                    Symbol.quote,
                     Candle.open_at,
                     Candle.close,
                 )
@@ -9933,19 +9974,21 @@ class SQLAlchemyRepository(Repository):
                     Instrument,
                     and_(
                         Candle.instrument_public_id == Instrument.public_id,
-                        *where_active(Instrument, as_of),
+                        Instrument.timestamp <= Candle.timestamp,
+                        Instrument.known_to > Candle.timestamp,
                     ),
                 )
                 .join(
                     Symbol,
                     and_(
                         Instrument.symbol_public_id == Symbol.public_id,
-                        *where_active(Symbol, as_of),
+                        Symbol.timestamp <= Candle.timestamp,
+                        Symbol.known_to > Candle.timestamp,
                     ),
                 )
                 .where(
-                    tuple_(Symbol.native_symbol, Instrument.exchange).in_(
-                        list(instrument_ids_by_series)
+                    tuple_(Symbol.native_symbol, Instrument.exchange, Symbol.quote).in_(
+                        list(refs_by_series)
                     ),
                     Candle.timeframe == "1m",
                     Candle.open_at >= start,
@@ -9955,11 +9998,11 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             candles: list[PnlTimelineCandleRow] = []
-            for native_symbol, exchange, open_at, close in result.all():
-                for instrument_public_id in instrument_ids_by_series[(native_symbol, exchange)]:
+            for native_symbol, exchange, quote, open_at, close in result.all():
+                for ref in refs_by_series[(native_symbol, exchange, quote)]:
                     candles.append(
                         {
-                            "instrument_public_id": instrument_public_id,
+                            "instrument_public_id": ref["instrument_public_id"],
                             "open_at": open_at,
                             "close": close,
                         }
@@ -9982,8 +10025,10 @@ class SQLAlchemyRepository(Repository):
         """Load finalized one-minute closes for currency pairs in one query.
 
         See the abstract declaration for the pair-matching and multi-venue
-        contract. Rows are sorted so a caller folding them into a rate map gets a
-        stable, reproducible winner when two venues quote the same minute.
+        contract. Instrument and Symbol ownership resolve at each candle
+        version's own authoring timestamp. Rows are sorted so a caller folding
+        them into a rate map gets a stable, reproducible winner when two venues
+        quote the same minute.
 
         Args:
             pairs: Distinct ``(base, quote)`` currency legs to resolve.
@@ -10010,14 +10055,16 @@ class SQLAlchemyRepository(Repository):
                     Instrument,
                     and_(
                         Candle.instrument_public_id == Instrument.public_id,
-                        *where_active(Instrument, as_of),
+                        Instrument.timestamp <= Candle.timestamp,
+                        Instrument.known_to > Candle.timestamp,
                     ),
                 )
                 .join(
                     Symbol,
                     and_(
                         Instrument.symbol_public_id == Symbol.public_id,
-                        *where_active(Symbol, as_of),
+                        Symbol.timestamp <= Candle.timestamp,
+                        Symbol.known_to > Candle.timestamp,
                     ),
                 )
                 .where(

@@ -146,7 +146,10 @@ def _seeded_repo() -> AsyncMock:
                 "instrument_public_id": "i1",
                 "native_symbol": "BTC-USD",
                 "exchange": "kraken",
+                "instrument_exchange": "kraken",
                 "quote_currency": "USD",
+                "valid_from": t0 - timedelta(days=1),
+                "valid_to": datetime.max.replace(tzinfo=UTC),
             }
         ]
     )
@@ -231,7 +234,7 @@ class TestHappyPath:
         assert payload["granularity"] == "1m"
         assert payload["valuation_ccy"] == "USD"
         assert payload["mark_source"] == "finalized_1m_candle_close"
-        assert payload["calc_version"] == "5A.3"
+        assert payload["calc_version"] == "5A.4"
         points = payload["points"]
         assert len(points) == 3
         assert points[0]["valuation_status"] == "complete"
@@ -392,6 +395,17 @@ class TestMarkerTimeline:
         assert repo.get_pnl_timeline_ai_decisions.await_args.args[4] == response_as_of
         assert repo.get_pnl_timeline_signals.await_args.args[5] == 2_001
         assert repo.get_pnl_timeline_ai_decisions.await_args.args[5] == 2_001
+
+    def test_withholds_fill_marker_price_without_denomination_proof(self) -> None:
+        """The API keeps a fill marker but emits null for its unproved price."""
+        repo = _seeded_repo()
+        repo.get_instrument_symbol_refs = AsyncMock(return_value=[])
+        response = _create_client(repo).get(_timeline_url(**{"to": _FROM}))
+        assert response.status_code == 200
+        fill = next(
+            marker for marker in response.json()["payload"]["markers"] if marker["kind"] == "fill"
+        )
+        assert fill["price"] is None
 
     def test_marker_truncation_is_disclosed_and_latest_are_retained(self) -> None:
         """A busy response states truncation and deterministically drops oldest."""

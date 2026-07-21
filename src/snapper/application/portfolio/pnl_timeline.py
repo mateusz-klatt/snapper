@@ -75,16 +75,22 @@ checklist:
   the cumulative realized for the rest of the series and holds until the pool
   flushes fully flat); the minute precedes the activation ``t0`` (the anchor proves
   no position state before then, so a pre-``t0`` grid point must never be valued
-  from the seeded book); a fill carries a non-finite or NEGATIVE size, or a seed
-  carries a non-finite quantity (a corrupt or sign-inverted quantity is tainted at
-  ingestion rather than replayed, so it can never fabricate a signed position or a
-  bogus realized number); or any monetary value — an aggregate cumulative total, a
+  from the seeded book); a fill carries a non-finite or NEGATIVE size; a
+  non-positive or non-finite execution price participates in a close, reduction,
+  or flip; or a seed carries a non-finite quantity (a corrupt or sign-inverted
+  quantity is tainted at ingestion rather than replayed, so it can never fabricate
+  a signed position or a bogus realized number). A non-positive or non-finite price
+  on an opening or same-side add instead makes only the entry basis unknown, so its
+  still-provable cumulatives survive while unrealized and net are withheld. Any
+  monetary value — an aggregate cumulative total, a
   PER-INSTRUMENT cumulative (realized / fee / accrual), the opening baseline, a
   per-instrument entry or unrealized, or the summed aggregate unrealized / net — is
   non-finite, whether a NaN/Inf price / fee / mark arrived directly or a VWAP entry
   or a sum overflowed from otherwise-finite inputs (including per-instrument
-  overflow that interleaved cancellation hides from the aggregate). No ``complete``
-  point ever carries a non-finite or fabricated number, at any level.
+  overflow that interleaved cancellation hides from the aggregate); or the caller
+  cannot prove that an execution price is denominated in the requested valuation
+  currency. No ``complete`` point ever carries a non-finite or fabricated number,
+  at any level.
 - **Activation baseline (checklist #3/#4/#6).** When an anchor is supplied, grid
   points before its ``t0`` are withheld as untrusted (no speculative backfill), and
   pre-activation funding accruals (``accrued_at`` before ``t0``) are dropped so
@@ -111,6 +117,7 @@ and does no candle reading or FX conversion itself.
 
 import math
 from collections import defaultdict
+from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -121,6 +128,7 @@ from typing import Literal
 
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.average_cost import apply_fill
+from snapper.core.numeric import is_positive_finite
 
 ValuationStatus = Literal["complete", "incomplete"]
 """Whether a point's mark-to-market valuation is trustworthy or withheld."""
@@ -921,6 +929,7 @@ def build_pnl_timeline(
     window: TimelineWindow,
     opening: TimelineOpening | None = None,
     lineage: Mapping[str, TimelineExecutionLineage] | None = None,
+    untrusted_price_instruments: Collection[str] = (),
 ) -> PnlTimelineResult:
     """Build the Net-P&L-since-activation series for one wallet/mode scope.
 
@@ -942,6 +951,10 @@ def build_pnl_timeline(
             from empty pools with a zero opening unrealized value.
         lineage: Order-keyed initiating command and signal lineage. Missing or
             ambiguous orders are intentionally absent and become unattributed.
+        untrusted_price_instruments: Instrument identities whose execution-price
+            denomination the caller could not prove equals the valuation
+            currency. Their fills are never passed to the accounting kernel and
+            latch the existing fully-untrusted tier when replay reaches them.
 
     Returns:
         The built :class:`PnlTimelineResult` at the requested granularity.
@@ -956,6 +969,7 @@ def build_pnl_timeline(
     pools: dict[str, _Pool] = {}
     weights_by_instrument: dict[str, dict[AttributionKey, float]] = {}
     resolved_lineage = {} if lineage is None else lineage
+    resolved_untrusted_price_instruments = frozenset(untrusted_price_instruments)
     opening_unrealized_value = 0.0
     seen: set[str] = set()
     attribution_seen: set[AttributionKey] = set()
@@ -1013,19 +1027,26 @@ def build_pnl_timeline(
             seen.add(instrument_public_id)
             attribution_key = _execution_attribution(execution, resolved_lineage)
             attribution_seen.add(attribution_key)
+            if instrument_public_id in resolved_untrusted_price_instruments:
+                realized_untrusted.add(instrument_public_id)
+                continue
             if not math.isfinite(execution.size) or execution.size < 0.0:
                 realized_untrusted.add(instrument_public_id)
                 continue
             signed_qty = execution.size if execution.side == "buy" else -execution.size
             pool = pools.get(instrument_public_id, _Pool(0.0, None))
             pre_fill_weights = dict(weights_by_instrument.get(instrument_public_id, {}))
+            price_is_trusted = is_positive_finite(execution.price)
             outcome = apply_fill(
                 pool.position_qty,
                 pool.entry_price,
                 signed_qty,
                 execution.size,
-                execution.price,
+                execution.price if price_is_trusted else math.nan,
             )
+            if not price_is_trusted and outcome.closed_qty > 0.0:
+                realized_untrusted.add(instrument_public_id)
+                continue
             pools[instrument_public_id] = _Pool(outcome.position_qty, outcome.entry_price)
             opened_opposite_side = outcome.closed_qty > 0.0 and outcome.opened_new_side
             realized_by_instrument[instrument_public_id] += outcome.realized_delta

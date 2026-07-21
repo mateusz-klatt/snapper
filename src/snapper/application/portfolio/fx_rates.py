@@ -30,6 +30,8 @@ import math
 from collections.abc import Mapping
 from datetime import datetime
 
+from snapper.core.numeric import is_positive_finite
+
 type FxRateKey = tuple[str, str, datetime]
 """Lookup key ``(base_currency, quote_currency, minute)`` for one candle close."""
 
@@ -68,11 +70,11 @@ def convert_amount(
     if from_currency == to_currency:
         return amount
     direct = rates.get((from_currency, to_currency, minute))
-    if direct is not None and math.isfinite(direct):
+    if is_positive_finite(direct):
         converted = amount * direct
         return converted if math.isfinite(converted) else None
     inverse = rates.get((to_currency, from_currency, minute))
-    if inverse is not None and math.isfinite(inverse) and inverse > 0.0:
+    if is_positive_finite(inverse):
         converted = amount / inverse
         return converted if math.isfinite(converted) else None
     return None

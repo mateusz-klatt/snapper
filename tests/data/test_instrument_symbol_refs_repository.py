@@ -26,15 +26,24 @@ _SESSION = "00000000-0000-7000-8000-000000000901"
 _SPID_USD = "00000000-0000-7000-8000-000000000a01"
 _SPID_EUR = "00000000-0000-7000-8000-000000000a02"
 _SPID_EQ = "00000000-0000-7000-8000-000000000a03"
+_SPID_REVISED = "00000000-0000-7000-8000-000000000a04"
 _INST_USD = "00000000-0000-7000-8000-000000000b01"
 _INST_EUR = "00000000-0000-7000-8000-000000000b02"
 _INST_EQ = "00000000-0000-7000-8000-000000000b03"
 _INST_PAPER = "00000000-0000-7000-8000-000000000b04"
+_INST_REVISED = "00000000-0000-7000-8000-000000000b05"
 _WALLET = "00000000-0000-7000-8000-000000000c01"
 _FOREIGN_WALLET = "00000000-0000-7000-8000-000000000c02"
 
 
-def _symbol(public_id: str, native_symbol: str, quote: str | None, asset_type: str) -> Symbol:
+def _symbol(
+    public_id: str,
+    native_symbol: str,
+    quote: str | None,
+    asset_type: str,
+    timestamp: datetime = _NOW,
+    known_to: datetime = KNOWN_TO_MAX,
+) -> Symbol:
     """Build one active symbol row."""
     return Symbol(
         public_id=public_id,
@@ -42,8 +51,9 @@ def _symbol(public_id: str, native_symbol: str, quote: str | None, asset_type: s
         base=native_symbol.split("-", maxsplit=1)[0],
         quote=quote,
         asset_type=asset_type,
-        created_at=_NOW,
-        timestamp=_NOW,
+        created_at=timestamp,
+        timestamp=timestamp,
+        known_to=known_to,
         session_id=_SESSION,
         sequence_id=1,
     )
@@ -54,6 +64,8 @@ def _instrument(
     symbol_public_id: str,
     exchange: str,
     source_exchange: str | None = None,
+    timestamp: datetime = _NOW,
+    known_to: datetime = KNOWN_TO_MAX,
 ) -> Instrument:
     """Build one active instrument row linked to a symbol."""
     return Instrument(
@@ -62,7 +74,8 @@ def _instrument(
         exchange=exchange,
         source_exchange=source_exchange,
         requires_ai_review=False,
-        timestamp=_NOW,
+        timestamp=timestamp,
+        known_to=known_to,
         session_id=_SESSION,
         sequence_id=1,
     )
@@ -74,6 +87,7 @@ def _candle(
     close: float,
     timeframe: str = "1m",
     complete: bool = True,
+    timestamp: datetime = _NOW,
 ) -> Candle:
     """Build one active candle row for range-read tests."""
     return Candle(
@@ -89,7 +103,7 @@ def _candle(
         trades=1,
         source="native",
         complete=complete,
-        timestamp=_NOW,
+        timestamp=timestamp,
         session_id=_SESSION,
         sequence_id=1,
     )
@@ -176,7 +190,10 @@ class TestGetInstrumentSymbolRefs:
                 "instrument_public_id": _INST_PAPER,
                 "native_symbol": "BTC-USD",
                 "exchange": "kraken",
+                "instrument_exchange": "paper",
                 "quote_currency": "USD",
+                "valid_from": _NOW,
+                "valid_to": KNOWN_TO_MAX,
             }
         ]
 
@@ -193,6 +210,61 @@ class TestGetInstrumentSymbolRefs:
             ["00000000-0000-7000-8000-0000000000ff"], _NOW
         )
         assert rows == []
+
+    async def test_returns_every_historical_reference_interval_known_at_horizon(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """A response-time successor cannot erase the identity that covered fills."""
+        created_at = _NOW - timedelta(hours=2)
+        revised_at = _NOW - timedelta(hours=1)
+        async with repository.session() as session:
+            session.add_all(
+                [
+                    _symbol(
+                        _SPID_REVISED,
+                        "EUR-X",
+                        "PLN",
+                        "forex",
+                        created_at,
+                        revised_at,
+                    ),
+                    _symbol(
+                        _SPID_REVISED,
+                        "EUR-X",
+                        "USD",
+                        "forex",
+                        revised_at,
+                    ),
+                    _instrument(
+                        _INST_REVISED,
+                        _SPID_REVISED,
+                        "walutomat",
+                        timestamp=created_at,
+                    ),
+                ]
+            )
+            await session.commit()
+        rows = await repository.get_instrument_symbol_refs([_INST_REVISED], _NOW)
+        assert rows == [
+            {
+                "instrument_public_id": _INST_REVISED,
+                "native_symbol": "EUR-X",
+                "exchange": "walutomat",
+                "instrument_exchange": "walutomat",
+                "quote_currency": "PLN",
+                "valid_from": created_at,
+                "valid_to": revised_at,
+            },
+            {
+                "instrument_public_id": _INST_REVISED,
+                "native_symbol": "EUR-X",
+                "exchange": "walutomat",
+                "instrument_exchange": "walutomat",
+                "quote_currency": "USD",
+                "valid_from": revised_at,
+                "valid_to": KNOWN_TO_MAX,
+            },
+        ]
 
 
 class TestGetPnlTimelineCandles:
@@ -276,6 +348,107 @@ class TestGetPnlTimelineCandles:
         refs = await repository.get_instrument_symbol_refs([_INST_USD], horizon)
         rows = await repository.get_pnl_timeline_candles(refs, open_at, open_at, horizon)
         assert [(row["open_at"], row["close"]) for row in rows] == [(open_at, 100.0)]
+
+    async def test_candle_uses_identity_valid_at_its_authoring_time(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """A later quote revision cannot relabel a historical candle close."""
+        created_at = _NOW - timedelta(hours=3)
+        candle_time = _NOW - timedelta(hours=2)
+        revised_at = _NOW - timedelta(hours=1)
+        open_at = candle_time - timedelta(minutes=1)
+        async with repository.session() as session:
+            session.add_all(
+                [
+                    _symbol(
+                        _SPID_REVISED,
+                        "EUR-X",
+                        "PLN",
+                        "forex",
+                        created_at,
+                        revised_at,
+                    ),
+                    _symbol(
+                        _SPID_REVISED,
+                        "EUR-X",
+                        "USD",
+                        "forex",
+                        revised_at,
+                    ),
+                    _instrument(
+                        _INST_REVISED,
+                        _SPID_REVISED,
+                        "walutomat",
+                        timestamp=created_at,
+                    ),
+                    _candle(
+                        _INST_REVISED,
+                        open_at,
+                        4.2,
+                        timestamp=candle_time,
+                    ),
+                ]
+            )
+            await session.commit()
+        refs = await repository.get_instrument_symbol_refs([_INST_REVISED], _NOW)
+        pln_ref = next(ref for ref in refs if ref["quote_currency"] == "PLN")
+        usd_ref = next(ref for ref in refs if ref["quote_currency"] == "USD")
+        historical = await repository.get_pnl_timeline_candles([pln_ref], open_at, open_at, _NOW)
+        relabeled = await repository.get_pnl_timeline_candles([usd_ref], open_at, open_at, _NOW)
+        assert historical == [
+            {
+                "instrument_public_id": _INST_REVISED,
+                "open_at": open_at,
+                "close": 4.2,
+            }
+        ]
+        assert relabeled == []
+
+    async def test_fill_reference_interval_does_not_bound_later_same_series_marks(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """Metadata churn after a fill cannot erase later same-series marks."""
+        created_at = _NOW - timedelta(hours=3)
+        revised_at = _NOW - timedelta(hours=1)
+        open_at = _NOW - timedelta(minutes=1)
+        async with repository.session() as session:
+            session.add_all(
+                [
+                    _symbol(
+                        _SPID_REVISED,
+                        "EUR-USD",
+                        "USD",
+                        "forex",
+                        created_at,
+                        revised_at,
+                    ),
+                    _symbol(
+                        _SPID_REVISED,
+                        "EUR-USD",
+                        "USD",
+                        "crypto",
+                        revised_at,
+                    ),
+                    _instrument(
+                        _INST_REVISED,
+                        _SPID_REVISED,
+                        "walutomat",
+                        timestamp=created_at,
+                    ),
+                    _candle(_INST_REVISED, open_at, 100.0, timestamp=_NOW),
+                ]
+            )
+            await session.commit()
+        refs = await repository.get_instrument_symbol_refs([_INST_REVISED], _NOW)
+        fill_ref = next(ref for ref in refs if ref["valid_to"] == revised_at)
+        rows = await repository.get_pnl_timeline_candles([fill_ref], open_at, open_at, _NOW)
+        assert rows == [
+            {
+                "instrument_public_id": _INST_REVISED,
+                "open_at": open_at,
+                "close": 100.0,
+            }
+        ]
 
 
 class TestGetFillShardKeysForScope:

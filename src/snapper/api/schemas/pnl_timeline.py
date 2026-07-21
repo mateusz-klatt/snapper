@@ -87,7 +87,7 @@ class PnlFillMarkerData(StrictBody):
     instrument_public_id: str
     side: str
     size: float
-    price: float
+    price: float | None
     execution_public_id: str
     order_public_id: str
     outcome: Literal["executed"] = "executed"

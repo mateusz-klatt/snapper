@@ -23,6 +23,16 @@ fabricating an unconverted number. The mark for grid minute ``M`` is the close o
 the finalized candle covering ``[M-1m, M)`` (``open_at == M - 1min``), so there
 is no look-ahead: minute ``M`` is valued only from the bar that closed at ``M``.
 
+Execution-price discipline uses the same direct-currency proof. Every version
+known at the response horizon must unanimously carry the requested quote
+currency. Within the execution span, adjacent or overlapping knowledge
+intervals with the same native symbol, candle venue, owning venue, and quote are
+merged before requiring one projection to cover every fill. This tolerates
+denomination-irrelevant metadata churn without allowing a quote correction,
+gap, conflicting projection, or venue mismatch to certify prices. The pure
+builder then withholds every component from the first affected fill onward
+instead of passing an unproved price into the average-cost kernel.
+
 Currency discipline for flows — UNKNOWN, never a fabricated ZERO. Exact zero is
 currency-invariant, so a zero fee or accrual stays zero even when its asset is
 empty or differs from the valuation currency. A nonzero fee or funding accrual
@@ -33,6 +43,7 @@ WITHHELD (untrusted) point, which is the honest outcome.
 """
 
 import math
+from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
@@ -54,6 +65,7 @@ from snapper.application.portfolio.pnl_timeline import TimelineExecution
 from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
 from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
+from snapper.core.numeric import is_positive_finite
 from snapper.data.repository import Repository
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRateRow
@@ -67,7 +79,7 @@ from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.3"
+PNL_TIMELINE_CALC_VERSION = "5A.4"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, or mark-resolution semantics
@@ -100,7 +112,7 @@ class PnlFillMarker:
     instrument_public_id: str
     side: str
     size: float
-    price: float
+    price: float | None
     execution_public_id: str
     order_public_id: str
     status: str
@@ -472,9 +484,132 @@ async def build_marks(
         as_of,
     )
     for candle in candles:
+        close = candle["close"]
+        if not is_positive_finite(close):
+            continue
         mark_minute = candle["open_at"] + timedelta(minutes=1)
-        marks[(candle["instrument_public_id"], mark_minute)] = candle["close"]
+        marks[(candle["instrument_public_id"], mark_minute)] = close
     return marks
+
+
+def _merge_price_ref_intervals(
+    refs: Sequence[InstrumentSymbolRefRow],
+) -> list[InstrumentSymbolRefRow]:
+    """Merge touching intervals that carry the same price-proof projection."""
+    grouped: dict[tuple[str, str, str, str | None], list[InstrumentSymbolRefRow]] = {}
+    for ref in refs:
+        key = (
+            ref["native_symbol"],
+            ref["exchange"],
+            ref["instrument_exchange"],
+            ref["quote_currency"],
+        )
+        grouped.setdefault(key, []).append(ref)
+    merged: list[InstrumentSymbolRefRow] = []
+    for group in grouped.values():
+        ordered = sorted(group, key=lambda ref: (ref["valid_from"], ref["valid_to"]))
+        current = ordered[0].copy()
+        for ref in ordered[1:]:
+            if ref["valid_from"] > current["valid_to"]:
+                merged.append(current)
+                current = ref.copy()
+                continue
+            current["valid_to"] = max(current["valid_to"], ref["valid_to"])
+        merged.append(current)
+    return merged
+
+
+def _partition_price_refs(
+    instrument_spans: Mapping[str, tuple[datetime, datetime]],
+    refs: Sequence[InstrumentSymbolRefRow],
+    valuation_ccy: str,
+) -> tuple[list[InstrumentSymbolRefRow], set[str]]:
+    """Partition instrument spans by direct price-currency proof.
+
+    Every version known at the response horizon must agree on
+    ``valuation_ccy``. Overlapping candidates are then collapsed by their
+    denomination-relevant projection and touching intervals for one projection
+    are merged before requiring exactly one candidate to cover the event span.
+    Missing, gapped, conflicting, null-quote, and foreign-quote references remain
+    untrusted while metadata-only version churn does not blank the series.
+
+    Args:
+        instrument_spans: Inclusive event-time bounds keyed by instrument.
+        refs: Historical symbol-reference intervals for those instruments.
+        valuation_ccy: Currency the execution prices must already represent.
+
+    Returns:
+        Uniquely proven references in input-instrument order and the set of
+        instrument identities whose execution-price currency is untrusted.
+    """
+    refs_by_instrument: dict[str, list[InstrumentSymbolRefRow]] = {}
+    for ref in refs:
+        refs_by_instrument.setdefault(ref["instrument_public_id"], []).append(ref)
+    trusted_refs: list[InstrumentSymbolRefRow] = []
+    untrusted_instruments: set[str] = set()
+    for instrument_public_id, (span_start, span_end) in instrument_spans.items():
+        instrument_refs = refs_by_instrument.get(instrument_public_id, [])
+        quote_currencies = {ref["quote_currency"] for ref in instrument_refs}
+        candidates = _merge_price_ref_intervals(
+            [
+                ref
+                for ref in instrument_refs
+                if ref["valid_from"] <= span_end and ref["valid_to"] > span_start
+            ]
+        )
+        if (
+            quote_currencies == {valuation_ccy}
+            and len(candidates) == 1
+            and candidates[0]["valid_from"] <= span_start
+            and candidates[0]["valid_to"] > span_end
+        ):
+            trusted_refs.append(candidates[0])
+        else:
+            untrusted_instruments.add(instrument_public_id)
+    return trusted_refs, untrusted_instruments
+
+
+def _partition_execution_price_refs(
+    execution_rows: Sequence[PnlTimelineExecutionRow],
+    refs: Sequence[InstrumentSymbolRefRow],
+    valuation_ccy: str,
+) -> tuple[list[InstrumentSymbolRefRow], set[str]]:
+    """Partition replayed execution instruments using their complete spans.
+
+    Args:
+        execution_rows: Scope execution prefix replayed by the P&L kernel.
+        refs: Historical symbol-reference intervals for those instruments.
+        valuation_ccy: Currency every execution price must already represent.
+
+    Returns:
+        References that prove one unchanged identity and owning venue covered
+        every fill, and the instruments whose execution-price denomination or
+        venue remains untrusted.
+    """
+    spans: dict[str, tuple[datetime, datetime]] = {}
+    for row in execution_rows:
+        instrument_public_id = row["instrument_public_id"]
+        event_time = row["timestamp"]
+        existing = spans.get(instrument_public_id)
+        if existing is None:
+            spans[instrument_public_id] = (event_time, event_time)
+        else:
+            spans[instrument_public_id] = (
+                min(existing[0], event_time),
+                max(existing[1], event_time),
+            )
+    trusted_refs, untrusted_instruments = _partition_price_refs(spans, refs, valuation_ccy)
+    trusted_by_instrument = {ref["instrument_public_id"]: ref for ref in trusted_refs}
+    for row in execution_rows:
+        instrument_public_id = row["instrument_public_id"]
+        ref = trusted_by_instrument.get(instrument_public_id)
+        if ref is not None and row["exchange"] != ref["instrument_exchange"]:
+            untrusted_instruments.add(instrument_public_id)
+    if untrusted_instruments:
+        trusted_refs = [
+            ref for ref in trusted_refs if ref["instrument_public_id"] not in untrusted_instruments
+        ]
+    return trusted_refs, untrusted_instruments
 
 
 def _flows_needing_conversion(
@@ -607,7 +742,11 @@ async def build_wallet_pnl_series(
     work_instrument_ids.update(row["instrument_public_id"] for row in accrual_rows)
     _enforce_total_work_budget(from_time, to_time, len(work_instrument_ids))
     refs = await repo.get_instrument_symbol_refs(instrument_ids, as_of)
-    marks = await build_marks(repo, refs, from_time, to_time, as_of, valuation_ccy)
+    replayed_execution_rows = [row for row in loaded_execution_rows if row["timestamp"] <= to_time]
+    trusted_refs, untrusted_price_instruments = _partition_execution_price_refs(
+        replayed_execution_rows, refs, valuation_ccy
+    )
+    marks = await build_marks(repo, trusted_refs, from_time, to_time, as_of, valuation_ccy)
     convertible = _flows_needing_conversion(loaded_execution_rows, accrual_rows, valuation_ccy)
     rates = await _load_flow_fx_rates(repo, convertible, valuation_ccy, as_of)
     executions = [
@@ -627,27 +766,39 @@ async def build_wallet_pnl_series(
         window,
         opening=None,
         lineage=lineage,
+        untrusted_price_instruments=untrusted_price_instruments,
     )
     if fill_gap:
         return _withhold_series_for_fill_gap(result)
     return result
 
 
-def _fill_marker(row: PnlTimelineExecutionRow) -> PnlFillMarker:
+def _fill_marker(
+    row: PnlTimelineExecutionRow,
+    trusted_price_instruments: set[str],
+) -> PnlFillMarker:
     """Project one execution row into a fill marker."""
     return PnlFillMarker(
         marker_time=row["timestamp"],
         instrument_public_id=row["instrument_public_id"],
         side=row["side"],
         size=row["size"],
-        price=row["price"],
+        price=(
+            row["price"]
+            if row["instrument_public_id"] in trusted_price_instruments
+            and is_positive_finite(row["price"])
+            else None
+        ),
         execution_public_id=row["public_id"],
         order_public_id=row["order_public_id"],
         status=row["status"],
     )
 
 
-def _signal_marker(row: PnlTimelineSignalMarkerRow) -> PnlSignalMarker:
+def _signal_marker(
+    row: PnlTimelineSignalMarkerRow,
+    trusted_price_instruments: set[str],
+) -> PnlSignalMarker:
     """Project one signal row without inferring existence from fills alone."""
     outcome: Literal["executed", "no_fill"] = "executed" if row["has_execution"] else "no_fill"
     return PnlSignalMarker(
@@ -657,7 +808,12 @@ def _signal_marker(row: PnlTimelineSignalMarkerRow) -> PnlSignalMarker:
         strategy_name=row["strategy_name"],
         strength=row["strength"],
         reason=row["reason"],
-        price=row["price"],
+        price=(
+            row["price"]
+            if row["instrument_public_id"] in trusted_price_instruments
+            and is_positive_finite(row["price"])
+            else None
+        ),
         signal_public_id=row["public_id"],
         outcome=outcome,
         status=outcome,
@@ -773,10 +929,43 @@ async def build_wallet_pnl_timeline(
         as_of,
         read_limit,
     )
+    replayed_execution_rows = [row for row in execution_rows if row["timestamp"] <= to_time]
+    marker_instrument_ids = list(
+        dict.fromkeys(
+            [row["instrument_public_id"] for row in replayed_execution_rows]
+            + [row["instrument_public_id"] for row in signal_rows if row["price"] is not None]
+        )
+    )
+    marker_refs = (
+        await repo.get_instrument_symbol_refs(marker_instrument_ids, as_of)
+        if marker_instrument_ids
+        else []
+    )
+    trusted_execution_refs, _ = _partition_execution_price_refs(
+        replayed_execution_rows, marker_refs, valuation_ccy
+    )
+    trusted_execution_instruments = {ref["instrument_public_id"] for ref in trusted_execution_refs}
+    signal_spans: dict[str, tuple[datetime, datetime]] = {}
+    for row in signal_rows:
+        if row["price"] is None:
+            continue
+        instrument_public_id = row["instrument_public_id"]
+        existing = signal_spans.get(instrument_public_id)
+        if existing is None:
+            signal_spans[instrument_public_id] = (row["fired_at"], row["fired_at"])
+        else:
+            signal_spans[instrument_public_id] = (
+                min(existing[0], row["fired_at"]),
+                max(existing[1], row["fired_at"]),
+            )
+    trusted_signal_refs, _ = _partition_price_refs(signal_spans, marker_refs, valuation_ccy)
+    trusted_signal_instruments = {ref["instrument_public_id"] for ref in trusted_signal_refs}
     markers: list[PnlTimelineMarker] = [
-        _fill_marker(row) for row in execution_rows if from_time <= row["timestamp"] <= to_time
+        _fill_marker(row, trusted_execution_instruments)
+        for row in execution_rows
+        if from_time <= row["timestamp"] <= to_time
     ]
-    markers.extend(_signal_marker(row) for row in signal_rows)
+    markers.extend(_signal_marker(row, trusted_signal_instruments) for row in signal_rows)
     markers.extend(_ai_decision_marker(row) for row in ai_decision_rows)
     markers.sort(key=_marker_sort_key)
     markers_truncated = len(markers) > PNL_TIMELINE_MARKER_LIMIT

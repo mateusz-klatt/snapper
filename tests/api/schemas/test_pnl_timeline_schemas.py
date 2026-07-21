@@ -193,6 +193,20 @@ class TestStrictContract:
         assert point.per_instrument[0].realized_pnl is None
         assert point.attribution[0].realized_pnl is None
 
+    def test_fill_marker_price_can_be_withheld(self) -> None:
+        """A fill marker retains its identity when its native price is unproved."""
+        marker = PnlFillMarkerData(
+            marker_time=_NOW,
+            instrument_public_id="i1",
+            side="buy",
+            size=1.0,
+            price=None,
+            execution_public_id="execution-1",
+            order_public_id="order-1",
+            status="filled",
+        )
+        assert marker.price is None
+
     def test_unknown_field_is_rejected(self) -> None:
         """Extra fields are forbidden on the strict point schema."""
         payload: dict[str, object] = {

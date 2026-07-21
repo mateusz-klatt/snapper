@@ -93,6 +93,11 @@ class TestRefusals:
         rates = {("EUR", "USD", _M): float("inf"), ("USD", "EUR", _M): 0.8}
         assert convert_amount(1.0, "EUR", "USD", _M, rates) == pytest.approx(1.25)
 
+    def test_non_positive_direct_close_falls_back_to_inverse(self) -> None:
+        """An unusable direct close never blocks a valid inverse pair."""
+        rates = {("EUR", "USD", _M): 0.0, ("USD", "EUR", _M): 0.8}
+        assert convert_amount(1.0, "EUR", "USD", _M, rates) == pytest.approx(1.25)
+
     def test_overflowing_direct_conversion_is_refused(self) -> None:
         """A finite rate whose product overflows withholds instead of returning inf."""
         assert convert_amount(1e308, "EUR", "USD", _M, _rates(EURUSD=1e308)) is None

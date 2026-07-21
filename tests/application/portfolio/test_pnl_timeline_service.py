@@ -100,17 +100,19 @@ def _signal_row(
     public_id: str,
     marker_time: datetime,
     has_execution: bool,
+    instrument: str = _I1,
+    price: float | None = 101.0,
 ) -> PnlTimelineSignalMarkerRow:
     """Build one independently sourced signal-marker row."""
     return {
         "public_id": public_id,
-        "instrument_public_id": _I1,
+        "instrument_public_id": instrument,
         "fired_at": marker_time,
         "side": "buy",
         "strategy_name": "momentum",
         "strength": 0.8,
         "reason": "breakout",
-        "price": 101.0,
+        "price": price,
         "has_execution": has_execution,
     }
 
@@ -159,19 +161,25 @@ def _ref(
     native_symbol: str,
     quote: str | None,
     exchange: str = "kraken",
+    instrument_exchange: str | None = None,
+    valid_from: datetime = _T0 - timedelta(days=1),
+    valid_to: datetime = datetime.max.replace(tzinfo=UTC),
 ) -> InstrumentSymbolRefRow:
     """Build one symbol reference row as ``get_instrument_symbol_refs`` returns it."""
     return {
         "instrument_public_id": instrument,
         "native_symbol": native_symbol,
         "exchange": exchange,
+        "instrument_exchange": (exchange if instrument_exchange is None else instrument_exchange),
         "quote_currency": quote,
+        "valid_from": valid_from,
+        "valid_to": valid_to,
     }
 
 
 def _candle(
     open_at: datetime,
-    close: float,
+    close: float | None,
     instrument: str = _I1,
 ) -> PnlTimelineCandleRow:
     """Build one row as the batched timeline candle read returns it."""
@@ -478,6 +486,19 @@ class TestBuildMarks:
         marks = await build_marks(repo, refs, _T0, _m(2), _T0, "USD")
         assert marks == {(_I1, _m(0)): 100.0, (_I1, _m(1)): 110.0, (_I1, _m(2)): 120.0}
 
+    @pytest.mark.parametrize(
+        "bad_close",
+        [0.0, -5.0, None, float("nan"), float("inf")],
+    )
+    async def test_non_positive_or_non_finite_close_is_omitted(
+        self, bad_close: float | None
+    ) -> None:
+        """An invalid candle close leaves no mark-map key behind."""
+        refs = [_ref(_I1, "BTC-USD", "USD")]
+        repo = FakeRepo(candles=[_candle(_m(-1), bad_close)])
+        marks = await build_marks(repo, refs, _T0, _T0, _T0, "USD")
+        assert marks == {}
+
     async def test_candle_read_window_floors_from_and_backs_one_minute(self) -> None:
         """The candle range starts one minute before the floored grid start."""
         refs = [_ref(_I1, "BTC-USD", "USD")]
@@ -548,6 +569,26 @@ class TestBuildWalletPnlSeries:
         assert [point.fee_pnl for point in result.points] == [0.0, 0.0]
         assert [point.net_pnl for point in result.points] == [0.0, 0.0]
 
+    @pytest.mark.parametrize("bad_close", [0.0, -5.0])
+    async def test_non_positive_mark_close_is_mark_incomplete(self, bad_close: float) -> None:
+        """A non-positive mark withholds stock values but keeps cumulatives."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 10.0, 100.0, 0.0, "USD")]
+        repo = FakeRepo(
+            executions=executions,
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), bad_close)],
+        )
+        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _T0, "1m", _T0)
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (0.0, 0.0, 0.0, None, None)
+
     async def test_nonzero_foreign_fee_withholds_the_series(self) -> None:
         """A nonzero foreign fee remains unknown and cannot become a zero cost."""
         executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.5, "EUR")]
@@ -561,6 +602,30 @@ class TestBuildWalletPnlSeries:
         ]
         assert all(point.fee_pnl is None for point in result.points)
         assert all(point.net_pnl is None for point in result.points)
+
+    @pytest.mark.parametrize("direct_close", [0.0, -1.25])
+    async def test_non_positive_direct_fx_fee_withholds_series(self, direct_close: float) -> None:
+        """A zero or negative direct FX close cannot erase or reverse a real fee."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.04, "EUR")]
+        repo = FakeRepo(
+            executions=executions,
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0)],
+            fx_rows=[_fx_row("EUR", "USD", 0, direct_close)],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.fee_pnl is None
+        assert point.net_pnl is None
 
     async def test_valuation_currency_accrual_becomes_accrual_pnl(self) -> None:
         """A USD accrual becomes accrual P&L with the holder-pays sign."""
@@ -627,7 +692,15 @@ class TestBuildWalletPnlSeries:
                 exchange="paper",
             )
         ]
-        refs = [_ref(_I1, "BTC-USD", "USD", exchange="kraken")]
+        refs = [
+            _ref(
+                _I1,
+                "BTC-USD",
+                "USD",
+                exchange="kraken",
+                instrument_exchange="paper",
+            )
+        ]
         candles = [_candle(_m(-1), 105.0), _candle(_m(0), 110.0)]
         repo = FakeRepo(executions=executions, refs=refs, candles=candles)
         result = await build_wallet_pnl_series(repo, "w1", "paper", _T0, _m(1), "1m", _T0)
@@ -773,6 +846,425 @@ class TestBuildWalletPnlSeries:
         assert repo.symbol_ref_calls == [[]]
 
 
+class TestExecutionQuoteCurrencyProof:
+    """Cover fail-closed proof of replayed execution-price denomination."""
+
+    async def test_foreign_quote_round_trip_is_fully_withheld(self) -> None:
+        """A USD gain can never be published as complete EUR P&L."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 0, "sell", 1.0, 110.0, 0.0, "USD"),
+        ]
+        repo = FakeRepo(executions=executions, refs=[_ref(_I1, "BTC-USD", "USD")])
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+            valuation_ccy="EUR",
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (None, None, None, None, None)
+        assert len(point.per_instrument) == 1
+        contribution = point.per_instrument[0]
+        assert contribution.instrument_public_id == _I1
+        assert (
+            contribution.realized_pnl,
+            contribution.fee_pnl,
+            contribution.accrual_pnl,
+            contribution.unrealized_pnl,
+        ) == (None, None, None, None)
+        assert len(point.attribution) == 1
+        attribution = point.attribution[0]
+        assert (
+            attribution.realized_pnl,
+            attribution.fee_pnl,
+            attribution.accrual_pnl,
+            attribution.unrealized_pnl,
+        ) == (None, None, None, None)
+
+    async def test_same_currency_round_trip_remains_complete(self) -> None:
+        """One unique EUR quote proves a EUR execution-price realization."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "EUR"),
+            _exec_row(_I1, 2, 0, "sell", 1.0, 110.0, 0.0, "EUR"),
+        ]
+        repo = FakeRepo(executions=executions, refs=[_ref(_I1, "BTC-EUR", "EUR")])
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+            valuation_ccy="EUR",
+        )
+        point = result.points[0]
+        assert point.valuation_status == "complete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (10.0, 0.0, 0.0, 0.0, 10.0)
+
+    async def test_response_time_successor_cannot_relabel_closed_round_trip(self) -> None:
+        """A USD successor beginning after PLN fills cannot certify their prices."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 0, "sell", 1.0, 110.0, 0.0, "USD"),
+        ]
+        refs = [
+            _ref(
+                _I1,
+                "BTC-X",
+                "USD",
+                valid_from=_m(1),
+            )
+        ]
+        result = await build_wallet_pnl_series(
+            FakeRepo(executions=executions, refs=refs),
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(2),
+            valuation_ccy="USD",
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.realized_pnl is None
+        assert point.net_pnl is None
+
+    async def test_symbol_and_exchange_revision_inside_fill_span_withholds(self) -> None:
+        """No single identity can certify fills that straddle a venue re-key."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(
+                _I1,
+                2,
+                2,
+                "sell",
+                1.0,
+                110.0,
+                0.0,
+                "USD",
+                exchange="coinbase",
+            ),
+        ]
+        refs = [
+            _ref(_I1, "BTC-USD", "USD", valid_to=_m(1)),
+            _ref(
+                _I1,
+                "XBT-USD",
+                "USD",
+                exchange="coinbase",
+                valid_from=_m(1),
+            ),
+        ]
+        result = await build_wallet_pnl_series(
+            FakeRepo(executions=executions, refs=refs),
+            "w1",
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _m(3),
+        )
+        assert all(point.valuation_status == "incomplete" for point in result.points)
+        assert all(point.realized_pnl is None for point in result.points)
+        assert all(point.net_pnl is None for point in result.points)
+
+    async def test_quote_revision_after_closed_span_withholds_prior_prices(self) -> None:
+        """A later quote correction invalidates the earlier denomination claim."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "EUR"),
+            _exec_row(_I1, 2, 0, "sell", 1.0, 110.0, 0.0, "EUR"),
+        ]
+        refs = [
+            _ref(_I1, "BTC-X", "EUR", valid_to=_m(1)),
+            _ref(_I1, "BTC-X", "USD", valid_from=_m(1)),
+        ]
+        result = await build_wallet_pnl_series(
+            FakeRepo(executions=executions, refs=refs),
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(2),
+            valuation_ccy="EUR",
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (None, None, None, None, None)
+
+    async def test_same_projection_revisions_are_merged_before_price_proof(self) -> None:
+        """Metadata-only version churn does not blank a covered round trip."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 2, "sell", 1.0, 110.0, 0.0, "USD"),
+        ]
+        refs = [
+            _ref(_I1, "BTC-USD", "USD", valid_to=_m(1)),
+            _ref(
+                _I1,
+                "BTC-USD",
+                "USD",
+                valid_from=_T0,
+                valid_to=_m(2),
+            ),
+            _ref(_I1, "BTC-USD", "USD", valid_from=_m(2)),
+        ]
+        repo = FakeRepo(executions=executions, refs=refs)
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _m(2),
+            _m(2),
+            "1m",
+            _m(3),
+        )
+        point = result.points[0]
+        assert point.valuation_status == "complete"
+        assert point.realized_pnl == 10.0
+        assert point.net_pnl == 10.0
+        merged_refs = repo.candle_calls[0][0]
+        assert len(merged_refs) == 1
+        assert merged_refs[0]["valid_from"] == refs[0]["valid_from"]
+        assert merged_refs[0]["valid_to"] == refs[2]["valid_to"]
+
+    async def test_same_projection_gap_remains_untrusted(self) -> None:
+        """Equal denomination projections cannot bridge a knowledge gap."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 2, "sell", 1.0, 110.0, 0.0, "USD"),
+        ]
+        refs = [
+            _ref(_I1, "BTC-USD", "USD", valid_to=_m(1)),
+            _ref(
+                _I1,
+                "BTC-USD",
+                "USD",
+                valid_from=_m(1) + timedelta(seconds=1),
+            ),
+        ]
+        result = await build_wallet_pnl_series(
+            FakeRepo(executions=executions, refs=refs),
+            "w1",
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _m(3),
+        )
+        assert all(point.valuation_status == "incomplete" for point in result.points)
+        assert all(point.realized_pnl is None for point in result.points)
+
+    async def test_execution_venue_must_match_historical_instrument_venue(self) -> None:
+        """A unique same-quote ref cannot certify fills from another venue."""
+        executions = [
+            _exec_row(
+                _I1,
+                1,
+                0,
+                "buy",
+                1.0,
+                100.0,
+                0.0,
+                "USD",
+                exchange="coinbase",
+            ),
+            _exec_row(
+                _I1,
+                2,
+                0,
+                "sell",
+                1.0,
+                110.0,
+                0.0,
+                "USD",
+                exchange="coinbase",
+            ),
+        ]
+        result = await build_wallet_pnl_series(
+            FakeRepo(
+                executions=executions,
+                refs=[_ref(_I1, "BTC-USD", "USD", instrument_exchange="kraken")],
+            ),
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.realized_pnl is None
+        assert point.net_pnl is None
+
+    async def test_missing_symbol_reference_withholds_round_trip(self) -> None:
+        """An absent reference cannot prove the execution-price currency."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "EUR"),
+            _exec_row(_I1, 2, 0, "sell", 1.0, 110.0, 0.0, "EUR"),
+        ]
+        result = await build_wallet_pnl_series(
+            FakeRepo(executions=executions),
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+            valuation_ccy="EUR",
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (None, None, None, None, None)
+
+    async def test_multiple_symbol_references_withhold_round_trip(self) -> None:
+        """One matching candidate cannot override a second ambiguous reference."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "EUR"),
+            _exec_row(_I1, 2, 0, "sell", 1.0, 110.0, 0.0, "EUR"),
+        ]
+        refs = [
+            _ref(_I1, "BTC-EUR", "EUR"),
+            _ref(_I1, "BTC-USD", "USD", exchange="other"),
+        ]
+        result = await build_wallet_pnl_series(
+            FakeRepo(executions=executions, refs=refs),
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+            valuation_ccy="EUR",
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (None, None, None, None, None)
+
+    async def test_mixed_quote_proof_preserves_points_before_untrusted_fill(self) -> None:
+        """Provable points survive until point-wide UNTRUSTED becomes necessary."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "EUR"),
+            _exec_row(_I1, 2, 0, "sell", 1.0, 110.0, 0.0, "EUR"),
+            _exec_row(_I2, 3, 1, "buy", 1.0, 200.0, 0.25, "EUR"),
+            _exec_row(_I2, 4, 1, "sell", 1.0, 220.0, 0.25, "EUR"),
+        ]
+        lineage = [
+            _lineage_row(executions[0]["order_public_id"], "rest"),
+            _lineage_row(executions[1]["order_public_id"], "rest"),
+            _lineage_row(
+                executions[2]["order_public_id"],
+                "strategy",
+                signal_public_id="signal-1",
+                strategy_name="momentum",
+            ),
+            _lineage_row(
+                executions[3]["order_public_id"],
+                "strategy",
+                signal_public_id="signal-2",
+                strategy_name="momentum",
+            ),
+        ]
+        refs = [
+            _ref(_I1, "BTC-EUR", "EUR"),
+            _ref(_I2, "ETH-USD", "USD"),
+        ]
+        result = await build_wallet_pnl_series(
+            FakeRepo(
+                executions=executions,
+                accruals=[_accrual_row(_I2, 1, 3.0, "EUR")],
+                refs=refs,
+                lineage=lineage,
+            ),
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(1),
+            valuation_ccy="EUR",
+        )
+        proven_point, untrusted_point = result.points
+        assert proven_point.valuation_status == "complete"
+        assert proven_point.realized_pnl == 10.0
+        assert proven_point.net_pnl == 10.0
+        assert [item.instrument_public_id for item in proven_point.per_instrument] == [_I1]
+        assert proven_point.per_instrument[0].realized_pnl == 10.0
+        assert len(proven_point.attribution) == 1
+        assert proven_point.attribution[0].origin == "manual"
+        assert proven_point.attribution[0].realized_pnl == 10.0
+        assert untrusted_point.valuation_status == "incomplete"
+        assert (
+            untrusted_point.realized_pnl,
+            untrusted_point.fee_pnl,
+            untrusted_point.accrual_pnl,
+            untrusted_point.unrealized_pnl,
+            untrusted_point.net_pnl,
+        ) == (None, None, None, None, None)
+        assert [item.instrument_public_id for item in untrusted_point.per_instrument] == [
+            _I1,
+            _I2,
+        ]
+        assert all(
+            contribution.realized_pnl is None
+            and contribution.fee_pnl is None
+            and contribution.accrual_pnl is None
+            and contribution.unrealized_pnl is None
+            for contribution in untrusted_point.per_instrument
+        )
+        assert {(item.origin, item.strategy_name) for item in untrusted_point.attribution} == {
+            ("manual", None),
+            ("system", "momentum"),
+            ("unattributed", None),
+        }
+        assert all(
+            contribution.realized_pnl is None
+            and contribution.fee_pnl is None
+            and contribution.accrual_pnl is None
+            and contribution.unrealized_pnl is None
+            for contribution in untrusted_point.attribution
+        )
+
+
 class TestBuildWalletPnlTimeline:
     """Cover independent marker sourcing, outcomes, ordering, and capping."""
 
@@ -859,6 +1351,7 @@ class TestBuildWalletPnlTimeline:
         assert fills[0].order_public_id == f"order-{_I1}-2"
         assert fills[0].status == "filled"
         assert fills[0].outcome == "executed"
+        assert fills[0].price == 100.0
         signal_markers = {
             marker.signal_public_id: marker
             for marker in result.markers
@@ -868,6 +1361,7 @@ class TestBuildWalletPnlTimeline:
         assert signal_markers["signal-no-fill"].status == "no_fill"
         assert signal_markers["signal-executed"].outcome == "executed"
         assert signal_markers["signal-executed"].status == "executed"
+        assert signal_markers["signal-executed"].price == 101.0
         ai_markers = {
             marker.event_public_id: marker
             for marker in result.markers
@@ -880,6 +1374,242 @@ class TestBuildWalletPnlTimeline:
         assert ai_markers["ai-executed"].outcome == "executed"
         assert ai_markers["ai-no-fill"].outcome == "no_fill"
         assert ai_markers["ai-no-fill"].rationale is None
+
+    @pytest.mark.parametrize("bad_price", [0.0, -1.25, float("nan")])
+    async def test_invalid_opening_price_is_mark_incomplete_until_later_close(
+        self, bad_price: float
+    ) -> None:
+        """Unknown opening basis keeps cumulatives until realization is attempted."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, bad_price, 0.25, "USD"),
+            _exec_row(_I1, 2, 1, "sell", 1.0, 110.0, 0.5, "USD"),
+        ]
+        repo = FakeRepo(
+            executions=executions,
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0), _candle(_m(0), 110.0)],
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+        )
+        opening_point, closing_point = result.series.points
+        assert opening_point.valuation_status == "incomplete"
+        assert (
+            opening_point.realized_pnl,
+            opening_point.fee_pnl,
+            opening_point.accrual_pnl,
+            opening_point.unrealized_pnl,
+            opening_point.net_pnl,
+        ) == (0.0, -0.25, 0.0, None, None)
+        assert closing_point.valuation_status == "incomplete"
+        assert (
+            closing_point.realized_pnl,
+            closing_point.fee_pnl,
+            closing_point.accrual_pnl,
+            closing_point.unrealized_pnl,
+            closing_point.net_pnl,
+        ) == (None, None, None, None, None)
+        fills = [marker for marker in result.markers if isinstance(marker, PnlFillMarker)]
+        assert [marker.price for marker in fills] == [None, 110.0]
+
+    @pytest.mark.parametrize("bad_price", [0.0, -1.25, float("nan")])
+    async def test_invalid_add_price_is_mark_incomplete_not_untrusted(
+        self, bad_price: float
+    ) -> None:
+        """An invalid same-side add poisons basis without inventing realization."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 1, "buy", 1.0, bad_price, 0.25, "USD"),
+        ]
+        repo = FakeRepo(
+            executions=executions,
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0), _candle(_m(0), 110.0)],
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+        )
+        opening_point, add_point = result.series.points
+        assert opening_point.valuation_status == "complete"
+        assert add_point.valuation_status == "incomplete"
+        assert (
+            add_point.realized_pnl,
+            add_point.fee_pnl,
+            add_point.accrual_pnl,
+            add_point.unrealized_pnl,
+            add_point.net_pnl,
+        ) == (0.0, -0.25, 0.0, None, None)
+        fills = [marker for marker in result.markers if isinstance(marker, PnlFillMarker)]
+        assert [marker.price for marker in fills] == [100.0, None]
+
+    @pytest.mark.parametrize("bad_price", [0.0, -1.25, float("nan")])
+    @pytest.mark.parametrize(
+        "closing_size",
+        [
+            pytest.param(0.5, id="reduction"),
+            pytest.param(1.0, id="close"),
+            pytest.param(2.0, id="flip"),
+        ],
+    )
+    async def test_invalid_reduction_close_or_flip_price_is_untrusted(
+        self,
+        bad_price: float,
+        closing_size: float,
+    ) -> None:
+        """Any invalid-price closing quantity makes cumulatives unprovable."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 1, "sell", closing_size, bad_price, 0.25, "USD"),
+        ]
+        repo = FakeRepo(
+            executions=executions,
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0), _candle(_m(0), 110.0)],
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+        )
+        opening_point, closing_point = result.series.points
+        assert opening_point.valuation_status == "complete"
+        assert closing_point.valuation_status == "incomplete"
+        assert (
+            closing_point.realized_pnl,
+            closing_point.fee_pnl,
+            closing_point.accrual_pnl,
+            closing_point.unrealized_pnl,
+            closing_point.net_pnl,
+        ) == (None, None, None, None, None)
+        fills = [marker for marker in result.markers if isinstance(marker, PnlFillMarker)]
+        assert [marker.price for marker in fills] == [100.0, None]
+
+    async def test_foreign_fill_and_signal_only_prices_are_withheld(self) -> None:
+        """Raw marker prices cannot escape without direct denomination proof."""
+        executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "EUR")]
+        signals = [_signal_row("signal-foreign", _m(0), False, _I2, 250.0)]
+        repo = FakeRepo(
+            executions=executions,
+            signals=signals,
+            refs=[
+                _ref(_I1, "BTC-USD", "USD"),
+                _ref(_I2, "ETH-PLN", "PLN", exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+            valuation_ccy="EUR",
+        )
+        fill = next(marker for marker in result.markers if isinstance(marker, PnlFillMarker))
+        signal = next(marker for marker in result.markers if isinstance(marker, PnlSignalMarker))
+        assert fill.price is None
+        assert signal.price is None
+        assert repo.symbol_ref_calls == [[_I1], [_I1, _I2]]
+
+    async def test_signal_only_same_currency_price_remains_visible(self) -> None:
+        """A signal-only instrument gets an independent direct-currency proof."""
+        repo = FakeRepo(
+            signals=[_signal_row("signal-usd", _T0, False, _I2, 250.0)],
+            refs=[_ref(_I2, "ETH-USD", "USD")],
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+        )
+        signal = next(marker for marker in result.markers if isinstance(marker, PnlSignalMarker))
+        assert signal.price == 250.0
+        assert repo.symbol_ref_calls == [[], [_I2]]
+
+    @pytest.mark.parametrize("bad_price", [0.0, -1.25])
+    async def test_signal_price_needs_value_proof_not_only_currency_proof(
+        self, bad_price: float
+    ) -> None:
+        """A proven currency does not make a non-positive signal price publishable.
+
+        Signal prices are captured from the same candle-close plane the mark
+        filter rejects, so currency proof alone would republish exactly the
+        corruption that filter exists to withhold. The fill marker already
+        applies both halves of the gate; a signal marker on the same overlay
+        must not disagree with it about whether zero is a real price.
+        """
+        repo = FakeRepo(
+            signals=[_signal_row("signal-bad", _T0, False, _I2, bad_price)],
+            refs=[_ref(_I2, "ETH-USD", "USD")],
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+        )
+        signal = next(marker for marker in result.markers if isinstance(marker, PnlSignalMarker))
+        assert signal.price is None
+
+    async def test_future_quote_revision_withholds_historical_window(self) -> None:
+        """A known future quote correction invalidates historical fill prices."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 0, "sell", 1.0, 110.0, 0.0, "USD"),
+            _exec_row(_I1, 3, 3, "buy", 1.0, 120.0, 0.0, "USD"),
+        ]
+        repo = FakeRepo(
+            executions=executions,
+            refs=[
+                _ref(_I1, "BTC-USD", "USD", valid_to=_m(2)),
+                _ref(_I1, "XBT-EUR", "EUR", valid_from=_m(2)),
+            ],
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(4),
+        )
+        point = result.series.points[0]
+        assert point.valuation_status == "incomplete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (None, None, None, None, None)
+        fills = [marker for marker in result.markers if isinstance(marker, PnlFillMarker)]
+        assert len(fills) == 2
+        assert [marker.price for marker in fills] == [None, None]
 
     async def test_exact_cap_is_complete_and_over_cap_keeps_latest(self) -> None:
         """The exact cap is complete; one extra drops the oldest with disclosure."""
@@ -932,7 +1662,7 @@ def test_provenance_constants_are_stable() -> None:
     Then: The documented source, version, and total-work limit remain stable.
     """
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
-    assert PNL_TIMELINE_CALC_VERSION == "5A.3"
+    assert PNL_TIMELINE_CALC_VERSION == "5A.4"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
 

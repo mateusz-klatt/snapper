@@ -401,9 +401,9 @@ class TestAttribution:
     def test_unrepresentable_unrealized_residue_withholds_the_point(self) -> None:
         """Unrealized attribution also fails closed under catastrophic cancellation."""
         executions = (
-            _exec("I1", 1, 0, "buy", 1.0, 0.0),
-            _exec("I2", 2, 0, "buy", 1.0, 0.0),
-            _exec("I3", 3, 0, "buy", 1.0, 0.0),
+            _exec("I1", 1, 0, "buy", 1.0, 1.0),
+            _exec("I2", 2, 0, "buy", 1.0, 1e20),
+            _exec("I3", 3, 0, "buy", 1.0, 1.0),
         )
         lineage = {
             "order-I1-1": TimelineExecutionLineage("rest", None, None, "live", None),
@@ -416,8 +416,8 @@ class TestAttribution:
         }
         marks: MarkMap = {
             ("I1", _m(0)): 1e20,
-            ("I2", _m(0)): -1e20,
-            ("I3", _m(0)): 1.0,
+            ("I2", _m(0)): 1.0,
+            ("I3", _m(0)): 2.0,
         }
         point = build_pnl_timeline(executions, (), marks, _window(0, 0), lineage=lineage).points[0]
         assert point.valuation_status == "incomplete"
@@ -958,7 +958,7 @@ class TestCorruptInputGuards:
     def test_net_overflow_from_finite_components_is_incomplete(self) -> None:
         """A finite realized and a finite unrealized whose sum overflows withhold net."""
         executions = (
-            _exec("I1", 1, 0, "buy", 1.0, 0.0),
+            _exec("I1", 1, 0, "buy", 1.0, 1.0),
             _exec("I1", 2, 0, "sell", 1.0, 1e308),
             _exec("I2", 3, 0, "buy", 1.0, 1.0),
         )

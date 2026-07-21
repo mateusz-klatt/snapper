@@ -9,7 +9,6 @@ and are scoped to the caller's accessible wallets.
 """
 
 import datetime as dt
-import math
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -52,6 +51,7 @@ from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.json_types import JsonObject
+from snapper.core.numeric import is_positive_finite
 from snapper.core.types import AllExchange
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionMode
@@ -351,11 +351,6 @@ _PAPER_SNAPSHOT_MAX_AGE = timedelta(seconds=30)
 _PAPER_CANDLE_MAX_AGE = timedelta(seconds=120)
 
 
-def _positive_finite(value: float | None) -> bool:
-    """Return whether a candidate reference price is usable."""
-    return value is not None and math.isfinite(value) and value > 0.0
-
-
 async def _resolve_paper_reference_price(
     *,
     repo: Repository,
@@ -401,8 +396,8 @@ async def _resolve_paper_reference_price(
         newest = max(snapshots, key=lambda row: row["ts"])
         side_price = newest["ask"] if body.side == "buy" else newest["bid"]
         for candidate in (side_price, newest["last"]):
-            if _positive_finite(candidate):
-                return float(cast(float, candidate))
+            if is_positive_finite(candidate):
+                return candidate
     candles = await repo.get_candles(
         instrument=body.instrument,
         timeframe="1m",
@@ -416,7 +411,7 @@ async def _resolve_paper_reference_price(
     if candles:
         newest_candle = candles[0]
         fresh = as_of - newest_candle["timestamp"] <= _PAPER_CANDLE_MAX_AGE
-        if fresh and _positive_finite(newest_candle["close"]):
+        if fresh and is_positive_finite(newest_candle["close"]):
             return float(newest_candle["close"])
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,

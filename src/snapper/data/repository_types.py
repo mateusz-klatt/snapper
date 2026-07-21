@@ -439,23 +439,27 @@ class PnlTimelineAccrualRow(TypedDict):
 
 
 class InstrumentSymbolRefRow(TypedDict):
-    """Symbol reference for one instrument, for P&L timeline mark resolution.
+    """One knowledge-time-bounded reference for P&L price-currency proof.
 
-    Returned by ``get_instrument_symbol_refs`` for the distinct instruments a
-    P&L timeline reconstruction touches. ``exchange`` is the canonical candle
-    venue: ``Instrument.source_exchange`` when present, otherwise the
-    instrument's own exchange. Together, ``native_symbol`` and ``exchange``
-    identify the finalized 1m candle series used for marks while the original
-    ``instrument_public_id`` remains the mark-map key. ``quote_currency`` is the
-    nullable ``Symbol.quote`` asset that decides whether the close is already
-    denominated in the valuation currency (checklist #13 — no FX conversion in
-    v1).
+    Returned by ``get_instrument_symbol_refs`` for every historical Instrument
+    and Symbol version intersection known at the requested horizon. ``exchange``
+    is the canonical candle venue: ``Instrument.source_exchange`` when present,
+    otherwise the instrument's own exchange. ``instrument_exchange`` retains
+    the instrument's venue for execution-lineage proof. Together,
+    ``native_symbol``, ``exchange``, and ``quote_currency`` identify the
+    finalized 1m candle series used for marks while the original
+    ``instrument_public_id`` remains the mark-map key. ``valid_from`` and
+    ``valid_to`` are the inclusive and exclusive knowledge bounds of the joined
+    versions, not independent market-validity timestamps.
     """
 
     instrument_public_id: str
     native_symbol: str
     exchange: str
+    instrument_exchange: str
     quote_currency: str | None
+    valid_from: datetime
+    valid_to: datetime
 
 
 class PnlTimelineCandleRow(TypedDict):
@@ -463,12 +467,13 @@ class PnlTimelineCandleRow(TypedDict):
 
     Returned by ``get_pnl_timeline_candles``. The instrument identity is copied
     from the requested symbol reference, including for PAPER instruments whose
-    candle row belongs to a canonical source-venue instrument.
+    candle row belongs to a canonical source-venue instrument. Legacy candle
+    closes may be null and are rejected by the mark builder.
     """
 
     instrument_public_id: str
     open_at: datetime
-    close: float
+    close: float | None
 
 
 class PnlFxRateRow(TypedDict):

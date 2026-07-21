@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine
 
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.models import Instrument
 from snapper.data.models import Symbol
@@ -27,7 +28,14 @@ _M = _NOW - timedelta(hours=1)
 _SESSION = "00000000-0000-7000-8000-000000000801"
 
 
-def _symbol(public_id: str, native_symbol: str, base: str, quote: str) -> Symbol:
+def _symbol(
+    public_id: str,
+    native_symbol: str,
+    base: str,
+    quote: str,
+    timestamp: datetime = _TS,
+    known_to: datetime = KNOWN_TO_MAX,
+) -> Symbol:
     """Build one active symbol carrying the currency legs the read matches on."""
     return Symbol(
         public_id=public_id,
@@ -35,21 +43,27 @@ def _symbol(public_id: str, native_symbol: str, base: str, quote: str) -> Symbol
         base=base,
         quote=quote,
         asset_type="forex",
-        created_at=_TS,
-        timestamp=_TS,
+        created_at=timestamp,
+        timestamp=timestamp,
+        known_to=known_to,
         session_id=_SESSION,
         sequence_id=1,
     )
 
 
-def _instrument(public_id: str, symbol_public_id: str, exchange: str) -> Instrument:
+def _instrument(
+    public_id: str,
+    symbol_public_id: str,
+    exchange: str,
+    timestamp: datetime = _TS,
+) -> Instrument:
     """Build one active instrument listing a symbol on a venue."""
     return Instrument(
         public_id=public_id,
         symbol_public_id=symbol_public_id,
         exchange=exchange,
         requires_ai_review=False,
-        timestamp=_TS,
+        timestamp=timestamp,
         session_id=_SESSION,
         sequence_id=1,
     )
@@ -190,3 +204,37 @@ class TestGetPnlFxRateCandles:
             _NOW + timedelta(days=1),
         )
         assert [r["open_at"] for r in rows] == sorted(r["open_at"] for r in rows)
+
+    async def test_rate_candle_uses_identity_valid_at_its_authoring_time(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """A later quote revision cannot turn a PLN candle into a USD rate."""
+        revised_at = _M + timedelta(minutes=30)
+        async with repository.session() as session:
+            session.add_all(
+                [
+                    _symbol(
+                        "sym-gbpx",
+                        "GBP-X",
+                        "GBP",
+                        "PLN",
+                        known_to=revised_at,
+                    ),
+                    _symbol(
+                        "sym-gbpx",
+                        "GBP-X",
+                        "GBP",
+                        "USD",
+                        timestamp=revised_at,
+                    ),
+                    _instrument("ins-gbpx", "sym-gbpx", "walutomat"),
+                    _candle("ins-gbpx", _M, 5.0),
+                ]
+            )
+            await session.commit()
+        historical = await repository.get_pnl_fx_rate_candles([("GBP", "PLN")], _M, _M, _NOW)
+        relabeled = await repository.get_pnl_fx_rate_candles([("GBP", "USD")], _M, _M, _NOW)
+        assert [(row["base"], row["quote"], row["close"]) for row in historical] == [
+            ("GBP", "PLN", 5.0)
+        ]
+        assert relabeled == []
