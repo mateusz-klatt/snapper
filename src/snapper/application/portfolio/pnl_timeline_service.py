@@ -423,6 +423,72 @@ async def build_marks(
     return marks
 
 
+def _flows_needing_conversion(
+    execution_rows: Sequence[PnlTimelineExecutionRow],
+    accrual_rows: Sequence[PnlTimelineAccrualRow],
+    valuation_ccy: str,
+) -> list[tuple[str, datetime]]:
+    """Return the (currency, minute) pairs whose conversion needs a real rate.
+
+    Only a NONZERO amount denominated in another currency needs evidence: an
+    exact zero is currency-invariant and the valuation currency converts by
+    identity, so neither should drag a candle read into existence.
+
+    Args:
+        execution_rows: Scope executions, whose fee carries ``fee_asset``.
+        accrual_rows: Scope accruals, whose amount carries ``amount_asset``.
+        valuation_ccy: Currency the series is valued in.
+
+    Returns:
+        Distinct ``(currency, rate_minute)`` pairs requiring a rate.
+    """
+    needed: set[tuple[str, datetime]] = set()
+    for row in execution_rows:
+        if row["fee"] != 0.0 and row["fee_asset"] != valuation_ccy:
+            needed.add((row["fee_asset"], _rate_minute(row["timestamp"])))
+    for accrual in accrual_rows:
+        if accrual["amount"] != 0.0 and accrual["amount_asset"] != valuation_ccy:
+            needed.add((accrual["amount_asset"], _rate_minute(accrual["accrued_at"])))
+    return sorted(needed)
+
+
+async def _load_flow_fx_rates(
+    repo: Repository,
+    convertible: Sequence[tuple[str, datetime]],
+    valuation_ccy: str,
+    as_of: datetime,
+) -> FxRateMap:
+    """Load exactly the FX rates the scope's foreign flows require.
+
+    The range is bounded by the FLOWS' OWN minutes, never by the requested
+    window. A fill that predates the window is still replayed — it seeds the pool
+    the window opens with — so its fee needs a rate at ITS timestamp; bounding the
+    read by the window silently withheld the whole series for any wallet whose
+    only foreign-currency fill happened earlier. Narrowing to the minutes that
+    actually need a rate also keeps the read small: a lifetime-spanning
+    min..max would otherwise pull one row per pair per minute.
+
+    Args:
+        repo: Repository providing the FX candle read.
+        convertible: ``(currency, minute)`` pairs needing a rate.
+        valuation_ccy: Target currency for every conversion.
+        as_of: Knowledge horizon threading the candle read.
+
+    Returns:
+        The minute-keyed rate map, empty when nothing needs converting.
+    """
+    if not convertible:
+        return {}
+    pairs = required_pairs(frozenset(currency for currency, _ in convertible), valuation_ccy)
+    if not pairs:
+        return {}
+    minutes = [minute for _, minute in convertible]
+    rate_rows = await repo.get_pnl_fx_rate_candles(
+        sorted(pairs), min(minutes) - timedelta(minutes=1), max(minutes), as_of
+    )
+    return build_fx_rates(rate_rows)
+
+
 async def build_wallet_pnl_series(
     repo: Repository,
     wallet_public_id: str,
@@ -483,15 +549,8 @@ async def build_wallet_pnl_series(
     _enforce_total_work_budget(from_time, to_time, len(work_instrument_ids))
     refs = await repo.get_instrument_symbol_refs(instrument_ids, as_of)
     marks = await build_marks(repo, refs, from_time, to_time, as_of, valuation_ccy)
-    flow_currencies = frozenset(
-        [row["fee_asset"] for row in loaded_execution_rows]
-        + [row["amount_asset"] for row in accrual_rows]
-    )
-    pairs = required_pairs(flow_currencies, valuation_ccy)
-    rate_rows = await repo.get_pnl_fx_rate_candles(
-        sorted(pairs), from_time - timedelta(minutes=1), to_time, as_of
-    )
-    rates = build_fx_rates(rate_rows)
+    convertible = _flows_needing_conversion(loaded_execution_rows, accrual_rows, valuation_ccy)
+    rates = await _load_flow_fx_rates(repo, convertible, valuation_ccy, as_of)
     executions = [
         _to_timeline_execution(row, valuation_ccy, rates) for row in loaded_execution_rows
     ]

@@ -8552,7 +8552,13 @@ def test_evicted_correction_write_cleans_all_dependent_repairs() -> None:
 
     Given: one late correction fans out to 5m and 1h repair keys,
     When: that correction row is evicted from the bounded candle writer queue,
-    Then: all dependent repair and late-drop state is removed with one warning.
+    Then: all dependent repair and late-drop state is removed and the abandonment
+        is warned about exactly once.
+
+    The assertion targets that SPECIFIC warning rather than the total call count:
+    the queue-full backlog warning is throttled on elapsed time, so in a fresh
+    worker process it also fires here, and counting calls made this test pass or
+    fail purely on which other tests happened to share the worker first.
     """
     pub = DummyPublisher(symbols=["BTC-USD", "ETH-USD"])
     pub._candle_write_queue = asyncio.Queue(maxsize=1)
@@ -8570,7 +8576,10 @@ def test_evicted_correction_write_cleans_all_dependent_repairs() -> None:
     replacement = _finalized_row(ipid="inst-2", open_at=_candle_minute(10, 8), complete=True)
     with patch("snapper.messaging.publishers.base.logger.warning") as warning:
         pub._enqueue_finalized_candles([("ETH-USD", replacement)], ExchangeEnum.KRAKEN, "kraken")
-    warning.assert_called_once()
+    abandoned = [
+        call for call in warning.call_args_list if "abandoned candle repairs" in str(call.args[0])
+    ]
+    assert len(abandoned) == 1
     assert pub._pending_candle_repairs == {}
     assert pub._pending_late_candle_drops == {}
 

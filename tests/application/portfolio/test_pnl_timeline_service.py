@@ -200,6 +200,7 @@ class FakeRepo:
         self._gapped_shards = gapped_shards or set()
         self._fx_rows: list[PnlFxRateRow] = list(fx_rows or [])
         self.fx_pair_calls: list[list[tuple[str, str]]] = []
+        self.fx_range_calls: list[tuple[datetime, datetime]] = []
         self.symbol_ref_calls: list[list[str]] = []
         self.candle_calls: list[
             tuple[list[InstrumentSymbolRefRow], datetime, datetime, datetime]
@@ -304,6 +305,7 @@ class FakeRepo:
     ) -> list[PnlFxRateRow]:
         """Record the requested pairs and return the canned FX candles."""
         self.fx_pair_calls.append(list(pairs))
+        self.fx_range_calls.append((start, end))
         requested = set(pairs)
         return [row for row in self._fx_rows if (row["base"], row["quote"]) in requested]
 
@@ -828,3 +830,70 @@ class TestForeignFeeConversion:
         repo = self._repo([_fx_row("EUR", "USD", 3, 1.25)])
         result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
         assert result.points[0].valuation_status == "incomplete"
+
+
+class TestFxRangeCoversPreWindowFlows:
+    """Cover the production defect: a foreign fee that predates the window."""
+
+    async def test_fee_before_the_window_still_converts(self) -> None:
+        """A fill older than `from_time` is replayed, so its fee needs ITS rate.
+
+        Found on prod: the wallet's only foreign-currency fill happened before the
+        requested 24h window. The fill is still replayed — it seeds the pool the
+        window opens with — but rates were loaded for the WINDOW only, so its fee
+        stayed unconvertible and withheld all 1441 points. The rate range must
+        follow the flows, not the window.
+        """
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, -600, "buy", 1.0, 100.0, 0.04, "EUR")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0), _candle(_m(0), 100.0)],
+            fx_rows=[_fx_row("EUR", "USD", -600, 1.25)],
+        )
+        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        point = result.points[0]
+        assert point.valuation_status == "complete"
+        assert point.fee_pnl == pytest.approx(-0.05)
+        requested_start, requested_end = repo.fx_range_calls[0]
+        assert requested_start <= _m(-600)
+        assert requested_end >= _m(-600)
+
+    async def test_no_foreign_flow_skips_the_rate_read_entirely(self) -> None:
+        """An all-native scope never touches the FX candle read."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.5, "USD")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0), _candle(_m(0), 100.0)],
+        )
+        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        assert result.points[0].valuation_status == "complete"
+        assert repo.fx_pair_calls == []
+
+    async def test_zero_foreign_fee_needs_no_rate(self) -> None:
+        """A zero fee in another currency is invariant and asks for no rate."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "EUR")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0), _candle(_m(0), 100.0)],
+        )
+        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        assert result.points[0].valuation_status == "complete"
+        assert repo.fx_pair_calls == []
+
+    async def test_nonzero_fee_with_unknown_denomination_is_withheld(self) -> None:
+        """A nonzero fee with an EMPTY asset cannot be priced, so it withholds.
+
+        Production writes an empty `fee_asset` for fee-free fills; a NONZERO
+        amount carrying no denomination is a different thing entirely — there is
+        no currency to convert from, so no pair can be requested and the value
+        must stay unknown rather than be guessed at par.
+        """
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.04, "")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0), _candle(_m(0), 100.0)],
+        )
+        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        assert result.points[0].valuation_status == "incomplete"
+        assert result.points[0].fee_pnl is None
+        assert repo.fx_pair_calls == []
