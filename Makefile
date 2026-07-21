@@ -207,13 +207,22 @@ mcp-pat:
 	$(info Minting MCP access token (admin creds from seed: data/ -> proprietary/ -> bundled OSS; mcp profile -> dev fallback)...)
 	$(PYRUN) snapper dev-mint-pat
 
+# Dependencies whose constraint must NOT be auto-bumped by `poetry up --latest`.
+# ccxt pins aiohttp to an EXACT version (4.5.67 -> aiohttp==3.14.1), so raising
+# aiohttp's floor to the newest release makes the solver unsatisfiable:
+#   "because snapper depends on both aiohttp (^3.14.2) and ccxt (^4.5.67),
+#    version solving failed".
+# The floor stays at whatever ccxt currently allows; drop the exclusion once
+# ccxt relaxes its aiohttp pin.
+PY_REFRESH_EXCLUDES := --exclude aiohttp
+
 py-refresh:
 	$(info Upgrading local Poetry tool...)
 	$(PYRUN) pip install --upgrade poetry
 	$(info Clearing Poetry cache...)
 	-$(PYRUN) poetry cache clear --all -n .
 	$(info Bumping Python dependency constraints to latest available versions...)
-	-$(PYRUN) poetry up --latest
+	-$(PYRUN) poetry up --latest $(PY_REFRESH_EXCLUDES)
 	$(info Refreshing Python lock file within the current constraints...)
 	$(PYRUN) poetry update
 	$(info Python dependencies refreshed!)
