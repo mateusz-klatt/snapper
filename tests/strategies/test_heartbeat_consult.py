@@ -23,6 +23,7 @@ from datetime import timedelta
 from datetime import tzinfo
 from typing import Any
 from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from uuid import uuid7
 
 import pytest
@@ -39,6 +40,7 @@ from snapper.core.types import AllExchange
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import TradeSideEnum
 from snapper.data.repository_types import CandleRow
+from snapper.data.repository_types import MarketViewRow
 from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.heartbeat_consult import CONSULT_SEQUENCE_STREAM
@@ -235,6 +237,58 @@ def _fresh_macro_rows() -> list[CandleRow]:
         candles,
         latest_timestamp=datetime(2026, 7, 21, 15, 1, tzinfo=UTC),
     )
+
+
+def _market_view() -> MarketViewRow:
+    """Build a current research artifact with more events than the digest cap."""
+    view_as_of = _CONSULT_AS_OF - timedelta(minutes=40)
+    return {
+        "public_id": "market-view-1",
+        "research_round_public_id": "research-round-1",
+        "trigger": "periodic",
+        "status": "completed",
+        "as_of": view_as_of,
+        "submitted_at": _CONSULT_AS_OF - timedelta(minutes=17, seconds=20),
+        "valid_until": _CONSULT_AS_OF + timedelta(hours=4),
+        "regime": "risk_off",
+        "bias": "avoid_new_longs",
+        "confidence": 0.82,
+        "horizon_hours": 4,
+        "key_risks": ["Inflation surprise"],
+        "next_events": [
+            {
+                "when_utc": _CONSULT_AS_OF + timedelta(minutes=30),
+                "name": "CPI release",
+                "severity": "high",
+            },
+            {
+                "when_utc": _CONSULT_AS_OF + timedelta(hours=1),
+                "name": "Fed speaker",
+                "severity": "medium",
+            },
+            {
+                "when_utc": _CONSULT_AS_OF + timedelta(hours=2),
+                "name": "Treasury auction",
+                "severity": "medium",
+            },
+            {
+                "when_utc": _CONSULT_AS_OF + timedelta(hours=3),
+                "name": "Earnings release",
+                "severity": "low",
+            },
+        ],
+        "rationale": "Risk appetite is constrained ahead of scheduled events.",
+        "sources": [
+            {
+                "public_id": "market-view-source-1",
+                "market_view_public_id": "market-view-1",
+                "ordinal": 0,
+                "url": "https://example.com/research",
+                "title": "Market briefing",
+                "retrieved_at": view_as_of - timedelta(minutes=5),
+            }
+        ],
+    }
 
 
 class _BlockedConsult:
@@ -1286,6 +1340,8 @@ class TestHeartbeatConsultConsult:
         macro_rows: list[CandleRow] | None = None,
         candles_error: Exception | None = None,
         macro_error: Exception | None = None,
+        market_view: MarketViewRow | None = None,
+        research_error: Exception | None = None,
     ) -> AsyncMock:
         """Patch repository + primitive for a consult round, return the repo mock."""
         repo = AsyncMock()
@@ -1312,6 +1368,10 @@ class TestHeartbeatConsultConsult:
             return candle_rows or []
 
         repo.get_candles = AsyncMock(side_effect=read_candles)
+        repo.get_latest_market_view = AsyncMock(
+            return_value=market_view,
+            side_effect=research_error,
+        )
         monkeypatch.setattr(
             "snapper.strategies.heartbeat_consult.get_repository", lambda db_url: repo
         )
@@ -1339,11 +1399,13 @@ class TestHeartbeatConsultConsult:
         outcome = _approved_outcome()
         primitive = AsyncMock(return_value=outcome)
         instrument_public_id = str(uuid7())
-        self._wire(
+        market_view = _market_view()
+        repo = self._wire(
             monkeypatch,
             instrument_public_id=instrument_public_id,
             primitive=primitive,
             macro_rows=_fresh_macro_rows(),
+            market_view=market_view,
         )
         candle = _candle()
         result = await strategy._consult("BTC-USD", candle)
@@ -1391,7 +1453,32 @@ class TestHeartbeatConsultConsult:
                 "change_since_session_open_pct": 6.0606,
                 "realized_vol_24h_pct": expected_macro_vol,
             },
+            "research": {
+                "market_view_public_id": "market-view-1",
+                "regime": "risk_off",
+                "bias": "avoid_new_longs",
+                "confidence": 0.82,
+                "age_minutes": 17.33,
+                "next_events": [
+                    {
+                        "when_utc": (_CONSULT_AS_OF + timedelta(minutes=30)).isoformat(),
+                        "name": "CPI release",
+                        "severity": "high",
+                    },
+                    {
+                        "when_utc": (_CONSULT_AS_OF + timedelta(hours=1)).isoformat(),
+                        "name": "Fed speaker",
+                        "severity": "medium",
+                    },
+                    {
+                        "when_utc": (_CONSULT_AS_OF + timedelta(hours=2)).isoformat(),
+                        "name": "Treasury auction",
+                        "severity": "medium",
+                    },
+                ],
+            },
         }
+        repo.get_latest_market_view.assert_awaited_once_with(replay_at=_CONSULT_AS_OF)
         assert request.instrument_metadata == {"last_price": candle.close}
         assert primitive.await_args.kwargs["deadline_seconds"] == DEFAULT_CONSULT_DEADLINE_SECONDS
         assert (
@@ -1477,6 +1564,61 @@ class TestHeartbeatConsultConsult:
         envelope = primitive.await_args.args[0].signal_envelope
         assert "market" in envelope
         assert "macro" not in envelope
+
+    @pytest.mark.asyncio
+    async def test_no_current_research_view_omits_digest(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify the normal absence of research omits only that section.
+
+        Given: No causally eligible current market view,
+        When: _consult builds the delegate request,
+        Then: The consult succeeds without a research envelope key.
+        """
+        strategy = HeartbeatConsult(_config())
+        outcome = _approved_outcome()
+        primitive = AsyncMock(return_value=outcome)
+        repo = self._wire(
+            monkeypatch,
+            instrument_public_id=str(uuid7()),
+            primitive=primitive,
+            macro_rows=_fresh_macro_rows(),
+        )
+        assert await strategy._consult("BTC-USD", _candle()) is outcome
+        assert primitive.await_args is not None
+        envelope = primitive.await_args.args[0].signal_envelope
+        assert "research" not in envelope
+        repo.get_latest_market_view.assert_awaited_once_with(replay_at=_CONSULT_AS_OF)
+
+    @pytest.mark.asyncio
+    async def test_research_read_failure_is_fail_soft_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify a research read error cannot block the consult.
+
+        Given: The latest-market-view read raises an unexpected error,
+        When: _consult builds the delegate request,
+        Then: The consult succeeds without research and logs a warning.
+        """
+        strategy = HeartbeatConsult(_config())
+        outcome = _approved_outcome()
+        primitive = AsyncMock(return_value=outcome)
+        warning = MagicMock()
+        monkeypatch.setattr("snapper.strategies.heartbeat_consult.logger.warning", warning)
+        self._wire(
+            monkeypatch,
+            instrument_public_id=str(uuid7()),
+            primitive=primitive,
+            macro_rows=_fresh_macro_rows(),
+            research_error=RuntimeError("research store down"),
+        )
+        assert await strategy._consult("BTC-USD", _candle()) is outcome
+        assert primitive.await_args is not None
+        envelope = primitive.await_args.args[0].signal_envelope
+        assert "research" not in envelope
+        warning.assert_called_once_with(
+            f"Strategy {strategy.name}: research digest unavailable — research store down"
+        )
 
     @pytest.mark.asyncio
     async def test_consult_sequence_uses_named_stream(

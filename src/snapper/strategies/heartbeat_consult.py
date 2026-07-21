@@ -458,6 +458,38 @@ async def _build_macro_snapshot(
     return snapshot
 
 
+async def _build_research_digest(repo: Repository, as_of: datetime) -> JsonObject:
+    """Build the minimal current market-view digest for one consult round.
+
+    Args:
+        repo: Repository handle for the causally eligible market-view read.
+        as_of: Temporal read and freshness anchor shared by the consult.
+
+    Returns:
+        The ``research`` envelope section, or an empty object when no
+        current market view exists.
+    """
+    view = await repo.get_latest_market_view(replay_at=as_of)
+    if view is None:
+        return {}
+    raw_age_minutes = (as_of - view["submitted_at"]).total_seconds() / 60.0
+    return {
+        "market_view_public_id": view["public_id"],
+        "regime": view["regime"],
+        "bias": view["bias"],
+        "confidence": view["confidence"],
+        "age_minutes": round(raw_age_minutes, 2),
+        "next_events": [
+            {
+                "when_utc": event["when_utc"].isoformat(),
+                "name": event["name"],
+                "severity": event["severity"],
+            }
+            for event in view["next_events"][:3]
+        ],
+    }
+
+
 @register_strategy("HeartbeatConsult")
 @create_strategy_process(
     process_name="strategy_heartbeat_consult_btc_1h",
@@ -774,6 +806,12 @@ class HeartbeatConsult(BaseStrategy):
                 )
             except Exception as exc:
                 logger.warning(f"Strategy {self.name}: macro snapshot unavailable — {exc}")
+            try:
+                research_digest = await _build_research_digest(repo, now)
+                if research_digest:
+                    signal_envelope["research"] = research_digest
+            except Exception as exc:
+                logger.warning(f"Strategy {self.name}: research digest unavailable — {exc}")
             request = AiReviewCreateRequest(
                 user_public_id=self.consult_user_public_id,
                 operator_public_id=self.config.operator_public_id,
