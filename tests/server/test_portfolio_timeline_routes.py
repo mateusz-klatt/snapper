@@ -13,6 +13,7 @@ from datetime import datetime
 from datetime import timedelta
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -594,3 +595,52 @@ class TestScopeAndFailures:
         response = client.get(_url())
         assert response.status_code == 500
         assert response.json()["detail"] == "Failed to build P&L series"
+
+
+class TestValuationCurrency:
+    """Cover the valuation-currency parameter and its validation."""
+
+    def test_defaults_to_usd(self) -> None:
+        """Omitting the parameter values the series in USD."""
+        repo = _seeded_repo()
+        response = _create_client(repo).get(_url())
+        assert response.status_code == 200
+        assert response.json()["payload"]["valuation_ccy"] == "USD"
+
+    def test_requested_currency_reaches_the_reconstruction(self) -> None:
+        """A requested currency is normalized and threaded to the series build.
+
+        A scope trading natively in another currency (a PLN walutomat wallet)
+        only resolves fully when asked for in that currency, so the parameter has
+        to reach the reconstruction rather than merely being echoed.
+        """
+        repo = _seeded_repo()
+        response = _create_client(repo).get(_url(valuation_ccy="pln"))
+        assert response.status_code == 200
+        assert response.json()["payload"]["valuation_ccy"] == "PLN"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param("US", id="too_short"),
+            pytest.param("USDT", id="too_long"),
+            pytest.param("US1", id="not_alphabetic"),
+            pytest.param("", id="empty"),
+        ],
+    )
+    def test_malformed_currency_is_rejected(self, value: str) -> None:
+        """A code that is not three letters is a 400, not a silent fallback."""
+        response = _create_client(_seeded_repo()).get(_url(valuation_ccy=value))
+        assert response.status_code == 400
+        assert "valuation_ccy" in response.json()["detail"]
+
+    def test_wellformed_but_unpriceable_currency_still_answers(self) -> None:
+        """An unpriceable-but-well-formed code returns honest points, not a 400.
+
+        The resolvable set is whatever our own candle plane can price and it grows
+        as venues are added, so shape is validated rather than an allowlist; the
+        series then withholds what it cannot value instead of refusing outright.
+        """
+        response = _create_client(_seeded_repo()).get(_url(valuation_ccy="JPY"))
+        assert response.status_code == 200
+        assert response.json()["payload"]["valuation_ccy"] == "JPY"

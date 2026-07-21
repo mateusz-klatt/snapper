@@ -68,6 +68,15 @@ _SUPPORTED_GRANULARITIES: Final[frozenset[str]] = frozenset({"1m", "5m", "1h", "
 _SUPPORTED_MODES: Final[frozenset[str]] = frozenset({"live", "paper"})
 """Trading modes accepted by the v1 reconstruction endpoint."""
 
+_VALUATION_CCY_LENGTH: Final[int] = 3
+"""Required length of an ISO-4217 alphabetic currency code.
+
+Validated by SHAPE rather than against a fixed allowlist: the resolvable set is
+whatever our own candle plane can price, and that grows as venues are added. A
+well-formed but unpriceable currency is answered with honest withheld points
+rather than a 400, so the response still shows everything that IS known."""
+"""Trading modes accepted by the v1 reconstruction endpoint."""
+
 _MIN_SAFE_WINDOW_FROM: Final[datetime] = datetime.min.replace(tzinfo=UTC) + timedelta(minutes=1)
 """Earliest start whose leading candle minute is representable."""
 
@@ -95,6 +104,7 @@ class _ValidatedTimelineRequest:
     window_from: datetime
     window_to: datetime
     as_of: datetime
+    valuation_ccy: str
 
 
 def _parse_utc_query_datetime(value: str, parameter_name: str) -> datetime:
@@ -170,6 +180,7 @@ async def _validate_timeline_request(
     from_time: str | None,
     to_time: str | None,
     as_of: str | None,
+    valuation_ccy: str,
 ) -> _ValidatedTimelineRequest:
     """Validate and authorize the request shared by both P&L endpoints.
 
@@ -183,6 +194,7 @@ async def _validate_timeline_request(
         from_time: Raw inclusive ISO window start.
         to_time: Raw inclusive ISO window end.
         as_of: Optional raw ISO knowledge horizon.
+        valuation_ccy: Currency the series is expressed in.
 
     Returns:
         Normalized UTC values and one effective read horizon shared by all reads.
@@ -200,6 +212,12 @@ async def _validate_timeline_request(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="from and to are required",
+        )
+    normalized_ccy = valuation_ccy.strip().upper()
+    if len(normalized_ccy) != _VALUATION_CCY_LENGTH or not normalized_ccy.isalpha():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported valuation_ccy: {valuation_ccy!r}; expected a 3-letter code",
         )
     if mode not in _SUPPORTED_MODES:
         raise HTTPException(
@@ -245,6 +263,7 @@ async def _validate_timeline_request(
         window_from=window_from,
         window_to=window_to,
         as_of=effective_as_of,
+        valuation_ccy=normalized_ccy,
     )
 
 
@@ -340,6 +359,9 @@ async def get_pnl_series(
         str | None,
         Query(description="Knowledge horizon for the bitemporal read (ISO, UTC)"),
     ] = None,
+    valuation_ccy: Annotated[
+        str, Query(description="Currency the series is valued in (3-letter code)")
+    ] = "USD",
 ) -> PnlSeriesResponse:
     """Reconstruct one wallet/mode scope's Net-P&L-since-activation series.
 
@@ -358,6 +380,9 @@ async def get_pnl_series(
         from_time: Required inclusive window start (ISO datetime).
         to_time: Required inclusive window end (ISO datetime).
         as_of: Optional bitemporal knowledge horizon (ISO datetime).
+        valuation_ccy: Currency to value the series in, defaulting to USD. A scope
+            trading natively in another currency resolves fully when asked for in
+            that currency, since its marks and flows are then already native.
 
     Returns:
         A :class:`PnlSeriesResponse` wrapping the decomposed series.
@@ -378,6 +403,7 @@ async def get_pnl_series(
         from_time,
         to_time,
         as_of,
+        valuation_ccy,
     )
     try:
         result = await build_wallet_pnl_series(
@@ -388,6 +414,7 @@ async def get_pnl_series(
             validated.window_to,
             validated.granularity,
             validated.as_of,
+            validated.valuation_ccy,
         )
         tracker: SequenceTracker = request.app.state.rest_tracker
         sid = tracker.session_id
@@ -455,6 +482,9 @@ async def get_pnl_timeline(
         str | None,
         Query(description="Knowledge horizon for the bitemporal read (ISO, UTC)"),
     ] = None,
+    valuation_ccy: Annotated[
+        str, Query(description="Currency the series is valued in (3-letter code)")
+    ] = "USD",
 ) -> PnlTimelineResponse:
     """Reconstruct a wallet P&L series with bounded decision markers.
 
@@ -475,6 +505,7 @@ async def get_pnl_timeline(
         from_time: Required inclusive ISO window start.
         to_time: Required inclusive ISO window end.
         as_of: Optional bitemporal knowledge horizon (ISO datetime).
+        valuation_ccy: Currency to value the series in, defaulting to USD.
 
     Returns:
         A flat :class:`PnlTimelineResponse` with series fields and markers.
@@ -494,6 +525,7 @@ async def get_pnl_timeline(
         from_time,
         to_time,
         as_of,
+        valuation_ccy,
     )
     try:
         result = await build_wallet_pnl_timeline(
@@ -504,6 +536,7 @@ async def get_pnl_timeline(
             validated.window_to,
             validated.granularity,
             validated.as_of,
+            validated.valuation_ccy,
         )
         tracker: SequenceTracker = request.app.state.rest_tracker
         sid = tracker.session_id
