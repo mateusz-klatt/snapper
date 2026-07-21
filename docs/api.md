@@ -3495,7 +3495,7 @@ the scoped prefixes documented in the WebSocket auth section above.
 #### Alerts and Reviews
 
 - `alerts.{user_public_id}.{alert_type}` -- Notification stream
-- `ai_research.` -- Research-round wake subscription root, gated by `submit:market_view`
+- `ai_research.{round_public_id}.request` -- Committed research-round wake, available through the `ai_research.` subscription root gated by `submit:market_view`
 - `plans.decisions.{plan_public_id}` -- Execution-plan decision events
 - `ai_reviews.{user_public_id}.{strategy_public_id}.{suffix}` -- AI delegate review frames
 - `accruals.{exchange}.{instrument}.{accrual_type}` -- Funding, rollover, and borrow accruals (internal ZMQ bus topic; not currently subscribable over the WebSocket -- no role's category set includes `accruals`)

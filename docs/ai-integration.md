@@ -180,7 +180,11 @@ that ingest hostile third-party material. Its role grant is exactly:
 It does not receive signal, order, position, or system-status permissions.
 Consequently it cannot subscribe to `ai_reviews.` or call the order-,
 position-, signal-, and review-shaped MCP tools. It can subscribe to the
-`ai_research.` wake root when its token retains `submit:market_view`.
+`ai_research.` wake root when its token retains `submit:market_view`. Periodic
+wakes arrive on `ai_research.{round_public_id}.request` with an
+`ai_research.request` frame carrying `round_public_id` and `trigger`; the round
+is durable even when the auxiliary wake is lost. The default
+`snapper-mcp watch` topic set includes this research root.
 
 Create one via `POST /api/ai-researchers` with a
 `ResearcherCreateRequest` envelope:

@@ -2,7 +2,7 @@
 
 Covers the bridge wire-contract emitter end-to-end:
 
-    - allow-list selection produces 19 deterministic interfaces
+    - allow-list selection produces 20 deterministic interfaces
     - class names preserved verbatim from the backend Pydantic source
     - alphabetical class ordering (after the ``FrameEnvelope`` base)
     - per-class field order matches Pydantic dataclass declaration order
@@ -63,11 +63,12 @@ def _make_args(**overrides: object) -> GenerateTypesArgs:
 class TestBridgeAllowList:
     """Allow-list shape and ordering invariants."""
 
-    def test_allowlist_contains_expected_19_classes(self) -> None:
-        """The allow-list MUST be exactly the 19 classes the bridge consumes."""
+    def test_allowlist_contains_expected_20_classes(self) -> None:
+        """The allow-list MUST be exactly the 20 classes the bridge consumes."""
         names = [name for name, _ in _bridge_allowlist()]
         assert names == sorted(names), "allow-list must be alphabetical"
         expected = {
+            "AiResearchRequestFrameData",
             "AiReviewCapsViolationFrameData",
             "AiReviewDecisionAckFrameData",
             "AiReviewRequestFrameData",
@@ -306,8 +307,8 @@ class TestBridgeRenderClass:
 class TestGenerateBridgeWireContract:
     """End-to-end emitter integration."""
 
-    def test_emits_19_interfaces_in_alphabetical_order(self, tmp_path: Path) -> None:
-        """The full file emits 19 interfaces sorted alphabetically after FrameEnvelope."""
+    def test_emits_20_interfaces_in_alphabetical_order(self, tmp_path: Path) -> None:
+        """The full file emits 20 interfaces sorted alphabetically after FrameEnvelope."""
         output_path = tmp_path / "wire-contract.ts"
         content = generate_bridge_wire_contract(output_path)
         interface_lines = [
@@ -319,7 +320,7 @@ class TestGenerateBridgeWireContract:
             line.removeprefix("export interface ").split(" ", 1)[0] for line in interface_lines[1:]
         ]
         assert class_names == sorted(class_names)
-        assert len(class_names) == 19
+        assert len(class_names) == 20
 
     def test_writes_deterministic_output(self, tmp_path: Path) -> None:
         """Two consecutive regenerations produce byte-identical output."""

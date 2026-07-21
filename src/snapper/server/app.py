@@ -112,6 +112,7 @@ from snapper.api.schemas.process import ProcessStatus
 from snapper.api.schemas.process import StrategyStatusPayload
 from snapper.api.schemas.process import SystemStatusData
 from snapper.api.schemas.process import SystemStatusResponse
+from snapper.application.ai_research.trigger import AiResearchTriggerService
 from snapper.application.ai_review.service import AiReviewService
 from snapper.application.ai_review.service import get_ai_review_service
 from snapper.application.ai_review.watchdog import AiDelegateWatchdog
@@ -576,6 +577,47 @@ async def _stop_market_data_watchdog(app: FastAPI) -> None:
     await watchdog.stop()
 
 
+async def _start_ai_research_trigger(
+    app: FastAPI,
+    *,
+    db_url: str,
+    msg_publisher: MessagePublisher | None = None,
+) -> None:
+    """Build and start the :class:`AiResearchTriggerService`.
+
+    The state attribute is attached only after startup succeeds. A
+    failure is logged without blocking the rest of the API lifespan.
+
+    Args:
+        app: FastAPI application whose state holds the trigger.
+        db_url: SQLAlchemy URL for the research repository.
+        msg_publisher: Shared publisher for research wake frames.
+    """
+    try:
+        trigger = AiResearchTriggerService(
+            repo=get_repository(db_url),
+            msg_publisher=msg_publisher,
+        )
+        await trigger.start()
+    except Exception:
+        logger.exception("AiResearchTriggerService startup failed — research wakes are offline")
+        return
+    app.state.ai_research_trigger = trigger
+    logger.info("AiResearchTriggerService started")
+
+
+async def _stop_ai_research_trigger(app: FastAPI) -> None:
+    """Stop the :class:`AiResearchTriggerService` when attached.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    trigger: AiResearchTriggerService | None = getattr(app.state, "ai_research_trigger", None)
+    if trigger is None:
+        return
+    await trigger.stop()
+
+
 async def _start_ai_delegate_watchdog(
     app: FastAPI,
     *,
@@ -973,6 +1015,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.retention_scheduler = None
     app.state.db_stats_snapshotter = None
     app.state.market_data_watchdog = None
+    app.state.ai_research_trigger = None
     app.state.ai_delegate_watchdog = None
     app.state.market_persist_policy = None
     app.state.market_cache = None
@@ -1083,6 +1126,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             app, db_url=settings.db_url, msg_publisher=user_publisher
         )
         await _start_market_data_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
+        await _start_ai_research_trigger(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_ai_delegate_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_retention_scheduler(app, db_url=settings.db_url)
         await _start_db_stats_snapshotter(app, db_url=settings.db_url)
@@ -1138,6 +1182,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _stop_db_stats_snapshotter(app)
         await _stop_retention_scheduler(app)
         await _stop_ai_delegate_watchdog(app)
+        await _stop_ai_research_trigger(app)
         await _stop_market_data_watchdog(app)
         await _stop_system_metrics_snapshotter(app)
         await _shutdown_zmq_bridge(app)

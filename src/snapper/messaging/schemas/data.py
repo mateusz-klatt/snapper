@@ -947,6 +947,24 @@ class AiReviewRequestFrameData(StrictDataSchema[Literal["ai_review.request"]]):
     dispatch_version: int
 
 
+class AiResearchRequestFrameData(StrictDataSchema[Literal["ai_research.request"]]):
+    """External WebSocket wake for one pending AI-research round.
+
+    Published after the round commits on
+    ``ai_research.{round_public_id}.request``. The researcher uses the
+    identifier with ``submit_market_view``; ``trigger`` explains why the
+    latest-wins round was opened.
+
+    Attributes:
+        round_public_id: UUID7 of the pending research round.
+        trigger: Server-owned creation reason.
+    """
+
+    type: Literal["ai_research.request"] = "ai_research.request"
+    round_public_id: str
+    trigger: str
+
+
 class AiReviewDecisionAckFrameData(StrictDataSchema[Literal["ai_review.decision_ack"]]):
     """External WS frame acknowledging a decision.
 

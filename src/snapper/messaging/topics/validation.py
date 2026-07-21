@@ -120,6 +120,7 @@ def _get_topic_prefix_validators() -> list[tuple[str, Callable[[str], tuple[bool
         ("portfolio.accounts.", _validate_portfolio_accounts_topic),
         ("plans.decisions.", _validate_plans_decisions_topic),
         ("ai_reviews.", _validate_ai_reviews_topic),
+        ("ai_research.", _validate_ai_research_topic),
         ("bus.", _validate_bus_topic),
         ("processes.events.summary.", _validate_processes_summary_topic),
         ("processes.events.configured.", _validate_processes_configured_topic),
@@ -936,6 +937,39 @@ def _validate_ai_reviews_topic(topic: str) -> tuple[bool, str]:
             f"ai_reviews.* segment 4 must be one of "
             f"{', '.join(sorted(_AI_REVIEW_FRAME_SUFFIXES))}, got '{suffix}'"
         )
+    return True, ""
+
+
+_AI_RESEARCH_TOPIC_FORMAT_MSG = (
+    "ai_research.* requires 3 segments (ai_research.<round_public_id>.request)"
+)
+
+
+def _validate_ai_research_topic(topic: str) -> tuple[bool, str]:
+    """Validate an external AI-research wake topic.
+
+    The globally scoped research plane has no consulting user or strategy
+    segment. Its concrete publish shape is
+    ``ai_research.{round_public_id}.request``; the UUID7 identifies the
+    pending round the researcher must complete through MCP.
+
+    Args:
+        topic: Topic string starting with ``ai_research.``.
+
+    Returns:
+        Tuple of validity and a diagnostic message.
+    """
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 3:
+        return False, f"{_AI_RESEARCH_TOPIC_FORMAT_MSG}, got '{topic}'"
+    if segments[0] != "ai_research":
+        return False, f"Expected 'ai_research' category, got '{segments[0]}'"
+    round_public_id = segments[1]
+    suffix = segments[2]
+    if not is_uuid7(round_public_id):
+        return False, f"ai_research.* segment 2 must be UUID7, got '{round_public_id}'"
+    if suffix != "request":
+        return False, f"ai_research.* segment 3 must be 'request', got '{suffix}'"
     return True, ""
 
 

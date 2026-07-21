@@ -25,6 +25,7 @@ from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import _is_valid_timeframe
 from snapper.messaging.topics.validation import _validate_accruals_topic
 from snapper.messaging.topics.validation import _validate_admin_topic
+from snapper.messaging.topics.validation import _validate_ai_research_topic
 from snapper.messaging.topics.validation import _validate_ai_reviews_topic
 from snapper.messaging.topics.validation import _validate_alerts_topic
 from snapper.messaging.topics.validation import _validate_backtest_prefix
@@ -4371,7 +4372,57 @@ class TestAiReviewsTopicValidation:
 
 
 class TestAiResearchTopicValidation:
-    """Tests for the research wake subscription root."""
+    """Tests for concrete research wakes and their subscription root."""
+
+    _ROUND = "019dbb34-f439-77bd-afa8-ee5321d60309"
+
+    def test_valid_request_topic(self) -> None:
+        """A UUID7 round plus the request suffix is accepted."""
+        valid, error = _validate_ai_research_topic(f"ai_research.{self._ROUND}.request")
+
+        assert valid
+        assert error == ""
+
+    def test_wrong_segment_count_rejected(self) -> None:
+        """Research publish topics contain exactly three segments."""
+        for topic in (
+            "ai_research.foo",
+            f"ai_research.{self._ROUND}.request.extra",
+            "ai_research.",
+        ):
+            valid, error = _validate_ai_research_topic(topic)
+
+            assert not valid
+            assert "3 segments" in error
+
+    def test_wrong_category_rejected(self) -> None:
+        """The first segment must be the singular research category."""
+        valid, error = _validate_ai_research_topic(f"ai_researches.{self._ROUND}.request")
+
+        assert not valid
+        assert "ai_research" in error
+
+    def test_non_uuid7_round_rejected(self) -> None:
+        """The round segment follows the project UUID7 convention."""
+        valid, error = _validate_ai_research_topic("ai_research.not-a-uuid.request")
+
+        assert not valid
+        assert "segment 2" in error
+        assert "UUID7" in error
+
+    def test_unknown_suffix_rejected(self) -> None:
+        """Request is the sole research wake suffix."""
+        valid, error = _validate_ai_research_topic(f"ai_research.{self._ROUND}.completed")
+
+        assert not valid
+        assert "segment 3" in error
+        assert "request" in error
+
+    def test_validate_topic_dispatches_research_wakes(self) -> None:
+        """The publish chokepoint routes research topics to their validator."""
+        valid, error = validate_topic(f"ai_research.{self._ROUND}.request")
+
+        assert valid, error
 
     def test_subscription_prefix_accepted(self) -> None:
         """Verify the subscriber-side validator accepts the research registry root.

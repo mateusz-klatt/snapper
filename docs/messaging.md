@@ -322,7 +322,11 @@ wakes. It belongs to its own `ai_research` authorization category and requires
 `submit:market_view`. An `AI_RESEARCHER` can subscribe to this root but cannot
 subscribe to `ai_reviews.`, whose combined `read:signals` and `create:orders`
 gate remains reserved for decision-capable principals. Concrete research frame
-shape and persistence are defined with the research-round domain model.
+shape is `ai_research.{round_public_id}.request` (3 segments), where the round
+identifier is UUID7 and `request` is the only valid suffix. The
+`ai_research.request` payload repeats `round_public_id` and carries the
+server-owned `trigger`. The round is already committed before this best-effort
+wake is published.
 
 ### Backtest
 

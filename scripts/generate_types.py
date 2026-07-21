@@ -45,6 +45,7 @@ from snapper.interface.websocket.schemas import WSReauthRequiredResponse
 from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.interface.websocket.schemas import WSSubscriptionSuccessResponse
 from snapper.messaging.schemas import data as data_schemas
+from snapper.messaging.schemas.data import AiResearchRequestFrameData
 from snapper.messaging.schemas.data import AiReviewCapsViolationFrameData
 from snapper.messaging.schemas.data import AiReviewDecisionAckFrameData
 from snapper.messaging.schemas.data import AiReviewRequestFrameData
@@ -1958,6 +1959,7 @@ def _bridge_allowlist() -> list[tuple[str, type[BaseModel]]]:
         Pairs of ``(class_name, model_class)`` ready for the emitter.
     """
     classes: list[type[BaseModel]] = [
+        AiResearchRequestFrameData,
         AiReviewCapsViolationFrameData,
         AiReviewDecisionAckFrameData,
         AiReviewRequestFrameData,
