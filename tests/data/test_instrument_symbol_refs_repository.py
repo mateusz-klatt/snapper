@@ -177,7 +177,9 @@ class TestGetInstrumentSymbolRefs:
         by_id = {r["instrument_public_id"]: r for r in rows}
         assert by_id[_INST_USD]["native_symbol"] == "BTC-USD"
         assert by_id[_INST_USD]["exchange"] == "kraken"
+        assert by_id[_INST_USD]["base_currency"] == "BTC"
         assert by_id[_INST_USD]["quote_currency"] == "USD"
+        assert by_id[_INST_EUR]["base_currency"] == "BTC"
         assert by_id[_INST_EUR]["quote_currency"] == "EUR"
 
     async def test_paper_instrument_projects_source_exchange(
@@ -191,6 +193,7 @@ class TestGetInstrumentSymbolRefs:
                 "native_symbol": "BTC-USD",
                 "exchange": "kraken",
                 "instrument_exchange": "paper",
+                "base_currency": "BTC",
                 "quote_currency": "USD",
                 "valid_from": _NOW,
                 "valid_to": KNOWN_TO_MAX,
@@ -202,6 +205,7 @@ class TestGetInstrumentSymbolRefs:
         rows = await repository.get_instrument_symbol_refs([_INST_EQ], _NOW)
         assert len(rows) == 1
         assert rows[0]["native_symbol"] == "AAPL"
+        assert rows[0]["base_currency"] == "AAPL"
         assert rows[0]["quote_currency"] is None
 
     async def test_unknown_instrument_is_omitted(self, repository: SQLAlchemyRepository) -> None:
@@ -251,6 +255,7 @@ class TestGetInstrumentSymbolRefs:
                 "native_symbol": "EUR-X",
                 "exchange": "walutomat",
                 "instrument_exchange": "walutomat",
+                "base_currency": "EUR",
                 "quote_currency": "PLN",
                 "valid_from": created_at,
                 "valid_to": revised_at,
@@ -260,6 +265,7 @@ class TestGetInstrumentSymbolRefs:
                 "native_symbol": "EUR-X",
                 "exchange": "walutomat",
                 "instrument_exchange": "walutomat",
+                "base_currency": "EUR",
                 "quote_currency": "USD",
                 "valid_from": revised_at,
                 "valid_to": KNOWN_TO_MAX,

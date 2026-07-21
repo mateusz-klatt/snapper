@@ -147,6 +147,7 @@ def _seeded_repo() -> AsyncMock:
                 "native_symbol": "BTC-USD",
                 "exchange": "kraken",
                 "instrument_exchange": "kraken",
+                "base_currency": "BTC",
                 "quote_currency": "USD",
                 "valid_from": t0 - timedelta(days=1),
                 "valid_to": datetime.max.replace(tzinfo=UTC),
@@ -234,7 +235,8 @@ class TestHappyPath:
         assert payload["granularity"] == "1m"
         assert payload["valuation_ccy"] == "USD"
         assert payload["mark_source"] == "finalized_1m_candle_close"
-        assert payload["calc_version"] == "5A.4"
+        assert payload["rate_sources"] == []
+        assert payload["calc_version"] == "5A.7"
         points = payload["points"]
         assert len(points) == 3
         assert points[0]["valuation_status"] == "complete"
@@ -254,6 +256,62 @@ class TestHappyPath:
         ]
         repo.get_pnl_timeline_candles.assert_awaited_once()
         repo.get_candles.assert_not_awaited()
+
+    def test_exposes_the_selected_fx_rate_source(self) -> None:
+        """A converted series identifies its request-pinned venue plane."""
+        repo = _seeded_repo()
+        t0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+        repo.get_instrument_symbol_refs = AsyncMock(
+            return_value=[
+                {
+                    "instrument_public_id": "i1",
+                    "native_symbol": "BTC-EUR",
+                    "exchange": "kraken",
+                    "instrument_exchange": "kraken",
+                    "base_currency": "BTC",
+                    "quote_currency": "EUR",
+                    "valid_from": t0 - timedelta(days=1),
+                    "valid_to": datetime.max.replace(tzinfo=UTC),
+                }
+            ]
+        )
+        repo.get_pnl_fx_rate_exchanges = AsyncMock(return_value=[("EUR", "USD", "kraken")])
+        repo.get_pnl_fx_rate_candles = AsyncMock(
+            return_value=[
+                {
+                    "base": "EUR",
+                    "quote": "USD",
+                    "exchange": "kraken",
+                    "open_at": t0 - timedelta(minutes=1),
+                    "close": 1.2,
+                },
+                {
+                    "base": "EUR",
+                    "quote": "USD",
+                    "exchange": "kraken",
+                    "open_at": t0,
+                    "close": 1.2,
+                },
+                {
+                    "base": "EUR",
+                    "quote": "USD",
+                    "exchange": "kraken",
+                    "open_at": t0 + timedelta(minutes=1),
+                    "close": 1.2,
+                },
+            ]
+        )
+        response = _create_client(repo).get(_url(as_of=_AS_OF))
+        assert response.status_code == 200
+        assert response.json()["payload"]["rate_sources"] == [
+            {
+                "source_currency": "EUR",
+                "valuation_currency": "USD",
+                "base_currency": "EUR",
+                "quote_currency": "USD",
+                "exchange": "kraken",
+            }
+        ]
 
     def test_naive_datetimes_are_accepted_and_coerced(self) -> None:
         """A window without a timezone suffix is treated as UTC and matches marks."""
@@ -373,6 +431,7 @@ class TestMarkerTimeline:
         assert payload["granularity"] == "1m"
         assert payload["marker_limit"] == PNL_TIMELINE_MARKER_LIMIT
         assert payload["markers_truncated"] is False
+        assert payload["rate_sources"] == []
         assert len(payload["points"]) == 3
         markers = {marker["kind"]: marker for marker in payload["markers"]}
         assert set(markers) == {"fill", "signal", "ai_decision"}

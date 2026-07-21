@@ -18,11 +18,16 @@ from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import required_pairs
 
 _M = datetime(2026, 7, 19, 19, 22, tzinfo=UTC)
+_PLANES = {
+    ("EUR", "USD"): ("EUR", "USD", "kraken"),
+    ("JPY", "USD"): ("JPY", "USD", "kraken"),
+    ("PLN", "USD"): ("USD", "PLN", "kraken"),
+}
 
 
 def _rates(**pairs: float) -> FxRateMap:
     """Build a rate map at :data:`_M` from ``BASEQUOTE=close`` keyword pairs."""
-    return {(name[:3], name[3:], _M): close for name, close in pairs.items()}
+    return {(name[:3], name[3:], "kraken", _M): close for name, close in pairs.items()}
 
 
 class TestIdentityAndZero:
@@ -47,21 +52,28 @@ class TestDirectAndInverse:
 
     def test_direct_pair_multiplies(self) -> None:
         """A EUR fee converts to USD through the quoted EUR-USD close."""
-        assert convert_amount(0.04, "EUR", "USD", _M, _rates(EURUSD=1.25)) == pytest.approx(0.05)
+        assert convert_amount(
+            0.04, "EUR", "USD", _M, _rates(EURUSD=1.25), _PLANES
+        ) == pytest.approx(0.05)
 
     def test_inverse_pair_divides(self) -> None:
         """With only USD-PLN listed, a PLN amount converts by the reciprocal."""
-        result = convert_amount(8.0, "PLN", "USD", _M, _rates(USDPLN=4.0))
+        result = convert_amount(8.0, "PLN", "USD", _M, _rates(USDPLN=4.0), _PLANES)
         assert result == pytest.approx(2.0)
 
     def test_direct_wins_over_inverse(self) -> None:
-        """A listed direct pair is preferred over inverting the opposite one."""
-        rates = {("EUR", "USD", _M): 1.25, ("USD", "EUR", _M): 99.0}
-        assert convert_amount(1.0, "EUR", "USD", _M, rates) == pytest.approx(1.25)
+        """A direct plane pinned for the request ignores the reverse series."""
+        rates = {
+            ("EUR", "USD", "kraken", _M): 1.25,
+            ("USD", "EUR", "kraken", _M): 99.0,
+        }
+        assert convert_amount(1.0, "EUR", "USD", _M, rates, _PLANES) == pytest.approx(1.25)
 
     def test_negative_amount_keeps_its_sign(self) -> None:
         """A rebate (negative fee) stays negative through conversion."""
-        assert convert_amount(-2.0, "EUR", "USD", _M, _rates(EURUSD=1.5)) == pytest.approx(-3.0)
+        assert convert_amount(-2.0, "EUR", "USD", _M, _rates(EURUSD=1.5), _PLANES) == pytest.approx(
+            -3.0
+        )
 
 
 class TestRefusals:
@@ -69,42 +81,54 @@ class TestRefusals:
 
     def test_missing_pair_returns_none(self) -> None:
         """An unlistable pair yields no rate instead of a guess."""
-        assert convert_amount(1.0, "JPY", "USD", _M, _rates(EURUSD=1.25)) is None
+        assert convert_amount(1.0, "JPY", "USD", _M, _rates(EURUSD=1.25), _PLANES) is None
 
     def test_missing_minute_returns_none(self) -> None:
         """A rate from another minute is never carried forward to this one."""
-        rates = {("EUR", "USD", _M - timedelta(minutes=1)): 1.25}
-        assert convert_amount(1.0, "EUR", "USD", _M, rates) is None
+        rates = {("EUR", "USD", "kraken", _M - timedelta(minutes=1)): 1.25}
+        assert convert_amount(1.0, "EUR", "USD", _M, rates, _PLANES) is None
+
+    def test_mismatched_pinned_plane_returns_none(self) -> None:
+        """A malformed pin cannot certify currencies outside its unordered key."""
+        rates = {("GBP", "USD", "kraken", _M): 1.4}
+        planes = {("EUR", "USD"): ("GBP", "USD", "kraken")}
+        assert convert_amount(1.0, "EUR", "USD", _M, rates, planes) is None
 
     def test_zero_inverse_close_is_refused(self) -> None:
         """A zero close is refused rather than inverted into an infinite rate."""
-        assert convert_amount(1.0, "PLN", "USD", _M, _rates(USDPLN=0.0)) is None
+        assert convert_amount(1.0, "PLN", "USD", _M, _rates(USDPLN=0.0), _PLANES) is None
 
     def test_negative_inverse_close_is_refused(self) -> None:
         """A negative close cannot be a price and is refused."""
-        assert convert_amount(1.0, "PLN", "USD", _M, _rates(USDPLN=-4.0)) is None
+        assert convert_amount(1.0, "PLN", "USD", _M, _rates(USDPLN=-4.0), _PLANES) is None
 
     def test_non_finite_direct_close_falls_through_to_none(self) -> None:
-        """A NaN direct close is ignored, and with no inverse the result is None."""
-        assert convert_amount(1.0, "EUR", "USD", _M, _rates(EURUSD=float("nan"))) is None
+        """A NaN close on the pinned direct plane returns None."""
+        assert convert_amount(1.0, "EUR", "USD", _M, _rates(EURUSD=float("nan")), _PLANES) is None
 
-    def test_non_finite_direct_close_falls_back_to_inverse(self) -> None:
-        """A NaN direct close still allows a usable inverse pair to answer."""
-        rates = {("EUR", "USD", _M): float("inf"), ("USD", "EUR", _M): 0.8}
-        assert convert_amount(1.0, "EUR", "USD", _M, rates) == pytest.approx(1.25)
+    def test_non_finite_pinned_direct_close_does_not_switch_to_inverse(self) -> None:
+        """A non-finite pinned close withholds despite a usable reverse series."""
+        rates = {
+            ("EUR", "USD", "kraken", _M): float("inf"),
+            ("USD", "EUR", "kraken", _M): 0.8,
+        }
+        assert convert_amount(1.0, "EUR", "USD", _M, rates, _PLANES) is None
 
-    def test_non_positive_direct_close_falls_back_to_inverse(self) -> None:
-        """An unusable direct close never blocks a valid inverse pair."""
-        rates = {("EUR", "USD", _M): 0.0, ("USD", "EUR", _M): 0.8}
-        assert convert_amount(1.0, "EUR", "USD", _M, rates) == pytest.approx(1.25)
+    def test_non_positive_pinned_direct_close_does_not_switch_to_inverse(self) -> None:
+        """A non-positive pinned close withholds despite a usable reverse series."""
+        rates = {
+            ("EUR", "USD", "kraken", _M): 0.0,
+            ("USD", "EUR", "kraken", _M): 0.8,
+        }
+        assert convert_amount(1.0, "EUR", "USD", _M, rates, _PLANES) is None
 
     def test_overflowing_direct_conversion_is_refused(self) -> None:
         """A finite rate whose product overflows withholds instead of returning inf."""
-        assert convert_amount(1e308, "EUR", "USD", _M, _rates(EURUSD=1e308)) is None
+        assert convert_amount(1e308, "EUR", "USD", _M, _rates(EURUSD=1e308), _PLANES) is None
 
     def test_overflowing_inverse_conversion_is_refused(self) -> None:
         """A tiny inverse close that overflows the quotient is refused."""
-        assert convert_amount(1e308, "PLN", "USD", _M, _rates(USDPLN=1e-308)) is None
+        assert convert_amount(1e308, "PLN", "USD", _M, _rates(USDPLN=1e-308), _PLANES) is None
 
 
 class TestRequiredPairs:

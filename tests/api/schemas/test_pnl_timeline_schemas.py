@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
 from snapper.api.schemas.pnl_timeline import PnlAttributionContributionData
 from snapper.api.schemas.pnl_timeline import PnlFillMarkerData
+from snapper.api.schemas.pnl_timeline import PnlFxRateSourceData
 from snapper.api.schemas.pnl_timeline import PnlInstrumentContributionData
 from snapper.api.schemas.pnl_timeline import PnlSeriesData
 from snapper.api.schemas.pnl_timeline import PnlSeriesResponse
@@ -96,6 +97,15 @@ def _series_data() -> PnlSeriesData:
         to_time=_NOW,
         as_of=_NOW,
         mark_source="finalized_1m_candle_close",
+        rate_sources=[
+            PnlFxRateSourceData(
+                source_currency="EUR",
+                valuation_currency="USD",
+                base_currency="EUR",
+                quote_currency="USD",
+                exchange="kraken",
+            )
+        ],
         calc_version="5A.1",
         points=[_point()],
     )
@@ -116,6 +126,7 @@ def _timeline_data() -> PnlTimelineData:
         to_time=_NOW,
         as_of=_NOW,
         mark_source="finalized_1m_candle_close",
+        rate_sources=[],
         calc_version="5A.2",
         points=[_point()],
         marker_limit=2_000,
@@ -172,6 +183,13 @@ class TestStrictContract:
         )
         assert response.type == "pnl_series"
         assert response.payload.calc_version == "5A.1"
+        assert (
+            response.payload.rate_sources[0].source_currency,
+            response.payload.rate_sources[0].valuation_currency,
+            response.payload.rate_sources[0].base_currency,
+            response.payload.rate_sources[0].quote_currency,
+            response.payload.rate_sources[0].exchange,
+        ) == ("EUR", "USD", "EUR", "USD", "kraken")
         assert response.payload.points[0].valuation_status == "complete"
         assert response.payload.points[0].attribution[0].origin == "system"
         assert response.payload.points[0].attribution[0].strategy_name == "momentum"

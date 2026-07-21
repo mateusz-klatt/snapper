@@ -4,7 +4,8 @@ Models the ``GET /api/portfolio/pnl/series`` response: a per-point
 Net-P&L-since-activation series with a realized / fee / accrual / unrealized /
 net decomposition, plus each point's per-instrument and origin/strategy
 attribution contributions and the series-level provenance (granularity,
-valuation currency, mark source, and the reconstruction ``calc_version``).
+valuation currency, mark source, pinned FX rate sources, and the reconstruction
+``calc_version``).
 Every monetary field is ``float | None`` so an incomplete point (a missing mark,
 or untrusted cumulatives) is transported honestly as ``null`` rather than a
 fabricated zero (checklist #7 / #10).
@@ -79,6 +80,21 @@ class PnlTimelinePointData(StrictBody):
     attribution: list[PnlAttributionContributionData]
 
 
+class PnlFxRateSourceData(StrictBody):
+    """One request-pinned FX plane with conversion and symbol directions.
+
+    ``source_currency`` is converted into ``valuation_currency`` while
+    ``base_currency`` and ``quote_currency`` identify the exact oriented candle
+    series pinned on ``exchange`` for the whole request.
+    """
+
+    source_currency: str
+    valuation_currency: str
+    base_currency: str
+    quote_currency: str
+    exchange: str
+
+
 class PnlFillMarkerData(StrictBody):
     """One execution marker projected from the immutable fill ledger."""
 
@@ -140,6 +156,7 @@ class _PnlSeriesFields[TypeT: str](StrictDataSchema[TypeT]):
     to_time: datetime
     as_of: datetime
     mark_source: str
+    rate_sources: list[PnlFxRateSourceData]
     calc_version: str
     points: list[PnlTimelinePointData]
 

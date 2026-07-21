@@ -13,6 +13,8 @@ from datetime import timedelta
 
 import pytest
 
+from snapper.application.portfolio.fx_rates import convert_amount
+from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARKER_LIMIT
@@ -24,10 +26,12 @@ from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBu
 from snapper.application.portfolio.pnl_timeline_service import _build_execution_lineage
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_accrual
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_execution
+from snapper.application.portfolio.pnl_timeline_service import build_fx_rates
 from snapper.application.portfolio.pnl_timeline_service import build_marks
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_timeline
 from snapper.data.repository_types import InstrumentSymbolRefRow
+from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
@@ -164,6 +168,7 @@ def _ref(
     instrument_exchange: str | None = None,
     valid_from: datetime = _T0 - timedelta(days=1),
     valid_to: datetime = datetime.max.replace(tzinfo=UTC),
+    base: str | None = None,
 ) -> InstrumentSymbolRefRow:
     """Build one symbol reference row as ``get_instrument_symbol_refs`` returns it."""
     return {
@@ -171,6 +176,7 @@ def _ref(
         "native_symbol": native_symbol,
         "exchange": exchange,
         "instrument_exchange": (exchange if instrument_exchange is None else instrument_exchange),
+        "base_currency": native_symbol.split("-", maxsplit=1)[0] if base is None else base,
         "quote_currency": quote,
         "valid_from": valid_from,
         "valid_to": valid_to,
@@ -231,6 +237,9 @@ class FakeRepo:
         self._gapped_shards = gapped_shards or set()
         self._fx_rows: list[PnlFxRateRow] = list(fx_rows or [])
         self.fx_pair_calls: list[list[tuple[str, str]]] = []
+        self.fx_plane_calls: list[list[PnlFxRatePlane]] = []
+        self.fx_candidate_pair_calls: list[list[tuple[str, str]]] = []
+        self.fx_candidate_range_calls: list[tuple[datetime, datetime]] = []
         self.fx_range_calls: list[tuple[datetime, datetime]] = []
         self.symbol_ref_calls: list[list[str]] = []
         self.candle_calls: list[
@@ -338,18 +347,44 @@ class FakeRepo:
         requested = {ref["instrument_public_id"] for ref in refs}
         return [candle for candle in self._candles if candle["instrument_public_id"] in requested]
 
-    async def get_pnl_fx_rate_candles(
+    async def get_pnl_fx_rate_exchanges(
         self,
         pairs: Sequence[tuple[str, str]],
         start: datetime,
         end: datetime,
         as_of: datetime,
-    ) -> list[PnlFxRateRow]:
-        """Record the requested pairs and return the canned FX candles."""
-        self.fx_pair_calls.append(list(pairs))
-        self.fx_range_calls.append((start, end))
+    ) -> list[PnlFxRatePlane]:
+        """Discover venue-qualified FX planes with bounded canned evidence."""
+        self.fx_candidate_pair_calls.append(list(pairs))
+        self.fx_candidate_range_calls.append((start, end))
         requested = set(pairs)
-        return [row for row in self._fx_rows if (row["base"], row["quote"]) in requested]
+        return sorted(
+            {
+                (row["base"], row["quote"], row["exchange"])
+                for row in self._fx_rows
+                if (row["base"], row["quote"]) in requested and start <= row["open_at"] <= end
+            }
+        )
+
+    async def get_pnl_fx_rate_candles(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Record exact venue planes and return their bounded canned candles."""
+        plane_list = list(planes)
+        self.fx_plane_calls.append(plane_list)
+        self.fx_pair_calls.append([(base, quote) for base, quote, _ in plane_list])
+        self.fx_range_calls.append((start, end))
+        requested = set(planes)
+        return [
+            row
+            for row in self._fx_rows
+            if (row["base"], row["quote"], row["exchange"]) in requested
+            and start <= row["open_at"] <= end
+        ]
 
 
 class TestToTimelineExecution:
@@ -1180,8 +1215,8 @@ class TestExecutionQuoteCurrencyProof:
             point.net_pnl,
         ) == (None, None, None, None, None)
 
-    async def test_mixed_quote_proof_preserves_points_before_untrusted_fill(self) -> None:
-        """Provable points survive until point-wide UNTRUSTED becomes necessary."""
+    async def test_untrusted_instrument_preserves_proven_peer_and_withholds_total(self) -> None:
+        """One untrusted instrument cannot blank a separately proven contribution."""
         executions = [
             _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "EUR"),
             _exec_row(_I1, 2, 0, "sell", 1.0, 110.0, 0.0, "EUR"),
@@ -1244,17 +1279,22 @@ class TestExecutionQuoteCurrencyProof:
             _I1,
             _I2,
         ]
-        assert all(
-            contribution.realized_pnl is None
-            and contribution.fee_pnl is None
-            and contribution.accrual_pnl is None
-            and contribution.unrealized_pnl is None
-            for contribution in untrusted_point.per_instrument
-        )
+        proven_contribution, untrusted_contribution = untrusted_point.per_instrument
+        assert (
+            proven_contribution.realized_pnl,
+            proven_contribution.fee_pnl,
+            proven_contribution.accrual_pnl,
+            proven_contribution.unrealized_pnl,
+        ) == (10.0, 0.0, 0.0, 0.0)
+        assert (
+            untrusted_contribution.realized_pnl,
+            untrusted_contribution.fee_pnl,
+            untrusted_contribution.accrual_pnl,
+            untrusted_contribution.unrealized_pnl,
+        ) == (None, None, None, None)
         assert {(item.origin, item.strategy_name) for item in untrusted_point.attribution} == {
             ("manual", None),
             ("system", "momentum"),
-            ("unattributed", None),
         }
         assert all(
             contribution.realized_pnl is None
@@ -1263,6 +1303,950 @@ class TestExecutionQuoteCurrencyProof:
             and contribution.unrealized_pnl is None
             for contribution in untrusted_point.attribution
         )
+
+
+class TestCrossCurrencyPrices:
+    """Cover exact-minute conversion of execution prices and historical marks."""
+
+    def test_same_minute_rates_from_two_venues_remain_distinct(self) -> None:
+        """The selected venue answers while its same-minute rival is ignored."""
+        rows = [
+            _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+            _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+        ]
+        rates = build_fx_rates(rows)
+        pair = currency_pair_key("EUR", "PLN")
+        assert rates[("EUR", "PLN", "polygon", _T0)] == 2.0
+        assert rates[("EUR", "PLN", "walutomat", _T0)] == 4.0
+        assert (
+            convert_amount(
+                1.0,
+                "EUR",
+                "PLN",
+                _T0,
+                rates,
+                {pair: ("EUR", "PLN", "walutomat")},
+            )
+            == 4.0
+        )
+
+    def test_conflicting_rows_on_one_full_plane_are_refused(self) -> None:
+        """Two closes for one full identity cannot let row order choose money."""
+        rows = [
+            _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+            _fx_row("EUR", "PLN", 0, 4.1, exchange="walutomat"),
+        ]
+        rates = build_fx_rates(rows)
+        pair = currency_pair_key("EUR", "PLN")
+        assert math.isnan(rates[("EUR", "PLN", "walutomat", _T0)])
+        assert (
+            convert_amount(
+                1.0,
+                "EUR",
+                "PLN",
+                _T0,
+                rates,
+                {pair: ("EUR", "PLN", "walutomat")},
+            )
+            is None
+        )
+
+    async def test_eur_pln_identity_forces_walutomat_despite_polygon_collision(
+        self,
+    ) -> None:
+        """A held EUR-PLN instrument values flat in EUR on its own venue."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="walutomat",
+                )
+            ],
+            refs=[_ref(_I1, "EUR-PLN", "PLN", exchange="walutomat")],
+            candles=[_candle(_m(-1), 4.0), _candle(_m(0), 5.0)],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 10.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 1, 5.0, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="EUR",
+        )
+        assert [point.valuation_status for point in result.points] == ["complete", "complete"]
+        point = result.points[1]
+        assert point.realized_pnl == 0.0
+        assert point.unrealized_pnl == 0.0
+        assert point.net_pnl == 0.0
+        assert point.per_instrument[0].realized_pnl == 0.0
+        assert point.per_instrument[0].unrealized_pnl == 0.0
+        assert [
+            (
+                source.source_currency,
+                source.valuation_currency,
+                source.base_currency,
+                source.quote_currency,
+                source.exchange,
+            )
+            for source in result.rate_sources
+        ] == [("PLN", "EUR", "EUR", "PLN", "walutomat")]
+        assert repo.fx_candidate_pair_calls == []
+        assert all(
+            exchange == "walutomat" for planes in repo.fx_plane_calls for _, _, exchange in planes
+        )
+
+    async def test_identity_plane_uses_held_orientation_when_reverse_is_also_complete(
+        self,
+    ) -> None:
+        """The held symbol's own series cancels its mark despite a reverse rival."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="walutomat",
+                )
+            ],
+            refs=[_ref(_I1, "EUR-PLN", "PLN", exchange="walutomat")],
+            candles=[_candle(_m(-1), 4.0), _candle(_m(0), 5.0)],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 1, 5.0, exchange="walutomat"),
+                _fx_row("PLN", "EUR", 0, 0.24, exchange="walutomat"),
+                _fx_row("PLN", "EUR", 1, 0.19, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="EUR",
+        )
+        assert [point.valuation_status for point in result.points] == ["complete", "complete"]
+        assert result.points[1].unrealized_pnl == 0.0
+        assert result.points[1].net_pnl == 0.0
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [("EUR", "PLN", "walutomat")]
+
+    async def test_identity_plane_gap_does_not_switch_to_reverse_orientation(
+        self,
+    ) -> None:
+        """A reverse symbol cannot fill a held symbol's missing mark-rate minute."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="walutomat",
+                )
+            ],
+            refs=[_ref(_I1, "EUR-PLN", "PLN", exchange="walutomat")],
+            candles=[_candle(_m(-1), 4.0), _candle(_m(0), 5.0)],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("PLN", "EUR", 1, 0.19, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="EUR",
+        )
+        assert result.points[0].valuation_status == "complete"
+        assert result.points[0].unrealized_pnl == 0.0
+        point = result.points[1]
+        assert point.valuation_status == "incomplete"
+        assert point.realized_pnl == 0.0
+        assert point.unrealized_pnl is None
+        assert point.net_pnl is None
+
+    async def test_pinned_fill_venue_does_not_switch_to_rival_for_mark(self) -> None:
+        """A missing canonical-venue mark rate withholds instead of venue-hopping."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="walutomat",
+                )
+            ],
+            refs=[_ref(_I1, "EUR-PLN", "PLN", exchange="walutomat")],
+            candles=[_candle(_m(-1), 4.0), _candle(_m(0), 5.0)],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 5.0, exchange="polygon"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="EUR",
+        )
+        assert result.points[0].valuation_status == "complete"
+        assert result.points[0].unrealized_pnl == 0.0
+        point = result.points[1]
+        assert point.valuation_status == "incomplete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (0.0, 0.0, 0.0, None, None)
+        contribution = point.per_instrument[0]
+        assert (
+            contribution.realized_pnl,
+            contribution.fee_pnl,
+            contribution.accrual_pnl,
+            contribution.unrealized_pnl,
+        ) == (0.0, 0.0, 0.0, None)
+
+    async def test_neither_venue_complete_pins_best_coverage_and_withholds_gap(
+        self,
+    ) -> None:
+        """A higher-coverage venue stays pinned when a rival alone has one mark."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[
+                _candle(_m(-1), 10.0),
+                _candle(_m(0), 12.0),
+                _candle(_m(1), 13.0),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 1, 5.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 2, 6.0, exchange="polygon"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _m(3),
+            valuation_ccy="PLN",
+        )
+        assert result.points[0].valuation_status == "complete"
+        assert result.points[1].valuation_status == "complete"
+        point = result.points[2]
+        assert point.valuation_status == "incomplete"
+        assert point.realized_pnl == 0.0
+        assert point.unrealized_pnl is None
+        assert point.net_pnl is None
+
+    async def test_pinned_orientation_gap_does_not_switch_to_reverse_series(self) -> None:
+        """A reverse-oriented candle cannot fill the selected series' later gap."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[
+                _candle(_m(-1), 10.0),
+                _candle(_m(0), 10.0),
+                _candle(_m(1), 10.0),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 1, 4.0, exchange="walutomat"),
+                _fx_row("PLN", "EUR", 2, 0.27, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _m(3),
+            valuation_ccy="PLN",
+        )
+        assert [point.valuation_status for point in result.points] == [
+            "complete",
+            "complete",
+            "incomplete",
+        ]
+        assert result.points[0].unrealized_pnl == 0.0
+        assert result.points[1].unrealized_pnl == 0.0
+        assert result.points[2].unrealized_pnl is None
+        assert result.points[2].net_pnl is None
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [("EUR", "PLN", "walutomat")]
+
+    async def test_complete_nonidentity_pln_tie_prefers_walutomat(self) -> None:
+        """Complete PLN planes use Walutomat despite a lexical Polygon rival."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[_candle(_m(-1), 10.0), _candle(_m(1), 12.0)],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 2, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 1, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 2, 4.0, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _m(3),
+            valuation_ccy="PLN",
+        )
+        assert result.points[2].valuation_status == "complete"
+        assert result.points[2].unrealized_pnl == 8.0
+        assert result.points[2].net_pnl == 8.0
+
+    async def test_complete_orientation_tie_pins_requested_direction_once(self) -> None:
+        """Equal orientations elect source-to-valuation once for the whole request."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[_candle(_m(-1), 10.0), _candle(_m(0), 12.0)],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 1, 5.0, exchange="walutomat"),
+                _fx_row("PLN", "EUR", 0, 0.24, exchange="walutomat"),
+                _fx_row("PLN", "EUR", 1, 0.19, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="PLN",
+        )
+        assert result.points[1].valuation_status == "complete"
+        assert result.points[1].unrealized_pnl == 20.0
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [("EUR", "PLN", "walutomat")]
+
+    async def test_pre_first_fill_mark_gap_does_not_demote_walutomat(self) -> None:
+        """An unused pre-position mark cannot steer the request-wide FX plane."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 1, "buy", 1.0, 10.0, 0.0, "")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[
+                _candle(_m(-1), 10.0),
+                _candle(_m(0), 10.0),
+                _candle(_m(1), 12.0),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 2, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 2, 4.0, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _m(3),
+            valuation_ccy="PLN",
+        )
+        before_fill, fill_point, marked_point = result.points
+        assert before_fill.valuation_status == "complete"
+        assert before_fill.per_instrument == ()
+        assert (
+            before_fill.realized_pnl,
+            before_fill.fee_pnl,
+            before_fill.accrual_pnl,
+            before_fill.unrealized_pnl,
+            before_fill.net_pnl,
+        ) == (0.0, 0.0, 0.0, 0.0, 0.0)
+        assert fill_point.unrealized_pnl == 0.0
+        assert marked_point.valuation_status == "complete"
+        assert marked_point.unrealized_pnl == 8.0
+        assert marked_point.net_pnl == 8.0
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [("EUR", "PLN", "walutomat")]
+
+    async def test_marks_before_a_future_first_fill_need_no_fx_plane(self) -> None:
+        """An instrument absent throughout the window cannot create FX requirements."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 2, "buy", 1.0, 10.0, 0.0, "")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[_candle(_m(-1), 10.0), _candle(_m(0), 11.0)],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(3),
+            valuation_ccy="PLN",
+        )
+        assert [point.valuation_status for point in result.points] == ["complete", "complete"]
+        assert all(point.per_instrument == () and point.net_pnl == 0.0 for point in result.points)
+        assert result.rate_sources == ()
+        assert repo.fx_candidate_pair_calls == []
+        assert repo.fx_plane_calls == []
+
+    async def test_complete_rival_beats_gapped_walutomat_for_the_whole_span(
+        self,
+    ) -> None:
+        """A complete Polygon plane prices both fill and mark when Walutomat gaps."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[_candle(_m(-1), 10.0), _candle(_m(0), 12.0)],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 3.0, exchange="polygon"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="PLN",
+        )
+        assert [point.valuation_status for point in result.points] == ["complete", "complete"]
+        assert result.points[0].unrealized_pnl == 0.0
+        assert result.points[1].unrealized_pnl == 16.0
+        assert result.points[1].net_pnl == 16.0
+        assert [source.exchange for source in result.rate_sources] == ["polygon"]
+
+    async def test_conflicting_full_key_does_not_count_as_coverage(self) -> None:
+        """A duplicate conflict cannot outrank a genuinely complete venue."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[_candle(_m(-1), 10.0), _candle(_m(0), 12.0)],
+            fx_rows=[
+                _fx_row("EUR", "USD", 0, 1.0, exchange="alpha"),
+                _fx_row("EUR", "USD", 0, 1.1, exchange="alpha"),
+                _fx_row("EUR", "USD", 1, 1.0, exchange="alpha"),
+                _fx_row("EUR", "USD", 0, 2.0, exchange="zeta"),
+                _fx_row("EUR", "USD", 1, 2.0, exchange="zeta"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="USD",
+        )
+        assert [point.valuation_status for point in result.points] == ["complete", "complete"]
+        assert result.points[1].unrealized_pnl == 4.0
+        assert result.points[1].net_pnl == 4.0
+
+    async def test_conflicting_identity_venues_leave_the_pair_unresolved(self) -> None:
+        """Two held canonical venues cannot be blended into one request plane."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="walutomat",
+                ),
+                _exec_row(
+                    _I2,
+                    2,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="polygon",
+                ),
+            ],
+            refs=[
+                _ref(_I1, "EUR-PLN", "PLN", exchange="walutomat"),
+                _ref(_I2, "EUR-PLN", "PLN", exchange="polygon"),
+            ],
+            candles=[
+                _candle(_m(-1), 4.0),
+                _candle(_m(-1), 4.0, instrument=_I2),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="polygon"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+            valuation_ccy="EUR",
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.realized_pnl == 0.0
+        assert point.unrealized_pnl is None
+        assert point.net_pnl is None
+        assert repo.fx_candidate_pair_calls == []
+        assert repo.fx_plane_calls == []
+
+    @pytest.mark.parametrize(
+        "valuation_ccy,fx_rows,expected_sources",
+        [
+            pytest.param(
+                "PLN",
+                [_fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat")],
+                [("EUR", "PLN", "EUR", "PLN", "walutomat")],
+                id="pln",
+            ),
+            pytest.param(
+                "EUR",
+                [_fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat")],
+                [("PLN", "EUR", "EUR", "PLN", "walutomat")],
+                id="eur",
+            ),
+            pytest.param(
+                "USD",
+                [
+                    _fx_row("EUR", "USD", 0, 1.2),
+                    _fx_row("USD", "PLN", 0, 4.0, exchange="walutomat"),
+                ],
+                [
+                    ("EUR", "USD", "EUR", "USD", "kraken"),
+                    ("PLN", "USD", "USD", "PLN", "walutomat"),
+                ],
+                id="usd",
+            ),
+        ],
+    )
+    async def test_real_wallet_quote_shapes_complete_with_exact_pair_evidence(
+        self,
+        valuation_ccy: str,
+        fx_rows: list[PnlFxRateRow],
+        expected_sources: list[tuple[str, str, str, str, str]],
+    ) -> None:
+        """XRP-EUR and EUR-PLN coexist when each foreign quote has its own pair."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, ""),
+                _exec_row(
+                    _I2,
+                    2,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="walutomat",
+                ),
+            ],
+            refs=[
+                _ref(_I1, "XRP-EUR", "EUR"),
+                _ref(_I2, "EUR-PLN", "PLN", exchange="walutomat"),
+            ],
+            candles=[
+                _candle(_m(-1), 10.0),
+                _candle(_m(-1), 4.0, instrument=_I2),
+            ],
+            fx_rows=fx_rows,
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+            valuation_ccy=valuation_ccy,
+        )
+        point = result.points[0]
+        assert point.valuation_status == "complete"
+        assert point.net_pnl == 0.0
+        assert [item.instrument_public_id for item in point.per_instrument] == [_I1, _I2]
+        assert all(item.unrealized_pnl == 0.0 for item in point.per_instrument)
+        assert [
+            (
+                source.source_currency,
+                source.valuation_currency,
+                source.base_currency,
+                source.quote_currency,
+                source.exchange,
+            )
+            for source in result.rate_sources
+        ] == expected_sources
+
+    async def test_different_buy_mark_and_sell_rates_keep_pool_in_one_currency(self) -> None:
+        """Buy basis, later mark, and sell all use their own PLN conversion rate."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 2.0, 10.0, 0.0, "PLN"),
+            _exec_row(_I1, 2, 2, "sell", 2.0, 11.0, 0.0, "PLN"),
+        ]
+        repo = FakeRepo(
+            executions=executions,
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[
+                _candle(_m(-1), 10.0),
+                _candle(_m(0), 12.0),
+                _candle(_m(1), 11.0),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 1, 5.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 2, 6.0, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _m(3),
+            valuation_ccy="PLN",
+        )
+        buy_point, mark_point, sell_point = result.points
+        assert buy_point.valuation_status == "complete"
+        assert buy_point.unrealized_pnl == 0.0
+        assert mark_point.valuation_status == "complete"
+        assert mark_point.unrealized_pnl == 40.0
+        assert mark_point.net_pnl == 40.0
+        assert sell_point.valuation_status == "complete"
+        assert sell_point.realized_pnl == 52.0
+        assert sell_point.unrealized_pnl == 0.0
+        assert sell_point.net_pnl == 52.0
+
+    async def test_inverse_pair_converts_execution_and_mark(self) -> None:
+        """A PLN-EUR candle proves both EUR execution and mark values by inverse."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "PLN")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[_candle(_m(-1), 10.0), _candle(_m(0), 12.0)],
+            fx_rows=[
+                _fx_row("PLN", "EUR", 0, 0.25, exchange="walutomat"),
+                _fx_row("PLN", "EUR", 1, 0.2, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="PLN",
+        )
+        assert [point.valuation_status for point in result.points] == ["complete", "complete"]
+        assert result.points[0].unrealized_pnl == 0.0
+        assert result.points[1].unrealized_pnl == 20.0
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [("PLN", "EUR", "walutomat")]
+
+    async def test_missing_exact_mark_rate_is_mark_incomplete_without_carry_forward(
+        self,
+    ) -> None:
+        """The prior minute's EUR-PLN close cannot price the next minute's mark."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "PLN")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[
+                _candle(_m(-1), 10.0),
+                _candle(_m(0), 12.0),
+                _candle(_m(1), 13.0),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 2, 6.0, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(2),
+            "1m",
+            _m(2),
+            valuation_ccy="PLN",
+        )
+        assert result.points[0].valuation_status == "complete"
+        point = result.points[1]
+        assert point.valuation_status == "incomplete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (0.0, 0.0, 0.0, None, None)
+        contribution = point.per_instrument[0]
+        assert (
+            contribution.realized_pnl,
+            contribution.fee_pnl,
+            contribution.accrual_pnl,
+            contribution.unrealized_pnl,
+        ) == (0.0, 0.0, 0.0, None)
+        recovered = result.points[2]
+        assert recovered.valuation_status == "complete"
+        assert recovered.unrealized_pnl == 38.0
+        assert recovered.net_pnl == 38.0
+
+    async def test_missing_opening_fill_rate_keeps_mark_independent_cumulatives(self) -> None:
+        """An unconvertible opening price leaves basis unknown without tainting flows."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "PLN")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[_candle(_m(0), 12.0)],
+            fx_rows=[_fx_row("EUR", "PLN", 1, 5.0, exchange="walutomat")],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _m(1),
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="PLN",
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (0.0, 0.0, 0.0, None, None)
+
+    async def test_missing_same_side_add_rate_keeps_mark_independent_cumulatives(self) -> None:
+        """An unconvertible add poisons basis but does not invent a realization."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, -1, "buy", 1.0, 10.0, 0.0, "PLN"),
+                _exec_row(_I1, 2, 0, "buy", 1.0, 11.0, 0.0, "PLN"),
+            ],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[_candle(_m(0), 12.0)],
+            fx_rows=[
+                _fx_row("EUR", "PLN", -1, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 1, 5.0, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _m(1),
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="PLN",
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (0.0, 0.0, 0.0, None, None)
+
+    @pytest.mark.parametrize(
+        "closing_size",
+        [
+            pytest.param(0.5, id="reduction"),
+            pytest.param(1.0, id="close"),
+            pytest.param(2.0, id="flip"),
+        ],
+    )
+    async def test_missing_reducing_fill_rate_latches_instrument_untrusted(
+        self,
+        closing_size: float,
+    ) -> None:
+        """A close component without its exact FX rate makes realization unknowable."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "PLN"),
+                _exec_row(_I1, 2, 1, "sell", closing_size, 11.0, 0.0, "PLN"),
+            ],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[_candle(_m(-1), 10.0), _candle(_m(0), 12.0)],
+            fx_rows=[_fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat")],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="PLN",
+        )
+        assert result.points[0].valuation_status == "complete"
+        point = result.points[1]
+        assert point.valuation_status == "incomplete"
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (None, None, None, None, None)
+        contribution = point.per_instrument[0]
+        assert (
+            contribution.realized_pnl,
+            contribution.fee_pnl,
+            contribution.accrual_pnl,
+            contribution.unrealized_pnl,
+        ) == (None, None, None, None)
+
+    async def test_shared_foreign_quote_loads_one_pair_set_per_rate_plane(self) -> None:
+        """Two EUR instruments request pair evidence by currency, not instrument."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "PLN"),
+                _exec_row(_I2, 2, 0, "buy", 1.0, 20.0, 0.0, "PLN"),
+            ],
+            refs=[_ref(_I1, "XRP-EUR", "EUR"), _ref(_I2, "BTC-EUR", "EUR")],
+            candles=[_candle(_m(-1), 10.0), _candle(_m(-1), 20.0, instrument=_I2)],
+            fx_rows=[_fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat")],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+            valuation_ccy="PLN",
+        )
+        assert result.points[0].valuation_status == "complete"
+        assert repo.fx_candidate_pair_calls == [
+            [("EUR", "PLN"), ("PLN", "EUR")],
+            [("EUR", "PLN"), ("PLN", "EUR")],
+        ]
+        assert repo.fx_pair_calls == [
+            [("EUR", "PLN")],
+            [("EUR", "PLN")],
+        ]
+
+    async def test_pre_window_fill_and_marks_use_separate_fx_ranges(self) -> None:
+        """An old basis rate does not widen the current mark-rate candle read."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, -600, "buy", 1.0, 10.0, 0.0, "PLN")],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[_candle(_m(-1), 10.0)],
+            fx_rows=[
+                _fx_row("EUR", "PLN", -600, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 0, 5.0, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+            valuation_ccy="PLN",
+        )
+        assert result.points[0].valuation_status == "complete"
+        assert result.points[0].unrealized_pnl == 10.0
+        assert repo.fx_range_calls == [
+            (_m(-1), _T0),
+            (_m(-601), _m(-600)),
+        ]
 
 
 class TestBuildWalletPnlTimeline:
@@ -1662,7 +2646,7 @@ def test_provenance_constants_are_stable() -> None:
     Then: The documented source, version, and total-work limit remain stable.
     """
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
-    assert PNL_TIMELINE_CALC_VERSION == "5A.4"
+    assert PNL_TIMELINE_CALC_VERSION == "5A.7"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
 
@@ -1693,13 +2677,16 @@ class TestForeignFeeConversion:
         assert point.valuation_status == "complete"
         assert point.fee_pnl == pytest.approx(-0.05)
         assert point.realized_pnl == 0.0
-        assert repo.fx_pair_calls[0] == [("EUR", "USD"), ("USD", "EUR")]
+        assert repo.fx_candidate_pair_calls == [[("EUR", "USD"), ("USD", "EUR")]]
+        assert repo.fx_pair_calls == [[("EUR", "USD")]]
 
     async def test_inverse_pair_also_converts(self) -> None:
         """Only a USD-EUR listing still prices the fee, by reciprocal."""
         repo = self._repo([_fx_row("USD", "EUR", 0, 0.8)])
         result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
         assert result.points[0].fee_pnl == pytest.approx(-0.05)
+        assert repo.fx_candidate_pair_calls == [[("EUR", "USD"), ("USD", "EUR")]]
+        assert repo.fx_pair_calls == [[("USD", "EUR")]]
 
     async def test_unresolvable_pair_still_withholds(self) -> None:
         """With no pair at all the fee stays unknown and the point is withheld.

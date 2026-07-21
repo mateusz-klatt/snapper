@@ -299,6 +299,7 @@ from snapper.data.repository_types import PairedExecutionLegFieldUpdate
 from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
+from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
@@ -2277,7 +2278,7 @@ class Repository(ABC):
         Joins every overlapping :class:`Instrument` and :class:`Symbol` version
         whose knowledge interval begins by ``as_of``. Each projected row carries
         the intersection's inclusive ``valid_from`` and exclusive ``valid_to``.
-        Callers must treat quote revisions across all versions known at the
+        Callers must treat currency-leg revisions across all versions known at the
         horizon as ambiguous because this axis cannot distinguish a correction
         from a market re-denomination. The candle venue is
         ``Instrument.source_exchange`` when present, otherwise the instrument's
@@ -2329,14 +2330,41 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def get_pnl_fx_rate_candles(
+    async def get_pnl_fx_rate_exchanges(
         self,
         pairs: Sequence[tuple[str, str]],
         start: datetime,
         end: datetime,
         as_of: datetime,
+    ) -> list[PnlFxRatePlane]:
+        """Discover spot-FX venue planes with evidence in a bounded window.
+
+        Each candidate is backed by at least one finalized one-minute forex
+        candle in the requested range. Instrument and Symbol ownership resolve
+        at the candle version's own authoring timestamp, preserving the same
+        denomination and venue identity used by the subsequent rate read.
+
+        Args:
+            pairs: Distinct ``(base, quote)`` currency legs to discover. Empty
+                input returns without a query.
+            start: Inclusive lower candle-open bound.
+            end: Inclusive upper candle-open bound.
+            as_of: Snapshot time selecting candle versions known at the horizon.
+
+        Returns:
+            Distinct ``(base, quote, exchange)`` planes in lexical order.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_fx_rate_candles(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
     ) -> list[PnlFxRateRow]:
-        """Load finalized one-minute closes for the requested currency pairs.
+        """Load finalized one-minute closes for pinned spot-FX venue planes.
 
         The P&L timeline converts a flow denominated in one currency into the
         series valuation currency using our OWN candle plane. Each candle is
@@ -2346,14 +2374,13 @@ class Repository(ABC):
         therefore priced by the same evidence the marks
         come from rather than an external feed.
 
-        Each pair is matched on the symbol's own ``base``/``quote`` legs, so the
-        caller can request both orientations and satisfy the conversion with
-        whichever one a venue actually lists. Several venues may list the same
-        pair; every match is returned WITH its exchange so the caller resolves
-        the collision deterministically instead of depending on row order.
+        Each plane is matched on the symbol's own ``base``/``quote`` legs and
+        the owning Instrument's exact exchange. Only symbols classified as
+        ``forex`` can certify a rate, so a future or perpetual carrying matching
+        currency-leg text cannot enter the conversion plane.
 
         Args:
-            pairs: Distinct ``(base, quote)`` currency legs to resolve. Empty
+            planes: Pinned ``(base, quote, exchange)`` planes to load. Empty
                 input returns without a query.
             start: Inclusive lower candle-open bound.
             end: Inclusive upper candle-open bound.
@@ -2361,7 +2388,7 @@ class Repository(ABC):
                 temporal predicates, so a corrected candle is seen AS KNOWN then.
 
         Returns:
-            Rows ordered by ``(open_at, base, quote, exchange)``.
+            Rows ordered by candle open time and plane identity.
         """
         ...
 
@@ -9953,6 +9980,7 @@ class SQLAlchemyRepository(Repository):
                         Instrument.exchange,
                     ),
                     Instrument.exchange,
+                    Symbol.base,
                     Symbol.quote,
                     Instrument.timestamp,
                     Instrument.known_to,
@@ -9980,6 +10008,7 @@ class SQLAlchemyRepository(Repository):
                     "native_symbol": native_symbol,
                     "exchange": exchange,
                     "instrument_exchange": instrument_exchange,
+                    "base_currency": base,
                     "quote_currency": quote,
                     "valid_from": max(instrument_from, symbol_from),
                     "valid_to": min(instrument_to, symbol_to),
@@ -9989,6 +10018,7 @@ class SQLAlchemyRepository(Repository):
                     native_symbol,
                     exchange,
                     instrument_exchange,
+                    base,
                     quote,
                     instrument_from,
                     instrument_to,
@@ -10004,6 +10034,7 @@ class SQLAlchemyRepository(Repository):
                     row["native_symbol"],
                     row["exchange"],
                     row["instrument_exchange"],
+                    row["base_currency"],
                     row["quote_currency"] or "",
                 )
             )
@@ -10033,15 +10064,21 @@ class SQLAlchemyRepository(Repository):
         """
         if not refs:
             return []
-        refs_by_series: dict[tuple[str, str, str | None], list[InstrumentSymbolRefRow]] = {}
+        refs_by_series: dict[tuple[str, str, str, str | None], list[InstrumentSymbolRefRow]] = {}
         for ref in refs:
-            series = (ref["native_symbol"], ref["exchange"], ref["quote_currency"])
+            series = (
+                ref["native_symbol"],
+                ref["exchange"],
+                ref["base_currency"],
+                ref["quote_currency"],
+            )
             refs_by_series.setdefault(series, []).append(ref)
         async with self.session() as s:
             result = await s.execute(
                 select(
                     Symbol.native_symbol,
                     Instrument.exchange,
+                    Symbol.base,
                     Symbol.quote,
                     Candle.open_at,
                     Candle.close,
@@ -10064,9 +10101,12 @@ class SQLAlchemyRepository(Repository):
                     ),
                 )
                 .where(
-                    tuple_(Symbol.native_symbol, Instrument.exchange, Symbol.quote).in_(
-                        list(refs_by_series)
-                    ),
+                    tuple_(
+                        Symbol.native_symbol,
+                        Instrument.exchange,
+                        Symbol.base,
+                        Symbol.quote,
+                    ).in_(list(refs_by_series)),
                     Candle.timeframe == "1m",
                     Candle.open_at >= start,
                     Candle.open_at <= end,
@@ -10075,8 +10115,8 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             candles: list[PnlTimelineCandleRow] = []
-            for native_symbol, exchange, quote, open_at, close in result.all():
-                for ref in refs_by_series[(native_symbol, exchange, quote)]:
+            for native_symbol, exchange, base, quote, open_at, close in result.all():
+                for ref in refs_by_series[(native_symbol, exchange, base, quote)]:
                     candles.append(
                         {
                             "instrument_public_id": ref["instrument_public_id"],
@@ -10092,23 +10132,82 @@ class SQLAlchemyRepository(Repository):
             )
             return candles
 
-    async def get_pnl_fx_rate_candles(
+    async def get_pnl_fx_rate_exchanges(
         self,
         pairs: Sequence[tuple[str, str]],
         start: datetime,
         end: datetime,
         as_of: datetime,
-    ) -> list[PnlFxRateRow]:
-        """Load finalized one-minute closes for currency pairs in one query.
+    ) -> list[PnlFxRatePlane]:
+        """Discover bounded spot-FX venue planes in one query.
 
-        See the abstract declaration for the pair-matching and multi-venue
-        contract. Instrument and Symbol ownership resolve at each candle
-        version's own authoring timestamp. Rows are sorted so a caller folding
-        them into a rate map gets a stable, reproducible winner when two venues
-        quote the same minute.
+        See the abstract declaration for the candidate evidence and author-time
+        identity contract.
 
         Args:
-            pairs: Distinct ``(base, quote)`` currency legs to resolve.
+            pairs: Distinct ``(base, quote)`` currency legs to discover.
+            start: Inclusive lower candle-open bound.
+            end: Inclusive upper candle-open bound.
+            as_of: Snapshot time threading the temporal predicates.
+
+        Returns:
+            Distinct planes in ``(base, quote, exchange)`` order.
+        """
+        if not pairs:
+            return []
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    Symbol.base,
+                    Symbol.quote,
+                    Instrument.exchange,
+                )
+                .select_from(Candle)
+                .join(
+                    Instrument,
+                    and_(
+                        Candle.instrument_public_id == Instrument.public_id,
+                        Instrument.timestamp <= Candle.timestamp,
+                        Instrument.known_to > Candle.timestamp,
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        Symbol.timestamp <= Candle.timestamp,
+                        Symbol.known_to > Candle.timestamp,
+                    ),
+                )
+                .where(
+                    tuple_(Symbol.base, Symbol.quote).in_(list(dict.fromkeys(pairs))),
+                    Symbol.asset_type == "forex",
+                    Candle.timeframe == "1m",
+                    Candle.open_at >= start,
+                    Candle.open_at <= end,
+                    Candle.complete.is_(True),
+                    *where_active(Candle, as_of),
+                )
+                .distinct()
+                .order_by(Symbol.base.asc(), Symbol.quote.asc(), Instrument.exchange.asc())
+            )
+            return [(base, quote, exchange) for base, quote, exchange in result.all()]
+
+    async def get_pnl_fx_rate_candles(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Load finalized one-minute closes for pinned FX planes in one query.
+
+        See the abstract declaration for exact plane matching and spot-FX
+        classification. Instrument and Symbol ownership resolve at each candle
+        version's own authoring timestamp.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` planes to load.
             start: Inclusive lower candle-open bound.
             end: Inclusive upper candle-open bound.
             as_of: Snapshot time threading the temporal predicates.
@@ -10116,7 +10215,7 @@ class SQLAlchemyRepository(Repository):
         Returns:
             Rows ordered by ``(open_at, base, quote, exchange)``.
         """
-        if not pairs:
+        if not planes:
             return []
         async with self.session() as s:
             result = await s.execute(
@@ -10145,7 +10244,10 @@ class SQLAlchemyRepository(Repository):
                     ),
                 )
                 .where(
-                    tuple_(Symbol.base, Symbol.quote).in_(list(dict.fromkeys(pairs))),
+                    tuple_(Symbol.base, Symbol.quote, Instrument.exchange).in_(
+                        list(dict.fromkeys(planes))
+                    ),
+                    Symbol.asset_type == "forex",
                     Candle.timeframe == "1m",
                     Candle.open_at >= start,
                     Candle.open_at <= end,

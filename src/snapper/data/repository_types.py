@@ -447,7 +447,8 @@ class InstrumentSymbolRefRow(TypedDict):
     otherwise the instrument's own exchange. ``instrument_exchange`` retains
     the instrument's venue for execution-lineage proof. Together,
     ``native_symbol``, ``exchange``, and ``quote_currency`` identify the
-    finalized 1m candle series used for marks while the original
+    finalized 1m candle series used for marks while ``base_currency`` and
+    ``quote_currency`` prove its currency-pair identity. The original
     ``instrument_public_id`` remains the mark-map key. ``valid_from`` and
     ``valid_to`` are the inclusive and exclusive knowledge bounds of the joined
     versions, not independent market-validity timestamps.
@@ -457,6 +458,7 @@ class InstrumentSymbolRefRow(TypedDict):
     native_symbol: str
     exchange: str
     instrument_exchange: str
+    base_currency: str
     quote_currency: str | None
     valid_from: datetime
     valid_to: datetime
@@ -476,14 +478,17 @@ class PnlTimelineCandleRow(TypedDict):
     close: float | None
 
 
+type PnlFxRatePlane = tuple[str, str, str]
+"""One pinned ``(base, quote, exchange)`` spot-FX candle plane."""
+
+
 class PnlFxRateRow(TypedDict):
     """One finalized one-minute close of a currency pair, for FX conversion.
 
     Returned by ``get_pnl_fx_rate_candles``. ``base``/``quote`` are the symbol's
     own currency legs, so the close reads as "one unit of ``base`` costs ``close``
-    units of ``quote``". ``exchange`` is carried because several venues list the
-    same pair; the caller resolves that collision deterministically rather than
-    letting row order decide which venue's rate wins.
+    units of ``quote``". ``exchange`` identifies the request-pinned venue plane;
+    rows from a rival venue cannot enter the same conversion map.
     """
 
     base: str

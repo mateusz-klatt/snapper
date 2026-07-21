@@ -1,10 +1,8 @@
-"""Tests for the P&L FX rate candle read.
+"""Tests for the P&L FX rate plane repository reads.
 
 Pins the read that prices a foreign-currency flow off our own candle plane:
-pair matching on the symbol's own ``base``/``quote`` legs, both orientations
-answerable, the finalized/timeframe/window filters, and — the one that protects
-reproducibility — a deterministic ordering when several venues list the same pair
-at the same minute.
+forex-only venue discovery, exact pinned-plane filtering, both orientations,
+the finalized/timeframe/window filters, and author-time denomination identity.
 """
 
 from collections.abc import AsyncIterator
@@ -33,6 +31,7 @@ def _symbol(
     native_symbol: str,
     base: str,
     quote: str,
+    asset_type: str = "forex",
     timestamp: datetime = _TS,
     known_to: datetime = KNOWN_TO_MAX,
 ) -> Symbol:
@@ -42,7 +41,7 @@ def _symbol(
         native_symbol=native_symbol,
         base=base,
         quote=quote,
-        asset_type="forex",
+        asset_type=asset_type,
         created_at=timestamp,
         timestamp=timestamp,
         known_to=known_to,
@@ -109,13 +108,29 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
         s.add_all(
             [
                 _symbol("sym-eurusd", "EUR-USD", "EUR", "USD"),
+                _symbol("sym-usdeur", "USD-EUR", "USD", "EUR"),
                 _symbol("sym-usdpln", "USD-PLN", "USD", "PLN"),
+                _symbol(
+                    "sym-eurusd-perp",
+                    "EUR-USD-PERP",
+                    "EUR",
+                    "USD",
+                    "crypto",
+                ),
                 _instrument("ins-eurusd-kraken", "sym-eurusd", "kraken"),
                 _instrument("ins-eurusd-walutomat", "sym-eurusd", "walutomat"),
+                _instrument("ins-usdeur-kraken", "sym-usdeur", "kraken"),
                 _instrument("ins-usdpln-kraken", "sym-usdpln", "kraken"),
+                _instrument(
+                    "ins-eurusd-kraken-futures",
+                    "sym-eurusd-perp",
+                    "kraken_futures",
+                ),
                 _candle("ins-eurusd-kraken", _M, 1.25),
                 _candle("ins-eurusd-walutomat", _M, 1.30),
+                _candle("ins-usdeur-kraken", _M, 0.8),
                 _candle("ins-usdpln-kraken", _M, 4.0),
+                _candle("ins-eurusd-kraken-futures", _M, 1.99),
                 _candle("ins-eurusd-kraken", _M - timedelta(minutes=1), 1.20),
                 _candle("ins-eurusd-kraken", _M + timedelta(hours=3), 9.99),
                 _candle("ins-eurusd-kraken", _M, 7.77, timeframe="5m"),
@@ -129,81 +144,133 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
         await repo.engine.dispose()
 
 
-class TestGetPnlFxRateCandles:
-    """Cover the FX rate candle read."""
+class TestGetPnlFxRateExchanges:
+    """Cover bounded spot-FX plane discovery."""
 
-    async def test_matches_pair_on_currency_legs(self, repository: SQLAlchemyRepository) -> None:
-        """A requested ``(base, quote)`` resolves through the symbol's own legs."""
-        rows = await repository.get_pnl_fx_rate_candles(
-            [("EUR", "USD")], _M, _M, _NOW + timedelta(days=1)
-        )
-        assert {(r["base"], r["quote"]) for r in rows} == {("EUR", "USD")}
-
-    async def test_multiple_venues_are_ordered_deterministically(
+    async def test_discovers_each_concrete_forex_venue_plane(
         self, repository: SQLAlchemyRepository
     ) -> None:
-        """Two venues quoting one pair at one minute return in a stable order.
-
-        Row order decides which rate a caller folds into its map, so an unstable
-        order would make the same request return different money on each call.
-        """
-        rows = await repository.get_pnl_fx_rate_candles(
+        """Two spot venues on one pair remain distinct discovery candidates."""
+        planes = await repository.get_pnl_fx_rate_exchanges(
             [("EUR", "USD")], _M, _M, _NOW + timedelta(days=1)
         )
-        assert [(r["exchange"], r["close"]) for r in rows] == [
-            ("kraken", 1.25),
-            ("walutomat", 1.30),
+        assert planes == [
+            ("EUR", "USD", "kraken"),
+            ("EUR", "USD", "walutomat"),
         ]
 
-    async def test_both_orientations_resolve_independently(
+    async def test_both_orientations_are_discovered_on_one_venue(
         self, repository: SQLAlchemyRepository
     ) -> None:
-        """Requesting several pairs returns each one's own legs and closes."""
-        rows = await repository.get_pnl_fx_rate_candles(
-            [("EUR", "USD"), ("USD", "PLN")], _M, _M, _NOW + timedelta(days=1)
+        """Direct and inverse listings remain eligible on the selected venue."""
+        planes = await repository.get_pnl_fx_rate_exchanges(
+            [("EUR", "USD"), ("USD", "EUR")],
+            _M,
+            _M,
+            _NOW + timedelta(days=1),
         )
-        by_pair = {(r["base"], r["quote"]): r["close"] for r in rows if r["exchange"] == "kraken"}
-        assert by_pair == {("EUR", "USD"): 1.25, ("USD", "PLN"): 4.0}
+        assert planes == [
+            ("EUR", "USD", "kraken"),
+            ("EUR", "USD", "walutomat"),
+            ("USD", "EUR", "kraken"),
+        ]
 
-    async def test_unlisted_pair_yields_nothing(self, repository: SQLAlchemyRepository) -> None:
-        """A pair no venue lists returns no rows rather than a substitute."""
+    async def test_requires_bounded_finalized_one_minute_evidence(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """An unfinalized minute alone cannot advertise a usable venue plane."""
+        planes = await repository.get_pnl_fx_rate_exchanges(
+            [("EUR", "USD")],
+            _M + timedelta(minutes=1),
+            _M + timedelta(minutes=1),
+            _NOW + timedelta(days=1),
+        )
+        assert planes == []
+
+    async def test_empty_request_skips_the_query(self, repository: SQLAlchemyRepository) -> None:
+        """No requested currency legs return no candidate planes."""
+        assert await repository.get_pnl_fx_rate_exchanges([], _M, _M, _NOW) == []
+
+    async def test_perpetual_with_matching_legs_is_never_a_candidate(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """A derivatives series cannot certify a spot conversion rate."""
+        planes = await repository.get_pnl_fx_rate_exchanges(
+            [("EUR", "USD")], _M, _M, _NOW + timedelta(days=1)
+        )
+        assert ("EUR", "USD", "kraken_futures") not in planes
+
+
+class TestGetPnlFxRateCandles:
+    """Cover the pinned FX rate candle read."""
+
+    async def test_matches_exact_currency_legs_and_exchange(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """The requested plane resolves through all three identity dimensions."""
         rows = await repository.get_pnl_fx_rate_candles(
-            [("JPY", "USD")], _M, _M, _NOW + timedelta(days=1)
+            [("EUR", "USD", "kraken")], _M, _M, _NOW + timedelta(days=1)
+        )
+        assert [(row["base"], row["quote"], row["exchange"], row["close"]) for row in rows] == [
+            ("EUR", "USD", "kraken", 1.25)
+        ]
+
+    async def test_pinned_exchange_ignores_rival_at_same_pair_and_minute(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """A rival venue cannot enter a request pinned to Walutomat."""
+        rows = await repository.get_pnl_fx_rate_candles(
+            [("EUR", "USD", "walutomat")], _M, _M, _NOW + timedelta(days=1)
+        )
+        assert [(row["exchange"], row["close"]) for row in rows] == [("walutomat", 1.30)]
+
+    async def test_both_orientations_load_on_the_same_selected_venue(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """One venue pin can request its direct and inverse spot listings."""
+        rows = await repository.get_pnl_fx_rate_candles(
+            [("EUR", "USD", "kraken"), ("USD", "EUR", "kraken")],
+            _M,
+            _M,
+            _NOW + timedelta(days=1),
+        )
+        by_pair = {(row["base"], row["quote"]): row["close"] for row in rows}
+        assert by_pair == {("EUR", "USD"): 1.25, ("USD", "EUR"): 0.8}
+
+    async def test_unlisted_plane_yields_nothing(self, repository: SQLAlchemyRepository) -> None:
+        """An unavailable exchange plane returns no substitute venue's rows."""
+        rows = await repository.get_pnl_fx_rate_candles(
+            [("EUR", "USD", "bitstamp")], _M, _M, _NOW + timedelta(days=1)
         )
         assert rows == []
 
     async def test_empty_request_skips_the_query(self, repository: SQLAlchemyRepository) -> None:
-        """No requested pairs short-circuits without touching the database."""
+        """No requested planes short-circuit without touching the database."""
         assert await repository.get_pnl_fx_rate_candles([], _M, _M, _NOW) == []
 
     async def test_window_timeframe_and_finality_are_enforced(
         self, repository: SQLAlchemyRepository
     ) -> None:
-        """Only finalized 1m candles inside the window contribute a rate.
-
-        The fixture seeds an out-of-window candle, a 5m candle, and an unfinalized
-        one at the same pair; none may leak into a conversion.
-        """
+        """Only finalized one-minute rows inside the pinned plane window survive."""
         rows = await repository.get_pnl_fx_rate_candles(
-            [("EUR", "USD")],
+            [("EUR", "USD", "kraken")],
             _M - timedelta(minutes=1),
             _M + timedelta(minutes=1),
             _NOW + timedelta(days=1),
         )
-        closes = sorted(r["close"] for r in rows)
-        assert closes == [1.20, 1.25, 1.30]
+        assert sorted(row["close"] for row in rows) == [1.20, 1.25]
 
-    async def test_rows_are_sorted_by_open_at_then_pair(
+    async def test_rows_are_sorted_by_open_at_then_plane(
         self, repository: SQLAlchemyRepository
     ) -> None:
-        """Ordering is by candle time first so a fold walks the series forward."""
+        """Ordering walks minutes forward before the plane identity."""
         rows = await repository.get_pnl_fx_rate_candles(
-            [("EUR", "USD")],
+            [("EUR", "USD", "kraken")],
             _M - timedelta(minutes=1),
             _M,
             _NOW + timedelta(days=1),
         )
-        assert [r["open_at"] for r in rows] == sorted(r["open_at"] for r in rows)
+        assert [row["open_at"] for row in rows] == sorted(row["open_at"] for row in rows)
 
     async def test_rate_candle_uses_identity_valid_at_its_authoring_time(
         self, repository: SQLAlchemyRepository
@@ -232,9 +299,25 @@ class TestGetPnlFxRateCandles:
                 ]
             )
             await session.commit()
-        historical = await repository.get_pnl_fx_rate_candles([("GBP", "PLN")], _M, _M, _NOW)
-        relabeled = await repository.get_pnl_fx_rate_candles([("GBP", "USD")], _M, _M, _NOW)
+        historical = await repository.get_pnl_fx_rate_candles(
+            [("GBP", "PLN", "walutomat")], _M, _M, _NOW
+        )
+        relabeled = await repository.get_pnl_fx_rate_candles(
+            [("GBP", "USD", "walutomat")], _M, _M, _NOW
+        )
         assert [(row["base"], row["quote"], row["close"]) for row in historical] == [
             ("GBP", "PLN", 5.0)
         ]
         assert relabeled == []
+
+    async def test_perpetual_is_rejected_even_when_explicitly_requested(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """The forex guard rejects a matching derivatives exchange plane."""
+        rows = await repository.get_pnl_fx_rate_candles(
+            [("EUR", "USD", "kraken_futures")],
+            _M,
+            _M,
+            _NOW + timedelta(days=1),
+        )
+        assert rows == []

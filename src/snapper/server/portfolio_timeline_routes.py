@@ -35,6 +35,7 @@ from loguru import logger
 from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
 from snapper.api.schemas.pnl_timeline import PnlAttributionContributionData
 from snapper.api.schemas.pnl_timeline import PnlFillMarkerData
+from snapper.api.schemas.pnl_timeline import PnlFxRateSourceData
 from snapper.api.schemas.pnl_timeline import PnlInstrumentContributionData
 from snapper.api.schemas.pnl_timeline import PnlSeriesData
 from snapper.api.schemas.pnl_timeline import PnlSeriesResponse
@@ -444,6 +445,16 @@ async def get_pnl_series(
             to_time=validated.window_to,
             as_of=validated.as_of,
             mark_source=PNL_TIMELINE_MARK_SOURCE,
+            rate_sources=[
+                PnlFxRateSourceData(
+                    source_currency=source.source_currency,
+                    valuation_currency=source.valuation_currency,
+                    base_currency=source.base_currency,
+                    quote_currency=source.quote_currency,
+                    exchange=source.exchange,
+                )
+                for source in result.rate_sources
+            ],
             calc_version=PNL_TIMELINE_CALC_VERSION,
             points=_point_data(result),
         )
@@ -566,6 +577,16 @@ async def get_pnl_timeline(
             to_time=validated.window_to,
             as_of=validated.as_of,
             mark_source=PNL_TIMELINE_MARK_SOURCE,
+            rate_sources=[
+                PnlFxRateSourceData(
+                    source_currency=source.source_currency,
+                    valuation_currency=source.valuation_currency,
+                    base_currency=source.base_currency,
+                    quote_currency=source.quote_currency,
+                    exchange=source.exchange,
+                )
+                for source in result.series.rate_sources
+            ],
             calc_version=PNL_TIMELINE_CALC_VERSION,
             points=_point_data(result.series),
             marker_limit=result.marker_limit,

@@ -728,7 +728,116 @@ class TestEdges:
 
 
 class TestUntrustedCumulatives:
-    """Cover the fully-untrusted paths: unknown seeded cost basis and NaN marks."""
+    """Cover global and instrument-scoped untrusted cumulative paths."""
+
+    def test_instrument_untrust_preserves_independent_contribution(self) -> None:
+        """An untrusted instrument withholds the total but not a proven peer."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 2.0, 100.0, fee=1.0),
+            _exec("I2", 2, 0, "buy", 1.0, 50.0),
+        )
+        accruals = (TimelineAccrual(instrument_public_id="I1", accrued_at=_m(0), amount_usd=3.0),)
+        marks: MarkMap = {("I1", _m(0)): 110.0, ("I2", _m(0)): 55.0}
+        point = build_pnl_timeline(
+            executions,
+            accruals,
+            marks,
+            _window(0, 0),
+            untrusted_price_instruments={"I2"},
+        ).points[0]
+        contributions = {
+            contribution.instrument_public_id: contribution for contribution in point.per_instrument
+        }
+        proven = contributions["I1"]
+        assert proven.realized_pnl == 0.0
+        assert proven.fee_pnl == pytest.approx(-1.0)
+        assert proven.accrual_pnl == pytest.approx(-3.0)
+        assert proven.unrealized_pnl == pytest.approx(20.0)
+        withheld = contributions["I2"]
+        assert withheld.realized_pnl is None
+        assert withheld.fee_pnl is None
+        assert withheld.accrual_pnl is None
+        assert withheld.unrealized_pnl is None
+        assert point.realized_pnl is None
+        assert point.fee_pnl is None
+        assert point.accrual_pnl is None
+        assert point.unrealized_pnl is None
+        assert point.net_pnl is None
+        assert all(
+            bucket.realized_pnl is None
+            and bucket.fee_pnl is None
+            and bucket.accrual_pnl is None
+            and bucket.unrealized_pnl is None
+            for bucket in point.attribution
+        )
+
+    def test_nonfinite_instrument_cumulative_preserves_finite_peer(self) -> None:
+        """An attributable NaN preserves its peer while aggregate overflow stays global."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, fee=2.0),
+            _exec("I2", 2, 0, "buy", 1.0, 50.0, fee=float("nan")),
+        )
+        marks: MarkMap = {("I1", _m(0)): 105.0, ("I2", _m(0)): 55.0}
+        point = build_pnl_timeline(executions, (), marks, _window(0, 0)).points[0]
+        contributions = {
+            contribution.instrument_public_id: contribution for contribution in point.per_instrument
+        }
+        assert contributions["I1"].realized_pnl == 0.0
+        assert contributions["I1"].fee_pnl == pytest.approx(-2.0)
+        assert contributions["I1"].accrual_pnl == 0.0
+        assert contributions["I1"].unrealized_pnl == pytest.approx(5.0)
+        assert contributions["I2"].realized_pnl is None
+        assert contributions["I2"].fee_pnl is None
+        assert contributions["I2"].accrual_pnl is None
+        assert contributions["I2"].unrealized_pnl is None
+        assert point.realized_pnl is None
+        assert point.fee_pnl is None
+        assert point.accrual_pnl is None
+        assert point.unrealized_pnl is None
+        assert point.net_pnl is None
+        overflow_executions = (
+            _exec("I1", 1, 0, "buy", 0.0, 100.0, fee=-1e308),
+            _exec("I2", 2, 0, "buy", 0.0, 100.0, fee=-1e308),
+        )
+        overflow_point = build_pnl_timeline(overflow_executions, (), {}, _window(0, 0)).points[0]
+        assert overflow_point.realized_pnl is None
+        assert overflow_point.fee_pnl is None
+        assert overflow_point.accrual_pnl is None
+        assert overflow_point.unrealized_pnl is None
+        assert overflow_point.net_pnl is None
+        assert all(
+            contribution.realized_pnl is None
+            and contribution.fee_pnl is None
+            and contribution.accrual_pnl is None
+            and contribution.unrealized_pnl is None
+            for contribution in overflow_point.per_instrument
+        )
+
+    def test_unprovable_close_preserves_finite_peer(self) -> None:
+        """An invalid reducing price taints only its own instrument contribution."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, fee=2.0),
+            _exec("I2", 2, 0, "buy", 1.0, 50.0),
+            _exec("I2", 3, 1, "sell", 1.0, float("nan")),
+        )
+        marks: MarkMap = {("I1", _m(1)): 105.0}
+        point = build_pnl_timeline(executions, (), marks, _window(1, 1)).points[0]
+        contributions = {
+            contribution.instrument_public_id: contribution for contribution in point.per_instrument
+        }
+        assert contributions["I1"].realized_pnl == 0.0
+        assert contributions["I1"].fee_pnl == pytest.approx(-2.0)
+        assert contributions["I1"].accrual_pnl == 0.0
+        assert contributions["I1"].unrealized_pnl == pytest.approx(5.0)
+        assert contributions["I2"].realized_pnl is None
+        assert contributions["I2"].fee_pnl is None
+        assert contributions["I2"].accrual_pnl is None
+        assert contributions["I2"].unrealized_pnl is None
+        assert point.realized_pnl is None
+        assert point.fee_pnl is None
+        assert point.accrual_pnl is None
+        assert point.unrealized_pnl is None
+        assert point.net_pnl is None
 
     def test_unknown_seeded_basis_held_is_untrusted(self) -> None:
         """A non-flat opening position with no entry price withholds every component.

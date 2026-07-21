@@ -1,45 +1,39 @@
 """Async orchestrator + mark builder for the P&L timeline (Phase 5A API layer).
 
 The pure :mod:`snapper.application.portfolio.pnl_timeline` builder performs no
-I/O — it consumes already-fetched executions, accruals, and a resolved USD mark
-lookup. This module is the thin async seam that reads those inputs from the
-repository, resolves the USD marks from finalized 1m candles, and calls the pure
-builder. Keeping the I/O here is what lets the builder stay provably
-deterministic and trivially unit-testable while the wiring is exercised against
-the repository.
+I/O. It consumes already-fetched executions, accruals, and a mark lookup whose
+money values are all expressed in the requested valuation currency. This module
+is the thin async seam that proves the native denomination, loads finalized 1m
+candles, converts those inputs, and calls the pure builder.
 
-Mark resolution (checklist #13 — no historical FX in v1). For each distinct
-instrument the executions touch, the orchestrator resolves its
-``(native_symbol, source_exchange, quote_currency)`` via
-:meth:`Repository.get_instrument_symbol_refs`. The source exchange is
-``Instrument.source_exchange`` when present and ``Instrument.exchange``
-otherwise, so a PAPER instrument reads the canonical venue's candles while its
-own public id remains the mark-map key. A mark is produced ONLY when the
-instrument's quote currency equals the window valuation currency, because a 1m
-candle close is denominated in the quote currency and is therefore already a
-direct valuation-currency mark with no FX conversion. For every other instrument
-NO mark is emitted, so the pure builder marks those points incomplete rather than
-fabricating an unconverted number. The mark for grid minute ``M`` is the close of
-the finalized candle covering ``[M-1m, M)`` (``open_at == M - 1min``), so there
-is no look-ahead: minute ``M`` is valued only from the bar that closed at ``M``.
+For each instrument the orchestrator resolves its ``(native_symbol,
+source_exchange, instrument_exchange, base_currency, quote_currency)`` history
+via :meth:`Repository.get_instrument_symbol_refs`. Every version known at the
+response horizon must unanimously carry one base and one non-null quote currency.
+Adjacent or overlapping knowledge intervals with the same full price projection
+are merged before one projection is required to cover every fill. Missing,
+gapped, conflicting, or venue-mismatched evidence remains untrusted and never
+reaches the average-cost kernel as a certified price.
 
-Execution-price discipline uses the same direct-currency proof. Every version
-known at the response horizon must unanimously carry the requested quote
-currency. Within the execution span, adjacent or overlapping knowledge
-intervals with the same native symbol, candle venue, owning venue, and quote are
-merged before requiring one projection to cover every fill. This tolerates
-denomination-irrelevant metadata churn without allowing a quote correction,
-gap, conflicting projection, or venue mismatch to certify prices. The pure
-builder then withholds every component from the first affected fill onward
-instead of passing an unproved price into the average-cost kernel.
+A proven foreign quote is converted rather than rejected. Each positive
+execution price is converted at the fill's own minute before pool replay, and
+each positive mark close is converted at the grid minute it values. One exact
+``(base, quote, exchange)`` plane is resolved per unordered currency pair for
+the entire request. A held instrument's own pair forces its canonical oriented
+source plane, while third-party oriented planes compete by exact-minute
+coverage. Neither a rival venue nor the opposite orientation can fill a pinned
+plane's gap. No triangulation, nearest-minute match, or stale carry-forward is
+permitted. A missing execution rate becomes ``NaN`` so the pure builder applies
+its existing opening-versus-closing trust tiers. A missing mark rate emits no
+mark, producing mark-incomplete valuation without tainting mark-independent
+cumulatives.
 
-Currency discipline for flows — UNKNOWN, never a fabricated ZERO. Exact zero is
-currency-invariant, so a zero fee or accrual stays zero even when its asset is
-empty or differs from the valuation currency. A nonzero fee or funding accrual
-denominated in something other than the valuation currency cannot be converted in
-v1 (the FX work is deferred), so it is passed to the builder as ``NaN`` rather
-than silently zeroed or dropped. The builder's finiteness guard turns that into a
-WITHHELD (untrusted) point, which is the honest outcome.
+The mark for grid minute ``M`` is the close of the finalized candle covering
+``[M-1m, M)`` (``open_at == M - 1min``), and its FX rate follows the same
+convention. Execution, fee, and accrual conversions use the last rate bar that
+had closed at the event's floored minute. Exact zero remains currency-invariant;
+an unconvertible nonzero flow is passed as ``NaN`` rather than silently zeroed or
+dropped.
 """
 
 import math
@@ -51,10 +45,13 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Final
 from typing import Literal
+from typing import cast
 
+from snapper.application.portfolio.fx_rates import FxPairKey
 from snapper.application.portfolio.fx_rates import FxRateMap
+from snapper.application.portfolio.fx_rates import FxVenueMap
 from snapper.application.portfolio.fx_rates import convert_amount
-from snapper.application.portfolio.fx_rates import required_pairs
+from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import PnlAttributionContribution
 from snapper.application.portfolio.pnl_timeline import PnlInstrumentContribution
@@ -68,6 +65,7 @@ from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
 from snapper.core.numeric import is_positive_finite
 from snapper.data.repository import Repository
 from snapper.data.repository_types import InstrumentSymbolRefRow
+from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
@@ -79,7 +77,7 @@ from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.4"
+PNL_TIMELINE_CALC_VERSION = "5A.7"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, or mark-resolution semantics
@@ -158,10 +156,28 @@ type PnlTimelineMarker = PnlFillMarker | PnlSignalMarker | PnlAiDecisionMarker
 
 
 @dataclass(frozen=True, slots=True)
+class PnlFxRateSource:
+    """One request-pinned FX plane expressed with conversion provenance."""
+
+    source_currency: str
+    valuation_currency: str
+    base_currency: str
+    quote_currency: str
+    exchange: str
+
+
+@dataclass(frozen=True)
+class PnlWalletSeriesResult(PnlTimelineResult):
+    """A pure P&L series augmented with attributable FX rate venues."""
+
+    rate_sources: tuple[PnlFxRateSource, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PnlWalletTimelineResult:
     """One reconstructed series with a bounded marker overlay."""
 
-    series: PnlTimelineResult
+    series: PnlWalletSeriesResult
     markers: tuple[PnlTimelineMarker, ...]
     marker_limit: int
     markers_truncated: bool
@@ -189,53 +205,88 @@ def _rate_minute(moment: datetime) -> datetime:
 
 
 def build_fx_rates(rows: Sequence[PnlFxRateRow]) -> FxRateMap:
-    """Fold FX candle rows into the minute-keyed rate map.
+    """Fold FX candle rows into the plane-qualified minute rate map.
 
-    Several venues list the same pair, so the FIRST row for a
-    ``(base, quote, minute)`` wins and later ones are ignored. The read returns
-    rows sorted by ``(open_at, base, quote, exchange)``, which makes that winner
-    the alphabetically-first venue — deterministic, so the same request always
-    returns the same money instead of depending on row order.
+    Venue is part of the key, so cross-venue quotes remain distinct evidence. If
+    two rows still conflict on the full identity, that key becomes ``NaN`` and
+    conversion refuses it rather than allowing row order to elect a price. The
+    caller filters the book through one request-pinned oriented plane per pair.
 
     Args:
         rows: Finalized 1m closes from ``get_pnl_fx_rate_candles``.
 
     Returns:
-        Rate map keyed by ``(base, quote, minute)`` where the minute is the
-        instant the bar closed.
+        Rate map keyed by ``(base, quote, exchange, minute)`` where the minute
+        is the instant the bar closed.
     """
-    rates: dict[tuple[str, str, datetime], float] = {}
+    rates: dict[tuple[str, str, str, datetime], float] = {}
     for row in rows:
-        rates.setdefault(
-            (row["base"], row["quote"], row["open_at"] + timedelta(minutes=1)), row["close"]
+        key = (
+            row["base"],
+            row["quote"],
+            row["exchange"],
+            row["open_at"] + timedelta(minutes=1),
         )
+        existing = rates.get(key)
+        if existing is not None and existing != row["close"]:
+            rates[key] = math.nan
+        else:
+            rates[key] = row["close"]
     return rates
 
 
 def _to_timeline_execution(
-    row: PnlTimelineExecutionRow, valuation_ccy: str, rates: FxRateMap
+    row: PnlTimelineExecutionRow,
+    valuation_ccy: str,
+    rates: FxRateMap,
+    price_currency: str | None = None,
+    venues: FxVenueMap | None = None,
 ) -> TimelineExecution:
     """Map a repository execution row onto the pure builder's input.
 
-    Exact zero passes through regardless of asset because zero is
-    currency-invariant. A nonzero foreign fee is CONVERTED at the flow's own
-    minute using our finalized 1m candles; only when no direct or inverse pair
-    covers that minute does it stay UNKNOWN and pass as ``NaN``, which makes the
-    builder withhold rather than understate a real cost. ``event_time`` is the row's ``timestamp`` (the
-    time axis), never the nullable ``executed_at``.
+    A positive execution price with a proven ``price_currency`` is converted at
+    the fill's exact rate minute before entering the average-cost pool. A missing
+    rate becomes ``NaN`` so the builder chooses its existing weakest honest tier.
+    Raw non-positive or non-finite prices pass through unchanged so the D1 guard
+    remains authoritative. Exact-zero fees pass through regardless of asset; a
+    nonzero foreign fee is converted at the same event minute or becomes
+    ``NaN``. ``event_time`` is the row's ``timestamp`` axis, never nullable
+    ``executed_at``.
 
     Args:
         row: One ``get_pnl_timeline_executions`` row.
         valuation_ccy: Currency the series is valued in.
-        rates: Minute-keyed FX rates used to convert a foreign-denominated fee.
+        rates: Minute-keyed FX rates used for price and fee conversion.
+        price_currency: Proven quote currency of the execution price. ``None``
+            leaves the raw price unchanged for callers that enforce trust
+            separately.
+        venues: Request-pinned oriented plane for each converted currency pair.
 
     Returns:
         The equivalent :class:`TimelineExecution`.
     """
-    converted = convert_amount(
-        row["fee"], row["fee_asset"], valuation_ccy, _rate_minute(row["timestamp"]), rates
+    rate_minute = _rate_minute(row["timestamp"])
+    converted_fee = convert_amount(
+        row["fee"],
+        row["fee_asset"],
+        valuation_ccy,
+        rate_minute,
+        rates,
+        venues,
     )
-    fee = math.nan if converted is None else converted
+    fee = math.nan if converted_fee is None else converted_fee
+    raw_price = row["price"]
+    price = raw_price
+    if price_currency is not None and is_positive_finite(raw_price):
+        converted_price = convert_amount(
+            raw_price,
+            price_currency,
+            valuation_ccy,
+            rate_minute,
+            rates,
+            venues,
+        )
+        price = converted_price if is_positive_finite(converted_price) else math.nan
     return TimelineExecution(
         order_public_id=row["order_public_id"],
         instrument_public_id=row["instrument_public_id"],
@@ -244,7 +295,7 @@ def _to_timeline_execution(
         event_time=row["timestamp"],
         side=row["side"],
         size=row["size"],
-        price=row["price"],
+        price=price,
         fee=fee,
         fee_asset=row["fee_asset"],
     )
@@ -290,7 +341,10 @@ def _build_execution_lineage(
 
 
 def _to_timeline_accrual(
-    row: PnlTimelineAccrualRow, valuation_ccy: str, rates: FxRateMap
+    row: PnlTimelineAccrualRow,
+    valuation_ccy: str,
+    rates: FxRateMap,
+    venues: FxVenueMap | None = None,
 ) -> TimelineAccrual:
     """Map a repository accrual row onto the pure builder's input.
 
@@ -303,12 +357,18 @@ def _to_timeline_accrual(
         row: One ``get_accruals_for_pnl`` row.
         valuation_ccy: Currency the series is valued in.
         rates: Minute-keyed FX rates used to convert a foreign-denominated amount.
+        venues: Request-pinned oriented plane for each converted currency pair.
 
     Returns:
         The equivalent :class:`TimelineAccrual`.
     """
     converted = convert_amount(
-        row["amount"], row["amount_asset"], valuation_ccy, _rate_minute(row["accrued_at"]), rates
+        row["amount"],
+        row["amount_asset"],
+        valuation_ccy,
+        _rate_minute(row["accrued_at"]),
+        rates,
+        venues,
     )
     amount = math.nan if converted is None else converted
     return TimelineAccrual(
@@ -441,6 +501,78 @@ def _enforce_total_work_budget(
         )
 
 
+async def _load_mark_candles(
+    repo: Repository,
+    refs: Sequence[InstrumentSymbolRefRow],
+    from_time: datetime,
+    to_time: datetime,
+    as_of: datetime,
+) -> list[PnlTimelineCandleRow]:
+    """Load one bounded batch of raw mark candles for trusted references.
+
+    Args:
+        repo: Repository providing the timeline candle read.
+        refs: Trusted symbol references to load.
+        from_time: Window start whose minute floor anchors the read.
+        to_time: Inclusive series end.
+        as_of: Snapshot time threading the candle read.
+
+    Returns:
+        Raw finalized one-minute mark candles, or an empty list when no
+        references need marks.
+    """
+    if not refs:
+        return []
+    grid_start = from_time.replace(second=0, microsecond=0)
+    candles = await repo.get_pnl_timeline_candles(
+        refs,
+        grid_start - timedelta(minutes=1),
+        to_time,
+        as_of,
+    )
+    return list(candles)
+
+
+def _build_marks_from_candles(
+    candles: Sequence[PnlTimelineCandleRow],
+    quote_by_instrument: Mapping[str, str],
+    valuation_ccy: str,
+    rates: FxRateMap,
+    venues: FxVenueMap,
+) -> MarkMap:
+    """Convert positive raw closes through one request-pinned FX plane map.
+
+    Args:
+        candles: Raw finalized mark candles.
+        quote_by_instrument: Proven denomination of each candle close.
+        valuation_ccy: Currency the returned marks are denominated in.
+        rates: Plane-qualified exact-minute FX closes.
+        venues: One request-pinned oriented plane per unordered currency pair.
+
+    Returns:
+        Positive converted marks keyed by instrument and closing minute.
+    """
+    marks: dict[tuple[str, datetime], float | None] = {}
+    for candle in candles:
+        close = candle["close"]
+        if not is_positive_finite(close):
+            continue
+        instrument_public_id = candle["instrument_public_id"]
+        quote_currency = quote_by_instrument[instrument_public_id]
+        mark_minute = candle["open_at"] + timedelta(minutes=1)
+        converted = convert_amount(
+            close,
+            quote_currency,
+            valuation_ccy,
+            mark_minute,
+            rates,
+            venues,
+        )
+        if is_positive_finite(converted):
+            marks[(instrument_public_id, mark_minute)] = converted
+    return marks
+
+
 async def build_marks(
     repo: Repository,
     refs: Sequence[InstrumentSymbolRefRow],
@@ -448,16 +580,19 @@ async def build_marks(
     to_time: datetime,
     as_of: datetime,
     valuation_ccy: str,
+    rates: FxRateMap | None = None,
+    venues: FxVenueMap | None = None,
 ) -> MarkMap:
-    """Resolve the valuation-currency marks from one batched candle read.
+    """Resolve valuation-currency marks from one batched candle read.
 
-    For every instrument whose quote currency equals ``valuation_ccy`` the 1m
-    candle series covering the window participates in one timeline-specific
-    repository range read. Each bar's close is keyed at ``open_at + 1min`` — the
-    grid minute the bar values without look-ahead. The repository resolves each
-    reference on its canonical source venue but projects the requesting
-    instrument's own public id, preserving PAPER instrument identity in the mark
-    map. Instruments quoted in another currency contribute no mark.
+    Every non-null-quote reference participates when a rate map is supplied.
+    Each positive candle close is converted from that quote into
+    ``valuation_ccy`` at ``open_at + 1min``, the grid minute the bar values
+    without look-ahead. A missing exact-minute rate emits no mark. When ``rates``
+    is omitted, only already-native references participate, retaining the
+    helper's direct-mark mode. The repository resolves each reference on its
+    canonical source venue but projects the requesting instrument's own public
+    id, preserving PAPER identity in the mark map.
 
     Args:
         repo: Repository providing the batched timeline candle read.
@@ -465,43 +600,55 @@ async def build_marks(
         from_time: Window start (its minute floor anchors the candle range).
         to_time: Window end.
         as_of: Snapshot time threading the candle read.
-        valuation_ccy: Currency the marks must already be denominated in.
+        valuation_ccy: Currency the returned marks are denominated in.
+        rates: Exact-minute pinned-plane rates for foreign closes. Omission
+            selects direct-mark mode and skips foreign references.
+        venues: One request-pinned oriented plane per unordered currency pair.
 
     Returns:
-        A mapping keyed by ``(instrument_public_id, grid_minute)`` to the direct
-        valuation-currency close mark for that minute.
+        A mapping keyed by ``(instrument_public_id, grid_minute)`` to the
+        converted valuation-currency close mark for that minute.
     """
-    marks: dict[tuple[str, datetime], float | None] = {}
-    grid_start = from_time.replace(second=0, microsecond=0)
-    candle_start = grid_start - timedelta(minutes=1)
-    eligible_refs = [ref for ref in refs if ref["quote_currency"] == valuation_ccy]
+    eligible_refs = [
+        ref
+        for ref in refs
+        if ref["quote_currency"] == valuation_ccy
+        or (rates is not None and ref["quote_currency"] is not None)
+    ]
     if not eligible_refs:
-        return marks
-    candles: Sequence[PnlTimelineCandleRow] = await repo.get_pnl_timeline_candles(
+        return {}
+    resolved_rates: FxRateMap = {} if rates is None else rates
+    resolved_venues: FxVenueMap = {} if venues is None else venues
+    quote_by_instrument = {
+        ref["instrument_public_id"]: cast(str, ref["quote_currency"]) for ref in eligible_refs
+    }
+    candles = await _load_mark_candles(
+        repo,
         eligible_refs,
-        candle_start,
+        from_time,
         to_time,
         as_of,
     )
-    for candle in candles:
-        close = candle["close"]
-        if not is_positive_finite(close):
-            continue
-        mark_minute = candle["open_at"] + timedelta(minutes=1)
-        marks[(candle["instrument_public_id"], mark_minute)] = close
-    return marks
+    return _build_marks_from_candles(
+        candles,
+        quote_by_instrument,
+        valuation_ccy,
+        resolved_rates,
+        resolved_venues,
+    )
 
 
 def _merge_price_ref_intervals(
     refs: Sequence[InstrumentSymbolRefRow],
 ) -> list[InstrumentSymbolRefRow]:
     """Merge touching intervals that carry the same price-proof projection."""
-    grouped: dict[tuple[str, str, str, str | None], list[InstrumentSymbolRefRow]] = {}
+    grouped: dict[tuple[str, str, str, str, str | None], list[InstrumentSymbolRefRow]] = {}
     for ref in refs:
         key = (
             ref["native_symbol"],
             ref["exchange"],
             ref["instrument_exchange"],
+            ref["base_currency"],
             ref["quote_currency"],
         )
         grouped.setdefault(key, []).append(ref)
@@ -519,27 +666,26 @@ def _merge_price_ref_intervals(
     return merged
 
 
-def _partition_price_refs(
+def _partition_series_price_refs(
     instrument_spans: Mapping[str, tuple[datetime, datetime]],
     refs: Sequence[InstrumentSymbolRefRow],
-    valuation_ccy: str,
 ) -> tuple[list[InstrumentSymbolRefRow], set[str]]:
-    """Partition instrument spans by direct price-currency proof.
+    """Partition instrument spans by convertible price-currency proof.
 
-    Every version known at the response horizon must agree on
-    ``valuation_ccy``. Overlapping candidates are then collapsed by their
-    denomination-relevant projection and touching intervals for one projection
-    are merged before requiring exactly one candidate to cover the event span.
-    Missing, gapped, conflicting, null-quote, and foreign-quote references remain
+    Every version known at the response horizon must agree on one base currency
+    and one non-null quote currency. The quote may differ from the requested
+    valuation currency because the series layer converts it later. Candidates are collapsed by
+    their denomination-relevant projection, and touching intervals for one
+    projection are merged before exactly one candidate must cover the event
+    span. Missing, gapped, conflicting, and null-quote references remain
     untrusted while metadata-only version churn does not blank the series.
 
     Args:
         instrument_spans: Inclusive event-time bounds keyed by instrument.
         refs: Historical symbol-reference intervals for those instruments.
-        valuation_ccy: Currency the execution prices must already represent.
 
     Returns:
-        Uniquely proven references in input-instrument order and the set of
+        Uniquely proven convertible references in input-instrument order and the
         instrument identities whose execution-price currency is untrusted.
     """
     refs_by_instrument: dict[str, list[InstrumentSymbolRefRow]] = {}
@@ -549,6 +695,7 @@ def _partition_price_refs(
     untrusted_instruments: set[str] = set()
     for instrument_public_id, (span_start, span_end) in instrument_spans.items():
         instrument_refs = refs_by_instrument.get(instrument_public_id, [])
+        base_currencies = {ref["base_currency"] for ref in instrument_refs}
         quote_currencies = {ref["quote_currency"] for ref in instrument_refs}
         candidates = _merge_price_ref_intervals(
             [
@@ -558,7 +705,9 @@ def _partition_price_refs(
             ]
         )
         if (
-            quote_currencies == {valuation_ccy}
+            len(base_currencies) == 1
+            and len(quote_currencies) == 1
+            and None not in quote_currencies
             and len(candidates) == 1
             and candidates[0]["valid_from"] <= span_start
             and candidates[0]["valid_to"] > span_end
@@ -566,6 +715,83 @@ def _partition_price_refs(
             trusted_refs.append(candidates[0])
         else:
             untrusted_instruments.add(instrument_public_id)
+    return trusted_refs, untrusted_instruments
+
+
+def _partition_price_refs(
+    instrument_spans: Mapping[str, tuple[datetime, datetime]],
+    refs: Sequence[InstrumentSymbolRefRow],
+    valuation_ccy: str,
+) -> tuple[list[InstrumentSymbolRefRow], set[str]]:
+    """Partition raw marker prices by direct valuation-currency proof.
+
+    Marker prices are intentionally not converted. This gate layers the raw
+    overlay's direct-currency requirement on top of the same unanimous quote,
+    interval-coverage, and projection proof used by the converted series.
+
+    Args:
+        instrument_spans: Inclusive event-time bounds keyed by instrument.
+        refs: Historical symbol-reference intervals for those instruments.
+        valuation_ccy: Currency a raw marker price must already represent.
+
+    Returns:
+        Direct-currency references and every instrument that fails either the
+        shared identity proof or the marker-specific valuation gate.
+    """
+    trusted_refs, untrusted_instruments = _partition_series_price_refs(
+        instrument_spans,
+        refs,
+    )
+    direct_refs: list[InstrumentSymbolRefRow] = []
+    for ref in trusted_refs:
+        if ref["quote_currency"] == valuation_ccy:
+            direct_refs.append(ref)
+        else:
+            untrusted_instruments.add(ref["instrument_public_id"])
+    return direct_refs, untrusted_instruments
+
+
+def _partition_series_execution_price_refs(
+    execution_rows: Sequence[PnlTimelineExecutionRow],
+    refs: Sequence[InstrumentSymbolRefRow],
+) -> tuple[list[InstrumentSymbolRefRow], set[str]]:
+    """Prove convertible execution prices over complete instrument spans.
+
+    The shared series proof establishes one non-null quote and one unchanged
+    source projection over every fill, then independently requires immutable
+    execution venue lineage to match the reference's owning venue.
+
+    Args:
+        execution_rows: Scope execution prefix replayed by the P&L kernel.
+        refs: Historical symbol-reference intervals for those instruments.
+
+    Returns:
+        References whose quote and venue can be converted safely, and the
+        instruments whose denomination or venue remains untrusted.
+    """
+    spans: dict[str, tuple[datetime, datetime]] = {}
+    for row in execution_rows:
+        instrument_public_id = row["instrument_public_id"]
+        event_time = row["timestamp"]
+        existing = spans.get(instrument_public_id)
+        if existing is None:
+            spans[instrument_public_id] = (event_time, event_time)
+        else:
+            spans[instrument_public_id] = (
+                min(existing[0], event_time),
+                max(existing[1], event_time),
+            )
+    trusted_refs, untrusted_instruments = _partition_series_price_refs(spans, refs)
+    trusted_by_instrument = {ref["instrument_public_id"]: ref for ref in trusted_refs}
+    for row in execution_rows:
+        instrument_public_id = row["instrument_public_id"]
+        ref = trusted_by_instrument.get(instrument_public_id)
+        if ref is not None and row["exchange"] != ref["instrument_exchange"]:
+            untrusted_instruments.add(instrument_public_id)
+    if untrusted_instruments:
+        trusted_refs = [
+            ref for ref in trusted_refs if ref["instrument_public_id"] not in untrusted_instruments
+        ]
     return trusted_refs, untrusted_instruments
 
 
@@ -586,96 +812,441 @@ def _partition_execution_price_refs(
         every fill, and the instruments whose execution-price denomination or
         venue remains untrusted.
     """
-    spans: dict[str, tuple[datetime, datetime]] = {}
-    for row in execution_rows:
-        instrument_public_id = row["instrument_public_id"]
-        event_time = row["timestamp"]
-        existing = spans.get(instrument_public_id)
-        if existing is None:
-            spans[instrument_public_id] = (event_time, event_time)
+    trusted_refs, untrusted_instruments = _partition_series_execution_price_refs(
+        execution_rows,
+        refs,
+    )
+    direct_refs: list[InstrumentSymbolRefRow] = []
+    for ref in trusted_refs:
+        if ref["quote_currency"] == valuation_ccy:
+            direct_refs.append(ref)
         else:
-            spans[instrument_public_id] = (
-                min(existing[0], event_time),
-                max(existing[1], event_time),
-            )
-    trusted_refs, untrusted_instruments = _partition_price_refs(spans, refs, valuation_ccy)
-    trusted_by_instrument = {ref["instrument_public_id"]: ref for ref in trusted_refs}
-    for row in execution_rows:
-        instrument_public_id = row["instrument_public_id"]
-        ref = trusted_by_instrument.get(instrument_public_id)
-        if ref is not None and row["exchange"] != ref["instrument_exchange"]:
-            untrusted_instruments.add(instrument_public_id)
-    if untrusted_instruments:
-        trusted_refs = [
-            ref for ref in trusted_refs if ref["instrument_public_id"] not in untrusted_instruments
-        ]
-    return trusted_refs, untrusted_instruments
+            untrusted_instruments.add(ref["instrument_public_id"])
+    return direct_refs, untrusted_instruments
 
 
-def _flows_needing_conversion(
-    execution_rows: Sequence[PnlTimelineExecutionRow],
-    accrual_rows: Sequence[PnlTimelineAccrualRow],
+type _FxMinuteRequirements = dict[FxPairKey, set[datetime]]
+"""Exact conversion minutes grouped by unordered currency pair."""
+
+type _FxIdentityPlanes = dict[FxPairKey, set[PnlFxRatePlane]]
+"""Canonical held-instrument planes constraining each needed FX pair."""
+
+
+def _add_fx_minute(
+    requirements: _FxMinuteRequirements,
+    currency: str,
     valuation_ccy: str,
-) -> list[tuple[str, datetime]]:
-    """Return the (currency, minute) pairs whose conversion needs a real rate.
-
-    Only a NONZERO amount denominated in another currency needs evidence: an
-    exact zero is currency-invariant and the valuation currency converts by
-    identity, so neither should drag a candle read into existence.
+    minute: datetime,
+) -> None:
+    """Add one foreign-currency conversion minute when evidence is required.
 
     Args:
-        execution_rows: Scope executions, whose fee carries ``fee_asset``.
+        requirements: Mutable exact-minute requirements grouped by pair.
+        currency: Denomination of the value being converted.
+        valuation_ccy: Target series currency.
+        minute: Exact rate minute needed by the conversion.
+    """
+    if not currency or currency == valuation_ccy:
+        return
+    requirements.setdefault(currency_pair_key(currency, valuation_ccy), set()).add(minute)
+
+
+def _event_fx_minutes(
+    execution_rows: Sequence[PnlTimelineExecutionRow],
+    accrual_rows: Sequence[PnlTimelineAccrualRow],
+    quote_by_instrument: Mapping[str, str],
+    valuation_ccy: str,
+) -> _FxMinuteRequirements:
+    """Collect exact rate minutes needed by prices, fees, and accruals.
+
+    A positive foreign execution price enters the average-cost kernel only after
+    conversion at its fill minute. Nonzero foreign fees and accruals need the same
+    proof, while exact zero and native-currency values need no candle.
+
+    Args:
+        execution_rows: Trusted scope executions replayed by the kernel.
         accrual_rows: Scope accruals, whose amount carries ``amount_asset``.
+        quote_by_instrument: Proven execution-price denominations.
         valuation_ccy: Currency the series is valued in.
 
     Returns:
-        Distinct ``(currency, rate_minute)`` pairs requiring a rate.
+        Exact required minutes grouped by unordered currency pair.
     """
-    needed: set[tuple[str, datetime]] = set()
+    needed: _FxMinuteRequirements = {}
     for row in execution_rows:
-        if row["fee"] != 0.0 and row["fee_asset"] != valuation_ccy:
-            needed.add((row["fee_asset"], _rate_minute(row["timestamp"])))
+        minute = _rate_minute(row["timestamp"])
+        quote_currency = quote_by_instrument.get(row["instrument_public_id"])
+        if quote_currency is not None and is_positive_finite(row["price"]):
+            _add_fx_minute(needed, quote_currency, valuation_ccy, minute)
+        if row["fee"] != 0.0:
+            _add_fx_minute(needed, row["fee_asset"], valuation_ccy, minute)
     for accrual in accrual_rows:
-        if accrual["amount"] != 0.0 and accrual["amount_asset"] != valuation_ccy:
-            needed.add((accrual["amount_asset"], _rate_minute(accrual["accrued_at"])))
-    return sorted(needed)
+        if accrual["amount"] != 0.0:
+            _add_fx_minute(
+                needed,
+                accrual["amount_asset"],
+                valuation_ccy,
+                _rate_minute(accrual["accrued_at"]),
+            )
+    return needed
 
 
-async def _load_flow_fx_rates(
-    repo: Repository,
-    convertible: Sequence[tuple[str, datetime]],
+def _mark_fx_minutes(
+    candles: Sequence[PnlTimelineCandleRow],
+    execution_rows: Sequence[PnlTimelineExecutionRow],
+    quote_by_instrument: Mapping[str, str],
     valuation_ccy: str,
-    as_of: datetime,
-) -> FxRateMap:
-    """Load exactly the FX rates the scope's foreign flows require.
-
-    The range is bounded by the FLOWS' OWN minutes, never by the requested
-    window. A fill that predates the window is still replayed — it seeds the pool
-    the window opens with — so its fee needs a rate at ITS timestamp; bounding the
-    read by the window silently withheld the whole series for any wallet whose
-    only foreign-currency fill happened earlier. Narrowing to the minutes that
-    actually need a rate also keeps the read small: a lifetime-spanning
-    min..max would otherwise pull one row per pair per minute.
+    from_time: datetime,
+    to_time: datetime,
+) -> _FxMinuteRequirements:
+    """Collect exact rate minutes needed by positive foreign mark closes.
 
     Args:
-        repo: Repository providing the FX candle read.
-        convertible: ``(currency, minute)`` pairs needing a rate.
-        valuation_ccy: Target currency for every conversion.
-        as_of: Knowledge horizon threading the candle read.
+        candles: Raw finalized mark candles already bounded to the chart window.
+        execution_rows: Trusted fills in replay order through the chart end.
+        quote_by_instrument: Proven denomination of each candle close.
+        valuation_ccy: Currency the series is valued in.
+        from_time: Requested chart start whose minute floor anchors the grid.
+        to_time: Inclusive requested chart end.
 
     Returns:
-        The minute-keyed rate map, empty when nothing needs converting.
+        Exact required minutes grouped by unordered currency pair.
     """
-    if not convertible:
-        return {}
-    pairs = required_pairs(frozenset(currency for currency, _ in convertible), valuation_ccy)
-    if not pairs:
-        return {}
-    minutes = [minute for _, minute in convertible]
-    rate_rows = await repo.get_pnl_fx_rate_candles(
-        sorted(pairs), min(minutes) - timedelta(minutes=1), max(minutes), as_of
+    needed: _FxMinuteRequirements = {}
+    grid_start = from_time.replace(second=0, microsecond=0)
+    first_fill_at: dict[str, datetime] = {}
+    for row in execution_rows:
+        first_fill_at.setdefault(row["instrument_public_id"], row["timestamp"])
+    for candle in candles:
+        if not is_positive_finite(candle["close"]):
+            continue
+        instrument_public_id = candle["instrument_public_id"]
+        first_fill = first_fill_at[instrument_public_id]
+        quote_currency = quote_by_instrument[instrument_public_id]
+        mark_minute = candle["open_at"] + timedelta(minutes=1)
+        if mark_minute < grid_start or mark_minute < first_fill or mark_minute > to_time:
+            continue
+        _add_fx_minute(
+            needed,
+            quote_currency,
+            valuation_ccy,
+            mark_minute,
+        )
+    return needed
+
+
+def _merge_fx_minutes(
+    first: Mapping[FxPairKey, set[datetime]],
+    second: Mapping[FxPairKey, set[datetime]],
+) -> _FxMinuteRequirements:
+    """Merge two pair-minute requirement maps without widening either read.
+
+    Args:
+        first: First bounded requirement map.
+        second: Second bounded requirement map.
+
+    Returns:
+        Unioned exact minutes used only for request-wide venue resolution.
+    """
+    merged: _FxMinuteRequirements = {pair: set(minutes) for pair, minutes in first.items()}
+    for pair, minutes in second.items():
+        merged.setdefault(pair, set()).update(minutes)
+    return merged
+
+
+def _identity_fx_planes(
+    refs: Sequence[InstrumentSymbolRefRow],
+    needed_pairs: frozenset[FxPairKey],
+) -> _FxIdentityPlanes:
+    """Find canonical held-symbol planes that constrain needed FX pairs.
+
+    Any trusted held instrument whose own currency legs equal a needed unordered
+    pair supplies its exact oriented candle plane. Multiple distinct canonical
+    planes are irreconcilable and intentionally leave the pair unresolved later.
+
+    Args:
+        refs: Trusted held-instrument symbol references.
+        needed_pairs: Currency pairs required anywhere in this request.
+
+    Returns:
+        Canonical oriented source planes grouped by matching unordered pair.
+    """
+    identities: _FxIdentityPlanes = {}
+    for ref in refs:
+        quote_currency = cast(str, ref["quote_currency"])
+        pair = currency_pair_key(ref["base_currency"], quote_currency)
+        if pair in needed_pairs:
+            identities.setdefault(pair, set()).add(
+                (ref["base_currency"], quote_currency, ref["exchange"])
+            )
+    return identities
+
+
+def _fx_requirement_range(
+    requirements: Mapping[FxPairKey, set[datetime]],
+) -> tuple[datetime, datetime] | None:
+    """Return the bounded candle-open range covering exact rate minutes.
+
+    Args:
+        requirements: Exact rate minutes grouped by pair.
+
+    Returns:
+        Inclusive candle-open bounds, or ``None`` for no requirements.
+    """
+    minutes = [minute for pair_minutes in requirements.values() for minute in pair_minutes]
+    if not minutes:
+        return None
+    return min(minutes) - timedelta(minutes=1), max(minutes)
+
+
+def _oriented_fx_pairs(pairs: Sequence[FxPairKey]) -> list[tuple[str, str]]:
+    """Expand unordered pairs into both publication orientations.
+
+    Args:
+        pairs: Unordered currency-pair identities.
+
+    Returns:
+        Deterministically ordered direct and inverse currency legs.
+    """
+    oriented: set[tuple[str, str]] = set()
+    for first, second in pairs:
+        oriented.add((first, second))
+        oriented.add((second, first))
+    return sorted(oriented)
+
+
+async def _discover_fx_candidates(
+    repo: Repository,
+    requirements: Mapping[FxPairKey, set[datetime]],
+    identity_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
+    as_of: datetime,
+) -> list[PnlFxRatePlane]:
+    """Discover nonidentity spot-FX planes in one bounded rate window.
+
+    Identity-constrained pairs skip discovery because their held instrument's
+    canonical source venue takes precedence even when it has gaps.
+
+    Args:
+        repo: Repository providing bounded forex-plane discovery.
+        requirements: Exact pair minutes in this mark or event window.
+        identity_planes: Canonical plane constraints for the whole request.
+        as_of: Knowledge horizon threading the repository read.
+
+    Returns:
+        Concrete oriented venue planes with evidence in this window.
+    """
+    unconstrained_pairs = sorted(pair for pair in requirements if not identity_planes.get(pair))
+    bounds = _fx_requirement_range({pair: requirements[pair] for pair in unconstrained_pairs})
+    if not unconstrained_pairs or bounds is None:
+        return []
+    return await repo.get_pnl_fx_rate_exchanges(
+        _oriented_fx_pairs(unconstrained_pairs),
+        bounds[0],
+        bounds[1],
+        as_of,
     )
-    return build_fx_rates(rate_rows)
+
+
+def _candidate_planes(
+    candidates: Sequence[PnlFxRatePlane],
+    identity_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
+) -> dict[FxPairKey, set[PnlFxRatePlane]]:
+    """Combine discovered planes with canonical identity constraints.
+
+    Args:
+        candidates: Oriented venue planes discovered across bounded windows.
+        identity_planes: Canonical held-symbol constraints by pair.
+
+    Returns:
+        Eligible oriented planes grouped by unordered pair.
+    """
+    planes: dict[FxPairKey, set[PnlFxRatePlane]] = {}
+    for candidate in candidates:
+        base, quote, _ = candidate
+        planes.setdefault(currency_pair_key(base, quote), set()).add(candidate)
+    for pair, identities in identity_planes.items():
+        if len(identities) == 1:
+            planes[pair] = set(identities)
+        else:
+            planes.pop(pair, None)
+    return planes
+
+
+async def _load_fx_candidate_rows(
+    repo: Repository,
+    requirements: Mapping[FxPairKey, set[datetime]],
+    candidate_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
+    as_of: datetime,
+) -> list[PnlFxRateRow]:
+    """Load eligible exact oriented planes in one bounded window.
+
+    Args:
+        repo: Repository providing exact venue-filtered forex candles.
+        requirements: Exact pair minutes in this mark or event window.
+        candidate_planes: Request-wide eligible planes by unordered pair.
+        as_of: Knowledge horizon threading the repository read.
+
+    Returns:
+        Candidate rows used jointly to resolve one oriented plane for the request.
+    """
+    bounds = _fx_requirement_range(requirements)
+    if bounds is None:
+        return []
+    planes: set[PnlFxRatePlane] = set()
+    for pair in requirements:
+        planes.update(candidate_planes.get(pair, set()))
+    if not planes:
+        return []
+    return await repo.get_pnl_fx_rate_candles(
+        sorted(planes),
+        bounds[0],
+        bounds[1],
+        as_of,
+    )
+
+
+def _resolve_fx_planes(
+    requirements: Mapping[FxPairKey, set[datetime]],
+    identity_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
+    candidate_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
+    rows: Sequence[PnlFxRateRow],
+    valuation_ccy: str,
+) -> dict[FxPairKey, PnlFxRatePlane]:
+    """Resolve one oriented plane per unordered pair for the entire request.
+
+    A single identity plane always wins. Conflicting identity planes leave the
+    pair unresolved. Otherwise the oriented series covering the most exact
+    required minutes wins. When several complete planes cover a PLN pair,
+    Walutomat is preferred. Other ties preserve lexical venue order, then prefer
+    the source-to-valuation orientation once for the whole request. Duplicate
+    conflicts on a full plane-minute identity do not count as coverage.
+
+    Args:
+        requirements: Union of exact mark and event rate minutes.
+        identity_planes: Canonical held-symbol constraints by pair.
+        candidate_planes: Eligible discovered or forced planes by pair.
+        rows: Candidate candle rows from both bounded reads.
+        valuation_ccy: Target currency defining the preferred conversion direction.
+
+    Returns:
+        One selected oriented plane for each resolvable unordered pair.
+    """
+    covered: dict[PnlFxRatePlane, set[datetime]] = {}
+    for (base, quote, exchange, minute), close in build_fx_rates(rows).items():
+        if not is_positive_finite(close):
+            continue
+        pair = currency_pair_key(base, quote)
+        if minute in requirements.get(pair, set()):
+            covered.setdefault((base, quote, exchange), set()).add(minute)
+    resolved: dict[FxPairKey, PnlFxRatePlane] = {}
+    for pair, minutes in requirements.items():
+        identities = identity_planes.get(pair, set())
+        if len(identities) == 1:
+            resolved[pair] = next(iter(identities))
+            continue
+        if identities:
+            continue
+        planes = candidate_planes.get(pair, set())
+        if not planes:
+            continue
+        coverage_by_plane = {
+            plane: len(covered.get(plane, set()).intersection(minutes)) for plane in planes
+        }
+        best_coverage = max(coverage_by_plane.values())
+        if best_coverage == 0:
+            continue
+        finalists = {
+            plane for plane, coverage in coverage_by_plane.items() if coverage == best_coverage
+        }
+        if best_coverage == len(minutes) and "PLN" in pair:
+            walutomat = {plane for plane in finalists if plane[2] == "walutomat"}
+            if walutomat:
+                finalists = walutomat
+        selected_exchange = min(plane[2] for plane in finalists)
+        venue_finalists = {plane for plane in finalists if plane[2] == selected_exchange}
+        source_currency = pair[1] if pair[0] == valuation_ccy else pair[0]
+        direct = {
+            plane
+            for plane in venue_finalists
+            if (plane[0], plane[1]) == (source_currency, valuation_ccy)
+        }
+        resolved[pair] = min(direct or venue_finalists)
+    return resolved
+
+
+async def _load_request_fx_rates(
+    repo: Repository,
+    mark_requirements: Mapping[FxPairKey, set[datetime]],
+    event_requirements: Mapping[FxPairKey, set[datetime]],
+    identity_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
+    as_of: datetime,
+    valuation_ccy: str,
+) -> tuple[FxRateMap, dict[FxPairKey, PnlFxRatePlane]]:
+    """Load and resolve one oriented-plane FX book for the whole request.
+
+    Mark and event reads retain their own bounded ranges, so an old opening fill
+    never widens the chart-window read. Candidate evidence from both is combined
+    before plane resolution, then every non-selected orientation and venue is
+    discarded. The same selected plane map governs marks, execution prices, fees, and
+    accruals at every minute.
+
+    Args:
+        repo: Repository providing bounded FX plane and candle reads.
+        mark_requirements: Exact conversion minutes from raw mark candles.
+        event_requirements: Exact conversion minutes from fills and accruals.
+        identity_planes: Canonical held-symbol plane constraints.
+        as_of: Knowledge horizon threading repository reads.
+        valuation_ccy: Target currency defining conversion-direction tie-breaks.
+
+    Returns:
+        Plane-filtered rate map and one selected plane per resolvable pair.
+    """
+    requirements = _merge_fx_minutes(mark_requirements, event_requirements)
+    if not requirements:
+        return {}, {}
+    mark_candidates = await _discover_fx_candidates(
+        repo,
+        mark_requirements,
+        identity_planes,
+        as_of,
+    )
+    event_candidates = await _discover_fx_candidates(
+        repo,
+        event_requirements,
+        identity_planes,
+        as_of,
+    )
+    candidate_planes = _candidate_planes(
+        [*mark_candidates, *event_candidates],
+        identity_planes,
+    )
+    mark_rows = await _load_fx_candidate_rows(
+        repo,
+        mark_requirements,
+        candidate_planes,
+        as_of,
+    )
+    event_rows = await _load_fx_candidate_rows(
+        repo,
+        event_requirements,
+        candidate_planes,
+        as_of,
+    )
+    rows = [*mark_rows, *event_rows]
+    planes = _resolve_fx_planes(
+        requirements,
+        identity_planes,
+        candidate_planes,
+        rows,
+        valuation_ccy,
+    )
+    selected_rows = [
+        row
+        for row in rows
+        if planes.get(currency_pair_key(row["base"], row["quote"]))
+        == (row["base"], row["quote"], row["exchange"])
+    ]
+    return build_fx_rates(selected_rows), planes
 
 
 async def build_wallet_pnl_series(
@@ -688,20 +1259,20 @@ async def build_wallet_pnl_series(
     as_of: datetime,
     valuation_ccy: str = "USD",
     execution_rows: Sequence[PnlTimelineExecutionRow] | None = None,
-) -> PnlTimelineResult:
+) -> PnlWalletSeriesResult:
     """Reconstruct one wallet/mode scope's Net-P&L-since-activation series.
 
     Reads the scope's append-only execution prefix, exact order lineage, and
-    funding accruals, resolves direct marks from finalized 1m candles, and calls
-    the pure builder with ``opening=None`` (no activation anchor is written in
-    v1, so the replay starts from empty pools with a zero opening unrealized
-    value). Lineage is accepted only when exactly one candidate row resolves an
-    execution order; missing or repeated rows are omitted so the builder assigns
-    the fill to unattributed. Exact-zero fees and accruals pass through
-    independent of asset; nonzero foreign flows become ``NaN``. Before calling
-    the pure builder, durable fill-gap evidence is consulted for every
-    fill-bearing shard in the exact wallet/mode scope. A proven gap causes an
-    explicit post-transform that withholds the entire built series.
+    funding accruals; proves each replayed instrument's quote and venue; converts
+    execution prices, marks, fees, and accruals from finalized exact-minute 1m
+    candles; and calls the pure builder with ``opening=None``. Every average-cost
+    pool input is therefore denominated in ``valuation_ccy`` before replay.
+    Missing execution rates become ``NaN`` for the builder's tiered D1 handling,
+    while missing mark rates simply omit that instrument-minute mark. Lineage is
+    accepted only when exactly one candidate row resolves an execution order.
+    Before the build, durable fill-gap evidence is consulted for every
+    fill-bearing shard in the exact wallet/mode scope; a proven gap withholds the
+    entire result.
 
     Args:
         repo: Repository providing the scope reads and candle marks.
@@ -743,16 +1314,70 @@ async def build_wallet_pnl_series(
     _enforce_total_work_budget(from_time, to_time, len(work_instrument_ids))
     refs = await repo.get_instrument_symbol_refs(instrument_ids, as_of)
     replayed_execution_rows = [row for row in loaded_execution_rows if row["timestamp"] <= to_time]
-    trusted_refs, untrusted_price_instruments = _partition_execution_price_refs(
-        replayed_execution_rows, refs, valuation_ccy
+    trusted_refs, untrusted_price_instruments = _partition_series_execution_price_refs(
+        replayed_execution_rows,
+        refs,
     )
-    marks = await build_marks(repo, trusted_refs, from_time, to_time, as_of, valuation_ccy)
-    convertible = _flows_needing_conversion(loaded_execution_rows, accrual_rows, valuation_ccy)
-    rates = await _load_flow_fx_rates(repo, convertible, valuation_ccy, as_of)
-    executions = [
-        _to_timeline_execution(row, valuation_ccy, rates) for row in loaded_execution_rows
+    quote_by_instrument = {
+        ref["instrument_public_id"]: cast(str, ref["quote_currency"]) for ref in trusted_refs
+    }
+    mark_candles = await _load_mark_candles(
+        repo,
+        trusted_refs,
+        from_time,
+        to_time,
+        as_of,
+    )
+    trusted_instruments = set(quote_by_instrument)
+    trusted_replayed_rows = [
+        row for row in replayed_execution_rows if row["instrument_public_id"] in trusted_instruments
     ]
-    accruals = [_to_timeline_accrual(row, valuation_ccy, rates) for row in accrual_rows]
+    replayed_accrual_rows = [row for row in accrual_rows if row["accrued_at"] <= to_time]
+    mark_requirements = _mark_fx_minutes(
+        mark_candles,
+        trusted_replayed_rows,
+        quote_by_instrument,
+        valuation_ccy,
+        from_time,
+        to_time,
+    )
+    event_requirements = _event_fx_minutes(
+        trusted_replayed_rows,
+        replayed_accrual_rows,
+        quote_by_instrument,
+        valuation_ccy,
+    )
+    requirements = _merge_fx_minutes(mark_requirements, event_requirements)
+    identity_planes = _identity_fx_planes(
+        trusted_refs,
+        frozenset(requirements),
+    )
+    rates, planes = await _load_request_fx_rates(
+        repo,
+        mark_requirements,
+        event_requirements,
+        identity_planes,
+        as_of,
+        valuation_ccy,
+    )
+    marks = _build_marks_from_candles(
+        mark_candles,
+        quote_by_instrument,
+        valuation_ccy,
+        rates,
+        planes,
+    )
+    executions = [
+        _to_timeline_execution(
+            row,
+            valuation_ccy,
+            rates,
+            quote_by_instrument.get(row["instrument_public_id"]),
+            planes,
+        )
+        for row in loaded_execution_rows
+    ]
+    accruals = [_to_timeline_accrual(row, valuation_ccy, rates, planes) for row in accrual_rows]
     window = TimelineWindow(
         from_time=from_time,
         to_time=to_time,
@@ -769,8 +1394,23 @@ async def build_wallet_pnl_series(
         untrusted_price_instruments=untrusted_price_instruments,
     )
     if fill_gap:
-        return _withhold_series_for_fill_gap(result)
-    return result
+        result = _withhold_series_for_fill_gap(result)
+    rate_sources = tuple(
+        PnlFxRateSource(
+            source_currency=second if first == valuation_ccy else first,
+            valuation_currency=valuation_ccy,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+            exchange=exchange,
+        )
+        for (first, second), (base_currency, quote_currency, exchange) in sorted(planes.items())
+    )
+    return PnlWalletSeriesResult(
+        points=result.points,
+        granularity=result.granularity,
+        valuation_ccy=result.valuation_ccy,
+        rate_sources=rate_sources,
+    )
 
 
 def _fill_marker(
