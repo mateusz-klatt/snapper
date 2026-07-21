@@ -456,10 +456,12 @@ _db_template_state: dict[str, Path | None] = {"path": None}
 
 @pytest.fixture(scope="session", autouse=True)
 def db_template_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Create a template SQLite DB with full schema once per worker.
+    """Create a WAL-mode template SQLite DB with full schema once per worker.
 
     Subsequent create_all() calls on SQLAlchemyRepository/DatabaseRepository
     copy this template (~1ms) instead of running metadata.create_all (~3-4s).
+    Persisting WAL mode before those copies preserves the connection-level
+    initialization that the create_all replacement otherwise bypasses.
     """
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
     template_dir = tmp_path_factory.mktemp(f"db-template-{worker_id}")
@@ -467,7 +469,11 @@ def db_template_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     engine = create_engine(f"sqlite:///{template_path}")
     Base.metadata.create_all(engine)
+    with engine.connect() as connection:
+        journal_mode = connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
     engine.dispose()
+    if journal_mode != "wal":
+        raise RuntimeError(f"SQLite test template did not enter WAL mode: {journal_mode}")
     _db_template_state["path"] = template_path
     return template_path
 
