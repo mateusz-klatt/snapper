@@ -12,8 +12,9 @@ Scope is deliberately narrow (no FX graph, no external feed):
 - **Identity.** A conversion into the same currency is ``1.0`` and needs no
   evidence at all, so a USD fee on a USD-valued series never touches a candle.
 - **Pinned plane.** One exact ``(base, quote, exchange)`` candle series is
-  selected for the unordered currency pair for the entire request. Neither a
-  rival venue nor the opposite orientation can enter a later lookup.
+  selected for each unordered currency pair in one consumer's map. Different
+  instruments may carry different maps, but neither a rival venue nor the
+  opposite orientation can enter one consumer's later lookup.
 - **Quoted direction.** A pinned ``FROM-TO`` plane is used as quoted: one unit
   of FROM costs ``close`` units of TO.
 - **Reciprocal direction.** A pinned ``TO-FROM`` plane converts FROM into TO by
@@ -52,7 +53,7 @@ type FxRatePlane = tuple[str, str, str]
 """Exact ``(base, quote, exchange)`` identity of one FX candle series."""
 
 type FxVenueMap = Mapping[FxPairKey, FxRatePlane]
-"""One request-pinned oriented plane for each unordered currency pair."""
+"""One consumer-pinned oriented plane for each unordered currency pair."""
 
 
 def currency_pair_key(first: str, second: str) -> FxPairKey:
@@ -86,7 +87,7 @@ def convert_amount(
         to_currency: Target valuation currency.
         minute: Grid minute whose ``[minute-1m, minute)`` close is the rate.
         rates: Preloaded plane-qualified candle closes for this scope.
-        venues: Request-pinned oriented plane keyed by unordered currency pair.
+        venues: Consumer-pinned oriented plane keyed by unordered currency pair.
 
     Returns:
         The converted amount, or ``None`` when the pinned plane has no usable

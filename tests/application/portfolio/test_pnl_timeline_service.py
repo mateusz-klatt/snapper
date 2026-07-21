@@ -1405,10 +1405,20 @@ class TestCrossCurrencyPrices:
             )
             for source in result.rate_sources
         ] == [("PLN", "EUR", "EUR", "PLN", "walutomat")]
-        assert repo.fx_candidate_pair_calls == []
-        assert all(
-            exchange == "walutomat" for planes in repo.fx_plane_calls for _, _, exchange in planes
-        )
+        assert repo.fx_candidate_pair_calls == [
+            [("EUR", "PLN"), ("PLN", "EUR")],
+            [("EUR", "PLN"), ("PLN", "EUR")],
+        ]
+        assert repo.fx_plane_calls == [
+            [
+                ("EUR", "PLN", "polygon"),
+                ("EUR", "PLN", "walutomat"),
+            ],
+            [
+                ("EUR", "PLN", "polygon"),
+                ("EUR", "PLN", "walutomat"),
+            ],
+        ]
 
     async def test_identity_plane_uses_held_orientation_when_reverse_is_also_complete(
         self,
@@ -1550,6 +1560,621 @@ class TestCrossCurrencyPrices:
             contribution.accrual_pnl,
             contribution.unrealized_pnl,
         ) == (0.0, 0.0, 0.0, None)
+
+    async def test_identity_gap_withholds_only_itself_without_cross_plane_borrowing(
+        self,
+    ) -> None:
+        """A peer uses Polygon while the held pair keeps its gapped Walutomat plane."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, -5, "buy", 1.0, 10.0, 0.0, ""),
+                _exec_row(
+                    _I2,
+                    2,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="walutomat",
+                ),
+            ],
+            refs=[
+                _ref(_I1, "XRP-PLN", "PLN"),
+                _ref(_I2, "EUR-PLN", "PLN", exchange="walutomat"),
+            ],
+            candles=[
+                _candle(_m(-1), 12.0),
+                _candle(_m(0), 15.0),
+                _candle(_m(-1), 4.0, instrument=_I2),
+                _candle(_m(0), 5.0, instrument=_I2),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", -5, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 2.0, exchange="polygon"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="EUR",
+        )
+        first_point, gapped_point = result.points
+        assert first_point.valuation_status == "complete"
+        assert first_point.unrealized_pnl == 1.0
+        first_peer, first_identity = first_point.per_instrument
+        assert first_peer.instrument_public_id == _I1
+        assert first_peer.unrealized_pnl == 1.0
+        assert first_identity.instrument_public_id == _I2
+        assert first_identity.unrealized_pnl == 0.0
+        assert gapped_point.valuation_status == "incomplete"
+        assert gapped_point.unrealized_pnl is None
+        assert gapped_point.net_pnl is None
+        peer, identity = gapped_point.per_instrument
+        assert peer.instrument_public_id == _I1
+        assert peer.unrealized_pnl == 2.5
+        assert identity.instrument_public_id == _I2
+        assert identity.realized_pnl == 0.0
+        assert identity.unrealized_pnl is None
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [
+            ("EUR", "PLN", "polygon"),
+            ("EUR", "PLN", "walutomat"),
+        ]
+        assert repo.fx_candidate_pair_calls == [
+            [("EUR", "PLN"), ("PLN", "EUR")],
+            [("EUR", "PLN"), ("PLN", "EUR")],
+        ]
+
+    async def test_zero_coverage_identity_does_not_displace_peer_plane(self) -> None:
+        """An empty canonical plane withholds its claimant but not a covered peer."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, -5, "buy", 1.0, 10.0, 0.0, ""),
+                _exec_row(
+                    _I2,
+                    2,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="walutomat",
+                ),
+            ],
+            refs=[
+                _ref(_I1, "XRP-PLN", "PLN"),
+                _ref(_I2, "EUR-PLN", "PLN", exchange="walutomat"),
+            ],
+            candles=[
+                _candle(_m(-1), 12.0),
+                _candle(_m(-1), 4.0, instrument=_I2),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", -5, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+            valuation_ccy="EUR",
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.unrealized_pnl is None
+        assert point.net_pnl is None
+        peer, identity = point.per_instrument
+        assert peer.instrument_public_id == _I1
+        assert peer.unrealized_pnl == 1.0
+        assert identity.instrument_public_id == _I2
+        assert identity.unrealized_pnl is None
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [("EUR", "PLN", "polygon")]
+
+    async def test_complete_identity_and_peer_publish_mixed_plane_total(self) -> None:
+        """Individually proven Walutomat and Polygon legs form one honest total."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, -5, "buy", 1.0, 10.0, 0.0, ""),
+                _exec_row(
+                    _I2,
+                    2,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="walutomat",
+                ),
+            ],
+            refs=[
+                _ref(_I1, "XRP-PLN", "PLN"),
+                _ref(_I2, "EUR-PLN", "PLN", exchange="walutomat"),
+            ],
+            candles=[
+                _candle(_m(-1), 12.0),
+                _candle(_m(0), 15.0),
+                _candle(_m(-1), 4.0, instrument=_I2),
+                _candle(_m(0), 5.0, instrument=_I2),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 1, 5.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", -5, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 2.0, exchange="polygon"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(2),
+            valuation_ccy="EUR",
+        )
+        assert [point.valuation_status for point in result.points] == ["complete", "complete"]
+        assert [point.unrealized_pnl for point in result.points] == [1.0, 2.5]
+        assert [point.net_pnl for point in result.points] == [1.0, 2.5]
+        assert [
+            [contribution.unrealized_pnl for contribution in point.per_instrument]
+            for point in result.points
+        ] == [[1.0, 0.0], [2.5, 0.0]]
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [
+            ("EUR", "PLN", "polygon"),
+            ("EUR", "PLN", "walutomat"),
+        ]
+
+    async def test_identity_only_minutes_do_not_outvote_peer_plane(self) -> None:
+        """Shared-plane coverage ranks only minutes required by general consumers."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, -5, "buy", 1.0, 10.0, 0.0, ""),
+                _exec_row(_I1, 2, -5, "sell", 1.0, 12.0, 0.0, ""),
+                _exec_row(
+                    _I2,
+                    3,
+                    0,
+                    "buy",
+                    1.0,
+                    4.0,
+                    0.0,
+                    "",
+                    exchange="walutomat",
+                ),
+            ],
+            refs=[
+                _ref(_I1, "XRP-PLN", "PLN"),
+                _ref(_I2, "EUR-PLN", "PLN", exchange="walutomat"),
+            ],
+            candles=[
+                _candle(_m(-1), 20.0),
+                _candle(_m(0), 21.0),
+                _candle(_m(1), 22.0),
+                _candle(_m(2), 23.0),
+                _candle(_m(-1), 4.0, instrument=_I2),
+                _candle(_m(0), 5.0, instrument=_I2),
+                _candle(_m(1), 6.0, instrument=_I2),
+                _candle(_m(2), 7.0, instrument=_I2),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", -5, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 1, 5.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 2, 6.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 3, 7.0, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(3),
+            "1m",
+            _m(4),
+            valuation_ccy="EUR",
+        )
+        assert [point.valuation_status for point in result.points] == [
+            "complete",
+            "complete",
+            "complete",
+            "complete",
+        ]
+        assert [point.realized_pnl for point in result.points] == [1.0, 1.0, 1.0, 1.0]
+        assert [point.unrealized_pnl for point in result.points] == [0.0, 0.0, 0.0, 0.0]
+        assert [point.net_pnl for point in result.points] == [1.0, 1.0, 1.0, 1.0]
+        assert [
+            [
+                (
+                    contribution.instrument_public_id,
+                    contribution.realized_pnl,
+                    contribution.unrealized_pnl,
+                )
+                for contribution in point.per_instrument
+            ]
+            for point in result.points
+        ] == [
+            [(_I1, 1.0, 0.0), (_I2, 0.0, 0.0)],
+            [(_I1, 1.0, 0.0), (_I2, 0.0, 0.0)],
+            [(_I1, 1.0, 0.0), (_I2, 0.0, 0.0)],
+            [(_I1, 1.0, 0.0), (_I2, 0.0, 0.0)],
+        ]
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [
+            ("EUR", "PLN", "polygon"),
+            ("EUR", "PLN", "walutomat"),
+        ]
+
+    async def test_regression_shadow_marks_do_not_steer_shared_fx_plane(self) -> None:
+        """Marks inside a scope-order regression shadow cannot outvote a valid peer."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I2, 1, 0, "buy", 1.0, 20.0, 0.0, ""),
+                _exec_row(_I2, 2, 10, "buy", 1.0, 30.0, 0.0, ""),
+                _exec_row(_I2, 3, 1, "sell", 2.0, 25.0, 0.0, ""),
+                _exec_row(_I1, 4, 11, "buy", 1.0, 10.0, 0.0, ""),
+            ],
+            refs=[
+                _ref(_I1, "XRP-EUR", "EUR"),
+                _ref(_I2, "BTC-EUR", "EUR"),
+            ],
+            candles=[
+                _candle(_m(10), 10.0),
+                _candle(_m(11), 12.0),
+                _candle(_m(0), 20.0, instrument=_I2),
+                _candle(_m(1), 20.0, instrument=_I2),
+                _candle(_m(2), 20.0, instrument=_I2),
+                _candle(_m(3), 20.0, instrument=_I2),
+                _candle(_m(4), 20.0, instrument=_I2),
+                _candle(_m(5), 20.0, instrument=_I2),
+                _candle(_m(6), 20.0, instrument=_I2),
+                _candle(_m(7), 20.0, instrument=_I2),
+                _candle(_m(8), 20.0, instrument=_I2),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 10, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 11, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 12, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 2, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 3, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 4, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 5, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 6, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 7, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 8, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 9, 4.0, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(12),
+            "1m",
+            _m(13),
+            valuation_ccy="PLN",
+        )
+        peer_point = result.points[12]
+        assert peer_point.valuation_status == "complete"
+        assert peer_point.realized_pnl == 0.0
+        assert peer_point.unrealized_pnl == 4.0
+        assert peer_point.net_pnl == 4.0
+        peer_contribution = next(
+            contribution
+            for contribution in peer_point.per_instrument
+            if contribution.instrument_public_id == _I1
+        )
+        assert peer_contribution.realized_pnl == 0.0
+        assert peer_contribution.unrealized_pnl == 4.0
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [("EUR", "PLN", "polygon")]
+
+    async def test_untrusted_instrument_regression_shadow_does_not_steer_peer_plane(
+        self,
+    ) -> None:
+        """A global shadow remains binding when its instrument identity is untrusted."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I2, 1, 0, "buy", 1.0, 20.0, 0.0, ""),
+                _exec_row(_I2, 2, 10, "buy", 1.0, 30.0, 0.0, ""),
+                _exec_row(_I2, 3, 1, "sell", 2.0, 25.0, 0.0, ""),
+                _exec_row(_I1, 4, 0, "buy", 1.0, 10.0, 0.0, ""),
+            ],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[
+                _candle(_m(minute - 1), 10.0 if minute == 0 else 12.0) for minute in range(12)
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 10, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 11, 2.0, exchange="polygon"),
+                *[
+                    _fx_row("EUR", "PLN", minute, 4.0, exchange="walutomat")
+                    for minute in range(1, 10)
+                ],
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(11),
+            "1m",
+            _m(12),
+            valuation_ccy="PLN",
+        )
+        peer_unrealized = [
+            next(
+                contribution.unrealized_pnl
+                for contribution in result.points[index].per_instrument
+                if contribution.instrument_public_id == _I1
+            )
+            for index in (0, 10, 11)
+        ]
+        assert peer_unrealized == [0.0, 4.0, 4.0]
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [("EUR", "PLN", "polygon")]
+
+    async def test_future_predecessor_regression_shadow_does_not_steer_peer_plane(
+        self,
+    ) -> None:
+        """Scope order retains a future predecessor that shadows the current chart."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I2, 1, 0, "buy", 1.0, 20.0, 0.0, ""),
+                _exec_row(_I2, 2, 20, "buy", 1.0, 30.0, 0.0, ""),
+                _exec_row(_I2, 3, 1, "sell", 2.0, 25.0, 0.0, ""),
+                _exec_row(_I1, 4, 0, "buy", 1.0, 10.0, 0.0, ""),
+            ],
+            refs=[_ref(_I1, "XRP-EUR", "EUR")],
+            candles=[
+                _candle(_m(minute - 1), 10.0 if minute == 0 else 12.0) for minute in range(12)
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                *[
+                    _fx_row("EUR", "PLN", minute, 4.0, exchange="walutomat")
+                    for minute in range(1, 12)
+                ],
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(11),
+            "1m",
+            _m(21),
+            valuation_ccy="PLN",
+        )
+        peer_contribution = next(
+            contribution
+            for contribution in result.points[0].per_instrument
+            if contribution.instrument_public_id == _I1
+        )
+        assert peer_contribution.realized_pnl == 0.0
+        assert peer_contribution.unrealized_pnl == 0.0
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [("EUR", "PLN", "polygon")]
+
+    @pytest.mark.parametrize(
+        "bad_size",
+        [
+            pytest.param(-1.0, id="negative"),
+            pytest.param(math.nan, id="nan"),
+            pytest.param(math.inf, id="infinite"),
+        ],
+    )
+    async def test_invalid_size_instrument_does_not_steer_shared_fx_plane(
+        self,
+        bad_size: float,
+    ) -> None:
+        """An already-invalid consumer cannot outvote a covered valid peer."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, ""),
+                _exec_row(_I1, 2, 1, "sell", 1.0, 12.0, 0.0, ""),
+                _exec_row(_I2, 3, 2, "buy", bad_size, 20.0, 0.0, ""),
+                _exec_row(_I2, 4, 3, "buy", 1.0, 21.0, 0.0, ""),
+                _exec_row(_I2, 5, 4, "buy", 1.0, 22.0, 0.0, ""),
+                _exec_row(_I2, 6, 5, "buy", 1.0, 23.0, 0.0, ""),
+            ],
+            refs=[
+                _ref(_I1, "XRP-EUR", "EUR"),
+                _ref(_I2, "BTC-EUR", "EUR"),
+            ],
+            candles=[
+                _candle(_m(-1), 10.0),
+                _candle(_m(0), 12.0),
+                _candle(_m(1), 20.0, instrument=_I2),
+                _candle(_m(2), 21.0, instrument=_I2),
+                _candle(_m(3), 22.0, instrument=_I2),
+                _candle(_m(4), 23.0, instrument=_I2),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 2, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 3, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 4, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 5, 4.0, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(5),
+            "1m",
+            _m(6),
+            valuation_ccy="PLN",
+        )
+        valid_point = result.points[1]
+        assert valid_point.valuation_status == "complete"
+        assert valid_point.realized_pnl == 4.0
+        assert valid_point.unrealized_pnl == 0.0
+        assert valid_point.net_pnl == 4.0
+        assert [
+            (
+                contribution.instrument_public_id,
+                contribution.realized_pnl,
+                contribution.unrealized_pnl,
+            )
+            for contribution in valid_point.per_instrument
+        ] == [(_I1, 4.0, 0.0)]
+        invalid_point = result.points[2]
+        invalid_contribution = next(
+            contribution
+            for contribution in invalid_point.per_instrument
+            if contribution.instrument_public_id == _I2
+        )
+        assert (
+            invalid_contribution.realized_pnl,
+            invalid_contribution.fee_pnl,
+            invalid_contribution.accrual_pnl,
+            invalid_contribution.unrealized_pnl,
+        ) == (None, None, None, None)
+        final_invalid_contribution = next(
+            contribution
+            for contribution in result.points[-1].per_instrument
+            if contribution.instrument_public_id == _I2
+        )
+        assert (
+            final_invalid_contribution.realized_pnl,
+            final_invalid_contribution.fee_pnl,
+            final_invalid_contribution.accrual_pnl,
+            final_invalid_contribution.unrealized_pnl,
+        ) == (None, None, None, None)
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [("EUR", "PLN", "polygon")]
+
+    @pytest.mark.parametrize(
+        "invalid_price",
+        [
+            pytest.param(0.0, id="zero"),
+            pytest.param(-1.0, id="negative"),
+            pytest.param(math.nan, id="nan"),
+            pytest.param(math.inf, id="infinite"),
+        ],
+    )
+    async def test_invalid_price_instrument_does_not_steer_shared_fx_plane(
+        self,
+        invalid_price: float,
+    ) -> None:
+        """A known-invalid raw price cannot make later marks outvote a valid peer."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, ""),
+                _exec_row(_I1, 2, 1, "sell", 1.0, 12.0, 0.0, ""),
+                _exec_row(_I2, 3, 2, "buy", 1.0, invalid_price, 0.0, ""),
+                _exec_row(_I2, 4, 3, "buy", 1.0, 21.0, 0.0, ""),
+                _exec_row(_I2, 5, 4, "buy", 1.0, 22.0, 0.0, ""),
+                _exec_row(_I2, 6, 5, "buy", 1.0, 23.0, 0.0, ""),
+            ],
+            refs=[
+                _ref(_I1, "XRP-EUR", "EUR"),
+                _ref(_I2, "BTC-EUR", "EUR"),
+            ],
+            candles=[
+                _candle(_m(-1), 10.0),
+                _candle(_m(0), 12.0),
+                _candle(_m(1), 20.0, instrument=_I2),
+                _candle(_m(2), 21.0, instrument=_I2),
+                _candle(_m(3), 22.0, instrument=_I2),
+                _candle(_m(4), 23.0, instrument=_I2),
+            ],
+            fx_rows=[
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 2, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 3, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 4, 4.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 5, 4.0, exchange="walutomat"),
+            ],
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _m(5),
+            "1m",
+            _m(6),
+            valuation_ccy="PLN",
+        )
+        valid_point = result.points[1]
+        assert valid_point.valuation_status == "complete"
+        assert valid_point.realized_pnl == 4.0
+        assert valid_point.unrealized_pnl == 0.0
+        assert valid_point.net_pnl == 4.0
+        assert [
+            (
+                contribution.instrument_public_id,
+                contribution.realized_pnl,
+                contribution.unrealized_pnl,
+            )
+            for contribution in valid_point.per_instrument
+        ] == [(_I1, 4.0, 0.0)]
+        invalid_point = result.points[2]
+        invalid_contribution = next(
+            contribution
+            for contribution in invalid_point.per_instrument
+            if contribution.instrument_public_id == _I2
+        )
+        assert invalid_contribution.unrealized_pnl is None
+        final_invalid_contribution = next(
+            contribution
+            for contribution in result.points[-1].per_instrument
+            if contribution.instrument_public_id == _I2
+        )
+        assert final_invalid_contribution.realized_pnl == 0.0
+        assert final_invalid_contribution.unrealized_pnl is None
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [("EUR", "PLN", "polygon")]
 
     async def test_neither_venue_complete_pins_best_coverage_and_withholds_gap(
         self,
@@ -1813,8 +2438,8 @@ class TestCrossCurrencyPrices:
         assert result.points[1].unrealized_pnl == 4.0
         assert result.points[1].net_pnl == 4.0
 
-    async def test_conflicting_identity_venues_leave_the_pair_unresolved(self) -> None:
-        """Two held canonical venues cannot be blended into one request plane."""
+    async def test_two_held_canonical_venues_each_use_their_own_plane(self) -> None:
+        """Divergent venue series independently certify both held instruments."""
         repo = FakeRepo(
             executions=[
                 _exec_row(
@@ -1834,7 +2459,7 @@ class TestCrossCurrencyPrices:
                     0,
                     "buy",
                     1.0,
-                    4.0,
+                    2.0,
                     0.0,
                     "",
                     exchange="polygon",
@@ -1846,11 +2471,15 @@ class TestCrossCurrencyPrices:
             ],
             candles=[
                 _candle(_m(-1), 4.0),
-                _candle(_m(-1), 4.0, instrument=_I2),
+                _candle(_m(0), 5.0),
+                _candle(_m(-1), 2.0, instrument=_I2),
+                _candle(_m(0), 3.0, instrument=_I2),
             ],
             fx_rows=[
                 _fx_row("EUR", "PLN", 0, 4.0, exchange="walutomat"),
-                _fx_row("EUR", "PLN", 0, 4.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 5.0, exchange="walutomat"),
+                _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
+                _fx_row("EUR", "PLN", 1, 3.0, exchange="polygon"),
             ],
         )
         result = await build_wallet_pnl_series(
@@ -1858,18 +2487,44 @@ class TestCrossCurrencyPrices:
             "w1",
             "live",
             _T0,
-            _T0,
-            "1m",
             _m(1),
+            "1m",
+            _m(2),
             valuation_ccy="EUR",
         )
-        point = result.points[0]
-        assert point.valuation_status == "incomplete"
-        assert point.realized_pnl == 0.0
-        assert point.unrealized_pnl is None
-        assert point.net_pnl is None
-        assert repo.fx_candidate_pair_calls == []
-        assert repo.fx_plane_calls == []
+        assert [
+            (
+                point.valuation_status,
+                point.realized_pnl,
+                point.unrealized_pnl,
+                point.net_pnl,
+            )
+            for point in result.points
+        ] == [
+            ("complete", 0.0, 0.0, 0.0),
+            ("complete", 0.0, 0.0, 0.0),
+        ]
+        assert [
+            [
+                (contribution.instrument_public_id, contribution.unrealized_pnl)
+                for contribution in point.per_instrument
+            ]
+            for point in result.points
+        ] == [
+            [(_I1, 0.0), (_I2, 0.0)],
+            [(_I1, 0.0), (_I2, 0.0)],
+        ]
+        assert [
+            (source.base_currency, source.quote_currency, source.exchange)
+            for source in result.rate_sources
+        ] == [
+            ("EUR", "PLN", "polygon"),
+            ("EUR", "PLN", "walutomat"),
+        ]
+        assert repo.fx_candidate_pair_calls == [
+            [("EUR", "PLN"), ("PLN", "EUR")],
+            [("EUR", "PLN"), ("PLN", "EUR")],
+        ]
 
     @pytest.mark.parametrize(
         "valuation_ccy,fx_rows,expected_sources",
@@ -2646,7 +3301,7 @@ def test_provenance_constants_are_stable() -> None:
     Then: The documented source, version, and total-work limit remain stable.
     """
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
-    assert PNL_TIMELINE_CALC_VERSION == "5A.7"
+    assert PNL_TIMELINE_CALC_VERSION == "5A.8"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
 

@@ -54,9 +54,10 @@ Executes the complete quality gate:
 10. Pydantic-only FastAPI I/O (`check-pydantic-routes`)
 11. Egress compose safety check (`check-egress-compose`)
 12. Frontend checks (`ui-typecheck`, ESLint, Prettier, dead code, i18n checks)
-13. No pragma/noqa/ignore exclusions
-14. Backend tests with 100% coverage
-15. Frontend tests with coverage
+13. Generated frontend/iOS type and backend i18n drift check (`ui-check-types`)
+14. No pragma/noqa/ignore exclusions
+15. Backend tests with 100% coverage
+16. Frontend tests with coverage
 
 ### Individual Steps
 
@@ -531,7 +532,7 @@ used locally in additional build and smoke stages:
 2.  `make ui-build` — Production frontend bundle
 3.  `make migrate-dev` — Initialize and seed the database
 4.  `make ui-check-types` — Drift check for generated types and backend i18n catalogs
-5.  `make check-all` — Backend checks, frontend checks, exclusion scan, and tests with coverage
+5.  `make check-all` — Backend checks, frontend checks, generated-type drift, exclusion scan, and tests with coverage
 6.  `make cov-xml` — Export coverage XML, consumed by the SonarCloud scan step
 7.  Docker smoke stage — `make docker-build-dev`, `make docker-migrate-dev`, `docker compose up` for the `snapper` and `snapper-web` services, then a `make server-check` health check
 
@@ -539,9 +540,10 @@ For debugging a failing `make check-all` locally, the equivalent steps are:
 
 1.  `make check` — Backend quality checks
 2.  `make ui-check` — Frontend lint, format, dead-code, type, and i18n catalog checks (`ui-lint ui-format ui-dead-code ui-typecheck ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market`)
-3.  `make check-exclusions` — No pragma/noqa/ignore bypasses
-4.  `make cov` — Backend tests with coverage
-5.  `make ui-cov` — Frontend tests with coverage
+3.  `make ui-check-types` — Generated frontend/iOS type and backend i18n drift check
+4.  `make check-exclusions` — No pragma/noqa/ignore bypasses
+5.  `make cov` — Backend tests with coverage
+6.  `make ui-cov` — Frontend tests with coverage
 
 ## Workflow
 

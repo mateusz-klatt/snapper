@@ -33,7 +33,7 @@ help:
 	$(info                           override TEST_DB_URL to opt into Postgres test runs [staging only])
 	$(info check                     Backend quality checks [fmt + lint + typecheck])
 	$(info fix                       Backend quality fixes [fmt-fix + lint-fix + move-imports])
-	$(info check-all                 Complete quality gate [check + ui + exclusions + cov])
+	$(info check-all                 Complete quality gate [check + ui + type drift + exclusions + cov])
 	$(info check-exclusions          Fail if pragma/noqa/ignore comments exist [strict])
 	$(info check-docstrings          Check docstring compliance [Google/BDD style])
 	$(info check-no-comments         Fail if Python hash comments exist [strict])
@@ -306,8 +306,8 @@ check: fmt lint typecheck check-docstrings check-no-comments check-main-guard ch
 
 fix: fmt-fix lint-fix move-imports
 
-check-all: check ui-check check-exclusions cov ui-cov
-	$(info All quality checks passed [backend + frontend + 100% coverage TDD])
+check-all: check ui-check ui-check-types check-exclusions cov ui-cov
+	$(info All quality checks passed [backend + frontend + type drift + 100% coverage TDD])
 
 fix-all: fix ui-fix
 	$(info All quality fixes applied [backend + frontend])

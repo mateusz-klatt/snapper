@@ -236,7 +236,7 @@ class TestHappyPath:
         assert payload["valuation_ccy"] == "USD"
         assert payload["mark_source"] == "finalized_1m_candle_close"
         assert payload["rate_sources"] == []
-        assert payload["calc_version"] == "5A.7"
+        assert payload["calc_version"] == "5A.8"
         points = payload["points"]
         assert len(points) == 3
         assert points[0]["valuation_status"] == "complete"
@@ -258,7 +258,7 @@ class TestHappyPath:
         repo.get_candles.assert_not_awaited()
 
     def test_exposes_the_selected_fx_rate_source(self) -> None:
-        """A converted series identifies its request-pinned venue plane."""
+        """A converted series identifies every venue plane used by a contribution."""
         repo = _seeded_repo()
         t0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
         repo.get_instrument_symbol_refs = AsyncMock(

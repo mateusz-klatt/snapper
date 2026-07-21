@@ -487,8 +487,8 @@ class PnlFxRateRow(TypedDict):
 
     Returned by ``get_pnl_fx_rate_candles``. ``base``/``quote`` are the symbol's
     own currency legs, so the close reads as "one unit of ``base`` costs ``close``
-    units of ``quote``". ``exchange`` identifies the request-pinned venue plane;
-    rows from a rival venue cannot enter the same conversion map.
+    units of ``quote``". ``exchange`` identifies one candidate venue plane;
+    rows from a rival venue cannot enter the same consumer's conversion map.
     """
 
     base: str

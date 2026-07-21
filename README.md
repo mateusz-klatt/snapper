@@ -466,7 +466,7 @@ restart / replay.
 ### Quality Gates
 
 ```bash
-make check-all   # Full quality gate (backend + frontend + tests + 100% coverage)
+make check-all   # Full gate (backend + frontend + generated-type drift + 100% coverage)
 make fix-all     # Automatic formatting and linting fixes
 ```
 

@@ -88,6 +88,7 @@ the complete quality gate using the consolidated Makefile targets before creatin
 - `make ui-format` - Prettier format checks for frontend
 - `make ui-dead-code` - Dead code analysis for frontend
 - `make ui-typecheck` - TypeScript type checking
+- `make ui-check-types` - Generated frontend/iOS type and backend i18n drift check
 - `make ui-i18n-check` - Frontend hardcoded-string i18n scan
 - `make ui-i18n-check-alerts` - Verify iOS alerts catalog parity
 - `make ui-i18n-check-market` - Verify iOS market catalog parity

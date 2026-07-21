@@ -17,16 +17,17 @@ reaches the average-cost kernel as a certified price.
 
 A proven foreign quote is converted rather than rejected. Each positive
 execution price is converted at the fill's own minute before pool replay, and
-each positive mark close is converted at the grid minute it values. One exact
-``(base, quote, exchange)`` plane is resolved per unordered currency pair for
-the entire request. A held instrument's own pair forces its canonical oriented
-source plane, while third-party oriented planes compete by exact-minute
-coverage. Neither a rival venue nor the opposite orientation can fill a pinned
-plane's gap. No triangulation, nearest-minute match, or stale carry-forward is
-permitted. A missing execution rate becomes ``NaN`` so the pure builder applies
-its existing opening-versus-closing trust tiers. A missing mark rate emits no
-mark, producing mark-incomplete valuation without tainting mark-independent
-cumulatives.
+each positive mark close is converted at the grid minute it values. General
+consumers resolve one exact ``(base, quote, exchange)`` plane per unordered
+currency pair by their own exact-minute coverage. A held instrument whose own
+currency legs match a needed pair instead uses its canonical oriented source
+plane for all of that instrument's conversions on the pair. Neither a rival
+venue nor the opposite orientation can fill that instrument plane's gap, while
+the gap cannot suppress independently covered peers. No triangulation,
+nearest-minute match, or stale carry-forward is permitted. A missing execution
+rate becomes ``NaN`` so the pure builder applies its existing
+opening-versus-closing trust tiers. A missing mark rate emits no mark, producing
+mark-incomplete valuation without tainting mark-independent cumulatives.
 
 The mark for grid minute ``M`` is the close of the finalized candle covering
 ``[M-1m, M)`` (``open_at == M - 1min``), and its FX rate follows the same
@@ -47,6 +48,7 @@ from typing import Final
 from typing import Literal
 from typing import cast
 
+from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.fx_rates import FxPairKey
 from snapper.application.portfolio.fx_rates import FxRateMap
 from snapper.application.portfolio.fx_rates import FxVenueMap
@@ -77,7 +79,7 @@ from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.7"
+PNL_TIMELINE_CALC_VERSION = "5A.8"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, or mark-resolution semantics
@@ -157,7 +159,7 @@ type PnlTimelineMarker = PnlFillMarker | PnlSignalMarker | PnlAiDecisionMarker
 
 @dataclass(frozen=True, slots=True)
 class PnlFxRateSource:
-    """One request-pinned FX plane expressed with conversion provenance."""
+    """One used FX plane expressed with conversion provenance."""
 
     source_currency: str
     valuation_currency: str
@@ -210,7 +212,7 @@ def build_fx_rates(rows: Sequence[PnlFxRateRow]) -> FxRateMap:
     Venue is part of the key, so cross-venue quotes remain distinct evidence. If
     two rows still conflict on the full identity, that key becomes ``NaN`` and
     conversion refuses it rather than allowing row order to elect a price. The
-    caller filters the book through one request-pinned oriented plane per pair.
+    caller filters the book through one consumer-pinned oriented plane per pair.
 
     Args:
         rows: Finalized 1m closes from ``get_pnl_fx_rate_candles``.
@@ -260,7 +262,7 @@ def _to_timeline_execution(
         price_currency: Proven quote currency of the execution price. ``None``
             leaves the raw price unchanged for callers that enforce trust
             separately.
-        venues: Request-pinned oriented plane for each converted currency pair.
+        venues: Instrument-pinned oriented plane for each converted currency pair.
 
     Returns:
         The equivalent :class:`TimelineExecution`.
@@ -357,7 +359,7 @@ def _to_timeline_accrual(
         row: One ``get_accruals_for_pnl`` row.
         valuation_ccy: Currency the series is valued in.
         rates: Minute-keyed FX rates used to convert a foreign-denominated amount.
-        venues: Request-pinned oriented plane for each converted currency pair.
+        venues: Instrument-pinned oriented plane for each converted currency pair.
 
     Returns:
         The equivalent :class:`TimelineAccrual`.
@@ -538,16 +540,16 @@ def _build_marks_from_candles(
     quote_by_instrument: Mapping[str, str],
     valuation_ccy: str,
     rates: FxRateMap,
-    venues: FxVenueMap,
+    venues_by_instrument: Mapping[str, FxVenueMap],
 ) -> MarkMap:
-    """Convert positive raw closes through one request-pinned FX plane map.
+    """Convert positive raw closes through each instrument's FX plane map.
 
     Args:
         candles: Raw finalized mark candles.
         quote_by_instrument: Proven denomination of each candle close.
         valuation_ccy: Currency the returned marks are denominated in.
         rates: Plane-qualified exact-minute FX closes.
-        venues: One request-pinned oriented plane per unordered currency pair.
+        venues_by_instrument: Consumer-pinned planes keyed by instrument and pair.
 
     Returns:
         Positive converted marks keyed by instrument and closing minute.
@@ -566,7 +568,7 @@ def _build_marks_from_candles(
             valuation_ccy,
             mark_minute,
             rates,
-            venues,
+            venues_by_instrument.get(instrument_public_id, {}),
         )
         if is_positive_finite(converted):
             marks[(instrument_public_id, mark_minute)] = converted
@@ -603,7 +605,7 @@ async def build_marks(
         valuation_ccy: Currency the returned marks are denominated in.
         rates: Exact-minute pinned-plane rates for foreign closes. Omission
             selects direct-mark mode and skips foreign references.
-        venues: One request-pinned oriented plane per unordered currency pair.
+        venues: One consumer-pinned oriented plane per unordered currency pair.
 
     Returns:
         A mapping keyed by ``(instrument_public_id, grid_minute)`` to the
@@ -634,7 +636,7 @@ async def build_marks(
         quote_by_instrument,
         valuation_ccy,
         resolved_rates,
-        resolved_venues,
+        dict.fromkeys(quote_by_instrument, resolved_venues),
     )
 
 
@@ -828,12 +830,19 @@ def _partition_execution_price_refs(
 type _FxMinuteRequirements = dict[FxPairKey, set[datetime]]
 """Exact conversion minutes grouped by unordered currency pair."""
 
-type _FxIdentityPlanes = dict[FxPairKey, set[PnlFxRatePlane]]
-"""Canonical held-instrument planes constraining each needed FX pair."""
+type _FxInstrumentRequirements = dict[str, _FxMinuteRequirements]
+"""Exact conversion minutes grouped first by consuming instrument."""
+
+type _FxIdentityPlanes = dict[str, PnlFxRatePlane]
+"""Canonical source plane keyed by the held instrument that justifies it."""
+
+type _FxPlanesByInstrument = dict[str, dict[FxPairKey, PnlFxRatePlane]]
+"""Selected conversion planes keyed by consuming instrument and pair."""
 
 
 def _add_fx_minute(
-    requirements: _FxMinuteRequirements,
+    requirements: _FxInstrumentRequirements,
+    instrument_public_id: str,
     currency: str,
     valuation_ccy: str,
     minute: datetime,
@@ -841,14 +850,16 @@ def _add_fx_minute(
     """Add one foreign-currency conversion minute when evidence is required.
 
     Args:
-        requirements: Mutable exact-minute requirements grouped by pair.
+        requirements: Mutable exact-minute requirements grouped by instrument.
+        instrument_public_id: Instrument whose contribution needs the rate.
         currency: Denomination of the value being converted.
         valuation_ccy: Target series currency.
         minute: Exact rate minute needed by the conversion.
     """
     if not currency or currency == valuation_ccy:
         return
-    requirements.setdefault(currency_pair_key(currency, valuation_ccy), set()).add(minute)
+    pair_requirements = requirements.setdefault(instrument_public_id, {})
+    pair_requirements.setdefault(currency_pair_key(currency, valuation_ccy), set()).add(minute)
 
 
 def _event_fx_minutes(
@@ -856,12 +867,15 @@ def _event_fx_minutes(
     accrual_rows: Sequence[PnlTimelineAccrualRow],
     quote_by_instrument: Mapping[str, str],
     valuation_ccy: str,
-) -> _FxMinuteRequirements:
+) -> _FxInstrumentRequirements:
     """Collect exact rate minutes needed by prices, fees, and accruals.
 
     A positive foreign execution price enters the average-cost kernel only after
-    conversion at its fill minute. Nonzero foreign fees and accruals need the same
-    proof, while exact zero and native-currency values need no candle.
+    conversion at its fill minute. Requirements stop when an invalid size or an
+    unknown-basis close permanently withholds that instrument, and prices that
+    cannot repair an already unknown basis do not steer peer selection. Nonzero
+    foreign fees and accruals need the same proof while their instrument remains
+    publishable; exact zero and native-currency values need no candle.
 
     Args:
         execution_rows: Trusted scope executions replayed by the kernel.
@@ -870,20 +884,70 @@ def _event_fx_minutes(
         valuation_ccy: Currency the series is valued in.
 
     Returns:
-        Exact required minutes grouped by unordered currency pair.
+        Exact required minutes grouped by instrument and unordered currency pair.
     """
-    needed: _FxMinuteRequirements = {}
+    needed: _FxInstrumentRequirements = {}
+    last_effective: dict[str, datetime] = {}
+    position_qty: dict[str, float] = {}
+    basis_unknown: set[str] = set()
+    untrusted_at: dict[str, datetime] = {}
     for row in execution_rows:
+        instrument_public_id = row["instrument_public_id"]
+        event_time = row["timestamp"]
+        effective_time = max(last_effective.get(instrument_public_id, event_time), event_time)
+        last_effective[instrument_public_id] = effective_time
+        if instrument_public_id in untrusted_at:
+            continue
+        size = row["size"]
+        if not math.isfinite(size) or size < 0.0:
+            untrusted_at[instrument_public_id] = effective_time
+            continue
+        old_qty = position_qty.get(instrument_public_id, 0.0)
+        signed_size = size if row["side"] == "buy" else -size
+        is_increasing = (old_qty >= 0.0 and signed_size > 0.0) or (
+            old_qty <= 0.0 and signed_size < 0.0
+        )
+        closed_qty = 0.0 if is_increasing else min(size, abs(old_qty))
+        price_is_known_valid = is_positive_finite(row["price"])
+        if closed_qty > 0.0 and (not price_is_known_valid or instrument_public_id in basis_unknown):
+            untrusted_at[instrument_public_id] = effective_time
+            continue
         minute = _rate_minute(row["timestamp"])
-        quote_currency = quote_by_instrument.get(row["instrument_public_id"])
-        if quote_currency is not None and is_positive_finite(row["price"]):
-            _add_fx_minute(needed, quote_currency, valuation_ccy, minute)
-        if row["fee"] != 0.0:
-            _add_fx_minute(needed, row["fee_asset"], valuation_ccy, minute)
-    for accrual in accrual_rows:
-        if accrual["amount"] != 0.0:
+        quote_currency = quote_by_instrument.get(instrument_public_id)
+        if (
+            quote_currency is not None
+            and size > 0.0
+            and price_is_known_valid
+            and instrument_public_id not in basis_unknown
+        ):
             _add_fx_minute(
                 needed,
+                instrument_public_id,
+                quote_currency,
+                valuation_ccy,
+                minute,
+            )
+        if row["fee"] != 0.0:
+            _add_fx_minute(
+                needed,
+                instrument_public_id,
+                row["fee_asset"],
+                valuation_ccy,
+                minute,
+            )
+        new_qty = old_qty + signed_size
+        if abs(new_qty) < FLAT_EPSILON:
+            new_qty = 0.0
+            basis_unknown.discard(instrument_public_id)
+        elif size > 0.0 and not price_is_known_valid:
+            basis_unknown.add(instrument_public_id)
+        position_qty[instrument_public_id] = new_qty
+    for accrual in accrual_rows:
+        invalid_at = untrusted_at.get(accrual["instrument_public_id"])
+        if accrual["amount"] != 0.0 and (invalid_at is None or accrual["accrued_at"] < invalid_at):
+            _add_fx_minute(
+                needed,
+                accrual["instrument_public_id"],
                 accrual["amount_asset"],
                 valuation_ccy,
                 _rate_minute(accrual["accrued_at"]),
@@ -898,40 +962,91 @@ def _mark_fx_minutes(
     valuation_ccy: str,
     from_time: datetime,
     to_time: datetime,
-) -> _FxMinuteRequirements:
-    """Collect exact rate minutes needed by positive foreign mark closes.
+) -> _FxInstrumentRequirements:
+    """Collect exact rate minutes for positive marks of non-flat instruments.
+
+    Position quantities replay in the same per-instrument monotone-clamped event
+    order as the pure builder. Global regression shadows are derived from the
+    complete replay prefix, including instruments whose price identity is not
+    trusted. Candles before an opening fill, after a full close, or after a
+    known-invalid size or price are not valuation consumers, so they cannot steer
+    a shared FX plane.
 
     Args:
         candles: Raw finalized mark candles already bounded to the chart window.
-        execution_rows: Trusted fills in replay order through the chart end.
+        execution_rows: Complete scope fills in replay order through the chart end.
         quote_by_instrument: Proven denomination of each candle close.
         valuation_ccy: Currency the series is valued in.
         from_time: Requested chart start whose minute floor anchors the grid.
         to_time: Inclusive requested chart end.
 
     Returns:
-        Exact required minutes grouped by unordered currency pair.
+        Exact required minutes grouped by instrument and unordered currency pair.
     """
-    needed: _FxMinuteRequirements = {}
-    grid_start = from_time.replace(second=0, microsecond=0)
-    first_fill_at: dict[str, datetime] = {}
+    effective_events: dict[str, list[tuple[datetime, str, int, float, bool]]] = {}
+    last_effective: dict[str, datetime] = {}
+    regression_shadows: list[tuple[datetime, datetime]] = []
     for row in execution_rows:
-        first_fill_at.setdefault(row["instrument_public_id"], row["timestamp"])
-    for candle in candles:
-        if not is_positive_finite(candle["close"]):
+        instrument_public_id = row["instrument_public_id"]
+        event_time = row["timestamp"]
+        previous_effective = last_effective.get(instrument_public_id)
+        if previous_effective is not None and event_time < previous_effective:
+            regression_shadows.append((event_time, previous_effective))
+        effective_time = max(previous_effective or event_time, event_time)
+        last_effective[instrument_public_id] = effective_time
+        if instrument_public_id not in quote_by_instrument:
             continue
-        instrument_public_id = candle["instrument_public_id"]
-        first_fill = first_fill_at[instrument_public_id]
-        quote_currency = quote_by_instrument[instrument_public_id]
-        mark_minute = candle["open_at"] + timedelta(minutes=1)
-        if mark_minute < grid_start or mark_minute < first_fill or mark_minute > to_time:
-            continue
-        _add_fx_minute(
-            needed,
-            quote_currency,
-            valuation_ccy,
-            mark_minute,
+        size = row["size"]
+        invalid_size = not math.isfinite(size) or size < 0.0
+        signed_size = 0.0 if invalid_size else size if row["side"] == "buy" else -size
+        effective_events.setdefault(instrument_public_id, []).append(
+            (
+                effective_time,
+                row["exchange"],
+                row["scope_sequence"],
+                signed_size,
+                invalid_size or (size > 0.0 and not is_positive_finite(row["price"])),
+            )
         )
+    candles_by_instrument: dict[str, list[PnlTimelineCandleRow]] = {}
+    for candle in candles:
+        candles_by_instrument.setdefault(candle["instrument_public_id"], []).append(candle)
+    needed: _FxInstrumentRequirements = {}
+    grid_start = from_time.replace(second=0, microsecond=0)
+    for instrument_public_id, instrument_candles in candles_by_instrument.items():
+        events = sorted(effective_events.get(instrument_public_id, []))
+        event_index = 0
+        position_qty = 0.0
+        mark_eligible = True
+        quote_currency = quote_by_instrument[instrument_public_id]
+        for candle in sorted(instrument_candles, key=lambda item: item["open_at"]):
+            mark_minute = candle["open_at"] + timedelta(minutes=1)
+            while event_index < len(events) and events[event_index][0] <= mark_minute:
+                position_qty += events[event_index][3]
+                if events[event_index][4]:
+                    mark_eligible = False
+                if abs(position_qty) < FLAT_EPSILON:
+                    position_qty = 0.0
+                event_index += 1
+            if (
+                not is_positive_finite(candle["close"])
+                or not mark_eligible
+                or mark_minute < grid_start
+                or mark_minute > to_time
+                or abs(position_qty) < FLAT_EPSILON
+                or any(
+                    shadow_start <= mark_minute < shadow_end
+                    for shadow_start, shadow_end in regression_shadows
+                )
+            ):
+                continue
+            _add_fx_minute(
+                needed,
+                instrument_public_id,
+                quote_currency,
+                valuation_ccy,
+                mark_minute,
+            )
     return needed
 
 
@@ -954,32 +1069,109 @@ def _merge_fx_minutes(
     return merged
 
 
+def _merge_instrument_fx_minutes(
+    first: Mapping[str, _FxMinuteRequirements],
+    second: Mapping[str, _FxMinuteRequirements],
+) -> _FxInstrumentRequirements:
+    """Merge exact-minute requirements while preserving consumer identity.
+
+    Args:
+        first: First bounded requirement map grouped by instrument.
+        second: Second bounded requirement map grouped by instrument.
+
+    Returns:
+        Unioned exact minutes grouped by instrument and pair.
+    """
+    merged: _FxInstrumentRequirements = {
+        instrument_public_id: {pair: set(minutes) for pair, minutes in requirements.items()}
+        for instrument_public_id, requirements in first.items()
+    }
+    for instrument_public_id, requirements in second.items():
+        target = merged.setdefault(instrument_public_id, {})
+        for pair, minutes in requirements.items():
+            target.setdefault(pair, set()).update(minutes)
+    return merged
+
+
+def _collapse_fx_minutes(
+    requirements: Mapping[str, _FxMinuteRequirements],
+) -> _FxMinuteRequirements:
+    """Collapse instrument requirements for bounded repository reads.
+
+    Args:
+        requirements: Exact minutes grouped by consuming instrument and pair.
+
+    Returns:
+        Unioned exact minutes grouped only by currency pair.
+    """
+    collapsed: _FxMinuteRequirements = {}
+    for instrument_requirements in requirements.values():
+        for pair, minutes in instrument_requirements.items():
+            collapsed.setdefault(pair, set()).update(minutes)
+    return collapsed
+
+
 def _identity_fx_planes(
     refs: Sequence[InstrumentSymbolRefRow],
-    needed_pairs: frozenset[FxPairKey],
+    requirements: Mapping[str, _FxMinuteRequirements],
 ) -> _FxIdentityPlanes:
-    """Find canonical held-symbol planes that constrain needed FX pairs.
+    """Find canonical held-symbol planes justified by each instrument.
 
-    Any trusted held instrument whose own currency legs equal a needed unordered
-    pair supplies its exact oriented candle plane. Multiple distinct canonical
-    planes are irreconcilable and intentionally leave the pair unresolved later.
+    A trusted held instrument supplies its exact oriented candle plane only when
+    that same instrument needs conversion across its own currency legs. The
+    plane constrains only that instrument and cannot suppress a peer using the
+    same unordered pair.
 
     Args:
         refs: Trusted held-instrument symbol references.
-        needed_pairs: Currency pairs required anywhere in this request.
+        requirements: Exact conversion minutes grouped by consuming instrument.
 
     Returns:
-        Canonical oriented source planes grouped by matching unordered pair.
+        Canonical oriented source plane keyed by its justifying instrument.
     """
     identities: _FxIdentityPlanes = {}
     for ref in refs:
+        instrument_public_id = ref["instrument_public_id"]
         quote_currency = cast(str, ref["quote_currency"])
         pair = currency_pair_key(ref["base_currency"], quote_currency)
-        if pair in needed_pairs:
-            identities.setdefault(pair, set()).add(
-                (ref["base_currency"], quote_currency, ref["exchange"])
+        if pair in requirements.get(instrument_public_id, {}):
+            identities[instrument_public_id] = (
+                ref["base_currency"],
+                quote_currency,
+                ref["exchange"],
             )
     return identities
+
+
+def _general_fx_minutes(
+    requirements: Mapping[str, _FxMinuteRequirements],
+    identity_planes: Mapping[str, PnlFxRatePlane],
+) -> _FxMinuteRequirements:
+    """Collect minutes whose consumers have no own-pair identity override.
+
+    Identity-only minutes cannot steer the shared plane used by peers. Other
+    currency pairs needed by an identity instrument remain general consumers.
+
+    Args:
+        requirements: Exact conversion minutes grouped by consuming instrument.
+        identity_planes: Canonical plane claims keyed by held instrument.
+
+    Returns:
+        General-consumer exact minutes grouped by unordered currency pair.
+    """
+    general: _FxMinuteRequirements = {}
+    for instrument_public_id, instrument_requirements in requirements.items():
+        identity_plane = identity_planes.get(instrument_public_id)
+        identity_pair = (
+            None
+            if identity_plane is None
+            else currency_pair_key(identity_plane[0], identity_plane[1])
+        )
+        for pair, minutes in instrument_requirements.items():
+            if pair == identity_pair:
+                continue
+            general.setdefault(pair, set()).update(minutes)
+    return general
 
 
 def _fx_requirement_range(
@@ -1018,29 +1210,24 @@ def _oriented_fx_pairs(pairs: Sequence[FxPairKey]) -> list[tuple[str, str]]:
 async def _discover_fx_candidates(
     repo: Repository,
     requirements: Mapping[FxPairKey, set[datetime]],
-    identity_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
     as_of: datetime,
 ) -> list[PnlFxRatePlane]:
-    """Discover nonidentity spot-FX planes in one bounded rate window.
-
-    Identity-constrained pairs skip discovery because their held instrument's
-    canonical source venue takes precedence even when it has gaps.
+    """Discover every spot-FX plane with evidence in one bounded rate window.
 
     Args:
         repo: Repository providing bounded forex-plane discovery.
         requirements: Exact pair minutes in this mark or event window.
-        identity_planes: Canonical plane constraints for the whole request.
         as_of: Knowledge horizon threading the repository read.
 
     Returns:
         Concrete oriented venue planes with evidence in this window.
     """
-    unconstrained_pairs = sorted(pair for pair in requirements if not identity_planes.get(pair))
-    bounds = _fx_requirement_range({pair: requirements[pair] for pair in unconstrained_pairs})
-    if not unconstrained_pairs or bounds is None:
+    pairs = sorted(requirements)
+    bounds = _fx_requirement_range(requirements)
+    if not pairs or bounds is None:
         return []
     return await repo.get_pnl_fx_rate_exchanges(
-        _oriented_fx_pairs(unconstrained_pairs),
+        _oriented_fx_pairs(pairs),
         bounds[0],
         bounds[1],
         as_of,
@@ -1049,13 +1236,13 @@ async def _discover_fx_candidates(
 
 def _candidate_planes(
     candidates: Sequence[PnlFxRatePlane],
-    identity_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
+    identity_planes: Mapping[str, PnlFxRatePlane],
 ) -> dict[FxPairKey, set[PnlFxRatePlane]]:
-    """Combine discovered planes with canonical identity constraints.
+    """Combine discovered planes with instrument-owned canonical planes.
 
     Args:
         candidates: Oriented venue planes discovered across bounded windows.
-        identity_planes: Canonical held-symbol constraints by pair.
+        identity_planes: Canonical held-symbol planes keyed by instrument.
 
     Returns:
         Eligible oriented planes grouped by unordered pair.
@@ -1064,11 +1251,9 @@ def _candidate_planes(
     for candidate in candidates:
         base, quote, _ = candidate
         planes.setdefault(currency_pair_key(base, quote), set()).add(candidate)
-    for pair, identities in identity_planes.items():
-        if len(identities) == 1:
-            planes[pair] = set(identities)
-        else:
-            planes.pop(pair, None)
+    for identity in identity_planes.values():
+        base, quote, _ = identity
+        planes.setdefault(currency_pair_key(base, quote), set()).add(identity)
     return planes
 
 
@@ -1083,11 +1268,11 @@ async def _load_fx_candidate_rows(
     Args:
         repo: Repository providing exact venue-filtered forex candles.
         requirements: Exact pair minutes in this mark or event window.
-        candidate_planes: Request-wide eligible planes by unordered pair.
+        candidate_planes: Eligible discovered and identity planes by pair.
         as_of: Knowledge horizon threading the repository read.
 
     Returns:
-        Candidate rows used jointly to resolve one oriented plane for the request.
+        Candidate rows used to resolve shared and instrument-owned planes.
     """
     bounds = _fx_requirement_range(requirements)
     if bounds is None:
@@ -1107,23 +1292,21 @@ async def _load_fx_candidate_rows(
 
 def _resolve_fx_planes(
     requirements: Mapping[FxPairKey, set[datetime]],
-    identity_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
     candidate_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
     rows: Sequence[PnlFxRateRow],
     valuation_ccy: str,
 ) -> dict[FxPairKey, PnlFxRatePlane]:
-    """Resolve one oriented plane per unordered pair for the entire request.
+    """Resolve one oriented plane per pair for general conversion consumers.
 
-    A single identity plane always wins. Conflicting identity planes leave the
-    pair unresolved. Otherwise the oriented series covering the most exact
-    required minutes wins. When several complete planes cover a PLN pair,
-    Walutomat is preferred. Other ties preserve lexical venue order, then prefer
-    the source-to-valuation orientation once for the whole request. Duplicate
-    conflicts on a full plane-minute identity do not count as coverage.
+    The oriented series covering the most exact general-consumer minutes wins.
+    Identity-only requirements have already been excluded so they cannot steer
+    a peer's plane. When several complete planes cover a PLN pair, Walutomat is
+    preferred. Other ties preserve lexical venue order, then prefer the
+    source-to-valuation orientation. Duplicate conflicts on a full plane-minute
+    identity do not count as coverage, and zero usable coverage never wins.
 
     Args:
-        requirements: Union of exact mark and event rate minutes.
-        identity_planes: Canonical held-symbol constraints by pair.
+        requirements: Exact mark and event minutes for general consumers.
         candidate_planes: Eligible discovered or forced planes by pair.
         rows: Candidate candle rows from both bounded reads.
         valuation_ccy: Target currency defining the preferred conversion direction.
@@ -1140,12 +1323,6 @@ def _resolve_fx_planes(
             covered.setdefault((base, quote, exchange), set()).add(minute)
     resolved: dict[FxPairKey, PnlFxRatePlane] = {}
     for pair, minutes in requirements.items():
-        identities = identity_planes.get(pair, set())
-        if len(identities) == 1:
-            resolved[pair] = next(iter(identities))
-            continue
-        if identities:
-            continue
         planes = candidate_planes.get(pair, set())
         if not planes:
             continue
@@ -1174,46 +1351,126 @@ def _resolve_fx_planes(
     return resolved
 
 
+def _resolve_identity_fx_planes(
+    requirements: Mapping[str, _FxMinuteRequirements],
+    identity_planes: Mapping[str, PnlFxRatePlane],
+    rows: Sequence[PnlFxRateRow],
+) -> _FxIdentityPlanes:
+    """Pin instrument-owned planes only after they prove usable coverage.
+
+    Partial positive coverage pins the canonical plane for the instrument's
+    whole request so a rival cannot fill later gaps. Zero usable coverage does
+    not pin or enter provenance, but the unresolved identity claim still blocks
+    that instrument from borrowing the shared plane.
+
+    Args:
+        requirements: Exact conversion minutes grouped by consuming instrument.
+        identity_planes: Canonical source-plane claims keyed by instrument.
+        rows: Candidate candle rows from both bounded reads.
+
+    Returns:
+        Canonical planes with nonzero usable coverage keyed by instrument.
+    """
+    covered: dict[PnlFxRatePlane, set[datetime]] = {}
+    for (base, quote, exchange, minute), close in build_fx_rates(rows).items():
+        if is_positive_finite(close):
+            covered.setdefault((base, quote, exchange), set()).add(minute)
+    resolved: _FxIdentityPlanes = {}
+    for instrument_public_id, plane in identity_planes.items():
+        pair = currency_pair_key(plane[0], plane[1])
+        minutes = requirements.get(instrument_public_id, {}).get(pair, set())
+        if covered.get(plane, set()).intersection(minutes):
+            resolved[instrument_public_id] = plane
+    return resolved
+
+
+def _fx_planes_by_instrument(
+    requirements: Mapping[str, _FxMinuteRequirements],
+    shared_planes: Mapping[FxPairKey, PnlFxRatePlane],
+    identity_planes: Mapping[str, PnlFxRatePlane],
+    resolved_identity_planes: Mapping[str, PnlFxRatePlane],
+) -> _FxPlanesByInstrument:
+    """Choose one plane per instrument-pair without cross-consumer borrowing.
+
+    Args:
+        requirements: Exact conversion minutes grouped by consuming instrument.
+        shared_planes: Coverage-ranked planes for general consumers.
+        identity_planes: Canonical source-plane claims keyed by instrument.
+        resolved_identity_planes: Identity planes with nonzero usable coverage.
+
+    Returns:
+        Selected planes for every instrument and required pair.
+    """
+    selected: _FxPlanesByInstrument = {}
+    for instrument_public_id, instrument_requirements in requirements.items():
+        identity_plane = identity_planes.get(instrument_public_id)
+        identity_pair = (
+            None
+            if identity_plane is None
+            else currency_pair_key(identity_plane[0], identity_plane[1])
+        )
+        instrument_planes: dict[FxPairKey, PnlFxRatePlane] = {}
+        for pair in instrument_requirements:
+            if pair == identity_pair:
+                resolved_identity = resolved_identity_planes.get(instrument_public_id)
+                if resolved_identity is not None:
+                    instrument_planes[pair] = resolved_identity
+                continue
+            shared_plane = shared_planes.get(pair)
+            if shared_plane is not None:
+                instrument_planes[pair] = shared_plane
+        selected[instrument_public_id] = instrument_planes
+    return selected
+
+
 async def _load_request_fx_rates(
     repo: Repository,
-    mark_requirements: Mapping[FxPairKey, set[datetime]],
-    event_requirements: Mapping[FxPairKey, set[datetime]],
-    identity_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
+    mark_requirements: Mapping[str, _FxMinuteRequirements],
+    event_requirements: Mapping[str, _FxMinuteRequirements],
+    identity_planes: Mapping[str, PnlFxRatePlane],
     as_of: datetime,
     valuation_ccy: str,
-) -> tuple[FxRateMap, dict[FxPairKey, PnlFxRatePlane]]:
-    """Load and resolve one oriented-plane FX book for the whole request.
+) -> tuple[
+    FxRateMap,
+    _FxPlanesByInstrument,
+    set[tuple[FxPairKey, PnlFxRatePlane]],
+]:
+    """Load shared and instrument-owned oriented FX planes for one request.
 
     Mark and event reads retain their own bounded ranges, so an old opening fill
     never widens the chart-window read. Candidate evidence from both is combined
-    before plane resolution, then every non-selected orientation and venue is
-    discarded. The same selected plane map governs marks, execution prices, fees, and
-    accruals at every minute.
+    before shared and per-instrument resolution, then every unused orientation
+    and venue is discarded. Each instrument uses one plane per pair for its
+    marks, execution prices, fees, and accruals at every minute.
 
     Args:
         repo: Repository providing bounded FX plane and candle reads.
-        mark_requirements: Exact conversion minutes from raw mark candles.
-        event_requirements: Exact conversion minutes from fills and accruals.
-        identity_planes: Canonical held-symbol plane constraints.
+        mark_requirements: Mark conversion minutes grouped by instrument.
+        event_requirements: Fill and accrual minutes grouped by instrument.
+        identity_planes: Canonical held-symbol planes keyed by instrument.
         as_of: Knowledge horizon threading repository reads.
         valuation_ccy: Target currency defining conversion-direction tie-breaks.
 
     Returns:
-        Plane-filtered rate map and one selected plane per resolvable pair.
+        Plane-filtered rates, per-instrument selections, and distinct used planes.
     """
-    requirements = _merge_fx_minutes(mark_requirements, event_requirements)
+    instrument_requirements = _merge_instrument_fx_minutes(
+        mark_requirements,
+        event_requirements,
+    )
+    mark_pair_requirements = _collapse_fx_minutes(mark_requirements)
+    event_pair_requirements = _collapse_fx_minutes(event_requirements)
+    requirements = _merge_fx_minutes(mark_pair_requirements, event_pair_requirements)
     if not requirements:
-        return {}, {}
+        return {}, {}, set()
     mark_candidates = await _discover_fx_candidates(
         repo,
-        mark_requirements,
-        identity_planes,
+        mark_pair_requirements,
         as_of,
     )
     event_candidates = await _discover_fx_candidates(
         repo,
-        event_requirements,
-        identity_planes,
+        event_pair_requirements,
         as_of,
     )
     candidate_planes = _candidate_planes(
@@ -1222,31 +1479,44 @@ async def _load_request_fx_rates(
     )
     mark_rows = await _load_fx_candidate_rows(
         repo,
-        mark_requirements,
+        mark_pair_requirements,
         candidate_planes,
         as_of,
     )
     event_rows = await _load_fx_candidate_rows(
         repo,
-        event_requirements,
+        event_pair_requirements,
         candidate_planes,
         as_of,
     )
     rows = [*mark_rows, *event_rows]
-    planes = _resolve_fx_planes(
-        requirements,
-        identity_planes,
+    shared_planes = _resolve_fx_planes(
+        _general_fx_minutes(instrument_requirements, identity_planes),
         candidate_planes,
         rows,
         valuation_ccy,
     )
+    resolved_identity_planes = _resolve_identity_fx_planes(
+        instrument_requirements,
+        identity_planes,
+        rows,
+    )
+    planes_by_instrument = _fx_planes_by_instrument(
+        instrument_requirements,
+        shared_planes,
+        identity_planes,
+        resolved_identity_planes,
+    )
+    used_planes = {
+        (pair, plane)
+        for instrument_planes in planes_by_instrument.values()
+        for pair, plane in instrument_planes.items()
+    }
+    selected_planes = {plane for _, plane in used_planes}
     selected_rows = [
-        row
-        for row in rows
-        if planes.get(currency_pair_key(row["base"], row["quote"]))
-        == (row["base"], row["quote"], row["exchange"])
+        row for row in rows if (row["base"], row["quote"], row["exchange"]) in selected_planes
     ]
-    return build_fx_rates(selected_rows), planes
+    return build_fx_rates(selected_rows), planes_by_instrument, used_planes
 
 
 async def build_wallet_pnl_series(
@@ -1335,7 +1605,7 @@ async def build_wallet_pnl_series(
     replayed_accrual_rows = [row for row in accrual_rows if row["accrued_at"] <= to_time]
     mark_requirements = _mark_fx_minutes(
         mark_candles,
-        trusted_replayed_rows,
+        loaded_execution_rows,
         quote_by_instrument,
         valuation_ccy,
         from_time,
@@ -1347,12 +1617,15 @@ async def build_wallet_pnl_series(
         quote_by_instrument,
         valuation_ccy,
     )
-    requirements = _merge_fx_minutes(mark_requirements, event_requirements)
+    instrument_requirements = _merge_instrument_fx_minutes(
+        mark_requirements,
+        event_requirements,
+    )
     identity_planes = _identity_fx_planes(
         trusted_refs,
-        frozenset(requirements),
+        instrument_requirements,
     )
-    rates, planes = await _load_request_fx_rates(
+    rates, planes_by_instrument, used_planes = await _load_request_fx_rates(
         repo,
         mark_requirements,
         event_requirements,
@@ -1365,7 +1638,7 @@ async def build_wallet_pnl_series(
         quote_by_instrument,
         valuation_ccy,
         rates,
-        planes,
+        planes_by_instrument,
     )
     executions = [
         _to_timeline_execution(
@@ -1373,11 +1646,19 @@ async def build_wallet_pnl_series(
             valuation_ccy,
             rates,
             quote_by_instrument.get(row["instrument_public_id"]),
-            planes,
+            planes_by_instrument.get(row["instrument_public_id"], {}),
         )
         for row in loaded_execution_rows
     ]
-    accruals = [_to_timeline_accrual(row, valuation_ccy, rates, planes) for row in accrual_rows]
+    accruals = [
+        _to_timeline_accrual(
+            row,
+            valuation_ccy,
+            rates,
+            planes_by_instrument.get(row["instrument_public_id"], {}),
+        )
+        for row in accrual_rows
+    ]
     window = TimelineWindow(
         from_time=from_time,
         to_time=to_time,
@@ -1403,7 +1684,7 @@ async def build_wallet_pnl_series(
             quote_currency=quote_currency,
             exchange=exchange,
         )
-        for (first, second), (base_currency, quote_currency, exchange) in sorted(planes.items())
+        for (first, second), (base_currency, quote_currency, exchange) in sorted(used_planes)
     )
     return PnlWalletSeriesResult(
         points=result.points,

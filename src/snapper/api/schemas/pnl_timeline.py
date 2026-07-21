@@ -81,11 +81,11 @@ class PnlTimelinePointData(StrictBody):
 
 
 class PnlFxRateSourceData(StrictBody):
-    """One request-pinned FX plane with conversion and symbol directions.
+    """One used FX plane with conversion and symbol directions.
 
     ``source_currency`` is converted into ``valuation_currency`` while
     ``base_currency`` and ``quote_currency`` identify the exact oriented candle
-    series pinned on ``exchange`` for the whole request.
+    series pinned on ``exchange`` for at least one contributing instrument.
     """
 
     source_currency: str
