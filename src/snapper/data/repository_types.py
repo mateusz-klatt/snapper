@@ -2718,6 +2718,87 @@ class AiReviewRow(TypedDict):
     resolved_at: datetime | None
 
 
+class AiResearchRoundInsertRow(TypedDict):
+    """Server-owned fields for creating one pending AI-research round."""
+
+    public_id: NotRequired[str]
+    trigger: str
+    created_at: datetime
+
+
+class AiResearchRoundRow(TypedDict):
+    """Current lifecycle projection for an AI-research round."""
+
+    public_id: str
+    trigger: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    resolved_at: datetime | None
+
+
+class MarketViewNextEventRow(TypedDict):
+    """Typed next-event item stored inside a market view."""
+
+    when_utc: datetime
+    name: str
+    severity: str
+
+
+class MarketViewSourceInsertRow(TypedDict):
+    """Author-owned source citation fields for market-view insertion."""
+
+    url: str
+    title: str
+    retrieved_at: datetime
+
+
+class MarketViewSourceRow(TypedDict):
+    """Persisted source citation with a server-generated public identifier."""
+
+    public_id: str
+    market_view_public_id: str
+    ordinal: int
+    url: str
+    title: str
+    retrieved_at: datetime
+
+
+class MarketViewInsertRow(TypedDict):
+    """Author-owned market-view fields plus trusted research-round lineage."""
+
+    research_round_public_id: str
+    as_of: datetime
+    valid_until: datetime
+    regime: str
+    bias: str
+    confidence: float
+    horizon_hours: int
+    key_risks: list[str]
+    next_events: list[MarketViewNextEventRow]
+    rationale: str
+
+
+class MarketViewRow(TypedDict):
+    """Complete immutable market view with ordered source citations."""
+
+    public_id: str
+    research_round_public_id: str
+    trigger: str
+    status: str
+    as_of: datetime
+    submitted_at: datetime
+    valid_until: datetime
+    regime: str
+    bias: str
+    confidence: float
+    horizon_hours: int
+    key_risks: list[str]
+    next_events: list[MarketViewNextEventRow]
+    rationale: str
+    sources: list[MarketViewSourceRow]
+
+
 class AiReviewPositionCycleTransitionRow(TypedDict):
     """One position-cycle lifecycle transition in an aftermath window.
 

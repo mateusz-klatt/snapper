@@ -4727,6 +4727,146 @@ class AiReviewEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
 
 
+class AiResearchRound(Base):
+    """Current lifecycle state for one AI-research wake.
+
+    Research rounds are operational state rows rather than bitemporal domain
+    snapshots. A round moves once from ``pending`` to a terminal status, while
+    every durable research artifact is retained separately in
+    :class:`MarketView`. A partial unique index enforces the global latest-wins
+    rule by permitting at most one pending round.
+    """
+
+    __tablename__ = "ai_research_rounds"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_ai_research_rounds_public_id"),
+        Index(
+            "uq_ai_research_rounds_one_pending",
+            "status",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index("ix_ai_research_rounds_created_at", "created_at"),
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'superseded', 'expired')",
+            name="ck_ai_research_rounds_status_enum",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND resolved_at IS NULL) OR "
+            "(status IN ('completed', 'superseded', 'expired') AND resolved_at IS NOT NULL)",
+            name="ck_ai_research_rounds_status_consistency",
+        ),
+        CheckConstraint(
+            "length(trim(trigger)) > 0",
+            name="ck_ai_research_rounds_trigger_nonempty",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, default=_public_id)
+    trigger: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, server_default="pending")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+class MarketView(Base):
+    """Immutable structured research artifact with two replay clocks.
+
+    ``as_of`` is supplied by the author and ``submitted_at`` is assigned by
+    the server. Replay eligibility must compare both with the replay instant,
+    preventing a backdated artifact submitted later from leaking into an
+    earlier decision. The row is insert-only and deliberately does not use
+    SCD2: author time and server knowledge time already express the temporal
+    facts, while ``known_to`` successors would incorrectly imply that an
+    immutable submission may be revised in place.
+    """
+
+    __tablename__ = "market_views"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_market_views_public_id"),
+        UniqueConstraint(
+            "research_round_public_id",
+            name="uq_market_views_research_round_public_id",
+        ),
+        Index(
+            "ix_market_views_replay_eligibility",
+            "submitted_at",
+            "as_of",
+            "valid_until",
+        ),
+        CheckConstraint(
+            "regime IN ('risk_on', 'neutral', 'risk_off', 'event_window')",
+            name="ck_market_views_regime_enum",
+        ),
+        CheckConstraint(
+            "bias IN ('longs_ok', 'neutral', 'avoid_new_longs', 'avoid_all')",
+            name="ck_market_views_bias_enum",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="ck_market_views_confidence_range",
+        ),
+        CheckConstraint(
+            "length(trim(trigger)) > 0",
+            name="ck_market_views_trigger_nonempty",
+        ),
+        CheckConstraint(
+            "length(trim(status)) > 0",
+            name="ck_market_views_status_nonempty",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, default=_public_id)
+    research_round_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    trigger: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    as_of: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(
+        TZDateTime(), nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    valid_until: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    regime: Mapped[str] = mapped_column(String(16), nullable=False)
+    bias: Mapped[str] = mapped_column(String(20), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    horizon_hours: Mapped[int] = mapped_column(Integer, nullable=False)
+    key_risks: Mapped[list[str]] = mapped_column(JSON(), nullable=False)
+    next_events: Mapped[list[JsonObject]] = mapped_column(JSON(), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class MarketViewSource(Base):
+    """Immutable source citation belonging to one :class:`MarketView`.
+
+    Each citation receives a server-generated public identifier for future
+    ID-only references. Sources share their parent view's immutable lifetime,
+    so SCD2 correction rows would add no valid state transition. ``ordinal``
+    preserves the author's submitted ordering deterministically.
+    """
+
+    __tablename__ = "market_view_sources"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_market_view_sources_public_id"),
+        UniqueConstraint(
+            "market_view_public_id",
+            "ordinal",
+            name="uq_market_view_sources_view_ordinal",
+        ),
+        CheckConstraint("ordinal >= 0", name="ck_market_view_sources_ordinal_nonnegative"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, default=_public_id)
+    market_view_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    retrieved_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+
+
 class InstrumentFeedHealth(Base):
     """Current-state per-symbol subscription / feed-health snapshot.
 

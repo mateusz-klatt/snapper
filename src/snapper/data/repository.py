@@ -179,6 +179,7 @@ from snapper.data.db_stats_types import TableEntry
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
 from snapper.data.models import AiDelegate
+from snapper.data.models import AiResearchRound
 from snapper.data.models import AiReview
 from snapper.data.models import AiReviewEvent
 from snapper.data.models import AlertDelivery
@@ -198,6 +199,8 @@ from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import MarketSnapshot
+from snapper.data.models import MarketView
+from snapper.data.models import MarketViewSource
 from snapper.data.models import NotificationDevice
 from snapper.data.models import Operator
 from snapper.data.models import Order
@@ -238,6 +241,8 @@ from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import AiDelegateRow
+from snapper.data.repository_types import AiResearchRoundInsertRow
+from snapper.data.repository_types import AiResearchRoundRow
 from snapper.data.repository_types import AiReviewAftermathExecutionRow
 from snapper.data.repository_types import AiReviewAftermathRow
 from snapper.data.repository_types import AiReviewEventInsertRow
@@ -285,6 +290,11 @@ from snapper.data.repository_types import MarketDataCoverageRow
 from snapper.data.repository_types import MarketDataFreshnessRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
+from snapper.data.repository_types import MarketViewInsertRow
+from snapper.data.repository_types import MarketViewNextEventRow
+from snapper.data.repository_types import MarketViewRow
+from snapper.data.repository_types import MarketViewSourceInsertRow
+from snapper.data.repository_types import MarketViewSourceRow
 from snapper.data.repository_types import NotificationDeviceRow
 from snapper.data.repository_types import NotificationDeviceUpsertRow
 from snapper.data.repository_types import OperatorRow
@@ -389,6 +399,10 @@ SQLAlchemy's default sizing, so the single-container backend is
 unaffected. Registered on the shared ``.env`` allowlist via
 :mod:`snapper.config.env_contract`.
 """
+
+_AI_RESEARCH_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
+    {"completed", "superseded", "expired"}
+)
 
 
 class _SpotAssetPrecisionEvidenceAbsentConflictError(Exception):
@@ -5440,6 +5454,70 @@ class Repository(ABC):
         transaction with admission counter increment +
         ``ai_review_events`` append).
         """
+        ...
+
+    @abstractmethod
+    async def create_ai_research_round(self, row: AiResearchRoundInsertRow) -> str:
+        """Supersede the pending research round and create its successor.
+
+        Both mutations commit atomically. The new row always starts pending,
+        and the schema-level partial unique index guarantees there is at most
+        one pending research round globally.
+        """
+        ...
+
+    @abstractmethod
+    async def get_ai_research_round(self, round_public_id: str) -> AiResearchRoundRow | None:
+        """Fetch one research round by public identifier."""
+        ...
+
+    @abstractmethod
+    async def transition_ai_research_round_status(
+        self,
+        round_public_id: str,
+        *,
+        expected_status: str,
+        new_status: str,
+        transitioned_at: datetime,
+    ) -> bool:
+        """CAS one research round from its expected status to a terminal status."""
+        ...
+
+    @abstractmethod
+    async def insert_market_view(
+        self,
+        row: MarketViewInsertRow,
+        sources: list[MarketViewSourceInsertRow],
+        *,
+        submitted_at: datetime,
+    ) -> str:
+        """Complete a pending round and atomically insert its view and sources.
+
+        ``submitted_at`` is a trusted server-clock value kept separate from
+        the author-owned insert row. Empty source lists and non-pending rounds
+        are rejected before any artifact is committed.
+        """
+        ...
+
+    @abstractmethod
+    async def get_market_view(self, market_view_public_id: str) -> MarketViewRow | None:
+        """Fetch one immutable market view with its ordered source rows."""
+        ...
+
+    @abstractmethod
+    async def get_latest_market_view(self, *, replay_at: datetime) -> MarketViewRow | None:
+        """Return the freshest view causally eligible at ``replay_at``.
+
+        Eligibility requires authored ``as_of`` and server ``submitted_at``
+        to be no later than the replay instant, and ``valid_until`` to remain
+        strictly later. This dual-clock predicate prevents backdated late
+        submissions from leaking into historical decisions.
+        """
+        ...
+
+    @abstractmethod
+    async def get_market_view_source(self, source_public_id: str) -> MarketViewSourceRow | None:
+        """Fetch one source citation by its externally citable public ID."""
         ...
 
     @abstractmethod
@@ -23159,6 +23237,273 @@ class SQLAlchemyRepository(Repository):
             s.add(review)
             await s.commit()
             return review.public_id
+
+    @staticmethod
+    def _ai_research_round_row_from_orm(row: AiResearchRound) -> AiResearchRoundRow:
+        """Project an AI-research round ORM row into its typed contract."""
+        return {
+            "public_id": row.public_id,
+            "trigger": row.trigger,
+            "status": row.status,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+            "resolved_at": row.resolved_at,
+        }
+
+    @staticmethod
+    def _market_view_source_row_from_orm(row: MarketViewSource) -> MarketViewSourceRow:
+        """Project a source ORM row into its externally citable contract."""
+        return {
+            "public_id": row.public_id,
+            "market_view_public_id": row.market_view_public_id,
+            "ordinal": row.ordinal,
+            "url": row.url,
+            "title": row.title,
+            "retrieved_at": row.retrieved_at,
+        }
+
+    @staticmethod
+    def _market_view_next_events_from_orm(
+        events: list[JsonObject],
+    ) -> list[MarketViewNextEventRow]:
+        """Decode JSON-safe event timestamps into typed datetimes."""
+        return [
+            {
+                "when_utc": datetime.fromisoformat(cast(str, event["when_utc"])),
+                "name": cast(str, event["name"]),
+                "severity": cast(str, event["severity"]),
+            }
+            for event in events
+        ]
+
+    @classmethod
+    def _market_view_row_from_orm(
+        cls,
+        row: MarketView,
+        sources: list[MarketViewSourceRow],
+    ) -> MarketViewRow:
+        """Project one immutable view and its ordered source citations."""
+        return {
+            "public_id": row.public_id,
+            "research_round_public_id": row.research_round_public_id,
+            "trigger": row.trigger,
+            "status": row.status,
+            "as_of": row.as_of,
+            "submitted_at": row.submitted_at,
+            "valid_until": row.valid_until,
+            "regime": row.regime,
+            "bias": row.bias,
+            "confidence": row.confidence,
+            "horizon_hours": row.horizon_hours,
+            "key_risks": row.key_risks,
+            "next_events": cls._market_view_next_events_from_orm(row.next_events),
+            "rationale": row.rationale,
+            "sources": sources,
+        }
+
+    async def _load_market_view_sources(
+        self,
+        session: AsyncSession,
+        market_view_public_id: str,
+    ) -> list[MarketViewSourceRow]:
+        """Load source citations in the author's stable submitted order."""
+        rows = (
+            (
+                await session.execute(
+                    select(MarketViewSource)
+                    .where(MarketViewSource.market_view_public_id == market_view_public_id)
+                    .order_by(MarketViewSource.ordinal.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [self._market_view_source_row_from_orm(row) for row in rows]
+
+    async def create_ai_research_round(self, row: AiResearchRoundInsertRow) -> str:
+        """Atomically replace the pending research round with a new one."""
+        created_at = row["created_at"]
+        public_id = row.get("public_id", str(uuid7()))
+        async with self.session() as s:
+            await s.execute(
+                update(AiResearchRound)
+                .where(AiResearchRound.status == "pending")
+                .values(
+                    status="superseded",
+                    updated_at=created_at,
+                    resolved_at=created_at,
+                )
+            )
+            research_round = AiResearchRound(
+                public_id=public_id,
+                trigger=row["trigger"],
+                status="pending",
+                created_at=created_at,
+                updated_at=created_at,
+                resolved_at=None,
+            )
+            s.add(research_round)
+            await s.commit()
+            return research_round.public_id
+
+    async def get_ai_research_round(self, round_public_id: str) -> AiResearchRoundRow | None:
+        """Fetch one AI-research round by public identifier."""
+        async with self.session() as s:
+            row = (
+                await s.execute(
+                    select(AiResearchRound).where(AiResearchRound.public_id == round_public_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return self._ai_research_round_row_from_orm(row)
+
+    async def transition_ai_research_round_status(
+        self,
+        round_public_id: str,
+        *,
+        expected_status: str,
+        new_status: str,
+        transitioned_at: datetime,
+    ) -> bool:
+        """CAS a pending research round into one final terminal status."""
+        if expected_status != "pending":
+            raise ValueError("AI-research rounds may transition only from pending")
+        if new_status not in _AI_RESEARCH_TERMINAL_STATUSES:
+            raise ValueError("AI-research round target status must be terminal")
+        async with self.session() as s:
+            transitioned_public_id = (
+                await s.execute(
+                    update(AiResearchRound)
+                    .where(
+                        AiResearchRound.public_id == round_public_id,
+                        AiResearchRound.status == expected_status,
+                    )
+                    .values(
+                        status=new_status,
+                        updated_at=transitioned_at,
+                        resolved_at=transitioned_at,
+                    )
+                    .returning(AiResearchRound.public_id)
+                )
+            ).scalar_one_or_none()
+            await s.commit()
+            return transitioned_public_id is not None
+
+    async def insert_market_view(
+        self,
+        row: MarketViewInsertRow,
+        sources: list[MarketViewSourceInsertRow],
+        *,
+        submitted_at: datetime,
+    ) -> str:
+        """Complete a pending round while inserting its immutable artifact."""
+        if not sources:
+            raise ValueError("market view requires at least one source")
+        if len(row["rationale"].encode("utf-8")) > 2048:
+            raise ValueError("market view rationale must not exceed 2048 UTF-8 bytes")
+        async with self.session() as s:
+            research_round = (
+                await s.execute(
+                    select(AiResearchRound)
+                    .where(AiResearchRound.public_id == row["research_round_public_id"])
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if research_round is None or research_round.status != "pending":
+                raise ValueError("market view requires a pending AI-research round")
+
+            market_view_public_id = str(uuid7())
+            serialized_events: list[JsonObject] = [
+                {
+                    "when_utc": event["when_utc"].isoformat(),
+                    "name": event["name"],
+                    "severity": event["severity"],
+                }
+                for event in row["next_events"]
+            ]
+            market_view = MarketView(
+                public_id=market_view_public_id,
+                research_round_public_id=research_round.public_id,
+                trigger=research_round.trigger,
+                status="completed",
+                as_of=row["as_of"],
+                submitted_at=submitted_at,
+                valid_until=row["valid_until"],
+                regime=row["regime"],
+                bias=row["bias"],
+                confidence=row["confidence"],
+                horizon_hours=row["horizon_hours"],
+                key_risks=row["key_risks"],
+                next_events=serialized_events,
+                rationale=row["rationale"],
+            )
+            s.add(market_view)
+            for ordinal, source in enumerate(sources):
+                s.add(
+                    MarketViewSource(
+                        public_id=str(uuid7()),
+                        market_view_public_id=market_view_public_id,
+                        ordinal=ordinal,
+                        url=source["url"],
+                        title=source["title"],
+                        retrieved_at=source["retrieved_at"],
+                    )
+                )
+            research_round.status = "completed"
+            research_round.updated_at = submitted_at
+            research_round.resolved_at = submitted_at
+            await s.commit()
+            return market_view_public_id
+
+    async def get_market_view(self, market_view_public_id: str) -> MarketViewRow | None:
+        """Fetch one immutable view and its ordered sources."""
+        async with self.session() as s:
+            row = (
+                await s.execute(
+                    select(MarketView).where(MarketView.public_id == market_view_public_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            sources = await self._load_market_view_sources(s, row.public_id)
+            return self._market_view_row_from_orm(row, sources)
+
+    async def get_latest_market_view(self, *, replay_at: datetime) -> MarketViewRow | None:
+        """Return the freshest unexpired artifact visible at replay time."""
+        async with self.session() as s:
+            row = (
+                await s.execute(
+                    select(MarketView)
+                    .where(
+                        MarketView.as_of <= replay_at,
+                        MarketView.submitted_at <= replay_at,
+                        MarketView.valid_until > replay_at,
+                    )
+                    .order_by(
+                        MarketView.as_of.desc(),
+                        MarketView.submitted_at.desc(),
+                        MarketView.id.desc(),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            sources = await self._load_market_view_sources(s, row.public_id)
+            return self._market_view_row_from_orm(row, sources)
+
+    async def get_market_view_source(self, source_public_id: str) -> MarketViewSourceRow | None:
+        """Fetch one source citation by public identifier."""
+        async with self.session() as s:
+            row = (
+                await s.execute(
+                    select(MarketViewSource).where(MarketViewSource.public_id == source_public_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return self._market_view_source_row_from_orm(row)
 
     async def get_ai_delegate_by_user_public_id(self, user_public_id: str) -> AiDelegateRow | None:
         """Lookup operational :class:`AiDelegate` row by user_public_id."""
