@@ -238,8 +238,10 @@ from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import AiDelegateRow
+from snapper.data.repository_types import AiReviewAftermathRow
 from snapper.data.repository_types import AiReviewEventInsertRow
 from snapper.data.repository_types import AiReviewInsertRow
+from snapper.data.repository_types import AiReviewPositionCycleTransitionRow
 from snapper.data.repository_types import AiReviewRow
 from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertDeliveryRow
@@ -5340,6 +5342,30 @@ class Repository(ABC):
         - ``await_ai_review`` poll fallback (DB-backed terminal
           status check on bus-loss / restart).
         - ``GET /api/ai-reviews/pending`` REST endpoint.
+        """
+        ...
+
+    @abstractmethod
+    async def get_ai_review_aftermath(
+        self,
+        review_public_id: str,
+        as_of: datetime,
+    ) -> AiReviewAftermathRow | None:
+        """Project review-scope trading activity through one temporal anchor.
+
+        The review row supplies the immutable wallet and instrument join keys
+        and the inclusive window start. Every temporal entity is read in its
+        state active at ``as_of``. The method performs no mutation and leaves
+        terminal-status policy and caller authorization to the API surfaces.
+
+        Args:
+            review_public_id: Public identifier of the review supplying scope.
+            as_of: Inclusive projection end and bitemporal read anchor.
+
+        Returns:
+            The review, exact-scope orders and executions, lifecycle
+            transitions, and current positions, or ``None`` when the review
+            does not exist.
         """
         ...
 
@@ -22599,6 +22625,40 @@ class SQLAlchemyRepository(Repository):
             },
         )
 
+    @staticmethod
+    def _ai_review_cycle_transition_from_orm(
+        cycle: PositionCycle,
+        *,
+        transition: str,
+        occurred_at: datetime,
+    ) -> AiReviewPositionCycleTransitionRow:
+        """Project one lifecycle timestamp from an active position cycle.
+
+        Args:
+            cycle: Cycle version active at the aftermath temporal anchor.
+            transition: Lifecycle transition name exposed by the projection.
+            occurred_at: Retained cycle-open or cycle-close timestamp.
+
+        Returns:
+            Typed transition row with the cycle's active-as-of state.
+        """
+        return {
+            "cycle_public_id": cycle.public_id,
+            "transition": transition,
+            "occurred_at": occurred_at,
+            "instrument_public_id": cycle.instrument_public_id,
+            "exchange": cycle.exchange,
+            "mode": cycle.mode,
+            "shard_key": cycle.shard_key,
+            "wallet_public_id": cycle.wallet_public_id,
+            "operator_public_id": cycle.operator_public_id,
+            "direction": cycle.direction,
+            "max_qty": cycle.max_qty,
+            "status_at_as_of": cycle.status,
+            "opening_command_public_id": cycle.opening_command_public_id,
+            "closing_command_public_id": cycle.closing_command_public_id,
+        }
+
     async def get_ai_review(self, review_public_id: str) -> AiReviewRow | None:
         """Fetch :class:`AiReview` row by public_id."""
         async with self.session() as s:
@@ -22608,6 +22668,312 @@ class SQLAlchemyRepository(Repository):
             if row is None:
                 return None
             return self._ai_review_row_from_orm(row)
+
+    async def get_ai_review_aftermath(
+        self,
+        review_public_id: str,
+        as_of: datetime,
+    ) -> AiReviewAftermathRow | None:
+        """Project exact-scope activity from review creation through ``as_of``.
+
+        Orders, executions, cycles, instruments, symbols, and positions use
+        the established temporal-active predicate at the same anchor. Cycle
+        lifecycle events are derived from the active-as-of row's retained
+        ``opened_at`` and ``closed_at`` values so max-quantity revisions are
+        not misreported as state transitions.
+
+        Args:
+            review_public_id: Review whose wallet and instrument key the read.
+            as_of: Inclusive window end and temporal version anchor.
+
+        Returns:
+            A complete aftermath projection, or ``None`` when the review does
+            not exist.
+        """
+        async with self.session() as s:
+            review_orm = (
+                await s.execute(select(AiReview).where(AiReview.public_id == review_public_id))
+            ).scalar_one_or_none()
+            if review_orm is None:
+                return None
+            review = self._ai_review_row_from_orm(review_orm)
+            window_started_at = review["created_at"]
+            wallet_public_id = review["wallet_public_id"]
+            instrument_public_id = review["instrument_public_id"]
+
+            order_query = (
+                select(Order, Instrument, Symbol)
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    Order.wallet_public_id == wallet_public_id,
+                    Order.instrument_public_id == instrument_public_id,
+                    Order.created_at >= window_started_at,
+                    Order.created_at <= as_of,
+                    *where_active(Order, as_of),
+                )
+                .order_by(Order.created_at.asc(), Order.public_id.asc())
+            )
+            order_rows = (await s.execute(order_query)).all()
+            orders: list[OrderRow] = [
+                {
+                    "public_id": order.public_id,
+                    "timestamp": order.timestamp,
+                    "session_id": order.session_id,
+                    "sequence_id": order.sequence_id,
+                    "instrument": symbol.native_symbol,
+                    "exchange": instrument.exchange,
+                    "mode": order.mode,
+                    "client_order_id": order.client_order_id or "",
+                    "exchange_order_id": order.exchange_order_id,
+                    "created_at": order.created_at,
+                    "updated_at": order.updated_at,
+                    "side": order.side,
+                    "order_type": order.order_type,
+                    "price": order.price,
+                    "size": order.size,
+                    "filled_size": order.filled_size,
+                    "average_price": order.average_price,
+                    "status": order.status,
+                    "time_in_force": order.time_in_force,
+                    "error": order.error,
+                    "leverage": order.leverage,
+                    "reduce_only": order.reduce_only,
+                    "wallet_public_id": order.wallet_public_id,
+                    "operator_public_id": order.operator_public_id,
+                    "plan_public_id": order.plan_public_id,
+                }
+                for order, instrument, symbol in order_rows
+            ]
+
+            execution_query = (
+                select(Execution, Order, Instrument, Symbol)
+                .join(
+                    Order,
+                    and_(
+                        Execution.order_public_id == Order.public_id,
+                        *where_active(Order, as_of),
+                    ),
+                )
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    Execution.wallet_public_id == wallet_public_id,
+                    Order.instrument_public_id == instrument_public_id,
+                    Execution.timestamp >= window_started_at,
+                    Execution.timestamp <= as_of,
+                    *where_active(Execution, as_of),
+                )
+                .order_by(
+                    Execution.timestamp.asc(),
+                    Execution.exchange.asc(),
+                    Execution.scope_sequence.asc(),
+                    Execution.public_id.asc(),
+                )
+            )
+            execution_rows = (await s.execute(execution_query)).all()
+            executions: list[ExecutionRow] = [
+                {
+                    "public_id": execution.public_id,
+                    "timestamp": execution.timestamp,
+                    "session_id": execution.session_id,
+                    "sequence_id": execution.sequence_id,
+                    "trade_id": execution.trade_id,
+                    "exec_id": execution.exec_id,
+                    "exchange_order_id": order.exchange_order_id,
+                    "client_order_id": order.client_order_id or "",
+                    "instrument": symbol.native_symbol,
+                    "exchange": instrument.exchange,
+                    "side": execution.side,
+                    "size": execution.size,
+                    "price": execution.price,
+                    "fee": execution.fee,
+                    "fee_asset": execution.fee_asset,
+                    "status": execution.status,
+                    "executed_at": execution.executed_at or execution.timestamp,
+                    "wallet_public_id": execution.wallet_public_id,
+                    "operator_public_id": execution.operator_public_id,
+                    "liquidity_role": execution.liquidity_role,
+                    "price_decimal": execution.price_decimal,
+                    "size_decimal": execution.size_decimal,
+                    "fee_decimal": execution.fee_decimal,
+                    "counter_amount_decimal": execution.counter_amount_decimal,
+                    "numeric_provenance": execution.numeric_provenance,
+                }
+                for execution, order, instrument, symbol in execution_rows
+            ]
+
+            cycle_query = (
+                select(PositionCycle)
+                .where(
+                    PositionCycle.wallet_public_id == wallet_public_id,
+                    PositionCycle.instrument_public_id == instrument_public_id,
+                    *where_active(PositionCycle, as_of),
+                    or_(
+                        and_(
+                            PositionCycle.opened_at >= window_started_at,
+                            PositionCycle.opened_at <= as_of,
+                        ),
+                        and_(
+                            PositionCycle.closed_at.is_not(None),
+                            PositionCycle.closed_at >= window_started_at,
+                            PositionCycle.closed_at <= as_of,
+                        ),
+                    ),
+                )
+                .order_by(PositionCycle.opened_at.asc(), PositionCycle.public_id.asc())
+            )
+            cycle_rows = (await s.execute(cycle_query)).scalars().all()
+            transitions: list[AiReviewPositionCycleTransitionRow] = []
+            for cycle in cycle_rows:
+                if window_started_at <= cycle.opened_at <= as_of:
+                    transitions.append(
+                        self._ai_review_cycle_transition_from_orm(
+                            cycle,
+                            transition="opened",
+                            occurred_at=cycle.opened_at,
+                        )
+                    )
+                if cycle.closed_at is not None and window_started_at <= cycle.closed_at <= as_of:
+                    transition = "liquidated" if cycle.status == "liquidated" else "closed"
+                    transitions.append(
+                        self._ai_review_cycle_transition_from_orm(
+                            cycle,
+                            transition=transition,
+                            occurred_at=cycle.closed_at,
+                        )
+                    )
+            transition_order = {"closed": 0, "liquidated": 0, "opened": 1}
+            transitions.sort(
+                key=lambda transition: (
+                    transition["occurred_at"],
+                    transition_order[transition["transition"]],
+                    transition["cycle_public_id"],
+                )
+            )
+
+            other_cycle = aliased(PositionCycle)
+            open_cycle_unambiguous = (
+                select(
+                    PositionCycle.instrument_public_id.label("instrument_public_id"),
+                    PositionCycle.exchange.label("exchange"),
+                    PositionCycle.mode.label("mode"),
+                    PositionCycle.wallet_public_id.label("wallet_public_id"),
+                    PositionCycle.public_id.label("position_cycle_public_id"),
+                )
+                .where(
+                    PositionCycle.status == "open",
+                    *where_active(PositionCycle, as_of),
+                    ~(
+                        select(1)
+                        .select_from(other_cycle)
+                        .where(
+                            other_cycle.status == "open",
+                            *where_active(other_cycle, as_of),
+                            other_cycle.instrument_public_id == PositionCycle.instrument_public_id,
+                            other_cycle.exchange == PositionCycle.exchange,
+                            other_cycle.mode == PositionCycle.mode,
+                            other_cycle.wallet_public_id == PositionCycle.wallet_public_id,
+                            other_cycle.id != PositionCycle.id,
+                        )
+                        .exists()
+                    ),
+                )
+                .subquery()
+            )
+            position_query = (
+                select(
+                    Position,
+                    Instrument,
+                    Symbol,
+                    open_cycle_unambiguous.c.position_cycle_public_id,
+                )
+                .join(
+                    Instrument,
+                    and_(
+                        Position.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .outerjoin(
+                    open_cycle_unambiguous,
+                    and_(
+                        open_cycle_unambiguous.c.instrument_public_id == Instrument.public_id,
+                        open_cycle_unambiguous.c.exchange == Instrument.exchange,
+                        open_cycle_unambiguous.c.mode == Position.mode,
+                        open_cycle_unambiguous.c.wallet_public_id == Position.wallet_public_id,
+                    ),
+                )
+                .where(
+                    Position.wallet_public_id == wallet_public_id,
+                    Position.instrument_public_id == instrument_public_id,
+                    *where_active(Position, as_of),
+                )
+                .order_by(Position.mode.asc(), Position.public_id.asc())
+            )
+            position_rows = (await s.execute(position_query)).all()
+            current_positions: list[PositionRow] = [
+                {
+                    "public_id": position.public_id,
+                    "timestamp": position.timestamp,
+                    "session_id": position.session_id,
+                    "sequence_id": position.sequence_id,
+                    "instrument": symbol.native_symbol,
+                    "instrument_public_id": instrument.public_id,
+                    "exchange": instrument.exchange,
+                    "mode": position.mode,
+                    "quantity": position.quantity,
+                    "average_price": position.average_price,
+                    "unrealized_pnl": position.unrealized_pnl,
+                    "realized_pnl": position.realized_pnl,
+                    "mark_price": position.mark_price,
+                    "marked_at": position.marked_at,
+                    "source_venue_event_id": position.source_venue_event_id,
+                    "position_cycle_public_id": cycle_public_id,
+                    "wallet_public_id": position.wallet_public_id,
+                }
+                for position, instrument, symbol, cycle_public_id in position_rows
+            ]
+            return {
+                "review": review,
+                "window_started_at": window_started_at,
+                "as_of": as_of,
+                "orders": orders,
+                "executions": executions,
+                "position_cycle_transitions": transitions,
+                "current_positions": current_positions,
+            }
 
     async def list_ai_reviews(
         self,

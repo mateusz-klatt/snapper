@@ -10,7 +10,8 @@ matches the action:
 - ``READ_ORDERS`` for ``list_orders`` and ``get_order_status``.
 - ``READ_POSITIONS`` for ``list_positions`` and ``get_position_cycle``.
 - ``READ_ACCOUNT_STATE`` for ``list_venue_account_states``.
-- ``READ_SIGNALS`` for ``list_recent_signals``.
+- ``READ_SIGNALS`` for ``list_recent_signals`` and
+  ``get_ai_review_aftermath``.
 - ``CREATE_ORDERS`` for ``submit_manual_order`` and
   ``submit_ai_review_decision``.
 - ``CANCEL_ORDERS`` for ``cancel_order``.
@@ -38,8 +39,10 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
 from sqlalchemy.exc import IntegrityError
 
+from snapper.api.schemas.ai_review_aftermath import AiReviewAftermathResponse
 from snapper.application.ai_review.citation import validate_ai_review_citation
 from snapper.application.ai_review.service import ERROR_DECISION_ALREADY_RECORDED
+from snapper.application.ai_review.service import ERROR_REVIEW_NOT_FOUND
 from snapper.application.ai_review.service import get_ai_review_service
 from snapper.application.engine.service import compute_shard_key
 from snapper.application.plans.cancel_service import PlanAlreadyTerminalError
@@ -63,6 +66,7 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.core.types import AiReviewDecisionEnum
+from snapper.core.types import AiReviewStatusEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderStatusEnum
@@ -234,6 +238,14 @@ _LIST_SIGNALS_LIMIT_CAP = 200
 _OHLCV_LIMIT_CAP = 1000
 _CANCEL_IDEMPOTENCY_KEY_MAX = 64
 _VALID_OHLCV_TIMEFRAMES: frozenset[str] = frozenset({"1m", "5m", "15m", "1h", "4h", "1d"})
+_TERMINAL_AI_REVIEW_STATUSES = frozenset(
+    {
+        AiReviewStatusEnum.RESOLVED_APPROVED.value,
+        AiReviewStatusEnum.RESOLVED_REJECTED.value,
+        AiReviewStatusEnum.TIMEOUT.value,
+        AiReviewStatusEnum.SUPERSEDED.value,
+    }
+)
 
 
 def _parse_iso8601_utc(value: str) -> datetime:
@@ -1379,6 +1391,92 @@ async def _get_position_cycle_tool(
     )
 
 
+async def _get_ai_review_aftermath_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+    review_public_id: str,
+) -> CallToolResult:
+    """Run the scoped terminal AI-review aftermath MCP read path.
+
+    Args:
+        repository_getter: Deferred repository singleton accessor.
+        claims_getter: Accessor for the authenticated caller's claims.
+        review_public_id: Public identifier of the review to project.
+
+    Returns:
+        Canonical MCP envelope containing the aftermath or a stable read error.
+    """
+    access = _get_tool_access_or_envelope(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.READ_SIGNALS,
+    )
+    if isinstance(access, CallToolResult):
+        return access
+    as_of = datetime.now(UTC)
+    delegate = await access.repo.get_ai_delegate_by_user_public_id(access.claims.user_public_id)
+    if delegate is None:
+        return to_call_tool_result(
+            success=False,
+            error_code="not_a_delegate",
+            message="AI review aftermath requires a registered AI delegate caller.",
+            details={},
+        )
+    review = await access.repo.get_ai_review(review_public_id)
+    if review is None:
+        return to_call_tool_result(
+            success=False,
+            error_code=ERROR_REVIEW_NOT_FOUND,
+            message="No terminal review with that id was found in the caller's scope.",
+            details=sanitize_output({"review_public_id": review_public_id}),
+        )
+    scope_ok = await access.repo.has_grant_for_delegate(
+        delegate_public_id=delegate["public_id"],
+        wallet_public_id=review["wallet_public_id"],
+        instrument_public_id=review["instrument_public_id"],
+        as_of=as_of,
+    )
+    if not scope_ok:
+        return to_call_tool_result(
+            success=False,
+            error_code=ERROR_REVIEW_NOT_FOUND,
+            message="No terminal review with that id was found in the caller's scope.",
+            details=sanitize_output({"review_public_id": review_public_id}),
+        )
+    if review["status"] not in _TERMINAL_AI_REVIEW_STATUSES:
+        return to_call_tool_result(
+            success=False,
+            error_code="review_not_terminal",
+            message="AI review aftermath is available only after terminal resolution.",
+            details=sanitize_output(
+                {
+                    "review_public_id": review_public_id,
+                    "status": review["status"],
+                }
+            ),
+        )
+    aftermath = await access.repo.get_ai_review_aftermath(review_public_id, as_of=as_of)
+    if aftermath is None:
+        return to_call_tool_result(
+            success=False,
+            error_code=ERROR_REVIEW_NOT_FOUND,
+            message="No terminal review with that id was found in the caller's scope.",
+            details=sanitize_output({"review_public_id": review_public_id}),
+        )
+    response = AiReviewAftermathResponse.model_validate(aftermath)
+    return to_call_tool_result(
+        success=True,
+        error_code=None,
+        message=(
+            f"Returned aftermath with {len(response.orders)} orders, "
+            f"{len(response.executions)} executions, and "
+            f"{len(response.current_positions)} current positions."
+        ),
+        details=sanitize_output({"aftermath": response.model_dump(mode="json")}),
+    )
+
+
 async def _cancel_order_tool(
     *,
     repository_getter: Callable[[], Repository | None],
@@ -2003,6 +2101,31 @@ def register_mcp_tools(
             repository_getter=repository_getter,
             claims_getter=claims_getter,
             cycle_public_id=cycle_public_id,
+        )
+
+    @mcp_server.tool()
+    async def get_ai_review_aftermath(review_public_id: str) -> CallToolResult:
+        """Return what happened after a terminal AI review was created.
+
+        This tool is read-only. It never reopens or updates the review and
+        emits no audit event. It resolves activity by the review's immutable
+        wallet and instrument keys over the inclusive ``[created_at, as_of]``
+        window, using one temporal anchor for every bitemporal read.
+
+        Args:
+            review_public_id: Public identifier of the terminal AI review.
+
+        Returns:
+            Canonical envelope whose ``details.aftermath`` contains the full
+            terminal review row, window anchors, orders, executions, explicit
+            position-cycle transitions, and current position snapshots. An
+            unknown or out-of-scope identifier returns ``review_not_found``;
+            a pending review returns ``review_not_terminal``.
+        """
+        return await _get_ai_review_aftermath_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
+            review_public_id=review_public_id,
         )
 
     @mcp_server.tool()

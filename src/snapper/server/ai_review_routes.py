@@ -14,6 +14,8 @@ Routes
       calling delegate (where the delegate is the
       ``selected_delegate_public_id`` and ``fanout_after`` has
       elapsed). Optional ``limit`` query param caps the snapshot.
+    ``GET /api/ai-reviews/{review_public_id}/aftermath`` — return one
+      terminal review plus exact-scope trading activity since creation.
 
 Permission gates
     ``POST .../decision`` requires :data:`Permission.CREATE_ORDERS` —
@@ -24,6 +26,9 @@ Permission gates
       AI_DELEGATE inherits this; non-delegate principals are admitted
       by the role check but get a 422 because the endpoint is keyed
       by ``AuthPrincipal.delegate_public_id``.
+    ``GET .../aftermath`` uses the same permission and delegate identity
+      requirement, then revalidates the delegate's active wallet and
+      instrument grant before reading the projection.
 """
 
 from datetime import UTC
@@ -38,6 +43,7 @@ from fastapi import HTTPException
 from fastapi import Query
 from fastapi import status
 
+from snapper.api.schemas.ai_review_aftermath import AiReviewAftermathResponse
 from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import StrictBody
 from snapper.application.ai_review.service import ERROR_DECISION_ALREADY_RECORDED
@@ -55,6 +61,7 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.core.json_types import JsonObject
 from snapper.core.types import AiReviewDecisionEnum
+from snapper.core.types import AiReviewStatusEnum
 from snapper.data.repository import Repository
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
@@ -65,6 +72,14 @@ router = APIRouter(prefix="/ai-reviews", tags=["ai-reviews"])
 _NON_DELEGATE_REQUEST = (
     "ai-reviews endpoints require an AI_DELEGATE principal "
     "(populated AuthPrincipal.delegate_public_id)."
+)
+_TERMINAL_AI_REVIEW_STATUSES = frozenset(
+    {
+        AiReviewStatusEnum.RESOLVED_APPROVED.value,
+        AiReviewStatusEnum.RESOLVED_REJECTED.value,
+        AiReviewStatusEnum.TIMEOUT.value,
+        AiReviewStatusEnum.SUPERSEDED.value,
+    }
 )
 
 
@@ -381,6 +396,109 @@ async def list_pending_ai_reviews(
         for row in rows
     ]
     return PendingReviewListResponse(items=items, count=len(items))
+
+
+@router.get(
+    "/{review_public_id}/aftermath",
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Review unknown or outside the delegate's active scope"
+        },
+        status.HTTP_409_CONFLICT: {"description": "Review is not terminal"},
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "description": "Caller is not an AI delegate principal"
+        },
+    },
+)
+async def get_ai_review_aftermath_route(
+    review_public_id: str,
+    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_SIGNALS))],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+) -> AiReviewAftermathResponse:
+    """Return a terminal review's read-only exact-scope aftermath.
+
+    The route captures one UTC temporal anchor, revalidates the caller's
+    active delegate grant for the review's wallet and instrument, rejects
+    non-terminal rows, and then returns the repository projection. Unknown
+    and out-of-scope identifiers share one response to prevent enumeration.
+
+    Args:
+        review_public_id: Public identifier of the terminal review.
+        principal: Authenticated AI delegate holding ``READ_SIGNALS``.
+        repo: Repository used for scope checks and temporal reads.
+
+    Returns:
+        Full terminal review, inclusive window bounds, activity rows, cycle
+        transitions, and current position snapshots.
+
+    Raises:
+        HTTPException: If the caller is not a delegate, the review is absent
+            or out of scope, the review is non-terminal, or it disappears
+            before the projection read.
+    """
+    if principal.delegate_public_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "success": False,
+                "error_code": "not_a_delegate",
+                "message": _NON_DELEGATE_REQUEST,
+                "details": {},
+            },
+        )
+    as_of = datetime.now(UTC)
+    review = await repo.get_ai_review(review_public_id)
+    if review is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "success": False,
+                "error_code": ERROR_REVIEW_NOT_FOUND,
+                "message": "No terminal review with that id was found in the caller's scope.",
+                "details": {"review_public_id": review_public_id},
+            },
+        )
+    scope_ok = await repo.has_grant_for_delegate(
+        delegate_public_id=principal.delegate_public_id,
+        wallet_public_id=review["wallet_public_id"],
+        instrument_public_id=review["instrument_public_id"],
+        as_of=as_of,
+    )
+    if not scope_ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "success": False,
+                "error_code": ERROR_REVIEW_NOT_FOUND,
+                "message": "No terminal review with that id was found in the caller's scope.",
+                "details": {"review_public_id": review_public_id},
+            },
+        )
+    if review["status"] not in _TERMINAL_AI_REVIEW_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "success": False,
+                "error_code": "review_not_terminal",
+                "message": "AI review aftermath is available only after terminal resolution.",
+                "details": {
+                    "review_public_id": review_public_id,
+                    "status": review["status"],
+                },
+            },
+        )
+    aftermath = await repo.get_ai_review_aftermath(review_public_id, as_of=as_of)
+    if aftermath is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "success": False,
+                "error_code": ERROR_REVIEW_NOT_FOUND,
+                "message": "No terminal review with that id was found in the caller's scope.",
+                "details": {"review_public_id": review_public_id},
+            },
+        )
+    return AiReviewAftermathResponse.model_validate(aftermath)
 
 
 @router.get(

@@ -360,6 +360,17 @@ to `caps_enforcer_getter` at registration.
     8601 UTC. Requires `READ_SIGNALS`; surfaces `signal_not_found`
     on wallet scope violation (anti-enumeration).
 
+- **`get_ai_review_aftermath(review_public_id: str)`** — read-only
+    projection for a terminal CONSULT round. Returns the complete persisted
+    review plus orders, executions/fills, position-cycle transitions, and
+    current position snapshots for the review's wallet and instrument over
+    the inclusive `[created_at, as_of]` window. Requires `READ_SIGNALS`, a
+    registered AI delegate, and a currently active grant for that exact
+    wallet and instrument. Unknown and out-of-scope reviews both return
+    `review_not_found`; pending and fanout-dispatched rows return
+    `review_not_terminal`. The tool never changes review state or emits an
+    audit event.
+
 - **`submit_manual_order(exchange, instrument, instrument_public_id,
     side, order_type, quantity, idempotency_key, wallet_public_id?,
     price?, stop_price?, operator_public_id?, ai_review_public_id?)`** —
@@ -481,6 +492,13 @@ offline. Short-deadline rounds such as `HeartbeatConsult` (25s) time
 out before that window opens, so a missed heartbeat frame is simply
 lost and the next 1h round retries — the catch-up read matters for
 strategies configured with deadlines longer than the fanout window.
+
+For a round that already became terminal while the delegate was away,
+call `get_ai_review_aftermath(review_public_id)` or its REST mirror,
+`GET /api/ai-reviews/{review_public_id}/aftermath`. The returned `as_of`
+anchors every temporal row in the projection, while `window_started_at`
+is the review's persisted `created_at`. This is retrospective evidence only:
+it does not reopen the review and grants no order authority.
 
 Operators and admins audit what the AI decided across the whole book
 via `GET /api/ai-reviews` (OPERATOR-gated; an ADMIN sees every

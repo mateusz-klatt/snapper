@@ -2713,6 +2713,42 @@ class AiReviewRow(TypedDict):
     resolved_at: datetime | None
 
 
+class AiReviewPositionCycleTransitionRow(TypedDict):
+    """One position-cycle lifecycle transition in an aftermath window.
+
+    The transition is derived from the cycle version active at the projection's
+    ``as_of`` instant. ``transition`` is ``opened``, ``closed``, or
+    ``liquidated``; max-quantity SCD2 revisions do not produce transitions.
+    """
+
+    cycle_public_id: str
+    transition: str
+    occurred_at: datetime
+    instrument_public_id: str
+    exchange: str
+    mode: str
+    shard_key: str
+    wallet_public_id: str
+    operator_public_id: str | None
+    direction: str
+    max_qty: float
+    status_at_as_of: str
+    opening_command_public_id: str | None
+    closing_command_public_id: str | None
+
+
+class AiReviewAftermathRow(TypedDict):
+    """Read-only terminal-review aftermath projection at one temporal anchor."""
+
+    review: AiReviewRow
+    window_started_at: datetime
+    as_of: datetime
+    orders: list[OrderRow]
+    executions: list[ExecutionRow]
+    position_cycle_transitions: list[AiReviewPositionCycleTransitionRow]
+    current_positions: list[PositionRow]
+
+
 class AiReviewEventRow(TypedDict):
     """Row dict for :class:`snapper.data.models.AiReviewEvent`.
 

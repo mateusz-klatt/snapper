@@ -3790,6 +3790,42 @@ resolved `instrument` ticker plus the raw `signal_envelope`
 payload (thesis, side, news anchors) so the AI delegate inbox
 can render a meaningful row without a follow-up read.
 
+### GET /api/ai-reviews/{review_public_id}/aftermath
+
+Return a terminal review and the exact wallet+instrument activity that became
+visible between the review's `created_at` and one captured `as_of` instant,
+inclusive. The route is read-only: it does not transition the review, write an
+audit event, or grant authority to place an order.
+
+Requires `Permission.READ_SIGNALS`, a populated AI-delegate identity, and an
+active delegate scope grant for the review's wallet and instrument. Unknown
+and out-of-scope identifiers both return `404` with
+`error_code="review_not_found"`; a non-terminal review returns `409` with
+`error_code="review_not_terminal"`; a permission-bearing caller without a
+delegate identity returns `422` with `error_code="not_a_delegate"`.
+
+**Response:** `AiReviewAftermathResponse` with this top-level shape:
+
+```json
+{
+    "review": { "public_id": "<uuid7>", "status": "timeout", "...": "..." },
+    "window_started_at": "2026-07-20T10:00:00Z",
+    "as_of": "2026-07-20T11:00:00Z",
+    "orders": [],
+    "executions": [],
+    "position_cycle_transitions": [],
+    "current_positions": []
+}
+```
+
+`review` is the complete persisted `ai_reviews` row. Orders and executions are
+the versions active at `as_of`, ordered oldest first and bounded by the review
+window. Each position-cycle transition is an explicit `opened`, `closed`, or
+`liquidated` event derived from lifecycle timestamps retained by the cycle
+version active at `as_of`. `current_positions` is a list because the review row
+does not carry a mode and more than one mode-specific position may exist; an
+instrument with no position returns an empty list.
+
 ### GET /api/ai-reviews
 
 Operator/admin audit list of AI reviews, newest first — the read-only
