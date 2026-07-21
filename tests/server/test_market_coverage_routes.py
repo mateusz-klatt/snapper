@@ -125,7 +125,9 @@ class TestCoverageRoute:
     ) -> None:
         """A principal without ``READ_SYSTEM_STATUS`` receives HTTP 403."""
         restricted_permissions: dict[UserRole, set[Permission]] = {UserRole.ADMIN: set()}
-        monkeypatch.setattr("snapper.auth.dependencies.ROLE_PERMISSIONS", restricted_permissions)
+        monkeypatch.setattr(
+            "snapper.auth.domain.permissions.ROLE_PERMISSIONS", restricted_permissions
+        )
         permission_checker = require_permission(Permission.READ_SYSTEM_STATUS)
         with pytest.raises(HTTPException) as exc:
             permission_checker(_principal())
