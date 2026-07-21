@@ -400,9 +400,7 @@ unaffected. Registered on the shared ``.env`` allowlist via
 :mod:`snapper.config.env_contract`.
 """
 
-_AI_RESEARCH_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
-    {"completed", "superseded", "expired"}
-)
+_AI_RESEARCH_MANUAL_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({"superseded", "expired"})
 
 
 class _SpotAssetPrecisionEvidenceAbsentConflictError(Exception):
@@ -5460,9 +5458,10 @@ class Repository(ABC):
     async def create_ai_research_round(self, row: AiResearchRoundInsertRow) -> str:
         """Supersede the pending research round and create its successor.
 
-        Both mutations commit atomically. The new row always starts pending,
-        and the schema-level partial unique index guarantees there is at most
-        one pending research round globally.
+        Both mutations commit atomically under a cross-process transaction
+        lock. The new row always starts pending, and the schema-level partial
+        unique index guarantees there is at most one pending research round
+        globally.
         """
         ...
 
@@ -5480,7 +5479,12 @@ class Repository(ABC):
         new_status: str,
         transitioned_at: datetime,
     ) -> bool:
-        """CAS one research round from its expected status to a terminal status."""
+        """CAS a pending round to ``superseded`` or ``expired``.
+
+        ``completed`` is deliberately unavailable here because it asserts that
+        a view and mandatory source rows were inserted atomically. Only
+        :meth:`insert_market_view` may perform that transition.
+        """
         ...
 
     @abstractmethod
@@ -23320,11 +23324,39 @@ class SQLAlchemyRepository(Repository):
         )
         return [self._market_view_source_row_from_orm(row) for row in rows]
 
+    async def _begin_ai_research_round_create_transaction(self, s: AsyncSession) -> None:
+        """Serialize global pending-slot replacement across processes.
+
+        PostgreSQL explicitly enters ``READ COMMITTED`` before acquiring a
+        transaction-scoped advisory lock in a plane-specific keyspace. The
+        UPDATE following a wait therefore receives a fresh snapshot and sees
+        the prior creator's committed pending row. SQLite opens with ``BEGIN
+        IMMEDIATE`` so competing connections serialize before either reads or
+        writes the slot. Unsupported dialects fail closed.
+        """
+        dialect = self.dialect_name
+        if dialect == "postgresql":
+            await s.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+            await s.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock("
+                    "hashtext('ai_research'), hashtext('pending_round'))"
+                )
+            )
+            return
+        if dialect == "sqlite":
+            await s.execute(text("BEGIN IMMEDIATE"))
+            return
+        raise NotImplementedError(
+            f"AI-research round creation lock not implemented for dialect={dialect}"
+        )
+
     async def create_ai_research_round(self, row: AiResearchRoundInsertRow) -> str:
         """Atomically replace the pending research round with a new one."""
         created_at = row["created_at"]
         public_id = row.get("public_id", str(uuid7()))
         async with self.session() as s:
+            await self._begin_ai_research_round_create_transaction(s)
             await s.execute(
                 update(AiResearchRound)
                 .where(AiResearchRound.status == "pending")
@@ -23366,11 +23398,11 @@ class SQLAlchemyRepository(Repository):
         new_status: str,
         transitioned_at: datetime,
     ) -> bool:
-        """CAS a pending research round into one final terminal status."""
+        """CAS a pending research round into supersession or expiry."""
         if expected_status != "pending":
             raise ValueError("AI-research rounds may transition only from pending")
-        if new_status not in _AI_RESEARCH_TERMINAL_STATUSES:
-            raise ValueError("AI-research round target status must be terminal")
+        if new_status not in _AI_RESEARCH_MANUAL_TERMINAL_STATUSES:
+            raise ValueError("AI-research round target status must be superseded or expired")
         async with self.session() as s:
             transitioned_public_id = (
                 await s.execute(

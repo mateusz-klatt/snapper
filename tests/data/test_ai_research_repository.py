@@ -5,6 +5,10 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import PropertyMock
+from unittest.mock import patch
 from uuid import UUID
 from uuid import uuid7
 
@@ -12,6 +16,7 @@ import pytest
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.data.models import AiResearchRound
 from snapper.data.models import MarketView
@@ -101,8 +106,23 @@ async def test_unknown_ai_research_records_return_none(
 @pytest.mark.asyncio
 async def test_new_round_atomically_supersedes_pending_and_cas_is_final(
     repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Latest-wins creation leaves one pending row and terminal rows stay final."""
+    transaction_starts = 0
+    original_begin = repository._begin_ai_research_round_create_transaction
+
+    async def record_transaction_start(session: AsyncSession) -> None:
+        """Record and delegate each pending-slot transaction opener."""
+        nonlocal transaction_starts
+        transaction_starts += 1
+        await original_begin(session)
+
+    monkeypatch.setattr(
+        repository,
+        "_begin_ai_research_round_create_transaction",
+        record_transaction_start,
+    )
     first_id = await repository.create_ai_research_round(_round_row("periodic", _T0))
     second_at = _T0 + timedelta(minutes=5)
     second_id = await repository.create_ai_research_round(_round_row("market_move", second_at))
@@ -139,6 +159,51 @@ async def test_new_round_atomically_supersedes_pending_and_cas_is_final(
     assert expired is not None
     assert expired["status"] == "expired"
     assert expired["resolved_at"] == expired_at
+    assert transaction_starts == 2
+
+
+@pytest.mark.asyncio
+async def test_postgresql_round_creation_lock_uses_fresh_snapshot_and_advisory_lock(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """PostgreSQL serializes the global slot before its replacement query."""
+    mock_session = AsyncMock(spec=AsyncSession)
+    with patch.object(
+        type(repository),
+        "dialect_name",
+        new_callable=PropertyMock,
+        return_value="postgresql",
+    ):
+        await repository._begin_ai_research_round_create_transaction(
+            cast(AsyncSession, mock_session)
+        )
+
+    statements = [str(call.args[0]) for call in mock_session.execute.await_args_list]
+    assert statements == [
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+        "SELECT pg_advisory_xact_lock(hashtext('ai_research'), hashtext('pending_round'))",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_round_creation_lock_rejects_an_unknown_dialect(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Unsupported databases cannot create an unprotected pending slot."""
+    mock_session = AsyncMock(spec=AsyncSession)
+    with (
+        patch.object(
+            type(repository),
+            "dialect_name",
+            new_callable=PropertyMock,
+            return_value="mysql",
+        ),
+        pytest.raises(NotImplementedError, match="mysql"),
+    ):
+        await repository._begin_ai_research_round_create_transaction(
+            cast(AsyncSession, mock_session)
+        )
+    mock_session.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -154,7 +219,7 @@ async def test_round_creation_generates_uuid_when_server_does_not_preallocate_on
 async def test_round_transition_rejects_non_lifecycle_requests(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """Only pending-to-terminal status transitions are accepted."""
+    """Only expiry and supersession may bypass artifact insertion."""
     with pytest.raises(ValueError, match="only from pending"):
         await repository.transition_ai_research_round_status(
             str(uuid7()),
@@ -162,13 +227,18 @@ async def test_round_transition_rejects_non_lifecycle_requests(
             new_status="expired",
             transitioned_at=_T0,
         )
-    with pytest.raises(ValueError, match="must be terminal"):
-        await repository.transition_ai_research_round_status(
-            str(uuid7()),
-            expected_status="pending",
-            new_status="pending",
-            transitioned_at=_T0,
-        )
+    round_id = await repository.create_ai_research_round(_round_row("periodic", _T0))
+    for new_status in ("pending", "completed"):
+        with pytest.raises(ValueError, match="must be superseded or expired"):
+            await repository.transition_ai_research_round_status(
+                round_id,
+                expected_status="pending",
+                new_status=new_status,
+                transitioned_at=_T0,
+            )
+    pending = await repository.get_ai_research_round(round_id)
+    assert pending is not None
+    assert pending["status"] == "pending"
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,7 @@ from snapper.core.json_types import JsonValue
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import RelationshipTypeEnum
+from snapper.data.ai_research_triggers import install_ai_research_immutability_triggers
 from snapper.data.ledger_triggers import install_execution_immutability_triggers
 
 KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
@@ -208,6 +209,9 @@ __all__ = [
     "UnderlyingAsset",
     "InstrumentUnderlyingMapping",
     "MarketSnapshot",
+    "AiResearchRound",
+    "MarketView",
+    "MarketViewSource",
     "Control",
     "Telemetry",
     "TradeCommand",
@@ -4838,6 +4842,14 @@ class MarketView(Base):
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+@event.listens_for(MarketView.__table__, "after_create")
+def _install_market_view_immutability_triggers(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Install physical insert-only guards whenever ``market_views`` is created."""
+    install_ai_research_immutability_triggers(connection, only="market_views")
+
+
 class MarketViewSource(Base):
     """Immutable source citation belonging to one :class:`MarketView`.
 
@@ -4865,6 +4877,14 @@ class MarketViewSource(Base):
     url: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     retrieved_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+
+
+@event.listens_for(MarketViewSource.__table__, "after_create")
+def _install_market_view_source_immutability_triggers(
+    target: object, connection: Connection, **kw: object
+) -> None:
+    """Install physical insert-only guards whenever source rows are created."""
+    install_ai_research_immutability_triggers(connection, only="market_view_sources")
 
 
 class InstrumentFeedHealth(Base):

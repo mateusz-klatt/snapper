@@ -10,6 +10,12 @@ from alembic.config import Config
 
 _ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 _TABLES = {"ai_research_rounds", "market_views", "market_view_sources"}
+_TRIGGERS = {
+    "market_view_sources_reject_delete",
+    "market_view_sources_reject_update",
+    "market_views_reject_delete",
+    "market_views_reject_update",
+}
 _TS = "2026-07-21 08:00:00+00:00"
 
 
@@ -23,6 +29,20 @@ def _config(db_url: str) -> Config:
 def _new_tables(engine: sa.Engine) -> set[str]:
     """Return the subset of AI-research tables currently present."""
     return set(sa.inspect(engine).get_table_names()) & _TABLES
+
+
+def _artifact_triggers(engine: sa.Engine) -> set[str]:
+    """Return the installed SQLite artifact immutability triggers."""
+    with engine.connect() as connection:
+        return {
+            str(row[0])
+            for row in connection.execute(
+                sa.text(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                    "AND tbl_name IN ('market_views', 'market_view_sources')"
+                )
+            )
+        }
 
 
 def _insert_round(
@@ -95,6 +115,7 @@ def test_0036_upgrade_round_trips_three_tables_and_required_clocks(tmp_path: Pat
 
     command.upgrade(config, "0036")
     assert _new_tables(engine) == _TABLES
+    assert _artifact_triggers(engine) == _TRIGGERS
     view_columns = {
         column["name"]: column for column in sa.inspect(engine).get_columns("market_views")
     }
@@ -114,6 +135,7 @@ def test_0036_upgrade_round_trips_three_tables_and_required_clocks(tmp_path: Pat
     assert _new_tables(engine) == set()
     command.upgrade(config, "0036")
     assert _new_tables(engine) == _TABLES
+    assert _artifact_triggers(engine) == _TRIGGERS
     engine.dispose()
 
 

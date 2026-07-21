@@ -92,6 +92,40 @@ async def test_ai_researcher_subscribes_to_ai_research_root(
 
 
 @pytest.mark.asyncio
+async def test_viewer_cannot_subscribe_to_ai_research_root() -> None:
+    """Verify a role without SUBMIT_MARKET_VIEW cannot receive research wakes.
+
+    Given: A VIEWER principal whose role lacks SUBMIT_MARKET_VIEW.
+    When: It requests the ``ai_research.`` registry root.
+    Then: The handler denies the topic and leaves the bridge untouched.
+    """
+    websocket, manager = _research_subscription_mocks()
+    message = WSSubscribeRequest(
+        public_id="test-pid",
+        timestamp=datetime(2026, 7, 21, tzinfo=UTC),
+        session_id="",
+        sequence_id=0,
+        topics=["ai_research."],
+    )
+
+    await handle_subscribe(
+        websocket,
+        message,
+        manager,
+        _principal(UserRole.VIEWER),
+    )
+
+    response = WSSubscriptionSuccessResponse.model_validate_json(
+        str(websocket.send_text.call_args.args[0])
+    )
+    assert response.status == SubscriptionStatusEnum.DENIED
+    assert response.topics == []
+    assert response.denied_topics == ["ai_research."]
+    manager.subscribe_client.assert_not_called()
+    manager.zmq_bridge.add_subscription.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ai_researcher_cannot_subscribe_to_ai_reviews_root() -> None:
     """Verify the researcher cannot receive consult or trading-intent frames.
 

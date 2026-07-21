@@ -357,7 +357,8 @@ curl -X POST http://localhost:8000/api/mcp/ \
 Read-only tools surface the delegate's order book, position state,
 signals, and venue market data. Write and decision tools
 (`submit_manual_order`, `cancel_order`,
-`submit_ai_review_decision`) are gated by per-tool permissions.
+`submit_ai_review_decision`, `submit_market_view`) are gated by
+per-tool permissions.
 Only `submit_manual_order` is unconditionally guarded by
 `TradingCapsEnforcer.guard`; `cancel_order` requires the caps enforcer
 to be initialized, then the cancel service enters the guard only when
@@ -423,6 +424,11 @@ to `caps_enforcer_getter` at registration.
     8601 UTC. Requires `READ_SIGNALS`; surfaces `signal_not_found`
     on wallet scope violation (anti-enumeration).
 
+- **`get_latest_research()`** — returns the complete current market-view
+    artifact, including its ordered source citations, at the server clock.
+    Requires `READ_MARKET_VIEWS`. When no causally eligible, unexpired view
+    exists, the successful envelope carries `details.market_view = null`.
+
 - **`get_ai_review_aftermath(review_public_id: str)`** — read-only
     projection for a terminal CONSULT round. Returns the complete persisted
     review plus orders, executions/fills, position-cycle transitions, and
@@ -434,6 +440,15 @@ to `caps_enforcer_getter` at registration.
     `review_not_terminal`. Executions include stable order, instrument, mode,
     and scope-sequence lineage even when the order itself predates the window.
     The tool never changes review state or emits an audit event.
+
+- **`submit_market_view(research_round_public_id, payload)`** — validates a
+    strict `SubmittedMarketView` JSON object and completes the target pending
+    research round atomically. Requires `SUBMIT_MARKET_VIEW`. Sources are
+    submitted inline as `{url, title, retrieved_at}` objects; identity,
+    trigger, status, and `submitted_at` are server-owned. Success returns
+    `market_view_public_id`. A missing or no-longer-pending round returns
+    `research_round_not_pending`; invalid source/rationale defenses return
+    `invalid_market_view`.
 
 - **`submit_manual_order(exchange, instrument, instrument_public_id,
     side, order_type, quantity, idempotency_key, wallet_public_id?,

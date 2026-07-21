@@ -4,7 +4,8 @@ The research plane is separate from the CONSULT ``ai_reviews`` state machine.
 Rounds are mutable lifecycle rows with one global pending slot, while market
 views and their sources are immutable submitted facts. Each view stores both
 the authored ``as_of`` and server-assigned ``submitted_at`` clocks required
-for causally correct replay eligibility. Revises 0035.
+for causally correct replay eligibility. Dual-dialect physical triggers reject
+updates, deletes, and PostgreSQL truncation of artifact rows. Revises 0035.
 """
 
 from collections.abc import Sequence
@@ -13,6 +14,9 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
+
+from snapper.data.ai_research_triggers import drop_ai_research_immutability_triggers
+from snapper.data.ai_research_triggers import install_ai_research_immutability_triggers
 
 revision: str = "0036"
 down_revision: str | None = "0035"
@@ -25,8 +29,18 @@ def _uuid_col() -> sa.types.TypeEngine[str]:
     return sa.String(36).with_variant(postgresql.UUID(as_uuid=False), "postgresql")
 
 
+def _require_online_bind() -> None:
+    """Refuse offline SQL rendering before dialect-specific trigger DDL."""
+    if op.get_context().as_sql:
+        raise RuntimeError(
+            "migration 0036 requires an online connection: it installs "
+            "dialect-specific AI-research immutability triggers"
+        )
+
+
 def upgrade() -> None:
     """Create the three AI-research persistence tables."""
+    _require_online_bind()
     op.create_table(
         "ai_research_rounds",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -142,10 +156,13 @@ def upgrade() -> None:
             name="ck_market_view_sources_ordinal_nonnegative",
         ),
     )
+    install_ai_research_immutability_triggers(op.get_bind())
 
 
 def downgrade() -> None:
     """Drop the AI-research persistence tables in dependency order."""
+    _require_online_bind()
+    drop_ai_research_immutability_triggers(op.get_bind())
     op.drop_table("market_view_sources")
     op.drop_table("market_views")
     op.drop_table("ai_research_rounds")

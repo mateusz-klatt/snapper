@@ -12,6 +12,8 @@ matches the action:
 - ``READ_ACCOUNT_STATE`` for ``list_venue_account_states``.
 - ``READ_SIGNALS`` for ``list_recent_signals`` and
   ``get_ai_review_aftermath``.
+- ``READ_MARKET_VIEWS`` for ``get_latest_research``.
+- ``SUBMIT_MARKET_VIEW`` for ``submit_market_view``.
 - ``CREATE_ORDERS`` for ``submit_manual_order`` and
   ``submit_ai_review_decision``.
 - ``CANCEL_ORDERS`` for ``cancel_order``.
@@ -24,6 +26,7 @@ claims are only a login-time snapshot.
 """
 
 import datetime as dt
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC
@@ -37,8 +40,10 @@ from fastapi import HTTPException
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
+from snapper.api.schemas.ai_research import SubmittedMarketView
 from snapper.api.schemas.ai_review_aftermath import AiReviewAftermathResponse
 from snapper.application.ai_review.citation import validate_ai_review_citation
 from snapper.application.ai_review.service import ERROR_DECISION_ALREADY_RECORDED
@@ -65,6 +70,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.scope_grant_service import get_scope_grant_service
+from snapper.core.json_types import JsonObject
 from snapper.core.types import AiReviewDecisionEnum
 from snapper.core.types import AiReviewStatusEnum
 from snapper.core.types import ExecutionModeEnum
@@ -78,6 +84,9 @@ from snapper.data.repository import Repository
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import ExecutionRow
+from snapper.data.repository_types import MarketViewInsertRow
+from snapper.data.repository_types import MarketViewRow
+from snapper.data.repository_types import MarketViewSourceInsertRow
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import PositionRow
@@ -245,6 +254,11 @@ _TERMINAL_AI_REVIEW_STATUSES = frozenset(
         AiReviewStatusEnum.SUPERSEDED.value,
     }
 )
+_MARKET_VIEW_INSERT_ERROR_CODES: dict[str, str] = {
+    "market view requires at least one source": "invalid_market_view",
+    "market view rationale must not exceed 2048 UTF-8 bytes": "invalid_market_view",
+    "market view requires a pending AI-research round": "research_round_not_pending",
+}
 
 
 def _parse_iso8601_utc(value: str) -> datetime:
@@ -500,6 +514,44 @@ def _serialize_signal_row(row: SignalRow) -> dict[str, Any]:
         "fired_at": row["fired_at"].isoformat(),
         "wallet_public_id": row["wallet_public_id"],
         "operator_public_id": row["operator_public_id"],
+    }
+
+
+def _serialize_market_view_row(row: MarketViewRow) -> JsonObject:
+    """JSON-serialise a complete market view and its ordered sources."""
+    return {
+        "public_id": row["public_id"],
+        "research_round_public_id": row["research_round_public_id"],
+        "trigger": row["trigger"],
+        "status": row["status"],
+        "as_of": row["as_of"].isoformat(),
+        "submitted_at": row["submitted_at"].isoformat(),
+        "valid_until": row["valid_until"].isoformat(),
+        "regime": row["regime"],
+        "bias": row["bias"],
+        "confidence": row["confidence"],
+        "horizon_hours": row["horizon_hours"],
+        "key_risks": list(row["key_risks"]),
+        "next_events": [
+            {
+                "when_utc": event["when_utc"].isoformat(),
+                "name": event["name"],
+                "severity": event["severity"],
+            }
+            for event in row["next_events"]
+        ],
+        "rationale": row["rationale"],
+        "sources": [
+            {
+                "public_id": source["public_id"],
+                "market_view_public_id": source["market_view_public_id"],
+                "ordinal": source["ordinal"],
+                "url": source["url"],
+                "title": source["title"],
+                "retrieved_at": source["retrieved_at"].isoformat(),
+            }
+            for source in row["sources"]
+        ],
     }
 
 
@@ -1113,6 +1165,135 @@ async def _submit_ai_review_decision_tool(
         error_code=result.error_code,
         message=result.message,
         details=sanitize_output(details),
+    )
+
+
+async def _submit_market_view_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+    research_round_public_id: str,
+    payload: JsonObject,
+) -> CallToolResult:
+    """Validate and persist one authored market view through MCP."""
+    access = _get_tool_access_or_envelope(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.SUBMIT_MARKET_VIEW,
+    )
+    if isinstance(access, CallToolResult):
+        return access
+    try:
+        submitted = SubmittedMarketView.model_validate_json(json.dumps(payload))
+    except ValidationError as exc:
+        return to_call_tool_result(
+            success=False,
+            error_code="invalid_market_view",
+            message="Market view payload does not match the SubmittedMarketView contract.",
+            details=cast(
+                JsonObject,
+                sanitize_output({"validation_error": str(exc)}),
+            ),
+        )
+    row: MarketViewInsertRow = {
+        "research_round_public_id": research_round_public_id,
+        "as_of": submitted.as_of,
+        "valid_until": submitted.valid_until,
+        "regime": submitted.regime,
+        "bias": submitted.bias,
+        "confidence": submitted.confidence,
+        "horizon_hours": submitted.horizon_hours,
+        "key_risks": list(submitted.key_risks),
+        "next_events": [
+            {
+                "when_utc": event.when_utc,
+                "name": event.name,
+                "severity": event.severity,
+            }
+            for event in submitted.next_events
+        ],
+        "rationale": submitted.rationale,
+    }
+    sources: list[MarketViewSourceInsertRow] = [
+        {
+            "url": source.url,
+            "title": source.title,
+            "retrieved_at": source.retrieved_at,
+        }
+        for source in submitted.sources
+    ]
+    submitted_at = datetime.now(UTC)
+    try:
+        market_view_public_id = await access.repo.insert_market_view(
+            row,
+            sources,
+            submitted_at=submitted_at,
+        )
+    except ValueError as exc:
+        error_message = str(exc)
+        error_code = _MARKET_VIEW_INSERT_ERROR_CODES.get(error_message)
+        if error_code is None:
+            raise
+        return to_call_tool_result(
+            success=False,
+            error_code=error_code,
+            message="Market view submission was rejected.",
+            details=cast(
+                JsonObject,
+                sanitize_output(
+                    {
+                        "research_round_public_id": research_round_public_id,
+                        "reason": error_message,
+                    }
+                ),
+            ),
+        )
+    return to_call_tool_result(
+        success=True,
+        error_code=None,
+        message="Market view submitted.",
+        details=cast(
+            JsonObject,
+            sanitize_output(
+                {
+                    "market_view_public_id": market_view_public_id,
+                    "research_round_public_id": research_round_public_id,
+                }
+            ),
+        ),
+    )
+
+
+async def _get_latest_research_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+) -> CallToolResult:
+    """Return the latest market view eligible at the server clock."""
+    access = _get_tool_access_or_envelope(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.READ_MARKET_VIEWS,
+    )
+    if isinstance(access, CallToolResult):
+        return access
+    replay_at = datetime.now(UTC)
+    market_view = await access.repo.get_latest_market_view(replay_at=replay_at)
+    if market_view is None:
+        return to_call_tool_result(
+            success=True,
+            error_code=None,
+            message="No current market view is available.",
+            details={"market_view": None},
+        )
+    return to_call_tool_result(
+        success=True,
+        error_code=None,
+        message="Returned the current market view.",
+        details=cast(
+            JsonObject,
+            sanitize_output({"market_view": _serialize_market_view_row(market_view)}),
+        ),
     )
 
 
@@ -1916,6 +2097,46 @@ def register_mcp_tools(
             review_id=review_id,
             decision=decision,
             rationale=rationale,
+        )
+
+    @mcp_server.tool()
+    async def submit_market_view(
+        research_round_public_id: str,
+        payload: JsonObject,
+    ) -> CallToolResult:
+        """Submit a structured market view for one pending research round.
+
+        The payload is validated as :class:`SubmittedMarketView` after the
+        permission gate. Sources are inline ``url``, ``title``, and
+        ``retrieved_at`` objects. Server-owned identity, lifecycle, trigger,
+        and submission-time fields are rejected by the strict payload model.
+
+        Args:
+            research_round_public_id: Target pending research-round identifier.
+            payload: Strict author-owned market-view JSON object.
+
+        Returns:
+            Canonical envelope with ``market_view_public_id`` on success.
+        """
+        return await _submit_market_view_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
+            research_round_public_id=research_round_public_id,
+            payload=payload,
+        )
+
+    @mcp_server.tool()
+    async def get_latest_research() -> CallToolResult:
+        """Return the latest market view eligible at the server clock.
+
+        Returns:
+            Canonical envelope whose ``details.market_view`` contains the full
+            artifact and ordered inline sources, or ``None`` when no submitted
+            view is currently valid.
+        """
+        return await _get_latest_research_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
         )
 
     @mcp_server.tool()
