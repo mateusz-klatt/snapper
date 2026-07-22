@@ -1,7 +1,7 @@
 """Tests for the admin.scope_revoked listener on WebSocketAuthManager.
 
-Covers the mid-session revalidation half: for each
-AI_DELEGATE connection whose principal is on the affected operator,
+Covers the mid-session revalidation half: for each connection with an
+AI-delegate lifecycle identity whose principal is on the affected operator,
 recompute the allowed ``(exchange, symbol)`` pair set and narrow the
 client's subscriptions to the still-covered topics. The WS stays
 open — only wallet-scoped out-of-scope topics are unsubscribed; every
@@ -84,6 +84,7 @@ def _delegate_principal(
         username=f"{role.value}-{user_public_id}",
         role=role,
         user_public_id=user_public_id,
+        delegate_public_id=f"delegate-{user_public_id}",
         operator_public_ids=list(operators),
     )
 
@@ -225,7 +226,7 @@ class TestHandleScopeRevoked:
 
     @pytest.mark.asyncio
     async def test_non_ai_delegate_connections_unaffected(self) -> None:
-        """VIEWER / OPERATOR / ADMIN principals are skipped entirely."""
+        """Principals without delegate lifecycle state are skipped entirely."""
         ws_viewer = MagicMock()
         ws_viewer.send_text = AsyncMock()
         viewer = AuthPrincipal(
@@ -501,7 +502,7 @@ class TestHandleScopeHandedOver:
 
     @pytest.mark.asyncio
     async def test_shared_revalidation_processes_reviewer_and_skips_viewer(self) -> None:
-        """Restrict shared scope-event fanout to AI review principals.
+        """Restrict shared scope-event fanout to delegate-backed principals.
 
         Given: A matching AI_REVIEWER and VIEWER subscribed to the same revoked pair,
         When: A handover invokes the shared operator revalidation helper,
@@ -577,7 +578,7 @@ class TestHandleScopeHandedOver:
 
     @pytest.mark.asyncio
     async def test_revalidate_helper_skips_non_delegate_connections(self) -> None:
-        """``_revalidate_delegates_for_operators`` walks only AI_DELEGATE roles."""
+        """The revalidation helper skips principals without delegate state."""
         ws_viewer = MagicMock()
         ws_viewer.send_text = AsyncMock()
         viewer = AuthPrincipal(

@@ -53,10 +53,9 @@ from snapper.application.ai_review.service import ERROR_REVIEW_EXPIRED
 from snapper.application.ai_review.service import ERROR_REVIEW_NOT_FOUND
 from snapper.application.ai_review.service import get_ai_review_service
 from snapper.auth.dependencies import require_permission
-from snapper.auth.dependencies import require_role
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.core.json_types import JsonObject
@@ -180,7 +179,7 @@ class AdminAiReviewItem(StrictBody):
 
     Carries the full state-machine outcome — ``status``, ``decision``,
     ``rationale``, ``resolution_mode`` and the responding delegate — so
-    an operator/admin can see WHAT the AI decided and WHY, plus the raw
+    an authorized reader can see WHAT the AI decided and WHY, plus the raw
     ``signal_envelope`` (thesis / side / news anchors) for context. This
     is the read-only, non-delegate-scoped counterpart to the pending
     inbox.
@@ -504,13 +503,13 @@ async def get_ai_review_aftermath_route(
 @router.get(
     "",
     responses={
-        status.HTTP_403_FORBIDDEN: {"description": "Caller lacks the operator role"},
+        status.HTTP_403_FORBIDDEN: {"description": "Caller lacks AI-review read access"},
     },
 )
 async def list_ai_reviews_route(
     principal: Annotated[
         AuthPrincipal,
-        Depends(require_role(UserRole.OPERATOR, Permission.READ_SIGNALS)),
+        Depends(require_permission(Permission.READ_AI_REVIEWS)),
     ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
@@ -518,22 +517,23 @@ async def list_ai_reviews_route(
     wallet_public_id: Annotated[str | None, Query()] = None,
     strategy_public_id: Annotated[str | None, Query()] = None,
 ) -> AdminAiReviewListResponse:
-    """List AI reviews newest-first for operator/admin observability.
+    """List AI reviews newest-first for permitted observability clients.
 
     Read-only audit surface answering "what did the AI decide?". Gated
-    at OPERATOR (operator + admin). Unlike ``/pending`` it is NOT keyed
+    by ``READ_AI_REVIEWS``. Unlike ``/pending`` it is NOT keyed
     by ``AuthPrincipal.delegate_public_id`` (so it does not 422 for a
     non-delegate) and it returns terminal decided rows, not only pending
     ones. Optional exact-match query filters narrow the snapshot.
 
-    Scope: an ADMIN sees every operator's reviews; a non-admin OPERATOR
-    is narrowed server-side to the operators it is a member of
+    Scope: a principal granted ``IMPERSONATE_OPERATOR`` sees every
+    operator's reviews; every other reader is narrowed server-side to
+    the operators it is a member of
     (``AuthPrincipal.operator_public_ids``) so it cannot read another
-    book's reviews. This mirrors the non-admin narrowing on the other
+    book's reviews. This mirrors membership narrowing on the other
     list surfaces (scope grants, orders/alerts scope filters).
 
     Args:
-        principal: Authenticated OPERATOR/ADMIN caller (drives scoping).
+        principal: Authenticated caller (drives scoping).
         repo: Repository handle.
         limit: Max rows returned (clamped to ``[1, 500]``).
         status_filter: Optional ``status`` filter (query alias
@@ -546,7 +546,11 @@ async def list_ai_reviews_route(
         :class:`AdminAiReviewListResponse` with up to ``limit`` items,
         newest first.
     """
-    operator_scope = None if principal.role == UserRole.ADMIN else principal.operator_public_ids
+    operator_scope = (
+        None
+        if role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR)
+        else principal.operator_public_ids
+    )
     rows = await repo.list_ai_reviews(
         limit=limit,
         status=status_filter,

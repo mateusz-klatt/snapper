@@ -49,13 +49,11 @@ from snapper.interface.websocket.dispatcher import send_auth_complete
 from snapper.interface.websocket.handlers.auth import authenticate_websocket
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.interface.websocket.helpers import get_allowed_topics_for_role
-from snapper.interface.websocket.helpers import has_trading_permission
 from snapper.interface.websocket.helpers import validate_origin
 
 __all__ = [
     "create_authenticated_websocket_router",
     "get_allowed_topics_for_role",
-    "has_trading_permission",
 ]
 
 

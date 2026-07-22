@@ -12,6 +12,8 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from snapper.auth.domain.permissions import ROLE_PERMISSIONS
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.routes import get_current_user_profile
 from snapper.auth.routes import router
@@ -60,10 +62,11 @@ async def test_get_current_user_profile_returns_user_from_db() -> None:
         result = await get_current_user_profile(
             request=_make_rest_request(), current_user=principal
         )
-    assert result.payload == expected_profile
     assert result.payload.username == "testuser"
     assert result.payload.role == UserRole.VIEWER
     assert result.payload.active_wallet_public_id == principal.active_wallet_public_id
+    assert set(result.payload.effective_permissions) == ROLE_PERMISSIONS[UserRole.VIEWER]
+    assert result.payload.delegate_public_id is None
     mock_service.get_user_with_operators.assert_awaited_once_with("testuser")
 
 
@@ -87,6 +90,43 @@ async def test_get_current_user_profile_user_deleted_returns_404() -> None:
     ):
         await get_current_user_profile(request=_make_rest_request(), current_user=principal)
     assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_current_profile_projects_effective_scope_and_delegate_state() -> None:
+    """The authenticated profile reflects token scope rather than role ceiling.
+
+    Given: A narrowed AI delegate principal with operational lifecycle state,
+    When: The current-profile route projects its session data,
+    Then: The response exposes only the effective token grant and delegate ID.
+    """
+    principal = AuthPrincipal(
+        username="delegate",
+        role=UserRole.AI_DELEGATE,
+        permissions=[Permission.READ_SIGNALS.value],
+        permission_scope_version=3,
+        delegate_public_id="delegate-public-id",
+    )
+    profile = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="delegate",
+        role=UserRole.AI_DELEGATE,
+        created_at=datetime.now(UTC),
+    )
+    mock_service = AsyncMock()
+    mock_service.get_user_with_operators = AsyncMock(return_value=profile)
+
+    with patch("snapper.auth.routes.get_user_service", return_value=mock_service):
+        result = await get_current_user_profile(
+            request=_make_rest_request(),
+            current_user=principal,
+        )
+
+    assert result.payload.effective_permissions == [Permission.READ_SIGNALS]
+    assert result.payload.delegate_public_id == "delegate-public-id"
 
 
 app = FastAPI()
@@ -1000,6 +1040,7 @@ class TestBuildAuthPrincipal:
             mock_repo = MagicMock()
             mock_repo.list_active_operators = AsyncMock()
             mock_repo.get_user_operator_memberships = AsyncMock()
+            mock_repo.get_ai_delegate_by_user_public_id = AsyncMock(return_value=None)
             mock_get_repo.return_value = mock_repo
             UserService.clear_instance()
             service = UserService()
@@ -1130,6 +1171,27 @@ class TestBuildAuthPrincipal:
         assert principal.operator_public_ids == []
         assert principal.primary_operator_public_id == ""
         assert principal.user_public_id == "user-public-id-1"
+
+    @pytest.mark.asyncio
+    async def test_delegate_identity_comes_from_operational_state(
+        self, user_service_with_repo: UserService
+    ) -> None:
+        """A decision-capable named set receives its lifecycle identifier.
+
+        Given: A delegate user backed by an operational lifecycle row,
+        When: Its authentication principal is built,
+        Then: The principal carries the lifecycle identifier without a role branch.
+        """
+        repo = user_service_with_repo.repository
+        repo.get_user_operator_memberships.return_value = []
+        repo.get_ai_delegate_by_user_public_id.return_value = {"public_id": "delegate-public-id-1"}
+
+        principal = await user_service_with_repo.build_auth_principal(
+            self._make_profile(UserRole.AI_DELEGATE)
+        )
+
+        assert principal.delegate_public_id == "delegate-public-id-1"
+        repo.get_ai_delegate_by_user_public_id.assert_awaited_once_with("user-public-id-1")
 
 
 class TestGetUserWithOperators:

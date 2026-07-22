@@ -13,8 +13,8 @@ signals.paper.BTC-USD.my_strategy      (paper prefix pass-through)       accepte
 market.kraken.BTC-USD.ticks            (non-wallet-scoped prefix)        accepted
 =======================================================================  ========
 
-AI_REVIEWER and AI_DELEGATE principals use the filter. ADMIN / VIEWER /
-OPERATOR pass through unchanged regardless of their operator set.
+Principals backed by an ``ai_delegates`` row use the filter. Principals
+without delegate state pass through unchanged regardless of their role.
 """
 
 import json
@@ -34,13 +34,18 @@ from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
-def _principal(role: UserRole, operators: list[str] | None = None) -> AuthPrincipal:
+def _principal(
+    role: UserRole,
+    operators: list[str] | None = None,
+    delegate_public_id: str | None = None,
+) -> AuthPrincipal:
     """Build an AuthPrincipal fixture (defaults to empty operator set)."""
     return AuthPrincipal(
         username="delegate",
         role=role,
         user_public_id="00000000-0000-7000-8000-0000000000d1",
         operator_public_ids=operators or [],
+        delegate_public_id=delegate_public_id,
     )
 
 
@@ -98,7 +103,11 @@ class TestAIDelegateWalletScopeFilter:
         repo = _repo_with_pairs(allowed_pairs)
         allowed, denied = await _enforce_ai_delegate_wallet_scope(
             [topic],
-            _principal(UserRole.AI_DELEGATE, operators=["op-1"]),
+            _principal(
+                UserRole.AI_DELEGATE,
+                operators=["op-1"],
+                delegate_public_id="delegate-1",
+            ),
             repo,
             datetime.now(UTC),
         )
@@ -124,7 +133,11 @@ class TestAIDelegateWalletScopeFilter:
 
         allowed, denied = await _enforce_ai_delegate_wallet_scope(
             [allowed_topic, denied_topic],
-            _principal(UserRole.AI_REVIEWER, operators=["op-1"]),
+            _principal(
+                UserRole.AI_REVIEWER,
+                operators=["op-1"],
+                delegate_public_id="reviewer-1",
+            ),
             repo,
             as_of,
         )
@@ -160,7 +173,11 @@ class TestAIDelegateWalletScopeFilter:
         with pytest.raises(RuntimeError, match="dispatch table wiring is broken"):
             await _enforce_ai_delegate_wallet_scope(
                 ["signals.kraken.BTC-USD.live"],
-                _principal(UserRole.AI_DELEGATE, operators=["op-1"]),
+                _principal(
+                    UserRole.AI_DELEGATE,
+                    operators=["op-1"],
+                    delegate_public_id="delegate-1",
+                ),
                 repository=None,
                 as_of=datetime.now(UTC),
             )
@@ -184,7 +201,11 @@ class TestAIDelegateWalletScopeFilter:
         ]
         allowed, denied = await _enforce_ai_delegate_wallet_scope(
             topics,
-            _principal(UserRole.AI_DELEGATE, operators=[]),
+            _principal(
+                UserRole.AI_DELEGATE,
+                operators=[],
+                delegate_public_id="delegate-1",
+            ),
             repo,
             datetime.now(UTC),
         )
@@ -222,7 +243,11 @@ class TestAIDelegateHandleSubscribeIntegration:
                 ]
             ),
             manager,
-            _principal(UserRole.AI_DELEGATE, operators=["op-1"]),
+            _principal(
+                UserRole.AI_DELEGATE,
+                operators=["op-1"],
+                delegate_public_id="delegate-1",
+            ),
             repo,
         )
 
@@ -252,7 +277,11 @@ class TestAIDelegateHandleSubscribeIntegration:
                 ]
             ),
             manager,
-            _principal(UserRole.AI_DELEGATE, operators=["op-1"]),
+            _principal(
+                UserRole.AI_DELEGATE,
+                operators=["op-1"],
+                delegate_public_id="delegate-1",
+            ),
             repo,
         )
         assert repo.list_scope_grant_instrument_pairs.await_count == 1

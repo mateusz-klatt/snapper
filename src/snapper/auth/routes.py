@@ -26,7 +26,7 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.requests import AdminResetPasswordRequest
 from snapper.auth.schemas.requests import ChangePasswordRequest
@@ -46,6 +46,8 @@ from snapper.auth.schemas.responses import UserResponse
 from snapper.auth.schemas.responses import WsTokenData
 from snapper.auth.schemas.responses import WsTokenResponse
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.schemas.user import UserProfile
+from snapper.auth.tokens import PERMISSION_SCOPE_VERSION
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
@@ -104,6 +106,40 @@ def _should_return_tokens(request: Request) -> bool:
     """
     value = request.query_params.get("return_tokens", "").strip().lower()
     return value == "true"
+
+
+def _authenticated_session_profile(
+    user: UserProfile,
+    principal: AuthPrincipal,
+    token_permissions: list[str] | None,
+    permission_scope_version: int | None,
+) -> UserProfile:
+    """Project current-session capabilities and state onto a user profile.
+
+    Args:
+        user: Account profile being returned.
+        principal: Authenticated principal supplying wallet and delegate state.
+        token_permissions: Permission strings carried by the current token.
+        permission_scope_version: Version governing token-scope compatibility.
+
+    Returns:
+        Profile enriched with current token capabilities and session state.
+    """
+    effective_permissions = sorted(
+        get_effective_permissions(
+            principal.role,
+            token_permissions,
+            permission_scope_version,
+        ),
+        key=lambda permission: permission.value,
+    )
+    return user.model_copy(
+        update={
+            "active_wallet_public_id": principal.active_wallet_public_id,
+            "effective_permissions": effective_permissions,
+            "delegate_public_id": principal.delegate_public_id,
+        }
+    )
 
 
 def _extract_refresh_bearer_token(request: Request) -> str | None:
@@ -245,7 +281,18 @@ async def login(
         path="/",
     )
     sid, seq, _pid, ts = _mint_provenance(request)
-    user = user.model_copy(update={"active_wallet_public_id": principal.active_wallet_public_id})
+    requested_permissions = login_data.payload.permissions
+    token_permissions = (
+        None
+        if requested_permissions is None
+        else [permission.value for permission in requested_permissions]
+    )
+    user = _authenticated_session_profile(
+        user,
+        principal,
+        token_permissions,
+        PERMISSION_SCOPE_VERSION,
+    )
     return_tokens = _should_return_tokens(request)
     login_payload = LoginData(
         session_id=sid,
@@ -274,16 +321,17 @@ async def _apply_wallet_hint(
 ) -> AuthPrincipal:
     """Apply an optional wallet hint to the authenticated principal.
 
-    Role-branched membership validation: ADMIN sees every active wallet via
-    ``list_active_wallets``; non-admins see only wallets their
-    operator memberships grant access to via
+    Permission-derived membership validation: a named set carrying
+    ``IMPERSONATE_OPERATOR`` sees every active wallet via
+    ``list_active_wallets``; other sets see only wallets their operator
+    memberships grant access to via
     ``list_accessible_wallets_for_operators``. A hint that doesn't
     match the caller's visibility returns 404 with a uniform message
     so cross-tenant existence is not leaked.
     """
     if payload.active_wallet_public_id is not None:
         now = datetime.now(UTC)
-        if principal.role == UserRole.ADMIN:
+        if role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR):
             rows = await repo.list_active_wallets(now)
         else:
             rows = await repo.list_accessible_wallets_for_operators(
@@ -416,6 +464,7 @@ async def refresh_token(
         refresh_permissions = get_effective_permissions(
             principal.role,
             token_data.permissions or [],
+            token_data.permission_scope_version,
         )
     new_token_pair = token_manager.create_tokens(
         principal,
@@ -433,6 +482,12 @@ async def refresh_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token already redeemed",
         )
+    response_permission_values = (
+        None
+        if refresh_permissions is None
+        else [permission.value for permission in refresh_permissions]
+    )
+    response_permission_scope_version: int | None = PERMISSION_SCOPE_VERSION
     if rotated_pair is new_token_pair:
         token_manager.blacklist_token(token_data.jti)
     else:
@@ -441,6 +496,8 @@ async def refresh_token(
             principal = principal.model_copy(
                 update={"active_wallet_public_id": winner_claims.active_wallet_public_id}
             )
+            response_permission_values = winner_claims.permissions
+            response_permission_scope_version = winner_claims.permission_scope_version
     csrf_manager = get_csrf_manager()
     csrf_token = csrf_manager.generate_token()
     cookie_secure = settings.session_secure
@@ -475,7 +532,12 @@ async def refresh_token(
     session_id = token_data.sid
     ws_token_result = ws_token_service.generate(user_id=user.username, session_id=session_id)
     sid, seq, _pid, ts = _mint_provenance(request)
-    user = user.model_copy(update={"active_wallet_public_id": principal.active_wallet_public_id})
+    user = _authenticated_session_profile(
+        user,
+        principal,
+        response_permission_values,
+        response_permission_scope_version,
+    )
     return_tokens = _should_return_tokens(request)
     refresh_data = RefreshData(
         session_id=sid,
@@ -624,7 +686,12 @@ async def get_current_user_profile(
             detail=_USER_NOT_FOUND,
         )
     sid, seq, pid, ts = _mint_provenance(request)
-    user = user.model_copy(update={"active_wallet_public_id": current_user.active_wallet_public_id})
+    user = _authenticated_session_profile(
+        user,
+        current_user,
+        current_user.permissions,
+        current_user.permission_scope_version,
+    )
     return UserResponse(
         session_id=sid,
         sequence_id=seq,
@@ -674,8 +741,11 @@ async def update_current_user_preferences(
             detail=_USER_NOT_FOUND,
         )
     sid, seq, pid, ts = _mint_provenance(request)
-    updated_user = updated_user.model_copy(
-        update={"active_wallet_public_id": current_user.active_wallet_public_id}
+    updated_user = _authenticated_session_profile(
+        updated_user,
+        current_user,
+        current_user.permissions,
+        current_user.permission_scope_version,
     )
     return UserResponse(
         session_id=sid,
@@ -963,6 +1033,7 @@ async def change_user_password(
         user_permissions = get_effective_permissions(
             current_user.role,
             current_user.permissions,
+            current_user.permission_scope_version,
         )
         if Permission.MANAGE_USERS not in user_permissions:
             raise HTTPException(

@@ -51,6 +51,26 @@ class TestResolveTargetWallets:
         mock_repo.list_accessible_wallets_for_operators.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_global_scope_survives_token_downscoping(self) -> None:
+        """Structural global scope follows the named role permission set.
+
+        Given: An ADMIN principal whose token permission claim is empty,
+        When: Wallet visibility is resolved without explicit narrowing,
+        Then: The historical global-scope result remains unfiltered.
+        """
+        mock_repo = AsyncMock()
+        principal = AuthPrincipal(
+            username="downscoped-admin",
+            role=UserRole.ADMIN,
+            permissions=[],
+        )
+
+        result = await resolve_target_wallets(principal, mock_repo)
+
+        assert result is None
+        mock_repo.list_accessible_wallets_for_operators.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_admin_with_wallet_param_returns_singleton_list(self) -> None:
         """ADMIN with explicit wallet_public_id narrows to that wallet.
 

@@ -20,8 +20,7 @@ from fastapi import status
 from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
-from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import get_token_manager
@@ -104,7 +103,7 @@ async def get_current_user(
     if not token_data:
         return None
     delegate_public_id: str | None = None
-    if token_data.role in AI_REVIEW_PRINCIPAL_ROLES:
+    if role_grants_permission(token_data.role, Permission.SUBMIT_AI_REVIEW_DECISION):
         delegate_row = await repo.get_ai_delegate_by_user_public_id(token_data.user_public_id)
         if delegate_row is not None:
             delegate_public_id = delegate_row["public_id"]
@@ -163,6 +162,7 @@ def require_permission(permission: Permission) -> Any:
         user_permissions = get_effective_permissions(
             current_user.role,
             current_user.permissions,
+            current_user.permission_scope_version,
         )
         if permission not in user_permissions:
             raise HTTPException(
@@ -172,47 +172,6 @@ def require_permission(permission: Permission) -> Any:
         return current_user
 
     return permission_checker
-
-
-def require_role(role: UserRole, permission: Permission | None = None) -> Any:
-    """Create dependency requiring a role and optional effective permission.
-
-    Args:
-        role: Minimum required role.
-        permission: Optional permission the presented token must retain in
-            addition to satisfying the identity-role hierarchy.
-
-    Returns:
-        Dependency function that validates role hierarchy.
-    """
-    role_hierarchy = {
-        UserRole.AI_RESEARCHER: -2,
-        UserRole.AI_REVIEWER: -1,
-        UserRole.AI_DELEGATE: -1,
-        UserRole.VIEWER: 0,
-        UserRole.OPERATOR: 1,
-        UserRole.ADMIN: 2,
-    }
-
-    def role_checker(
-        current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
-    ) -> AuthPrincipal:
-        if role_hierarchy[current_user.role] < role_hierarchy[role]:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Role '{role.value}' or higher required",
-            )
-        if permission is not None and permission not in get_effective_permissions(
-            current_user.role,
-            current_user.permissions,
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Permission '{permission.value}' required",
-            )
-        return current_user
-
-    return role_checker
 
 
 class CSRFManager:
@@ -498,8 +457,6 @@ def validate_csrf_token(
 
 
 AuthenticatedUser = Annotated[AuthPrincipal, Depends(require_authentication)]
-OperatorUser = Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))]
-AdminUser = Annotated[AuthPrincipal, Depends(require_role(UserRole.ADMIN))]
 ReadMarketDataUser = Annotated[
     AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))
 ]

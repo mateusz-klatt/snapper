@@ -32,6 +32,7 @@ from snapper.auth.deactivation_fallback import start_deactivation_fallback_task
 from snapper.auth.deactivation_fallback import stop_deactivation_fallback_task
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import get_effective_permissions
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -156,7 +157,7 @@ but a ten-year default is a liability for tokens that may live in CI
 secret stores or IDE config.
 """
 
-PERMISSION_SCOPE_VERSION: Final[int] = 2
+PERMISSION_SCOPE_VERSION: Final[int] = 3
 """Version marker for refresh tokens carrying an intentional access scope."""
 
 
@@ -1189,7 +1190,11 @@ class TokenManager:
         )
         permissions: Iterable[Permission | str] | None = None
         if token_data.permission_scope_version is not None:
-            permissions = token_data.permissions or []
+            permissions = get_effective_permissions(
+                token_data.role,
+                token_data.permissions or [],
+                token_data.permission_scope_version,
+            )
         new_tokens = self.create_tokens(
             principal,
             session_id=token_data.sid,

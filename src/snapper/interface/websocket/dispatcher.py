@@ -214,7 +214,11 @@ async def send_auth_complete(
         timestamp=datetime.now(UTC),
     )
     await websocket.send_text(auth_ok.model_dump_json())
-    allowed_topics = get_allowed_topics_for_role(user.role, user.permissions)
+    allowed_topics = get_allowed_topics_for_role(
+        user.role,
+        user.permissions,
+        user.permission_scope_version,
+    )
     session_expires_at_dt = ws_auth_manager.get_connection_expiration(websocket)
     auth_complete = WSAuthCompleteResponse(
         available_topics=allowed_topics,
@@ -415,7 +419,11 @@ def _build_dispatch_table(
         WSSubscribeRequest: lambda msg: handle_subscribe(websocket, msg, manager, user, repository),
         WSUnsubscribeRequest: lambda msg: handle_unsubscribe(websocket, msg, manager),
         WSGetSubscriptionsRequest: lambda msg: handle_get_subscriptions(
-            websocket, manager, user.role, user.permissions
+            websocket,
+            manager,
+            user.role,
+            user.permissions,
+            user.permission_scope_version,
         ),
         WSPingRequest: lambda msg: _handle_ping_with_liveness(
             websocket, manager, user, ws_auth_manager

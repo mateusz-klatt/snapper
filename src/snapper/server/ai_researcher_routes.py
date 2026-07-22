@@ -21,10 +21,9 @@ from snapper.api.schemas.ai_researchers import ResearcherCreateRequest
 from snapper.application.ai_researchers.service import InvalidResearcherOwnerPrincipalError
 from snapper.application.ai_researchers.service import ResearcherProliferationError
 from snapper.application.ai_researchers.service import ResearcherService
-from snapper.auth.dependencies import require_role
+from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import get_token_manager
@@ -62,7 +61,7 @@ async def create_researcher(
     body: Annotated[ResearcherCreateRequest, Depends(json_body(ResearcherCreateRequest))],
     owner: Annotated[
         AuthPrincipal,
-        Depends(require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)),
+        Depends(require_permission(Permission.MANAGE_AI_INTEGRATION)),
     ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],

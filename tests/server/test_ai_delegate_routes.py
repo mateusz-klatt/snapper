@@ -548,6 +548,148 @@ class TestGetDelegate:
             )
 
 
+class TestDelegateReadScopes:
+    """Read scopes widen by operator membership without widening mutations."""
+
+    @pytest.mark.asyncio
+    async def test_manager_list_and_detail_remain_creator_owned(
+        self,
+        repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Managers sharing an operator still read only delegates they created."""
+        await _seed_owner(repo, public_id="manager-a", username="manager-a")
+        await _seed_owner(repo, public_id="manager-b", username="manager-b")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        monkeypatch.setattr(
+            "snapper.application.ai_delegates.service._now_for_join",
+            lambda: datetime.now(UTC) + _td(minutes=1),
+        )
+        first = await service.create_delegate(
+            owner=_make_owner_principal("manager-a", operator_public_id="operator-shared"),
+            body=DelegateCreateBody(label="First Manager", caps=DelegateCapsBody()),
+        )
+        second = await service.create_delegate(
+            owner=_make_owner_principal("manager-b", operator_public_id="operator-shared"),
+            body=DelegateCreateBody(label="Second Manager", caps=DelegateCapsBody()),
+        )
+
+        listed = await service.list_delegates(owner_public_id="manager-a")
+        detailed = await service.get_delegate(
+            public_id=first.delegate.public_id,
+            owner_public_id="manager-a",
+        )
+
+        assert [delegate.public_id for delegate in listed] == [first.delegate.public_id]
+        assert detailed.public_id == first.delegate.public_id
+        with pytest.raises(DelegateNotFoundError):
+            await service.get_delegate(
+                public_id=second.delegate.public_id,
+                owner_public_id="manager-a",
+            )
+
+    @pytest.mark.asyncio
+    async def test_read_scope_lists_and_gets_matching_operator_delegates(
+        self,
+        repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Membership readers see all creators in-scope and hide another operator."""
+        await _seed_owner(repo, public_id="creator-a", username="creator-a")
+        await _seed_owner(repo, public_id="creator-b", username="creator-b")
+        await _seed_owner(repo, public_id="creator-c", username="creator-c")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        monkeypatch.setattr(
+            "snapper.application.ai_delegates.service._now_for_join",
+            lambda: datetime.now(UTC) + _td(minutes=1),
+        )
+        first = await service.create_delegate(
+            owner=_make_owner_principal("creator-a", operator_public_id="operator-visible"),
+            body=DelegateCreateBody(label="Visible One", caps=DelegateCapsBody()),
+        )
+        second = await service.create_delegate(
+            owner=_make_owner_principal("creator-b", operator_public_id="operator-visible"),
+            body=DelegateCreateBody(label="Visible Two", caps=DelegateCapsBody()),
+        )
+        hidden = await service.create_delegate(
+            owner=_make_owner_principal("creator-c", operator_public_id="operator-hidden"),
+            body=DelegateCreateBody(label="Hidden", caps=DelegateCapsBody()),
+        )
+
+        listed = await service.list_delegates(operator_public_ids=["operator-visible"])
+        detailed = await service.get_delegate(
+            public_id=second.delegate.public_id,
+            operator_public_ids=["operator-visible"],
+        )
+
+        assert {delegate.public_id for delegate in listed} == {
+            first.delegate.public_id,
+            second.delegate.public_id,
+        }
+        assert detailed.public_id == second.delegate.public_id
+        with pytest.raises(DelegateNotFoundError):
+            await service.get_delegate(
+                public_id=hidden.delegate.public_id,
+                operator_public_ids=["operator-visible"],
+            )
+
+    @pytest.mark.asyncio
+    async def test_empty_and_unmatched_read_scopes_fail_closed(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """No memberships return an empty list and detail remains indistinguishable from missing."""
+        await _seed_owner(repo, public_id="creator-scope", username="creator-scope")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        created = await service.create_delegate(
+            owner=_make_owner_principal("creator-scope", operator_public_id="operator-real"),
+            body=DelegateCreateBody(label="Scoped", caps=DelegateCapsBody()),
+        )
+
+        assert await service.list_delegates(operator_public_ids=[]) == []
+        assert await service.list_delegates(operator_public_ids=["operator-other"]) == []
+        with pytest.raises(DelegateNotFoundError):
+            await service.get_delegate(
+                public_id=created.delegate.public_id,
+                operator_public_ids=[],
+            )
+        with pytest.raises(DelegateNotFoundError):
+            await service.get_delegate(
+                public_id=created.delegate.public_id,
+                operator_public_ids=["operator-other"],
+            )
+
+    @pytest.mark.asyncio
+    async def test_shared_operator_read_does_not_widen_caps_mutation(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """A different creator can read through membership but cannot patch caps."""
+        await _seed_owner(repo, public_id="creator-mutate", username="creator-mutate")
+        await _seed_owner(repo, public_id="other-manager", username="other-manager")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        created = await service.create_delegate(
+            owner=_make_owner_principal("creator-mutate", operator_public_id="operator-shared"),
+            body=DelegateCreateBody(
+                label="Mutation Guard",
+                caps=DelegateCapsBody(max_open_orders=5),
+            ),
+        )
+
+        readable = await service.get_delegate(
+            public_id=created.delegate.public_id,
+            operator_public_ids=["operator-shared"],
+        )
+
+        assert readable.caps.max_open_orders == 5
+        with pytest.raises(DelegateNotFoundError):
+            await service.update_caps(
+                public_id=created.delegate.public_id,
+                owner_public_id="other-manager",
+                body=DelegateCapsUpdateBody(caps=DelegateCapsBody(max_open_orders=99)),
+            )
+
+
 class TestUpdateCaps:
     """PATCH close+inserts new caps; owner guard applies."""
 
@@ -1454,6 +1596,131 @@ class TestRouteHandlers:
         assert response.payload.public_id == "d1"
 
     @pytest.mark.asyncio
+    async def test_read_only_routes_forward_operator_membership_scope(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Viewer list and detail calls use memberships instead of creator ownership."""
+        delegate = DelegateRead(
+            public_id="viewer-visible",
+            username="ai-viewer-visible-abc123",
+            label="viewer-visible",
+            created_by_user_public_id="creator-other",
+            created_at=datetime.now(UTC),
+            is_active=True,
+            caps=DelegateCapsBody(),
+        )
+        list_calls: list[tuple[str | None, list[str] | None]] = []
+        get_calls: list[tuple[str, str | None, list[str] | None]] = []
+
+        class _ScopedService:
+            async def list_delegates(
+                self,
+                owner_public_id: str | None = None,
+                *,
+                operator_public_ids: list[str] | None = None,
+            ) -> list[DelegateRead]:
+                list_calls.append((owner_public_id, operator_public_ids))
+                return [delegate]
+
+            async def get_delegate(
+                self,
+                public_id: str,
+                owner_public_id: str | None = None,
+                *,
+                operator_public_ids: list[str] | None = None,
+            ) -> DelegateRead:
+                get_calls.append((public_id, owner_public_id, operator_public_ids))
+                return delegate
+
+        monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: _ScopedService())
+        viewer = AuthPrincipal(
+            username="viewer",
+            role=UserRole.VIEWER,
+            user_public_id="viewer-user",
+            operator_public_ids=["operator-visible"],
+            primary_operator_public_id="operator-visible",
+        )
+        request = _make_rest_request()
+
+        listed = await ai_delegate_routes.list_delegates(
+            request=request,
+            owner=viewer,
+            repo=repo,
+        )
+        detailed = await ai_delegate_routes.get_delegate(
+            request=request,
+            delegate_public_id=delegate.public_id,
+            owner=viewer,
+            repo=repo,
+        )
+
+        assert listed.payload == [delegate]
+        assert detailed.payload == delegate
+        assert list_calls == [(None, ["operator-visible"])]
+        assert get_calls == [(delegate.public_id, None, ["operator-visible"])]
+
+    @pytest.mark.asyncio
+    async def test_management_routes_forward_creator_scope(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Manager list and detail calls retain the caller's creator identity."""
+        delegate = DelegateRead(
+            public_id="manager-visible",
+            username="ai-manager-visible-abc123",
+            label="manager-visible",
+            created_by_user_public_id="manager-user",
+            created_at=datetime.now(UTC),
+            is_active=True,
+            caps=DelegateCapsBody(),
+        )
+        list_calls: list[tuple[str | None, list[str] | None]] = []
+        get_calls: list[tuple[str, str | None, list[str] | None]] = []
+
+        class _ScopedService:
+            async def list_delegates(
+                self,
+                owner_public_id: str | None = None,
+                *,
+                operator_public_ids: list[str] | None = None,
+            ) -> list[DelegateRead]:
+                list_calls.append((owner_public_id, operator_public_ids))
+                return [delegate]
+
+            async def get_delegate(
+                self,
+                public_id: str,
+                owner_public_id: str | None = None,
+                *,
+                operator_public_ids: list[str] | None = None,
+            ) -> DelegateRead:
+                get_calls.append((public_id, owner_public_id, operator_public_ids))
+                return delegate
+
+        monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: _ScopedService())
+        manager = _make_owner_principal(
+            user_public_id="manager-user",
+            operator_public_id="operator-shared",
+        )
+        request = _make_rest_request()
+
+        listed = await ai_delegate_routes.list_delegates(
+            request=request,
+            owner=manager,
+            repo=repo,
+        )
+        detailed = await ai_delegate_routes.get_delegate(
+            request=request,
+            delegate_public_id=delegate.public_id,
+            owner=manager,
+            repo=repo,
+        )
+
+        assert listed.payload == [delegate]
+        assert detailed.payload == delegate
+        assert list_calls == [("manager-user", None)]
+        assert get_calls == [(delegate.public_id, "manager-user", None)]
+
+    @pytest.mark.asyncio
     async def test_patch_route_returns_updated_delegate(
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1562,6 +1829,42 @@ class TestRouteHandlers:
                 _csrf=None,
             )
         assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_deactivate_route_retains_creator_scope_for_shared_operator(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deactivation pre-load uses creator identity, never operator membership."""
+        get_calls: list[tuple[str, str]] = []
+
+        class _CreatorScopedService:
+            async def get_delegate(self, public_id: str, owner_public_id: str) -> DelegateRead:
+                get_calls.append((public_id, owner_public_id))
+                raise DelegateNotFoundError(public_id)
+
+        monkeypatch.setattr(
+            ai_delegate_routes,
+            "_build_service",
+            lambda _repo: _CreatorScopedService(),
+        )
+        request = _make_rest_request()
+        manager = _make_owner_principal(
+            user_public_id="manager-other",
+            operator_public_id="operator-shared",
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            await ai_delegate_routes.deactivate_delegate(
+                request=request,
+                delegate_public_id="delegate-created-by-peer",
+                body=None,
+                owner=manager,
+                repo=repo,
+                _csrf=None,
+            )
+
+        assert exc.value.status_code == 404
+        assert get_calls == [("delegate-created-by-peer", "manager-other")]
 
     @pytest.mark.asyncio
     async def test_deactivate_route_calls_user_service_and_returns_inactive(

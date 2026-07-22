@@ -515,7 +515,7 @@ def _admin_review_row(**overrides: Any) -> dict[str, Any]:
 
 
 class TestListAiReviewsRoute:
-    """``GET /api/ai-reviews`` operator/admin read-only observability surface."""
+    """``GET /api/ai-reviews`` permission-gated read-only observability surface."""
 
     def test_operator_sees_review_with_decision(self) -> None:
         """An operator gets the terminal decision + rationale + envelope."""
@@ -557,16 +557,23 @@ class TestListAiReviewsRoute:
         kwargs = repo.list_ai_reviews.await_args.kwargs
         assert kwargs["operator_public_ids"] is None
 
-    def test_viewer_is_forbidden(self) -> None:
-        """VIEWER is below the OPERATOR gate -> 403."""
+    def test_viewer_is_allowed_with_membership_scope(self) -> None:
+        """A read-only operator sees reviews inside its operator memberships.
+
+        Given: A VIEWER principal with one operator membership,
+        When: The principal reads the AI-review audit list,
+        Then: The route returns 200 and forwards that membership as its scope.
+        """
         repo = AsyncMock()
         repo.list_ai_reviews = AsyncMock(return_value=[])
         client = _create_client(repo=repo, principal=_viewer_principal())
         response = client.get("/api/ai-reviews")
-        assert response.status_code == 403
+        assert response.status_code == 200
+        kwargs = repo.list_ai_reviews.await_args.kwargs
+        assert kwargs["operator_public_ids"] == ["op-1"]
 
     def test_delegate_is_forbidden(self) -> None:
-        """AI_DELEGATE (role below OPERATOR) is 403 and cannot read other books' reviews."""
+        """A principal without READ_AI_REVIEWS cannot read other books' reviews."""
         repo = AsyncMock()
         repo.list_ai_reviews = AsyncMock(return_value=[])
         client = _create_client(repo=repo, principal=_delegate_principal())

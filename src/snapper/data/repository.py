@@ -155,7 +155,7 @@ from snapper.application.portfolio.reconciliation_invariants import (
     validate_portfolio_reconciliation_spot_anchor_lineage,
 )
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
-from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
+from snapper.auth.domain.permissions import Permission
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 from snapper.core.paired_execution import compute_paired_group_key
@@ -387,6 +387,13 @@ __all__ = [
 _DB_POOL_SIZE_ENV: Final[str] = "DB_POOL_SIZE"
 _DB_MAX_OVERFLOW_ENV: Final[str] = "DB_MAX_OVERFLOW"
 ENV_VARS: Final[frozenset[str]] = frozenset({_DB_POOL_SIZE_ENV, _DB_MAX_OVERFLOW_ENV})
+_AI_REVIEW_DECISION_ROLE_VALUES: Final[tuple[str, ...]] = tuple(
+    sorted(
+        role.value
+        for role, permissions in ROLE_PERMISSIONS.items()
+        if Permission.SUBMIT_AI_REVIEW_DECISION in permissions
+    )
+)
 """Per-process SQLAlchemy engine pool-clamp keys (PostgreSQL only).
 
 Read directly via ``os.getenv`` in :meth:`SQLAlchemyRepository.__init__`
@@ -5682,8 +5689,8 @@ class Repository(ABC):
         """Eligible AI-delegate candidates for admission control.
 
         Returns the ``ai_delegates`` rows whose users are active members of
-        ``operator_public_id`` (``users.is_active = TRUE`` and role in
-        ``AI_REVIEW_PRINCIPAL_ROLES``) and whose ``last_seen_at`` falls inside
+        ``operator_public_id`` (``users.is_active = TRUE`` and whose role grants
+        ``SUBMIT_AI_REVIEW_DECISION``) and whose ``last_seen_at`` falls inside
         the heartbeat window (``as_of - heartbeat_window_seconds``,
         ``as_of``], ordered by ``last_seen_at DESC``. Pre-checks that the
         operator actually holds a matching active scope grant
@@ -23668,7 +23675,7 @@ class SQLAlchemyRepository(Repository):
                 == UserOperatorMembership.operator_public_id,
             )
             .where(
-                User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
+                User.role.in_(_AI_REVIEW_DECISION_ROLE_VALUES),
                 User.is_active.is_(True),
                 AiDelegate.last_seen_at.is_not(None),
                 AiDelegate.last_seen_at > threshold,
@@ -23764,7 +23771,7 @@ class SQLAlchemyRepository(Repository):
                             UserOperatorMembership.user_public_id == AiDelegate.user_public_id,
                         )
                         .where(
-                            User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
+                            User.role.in_(_AI_REVIEW_DECISION_ROLE_VALUES),
                             User.is_active.is_(True),
                             UserOperatorMembership.operator_public_id == operator_public_id,
                             AiDelegate.last_seen_at.is_not(None),

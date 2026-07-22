@@ -92,7 +92,6 @@ from snapper.server.app import create_api_router
 from snapper.server.app import create_app
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.authenticated_websocket import get_allowed_topics_for_role
-from snapper.server.authenticated_websocket import has_trading_permission
 
 
 def _make_rest_request() -> MagicMock:
@@ -106,7 +105,6 @@ pytest = cast(Any, pytest)
 create_app = cast(Any, create_app)
 create_api_router = cast(Any, create_api_router)
 create_authenticated_websocket_router = cast(Any, create_authenticated_websocket_router)
-has_trading_permission = cast(Any, has_trading_permission)
 
 
 class _TestZmqBridge:
@@ -2167,6 +2165,7 @@ async def test_ws_endpoint_success_and_reauth_flow(
             role=UserRole.ADMIN,
             username="u7",
             permissions=None,
+            permission_scope_version=None,
         ),
         SimpleNamespace(sid="sid-7"),
     )
@@ -2395,18 +2394,6 @@ async def test_handle_get_subscriptions_uses_helper() -> None:
     assert response["type"] == "subscriptions_list"
     assert response["subscriptions"] == ["signals.kraken.BTC-USD.live"]
     assert response["available_topics"] == ["market.kraken.BTC-USD.candles.1m"]
-
-
-def test_has_trading_permission_roles() -> None:
-    """Trading permission based on user role.
-
-    Given: Different user roles,
-    When: Checking trading permission,
-    Then: Viewer denied, operator and admin granted.
-    """
-    assert not has_trading_permission(UserRole.VIEWER)
-    assert has_trading_permission(UserRole.OPERATOR)
-    assert has_trading_permission(UserRole.ADMIN)
 
 
 @pytest.mark.asyncio
@@ -5417,11 +5404,11 @@ class TestWebSocketAuthManager:
         assert token_data.sid
 
     def test_connection_tracking(self) -> None:
-        """Connection tracking manages authenticated connections.
+        """Connection tracking manages authenticated users.
 
         Given: A WebSocket and user,
         When: Tracking connection lifecycle,
-        Then: Correctly reports auth state and permissions.
+        Then: Correctly reports authentication state and user identity.
         """
         ws_auth_manager = get_ws_auth_manager()
         websocket = MagicMock(spec=WebSocket)
@@ -5435,8 +5422,6 @@ class TestWebSocketAuthManager:
         ws_auth_manager.authenticated_connections[websocket] = user
         assert ws_auth_manager.is_authenticated(websocket)
         assert ws_auth_manager.get_authenticated_user(websocket) == user
-        assert ws_auth_manager.has_permission(websocket, UserRole.VIEWER)
-        assert not ws_auth_manager.has_permission(websocket, UserRole.ADMIN)
         ws_auth_manager.disconnect(websocket)
         assert not ws_auth_manager.is_authenticated(websocket)
 
@@ -5484,17 +5469,6 @@ class TestSecureWebSocketUtilities:
         admin_topics = get_allowed_topics_for_role(UserRole.ADMIN)
         assert "signals" in admin_topics or any(t.startswith("signals") for t in admin_topics)
         assert "system.heartbeats." in admin_topics
-
-    def test_trading_permissions(self) -> None:
-        """Trading permission based on role.
-
-        Given: Different user roles,
-        When: Checking trading permission,
-        Then: Only operator and admin have permission.
-        """
-        assert not has_trading_permission(UserRole.VIEWER)
-        assert has_trading_permission(UserRole.OPERATOR)
-        assert has_trading_permission(UserRole.ADMIN)
 
 
 class TestUserManagementCoverage:

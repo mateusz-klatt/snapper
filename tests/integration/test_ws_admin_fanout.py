@@ -105,6 +105,7 @@ def _ai_delegate(
         role=UserRole.AI_DELEGATE,
         user_public_id=user_public_id,
         operator_public_ids=list(operators),
+        delegate_public_id=f"delegate-{user_public_id}",
     )
 
 

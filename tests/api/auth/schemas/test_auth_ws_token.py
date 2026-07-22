@@ -462,23 +462,6 @@ def test_get_session_id_returns_none_when_no_state() -> None:
     WebSocketAuthManager.clear_instance()
 
 
-def test_has_permission_returns_false_when_not_authenticated() -> None:
-    """Verify has_permission returns False for unauthenticated.
-
-    Given: A websocket not authenticated,
-    When: has_permission is called,
-    Then: False is returned.
-    """
-    WebSocketAuthManager.clear_instance()
-    manager = WebSocketAuthManager()
-    token_manager = DummyTokenManager()
-    manager.token_manager = cast(Any, token_manager)
-    websocket = DummyWebSocket()
-    result = manager.has_permission(cast(Any, websocket), UserRole.VIEWER)
-    assert result is False
-    WebSocketAuthManager.clear_instance()
-
-
 def test_get_connection_expiration_returns_none_when_no_state() -> None:
     """Verify get_connection_expiration returns None for unregistered.
 

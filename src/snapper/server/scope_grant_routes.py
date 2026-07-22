@@ -3,8 +3,8 @@
 Returns the active ``wallet_operator_scope_grants`` rows on a given
 wallet and accepts create + handover commands.
 Authorization rules
-ADMIN principals may query / mutate any wallet.
-Non-ADMIN principals may query only wallets covered by at least one
+Principals granted ``IMPERSONATE_OPERATOR`` may query any wallet.
+Other principals may query only wallets covered by at least one
   active scope grant from their operator set (read gate). Mutation
   additionally requires the ``MANAGE_SCOPE_GRANTS`` permission,
   currently granted only to ADMIN.
@@ -41,7 +41,7 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.auth.scope_grant_service import get_scope_grant_service
@@ -170,7 +170,7 @@ async def list_scope_grants(
 ) -> ScopeGrantListResponse:
     """List active scope grants on a given wallet.
 
-    Non-ADMIN callers must have visibility into the target wallet
+    Callers without ``IMPERSONATE_OPERATOR`` must have visibility into the target wallet
     through their operator set; otherwise the request is rejected
     with 403 so the existence of the wallet is not leaked through
     an empty payload vs. a 404.
@@ -188,7 +188,7 @@ async def list_scope_grants(
         HTTPException: 403 if the caller cannot see the target wallet.
     """
     now = datetime.now(UTC)
-    if principal.role != UserRole.ADMIN:
+    if not role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR):
         accessible = await repo.list_accessible_wallets_for_operators(
             principal.operator_public_ids, now
         )

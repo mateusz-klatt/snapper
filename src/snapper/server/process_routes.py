@@ -832,7 +832,7 @@ async def _enforce_strategy_scope(
 @router.get("/available")
 async def list_available_processes(
     request: Request,
-    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_PROCESSES))],
 ) -> AvailableProcessesResponse:
     sid, seq, pid, ts = _mint_provenance(request)
     registry = get_registered_processes()
@@ -869,7 +869,7 @@ async def list_configured_processes(
     request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     cache: Annotated[RemoteSummaryCache | None, Depends(get_remote_summary_cache)],
-    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_PROCESSES))],
 ) -> ConfiguredProcessesResponse:
     """List configured processes — DB templates plus runtime per-wallet instances.
 
@@ -1137,7 +1137,7 @@ async def get_process_schema(
     request: Request,
     name: str,
     settings: Annotated[AppSettings, Depends(get_settings)],
-    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_PROCESSES))],
 ) -> ProcessSchemaResponse:
     """Get the configuration schema for a registered process.
 
@@ -1567,7 +1567,7 @@ async def update_process_scope_config(
 async def list_process_runs(
     request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
-    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_PROCESSES))],
     limit: int = 50,
     name: str | None = None,
 ) -> ProcessRunsResponse:

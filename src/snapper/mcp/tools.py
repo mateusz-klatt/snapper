@@ -66,7 +66,7 @@ from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.scope_grant_service import get_scope_grant_service
@@ -223,7 +223,11 @@ def _require_permission(claims: TokenClaims, permission: Permission) -> None:
             not include the required permission. Caught by FastMCP and
             returned to the MCP client as a tool-error response.
     """
-    effective_permissions = get_effective_permissions(claims.role, claims.permissions)
+    effective_permissions = get_effective_permissions(
+        claims.role,
+        claims.permissions,
+        claims.permission_scope_version,
+    )
     if permission not in effective_permissions:
         raise PermissionError(
             f"Tool requires permission '{permission.value}' which is not "
@@ -300,7 +304,11 @@ def _envelope_for_permission_check(
     check here at their entry point so clients receive the canonical
     envelope.
     """
-    effective_permissions = get_effective_permissions(claims.role, claims.permissions)
+    effective_permissions = get_effective_permissions(
+        claims.role,
+        claims.permissions,
+        claims.permission_scope_version,
+    )
     if permission not in effective_permissions:
         return to_call_tool_result(
             success=False,
@@ -591,13 +599,13 @@ async def _resolve_target_wallets_for_mcp(
     entity-specific not-found error code (anti-enumeration: callers
     cannot tell whether the wallet exists or just isn't theirs).
 
-    ADMIN with no explicit ``wallet_public_id`` returns
+    A caller granted ``IMPERSONATE_OPERATOR`` with no explicit ``wallet_public_id`` returns
     ``(None, False)`` so :meth:`Repository.get_orders` skips wallet
-    filtering entirely. Non-admin callers always go through
+    filtering entirely. Other callers always go through
     :meth:`Repository.list_accessible_wallets_for_operators` keyed by
     every operator their token claims membership in.
     """
-    if claims.role == UserRole.ADMIN:
+    if role_grants_permission(claims.role, Permission.IMPERSONATE_OPERATOR):
         if wallet_public_id is not None:
             return [wallet_public_id], False
         return None, False

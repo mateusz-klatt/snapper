@@ -34,6 +34,8 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
 from snapper.application.portfolio.reconciliation_methods import PortfolioReconciliationMethod
+from snapper.auth.domain.permissions import ROLE_PERMISSIONS
+from snapper.auth.domain.permissions import Permission
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.infrastructure.exchanges.reconciliation_policy import account_mode_for_exchange
@@ -543,8 +545,9 @@ def seed_default_multi_tenant(
        created as the bootstrap fallback so fresh ``make migrate-dev``
        runs against seed profiles that predate the ``[[wallets]]``
        TOML format still produce a working paper sandbox.
-    3. UserOperatorMembership linking the first admin user in the
-       ``users`` table to the default operator as ``is_primary=TRUE``.
+    3. UserOperatorMembership rows linking every user whose named
+       permission set includes ``READ_ACCOUNT_STATE`` to the default
+       operator as ``is_primary=TRUE``.
 
     Idempotent: the function checks the ``operators`` and ``wallets``
     tables and skips the entire bootstrap when either is non-empty.
@@ -630,15 +633,19 @@ def seed_default_multi_tenant(
         )
         inserted += wallet_rows
 
-    admin_row = conn.execute(
-        text(
-            "SELECT public_id FROM users"
-            " WHERE role = 'admin' AND known_to = :known_to"
-            " ORDER BY id ASC LIMIT 1"
-        ),
+    membership_role_values = frozenset(
+        role.value
+        for role, permissions in ROLE_PERMISSIONS.items()
+        if Permission.READ_ACCOUNT_STATE in permissions
+    )
+    membership_user_rows = conn.execute(
+        text("SELECT public_id, role FROM users WHERE known_to = :known_to ORDER BY id ASC"),
         {"known_to": known_to},
-    ).first()
-    if admin_row is not None:
+    ).all()
+    membership_count = 0
+    for membership_user_row in membership_user_rows:
+        if membership_user_row[1] not in membership_role_values:
+            continue
         conn.execute(
             text(
                 "INSERT INTO user_operator_memberships"
@@ -650,7 +657,7 @@ def seed_default_multi_tenant(
             ),
             {
                 "public_id": str(uuid7()),
-                "user_public_id": admin_row[0],
+                "user_public_id": membership_user_row[0],
                 "operator_public_id": operator_public_id,
                 "is_primary": True,
                 "timestamp": now,
@@ -659,11 +666,12 @@ def seed_default_multi_tenant(
                 "sequence_id": tracker.next_sequence("user_operator_memberships"),
             },
         )
+        membership_count += 1
         inserted += 1
 
     logger.info(
         f"Seeded multi-tenant bootstrap: 1 operator, {wallet_count} wallet(s), "
-        f"{1 if admin_row is not None else 0} membership, "
+        f"{membership_count} membership(s), "
         f"{credential_count} wallet credential(s), "
         f"{method_config_count} reconciliation method config(s)"
     )

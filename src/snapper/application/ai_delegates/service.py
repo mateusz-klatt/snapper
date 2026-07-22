@@ -30,6 +30,8 @@ from snapper.api.schemas.ai_delegates import DelegateCapsUpdateBody
 from snapper.api.schemas.ai_delegates import DelegateCreateBody
 from snapper.api.schemas.ai_delegates import DelegateCreatedPayload
 from snapper.api.schemas.ai_delegates import DelegateRead
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
@@ -210,9 +212,8 @@ class DelegateService:
         without a User, no phantom tokens.
 
         Args:
-            owner: The creating operator's principal. Must be
-                OPERATOR or ADMIN; the ``require_role`` dep on
-                the route enforces that.
+            owner: Principal granted AI-integration management; the route's
+                permission dependency enforces the capability.
             body: Parsed :class:`DelegateCreateBody` with the
                 human-readable label + optional caps.
 
@@ -363,9 +364,9 @@ class DelegateService:
         caps + token rows so a partial insert cannot leak a delegate
         that can authenticate but cannot act.
         Resolution order
-            1. ADMIN caller + explicit ``operator_public_id`` → use
-               it unchanged. ADMIN implicitly spans every operator.
-            2. Non-ADMIN caller + explicit ``operator_public_id``
+            1. Caller whose named set carries ``IMPERSONATE_OPERATOR``
+               plus an explicit ``operator_public_id`` → use it unchanged.
+            2. Other caller + explicit ``operator_public_id``
                → MUST sit inside ``owner.operator_public_ids``
                otherwise raise :class:`DelegateOperatorBindingError`
                (cross-operator spoof attempt).
@@ -393,7 +394,7 @@ class DelegateService:
         """
         explicit = body.operator_public_id
         if explicit is not None:
-            if owner.role == UserRole.ADMIN:
+            if role_grants_permission(owner.role, Permission.IMPERSONATE_OPERATOR):
                 return explicit
             if explicit not in owner.operator_public_ids:
                 raise DelegateOperatorBindingError(
@@ -406,49 +407,68 @@ class DelegateService:
             )
         return owner.primary_operator_public_id
 
-    async def list_delegates(self, owner_public_id: str) -> list[DelegateRead]:
-        """Return every SCD2-active delegate the caller owns.
+    async def list_delegates(
+        self,
+        owner_public_id: str | None = None,
+        *,
+        operator_public_ids: list[str] | None = None,
+    ) -> list[DelegateRead]:
+        """Return every active delegate visible through one read scope.
 
-        Fails closed with :class:`InvalidOwnerPrincipalError` when
-        the ``owner_public_id`` is empty — prevents legacy blank-ID
-        tokens from enumerating other blank-ID operators' delegates
+        Management callers retain the historical creator-owner view.
+        Read-only callers use operator memberships, matching wallet scope.
+        Exactly one scope must be supplied. An empty operator scope returns
+        an empty list without querying.
         Excludes deactivated delegates (``is_active=False``) so
         the frontend list view matches the
         ``POST /deactivate`` semantic — a deactivated delegate
         drops out of the list view + detail view reports 404.
 
         Args:
-            owner_public_id: UUID of the calling operator; the
-                ``created_by_user_public_id`` filter scopes the
-                result set to just the caller's delegates.
+            owner_public_id: Creator UUID for the historical management view.
+            operator_public_ids: Operator memberships for the read-only view.
 
         Returns:
-            List of :class:`DelegateRead` projections. Empty when
-            the operator has never created a delegate.
+            List of :class:`DelegateRead` projections in the selected scope.
         """
-        self._guard_owner(owner_public_id)
+        if (owner_public_id is None) == (operator_public_ids is None):
+            raise InvalidOwnerPrincipalError("Exactly one AI delegate read scope must be supplied.")
+        if owner_public_id is not None:
+            self._guard_owner(owner_public_id)
+        elif not operator_public_ids:
+            return []
         async with self.repository.session() as session:
             now = _now_for_join()
             caps_ts, caps_known_to = where_active(UserTradingCaps, now)
             user_ts, user_known_to = where_active(User, now)
-            stmt = (
-                select(User, UserTradingCaps)
-                .join(
-                    UserTradingCaps,
-                    (UserTradingCaps.user_public_id == User.public_id) & caps_ts & caps_known_to,
-                    isouter=True,
-                )
-                .where(
-                    User.created_by_user_public_id == owner_public_id,
-                    User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
-                    User.is_active,
-                    user_ts,
-                    user_known_to,
-                )
+            stmt = select(User, UserTradingCaps).join(
+                UserTradingCaps,
+                (UserTradingCaps.user_public_id == User.public_id) & caps_ts & caps_known_to,
+                isouter=True,
+            )
+            if owner_public_id is not None:
+                stmt = stmt.where(User.created_by_user_public_id == owner_public_id)
+            else:
+                membership_ts, membership_known_to = where_active(UserOperatorMembership, now)
+                stmt = stmt.join(
+                    UserOperatorMembership,
+                    (UserOperatorMembership.user_public_id == User.public_id)
+                    & membership_ts
+                    & membership_known_to,
+                ).where(UserOperatorMembership.operator_public_id.in_(operator_public_ids or []))
+            stmt = stmt.where(
+                User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
+                User.is_active,
+                user_ts,
+                user_known_to,
             )
             rows = (await session.execute(stmt)).all()
             delegates: list[DelegateRead] = []
+            seen_user_public_ids: set[str] = set()
             for user_row, caps_row in rows:
+                if user_row.public_id in seen_user_public_ids:
+                    continue
+                seen_user_public_ids.add(user_row.public_id)
                 delegates.append(
                     self._delegate_read_from_rows(
                         user_row=user_row,
@@ -461,21 +481,21 @@ class DelegateService:
     async def get_delegate(
         self,
         public_id: str,
-        owner_public_id: str,
+        owner_public_id: str | None = None,
+        *,
+        operator_public_ids: list[str] | None = None,
     ) -> DelegateRead:
-        """Fetch a single active delegate scoped to the caller.
+        """Fetch one active delegate in a creator or membership scope.
 
         Raises :class:`DelegateNotFoundError` rather than returning
         ``None`` so the route handler can map cleanly to a 404.
-        The owner guard prevents operators from reading each
-        other's delegates even via guessed UUIDs.
+        Management callers retain creator ownership. Read-only callers
+        may read delegates bound to one of their operators.
 
         Args:
             public_id: UUID of the delegate to fetch.
-            owner_public_id: Calling operator's UUID; the
-                DB-level WHERE clause enforces the ownership
-                predicate so cross-tenant reads surface as
-                :class:`DelegateNotFoundError` (404 upstream).
+            owner_public_id: Creator UUID for the management view.
+            operator_public_ids: Operator memberships for read-only access.
 
         Returns:
             :class:`DelegateRead` projection of the active
@@ -485,11 +505,22 @@ class DelegateService:
             InvalidOwnerPrincipalError: if ``owner_public_id`` is
                 empty.
         """
-        self._guard_owner(owner_public_id)
+        if (owner_public_id is None) == (operator_public_ids is None):
+            raise InvalidOwnerPrincipalError("Exactly one AI delegate read scope must be supplied.")
         async with self.repository.session() as session:
-            user_row, caps_row = await self._load_delegate_with_caps(
-                session, public_id, owner_public_id
-            )
+            if owner_public_id is not None:
+                self._guard_owner(owner_public_id)
+                user_row, caps_row = await self._load_delegate_with_caps(
+                    session, public_id, owner_public_id
+                )
+            else:
+                if not operator_public_ids:
+                    raise DelegateNotFoundError(public_id)
+                user_row, caps_row = await self._load_delegate_for_operators(
+                    session,
+                    public_id,
+                    operator_public_ids,
+                )
         return self._delegate_read_from_rows(
             user_row=user_row,
             caps_row=caps_row,
@@ -682,6 +713,56 @@ class DelegateService:
             .where(
                 User.public_id == public_id,
                 User.created_by_user_public_id == owner_public_id,
+                User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
+                User.is_active,
+                user_ts,
+                user_known_to,
+            )
+        )
+        row = (await session.execute(stmt)).first()
+        if row is None:
+            raise DelegateNotFoundError(public_id)
+        return row[0], row[1]
+
+    async def _load_delegate_for_operators(
+        self,
+        session: AsyncSession,
+        public_id: str,
+        operator_public_ids: list[str],
+    ) -> tuple[User, UserTradingCaps | None]:
+        """Load one active delegate reachable through operator membership.
+
+        Args:
+            session: Active database session.
+            public_id: Delegate user identifier.
+            operator_public_ids: Caller operator memberships.
+
+        Returns:
+            Active delegate user and optional caps row.
+
+        Raises:
+            DelegateNotFoundError: If the delegate is absent or outside scope.
+        """
+        now = _now_for_join()
+        caps_ts, caps_known_to = where_active(UserTradingCaps, now)
+        user_ts, user_known_to = where_active(User, now)
+        membership_ts, membership_known_to = where_active(UserOperatorMembership, now)
+        stmt = (
+            select(User, UserTradingCaps)
+            .join(
+                UserTradingCaps,
+                (UserTradingCaps.user_public_id == User.public_id) & caps_ts & caps_known_to,
+                isouter=True,
+            )
+            .join(
+                UserOperatorMembership,
+                (UserOperatorMembership.user_public_id == User.public_id)
+                & membership_ts
+                & membership_known_to,
+            )
+            .where(
+                User.public_id == public_id,
+                UserOperatorMembership.operator_public_id.in_(operator_public_ids),
                 User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
                 User.is_active,
                 user_ts,

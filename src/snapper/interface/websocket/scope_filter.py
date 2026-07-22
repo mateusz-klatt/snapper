@@ -20,7 +20,7 @@ Four filters live here today:
 - :func:`enforce_account_state_scope` — gates ``portfolio.accounts.*``
   invalidations by the same accessible-wallet set as the REST account page.
 - :func:`enforce_alerts_scope` — gates ``alerts.*`` per principal by
-  exact ``user_public_id`` match (ADMIN bypass). Powers the web
+  exact ``user_public_id`` match (global-scope permission bypass). Powers the web
   (WebSocket) live-refresh path so a web user only sees their own
   alert frames.
 """
@@ -32,7 +32,8 @@ from datetime import UTC
 from datetime import datetime
 from typing import Any
 
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.core.json_types import JsonValue
@@ -58,7 +59,7 @@ AI_REVIEWS_TOPIC_PREFIX = "ai_reviews."
 ALERTS_TOPIC_PREFIX = "alerts."
 ORDERS_EVENTS_TOPIC_PREFIX = "orders.events."
 PORTFOLIO_ACCOUNTS_TOPIC_PREFIX = "portfolio.accounts."
-WalletAccessCacheKey = tuple[str, str, tuple[str, ...], str, str | None, str | None]
+WalletAccessCacheKey = tuple[bool, str, tuple[str, ...], str, str | None, str | None]
 WalletAccessCache = MutableMapping[WalletAccessCacheKey, frozenset[str]]
 """Frame-local accessible-wallet cache keyed by authorization identity.
 
@@ -79,7 +80,7 @@ def wallet_access_cache_key(principal: AuthPrincipal) -> WalletAccessCacheKey:
         cache key.
     """
     return (
-        principal.role.value,
+        role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR),
         principal.user_public_id,
         tuple(principal.operator_public_ids),
         principal.primary_operator_public_id,
@@ -228,8 +229,8 @@ async def enforce_orders_events_scope(
       ``orders.events.*`` family).
     - Missing principal (e.g. WS pre-auth or auth dropped) returns
       ``False`` — no frame leaks to an un-authenticated socket.
-    - ADMIN role bypass — returns ``True`` without a service call;
-      ADMIN sees every wallet by contract (mirrors REST ADMIN bypass).
+    - ``IMPERSONATE_OPERATOR`` bypass — returns ``True`` without a service call;
+      the permission grants every-wallet visibility, matching REST.
     - Missing or non-string ``wallet_public_id`` in the payload
       returns ``False``: the bridge's fail-closed parsing layer should
       already drop these before reaching the filter, but this is the
@@ -280,8 +281,8 @@ async def enforce_account_state_scope(
 
     Mirrors the REST account page's accessible-wallet scope. Every account
     frame is first revalidated against the exact event schema, UUID7 topic,
-    and topic-payload wallet invariant. ADMIN then bypasses only the accessible
-    wallet lookup. The optional cache is frame-local so one ZMQ frame performs
+    and topic-payload wallet invariant. ``IMPERSONATE_OPERATOR`` then bypasses
+    only the accessible wallet lookup. The optional cache is frame-local so one ZMQ frame performs
     at most one wallet query per authorization identity while scope changes
     take effect on the next frame.
 
@@ -326,7 +327,7 @@ async def _enforce_validated_account_state_scope(
     accepted the frame, allowing every subscriber to reuse the same strict
     typed event. Raw or otherwise untrusted callers must use
     :func:`enforce_account_state_scope`, which performs validation before this
-    authorization-only step and therefore before the ADMIN wallet bypass.
+    authorization-only step and therefore before the global wallet bypass.
 
     Args:
         topic: Full validated ``portfolio.accounts.{wallet_public_id}`` topic.
@@ -378,7 +379,7 @@ async def _enforce_wallet_scope(
         return True
     if connection_principal is None:
         return False
-    if connection_principal.role == UserRole.ADMIN:
+    if role_grants_permission(connection_principal.role, Permission.IMPERSONATE_OPERATOR):
         return True
     wallet_public_id = payload.get("wallet_public_id")
     if not isinstance(wallet_public_id, str):
@@ -430,9 +431,8 @@ def enforce_alerts_scope(
       family).
     - Missing principal (e.g. WS pre-auth or auth dropped) returns
       ``False`` — no frame leaks to an un-authenticated socket.
-    - ADMIN role bypass — returns ``True`` without inspecting the
-      payload; ADMIN sees every user's alerts by contract (mirrors
-      REST ADMIN bypass).
+    - ``IMPERSONATE_OPERATOR`` bypass — returns ``True`` without inspecting the
+      payload and matches the REST global-scope contract.
     - Missing or non-string ``user_public_id`` in the payload returns
       ``False``: the bridge's fail-closed parsing layer should already
       drop these before reaching the filter, but this is the
@@ -454,7 +454,7 @@ def enforce_alerts_scope(
         return True
     if connection_principal is None:
         return False
-    if connection_principal.role == UserRole.ADMIN:
+    if role_grants_permission(connection_principal.role, Permission.IMPERSONATE_OPERATOR):
         return True
     payload_user_pid = payload.get("user_public_id")
     if not isinstance(payload_user_pid, str):

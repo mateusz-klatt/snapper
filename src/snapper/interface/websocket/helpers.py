@@ -25,7 +25,6 @@ from snapper.messaging.topics.schemas import get_topics_by_category
 
 __all__ = [
     "get_allowed_topics_for_role",
-    "has_trading_permission",
     "role_allowed_categories",
     "filter_topics",
     "determine_topic_category",
@@ -156,6 +155,7 @@ async def validate_origin(
 def role_allowed_categories(
     role: UserRole,
     token_permissions: list[str] | None = None,
+    permission_scope_version: int | None = None,
 ) -> set[str]:
     """Get topic categories allowed for a role-bounded token grant.
 
@@ -167,16 +167,18 @@ def role_allowed_categories(
         role: User role to check.
         token_permissions: Permission strings carried by the JWT, or
             ``None`` for the backward-compatible full-role grant.
+        permission_scope_version: Version governing scope compatibility.
 
     Returns:
         Set of allowed category names.
     """
-    return get_role_allowed_categories(role, token_permissions)
+    return get_role_allowed_categories(role, token_permissions, permission_scope_version)
 
 
 def get_allowed_topics_for_role(
     role: UserRole,
     token_permissions: list[str] | None = None,
+    permission_scope_version: int | None = None,
 ) -> list[str]:
     """Get topic patterns allowed for a role-bounded token grant.
 
@@ -184,11 +186,16 @@ def get_allowed_topics_for_role(
         role: User role to check.
         token_permissions: Permission strings carried by the JWT, or
             ``None`` for the backward-compatible full-role grant.
+        permission_scope_version: Version governing scope compatibility.
 
     Returns:
         Sorted list of allowed topic names.
     """
-    allowed_categories = role_allowed_categories(role, token_permissions)
+    allowed_categories = role_allowed_categories(
+        role,
+        token_permissions,
+        permission_scope_version,
+    )
     topics: list[str] = []
     for category in allowed_categories:
         schemas = get_topics_by_category(category)
@@ -297,15 +304,3 @@ def determine_topic_category(topic: str) -> str | None:
         "heartbeat": "system",
     }
     return category_map.get(topic)
-
-
-def has_trading_permission(role: UserRole) -> bool:
-    """Check if a role has trading permissions.
-
-    Args:
-        role: User role to check.
-
-    Returns:
-        True if role can trade, False otherwise.
-    """
-    return role in {UserRole.OPERATOR, UserRole.ADMIN}

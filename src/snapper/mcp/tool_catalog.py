@@ -56,7 +56,11 @@ def is_mcp_tool_visible(tool_name: str, claims: TokenClaims) -> bool:
     if rule is None:
         return False
     if isinstance(rule, Permission):
-        effective_permissions = get_effective_permissions(claims.role, claims.permissions)
+        effective_permissions = get_effective_permissions(
+            claims.role,
+            claims.permissions,
+            claims.permission_scope_version,
+        )
         return rule in effective_permissions
     return rule(claims)
 

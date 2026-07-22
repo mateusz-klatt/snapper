@@ -3,13 +3,12 @@
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from unittest.mock import MagicMock
 
 import jwt
 import pytest
 from fastapi import HTTPException
 
-from snapper.auth.dependencies import require_role
+from snapper.auth.dependencies import require_permission
 from snapper.auth.domain.permissions import CATEGORY_PERMISSIONS
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
@@ -20,7 +19,6 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import PERMISSION_SCOPE_VERSION
 from snapper.auth.tokens import TokenManager
-from snapper.auth.websocket_auth import WebSocketAuthManager
 
 
 def test_ai_reviewer_role_and_grant_are_exact() -> None:
@@ -89,40 +87,106 @@ def test_ai_delegate_holds_ai_review_decision_permission() -> None:
     assert Permission.SUBMIT_AI_REVIEW_DECISION in ROLE_PERMISSIONS[UserRole.ADMIN]
 
 
-def test_http_role_hierarchy_recognizes_ai_reviewer_without_elevation() -> None:
-    """Verify the HTTP role hierarchy handles the review-only role safely.
+@pytest.mark.parametrize(
+    (
+        "role",
+        "converted_reads_allowed",
+        "process_mutations_allowed",
+        "ai_integration_mutations_allowed",
+        "review_decisions_allowed",
+    ),
+    [
+        pytest.param(UserRole.AI_RESEARCHER, False, False, False, False, id="researcher"),
+        pytest.param(UserRole.AI_REVIEWER, False, False, False, True, id="reviewer"),
+        pytest.param(UserRole.AI_DELEGATE, False, False, False, True, id="delegate"),
+        pytest.param(UserRole.VIEWER, True, False, False, False, id="viewer"),
+        pytest.param(UserRole.OPERATOR, True, True, True, False, id="operator"),
+        pytest.param(UserRole.ADMIN, True, True, True, True, id="admin"),
+    ],
+)
+def test_converted_surface_permission_matrix_is_exact(
+    role: UserRole,
+    converted_reads_allowed: bool,
+    process_mutations_allowed: bool,
+    ai_integration_mutations_allowed: bool,
+    review_decisions_allowed: bool,
+) -> None:
+    """Pin the effective access matrix for all converted authorization surfaces.
 
-    Given: An AI_REVIEWER principal and reviewer and viewer minimum-role guards.
-    When: Both role comparisons are evaluated.
-    Then: The reviewer tier passes itself and remains below VIEWER.
+    Given: The seven GET surfaces converted from operator-role checks and their
+        associated process, AI integration, and review-decision mutations.
+    When: Access is projected exclusively from each role's named permission set.
+    Then: Every non-viewer role retains its prior allow or deny result, while
+        viewer gains the three read capability groups and no mutation grant.
     """
-    principal = AuthPrincipal(username="reviewer-http", role=UserRole.AI_REVIEWER)
+    get_requirements = {
+        "ai_reviews_list": Permission.READ_AI_REVIEWS,
+        "ai_delegates_list": Permission.READ_AI_INTEGRATION,
+        "ai_delegates_detail": Permission.READ_AI_INTEGRATION,
+        "processes_available": Permission.READ_PROCESSES,
+        "processes_configured": Permission.READ_PROCESSES,
+        "processes_schema": Permission.READ_PROCESSES,
+        "processes_runs": Permission.READ_PROCESSES,
+    }
+    role_permissions = ROLE_PERMISSIONS[role]
 
-    assert require_role(UserRole.AI_REVIEWER)(current_user=principal) is principal
-    with pytest.raises(HTTPException) as exc_info:
-        require_role(UserRole.VIEWER)(current_user=principal)
-    assert exc_info.value.status_code == 403
+    assert len(get_requirements) == 7
+    for permission in get_requirements.values():
+        assert (permission in role_permissions) is converted_reads_allowed
+    assert (Permission.MANAGE_PROCESSES in role_permissions) is process_mutations_allowed
+    assert (
+        Permission.MANAGE_AI_INTEGRATION in role_permissions
+    ) is ai_integration_mutations_allowed
+    assert (Permission.SUBMIT_AI_REVIEW_DECISION in role_permissions) is review_decisions_allowed
 
 
-def test_websocket_role_hierarchy_recognizes_ai_reviewer_without_elevation() -> None:
-    """Verify the WebSocket role hierarchy handles the review-only role safely.
+def test_viewer_has_no_operational_or_administrative_mutation() -> None:
+    """Pin viewer as read-only apart from personal notification-device setup.
 
-    Given: An authenticated AI_REVIEWER WebSocket connection.
-    When: Reviewer and viewer role levels are checked.
-    Then: The reviewer tier passes itself and remains below VIEWER without a lookup error.
+    Given: Every trading, process, strategy, AI, backtest, system, and tenant
+        mutation permission in the authorization vocabulary.
+    When: The viewer permission set is intersected with those capabilities.
+    Then: The intersection is empty.
     """
-    WebSocketAuthManager.clear_instance()
-    manager = WebSocketAuthManager()
-    websocket = MagicMock()
-    manager.authenticated_connections[websocket] = AuthPrincipal(
-        username="reviewer-ws",
-        role=UserRole.AI_REVIEWER,
+    operational_mutations = {
+        Permission.SUBMIT_MARKET_VIEW,
+        Permission.SUBMIT_AI_REVIEW_DECISION,
+        Permission.CREATE_ORDERS,
+        Permission.CANCEL_ORDERS,
+        Permission.MANAGE_POSITIONS,
+        Permission.START_STRATEGIES,
+        Permission.STOP_STRATEGIES,
+        Permission.CONFIGURE_STRATEGIES,
+        Permission.MANAGE_PROCESSES,
+        Permission.MANAGE_AI_INTEGRATION,
+        Permission.CONFIGURE_SYSTEM,
+        Permission.MANAGE_USERS,
+        Permission.MANAGE_WALLET_CREDENTIALS,
+        Permission.MANAGE_SCOPE_GRANTS,
+        Permission.IMPERSONATE_OPERATOR,
+        Permission.MANAGE_BACKTESTS,
+        Permission.MANAGE_PAIRED_EXECUTION,
+    }
+
+    assert ROLE_PERMISSIONS[UserRole.VIEWER].isdisjoint(operational_mutations)
+
+
+def test_ai_reviewer_permission_gates_allow_decisions_but_deny_audit_reads() -> None:
+    """Verify the review-only set exposes decisions without audit visibility.
+
+    Given: An AI_REVIEWER principal with its complete role permission set.
+    When: Decision submission and AI review audit gates are evaluated.
+    Then: Decision submission succeeds while audit-list access returns HTTP 403.
+    """
+    principal = AuthPrincipal(username="reviewer-permissions", role=UserRole.AI_REVIEWER)
+
+    assert (
+        require_permission(Permission.SUBMIT_AI_REVIEW_DECISION)(current_user=principal)
+        is principal
     )
-    try:
-        assert manager.has_permission(websocket, UserRole.AI_REVIEWER) is True
-        assert manager.has_permission(websocket, UserRole.VIEWER) is False
-    finally:
-        WebSocketAuthManager.clear_instance()
+    with pytest.raises(HTTPException) as exc_info:
+        require_permission(Permission.READ_AI_REVIEWS)(current_user=principal)
+    assert exc_info.value.status_code == 403
 
 
 @pytest.mark.parametrize(
@@ -166,14 +230,14 @@ def test_websocket_role_hierarchy_recognizes_ai_reviewer_without_elevation() -> 
         pytest.param(
             UserRole.AI_RESEARCHER,
             None,
-            2,
+            3,
             False,
             id="researcher",
         ),
         pytest.param(
             UserRole.VIEWER,
             None,
-            2,
+            3,
             False,
             id="viewer",
         ),
@@ -187,7 +251,7 @@ def test_ai_review_decision_capability_projection(
 ) -> None:
     """Verify every new and compatibility decision-capability branch.
 
-    Given: A role-bounded token scope from the v2 or historical v1 model.
+    Given: A role-bounded current, v2, or historical v1 token scope.
     When: The centralized AI-review decision projector evaluates it.
     Then: Only the new grant or the exact v1 delegate CREATE_ORDERS rule admits it.
     """
@@ -201,18 +265,18 @@ def test_ai_review_decision_capability_projection(
     )
 
 
-def test_new_tokens_stamp_literal_v2_permission_scope() -> None:
-    """Verify every token minting shape emits scope version two.
+def test_new_tokens_stamp_literal_v3_permission_scope() -> None:
+    """Verify every token minting shape emits scope version three.
 
     Given: An AI_REVIEWER principal and the rotating and long-lived mint paths.
     When: Access, refresh, and delegate-style long-lived tokens are decoded.
-    Then: Each token carries the literal permission scope version two.
+    Then: Each token carries the literal permission scope version three.
     """
     token_manager = TokenManager()
     principal = AuthPrincipal(
-        username="reviewer-v2",
+        username="reviewer-v3",
         role=UserRole.AI_REVIEWER,
-        user_public_id="reviewer-v2-user",
+        user_public_id="reviewer-v3-user",
     )
 
     token_pair = token_manager.create_tokens(principal)
@@ -224,10 +288,10 @@ def test_new_tokens_stamp_literal_v2_permission_scope() -> None:
     refresh_claims = token_manager.decode_fresh_token(token_pair.refresh_token)
     long_lived_claims = token_manager.decode_fresh_token(long_lived.access_token)
 
-    assert PERMISSION_SCOPE_VERSION == 2
-    assert access_claims.permission_scope_version == 2
-    assert refresh_claims.permission_scope_version == 2
-    assert long_lived_claims.permission_scope_version == 2
+    assert PERMISSION_SCOPE_VERSION == 3
+    assert access_claims.permission_scope_version == 3
+    assert refresh_claims.permission_scope_version == 3
+    assert long_lived_claims.permission_scope_version == 3
 
 
 def test_claimless_ai_delegate_token_resolves_full_current_role() -> None:

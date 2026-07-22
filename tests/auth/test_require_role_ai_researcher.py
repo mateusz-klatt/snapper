@@ -1,18 +1,14 @@
-"""AI_RESEARCHER role hierarchy, permission, and token-ceiling tests."""
-
-from unittest.mock import MagicMock
+"""AI_RESEARCHER permission-set and token-ceiling tests."""
 
 import pytest
 from fastapi import HTTPException
 
 from snapper.auth.dependencies import require_permission
-from snapper.auth.dependencies import require_role
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
-from snapper.auth.websocket_auth import WebSocketAuthManager
 
 
 def _principal(
@@ -104,35 +100,16 @@ def test_ai_researcher_token_cannot_expand_beyond_role_ceiling() -> None:
     assert effective == {Permission.READ_MARKET_VIEWS}
 
 
-def test_require_role_handles_ai_researcher_without_elevation() -> None:
-    """Verify the HTTP hierarchy recognizes and confines the researcher role.
+def test_ai_researcher_permission_gate_rejects_signal_access() -> None:
+    """Verify researcher access is denied by the missing capability.
 
-    Given: An AI_RESEARCHER principal and role guards for researcher and delegate.
-    When: Both hierarchy comparisons are evaluated.
-    Then: Its own guard passes while the AI_DELEGATE guard returns HTTP 403.
+    Given: An AI_RESEARCHER principal without READ_SIGNALS.
+    When: The REST permission dependency evaluates signal access.
+    Then: The permission gate returns HTTP 403.
     """
-    principal = _principal(UserRole.AI_RESEARCHER)
+    checker = require_permission(Permission.READ_SIGNALS)
 
-    assert require_role(UserRole.AI_RESEARCHER)(current_user=principal) is principal
     with pytest.raises(HTTPException) as exc_info:
-        require_role(UserRole.AI_DELEGATE)(current_user=principal)
+        checker(current_user=_principal(UserRole.AI_RESEARCHER))
+
     assert exc_info.value.status_code == 403
-
-
-def test_websocket_hierarchy_handles_ai_researcher_without_elevation() -> None:
-    """Verify the WebSocket hierarchy recognizes and confines the researcher role.
-
-    Given: An authenticated AI_RESEARCHER WebSocket connection.
-    When: Researcher, delegate, and viewer role levels are checked.
-    Then: Only the researcher's own level is satisfied and no KeyError occurs.
-    """
-    WebSocketAuthManager.clear_instance()
-    manager = WebSocketAuthManager()
-    websocket = MagicMock()
-    manager.authenticated_connections[websocket] = _principal(UserRole.AI_RESEARCHER)
-    try:
-        assert manager.has_permission(websocket, UserRole.AI_RESEARCHER) is True
-        assert manager.has_permission(websocket, UserRole.AI_DELEGATE) is False
-        assert manager.has_permission(websocket, UserRole.VIEWER) is False
-    finally:
-        WebSocketAuthManager.clear_instance()

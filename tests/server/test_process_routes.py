@@ -13,8 +13,10 @@ from unittest.mock import patch
 from unittest.mock import patch as _patch
 
 import pytest
+from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from snapper.api.schemas.process import ProcessCategoryCount
@@ -35,6 +37,10 @@ from snapper.application.process_manager.models import ProcessStopResult
 from snapper.application.process_manager.strategy_scope import StrategyOutputCoverageError
 from snapper.application.process_manager.strategy_scope import StrategyProcessClassification
 from snapper.application.process_manager.strategy_scope import StrategyWalletScope
+from snapper.auth.dependencies import require_authentication
+from snapper.auth.dependencies import validate_csrf_token
+from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Setting
@@ -42,6 +48,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import WalletRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ProcessSummaryItem
+from snapper.server.app import create_app
 from snapper.server.process_routes import _classify_persisted_process_for_start
 from snapper.server.process_routes import _enforce_strategy_outputs_covered
 from snapper.server.process_routes import _enforce_strategy_scope
@@ -70,6 +77,55 @@ def _make_rest_request() -> MagicMock:
     mock_request = MagicMock()
     mock_request.app.state.rest_tracker = SequenceTracker()
     return mock_request
+
+
+async def _noop_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Disable application lifespan for endpoint permission tests."""
+    yield
+
+
+def _viewer_client() -> TestClient:
+    """Build an endpoint client authenticated as a read-only operator."""
+    app = create_app()
+    app.router.lifespan_context = _noop_lifespan
+    app.state.settings = MagicMock()
+    app.state.rest_tracker = SequenceTracker()
+    app.state.process_factory = MagicMock()
+
+    def authenticate_viewer() -> AuthPrincipal:
+        return AuthPrincipal(username="viewer", role=UserRole.VIEWER)
+
+    app.dependency_overrides[require_authentication] = authenticate_viewer
+    app.dependency_overrides[validate_csrf_token] = lambda: None
+    return TestClient(app)
+
+
+class TestProcessPermissionBoundary:
+    """Exercise the read-versus-manage permission boundary over HTTP."""
+
+    def test_viewer_reads_available_processes(self) -> None:
+        """The read-only operator can inspect available process definitions.
+
+        Given: A VIEWER principal with ``READ_PROCESSES``,
+        When: The principal requests the available-process catalogue,
+        Then: The endpoint admits the read request.
+        """
+        client = _viewer_client()
+        response = client.get("/api/processes/available")
+        assert response.status_code == 200
+        client.close()
+
+    def test_viewer_cannot_stop_process(self) -> None:
+        """The read-only operator cannot stop a process.
+
+        Given: A VIEWER principal without ``MANAGE_PROCESSES``,
+        When: The principal requests a process stop,
+        Then: The endpoint rejects the mutation with 403.
+        """
+        client = _viewer_client()
+        response = client.post("/api/processes/example/stop")
+        assert response.status_code == 403
+        client.close()
 
 
 def _wallet_row(public_id: str, *, is_paper: bool = False) -> WalletRow:

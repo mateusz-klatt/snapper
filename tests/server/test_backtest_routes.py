@@ -1203,6 +1203,21 @@ class TestNoActiveWalletGuards:
 class TestCompareCreate:
     """POST /api/backtests/compare — auto + manual flows."""
 
+    def test_viewer_cannot_create_comparison(self) -> None:
+        """A read-only operator cannot persist a backtest comparison.
+
+        Given: A VIEWER principal with a selected wallet,
+        When: The principal requests comparison creation,
+        Then: The permission dependency rejects the mutation with 403.
+        """
+        bt = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, role=UserRole.VIEWER)
+            body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 403
+            client.close()
+
     def test_no_active_wallet_returns_400(self) -> None:
         """Caller without active wallet → 400.
 

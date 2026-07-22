@@ -922,6 +922,57 @@ class TestSeedDefaultMultiTenant:
             conn.close()
             cast(Any, engine).dispose()
 
+    def test_memberships_follow_read_account_state_permission(self, tmp_path: Path) -> None:
+        """Bootstrap memberships follow the named account-read permission.
+
+        Given: Active admin, operator, viewer, and AI-role users,
+        When: ``seed_default_multi_tenant`` creates the default operator,
+        Then: Every account-state reader receives a primary membership and
+            unrelated AI roles receive none.
+        """
+        engine, conn = self._make_db(tmp_path)
+        try:
+            conn.execute(
+                text(
+                    "INSERT INTO users (public_id, username, email, password_hash,"
+                    " role, is_active, created_at, timestamp, known_to,"
+                    " session_id, sequence_id) VALUES"
+                    " ('user-admin', 'admin', 'admin@t.com', 'hash', 'admin',"
+                    " 1, :ts, :ts, :known_to, 's', 1),"
+                    " ('user-operator', 'operator', 'operator@t.com', 'hash', 'operator',"
+                    " 1, :ts, :ts, :known_to, 's', 2),"
+                    " ('user-viewer', 'viewer', 'viewer@t.com', 'hash', 'viewer',"
+                    " 1, :ts, :ts, :known_to, 's', 3),"
+                    " ('user-ai-researcher', 'ai-researcher', NULL, 'hash', 'ai_researcher',"
+                    " 1, :ts, :ts, :known_to, 's', 4),"
+                    " ('user-ai-reviewer', 'ai-reviewer', NULL, 'hash', 'ai_reviewer',"
+                    " 1, :ts, :ts, :known_to, 's', 5),"
+                    " ('user-ai-delegate', 'ai-delegate', NULL, 'hash', 'ai_delegate',"
+                    " 1, :ts, :ts, :known_to, 's', 6)"
+                ),
+                {"ts": str(datetime.now(UTC)), "known_to": str(KNOWN_TO_MAX)},
+            )
+            conn.commit()
+
+            count = seed_default_multi_tenant(conn, SequenceTracker())
+            conn.commit()
+
+            memberships = conn.execute(
+                text(
+                    "SELECT user_public_id, is_primary"
+                    " FROM user_operator_memberships ORDER BY user_public_id"
+                )
+            ).all()
+            assert count == 6
+            assert [(row[0], row[1]) for row in memberships] == [
+                ("user-admin", 1),
+                ("user-operator", 1),
+                ("user-viewer", 1),
+            ]
+        finally:
+            conn.close()
+            cast(Any, engine).dispose()
+
     def test_skips_when_operators_already_exist(self, tmp_path: Path) -> None:
         """Bootstrap is a no-op when any operator row already exists.
 
@@ -979,8 +1030,8 @@ class TestSeedDefaultMultiTenant:
             conn.close()
             cast(Any, engine).dispose()
 
-    def test_skips_membership_when_no_admin_user(self, tmp_path: Path) -> None:
-        """Bootstrap skips the membership row when no admin user is present.
+    def test_skips_membership_when_no_entitled_user(self, tmp_path: Path) -> None:
+        """Bootstrap skips membership rows when no entitled user is present.
 
         Given: A database with the users table empty,
         When: ``seed_default_multi_tenant`` is invoked,

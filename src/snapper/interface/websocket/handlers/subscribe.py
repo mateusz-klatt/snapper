@@ -1,7 +1,7 @@
 """WebSocket subscription handlers.
 
 This module handles topic subscription and unsubscription requests
-with role-based access control and ZMQ bridge integration.
+with permission-based access control and ZMQ bridge integration.
 """
 
 from datetime import UTC
@@ -10,7 +10,8 @@ from uuid import uuid7
 
 from fastapi import WebSocket
 
-from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import SubscriptionActionEnum
@@ -55,7 +56,7 @@ def _extract_backtest_wallet_public_id(topic: str) -> str | None:
 
 def _is_backtest_topic_allowed(topic: str, principal: AuthPrincipal) -> bool:
     """Return whether the principal may subscribe to a backtest topic."""
-    if principal.role == UserRole.ADMIN:
+    if role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR):
         return True
     active_wallet = principal.active_wallet_public_id
     if active_wallet is None:
@@ -124,9 +125,8 @@ async def _enforce_ai_delegate_wallet_scope(
 ) -> tuple[list[str], list[str]]:
     """Split wallet-scoped topics for an AI review principal.
 
-    Subscribe-time filter. Fast-paths any non-review principal
-    (role gate returns the topic set unchanged). For AI_REVIEWER and
-    AI_DELEGATE the filter:
+    Subscribe-time filter. Fast-paths any principal without a delegate
+    identity. For a principal backed by an ``ai_delegates`` row the filter:
 
     1. Computes the delegate's allowed ``(exchange, native_symbol)``
        pairs via ``repository.list_scope_grant_instrument_pairs`` (one
@@ -148,16 +148,16 @@ async def _enforce_ai_delegate_wallet_scope(
 
     Args:
         topics: Already shape-validated topic list.
-        principal: Authenticated caller; role gates the whole filter.
+        principal: Authenticated caller; delegate state gates the whole filter.
         repository: Repository for the scope-grant pair projection.
-            Ignored for non-review-principal roles and required for
-            AI_REVIEWER and AI_DELEGATE.
+            Ignored when ``delegate_public_id`` is absent and required
+            when it is populated.
         as_of: Bus time for the temporal scope read.
 
     Returns:
         Tuple of (allowed, denied) in original input order.
     """
-    if principal.role not in AI_REVIEW_PRINCIPAL_ROLES:
+    if principal.delegate_public_id is None:
         return topics, []
     if repository is None:
         raise RuntimeError(
@@ -186,14 +186,9 @@ def _enforce_backtest_wallet_scope(
 ) -> tuple[list[str], list[str]]:
     """Split ``backtest.*`` topics into (allowed, denied) by wallet RBAC.
 
-    Authoritative matrix
-    ====== ============ ========================= ===============================
-    Role ``backtest.`` ``backtest.{own_wallet}.`` ``backtest.{foreign_wallet}.*``
-    ====== ============ ========================= ===============================
-    VIEWER denied accepted denied
-    OPER. denied accepted denied
-    ADMIN accepted accepted accepted
-    ====== ============ ========================= ===============================
+    A caller granted ``IMPERSONATE_OPERATOR`` may subscribe to any
+    backtest topic. Other callers may subscribe only to the topic for
+    their active wallet and cannot subscribe to the bare root.
     Wallet segment is extracted from the second dotted segment (the
     topic validator has already proven it is a UUID7). Non-backtest
     topics pass through unchanged on the allowed side.
@@ -201,9 +196,9 @@ def _enforce_backtest_wallet_scope(
     Args:
         topics: Already-validated topics (shape-correct but scope
             unchecked).
-        principal: Authenticated caller. ``principal.role`` drives
-            the matrix; ``principal.active_wallet_public_id`` is the
-            only wallet non-admin roles may subscribe to.
+        principal: Authenticated caller. Permissions determine global
+            scope; ``principal.active_wallet_public_id`` is the only
+            wallet a caller without global scope may subscribe to.
 
     Returns:
         Tuple of (wallet_allowed, wallet_denied) in original order.
@@ -236,16 +231,16 @@ async def handle_subscribe(
     backtest subscriptions can be constrained to the caller's
     ``active_wallet_public_id``. See :func:`_enforce_backtest_wallet_scope`
     and :func:`_enforce_ai_delegate_wallet_scope` for the authoritative
-    role/prefix matrices.
+    scope rules.
 
     Args:
         websocket: The WebSocket connection.
         message: Subscription request with topic list.
         manager: WebSocket connection manager.
-        principal: Authenticated caller — role + wallet scope.
+        principal: Authenticated caller — permissions + wallet scope.
         repository: Repository for the AI review-principal wallet-scope
-            filter. Required for AI_REVIEWER and AI_DELEGATE; optional
-            for other roles because the filter fast-paths them.
+            filter. Required when ``delegate_public_id`` is populated;
+            optional otherwise because the filter fast-paths it.
     """
     role = principal.role
     topics, invalid_topics = _validate_ws_topics(message.topics)
@@ -267,9 +262,17 @@ async def handle_subscribe(
     )
     if ai_delegate_denied:
         wallet_denied = [*wallet_denied, *ai_delegate_denied]
-    allowed_topics = get_allowed_topics_for_role(role, principal.permissions)
+    allowed_topics = get_allowed_topics_for_role(
+        role,
+        principal.permissions,
+        principal.permission_scope_version,
+    )
     allowed_set = set(allowed_topics)
-    allowed_categories = role_allowed_categories(role, principal.permissions)
+    allowed_categories = role_allowed_categories(
+        role,
+        principal.permissions,
+        principal.permission_scope_version,
+    )
     allowed, denied = filter_topics(topics, allowed_set, allowed_categories)
     if wallet_denied:
         denied = [*denied, *wallet_denied]
@@ -400,6 +403,7 @@ async def handle_get_subscriptions(
     manager: WebSocketConnectionManager,
     role: UserRole,
     token_permissions: list[str] | None = None,
+    permission_scope_version: int | None = None,
 ) -> None:
     """Handle get subscriptions request.
 
@@ -411,8 +415,13 @@ async def handle_get_subscriptions(
         role: User's role for available topics.
         token_permissions: Permission strings carried by the JWT, or
             ``None`` for the backward-compatible full-role grant.
+        permission_scope_version: Version governing scope compatibility.
     """
-    allowed_topics = get_allowed_topics_for_role(role, token_permissions)
+    allowed_topics = get_allowed_topics_for_role(
+        role,
+        token_permissions,
+        permission_scope_version,
+    )
     response = WSSubscriptionsListResponse(
         subscriptions=list(manager.get_client_subscriptions(websocket)),
         available_topics=allowed_topics,

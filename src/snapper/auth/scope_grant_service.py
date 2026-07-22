@@ -29,7 +29,8 @@ from uuid import uuid7
 
 from loguru import logger
 
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import get_settings
 from snapper.data.repository import get_repository
@@ -443,27 +444,25 @@ class ScopeGrantService:
         REST snapshot endpoints — closes the v0.7.0 RBAC asymmetry
         where REST applied scope filtering and WS bridge did not.
 
-        ADMIN role bypass: returns the public_ids of EVERY active
-        wallet (caller can short-circuit by checking
-        ``principal.role == UserRole.ADMIN`` first; this method
-        preserves the same contract regardless to keep call-site
-        decisions optional). Empty operator-set on a non-ADMIN
+        Global-scope permission bypass: a named set carrying
+        ``IMPERSONATE_OPERATOR`` receives every active wallet. Empty
+        operator-set on a non-global principal
         principal returns an empty set without hitting the
         repository's joined query path — matches the wallet-picker
         contract that "no operator membership = no wallet visibility".
 
         Args:
-            principal: Authenticated caller — role + ``operator_public_ids``
-                drive the wallet-scope filter.
+            principal: Authenticated caller whose named permissions and
+                ``operator_public_ids`` drive the wallet-scope filter.
             as_of: Wall-clock for SCD2-active filtering on operator
                 memberships and scope grants.
 
         Returns:
             Set of wallet ``public_id`` strings the principal can read.
             Empty set when the principal has no operator memberships
-            (non-ADMIN) and no scope grants reach them transitively.
+            without global scope when no grants reach it transitively.
         """
-        if principal.role == UserRole.ADMIN:
+        if role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR):
             rows = await self.repository.list_active_wallets(as_of=as_of)
         elif not principal.operator_public_ids:
             return set()

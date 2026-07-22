@@ -383,6 +383,7 @@ class TestWsAiDelegateWalletScopeContract:
             role=UserRole.AI_DELEGATE,
             user_public_id="user-contract",
             operator_public_ids=["op-contract"],
+            delegate_public_id="delegate-contract",
         )
         message = WSSubscribeRequest(
             public_id="contract-pid",

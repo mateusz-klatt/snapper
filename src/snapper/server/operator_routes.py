@@ -1,10 +1,10 @@
 """REST API routes for operator catalogue read access.
 
 Provides the frontend operator picker with the list of
-operators the current principal may act AS. ADMIN principals see
-every active operator (matching the ADMIN-wide expansion rule in
+operators the current principal may act AS. Principals granted
+``IMPERSONATE_OPERATOR`` see every active operator (matching the expansion rule in
 ``UserService.build_auth_principal`` / ``get_user_with_operators``)
-non-ADMIN principals see only the operators covered by
+other principals see only the operators covered by
 their ``user_operator_memberships`` (exposed on the principal as
 ``operator_public_ids`` at token issue time).
 The endpoint performs a server-side filter even though
@@ -33,7 +33,7 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import OperatorConflictError
 from snapper.data.repository import Repository
@@ -55,8 +55,8 @@ async def list_operators(
 ) -> OperatorListResponse:
     """List operators accessible to the current principal.
 
-    ADMIN sees every active operator. Non-ADMIN callers see only
-    the operators in ``principal.operator_public_ids``, resolved to
+    A caller granted ``IMPERSONATE_OPERATOR`` sees every active operator.
+    Other callers see only the operators in ``principal.operator_public_ids``, resolved to
     ``OperatorInfo`` projections via ``list_active_operators`` so
     the label / description fields are populated for the picker UI.
 
@@ -71,7 +71,7 @@ async def list_operators(
     """
     now = datetime.now(UTC)
     all_active = await repo.list_active_operators(now)
-    if principal.role == UserRole.ADMIN:
+    if role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR):
         visible = all_active
     else:
         allowed = set(principal.operator_public_ids)

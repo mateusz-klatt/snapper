@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import Field
 
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 
 
@@ -54,6 +55,13 @@ class UserProfile(StrictDataSchema[Literal["user_profile"]]):
             have not yet picked a language via the frontend
             ``LocaleSwitcher``; the alert pipeline falls through to
             English emission in that case.
+        effective_permissions: Permission grant carried by the caller's
+            current token. Authenticated-session responses populate this
+            field; user-management projections leave it empty because they
+            describe an account, not a session.
+        delegate_public_id: Operational AI-delegate lifecycle identity for
+            the current session, when one exists. This is state used to
+            select delegate-specific UI surfaces, never a role proxy.
     """
 
     type: Literal["user_profile"] = "user_profile"
@@ -66,3 +74,5 @@ class UserProfile(StrictDataSchema[Literal["user_profile"]]):
     primary_operator_public_id: str | None = None
     active_wallet_public_id: str | None = None
     default_language: str | None = None
+    effective_permissions: list[Permission] = Field(default=[])
+    delegate_public_id: str | None = None

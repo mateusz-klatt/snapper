@@ -1,7 +1,7 @@
 """WebSocket authentication module.
 
 This module provides authentication management for WebSocket
-connections including session tracking and role-based access control.
+connections including session tracking and permission-based access control.
 """
 
 import asyncio
@@ -26,7 +26,8 @@ from snapper.auth.deactivation_fallback import list_inactive_user_public_ids
 from snapper.auth.deactivation_fallback import run_deactivation_fallback_loop
 from snapper.auth.deactivation_fallback import start_deactivation_fallback_task
 from snapper.auth.deactivation_fallback import stop_deactivation_fallback_task
-from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -287,7 +288,7 @@ class WebSocketAuthManager:
         if not token_data:
             return None
         delegate_public_id: str | None = None
-        if token_data.role in AI_REVIEW_PRINCIPAL_ROLES:
+        if role_grants_permission(token_data.role, Permission.SUBMIT_AI_REVIEW_DECISION):
             delegate_row = await repository.get_ai_delegate_by_user_public_id(
                 token_data.user_public_id
             )
@@ -728,29 +729,6 @@ class WebSocketAuthManager:
                 exc,
             )
 
-    def has_permission(self, websocket: WebSocket, required_role: UserRole) -> bool:
-        """Check if connection has required role level.
-
-        Args:
-            websocket: WebSocket connection.
-            required_role: Minimum required role.
-
-        Returns:
-            True if user has required role or higher.
-        """
-        user = self.get_authenticated_user(websocket)
-        if not user:
-            return False
-        role_hierarchy = {
-            UserRole.AI_RESEARCHER: -2,
-            UserRole.AI_REVIEWER: -1,
-            UserRole.AI_DELEGATE: -1,
-            UserRole.VIEWER: 0,
-            UserRole.OPERATOR: 1,
-            UserRole.ADMIN: 2,
-        }
-        return role_hierarchy[user.role] >= role_hierarchy[required_role]
-
     async def start_admin_listener(self, zmq_broker_xpub: str) -> None:
         """Open the admin-bus subscriber and start the dispatch task.
 
@@ -1013,7 +991,7 @@ class WebSocketAuthManager:
         now = datetime.now(UTC)
         snapshot = tuple(self.authenticated_connections.items())
         for ws, principal in snapshot:
-            if principal.role not in AI_REVIEW_PRINCIPAL_ROLES:
+            if principal.delegate_public_id is None:
                 continue
             if data.operator_public_id not in principal.operator_public_ids:
                 continue
@@ -1127,7 +1105,7 @@ class WebSocketAuthManager:
         now = datetime.now(UTC)
         snapshot = tuple(self.authenticated_connections.items())
         for ws, principal in snapshot:
-            if principal.role not in AI_REVIEW_PRINCIPAL_ROLES:
+            if principal.delegate_public_id is None:
                 continue
             if not any(op in affected_operators for op in principal.operator_public_ids):
                 continue

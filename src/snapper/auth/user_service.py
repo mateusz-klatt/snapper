@@ -16,6 +16,8 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy import update
 
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.user import UserProfile
@@ -129,10 +131,11 @@ class UserService:
 
         Resolves the multi-tenant fields (``user_public_id``,
         ``operator_public_ids``, ``primary_operator_public_id``) from the
-        repository. ADMIN users automatically
-        receive the operator set covering every active operator;
-        OPERATOR / VIEWER users get only their explicit memberships
-        from ``user_operator_memberships``. ``active_wallet_public_id``
+        repository. Named permission sets carrying
+        :data:`Permission.IMPERSONATE_OPERATOR` automatically receive the
+        operator set covering every active operator; other users get only
+        their explicit memberships from ``user_operator_memberships``.
+        ``active_wallet_public_id``
         is intentionally NOT populated here — it is UI state set by the
         client and round-tripped through token claims.
 
@@ -146,11 +149,16 @@ class UserService:
         memberships = await self.repository.get_user_operator_memberships(
             user_public_id=user.public_id, as_of=now
         )
-        if user.role == UserRole.ADMIN:
+        if role_grants_permission(user.role, Permission.IMPERSONATE_OPERATOR):
             operators = await self.repository.list_active_operators(now)
             operator_public_ids = [op["public_id"] for op in operators]
         else:
             operator_public_ids = [m["operator_public_id"] for m in memberships]
+        delegate_public_id: str | None = None
+        if role_grants_permission(user.role, Permission.SUBMIT_AI_REVIEW_DECISION):
+            delegate_row = await self.repository.get_ai_delegate_by_user_public_id(user.public_id)
+            if delegate_row is not None:
+                delegate_public_id = delegate_row["public_id"]
         primary_match = next((m for m in memberships if m["is_primary"]), None)
         primary_operator_public_id = (
             primary_match["operator_public_id"] if primary_match is not None else ""
@@ -163,6 +171,7 @@ class UserService:
             user_public_id=user.public_id,
             operator_public_ids=operator_public_ids,
             primary_operator_public_id=primary_operator_public_id,
+            delegate_public_id=delegate_public_id,
         )
 
     async def authenticate_user(self, username: str, password: str) -> UserProfile | None:
@@ -221,10 +230,10 @@ class UserService:
     async def get_user_with_operators(self, user_id: str) -> UserProfile | None:
         """Get active user enriched with operator membership fields.
 
-        Applies the same resolution rule as
-        ``build_auth_principal``: ADMIN receives every active
-        operator's ``public_id``, while OPERATOR / VIEWER receive only
-        their explicit ``user_operator_memberships`` entries. The
+        Applies the same resolution rule as ``build_auth_principal``:
+        named sets carrying ``IMPERSONATE_OPERATOR`` receive every active
+        operator's ``public_id``, while other sets receive only their
+        explicit ``user_operator_memberships`` entries. The
         ``primary_operator_public_id`` is taken from the membership row
         marked ``is_primary=TRUE`` when present.
 
@@ -244,7 +253,7 @@ class UserService:
         memberships = await self.repository.get_user_operator_memberships(
             user_public_id=profile.public_id, as_of=now
         )
-        if profile.role == UserRole.ADMIN:
+        if role_grants_permission(profile.role, Permission.IMPERSONATE_OPERATOR):
             operators = await self.repository.list_active_operators(now)
             operator_public_ids = [op["public_id"] for op in operators]
         else:

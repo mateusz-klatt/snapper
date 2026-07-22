@@ -29,7 +29,8 @@ surfaces as a structured tool error.
 from datetime import UTC
 from datetime import datetime
 
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.data.repository import Repository
 
@@ -59,8 +60,8 @@ def ensure_operator_in_claims(
 ) -> None:
     """Reject when the caller picks an operator outside their authenticated set.
 
-    ADMIN bypass mirrors the wallet gate: a role that implicitly
-    covers every operator does not need this check. All other roles
+    ``IMPERSONATE_OPERATOR`` mirrors the wallet gate: a role permission
+    set that covers every operator does not need this check. Other callers
     must select one of the operators listed on their JWT claims. A
     ``None`` selection is admitted because the caller defers to
     :attr:`TokenClaims.primary_operator_public_id`, which the tool
@@ -81,14 +82,14 @@ def ensure_operator_in_claims(
             is always admitted.
 
     Raises:
-        PermissionError: when a non-ADMIN caller picks an operator
+        PermissionError: when a caller without global scope picks an operator
             outside :attr:`TokenClaims.operator_public_ids`. The
             message starts with :data:`OPERATOR_SCOPE_ERROR_CODE`
             so FastMCP tool errors carry a stable classifier.
     """
     if operator_public_id is None:
         return
-    if claims.role == UserRole.ADMIN:
+    if role_grants_permission(claims.role, Permission.IMPERSONATE_OPERATOR):
         return
     if operator_public_id in claims.operator_public_ids:
         return
@@ -115,10 +116,10 @@ async def validate_user_wallet_scope(
     operators at ``as_of``. A wallet outside that union is
     rejected.
 
-    ADMIN bypass: a caller whose role is :attr:`UserRole.ADMIN`
-    implicitly covers every wallet, matching the REST
-    ``resolve_target_wallets`` behaviour. All other roles
-    (AI_DELEGATE included) go through the repository lookup.
+    Global-scope bypass: a caller whose role permission set grants
+    :attr:`Permission.IMPERSONATE_OPERATOR` implicitly covers every wallet,
+    matching the REST ``resolve_target_wallets`` behaviour. Every other caller
+    goes through the repository lookup.
 
     A caller with *no* operator memberships (``operator_public_ids``
     is empty) is rejected without hitting the repository — the
@@ -137,12 +138,12 @@ async def validate_user_wallet_scope(
             deterministic instant.
 
     Raises:
-        PermissionError: when the caller is not ADMIN and the
+        PermissionError: when the caller lacks global scope and the
             wallet is not in the operator-accessible set. The
             message includes :data:`WALLET_SCOPE_ERROR_CODE` so
             FastMCP-surfaced errors carry a stable classifier.
     """
-    if claims.role == UserRole.ADMIN:
+    if role_grants_permission(claims.role, Permission.IMPERSONATE_OPERATOR):
         return
     if not claims.operator_public_ids:
         raise PermissionError(

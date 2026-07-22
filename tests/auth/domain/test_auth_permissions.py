@@ -23,11 +23,13 @@ from snapper.auth.dependencies import get_csrf_token
 from snapper.auth.dependencies import get_current_user
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
-from snapper.auth.dependencies import require_role
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import RESOURCE_PERMISSIONS
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.permissions import get_effective_permissions
+from snapper.auth.domain.permissions import is_ai_review_decision_capable
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -1075,6 +1077,52 @@ class TestTokenManager:
             permission.value for permission in ROLE_PERMISSIONS[UserRole.OPERATOR]
         }
 
+    def test_refresh_tokens_upgrades_full_v2_scope_to_full_v3_role(self) -> None:
+        """Refreshing an exact full v2 role grant adopts the current role grant.
+
+        Given: A v2 operator refresh JWT containing every permission available
+            when v2 was minted,
+        When: The refresh token is rotated under the v3 permission vocabulary,
+        Then: Its successor is stamped v3 with the complete current operator set.
+        """
+        token_manager = TokenManager()
+        now = datetime.now(UTC)
+        version_three_additions = {
+            Permission.READ_PROCESSES,
+            Permission.READ_AI_REVIEWS,
+            Permission.READ_AI_INTEGRATION,
+            Permission.MANAGE_AI_INTEGRATION,
+        }
+        old_permission_values = [
+            permission.value
+            for permission in (ROLE_PERMISSIONS[UserRole.OPERATOR] - version_three_additions)
+        ]
+        payload: dict[str, str | int | list[str]] = {
+            "sub": "v2-refresh-user",
+            "username": "v2-refresh-user",
+            "role": UserRole.OPERATOR.value,
+            "permissions": old_permission_values,
+            "permission_scope_version": 2,
+            "sid": "v2-refresh-session",
+            "exp": int((now + timedelta(hours=1)).timestamp()),
+            "iat": int(now.timestamp()),
+            "jti": "refresh_v2-full-role-jti",
+        }
+        refresh_token = jwt.encode(
+            payload,
+            token_manager.settings.auth_secret_key,
+            algorithm=token_manager.settings.auth_algorithm,
+        )
+
+        successor = token_manager.refresh_tokens(refresh_token)
+
+        assert successor is not None
+        successor_claims = token_manager.decode_fresh_token(successor.access_token)
+        assert successor_claims.permission_scope_version == 3
+        assert set(successor_claims.permissions or []) == {
+            permission.value for permission in ROLE_PERMISSIONS[UserRole.OPERATOR]
+        }
+
     def test_refresh_tokens_invalid_token(self) -> None:
         """Verify refresh_tokens returns None for invalid token.
 
@@ -1965,7 +2013,7 @@ class TestResourcePermissions:
             (which already hold READ_POSITIONS via ROLE_PERMISSIONS) can access
             the new Positions tab.
         """
-        assert RESOURCE_PERMISSIONS["positions"] == Permission.READ_POSITIONS
+        assert RESOURCE_PERMISSIONS["positions"] == {Permission.READ_POSITIONS}
 
     def test_accounts_requires_read_account_state(self) -> None:
         """Accounts resource requires READ_ACCOUNT_STATE permission.
@@ -1976,7 +2024,7 @@ class TestResourcePermissions:
             (which hold READ_ACCOUNT_STATE) can access the venue-account tab, while
             AI delegates (which do not) are excluded from the derived resource access.
         """
-        assert RESOURCE_PERMISSIONS["accounts"] == Permission.READ_ACCOUNT_STATE
+        assert RESOURCE_PERMISSIONS["accounts"] == {Permission.READ_ACCOUNT_STATE}
 
     def test_signals_requires_read_signals(self) -> None:
         """Trading-signal resources require the signal-specific grant.
@@ -1985,27 +2033,29 @@ class TestResourcePermissions:
         When: The signals entry is inspected.
         Then: It requires READ_SIGNALS rather than general market-data access.
         """
-        assert RESOURCE_PERMISSIONS["signals"] == Permission.READ_SIGNALS
+        assert RESOURCE_PERMISSIONS["signals"] == {Permission.READ_SIGNALS}
 
     def test_overview_requires_no_permission(self) -> None:
         """Overview resource is accessible without any specific permission.
 
         Given: RESOURCE_PERMISSIONS mapping,
         When: Checking the 'overview' entry,
-        Then: Its value is None (no permission required).
+        Then: Its requirement set is empty (no permission required).
         """
-        assert RESOURCE_PERMISSIONS["overview"] is None
+        assert RESOURCE_PERMISSIONS["overview"] == frozenset()
 
     def test_protected_resources_have_valid_permissions(self) -> None:
-        """All non-None entries map to valid Permission enum members.
+        """Every resource maps to an immutable set of valid permissions.
 
-        Given: RESOURCE_PERMISSIONS with some Permission values,
-        When: Filtering for non-None entries,
-        Then: Each value is a member of Permission.
+        Given: RESOURCE_PERMISSIONS with permission requirement sets,
+        When: Every mapping value is inspected,
+        Then: Each value is a frozenset containing only Permission members.
         """
-        for resource, perm in RESOURCE_PERMISSIONS.items():
-            if perm is not None:
-                assert isinstance(perm, Permission), f"{resource} maps to non-Permission value"
+        for resource, requirements in RESOURCE_PERMISSIONS.items():
+            assert isinstance(requirements, frozenset), f"{resource} maps to a mutable value"
+            assert all(
+                isinstance(permission, Permission) for permission in requirements
+            ), f"{resource} maps to a non-Permission value"
 
     def test_admin_requires_manage_users(self) -> None:
         """Admin resource requires MANAGE_USERS permission.
@@ -2014,7 +2064,7 @@ class TestResourcePermissions:
         When: Checking the 'admin' entry,
         Then: Its value is Permission.MANAGE_USERS.
         """
-        assert RESOURCE_PERMISSIONS["admin"] == Permission.MANAGE_USERS
+        assert RESOURCE_PERMISSIONS["admin"] == {Permission.MANAGE_USERS}
 
     def test_settings_requires_configure_system(self) -> None:
         """Settings resource requires CONFIGURE_SYSTEM permission.
@@ -2023,7 +2073,198 @@ class TestResourcePermissions:
         When: Checking the 'settings' entry,
         Then: Its value is Permission.CONFIGURE_SYSTEM.
         """
-        assert RESOURCE_PERMISSIONS["settings"] == Permission.CONFIGURE_SYSTEM
+        assert RESOURCE_PERMISSIONS["settings"] == {Permission.CONFIGURE_SYSTEM}
+
+    def test_read_only_operator_resources_use_dedicated_read_permissions(self) -> None:
+        """Process and AI resources expose their dedicated read requirements.
+
+        Given: Resources that previously reused mutation or signal permissions,
+        When: Their generated authorization requirements are inspected,
+        Then: Processes and AI integration use read permissions and AI reviews
+            accepts either the audit-read or decision-submission capability.
+        """
+        assert RESOURCE_PERMISSIONS["processes"] == {Permission.READ_PROCESSES}
+        assert RESOURCE_PERMISSIONS["ai-integration"] == {Permission.READ_AI_INTEGRATION}
+        assert RESOURCE_PERMISSIONS["ai-reviews"] == {
+            Permission.READ_AI_REVIEWS,
+            Permission.SUBMIT_AI_REVIEW_DECISION,
+        }
+
+
+class TestCapabilityPermissionSets:
+    """Tests for permission-set role definitions and scope migration."""
+
+    @staticmethod
+    def _v2_role_permissions(role: UserRole) -> set[Permission]:
+        """Return the role grant that existed before scope version three."""
+        version_three_additions = {
+            Permission.READ_PROCESSES,
+            Permission.READ_AI_REVIEWS,
+            Permission.READ_AI_INTEGRATION,
+            Permission.MANAGE_AI_INTEGRATION,
+        }
+        return ROLE_PERMISSIONS[role] - version_three_additions
+
+    def test_permission_values_are_dedicated_to_their_capabilities(self) -> None:
+        """The new read and management permissions have stable wire values."""
+        assert Permission.READ_PROCESSES.value == "read:processes"
+        assert Permission.READ_AI_REVIEWS.value == "read:ai_reviews"
+        assert Permission.READ_AI_INTEGRATION.value == "read:ai_integration"
+        assert Permission.MANAGE_AI_INTEGRATION.value == "manage:ai_integration"
+
+    def test_new_role_grants_preserve_ai_roles_and_separate_viewer_mutations(self) -> None:
+        """Only viewer, operator, and admin receive the newly introduced grants.
+
+        Given: The four permissions introduced for process and AI visibility,
+        When: Every named permission set is inspected,
+        Then: Viewer receives the three reads, operator receives all four,
+            admin receives all permissions, and AI role grants remain untouched.
+        """
+        read_additions = {
+            Permission.READ_PROCESSES,
+            Permission.READ_AI_REVIEWS,
+            Permission.READ_AI_INTEGRATION,
+        }
+        all_additions = read_additions | {Permission.MANAGE_AI_INTEGRATION}
+
+        assert ROLE_PERMISSIONS[UserRole.VIEWER] & all_additions == read_additions
+        assert ROLE_PERMISSIONS[UserRole.OPERATOR] & all_additions == all_additions
+        assert ROLE_PERMISSIONS[UserRole.ADMIN] & all_additions == all_additions
+        for role in {
+            UserRole.AI_RESEARCHER,
+            UserRole.AI_REVIEWER,
+            UserRole.AI_DELEGATE,
+        }:
+            assert ROLE_PERMISSIONS[role].isdisjoint(all_additions)
+
+    def test_viewer_contains_every_operator_read_permission(self) -> None:
+        """Viewer is the operator permission set with operational writes removed."""
+        operator_reads = {
+            permission
+            for permission in ROLE_PERMISSIONS[UserRole.OPERATOR]
+            if permission.value.startswith("read:")
+        }
+        assert operator_reads <= ROLE_PERMISSIONS[UserRole.VIEWER]
+
+    def test_role_grants_permission_reads_only_the_named_permission_set(self) -> None:
+        """Role capability projection delegates exclusively to ROLE_PERMISSIONS."""
+        assert role_grants_permission(UserRole.VIEWER, Permission.READ_AI_REVIEWS) is True
+        assert role_grants_permission(UserRole.VIEWER, Permission.MANAGE_AI_INTEGRATION) is False
+
+    @pytest.mark.parametrize(
+        "role",
+        [UserRole.VIEWER, UserRole.OPERATOR, UserRole.ADMIN],
+    )
+    def test_v2_full_role_claim_upgrades_to_current_role(self, role: UserRole) -> None:
+        """An exact full v2 grant inherits its role's newly added permissions."""
+        old_values = [permission.value for permission in self._v2_role_permissions(role)]
+
+        effective = get_effective_permissions(role, old_values, 2)
+
+        assert effective == ROLE_PERMISSIONS[role]
+
+    @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.ADMIN])
+    def test_v2_narrow_signal_scope_maps_to_ai_review_read(self, role: UserRole) -> None:
+        """Narrow operational v2 signal grants retain equivalent review visibility."""
+        effective = get_effective_permissions(
+            role,
+            [Permission.READ_SIGNALS.value],
+            2,
+        )
+
+        assert effective == {
+            Permission.READ_SIGNALS,
+            Permission.READ_AI_REVIEWS,
+        }
+
+    @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.ADMIN])
+    def test_v2_narrow_process_scope_maps_to_replacement_capabilities(
+        self,
+        role: UserRole,
+    ) -> None:
+        """Narrow operational v2 process grants retain their old effective surface."""
+        effective = get_effective_permissions(
+            role,
+            [Permission.MANAGE_PROCESSES.value],
+            2,
+        )
+
+        assert effective == {
+            Permission.MANAGE_PROCESSES,
+            Permission.READ_PROCESSES,
+            Permission.READ_AI_INTEGRATION,
+            Permission.MANAGE_AI_INTEGRATION,
+        }
+
+    def test_v2_narrow_viewer_scope_does_not_inherit_new_reads(self) -> None:
+        """An intentionally narrowed viewer remains narrower than the full role."""
+        effective = get_effective_permissions(
+            UserRole.VIEWER,
+            [Permission.READ_SIGNALS.value],
+            2,
+        )
+
+        assert effective == {Permission.READ_SIGNALS}
+
+    def test_v3_scope_is_a_strict_role_bounded_intersection(self) -> None:
+        """Current tokens never infer permissions omitted by their explicit scope."""
+        effective = get_effective_permissions(
+            UserRole.OPERATOR,
+            [
+                Permission.READ_SIGNALS.value,
+                Permission.MANAGE_PROCESSES.value,
+                Permission.MANAGE_USERS.value,
+            ],
+            3,
+        )
+
+        assert effective == {
+            Permission.READ_SIGNALS,
+            Permission.MANAGE_PROCESSES,
+        }
+
+    def test_absent_permission_claim_resolves_full_current_role(self) -> None:
+        """A claimless historical token preserves full-role semantics."""
+        assert (
+            get_effective_permissions(UserRole.VIEWER, None, None)
+            == ROLE_PERMISSIONS[UserRole.VIEWER]
+        )
+
+    def test_v1_ai_review_compatibility_is_derived_from_role_permissions(self) -> None:
+        """Legacy decision compatibility follows grants instead of a role identity.
+
+        Given: A role mapping that grants decision and legacy order capabilities,
+        When: A v1 token retains only the historical order permission,
+        Then: Decision compatibility follows that named permission set regardless
+            of the role's enum identity.
+        """
+        role_permissions = {
+            role: set(permissions) for role, permissions in ROLE_PERMISSIONS.items()
+        }
+        role_permissions[UserRole.AI_REVIEWER].add(Permission.CREATE_ORDERS)
+        with patch(
+            "snapper.auth.domain.permissions.ROLE_PERMISSIONS",
+            role_permissions,
+        ):
+            assert (
+                is_ai_review_decision_capable(
+                    UserRole.AI_REVIEWER,
+                    [Permission.CREATE_ORDERS.value],
+                    1,
+                )
+                is True
+            )
+
+    def test_v1_ai_review_compatibility_does_not_widen_narrow_admin(self) -> None:
+        """A v1 admin scope that omitted decision submission stays narrowed."""
+        assert (
+            is_ai_review_decision_capable(
+                UserRole.ADMIN,
+                [Permission.CREATE_ORDERS.value],
+                1,
+            )
+            is False
+        )
 
 
 class TestMultiTenantPermissions:
@@ -2089,76 +2330,6 @@ class TestMultiTenantPermissions:
         assert Permission.MANAGE_WALLET_CREDENTIALS.value == "manage:wallet_credentials"
         assert Permission.MANAGE_SCOPE_GRANTS.value == "manage:scope_grants"
         assert Permission.IMPERSONATE_OPERATOR.value == "impersonate:operator"
-
-
-class TestRequireRole:
-    """Tests for require_role dependency."""
-
-    async def test_require_role_with_sufficient_role(self) -> None:
-        """Verify require_role passes with higher role.
-
-        Given: An admin user when operator role is required,
-        When: Role checker is called,
-        Then: User is returned.
-        """
-        user = AuthPrincipal(username="testuser", role=UserRole.ADMIN)
-        role_checker = require_role(UserRole.OPERATOR)
-        result = role_checker(user)
-        assert result == user
-
-    async def test_require_role_with_exact_role(self) -> None:
-        """Verify require_role passes with exact role.
-
-        Given: An operator user when operator role is required,
-        When: Role checker is called,
-        Then: User is returned.
-        """
-        user = AuthPrincipal(username="testuser", role=UserRole.OPERATOR)
-        role_checker = require_role(UserRole.OPERATOR)
-        result = role_checker(user)
-        assert result == user
-
-    async def test_require_role_with_insufficient_role(self) -> None:
-        """Verify require_role raises 403 with insufficient role.
-
-        Given: A viewer user when admin role is required,
-        When: Role checker is called,
-        Then: HTTPException with 403 status is raised.
-        """
-        user = AuthPrincipal(username="testuser", role=UserRole.VIEWER)
-        role_checker = require_role(UserRole.ADMIN)
-        with pytest.raises(HTTPException) as exc_info:
-            role_checker(user)
-        assert exc_info.value.status_code == 403
-        assert "Role 'admin' or higher required" in exc_info.value.detail
-
-    async def test_require_role_with_permission_enforces_token_scope(self) -> None:
-        """A role-qualified request is still denied when its scope omits the action."""
-        user = AuthPrincipal(
-            username="scoped-operator",
-            role=UserRole.OPERATOR,
-            permissions=[Permission.READ_MARKET_DATA.value],
-        )
-        role_checker = require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)
-
-        with pytest.raises(HTTPException) as exc_info:
-            role_checker(user)
-
-        assert exc_info.value.status_code == 403
-        assert "Permission 'manage:processes' required" in exc_info.value.detail
-
-    async def test_require_role_with_permission_accepts_retained_grant(self) -> None:
-        """A token retaining the role-gated action permission is admitted."""
-        user = AuthPrincipal(
-            username="scoped-operator",
-            role=UserRole.OPERATOR,
-            permissions=[Permission.MANAGE_PROCESSES.value],
-        )
-        role_checker = require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)
-
-        result = role_checker(user)
-
-        assert result == user
 
 
 class TestCSRFManager:

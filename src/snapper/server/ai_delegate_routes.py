@@ -1,12 +1,8 @@
 """AI delegate CRUD routes.
 
-Mounted at ``/api/ai-delegates``. Only operators (OPERATOR /
-ADMIN) can create + manage delegates; the role hierarchy
-and ``MANAGE_PROCESSES`` effective permission gate access via
-``require_role``. Delegates themselves are
-AI_DELEGATE users and cannot manage other delegates — the
-``role_hierarchy`` dict in ``require_role`` puts AI_DELEGATE
-below VIEWER.
+Mounted at ``/api/ai-delegates``. Read and management capabilities
+are guarded by their dedicated permissions. Delegates themselves do
+not receive those permissions and cannot manage peer delegates.
 Routes
     ``POST /api/ai-delegates`` — atomic create returning the
       delegate's freshly-minted long-lived access JWT.
@@ -44,10 +40,10 @@ from snapper.application.ai_delegates.service import DelegateOperatorBindingErro
 from snapper.application.ai_delegates.service import DelegateProliferationError
 from snapper.application.ai_delegates.service import DelegateService
 from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
-from snapper.auth.dependencies import require_role
+from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.permissions import get_effective_permissions
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import get_token_manager
@@ -166,7 +162,7 @@ async def create_delegate(
     body: Annotated[DelegateCreateRequest, Depends(json_body(DelegateCreateRequest))],
     owner: Annotated[
         AuthPrincipal,
-        Depends(require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)),
+        Depends(require_permission(Permission.MANAGE_AI_INTEGRATION)),
     ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
@@ -182,8 +178,7 @@ async def create_delegate(
         request: FastAPI request (for the REST tracker).
         body: :class:`DelegateCreateRequest` with label + optional
             caps.
-        owner: Authenticated operator (OPERATOR or ADMIN via
-            ``require_role``).
+        owner: Authenticated caller granted AI-integration management.
         repo: Repository dep — the service opens a single
             transactional scope underneath.
         _csrf: CSRF validation dep. Required because create is a
@@ -242,19 +237,28 @@ async def list_delegates(
     request: Request,
     owner: Annotated[
         AuthPrincipal,
-        Depends(require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)),
+        Depends(require_permission(Permission.READ_AI_INTEGRATION)),
     ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
 ) -> DelegateListResponse:
-    """Return every SCD2-active delegate the caller owns.
+    """Return delegates in the caller's permission-appropriate scope.
 
-    Deactivated delegates drop out of the list; the frontend
-    list view tracks the active set.
+    Management-capable callers retain their historical creator-owned view.
+    Read-only callers see delegates bound to their operator memberships.
+    Deactivated delegates drop out of both views.
     """
     service = _build_service(repo)
     try:
-        delegates = await service.list_delegates(owner_public_id=owner.user_public_id)
+        effective_permissions = get_effective_permissions(
+            owner.role,
+            owner.permissions,
+            owner.permission_scope_version,
+        )
+        if Permission.MANAGE_AI_INTEGRATION in effective_permissions:
+            delegates = await service.list_delegates(owner_public_id=owner.user_public_id)
+        else:
+            delegates = await service.list_delegates(operator_public_ids=owner.operator_public_ids)
     except InvalidOwnerPrincipalError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_PRINCIPAL
@@ -276,22 +280,33 @@ async def get_delegate(
     delegate_public_id: str,
     owner: Annotated[
         AuthPrincipal,
-        Depends(require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)),
+        Depends(require_permission(Permission.READ_AI_INTEGRATION)),
     ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
 ) -> DelegateResponse:
-    """Fetch a single delegate owned by the caller.
+    """Fetch one delegate in the caller's permission-appropriate scope.
 
-    Returns 404 both for "no such delegate" AND "not owned by
-    you" so cross-tenant existence isn't leaked via error codes.
+    Management-capable callers retain creator ownership; read-only callers
+    use operator memberships. Every absent or out-of-scope result is 404.
     """
     service = _build_service(repo)
     try:
-        delegate = await service.get_delegate(
-            public_id=delegate_public_id,
-            owner_public_id=owner.user_public_id,
+        effective_permissions = get_effective_permissions(
+            owner.role,
+            owner.permissions,
+            owner.permission_scope_version,
         )
+        if Permission.MANAGE_AI_INTEGRATION in effective_permissions:
+            delegate = await service.get_delegate(
+                public_id=delegate_public_id,
+                owner_public_id=owner.user_public_id,
+            )
+        else:
+            delegate = await service.get_delegate(
+                public_id=delegate_public_id,
+                operator_public_ids=owner.operator_public_ids,
+            )
     except InvalidOwnerPrincipalError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_PRINCIPAL
@@ -321,7 +336,7 @@ async def update_delegate_caps(
     body: Annotated[DelegateCapsUpdateRequest, Depends(json_body(DelegateCapsUpdateRequest))],
     owner: Annotated[
         AuthPrincipal,
-        Depends(require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)),
+        Depends(require_permission(Permission.MANAGE_AI_INTEGRATION)),
     ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
@@ -367,7 +382,7 @@ async def deactivate_delegate(
     ],
     owner: Annotated[
         AuthPrincipal,
-        Depends(require_role(UserRole.OPERATOR, Permission.MANAGE_PROCESSES)),
+        Depends(require_permission(Permission.MANAGE_AI_INTEGRATION)),
     ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],

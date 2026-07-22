@@ -2,8 +2,8 @@
 
 Provides the frontend wallet picker with the list of
 wallets the current principal can act on, plus a guarded create
-endpoint backing the admin Wallet Credentials tab. ADMIN
-principals see every active wallet; non-ADMIN principals see only
+endpoint backing the admin Wallet Credentials tab. Principals granted
+``IMPERSONATE_OPERATOR`` see every active wallet; other principals see only
 the subset covered by at least one of their active scope grants.
 Credential management (add / rotate / restart) lives on dedicated
 routes under ``/wallets/{id}/credentials`` and never co-returns the
@@ -33,7 +33,7 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.data.repository import WalletConflictError
@@ -69,15 +69,15 @@ async def list_wallets(
 ) -> WalletListResponse:
     """List wallets accessible to the current principal.
 
-    ADMIN sees every active wallet. Non-ADMIN callers see only the
-    wallets covered by at least one active scope grant from the
+    A caller granted ``IMPERSONATE_OPERATOR`` sees every active wallet.
+    Other callers see only the wallets covered by at least one active scope grant from the
     principal's operator set — matching the wallet picker
     contract that the picker is filtered server-side.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
         principal: Authenticated caller — the wallet visibility scope
-            is derived from its role and ``operator_public_ids``.
+            is derived from its permissions and ``operator_public_ids``.
         repo: Repository dependency.
 
     Returns:
@@ -86,7 +86,7 @@ async def list_wallets(
         ``(is_paper, label)``.
     """
     now = datetime.now(UTC)
-    if principal.role == UserRole.ADMIN:
+    if role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR):
         rows = await repo.list_active_wallets(now)
     else:
         rows = await repo.list_accessible_wallets_for_operators(principal.operator_public_ids, now)
