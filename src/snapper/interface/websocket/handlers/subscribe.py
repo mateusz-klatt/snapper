@@ -10,6 +10,7 @@ from uuid import uuid7
 
 from fastapi import WebSocket
 
+from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import SubscriptionActionEnum
@@ -121,11 +122,11 @@ async def _enforce_ai_delegate_wallet_scope(
     repository: Repository | None,
     as_of: datetime,
 ) -> tuple[list[str], list[str]]:
-    """Split wallet-scoped topics into (allowed, denied) for AI_DELEGATE.
+    """Split wallet-scoped topics for an AI review principal.
 
-    Subscribe-time filter. Fast-paths any non-AI_DELEGATE principal
-    (role gate returns the topic set unchanged). For AI_DELEGATE
-    the filter:
+    Subscribe-time filter. Fast-paths any non-review principal
+    (role gate returns the topic set unchanged). For AI_REVIEWER and
+    AI_DELEGATE the filter:
 
     1. Computes the delegate's allowed ``(exchange, native_symbol)``
        pairs via ``repository.list_scope_grant_instrument_pairs`` (one
@@ -141,7 +142,7 @@ async def _enforce_ai_delegate_wallet_scope(
        ``topic_outside_scope`` in the response envelope.
 
     Raising on missing ``repository`` is intentional for the
-    AI_DELEGATE path: a delegate principal reaching this filter
+    AI review-principal path: a principal reaching this filter
     without a live repository reference indicates a runtime wiring
     bug, and silently passing topics through would leak wallet scope.
 
@@ -149,18 +150,18 @@ async def _enforce_ai_delegate_wallet_scope(
         topics: Already shape-validated topic list.
         principal: Authenticated caller; role gates the whole filter.
         repository: Repository for the scope-grant pair projection.
-            Ignored for non-AI_DELEGATE roles. Required for
-            AI_DELEGATE.
+            Ignored for non-review-principal roles and required for
+            AI_REVIEWER and AI_DELEGATE.
         as_of: Bus time for the temporal scope read.
 
     Returns:
         Tuple of (allowed, denied) in original input order.
     """
-    if principal.role != UserRole.AI_DELEGATE:
+    if principal.role not in AI_REVIEW_PRINCIPAL_ROLES:
         return topics, []
     if repository is None:
         raise RuntimeError(
-            "AI_DELEGATE subscribe reached the wallet-scope filter without a "
+            "AI review principal reached the wallet-scope filter without a "
             "repository reference; dispatch table wiring is broken"
         )
     allowed_pairs = await repository.list_scope_grant_instrument_pairs(
@@ -227,7 +228,7 @@ async def handle_subscribe(
     """Handle topic subscription request.
 
     Validates topic patterns, checks category-level RBAC, enforces the
-    backtest per-subscription wallet-scope rule, runs the AI_DELEGATE
+    backtest per-subscription wallet-scope rule, runs the AI review-principal
     wallet-scope filter, and registers subscriptions with both the
     connection manager and ZMQ bridge.
 
@@ -242,9 +243,9 @@ async def handle_subscribe(
         message: Subscription request with topic list.
         manager: WebSocket connection manager.
         principal: Authenticated caller — role + wallet scope.
-        repository: Repository for the AI_DELEGATE wallet-scope
-            filter. Required for AI_DELEGATE principals; optional for
-            other roles (the filter fast-paths non-AI_DELEGATE calls).
+        repository: Repository for the AI review-principal wallet-scope
+            filter. Required for AI_REVIEWER and AI_DELEGATE; optional
+            for other roles because the filter fast-paths them.
     """
     role = principal.role
     topics, invalid_topics = _validate_ws_topics(message.topics)

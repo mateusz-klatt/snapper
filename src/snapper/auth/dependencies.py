@@ -20,6 +20,7 @@ from fastapi import status
 from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
+from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -103,7 +104,7 @@ async def get_current_user(
     if not token_data:
         return None
     delegate_public_id: str | None = None
-    if token_data.role == UserRole.AI_DELEGATE:
+    if token_data.role in AI_REVIEW_PRINCIPAL_ROLES:
         delegate_row = await repo.get_ai_delegate_by_user_public_id(token_data.user_public_id)
         if delegate_row is not None:
             delegate_public_id = delegate_row["public_id"]
@@ -115,6 +116,7 @@ async def get_current_user(
         primary_operator_public_id=token_data.primary_operator_public_id,
         active_wallet_public_id=token_data.active_wallet_public_id,
         permissions=token_data.permissions,
+        permission_scope_version=token_data.permission_scope_version,
         delegate_public_id=delegate_public_id,
     )
     request.state.user = principal
@@ -185,6 +187,7 @@ def require_role(role: UserRole, permission: Permission | None = None) -> Any:
     """
     role_hierarchy = {
         UserRole.AI_RESEARCHER: -2,
+        UserRole.AI_REVIEWER: -1,
         UserRole.AI_DELEGATE: -1,
         UserRole.VIEWER: 0,
         UserRole.OPERATOR: 1,

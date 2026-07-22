@@ -4480,9 +4480,10 @@ class AlertDelivery(TemporalMixin, Base):
 
 
 class AiDelegate(Base):
-    """Runtime state for AI delegates.
+    """Runtime state for AI review principals.
 
-    Logical 1-to-1 with ``users`` rows where ``role=AI_DELEGATE``.
+    Logical 1-to-1 with ``users`` rows whose role is AI_REVIEWER or
+    AI_DELEGATE.
     Created by ``UserService.create_ai_delegate`` AFTER the user
     row is committed. Stores fields that change frequently (liveness
     timestamp, in-flight review counter) and are NOT bitemporal —
@@ -4497,8 +4498,8 @@ class AiDelegate(Base):
     Attributes:
         public_id: UUID7 — used as ``selected_delegate_public_id``
             on :class:`AiReview`.
-        user_public_id: Logical FK to ``users.public_id`` (the user
-            row with ``role=AI_DELEGATE``).
+        user_public_id: Logical FK to ``users.public_id`` for an AI
+            review-principal user row.
         last_seen_at: Most recent WS connection / heartbeat /
             authenticate frame. Updated by
             ``WebSocketAuthManager``. Used by the Layer 2 scanner +

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Update
 from sqlalchemy.sql.expression import Select
 
+from snapper.auth.domain.roles import UserRole
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AiDelegate
 from snapper.data.models import AiReview
@@ -688,8 +689,8 @@ async def _seed_user_row(
 ) -> None:
     """Insert an active ``users`` row with the requested role + public_id.
 
-    Admission control filters delegates by
-    ``users.role = 'ai_delegate'``; tests for
+    Admission control filters delegates by the shared AI review-principal
+    roles; tests for
     ``list_eligible_delegates_for_ai_review`` need real User rows so the
     JOIN can resolve. The default username is derived from the public_id
     fragment to keep ``uq_users_username`` happy across multi-user tests.
@@ -767,8 +768,9 @@ async def _seed_full_eligible_setup(
     repo: SQLAlchemyRepository,
     *,
     as_of: datetime,
+    role: UserRole = UserRole.AI_DELEGATE,
 ) -> dict[str, str]:
-    """Seed a single eligible delegate end-to-end (user + membership + grant + delegate).
+    """Seed one eligible review principal with membership, grant, and delegate row.
 
     Returns the same id-bag as :func:`_seed_user_operator_wallet_instrument`
     plus ``delegate_public_id`` so callers can assert against the candidate
@@ -776,7 +778,10 @@ async def _seed_full_eligible_setup(
     """
     ids = await _seed_user_operator_wallet_instrument(repo, as_of=as_of)
     await _seed_user_row(
-        repo, user_public_id=ids["user_public_id"], role="ai_delegate", as_of=as_of
+        repo,
+        user_public_id=ids["user_public_id"],
+        role=role.value,
+        as_of=as_of,
     )
     await _add_membership(
         repo,
@@ -895,14 +900,14 @@ async def test_list_eligible_returns_empty_when_operator_has_no_grant(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
-async def test_list_eligible_returns_empty_when_user_role_is_not_ai_delegate(
+async def test_list_eligible_returns_empty_when_user_role_is_not_ai_review_principal(
     tmp_path: Path,
 ) -> None:
     """Live AiDelegate row + grant + membership but ``users.role='viewer'`` -> empty.
 
     Defends against the row-soup scenario where someone backfills an
     ``ai_delegates`` row without flipping the user's role; the JOIN
-    requires the role check to pass.
+    requires membership in the shared AI review-principal role set.
     """
     repo = await _build_repo(tmp_path, "eligible_wrong_role.db")
     as_of = _now()
@@ -1025,6 +1030,36 @@ async def test_list_eligible_returns_delegate_with_instrument_grant(
     assert result[0]["user_public_id"] == ids["user_public_id"]
     assert result[0]["active_reviews_count"] == 0
     assert result[0]["last_seen_at"] is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_list_eligible_returns_ai_reviewer_with_instrument_grant(
+    tmp_path: Path,
+) -> None:
+    """AI_REVIEWER participates in review admission through the delegate lifecycle.
+
+    Given: A live AI_REVIEWER with operator membership and an instrument grant.
+    When: Eligible delegates are listed for that operator, wallet, and instrument.
+    Then: The reviewer's shared AiDelegate operational row is returned.
+    """
+    repo = await _build_repo(tmp_path, "eligible_ai_reviewer.db")
+    as_of = _now()
+    ids = await _seed_full_eligible_setup(
+        repo,
+        as_of=as_of,
+        role=UserRole.AI_REVIEWER,
+    )
+
+    result = await repo.list_eligible_delegates_for_ai_review(
+        operator_public_id=ids["operator_public_id"],
+        wallet_public_id=ids["wallet_public_id"],
+        instrument_public_id=ids["instrument_public_id"],
+        heartbeat_window_seconds=15,
+        as_of=as_of,
+    )
+
+    assert [row["public_id"] for row in result] == [ids["delegate_public_id"]]
 
 
 @pytest.mark.asyncio
@@ -2209,6 +2244,31 @@ async def test_has_live_ai_delegate_uses_strict_admission_boundary(
         await session.commit()
 
     assert not await repo.has_live_ai_delegate(
+        heartbeat_window_seconds=15,
+        as_of=as_of,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_has_live_ai_delegate_recognizes_ai_reviewer(
+    tmp_path: Path,
+) -> None:
+    """Global reviewer liveness includes the shared AI_REVIEWER lifecycle.
+
+    Given: A scoped AI_REVIEWER with membership and a fresh delegate heartbeat.
+    When: The repository checks for a globally live AI review principal.
+    Then: The liveness query returns true for the reviewer.
+    """
+    repo = await _build_repo(tmp_path, "ai_reviewer_watchdog_liveness.db")
+    as_of = _now()
+    await _seed_full_eligible_setup(
+        repo,
+        as_of=as_of,
+        role=UserRole.AI_REVIEWER,
+    )
+
+    assert await repo.has_live_ai_delegate(
         heartbeat_window_seconds=15,
         as_of=as_of,
     )

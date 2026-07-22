@@ -30,6 +30,7 @@ from snapper.api.schemas.ai_delegates import DelegateCapsUpdateBody
 from snapper.api.schemas.ai_delegates import DelegateCreateBody
 from snapper.api.schemas.ai_delegates import DelegateCreatedPayload
 from snapper.api.schemas.ai_delegates import DelegateRead
+from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import TokenManager
@@ -439,7 +440,7 @@ class DelegateService:
                 )
                 .where(
                     User.created_by_user_public_id == owner_public_id,
-                    User.role == UserRole.AI_DELEGATE.value,
+                    User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
                     User.is_active,
                     user_ts,
                     user_known_to,
@@ -604,7 +605,7 @@ class DelegateService:
             .select_from(User)
             .where(
                 User.created_by_user_public_id == owner_public_id,
-                User.role == UserRole.AI_DELEGATE.value,
+                User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
                 User.is_active,
                 User.known_to > now,
             )
@@ -681,7 +682,7 @@ class DelegateService:
             .where(
                 User.public_id == public_id,
                 User.created_by_user_public_id == owner_public_id,
-                User.role == UserRole.AI_DELEGATE.value,
+                User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
                 User.is_active,
                 user_ts,
                 user_known_to,

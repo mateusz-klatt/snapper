@@ -27,6 +27,7 @@ class Permission(StrEnum):
     READ_MARKET_DATA = "read:market_data"
     READ_MARKET_VIEWS = "read:market_views"
     SUBMIT_MARKET_VIEW = "submit:market_view"
+    SUBMIT_AI_REVIEW_DECISION = "submit:ai_review_decision"
     READ_ORDERS = "read:orders"
     CREATE_ORDERS = "create:orders"
     CANCEL_ORDERS = "cancel:orders"
@@ -78,6 +79,17 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_MARKET_VIEWS,
         Permission.SUBMIT_MARKET_VIEW,
     },
+    UserRole.AI_REVIEWER: {
+        Permission.READ_MARKET_DATA,
+        Permission.READ_MARKET_VIEWS,
+        Permission.READ_ORDERS,
+        Permission.READ_POSITIONS,
+        Permission.READ_STRATEGIES,
+        Permission.READ_SIGNALS,
+        Permission.READ_SYSTEM_STATUS,
+        Permission.READ_BACKTESTS,
+        Permission.SUBMIT_AI_REVIEW_DECISION,
+    },
     UserRole.AI_DELEGATE: {
         Permission.READ_MARKET_DATA,
         Permission.READ_MARKET_VIEWS,
@@ -90,6 +102,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_SIGNALS,
         Permission.READ_SYSTEM_STATUS,
         Permission.READ_BACKTESTS,
+        Permission.SUBMIT_AI_REVIEW_DECISION,
     },
     UserRole.VIEWER: {
         Permission.READ_MARKET_DATA,
@@ -190,6 +203,39 @@ def get_effective_permissions(
     return {
         permission for permission in role_permissions if permission.value in token_permission_values
     }
+
+
+def is_ai_review_decision_capable(
+    role: UserRole,
+    token_permissions: list[str] | None,
+    permission_scope_version: int | None,
+) -> bool:
+    """Return whether one token can submit an AI review decision.
+
+    The compatibility branch is deliberately limited to legacy v1
+    AI_DELEGATE scopes that retained CREATE_ORDERS. It does not add
+    CREATE_ORDERS to effective permissions or alias that permission for
+    any authorization surface outside AI review decisions.
+
+    Args:
+        role: Authenticated principal's role.
+        token_permissions: Permission strings carried by the JWT, or
+            ``None`` when the claim was absent.
+        permission_scope_version: Permission-scope version from the JWT,
+            or ``None`` when the claim was absent.
+
+    Returns:
+        True when the effective grant contains the decision permission,
+        or when the narrow v1 AI_DELEGATE compatibility rule applies.
+    """
+    effective_permissions = get_effective_permissions(role, token_permissions)
+    if Permission.SUBMIT_AI_REVIEW_DECISION in effective_permissions:
+        return True
+    return (
+        permission_scope_version == 1
+        and role == UserRole.AI_DELEGATE
+        and Permission.CREATE_ORDERS in effective_permissions
+    )
 
 
 def get_role_allowed_categories(

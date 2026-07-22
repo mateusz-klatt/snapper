@@ -1685,6 +1685,56 @@ class TestGetCurrentUser:
         assert result.delegate_public_id == "del-9"
         repo.get_ai_delegate_by_user_public_id.assert_awaited_once_with("user-delegate-1")
 
+    async def test_get_current_user_populates_reviewer_identity_and_scope_version(
+        self,
+    ) -> None:
+        """Resolve AI_REVIEWER through the shared operational identity path.
+
+        Given: A v2 AI_REVIEWER token with a matching ai_delegates row,
+        When: get_current_user projects the authenticated principal,
+        Then: The delegate row identifier and permission scope version are preserved.
+        """
+        request = Mock(spec=Request)
+        request.state = Mock()
+        request.cookies = {"access_token": "reviewer_token"}
+        request.headers = {}
+        now = int(datetime.now(UTC).timestamp())
+        token_data = TokenClaims(
+            sub="user-reviewer-1",
+            username="reviewer-1",
+            role=UserRole.AI_REVIEWER,
+            permissions=[Permission.SUBMIT_AI_REVIEW_DECISION.value],
+            permission_scope_version=2,
+            exp=now + 3600,
+            iat=now,
+            jti="jwt-reviewer",
+            sid="sid-reviewer",
+            user_public_id="user-reviewer-1",
+        )
+        with patch("snapper.auth.dependencies.get_token_manager") as mock_get_token_manager:
+            mock_token_manager = Mock()
+            mock_token_manager.verify_token_with_db = AsyncMock(return_value=token_data)
+            mock_get_token_manager.return_value = mock_token_manager
+            repo = Mock()
+            repo.get_ai_delegate_by_user_public_id = AsyncMock(
+                return_value={
+                    "public_id": "reviewer-row-1",
+                    "user_public_id": "user-reviewer-1",
+                    "last_seen_at": None,
+                    "active_reviews_count": 0,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            result = await get_current_user(request, repo)
+
+        assert result is not None
+        assert result.role == UserRole.AI_REVIEWER
+        assert result.delegate_public_id == "reviewer-row-1"
+        assert result.permission_scope_version == 2
+        assert request.state.token_data == token_data
+        repo.get_ai_delegate_by_user_public_id.assert_awaited_once_with("user-reviewer-1")
+
     async def test_get_current_user_skips_delegate_lookup_for_non_delegate_role(
         self,
     ) -> None:

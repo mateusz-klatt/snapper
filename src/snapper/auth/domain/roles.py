@@ -14,9 +14,12 @@ class UserRole(StrEnum):
     access levels
     AI_RESEARCHER: Research-only AI integration user that can observe
       market data and persist market views without signal or trading
-      authority. Ordinally below AI_DELEGATE and VIEWER so role-level
-      guards cannot elevate a researcher into either surface.
-    AI_DELEGATE: Narrow permission set for AI-integration users
+      authority. Ordinally below AI review principals and VIEWER so
+      role-level guards cannot elevate a researcher into either surface.
+    AI_REVIEWER: Review-only AI integration user that can observe the
+      delegate read surface and submit AI review decisions without
+      order execution or position-management authority.
+    AI_DELEGATE: Elevated permission set for AI-integration users
       (observe market/signals/orders, submit/cancel trades via MCP).
       **Ordinally below VIEWER** in the role_hierarchy dicts consulted
       by ``require_role()`` (``snapper.auth.dependencies``) and
@@ -32,7 +35,15 @@ class UserRole(StrEnum):
     """
 
     AI_RESEARCHER = "ai_researcher"
+    AI_REVIEWER = "ai_reviewer"
     AI_DELEGATE = "ai_delegate"
     VIEWER = "viewer"
     OPERATOR = "operator"
     ADMIN = "admin"
+
+
+AI_REVIEW_PRINCIPAL_ROLES: set[UserRole] = {
+    UserRole.AI_REVIEWER,
+    UserRole.AI_DELEGATE,
+}
+"""Roles backed by the shared AI delegate operational lifecycle."""

@@ -40,6 +40,10 @@ class AuthPrincipal(StrictBody):
     - ``permissions`` is the permission grant carried by the presented
       access token. ``None`` identifies a legacy token with no claim and
       therefore falls back to the full role grant at authorization time.
+    - ``permission_scope_version`` identifies the permission projection
+      used when the token was minted. ``None`` preserves claim-less
+      historical tokens and lets narrow compatibility rules distinguish
+      legacy explicit scopes from current scopes.
 
     The wallet-level scope set is intentionally NOT stored on the
     principal — it is derived on demand from
@@ -57,7 +61,9 @@ class AuthPrincipal(StrictBody):
         active_wallet_public_id: Last-selected wallet UI state.
         permissions: Permission strings granted by the presented token,
             or ``None`` when the legacy claim is absent.
-        delegate_public_id: For ``role=AI_DELEGATE`` principals only,
+        permission_scope_version: Permission-scope version carried by the
+            token, or ``None`` when the claim is absent.
+        delegate_public_id: For AI review principals only,
             the ``ai_delegates.public_id`` UUID7 (operational
             side-table FK to ``users.public_id``). Used by reconnect
             hysteresis (``on_disconnect`` / ``on_authenticate``
@@ -79,4 +85,5 @@ class AuthPrincipal(StrictBody):
     primary_operator_public_id: str = ""
     active_wallet_public_id: str | None = None
     permissions: list[str] | None = None
+    permission_scope_version: int | None = None
     delegate_public_id: str | None = None

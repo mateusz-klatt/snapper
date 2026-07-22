@@ -77,11 +77,12 @@ def _delegate_principal(
     *,
     user_public_id: str = "user-delegate",
     operators: tuple[str, ...] = ("op-1",),
+    role: UserRole = UserRole.AI_DELEGATE,
 ) -> AuthPrincipal:
-    """Build an AI_DELEGATE principal fixture."""
+    """Build an AI review principal fixture."""
     return AuthPrincipal(
-        username=f"delegate-{user_public_id}",
-        role=UserRole.AI_DELEGATE,
+        username=f"{role.value}-{user_public_id}",
+        role=role,
         user_public_id=user_public_id,
         operator_public_ids=list(operators),
     )
@@ -163,6 +164,34 @@ class TestHandleScopeRevoked:
         assert "topic_outside_scope" in frame_sent
         assert "signals.kraken.BTC-USD.live" in frame_sent
         ws.close.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ai_reviewer_subscription_is_revalidated_on_revoke(self) -> None:
+        """Apply revoked scope to an authenticated review-only principal.
+
+        Given: An AI_REVIEWER subscribed to a wallet-scoped signal that lost its grant,
+        When: The scope-revoked handler revalidates matching connections,
+        Then: The reviewer subscription is removed through the existing delegate path.
+        """
+        ws = MagicMock()
+        ws.send_text = AsyncMock()
+        principal = _delegate_principal(role=UserRole.AI_REVIEWER)
+        topic = "signals.kraken.BTC-USD.live"
+        cm = _mock_connection_manager({ws: {topic}})
+        bridge = _mock_bridge()
+        repo = _repo_with_pairs(set())
+        manager = _make_manager(
+            connection_manager=cm,
+            zmq_bridge=bridge,
+            repository_factory=lambda: repo,
+        )
+        manager.authenticated_connections[ws] = principal
+
+        await manager._handle_scope_revoked(_make_event())
+
+        cm.unsubscribe_client.assert_called_once_with(ws, topic)
+        bridge.remove_subscription.assert_awaited_once_with(ws, [topic])
+        ws.send_text.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_preserves_in_scope_topics(self) -> None:
@@ -469,6 +498,53 @@ class TestHandleScopeHandedOver:
         await manager._handle_scope_handed_over(_make_handed_over_event())
 
         cm.unsubscribe_client.assert_called_once_with(ws_from, "signals.kraken.BTC-USD.live")
+
+    @pytest.mark.asyncio
+    async def test_shared_revalidation_processes_reviewer_and_skips_viewer(self) -> None:
+        """Restrict shared scope-event fanout to AI review principals.
+
+        Given: A matching AI_REVIEWER and VIEWER subscribed to the same revoked pair,
+        When: A handover invokes the shared operator revalidation helper,
+        Then: Only the reviewer is revalidated and unsubscribed while the viewer is untouched.
+        """
+        topic = "signals.kraken.BTC-USD.live"
+        ws_reviewer = MagicMock()
+        ws_reviewer.send_text = AsyncMock()
+        ws_viewer = MagicMock()
+        ws_viewer.send_text = AsyncMock()
+        reviewer = _delegate_principal(
+            user_public_id="user-reviewer",
+            operators=("op-from",),
+            role=UserRole.AI_REVIEWER,
+        )
+        viewer = AuthPrincipal(
+            username="viewer",
+            role=UserRole.VIEWER,
+            user_public_id="user-viewer",
+            operator_public_ids=["op-from"],
+        )
+        cm = _mock_connection_manager(
+            {
+                ws_reviewer: {topic},
+                ws_viewer: {topic},
+            }
+        )
+        bridge = _mock_bridge()
+        repo = _repo_with_pairs(set())
+        manager = _make_manager(
+            connection_manager=cm,
+            zmq_bridge=bridge,
+            repository_factory=lambda: repo,
+        )
+        manager.authenticated_connections[ws_reviewer] = reviewer
+        manager.authenticated_connections[ws_viewer] = viewer
+
+        await manager._handle_scope_handed_over(_make_handed_over_event())
+
+        cm.unsubscribe_client.assert_called_once_with(ws_reviewer, topic)
+        bridge.remove_subscription.assert_awaited_once_with(ws_reviewer, [topic])
+        ws_reviewer.send_text.assert_awaited_once()
+        ws_viewer.send_text.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_admin_dispatch_routes_scope_handed_over_topic(self) -> None:

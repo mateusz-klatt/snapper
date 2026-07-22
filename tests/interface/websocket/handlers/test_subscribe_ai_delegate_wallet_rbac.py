@@ -1,4 +1,4 @@
-"""AI_DELEGATE subscribe-time wallet-scope RBAC matrix.
+"""AI review-principal subscribe-time wallet-scope RBAC matrix.
 
 Authoritative truth table:
 
@@ -13,9 +13,8 @@ signals.paper.BTC-USD.my_strategy      (paper prefix pass-through)       accepte
 market.kraken.BTC-USD.ticks            (non-wallet-scoped prefix)        accepted
 =======================================================================  ========
 
-Non-AI_DELEGATE principals pass through the filter unchanged; ADMIN /
-VIEWER / OPERATOR are unaffected by this new gate regardless of their
-operator set.
+AI_REVIEWER and AI_DELEGATE principals use the filter. ADMIN / VIEWER /
+OPERATOR pass through unchanged regardless of their operator set.
 """
 
 import json
@@ -111,8 +110,32 @@ class TestAIDelegateWalletScopeFilter:
             assert denied == [topic]
 
     @pytest.mark.asyncio
-    async def test_non_ai_delegate_fast_path_passes_through(self) -> None:
-        """Every non-AI_DELEGATE role skips the filter entirely.
+    async def test_ai_reviewer_uses_wallet_scope_filter(self) -> None:
+        """AI_REVIEWER receives the same wallet-scope filtering as AI_DELEGATE.
+
+        Given: A reviewer with one allowed instrument pair and two signal topics.
+        When: The shared review-principal wallet-scope filter evaluates the topics.
+        Then: The allowed topic passes, the other is denied, and scope is queried once.
+        """
+        allowed_topic = "signals.kraken.BTC-USD.live"
+        denied_topic = "signals.kraken.ETH-USD.live"
+        repo = _repo_with_pairs({("kraken", "BTC-USD")})
+        as_of = datetime.now(UTC)
+
+        allowed, denied = await _enforce_ai_delegate_wallet_scope(
+            [allowed_topic, denied_topic],
+            _principal(UserRole.AI_REVIEWER, operators=["op-1"]),
+            repo,
+            as_of,
+        )
+
+        assert allowed == [allowed_topic]
+        assert denied == [denied_topic]
+        repo.list_scope_grant_instrument_pairs.assert_awaited_once_with(["op-1"], as_of)
+
+    @pytest.mark.asyncio
+    async def test_non_ai_review_principal_fast_path_passes_through(self) -> None:
+        """Every non-review-principal role skips the filter entirely.
 
         Verifies that VIEWER, OPERATOR, ADMIN, even without a live
         repository, never hit the scope-grant pair query — the filter

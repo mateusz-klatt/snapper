@@ -26,6 +26,7 @@ from snapper.auth.deactivation_fallback import list_inactive_user_public_ids
 from snapper.auth.deactivation_fallback import run_deactivation_fallback_loop
 from snapper.auth.deactivation_fallback import start_deactivation_fallback_task
 from snapper.auth.deactivation_fallback import stop_deactivation_fallback_task
+from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -286,7 +287,7 @@ class WebSocketAuthManager:
         if not token_data:
             return None
         delegate_public_id: str | None = None
-        if token_data.role == UserRole.AI_DELEGATE:
+        if token_data.role in AI_REVIEW_PRINCIPAL_ROLES:
             delegate_row = await repository.get_ai_delegate_by_user_public_id(
                 token_data.user_public_id
             )
@@ -300,6 +301,7 @@ class WebSocketAuthManager:
             primary_operator_public_id=token_data.primary_operator_public_id,
             active_wallet_public_id=token_data.active_wallet_public_id,
             permissions=token_data.permissions,
+            permission_scope_version=token_data.permission_scope_version,
             delegate_public_id=delegate_public_id,
         )
         return user, token_data
@@ -491,7 +493,7 @@ class WebSocketAuthManager:
         the prior :meth:`on_disconnect` so subscribers never observe a
         phantom-offline transition for a flapping delegate.
 
-        Non-delegate principals short-circuit; only AI_DELEGATE
+        Non-review principals short-circuit; AI_REVIEWER and AI_DELEGATE
         principals carry a populated ``delegate_public_id``.
         Same-delegate transitions are
         serialised through :meth:`_delegate_lock` so concurrent hooks
@@ -507,7 +509,7 @@ class WebSocketAuthManager:
                 (passed through for symmetry with future hooks; the
                 hysteresis logic itself is delegate-keyed).
             principal: Resolved principal carrying
-                ``delegate_public_id`` for AI delegates.
+                ``delegate_public_id`` for an AI review principal.
         """
         del websocket
         delegate_id = principal.delegate_public_id
@@ -599,7 +601,7 @@ class WebSocketAuthManager:
         transitions are serialised through :meth:`_delegate_lock` so
         concurrent disconnects cannot orphan a pending offline task.
 
-        Non-delegate principals short-circuit; only AI_DELEGATE
+        Non-review principals short-circuit; AI_REVIEWER and AI_DELEGATE
         principals carry a populated ``delegate_public_id``.
 
         Multi-WS-per-delegate note: the registry is delegate-keyed,
@@ -617,7 +619,7 @@ class WebSocketAuthManager:
             websocket: WebSocket connection that just dropped (passed
                 through for symmetry with future per-WS hooks).
             principal: Resolved principal carrying
-                ``delegate_public_id`` for AI delegates.
+                ``delegate_public_id`` for an AI review principal.
         """
         del websocket
         delegate_id = principal.delegate_public_id
@@ -670,7 +672,7 @@ class WebSocketAuthManager:
         transient broker hiccup cannot leak either.
 
         Args:
-            user_public_id: Owner of the AI_DELEGATE user row.
+            user_public_id: Owner of the AI review-principal user row.
             delegate_public_id: ``ai_delegates.public_id`` for the
                 disconnected WS. Caller (``on_disconnect``) MUST
                 supply a non-None value; this method is private and
@@ -741,6 +743,7 @@ class WebSocketAuthManager:
             return False
         role_hierarchy = {
             UserRole.AI_RESEARCHER: -2,
+            UserRole.AI_REVIEWER: -1,
             UserRole.AI_DELEGATE: -1,
             UserRole.VIEWER: 0,
             UserRole.OPERATOR: 1,
@@ -760,7 +763,7 @@ class WebSocketAuthManager:
         DB-backed fallback scanner when lifespan wiring provides a
         repository factory, so broker outages cannot leave existing
         sessions alive until reconnect. The scope-revoked branch
-        narrows affected AI_DELEGATE subscriptions in place without
+        narrows affected AI review-principal subscriptions in place without
         closing the WS (see ``_handle_scope_revoked``).
         Idempotent + restart-safe via `_admin_listener_lock`: a second
         call while a healthy listener is already running is a no-op
@@ -967,11 +970,11 @@ class WebSocketAuthManager:
         )
 
     async def _handle_scope_revoked(self, data: ScopeRevokedData) -> None:
-        """Mid-session revalidation for affected AI_DELEGATE connections.
+        """Mid-session revalidation for affected AI review-principal connections.
 
         Unlike ``_handle_user_deactivated`` (which closes the entire
         WS — user is gone), this handler only narrows subscriptions:
-        for each AI_DELEGATE connection whose
+        for each AI_REVIEWER or AI_DELEGATE connection whose
         ``operator_public_ids`` contains the revoked grant's operator,
         recompute the delegate's allowed ``(exchange, symbol)`` pair set
         against the post-revocation DB snapshot, then walk the client's
@@ -1010,7 +1013,7 @@ class WebSocketAuthManager:
         now = datetime.now(UTC)
         snapshot = tuple(self.authenticated_connections.items())
         for ws, principal in snapshot:
-            if principal.role != UserRole.AI_DELEGATE:
+            if principal.role not in AI_REVIEW_PRINCIPAL_ROLES:
                 continue
             if data.operator_public_id not in principal.operator_public_ids:
                 continue
@@ -1090,7 +1093,7 @@ class WebSocketAuthManager:
         event_identifier: str,
         log_prefix: str,
     ) -> None:
-        """Walk AI_DELEGATE connections whose operator set overlaps ``affected_operators``.
+        """Walk AI review-principal connections overlapping ``affected_operators``.
 
         Mirrors :meth:`_handle_scope_revoked` but accepts a set of
         operators so granted (single operator) and handed_over (two
@@ -1124,7 +1127,7 @@ class WebSocketAuthManager:
         now = datetime.now(UTC)
         snapshot = tuple(self.authenticated_connections.items())
         for ws, principal in snapshot:
-            if principal.role != UserRole.AI_DELEGATE:
+            if principal.role not in AI_REVIEW_PRINCIPAL_ROLES:
                 continue
             if not any(op in affected_operators for op in principal.operator_public_ids):
                 continue

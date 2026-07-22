@@ -156,7 +156,7 @@ but a ten-year default is a liability for tokens that may live in CI
 secret stores or IDE config.
 """
 
-PERMISSION_SCOPE_VERSION: Final[int] = 1
+PERMISSION_SCOPE_VERSION: Final[int] = 2
 """Version marker for refresh tokens carrying an intentional access scope."""
 
 

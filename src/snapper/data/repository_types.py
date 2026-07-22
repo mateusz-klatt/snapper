@@ -2675,8 +2675,9 @@ class AlertDeliveryRow(TypedDict):
 class AiDelegateRow(TypedDict):
     """Row dict for :class:`snapper.data.models.AiDelegate`.
 
-    Operational side-table FK to AI_DELEGATE-role users; holds the
-    admission counter + ``last_seen_at`` for reconnect hysteresis.
+    Operational side-table FK to AI_REVIEWER or AI_DELEGATE users;
+    holds the admission counter and ``last_seen_at`` for reconnect
+    hysteresis.
     """
 
     public_id: str

@@ -240,6 +240,46 @@ class TestSubmitAiReviewDecisionTool:
         stub.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_v1_delegate_create_scope_keeps_approval_happy_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A historical v1 delegate scope still reaches the unchanged live gate.
+
+        Given: An explicit v1 AI_DELEGATE token carrying only historical CREATE_ORDERS.
+        When: The token submits an approve decision through the MCP tool.
+        Then: The unchanged CREATE_ORDERS gate admits it and the decision succeeds.
+        """
+        stub = self._stub_submit_decision(
+            monkeypatch,
+            AiReviewDecisionResult(
+                error_code=None,
+                message="Decision recorded.",
+                status=AiReviewStatusEnum.RESOLVED_APPROVED,
+                resolution_mode=AiReviewResolutionModeEnum.PICK_ONE_PRIMARY,
+                dispatch_version=0,
+                details={"previous_status": "pending"},
+            ),
+        )
+        claims = _make_claims().model_copy(
+            update={
+                "permissions": [Permission.CREATE_ORDERS.value],
+                "permission_scope_version": 1,
+            }
+        )
+        server = _build_server(repository=AsyncMock(), claims=claims)
+
+        result = await server._tool_manager.call_tool(
+            "submit_ai_review_decision",
+            {"review_id": "rev-v1", "decision": "approve"},
+        )
+
+        envelope = _decode_call_tool_result(result)
+        assert envelope["success"] is True
+        assert envelope["error_code"] is None
+        assert envelope["details"]["status"] == "resolved_approved"
+        stub.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_idempotent_retry_keeps_iserror_false(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -370,6 +410,32 @@ class TestSubmitAiReviewDecisionTool:
         finally:
             if saved is not None:
                 ROLE_PERMISSIONS[UserRole.VIEWER] = saved
+
+    @pytest.mark.asyncio
+    async def test_ai_reviewer_remains_denied_by_live_create_orders_gate(self) -> None:
+        """D4a leaves the live decision gate unchanged for AI_REVIEWER.
+
+        Given: A v2 AI_REVIEWER token carrying its complete review-only role grant.
+        When: It invokes the submit_ai_review_decision MCP tool before cutover.
+        Then: The live CREATE_ORDERS gate raises ToolError and no approval occurs.
+        """
+        claims = _make_claims(role=UserRole.AI_REVIEWER).model_copy(
+            update={
+                "permissions": sorted(
+                    permission.value for permission in ROLE_PERMISSIONS[UserRole.AI_REVIEWER]
+                ),
+                "permission_scope_version": 2,
+            }
+        )
+        server = _build_server(repository=AsyncMock(), claims=claims)
+
+        with pytest.raises(ToolError) as exc:
+            await server._tool_manager.call_tool(
+                "submit_ai_review_decision",
+                {"review_id": "rev-reviewer", "decision": "approve"},
+            )
+
+        assert Permission.CREATE_ORDERS.value in str(exc.value)
 
     @pytest.mark.asyncio
     async def test_repository_not_initialized_yields_tool_error(self) -> None:

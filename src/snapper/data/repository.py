@@ -155,7 +155,7 @@ from snapper.application.portfolio.reconciliation_invariants import (
     validate_portfolio_reconciliation_spot_anchor_lineage,
 )
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
-from snapper.auth.domain.roles import UserRole
+from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 from snapper.core.paired_execution import compute_paired_group_key
@@ -4499,7 +4499,7 @@ class Repository(ABC):
         ``instrument_underlying_mappings`` active at ``as_of``;
         instrument-scoped grants resolve directly.
 
-        Used by the subscribe-time AI_DELEGATE wallet-scope filter
+        Used by the subscribe-time AI review-principal wallet-scope filter
         and by the admin-bus mid-session revalidation path.
         No caching — grants / mappings / symbol-exchange joins can all
         change between calls, so callers get an authoritative read.
@@ -5682,8 +5682,8 @@ class Repository(ABC):
         """Eligible AI-delegate candidates for admission control.
 
         Returns the ``ai_delegates`` rows whose users are active members of
-        ``operator_public_id`` (``users.is_active = TRUE``,
-        ``users.role = AI_DELEGATE``) and whose ``last_seen_at`` falls inside
+        ``operator_public_id`` (``users.is_active = TRUE`` and role in
+        ``AI_REVIEW_PRINCIPAL_ROLES``) and whose ``last_seen_at`` falls inside
         the heartbeat window (``as_of - heartbeat_window_seconds``,
         ``as_of``], ordered by ``last_seen_at DESC``. Pre-checks that the
         operator actually holds a matching active scope grant
@@ -5712,7 +5712,7 @@ class Repository(ABC):
         Returns:
             Eligible :class:`AiDelegateRow` rows ordered by
             ``last_seen_at DESC``. Empty when the operator has no matching
-            grant, no AI_DELEGATE members, or no live members.
+            grant, no AI review-principal members, or no live members.
         """
         ...
 
@@ -23668,7 +23668,7 @@ class SQLAlchemyRepository(Repository):
                 == UserOperatorMembership.operator_public_id,
             )
             .where(
-                User.role == UserRole.AI_DELEGATE.value,
+                User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
                 User.is_active.is_(True),
                 AiDelegate.last_seen_at.is_not(None),
                 AiDelegate.last_seen_at > threshold,
@@ -23764,7 +23764,7 @@ class SQLAlchemyRepository(Repository):
                             UserOperatorMembership.user_public_id == AiDelegate.user_public_id,
                         )
                         .where(
-                            User.role == UserRole.AI_DELEGATE.value,
+                            User.role.in_(tuple(sorted(AI_REVIEW_PRINCIPAL_ROLES))),
                             User.is_active.is_(True),
                             UserOperatorMembership.operator_public_id == operator_public_id,
                             AiDelegate.last_seen_at.is_not(None),

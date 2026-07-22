@@ -80,6 +80,18 @@ def _viewer_principal() -> AuthPrincipal:
     )
 
 
+def _reviewer_principal() -> AuthPrincipal:
+    """AI_REVIEWER principal that remains outside the live decision gate."""
+    return AuthPrincipal(
+        username="reviewer-1",
+        role=UserRole.AI_REVIEWER,
+        user_public_id="reviewer-user-1",
+        operator_public_ids=["op-1"],
+        primary_operator_public_id="op-1",
+        delegate_public_id="reviewer-row-1",
+    )
+
+
 def _create_client(
     *,
     repo: Any,
@@ -322,6 +334,22 @@ class TestSubmitDecisionRoute:
             "/api/ai-reviews/rev-1/decision",
             json=_decision_envelope(decision="approve"),
         )
+        assert response.status_code == 403
+
+    def test_ai_reviewer_remains_denied_before_live_gate_cutover(self) -> None:
+        """D4a keeps the REST decision gate on CREATE_ORDERS.
+
+        Given: An operationally recognized AI_REVIEWER with its complete role grant.
+        When: The reviewer submits an approval through the live REST route.
+        Then: The unchanged CREATE_ORDERS dependency returns HTTP 403.
+        """
+        client = _create_client(repo=AsyncMock(), principal=_reviewer_principal())
+
+        response = client.post(
+            "/api/ai-reviews/rev-reviewer/decision",
+            json=_decision_envelope(decision="approve"),
+        )
+
         assert response.status_code == 403
 
 

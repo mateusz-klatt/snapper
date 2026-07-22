@@ -816,6 +816,53 @@ class TestDelegateProliferationCap:
     """Bound delegates per operator."""
 
     @pytest.mark.asyncio
+    async def test_ai_reviewer_uses_shared_lifecycle_and_cap(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """AI_REVIEWER rows reuse delegate management and proliferation controls.
+
+        Given: A full owner quota whose first operational principal is changed to AI_REVIEWER.
+        When: The owner lists and loads that reviewer and then requests another delegate.
+        Then: Lifecycle reads include the reviewer and the shared quota still rejects the mint.
+        """
+        await _seed_owner(repo, public_id="owner-reviewer", username="reviewer-owner")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        created = []
+        for index in range(MAX_AI_DELEGATES_PER_OWNER):
+            created.append(
+                await service.create_delegate(
+                    owner=_make_owner_principal("owner-reviewer"),
+                    body=DelegateCreateBody(
+                        label=f"review-principal-{index}",
+                        caps=DelegateCapsBody(),
+                    ),
+                )
+            )
+        reviewer_public_id = created[0].delegate.public_id
+        async with repo.session() as session:
+            await session.execute(
+                _up(User)
+                .where(User.public_id == reviewer_public_id)
+                .values(role=UserRole.AI_REVIEWER.value)
+            )
+            await session.commit()
+
+        listed = await service.list_delegates(owner_public_id="owner-reviewer")
+        loaded = await service.get_delegate(
+            public_id=reviewer_public_id,
+            owner_public_id="owner-reviewer",
+        )
+
+        assert len(listed) == MAX_AI_DELEGATES_PER_OWNER
+        assert reviewer_public_id in {delegate.public_id for delegate in listed}
+        assert loaded.public_id == reviewer_public_id
+        with pytest.raises(DelegateProliferationError):
+            await service.create_delegate(
+                owner=_make_owner_principal("owner-reviewer"),
+                body=DelegateCreateBody(label="over-shared-cap", caps=DelegateCapsBody()),
+            )
+
+    @pytest.mark.asyncio
     async def test_sixth_create_raises_proliferation_error(
         self, repo: SQLAlchemyRepository
     ) -> None:

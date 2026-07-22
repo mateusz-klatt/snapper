@@ -140,6 +140,7 @@ def test_ai_delegate_has_canonical_permission_set() -> None:
         Permission.READ_SIGNALS,
         Permission.READ_SYSTEM_STATUS,
         Permission.READ_BACKTESTS,
+        Permission.SUBMIT_AI_REVIEW_DECISION,
     }
     assert ROLE_PERMISSIONS[UserRole.AI_DELEGATE] == expected
 

@@ -311,6 +311,55 @@ class TestWebSocketBearerAuth:
         repo.get_ai_delegate_by_user_public_id.assert_awaited_once_with("ai-user")
 
     @pytest.mark.asyncio
+    async def test_ai_reviewer_principal_carries_identity_and_scope_version(self) -> None:
+        """Resolve AI_REVIEWER through the shared WebSocket identity path.
+
+        Given: A v2 AI_REVIEWER bearer token with an operational delegate row,
+        When: The WebSocket session verifier projects its AuthPrincipal,
+        Then: The reviewer row identifier and permission scope version are retained.
+        """
+        now = int(datetime.now(UTC).timestamp())
+        claims = TokenClaims(
+            sub="reviewer-user",
+            username="ai-reviewer-1",
+            role=UserRole.AI_REVIEWER,
+            permissions=["submit:ai_review_decision"],
+            permission_scope_version=2,
+            exp=now + 3600,
+            iat=now,
+            jti="jti-ws-reviewer",
+            sid="sid-ws-reviewer",
+            user_public_id="reviewer-user",
+        )
+        ws = self._make_ws(headers={"authorization": "Bearer reviewer.jwt"})
+        manager = WebSocketAuthManager()
+        WebSocketAuthManager._initialized = False
+        manager.__init__()
+        repo = Mock(
+            get_ai_delegate_by_user_public_id=AsyncMock(
+                return_value={
+                    "public_id": "reviewer-row-2",
+                    "user_public_id": "reviewer-user",
+                    "last_seen_at": None,
+                    "active_reviews_count": 0,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+        )
+        with patch.object(manager, "token_manager") as token_manager_mock:
+            token_manager_mock.verify_token_with_db = AsyncMock(return_value=claims)
+            result = await manager.verify_session_cookie(ws, repo)
+
+        assert result is not None
+        principal, returned_claims = result
+        assert returned_claims is claims
+        assert principal.role == UserRole.AI_REVIEWER
+        assert principal.delegate_public_id == "reviewer-row-2"
+        assert principal.permission_scope_version == 2
+        repo.get_ai_delegate_by_user_public_id.assert_awaited_once_with("reviewer-user")
+
+    @pytest.mark.asyncio
     async def test_non_ai_delegate_role_skips_delegate_lookup(self) -> None:
         """OPERATOR / VIEWER WS upgrade -> no delegate lookup; field stays None.
 
