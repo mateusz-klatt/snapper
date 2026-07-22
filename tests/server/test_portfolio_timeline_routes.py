@@ -4,7 +4,8 @@ Exercises the ``GET /api/portfolio/pnl/series`` endpoint end to end with a mocke
 repository: the happy path and response shape, every 400 parameter guard, the
 total-work budget, bitemporal horizon, timezone coercion, wallet/mode
 consistency, extreme datetime handling, wallet-scope 403, and the 500 wrapper on
-an unexpected reconstruction failure.
+an unexpected reconstruction failure. The response checks include causal,
+instrument-identified incompleteness records, including a real multi-cause point.
 """
 
 from collections.abc import AsyncGenerator
@@ -236,14 +237,17 @@ class TestHappyPath:
         assert payload["valuation_ccy"] == "USD"
         assert payload["mark_source"] == "finalized_1m_candle_close"
         assert payload["rate_sources"] == []
-        assert payload["calc_version"] == "5A.9"
+        assert payload["calc_version"] == "5A.11"
         points = payload["points"]
         assert len(points) == 3
         assert points[0]["valuation_status"] == "complete"
+        assert points[0]["incompleteness_reasons"] == []
         assert points[0]["fee_pnl"] == -0.5
         assert points[0]["unrealized_pnl"] == 5.0
         assert points[0]["net_pnl"] == 4.5
         assert points[0]["per_instrument"][0]["instrument_public_id"] == "i1"
+        assert points[0]["per_instrument"][0]["native_symbol"] == "BTC-USD"
+        assert points[0]["per_instrument"][0]["exchange"] == "kraken"
         assert points[0]["attribution"] == [
             {
                 "origin": "system",
@@ -389,6 +393,14 @@ class TestHappyPath:
         assert point["accrual_pnl"] is None
         assert point["unrealized_pnl"] is None
         assert point["net_pnl"] is None
+        assert point["incompleteness_reasons"] == [
+            {
+                "reason": "fill_evidence_gap",
+                "withholding_tier": "untrusted",
+                "withholding_scope": "global",
+                "trigger_instrument_public_id": None,
+            }
+        ]
         assert point["attribution"] == [
             {
                 "origin": "system",
@@ -398,6 +410,69 @@ class TestHappyPath:
                 "accrual_pnl": None,
                 "unrealized_pnl": None,
             }
+        ]
+
+    def test_transports_multi_cause_instrument_reasons(self) -> None:
+        """A MARK cause and an UNTRUSTED cause retain both instrument identities."""
+        repo = _seeded_repo()
+        t0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+        repo.get_pnl_timeline_executions.return_value.append(
+            {
+                "public_id": "execution-2",
+                "instrument_public_id": "i2",
+                "exchange": "kraken",
+                "scope_sequence": 2,
+                "order_public_id": "o2",
+                "side": "buy",
+                "status": "filled",
+                "size": 1.0,
+                "price": 100.0,
+                "fee": 0.0,
+                "fee_asset": "USD",
+                "executed_at": None,
+                "timestamp": t0,
+                "exec_id": "e2",
+                "trade_id": "t2",
+            }
+        )
+        repo.get_pnl_timeline_candles = AsyncMock(return_value=[])
+        response = _create_client(repo).get(_url(**{"to": _FROM}))
+        assert response.status_code == 200
+        point = response.json()["payload"]["points"][0]
+        assert point["valuation_status"] == "incomplete"
+        assert point["incompleteness_reasons"] == [
+            {
+                "reason": "mark_unavailable",
+                "withholding_tier": "mark_incomplete",
+                "withholding_scope": "instrument",
+                "trigger_instrument_public_id": "i1",
+            },
+            {
+                "reason": "execution_price_provenance_unproven",
+                "withholding_tier": "untrusted",
+                "withholding_scope": "instrument",
+                "trigger_instrument_public_id": "i2",
+            },
+        ]
+        assert point["per_instrument"] == [
+            {
+                "instrument_public_id": "i1",
+                "native_symbol": "BTC-USD",
+                "exchange": "kraken",
+                "realized_pnl": 0.0,
+                "fee_pnl": -0.5,
+                "accrual_pnl": 0.0,
+                "unrealized_pnl": None,
+            },
+            {
+                "instrument_public_id": "i2",
+                "native_symbol": None,
+                "exchange": None,
+                "realized_pnl": None,
+                "fee_pnl": None,
+                "accrual_pnl": None,
+                "unrealized_pnl": None,
+            },
         ]
 
 

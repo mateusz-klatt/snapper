@@ -42,6 +42,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from datetime import datetime
 from datetime import timedelta
 from typing import Final
@@ -54,8 +55,11 @@ from snapper.application.portfolio.fx_rates import FxRateMap
 from snapper.application.portfolio.fx_rates import FxVenueMap
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
+from snapper.application.portfolio.pnl_timeline import MarkIncompletenessReasonMap
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import PnlAttributionContribution
+from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
+from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
 from snapper.application.portfolio.pnl_timeline import PnlInstrumentContribution
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline import PnlTimelineResult
@@ -64,6 +68,7 @@ from snapper.application.portfolio.pnl_timeline import TimelineExecution
 from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
 from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
+from snapper.application.portfolio.pnl_timeline import canonical_incompleteness_reasons
 from snapper.core.numeric import is_positive_finite
 from snapper.data.repository import Repository
 from snapper.data.repository_types import InstrumentSymbolRefRow
@@ -79,12 +84,12 @@ from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.9"
+PNL_TIMELINE_CALC_VERSION = "5A.11"
 """Reconstruction algorithm version stamped on every series response.
 
-Bumped whenever the pool replay, decomposition, or mark-resolution semantics
-change so a cached or persisted point can be told apart from a re-derivation
-under a newer contract.
+Bumped whenever the pool replay, decomposition, mark resolution, or public point
+contract changes so a cached or persisted point can be told apart from a
+re-derivation under a newer contract.
 """
 
 PNL_TIMELINE_MAX_WORK_UNITS: Final[int] = 131_040
@@ -277,8 +282,17 @@ def _to_timeline_execution(
         venues,
     )
     fee = math.nan if converted_fee is None else converted_fee
+    fee_incompleteness_reason: PnlIncompletenessReason | None = (
+        "fx_conversion_unproven"
+        if math.isfinite(row["fee"])
+        and row["fee"] != 0.0
+        and row["fee_asset"] != valuation_ccy
+        and converted_fee is None
+        else None
+    )
     raw_price = row["price"]
     price = raw_price
+    price_incompleteness_reason: PnlIncompletenessReason | None = None
     if price_currency is not None and is_positive_finite(raw_price):
         converted_price = convert_amount(
             raw_price,
@@ -289,6 +303,8 @@ def _to_timeline_execution(
             venues,
         )
         price = converted_price if is_positive_finite(converted_price) else math.nan
+        if price_currency != valuation_ccy and not is_positive_finite(converted_price):
+            price_incompleteness_reason = "fx_conversion_unproven"
     return TimelineExecution(
         order_public_id=row["order_public_id"],
         instrument_public_id=row["instrument_public_id"],
@@ -300,6 +316,8 @@ def _to_timeline_execution(
         price=price,
         fee=fee,
         fee_asset=row["fee_asset"],
+        price_incompleteness_reason=price_incompleteness_reason,
+        fee_incompleteness_reason=fee_incompleteness_reason,
     )
 
 
@@ -373,25 +391,38 @@ def _to_timeline_accrual(
         venues,
     )
     amount = math.nan if converted is None else converted
+    incompleteness_reason: PnlIncompletenessReason | None = (
+        "fx_conversion_unproven"
+        if math.isfinite(row["amount"])
+        and row["amount"] != 0.0
+        and row["amount_asset"] != valuation_ccy
+        and converted is None
+        else None
+    )
     return TimelineAccrual(
         instrument_public_id=row["instrument_public_id"],
         accrued_at=row["accrued_at"],
         amount_usd=amount,
+        incompleteness_reason=incompleteness_reason,
     )
 
 
-def _withhold_series_for_fill_gap(result: PnlTimelineResult) -> PnlTimelineResult:
+def _withhold_series_for_fill_gap(
+    result: PnlTimelineResult,
+    fill_gap_reason: PnlIncompletenessReasonEntry,
+) -> PnlTimelineResult:
     """Post-transform a built series when durable fill evidence proves a gap.
 
     A recorded-versus-consumed fill mismatch means no cumulative monetary value
     is defensible, including values from minutes before the visible execution
     prefix. Every aggregate, per-instrument, and attribution monetary field is
     therefore withheld while timestamps and contributing identities remain
-    available. A machine-readable incompleteness reason is a valuable follow-up,
-    but it requires an approved pure-engine contract change and is outside v1.
+    available. The global gap cause is added to every point's already-established
+    reasons rather than replacing independent causes from the pure replay.
 
     Args:
         result: Series built from the currently visible execution prefix.
+        fill_gap_reason: Global cause stamped by the positive evidence read.
 
     Returns:
         The same grid and metadata with every point fully untrusted.
@@ -405,9 +436,17 @@ def _withhold_series_for_fill_gap(result: PnlTimelineResult) -> PnlTimelineResul
             unrealized_pnl=None,
             net_pnl=None,
             valuation_status="incomplete",
+            incompleteness_reasons=canonical_incompleteness_reasons(
+                (
+                    *point.incompleteness_reasons,
+                    fill_gap_reason,
+                )
+            ),
             per_instrument=tuple(
                 PnlInstrumentContribution(
                     instrument_public_id=contribution.instrument_public_id,
+                    native_symbol=contribution.native_symbol,
+                    exchange=contribution.exchange,
                     realized_pnl=None,
                     fee_pnl=None,
                     accrual_pnl=None,
@@ -436,12 +475,105 @@ def _withhold_series_for_fill_gap(result: PnlTimelineResult) -> PnlTimelineResul
     )
 
 
+def _with_instrument_display_identity(
+    contribution: PnlInstrumentContribution,
+    identity: tuple[str, str] | None,
+) -> PnlInstrumentContribution:
+    """Attach one proven display identity or retain an honest null pair.
+
+    Args:
+        contribution: Pure-builder contribution to decorate.
+        identity: Proven native symbol and canonical source venue, when available.
+
+    Returns:
+        The contribution with only its display metadata replaced.
+    """
+    return replace(
+        contribution,
+        native_symbol=None if identity is None else identity[0],
+        exchange=None if identity is None else identity[1],
+    )
+
+
+def _instrument_display_identities(
+    activity_spans: Mapping[str, tuple[datetime, datetime]],
+    refs: Sequence[InstrumentSymbolRefRow],
+) -> dict[str, tuple[str, str]]:
+    """Prove display identities independently from price denomination.
+
+    Args:
+        activity_spans: Inclusive replay activity bounds keyed by instrument.
+        refs: Symbol references loaded at the response knowledge horizon.
+
+    Returns:
+        Native symbol and canonical source venue for instruments whose relevant
+        activity is continuously covered by one unanimous display projection.
+    """
+    refs_by_instrument: dict[str, list[InstrumentSymbolRefRow]] = {}
+    for ref in refs:
+        refs_by_instrument.setdefault(ref["instrument_public_id"], []).append(ref)
+    identities: dict[str, tuple[str, str]] = {}
+    for instrument_public_id, (span_start, span_end) in activity_spans.items():
+        candidates = [
+            ref
+            for ref in refs_by_instrument.get(instrument_public_id, [])
+            if ref["valid_from"] <= span_end and ref["valid_to"] > span_start
+        ]
+        display_projections = {(ref["native_symbol"], ref["exchange"]) for ref in candidates}
+        if len(display_projections) != 1:
+            continue
+        ordered = sorted(candidates, key=lambda ref: (ref["valid_from"], ref["valid_to"]))
+        coverage_start = ordered[0]["valid_from"]
+        coverage_end = ordered[0]["valid_to"]
+        merged_intervals: list[tuple[datetime, datetime]] = []
+        for ref in ordered[1:]:
+            if ref["valid_from"] > coverage_end:
+                merged_intervals.append((coverage_start, coverage_end))
+                coverage_start = ref["valid_from"]
+                coverage_end = ref["valid_to"]
+            else:
+                coverage_end = max(coverage_end, ref["valid_to"])
+        merged_intervals.append((coverage_start, coverage_end))
+        if any(start <= span_start and end > span_end for start, end in merged_intervals):
+            identities[instrument_public_id] = next(iter(display_projections))
+    return identities
+
+
+def _with_instrument_display_identities(
+    result: PnlTimelineResult,
+    identities: Mapping[str, tuple[str, str]],
+) -> PnlTimelineResult:
+    """Attach only symbol identities proven by the request's ``as_of`` refs.
+
+    Args:
+        result: Fully built, downsampled, and gap-withheld series.
+        identities: Display projections proven over the relevant replay spans.
+
+    Returns:
+        The same series values and causes with nullable contribution identities.
+    """
+    points = tuple(
+        replace(
+            point,
+            per_instrument=tuple(
+                _with_instrument_display_identity(
+                    contribution,
+                    identities.get(contribution.instrument_public_id),
+                )
+                for contribution in point.per_instrument
+            ),
+        )
+        for point in result.points
+    )
+    return replace(result, points=points)
+
+
 async def _scope_has_fill_gap(
     repo: Repository,
     wallet_public_id: str,
     mode: str,
     as_of: datetime,
-) -> bool:
+) -> PnlIncompletenessReasonEntry | None:
     """Consult durable gap evidence for every fill-bearing shard in the scope.
 
     Each shared shard cursor derives its venue prefix at ``as_of``; exact wallet
@@ -457,7 +589,8 @@ async def _scope_has_fill_gap(
         as_of: Temporal anchor for consumed execution evidence.
 
     Returns:
-        ``True`` as soon as any scoped shard has a proven fill gap.
+        The stamped global reason as soon as any scoped shard has a proven fill
+        gap, otherwise ``None``.
     """
     shard_keys = await repo.get_fill_shard_keys_for_scope(wallet_public_id, mode, as_of)
     for shard_key in shard_keys:
@@ -467,8 +600,13 @@ async def _scope_has_fill_gap(
             mode,
             as_of,
         ):
-            return True
-    return False
+            return PnlIncompletenessReasonEntry(
+                reason="fill_evidence_gap",
+                withholding_tier="untrusted",
+                withholding_scope="global",
+                trigger_instrument_public_id=None,
+            )
+    return None
 
 
 def _enforce_total_work_budget(
@@ -535,14 +673,14 @@ async def _load_mark_candles(
     return list(candles)
 
 
-def _build_marks_from_candles(
+def _build_marks_and_reasons_from_candles(
     candles: Sequence[PnlTimelineCandleRow],
     quote_by_instrument: Mapping[str, str],
     valuation_ccy: str,
     rates: FxRateMap,
     venues_by_instrument: Mapping[str, FxVenueMap],
-) -> MarkMap:
-    """Convert positive raw closes through each instrument's FX plane map.
+) -> tuple[MarkMap, MarkIncompletenessReasonMap]:
+    """Convert raw closes and retain exact caller-side FX failures.
 
     Args:
         candles: Raw finalized mark candles.
@@ -552,9 +690,11 @@ def _build_marks_from_candles(
         venues_by_instrument: Consumer-pinned planes keyed by instrument and pair.
 
     Returns:
-        Positive converted marks keyed by instrument and closing minute.
+        Positive converted marks and caller-stamped conversion failures keyed by
+        instrument and closing minute.
     """
     marks: dict[tuple[str, datetime], float | None] = {}
+    incompleteness_reasons: dict[tuple[str, datetime], PnlIncompletenessReason] = {}
     for candle in candles:
         close = candle["close"]
         if not is_positive_finite(close):
@@ -572,6 +712,26 @@ def _build_marks_from_candles(
         )
         if is_positive_finite(converted):
             marks[(instrument_public_id, mark_minute)] = converted
+        else:
+            incompleteness_reasons[(instrument_public_id, mark_minute)] = "fx_conversion_unproven"
+    return marks, incompleteness_reasons
+
+
+def _build_marks_from_candles(
+    candles: Sequence[PnlTimelineCandleRow],
+    quote_by_instrument: Mapping[str, str],
+    valuation_ccy: str,
+    rates: FxRateMap,
+    venues_by_instrument: Mapping[str, FxVenueMap],
+) -> MarkMap:
+    """Convert positive raw closes through each instrument's FX plane map."""
+    marks, _ = _build_marks_and_reasons_from_candles(
+        candles,
+        quote_by_instrument,
+        valuation_ccy,
+        rates,
+        venues_by_instrument,
+    )
     return marks
 
 
@@ -668,10 +828,14 @@ def _merge_price_ref_intervals(
     return merged
 
 
+type _InstrumentIncompletenessReasons = dict[str, set[PnlIncompletenessReason]]
+"""Caller-stamped causal reasons keyed by the affected instrument."""
+
+
 def _partition_series_price_refs(
     instrument_spans: Mapping[str, tuple[datetime, datetime]],
     refs: Sequence[InstrumentSymbolRefRow],
-) -> tuple[list[InstrumentSymbolRefRow], set[str]]:
+) -> tuple[list[InstrumentSymbolRefRow], _InstrumentIncompletenessReasons]:
     """Partition instrument spans by convertible price-currency proof.
 
     Every version known at the response horizon must agree on one base currency
@@ -688,13 +852,14 @@ def _partition_series_price_refs(
 
     Returns:
         Uniquely proven convertible references in input-instrument order and the
-        instrument identities whose execution-price currency is untrusted.
+        exact stamped reasons for instruments whose execution-price currency is
+        untrusted.
     """
     refs_by_instrument: dict[str, list[InstrumentSymbolRefRow]] = {}
     for ref in refs:
         refs_by_instrument.setdefault(ref["instrument_public_id"], []).append(ref)
     trusted_refs: list[InstrumentSymbolRefRow] = []
-    untrusted_instruments: set[str] = set()
+    untrusted_reasons: _InstrumentIncompletenessReasons = {}
     for instrument_public_id, (span_start, span_end) in instrument_spans.items():
         instrument_refs = refs_by_instrument.get(instrument_public_id, [])
         base_currencies = {ref["base_currency"] for ref in instrument_refs}
@@ -716,8 +881,10 @@ def _partition_series_price_refs(
         ):
             trusted_refs.append(candidates[0])
         else:
-            untrusted_instruments.add(instrument_public_id)
-    return trusted_refs, untrusted_instruments
+            untrusted_reasons.setdefault(instrument_public_id, set()).add(
+                "execution_price_provenance_unproven"
+            )
+    return trusted_refs, untrusted_reasons
 
 
 def _partition_price_refs(
@@ -740,10 +907,11 @@ def _partition_price_refs(
         Direct-currency references and every instrument that fails either the
         shared identity proof or the marker-specific valuation gate.
     """
-    trusted_refs, untrusted_instruments = _partition_series_price_refs(
+    trusted_refs, untrusted_reasons = _partition_series_price_refs(
         instrument_spans,
         refs,
     )
+    untrusted_instruments = set(untrusted_reasons)
     direct_refs: list[InstrumentSymbolRefRow] = []
     for ref in trusted_refs:
         if ref["quote_currency"] == valuation_ccy:
@@ -756,7 +924,7 @@ def _partition_price_refs(
 def _partition_series_execution_price_refs(
     execution_rows: Sequence[PnlTimelineExecutionRow],
     refs: Sequence[InstrumentSymbolRefRow],
-) -> tuple[list[InstrumentSymbolRefRow], set[str]]:
+) -> tuple[list[InstrumentSymbolRefRow], _InstrumentIncompletenessReasons]:
     """Prove convertible execution prices over complete instrument spans.
 
     The shared series proof establishes one non-null quote and one unchanged
@@ -769,7 +937,8 @@ def _partition_series_execution_price_refs(
 
     Returns:
         References whose quote and venue can be converted safely, and the
-        instruments whose denomination or venue remains untrusted.
+        stamped per-instrument reasons whose denomination or venue remains
+        untrusted.
     """
     spans: dict[str, tuple[datetime, datetime]] = {}
     for row in execution_rows:
@@ -783,18 +952,20 @@ def _partition_series_execution_price_refs(
                 min(existing[0], event_time),
                 max(existing[1], event_time),
             )
-    trusted_refs, untrusted_instruments = _partition_series_price_refs(spans, refs)
+    trusted_refs, untrusted_reasons = _partition_series_price_refs(spans, refs)
     trusted_by_instrument = {ref["instrument_public_id"]: ref for ref in trusted_refs}
     for row in execution_rows:
         instrument_public_id = row["instrument_public_id"]
         ref = trusted_by_instrument.get(instrument_public_id)
         if ref is not None and row["exchange"] != ref["instrument_exchange"]:
-            untrusted_instruments.add(instrument_public_id)
-    if untrusted_instruments:
+            untrusted_reasons.setdefault(instrument_public_id, set()).add(
+                "execution_price_provenance_unproven"
+            )
+    if untrusted_reasons:
         trusted_refs = [
-            ref for ref in trusted_refs if ref["instrument_public_id"] not in untrusted_instruments
+            ref for ref in trusted_refs if ref["instrument_public_id"] not in untrusted_reasons
         ]
-    return trusted_refs, untrusted_instruments
+    return trusted_refs, untrusted_reasons
 
 
 def _partition_execution_price_refs(
@@ -814,10 +985,11 @@ def _partition_execution_price_refs(
         every fill, and the instruments whose execution-price denomination or
         venue remains untrusted.
     """
-    trusted_refs, untrusted_instruments = _partition_series_execution_price_refs(
+    trusted_refs, untrusted_reasons = _partition_series_execution_price_refs(
         execution_rows,
         refs,
     )
+    untrusted_instruments = set(untrusted_reasons)
     direct_refs: list[InstrumentSymbolRefRow] = []
     for ref in trusted_refs:
         if ref["quote_currency"] == valuation_ccy:
@@ -1566,7 +1738,7 @@ async def build_wallet_pnl_series(
         ValueError: When ``granularity`` is not a supported value (surfaced by
             the pure builder).
     """
-    fill_gap = await _scope_has_fill_gap(repo, wallet_public_id, mode, as_of)
+    fill_gap_reason = await _scope_has_fill_gap(repo, wallet_public_id, mode, as_of)
     loaded_execution_rows = (
         await repo.get_pnl_timeline_executions(wallet_public_id, mode, as_of)
         if execution_rows is None
@@ -1576,15 +1748,18 @@ async def build_wallet_pnl_series(
     lineage_rows = await repo.get_pnl_timeline_execution_lineage(order_public_ids, as_of)
     lineage = _build_execution_lineage(lineage_rows)
     accrual_rows = await repo.get_accruals_for_pnl(wallet_public_id, mode, as_of)
-    instrument_ids = list(
+    execution_instrument_ids = list(
         dict.fromkeys(row["instrument_public_id"] for row in loaded_execution_rows)
     )
-    work_instrument_ids = set(instrument_ids)
-    work_instrument_ids.update(row["instrument_public_id"] for row in accrual_rows)
-    _enforce_total_work_budget(from_time, to_time, len(work_instrument_ids))
+    instrument_ids = list(
+        dict.fromkeys(
+            execution_instrument_ids + [row["instrument_public_id"] for row in accrual_rows]
+        )
+    )
+    _enforce_total_work_budget(from_time, to_time, len(instrument_ids))
     refs = await repo.get_instrument_symbol_refs(instrument_ids, as_of)
     replayed_execution_rows = [row for row in loaded_execution_rows if row["timestamp"] <= to_time]
-    trusted_refs, untrusted_price_instruments = _partition_series_execution_price_refs(
+    trusted_refs, untrusted_price_reasons_by_instrument = _partition_series_execution_price_refs(
         replayed_execution_rows,
         refs,
     )
@@ -1603,6 +1778,23 @@ async def build_wallet_pnl_series(
         row for row in replayed_execution_rows if row["instrument_public_id"] in trusted_instruments
     ]
     replayed_accrual_rows = [row for row in accrual_rows if row["accrued_at"] <= to_time]
+    display_activity_spans: dict[str, tuple[datetime, datetime]] = {}
+    display_activity = [
+        (row["instrument_public_id"], row["timestamp"]) for row in replayed_execution_rows
+    ]
+    display_activity.extend(
+        (row["instrument_public_id"], row["accrued_at"]) for row in replayed_accrual_rows
+    )
+    for instrument_public_id, activity_time in display_activity:
+        existing = display_activity_spans.get(instrument_public_id)
+        if existing is None:
+            display_activity_spans[instrument_public_id] = (activity_time, activity_time)
+        else:
+            display_activity_spans[instrument_public_id] = (
+                min(existing[0], activity_time),
+                max(existing[1], activity_time),
+            )
+    display_identities = _instrument_display_identities(display_activity_spans, refs)
     mark_requirements = _mark_fx_minutes(
         mark_candles,
         loaded_execution_rows,
@@ -1633,7 +1825,7 @@ async def build_wallet_pnl_series(
         as_of,
         valuation_ccy,
     )
-    marks = _build_marks_from_candles(
+    marks, mark_incompleteness_reasons = _build_marks_and_reasons_from_candles(
         mark_candles,
         quote_by_instrument,
         valuation_ccy,
@@ -1672,10 +1864,15 @@ async def build_wallet_pnl_series(
         window,
         opening=None,
         lineage=lineage,
-        untrusted_price_instruments=untrusted_price_instruments,
+        untrusted_price_reasons_by_instrument=untrusted_price_reasons_by_instrument,
+        mark_incompleteness_reasons=mark_incompleteness_reasons,
     )
-    if fill_gap:
-        result = _withhold_series_for_fill_gap(result)
+    if fill_gap_reason is not None:
+        result = _withhold_series_for_fill_gap(result, fill_gap_reason)
+    result = _with_instrument_display_identities(
+        result,
+        display_identities,
+    )
     rate_sources = tuple(
         PnlFxRateSource(
             source_currency=second if first == valuation_ccy else first,

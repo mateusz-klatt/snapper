@@ -19,6 +19,7 @@ from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.pnl_timeline import AttributionKey
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import OpeningPosition
+from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
@@ -26,9 +27,12 @@ from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
 from snapper.application.portfolio.pnl_timeline import TimelineOpening
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
 from snapper.application.portfolio.pnl_timeline import _allocate_by_weights
+from snapper.application.portfolio.pnl_timeline import _Pool
 from snapper.application.portfolio.pnl_timeline import _reconcile_weights
+from snapper.application.portfolio.pnl_timeline import _value_point
 from snapper.application.portfolio.pnl_timeline import _values_with_residue
 from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
+from snapper.application.portfolio.pnl_timeline import canonical_incompleteness_reasons
 
 _T0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
 
@@ -91,6 +95,244 @@ def _assert_exact_attribution_sums(point: PnlTimelinePoint) -> None:
     assert sum(value for value in fees if value is not None) == point.fee_pnl
     assert sum(value for value in accruals if value is not None) == point.accrual_pnl
     assert sum(value for value in unrealized if value is not None) == point.unrealized_pnl
+
+
+def _reason_rows(point: PnlTimelinePoint) -> list[tuple[str, str, str, str | None]]:
+    """Project structured point reasons into concise assertion rows."""
+    return [
+        (
+            entry.reason,
+            entry.withholding_tier,
+            entry.withholding_scope,
+            entry.trigger_instrument_public_id,
+        )
+        for entry in point.incompleteness_reasons
+    ]
+
+
+class TestMachineReadableIncompletenessReasons:
+    """Pin causal threading, canonical form, and reason/status equivalence."""
+
+    def test_domain_rejects_both_status_reason_mismatches(self) -> None:
+        """Complete-with-reason and incomplete-without-reason both fail loudly."""
+        reason = PnlIncompletenessReasonEntry(
+            reason="before_activation",
+            withholding_tier="untrusted",
+            withholding_scope="global",
+            trigger_instrument_public_id=None,
+        )
+        with pytest.raises(ValueError, match="complete point cannot carry"):
+            PnlTimelinePoint(
+                point_time=_m(0),
+                realized_pnl=None,
+                fee_pnl=None,
+                accrual_pnl=None,
+                unrealized_pnl=None,
+                net_pnl=None,
+                valuation_status="complete",
+                incompleteness_reasons=(reason,),
+                per_instrument=(),
+                attribution=(),
+            )
+        with pytest.raises(ValueError, match="incomplete point must carry"):
+            PnlTimelinePoint(
+                point_time=_m(0),
+                realized_pnl=None,
+                fee_pnl=None,
+                accrual_pnl=None,
+                unrealized_pnl=None,
+                net_pnl=None,
+                valuation_status="incomplete",
+                incompleteness_reasons=(),
+                per_instrument=(),
+                attribution=(),
+            )
+
+    def test_domain_rejects_noncanonical_and_instrumentless_reasons(self) -> None:
+        """Instrument scope needs identity and point reasons must be sorted and unique."""
+        with pytest.raises(ValueError, match="requires a triggering instrument"):
+            PnlIncompletenessReasonEntry(
+                reason="mark_unavailable",
+                withholding_tier="mark_incomplete",
+                withholding_scope="instrument",
+                trigger_instrument_public_id=None,
+            )
+        first = PnlIncompletenessReasonEntry(
+            reason="execution_size_invalid",
+            withholding_tier="untrusted",
+            withholding_scope="instrument",
+            trigger_instrument_public_id="I2",
+        )
+        second = PnlIncompletenessReasonEntry(
+            reason="before_activation",
+            withholding_tier="untrusted",
+            withholding_scope="global",
+            trigger_instrument_public_id=None,
+        )
+        third = PnlIncompletenessReasonEntry(
+            reason="fx_conversion_unproven",
+            withholding_tier="untrusted",
+            withholding_scope="instrument",
+            trigger_instrument_public_id="I1",
+        )
+        fourth = PnlIncompletenessReasonEntry(
+            reason="mark_unavailable",
+            withholding_tier="mark_incomplete",
+            withholding_scope="instrument",
+            trigger_instrument_public_id="I1",
+        )
+        fifth = PnlIncompletenessReasonEntry(
+            reason="execution_price_invalid",
+            withholding_tier="mark_incomplete",
+            withholding_scope="instrument",
+            trigger_instrument_public_id="I1",
+        )
+        with pytest.raises(ValueError, match="deduplicated and sorted"):
+            PnlTimelinePoint(
+                point_time=_m(0),
+                realized_pnl=None,
+                fee_pnl=None,
+                accrual_pnl=None,
+                unrealized_pnl=None,
+                net_pnl=None,
+                valuation_status="incomplete",
+                incompleteness_reasons=(first, second, first),
+                per_instrument=(),
+                attribution=(),
+            )
+        assert canonical_incompleteness_reasons((first, third, fourth, second, fifth, first)) == (
+            second,
+            fifth,
+            fourth,
+            third,
+            first,
+        )
+
+    def test_mark_and_untrusted_instruments_coexist_without_precedence(self) -> None:
+        """A missing mark on A and invalid close on B remain two causal entries."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0),
+            _exec("I2", 2, 0, "buy", 1.0, 50.0),
+            _exec("I2", 3, 1, "sell", 1.0, float("nan")),
+        )
+        point = build_pnl_timeline(executions, (), {}, _window(1, 1)).points[0]
+        assert _reason_rows(point) == [
+            ("mark_unavailable", "mark_incomplete", "instrument", "I1"),
+            ("execution_price_invalid", "untrusted", "instrument", "I2"),
+        ]
+        first, second = point.per_instrument
+        assert first.instrument_public_id == "I1"
+        assert first.realized_pnl == 0.0
+        assert first.unrealized_pnl is None
+        assert second.instrument_public_id == "I2"
+        assert second.realized_pnl is None
+
+    def test_invalid_close_preserves_distinct_preexisting_basis_cause(self) -> None:
+        """A direct bad close does not erase an earlier FX-unprovable entry basis."""
+        opening = TimelineExecution(
+            instrument_public_id="I1",
+            exchange="kraken",
+            scope_sequence=1,
+            event_time=_m(0),
+            side="buy",
+            size=1.0,
+            price=float("nan"),
+            fee=0.0,
+            fee_asset="USD",
+            order_public_id="order-I1-1",
+            price_incompleteness_reason="fx_conversion_unproven",
+        )
+        closing = _exec("I1", 2, 1, "sell", 1.0, float("nan"))
+        result = build_pnl_timeline(
+            (opening, closing),
+            (),
+            {("I1", _m(0)): 100.0},
+            _window(0, 1),
+        )
+        assert _reason_rows(result.points[0]) == [
+            ("fx_conversion_unproven", "mark_incomplete", "instrument", "I1")
+        ]
+        assert _reason_rows(result.points[1]) == [
+            ("execution_price_invalid", "untrusted", "instrument", "I1"),
+            ("fx_conversion_unproven", "untrusted", "instrument", "I1"),
+        ]
+
+    def test_valid_close_of_bad_basis_reports_only_the_root_cause(self) -> None:
+        """Synthetic NaN realization cannot create a derivative cumulative reason."""
+        opening = TimelineExecution(
+            instrument_public_id="I1",
+            exchange="kraken",
+            scope_sequence=1,
+            event_time=_m(0),
+            side="buy",
+            size=1.0,
+            price=float("nan"),
+            fee=0.0,
+            fee_asset="USD",
+            order_public_id="order-I1-1",
+            price_incompleteness_reason="fx_conversion_unproven",
+        )
+        closing = _exec("I1", 2, 1, "sell", 1.0, 110.0)
+        point = build_pnl_timeline((opening, closing), (), {}, _window(1, 1)).points[0]
+        assert _reason_rows(point) == [("fx_conversion_unproven", "untrusted", "instrument", "I1")]
+
+    def test_global_early_return_keeps_latched_untrusted_only(self) -> None:
+        """Pre-activation carries a latched size cause but does not inspect marks."""
+        opening = TimelineOpening(
+            positions={"I2": OpeningPosition(position_qty=1.0, entry_price=100.0)},
+            opening_unrealized_value=0.0,
+            t0=_m(1),
+        )
+        execution = _exec("I1", 1, 0, "buy", -1.0, 100.0)
+        point = build_pnl_timeline((execution,), (), {}, _window(0, 0), opening).points[0]
+        assert _reason_rows(point) == [
+            ("before_activation", "untrusted", "global", None),
+            ("execution_size_invalid", "untrusted", "instrument", "I1"),
+        ]
+
+    def test_downsampling_keeps_only_endpoint_reasons(self) -> None:
+        """A hidden missing-mark minute cannot contaminate a complete endpoint."""
+        execution = _exec("I1", 1, 0, "buy", 1.0, 100.0)
+        marks: MarkMap = {
+            ("I1", _m(1)): 101.0,
+            ("I1", _m(2)): 102.0,
+            ("I1", _m(3)): 103.0,
+            ("I1", _m(4)): 104.0,
+        }
+        raw = build_pnl_timeline((execution,), (), marks, _window(0, 4))
+        sampled = build_pnl_timeline((execution,), (), marks, _window(0, 4, "5m"))
+        assert _reason_rows(raw.points[0]) == [
+            ("mark_unavailable", "mark_incomplete", "instrument", "I1")
+        ]
+        assert raw.points[4].valuation_status == "complete"
+        assert raw.points[4].incompleteness_reasons == ()
+        assert sampled.points == (raw.points[4],)
+
+    def test_unstamped_unavailable_basis_fails_loudly(self) -> None:
+        """A future basis path cannot silently invent a fallback reason."""
+        with pytest.raises(ValueError, match="requires a stamped causal reason"):
+            _value_point(
+                _m(0),
+                {"I1": _Pool(position_qty=1.0, entry_price=None)},
+                {},
+                {("I1", _m(0)): 100.0},
+                ["I1"],
+                [],
+                {},
+                {},
+                {},
+                {},
+                {},
+                {},
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                (),
+                {},
+                {},
+                {},
+            )
 
 
 class TestAttribution:
@@ -378,6 +620,9 @@ class TestAttribution:
         assert all(bucket.fee_pnl is None for bucket in point.attribution)
         assert all(bucket.accrual_pnl is None for bucket in point.attribution)
         assert all(bucket.unrealized_pnl is None for bucket in point.attribution)
+        assert _reason_rows(point) == [
+            ("attribution_reconciliation_failed", "untrusted", "global", None)
+        ]
 
     def test_reversed_cancellation_cannot_transport_fee_residue(self) -> None:
         """Large cancellation cannot fabricate a zero-fee final bucket."""
@@ -423,6 +668,9 @@ class TestAttribution:
         assert point.valuation_status == "incomplete"
         assert point.unrealized_pnl is None
         assert all(bucket.unrealized_pnl is None for bucket in point.attribution)
+        assert _reason_rows(point) == [
+            ("attribution_reconciliation_failed", "untrusted", "global", None)
+        ]
 
     def test_adjacent_final_float_can_absorb_residue_exactly(self) -> None:
         """The final key takes a one-ULP correction when direct subtraction differs."""
@@ -560,6 +808,7 @@ class TestIncompleteMarks:
         assert point.attribution[0].fee_pnl == pytest.approx(-0.5)
         assert point.attribution[0].accrual_pnl == 0.0
         assert point.attribution[0].unrealized_pnl is None
+        assert _reason_rows(point) == [("mark_unavailable", "mark_incomplete", "instrument", "I1")]
 
     def test_none_valued_mark_is_treated_as_absent(self) -> None:
         """An explicit ``None`` mark is the same as a missing one."""
@@ -595,6 +844,36 @@ class TestOpeningAnchor:
         marks: MarkMap = {("I1", _m(0)): 110.0}
         result = build_pnl_timeline((), (), marks, _window(0, 0), opening=opening)
         assert result.points[0].valuation_status == "incomplete"
+
+    def test_nonfinite_activation_baseline_stamps_global_cause(self) -> None:
+        """The baseline finiteness gate carries its exact global reason."""
+        opening = TimelineOpening(
+            positions={},
+            opening_unrealized_value=float("nan"),
+            t0=_m(0),
+        )
+        point = build_pnl_timeline((), (), {}, _window(0, 0), opening=opening).points[0]
+        assert _reason_rows(point) == [
+            ("activation_baseline_non_finite", "untrusted", "global", None)
+        ]
+
+    def test_nonfinite_seeded_entry_stamps_cost_basis_cause(self) -> None:
+        """A held finite-quantity seed retains its detected unusable basis cause."""
+        opening = TimelineOpening(
+            positions={"I1": OpeningPosition(position_qty=1.0, entry_price=float("nan"))},
+            opening_unrealized_value=0.0,
+            t0=_m(0),
+        )
+        point = build_pnl_timeline(
+            (),
+            (),
+            {("I1", _m(0)): 100.0},
+            _window(0, 0),
+            opening,
+        ).points[0]
+        assert _reason_rows(point) == [
+            ("cost_basis_unavailable", "mark_incomplete", "instrument", "I1")
+        ]
 
 
 class TestShortSide:
@@ -659,6 +938,9 @@ class TestRegressionGuard:
         assert result.points[1].accrual_pnl is None
         assert result.points[1].net_pnl is None
         assert result.points[1].per_instrument == ()
+        assert _reason_rows(result.points[1]) == [
+            ("scope_order_regression", "untrusted", "global", "I1")
+        ]
 
     def test_unshadowed_minutes_stay_complete(self) -> None:
         """Minutes outside the shadow window value normally after the clamp."""
@@ -743,7 +1025,7 @@ class TestUntrustedCumulatives:
             accruals,
             marks,
             _window(0, 0),
-            untrusted_price_instruments={"I2"},
+            untrusted_price_reasons_by_instrument={"I2": {"execution_price_provenance_unproven"}},
         ).points[0]
         contributions = {
             contribution.instrument_public_id: contribution for contribution in point.per_instrument
@@ -770,6 +1052,14 @@ class TestUntrustedCumulatives:
             and bucket.unrealized_pnl is None
             for bucket in point.attribution
         )
+        assert _reason_rows(point) == [
+            (
+                "execution_price_provenance_unproven",
+                "untrusted",
+                "instrument",
+                "I2",
+            )
+        ]
 
     def test_nonfinite_instrument_cumulative_preserves_finite_peer(self) -> None:
         """An attributable NaN preserves its peer while aggregate overflow stays global."""
@@ -795,6 +1085,7 @@ class TestUntrustedCumulatives:
         assert point.accrual_pnl is None
         assert point.unrealized_pnl is None
         assert point.net_pnl is None
+        assert _reason_rows(point) == [("cumulative_non_finite", "untrusted", "instrument", "I2")]
         overflow_executions = (
             _exec("I1", 1, 0, "buy", 0.0, 100.0, fee=-1e308),
             _exec("I2", 2, 0, "buy", 0.0, 100.0, fee=-1e308),
@@ -812,6 +1103,9 @@ class TestUntrustedCumulatives:
             and contribution.unrealized_pnl is None
             for contribution in overflow_point.per_instrument
         )
+        assert _reason_rows(overflow_point) == [
+            ("cumulative_non_finite", "untrusted", "global", None)
+        ]
 
     def test_unprovable_close_preserves_finite_peer(self) -> None:
         """An invalid reducing price taints only its own instrument contribution."""
@@ -857,6 +1151,9 @@ class TestUntrustedCumulatives:
         assert all(point.valuation_status == "incomplete" for point in result.points)
         assert result.points[0].realized_pnl is None
         assert result.points[0].net_pnl is None
+        assert _reason_rows(result.points[0]) == [
+            ("cost_basis_unavailable", "untrusted", "instrument", "I1")
+        ]
 
     def test_unknown_seeded_basis_realization_permanently_taints(self) -> None:
         """Selling unknown-basis inventory taints realized for the rest of the series.
@@ -874,6 +1171,9 @@ class TestUntrustedCumulatives:
         result = build_pnl_timeline(executions, (), {}, _window(), opening)
         assert all(point.valuation_status == "incomplete" for point in result.points)
         assert result.points[5].realized_pnl is None
+        assert _reason_rows(result.points[5]) == [
+            ("cost_basis_unavailable", "untrusted", "instrument", "I1")
+        ]
 
     def test_unknown_basis_add_stays_untrusted(self) -> None:
         """Adding to unknown-basis inventory keeps the position untrusted.
@@ -968,6 +1268,7 @@ class TestUntrustedEdgeCases:
         assert point.attribution[0].fee_pnl is None
         assert point.attribution[0].accrual_pnl is None
         assert point.attribution[0].unrealized_pnl is None
+        assert _reason_rows(point) == [("cumulative_non_finite", "untrusted", "instrument", "I1")]
 
     def test_nan_entry_price_is_mark_incomplete(self) -> None:
         """A position opened at a NaN price withholds only its unrealized."""
@@ -978,6 +1279,9 @@ class TestUntrustedEdgeCases:
         assert point.valuation_status == "incomplete"
         assert point.unrealized_pnl is None
         assert point.realized_pnl == 0.0
+        assert _reason_rows(point) == [
+            ("execution_price_invalid", "mark_incomplete", "instrument", "I1")
+        ]
 
     def test_overflow_unrealized_is_mark_incomplete(self) -> None:
         """A finite mark and entry whose difference overflows withhold the unrealized."""
@@ -988,6 +1292,9 @@ class TestUntrustedEdgeCases:
         assert point.valuation_status == "incomplete"
         assert point.unrealized_pnl is None
         assert point.realized_pnl == 0.0
+        assert _reason_rows(point) == [
+            ("unrealized_non_finite", "mark_incomplete", "instrument", "I1")
+        ]
 
 
 class TestActivationBoundary:
@@ -1012,6 +1319,9 @@ class TestActivationBoundary:
         assert result.points[0].net_pnl is None
         assert result.points[2].valuation_status == "complete"
         assert result.points[2].net_pnl == pytest.approx(0.0)
+        assert _reason_rows(result.points[0]) == [
+            ("before_activation", "untrusted", "global", None)
+        ]
 
 
 class TestCorruptInputGuards:
@@ -1031,12 +1341,34 @@ class TestCorruptInputGuards:
         result = build_pnl_timeline((), (), {("I1", _m(0)): 110.0}, _window(), opening)
         assert all(point.valuation_status == "incomplete" for point in result.points)
         assert result.points[0].realized_pnl is None
+        assert _reason_rows(result.points[0]) == [
+            ("seed_quantity_non_finite", "untrusted", "instrument", "I1")
+        ]
 
     def test_negative_fill_size_is_untrusted(self) -> None:
         """A negative fill size is tainted, not sign-inverted into a short."""
         executions = (_exec("I1", 1, 0, "buy", -1.0, 100.0),)
         result = build_pnl_timeline(executions, (), {("I1", _m(0)): 90.0}, _window())
         assert all(point.valuation_status == "incomplete" for point in result.points)
+        assert _reason_rows(result.points[0]) == [
+            ("execution_size_invalid", "untrusted", "instrument", "I1")
+        ]
+
+    def test_replay_entry_arithmetic_failure_stamps_cost_basis_cause(self) -> None:
+        """Finite fill inputs whose VWAP is unusable cannot escape without a cause."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1e308, 1e308),
+            _exec("I1", 2, 0, "buy", 1e308, 1e308),
+        )
+        point = build_pnl_timeline(
+            executions,
+            (),
+            {("I1", _m(0)): 1e308},
+            _window(0, 0),
+        ).points[0]
+        assert _reason_rows(point) == [
+            ("cost_basis_unavailable", "mark_incomplete", "instrument", "I1")
+        ]
 
     def test_aggregate_unrealized_overflow_is_incomplete(self) -> None:
         """Finite per-instrument unrealizeds that overflow when summed withhold net.
@@ -1057,12 +1389,32 @@ class TestCorruptInputGuards:
             ("I3", _m(0)): 1.0,
             ("I4", _m(0)): 1.0,
         }
-        result = build_pnl_timeline(executions, (), marks, _window(0, 0))
+        lineage = {
+            execution.order_public_id: TimelineExecutionLineage(
+                "strategy",
+                None,
+                f"signal-{index}",
+                "live",
+                f"strategy-{index}",
+            )
+            for index, execution in enumerate(executions)
+        }
+        result = build_pnl_timeline(
+            executions,
+            (),
+            marks,
+            _window(0, 0),
+            lineage=lineage,
+        )
         point = result.points[0]
         assert point.valuation_status == "incomplete"
         assert point.unrealized_pnl is None
         assert point.net_pnl is None
         assert point.realized_pnl == 0.0
+        assert _reason_rows(point) == [
+            ("net_non_finite", "mark_incomplete", "global", None),
+            ("unrealized_non_finite", "mark_incomplete", "global", None),
+        ]
 
     def test_net_overflow_from_finite_components_is_incomplete(self) -> None:
         """A finite realized and a finite unrealized whose sum overflows withhold net."""
@@ -1078,6 +1430,7 @@ class TestCorruptInputGuards:
         assert point.realized_pnl == pytest.approx(1e308)
         assert point.net_pnl is None
         assert point.unrealized_pnl is None
+        assert _reason_rows(point) == [("net_non_finite", "mark_incomplete", "global", None)]
 
     def test_per_instrument_fee_overflow_is_untrusted(self) -> None:
         """Interleaved fees keep the aggregate finite while one instrument overflows.
@@ -1122,3 +1475,26 @@ class TestCorruptInputGuards:
         assert point.fee_pnl is None
         assert {bucket.origin for bucket in point.attribution} == {"manual", "system"}
         assert all(bucket.fee_pnl is None for bucket in point.attribution)
+        assert _reason_rows(point) == [
+            ("attribution_value_non_finite", "untrusted", "global", None)
+        ]
+
+    def test_unrealized_attribution_overflow_names_triggering_instrument(self) -> None:
+        """Finite instrument values can overflow one bucket and retain its trigger."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 1.0),
+            _exec("I2", 2, 0, "buy", 1.0, 1.0),
+        )
+        marks: MarkMap = {
+            ("I1", _m(0)): 1e308,
+            ("I2", _m(0)): 1e308,
+        }
+        point = build_pnl_timeline(executions, (), marks, _window(0, 0)).points[0]
+        assert _reason_rows(point) == [
+            (
+                "attribution_value_non_finite",
+                "mark_incomplete",
+                "instrument",
+                "I2",
+            )
+        ]

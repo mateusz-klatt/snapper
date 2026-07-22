@@ -8,18 +8,40 @@ valuation currency, mark source, pinned FX rate sources, and the reconstruction
 ``calc_version``).
 Every monetary field is ``float | None`` so an incomplete point (a missing mark,
 or untrusted cumulatives) is transported honestly as ``null`` rather than a
-fabricated zero (checklist #7 / #10).
+fabricated zero (checklist #7 / #10). Every incomplete point also carries the
+closed causal records stamped by its withholding sites.
 """
 
 from datetime import datetime
 from typing import Literal
+from typing import Self
+
+from pydantic import model_validator
 
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.application.portfolio.pnl_timeline import (
+    PnlIncompletenessReason as DomainPnlIncompletenessReason,
+)
+from snapper.application.portfolio.pnl_timeline import (
+    PnlWithholdingScope as DomainPnlWithholdingScope,
+)
+from snapper.application.portfolio.pnl_timeline import (
+    PnlWithholdingTier as DomainPnlWithholdingTier,
+)
 
 type PnlValuationStatus = Literal["complete", "incomplete"]
 """Whether a point's mark-to-market valuation is trustworthy or withheld."""
+
+type PnlIncompletenessReason = DomainPnlIncompletenessReason
+"""Closed transport taxonomy for why a P&L point was withheld."""
+
+type PnlWithholdingTier = DomainPnlWithholdingTier
+"""Closed transport tier for a withholding cause."""
+
+type PnlWithholdingScope = DomainPnlWithholdingScope
+"""Closed transport scope for a withholding cause."""
 
 type PnlAttributionOrigin = Literal["manual", "plan", "system", "unattributed"]
 """Proven initiating origin for one composite attribution bucket."""
@@ -28,15 +50,40 @@ type PnlMarkerOutcome = Literal["executed", "rejected", "no_fill"]
 """Observable execution outcome carried by a timeline decision marker."""
 
 
+class PnlIncompletenessReasonData(StrictBody):
+    """One causal reason stamped where a point value was withheld.
+
+    Instrument-scoped causes always identify the triggering instrument. Global
+    causes retain an instrument only when the detection site proves one, such as
+    the instrument whose scope-order regression shadows a minute.
+    """
+
+    reason: PnlIncompletenessReason
+    withholding_tier: PnlWithholdingTier
+    withholding_scope: PnlWithholdingScope
+    trigger_instrument_public_id: str | None
+
+    @model_validator(mode="after")
+    def _require_instrument_identity(self) -> Self:
+        """Reject instrument-scoped causes that omit their proven identity."""
+        if self.withholding_scope == "instrument" and self.trigger_instrument_public_id is None:
+            raise ValueError("instrument-scoped incompleteness requires a triggering instrument")
+        return self
+
+
 class PnlInstrumentContributionData(StrictBody):
     """One instrument's contribution to a series point.
 
-    Every field is ``None`` together when the point's cumulatives are untrusted;
-    ``unrealized_pnl`` alone is ``None`` when the instrument is held but has no
-    mark or seeded entry for that minute.
+    ``native_symbol`` and ``exchange`` are nullable display identity fields
+    proven from the reconstruction's symbol reference at ``as_of``.
+    Every monetary field is ``None`` together when the point's cumulatives are
+    untrusted; ``unrealized_pnl`` alone is ``None`` when the instrument is held
+    but has no mark or seeded entry for that minute.
     """
 
     instrument_public_id: str
+    native_symbol: str | None
+    exchange: str | None
     realized_pnl: float | None
     fee_pnl: float | None
     accrual_pnl: float | None
@@ -64,9 +111,10 @@ class PnlTimelinePointData(StrictBody):
 
     ``realized_pnl`` / ``fee_pnl`` / ``accrual_pnl`` are cumulative since
     activation; ``unrealized_pnl`` and ``net_pnl`` are the mark-dependent stocks
-    that go ``None`` on an incomplete point. ``valuation_status`` names why.
-    ``attribution`` carries composite origin/strategy buckets whose components
-    reconcile with the point totals.
+    that go ``None`` on an incomplete point. ``incompleteness_reasons`` carries
+    every cause established at the withholding sites without deriving causes
+    from the null fields. ``attribution`` carries composite origin/strategy
+    buckets whose components reconcile with the point totals.
     """
 
     point_time: datetime
@@ -76,8 +124,19 @@ class PnlTimelinePointData(StrictBody):
     unrealized_pnl: float | None
     net_pnl: float | None
     valuation_status: PnlValuationStatus
+    incompleteness_reasons: list[PnlIncompletenessReasonData]
     per_instrument: list[PnlInstrumentContributionData]
     attribution: list[PnlAttributionContributionData]
+
+    @model_validator(mode="after")
+    def _require_consistent_incompleteness(self) -> Self:
+        """Keep valuation status equivalent to presence of causal reasons."""
+        has_reasons = bool(self.incompleteness_reasons)
+        if (self.valuation_status == "complete") == has_reasons:
+            raise ValueError(
+                "complete points require no reasons and incomplete points require reasons"
+            )
+        return self
 
 
 class PnlFxRateSourceData(StrictBody):

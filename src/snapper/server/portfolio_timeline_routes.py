@@ -36,6 +36,7 @@ from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
 from snapper.api.schemas.pnl_timeline import PnlAttributionContributionData
 from snapper.api.schemas.pnl_timeline import PnlFillMarkerData
 from snapper.api.schemas.pnl_timeline import PnlFxRateSourceData
+from snapper.api.schemas.pnl_timeline import PnlIncompletenessReasonData
 from snapper.api.schemas.pnl_timeline import PnlInstrumentContributionData
 from snapper.api.schemas.pnl_timeline import PnlSeriesData
 from snapper.api.schemas.pnl_timeline import PnlSeriesResponse
@@ -279,9 +280,20 @@ def _point_data(result: PnlTimelineResult) -> list[PnlTimelinePointData]:
             unrealized_pnl=point.unrealized_pnl,
             net_pnl=point.net_pnl,
             valuation_status=point.valuation_status,
+            incompleteness_reasons=[
+                PnlIncompletenessReasonData(
+                    reason=entry.reason,
+                    withholding_tier=entry.withholding_tier,
+                    withholding_scope=entry.withholding_scope,
+                    trigger_instrument_public_id=entry.trigger_instrument_public_id,
+                )
+                for entry in point.incompleteness_reasons
+            ],
             per_instrument=[
                 PnlInstrumentContributionData(
                     instrument_public_id=contribution.instrument_public_id,
+                    native_symbol=contribution.native_symbol,
+                    exchange=contribution.exchange,
                     realized_pnl=contribution.realized_pnl,
                     fee_pnl=contribution.fee_pnl,
                     accrual_pnl=contribution.accrual_pnl,

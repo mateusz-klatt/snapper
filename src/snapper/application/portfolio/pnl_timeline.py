@@ -125,6 +125,7 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Final
 from typing import Literal
+from typing import cast
 
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.average_cost import apply_fill
@@ -132,6 +133,32 @@ from snapper.core.numeric import is_positive_finite
 
 ValuationStatus = Literal["complete", "incomplete"]
 """Whether a point's mark-to-market valuation is trustworthy or withheld."""
+
+PnlIncompletenessReason = Literal[
+    "scope_order_regression",
+    "before_activation",
+    "activation_baseline_non_finite",
+    "fill_evidence_gap",
+    "seed_quantity_non_finite",
+    "cost_basis_unavailable",
+    "execution_price_provenance_unproven",
+    "execution_size_invalid",
+    "execution_price_invalid",
+    "fx_conversion_unproven",
+    "mark_unavailable",
+    "cumulative_non_finite",
+    "unrealized_non_finite",
+    "net_non_finite",
+    "attribution_value_non_finite",
+    "attribution_reconciliation_failed",
+]
+"""Closed causal taxonomy for a withheld P&L timeline value."""
+
+PnlWithholdingTier = Literal["mark_incomplete", "untrusted"]
+"""Weakest honest withholding tier established at the causal site."""
+
+PnlWithholdingScope = Literal["global", "instrument"]
+"""Whether one instrument or the entire point is causally untrusted."""
 
 OriginBucket = Literal["manual", "plan", "system", "unattributed"]
 """Proven initiating origin of an execution, or the fail-closed fallback."""
@@ -147,6 +174,9 @@ close of the candle covering ``[M-1m, M)``, converted by the caller at that exac
 minute when necessary. A ``None`` value or an absent key both mean "no mark for
 that instrument at that minute".
 """
+
+type MarkIncompletenessReasonMap = Mapping[tuple[str, datetime], PnlIncompletenessReason]
+"""Causal mark failures stamped by the caller at conversion sites."""
 
 _GRANULARITY_MINUTES: Final[dict[str, int]] = {"1m": 1, "5m": 5, "1h": 60, "1d": 1440}
 """Downsampling bucket width in minutes per supported granularity."""
@@ -172,6 +202,10 @@ class TimelineExecution:
             consumed by the pure math here.
         order_public_id: Immutable order identity used to resolve the caller's
             supplied command lineage.
+        price_incompleteness_reason: Causal price-conversion failure stamped by
+            the caller, or ``None`` when no caller-side failure was established.
+        fee_incompleteness_reason: Causal fee-conversion failure stamped by the
+            caller, or ``None`` when no caller-side failure was established.
     """
 
     instrument_public_id: str
@@ -184,6 +218,8 @@ class TimelineExecution:
     fee: float
     fee_asset: str
     order_public_id: str
+    price_incompleteness_reason: PnlIncompletenessReason | None = None
+    fee_incompleteness_reason: PnlIncompletenessReason | None = None
 
 
 @dataclass(frozen=True)
@@ -219,11 +255,14 @@ class TimelineAccrual:
         accrued_at: The time-axis timestamp the accrual takes effect at.
         amount_usd: Signed accrual amount in the valuation currency; positive
             means the holder pays (a negative P&L contribution).
+        incompleteness_reason: Causal conversion failure stamped by the caller,
+            or ``None`` when no caller-side failure was established.
     """
 
     instrument_public_id: str
     accrued_at: datetime
     amount_usd: float
+    incompleteness_reason: PnlIncompletenessReason | None = None
 
 
 @dataclass(frozen=True)
@@ -282,6 +321,10 @@ class PnlInstrumentContribution:
 
     Attributes:
         instrument_public_id: The contributing instrument.
+        native_symbol: Native symbol proven by the service at the response
+            horizon, or ``None`` when no single identity is defensible.
+        exchange: Canonical source venue paired with ``native_symbol``, or
+            ``None`` when the identity is unresolved.
         realized_pnl: Cumulative price-realized P&L since t0 for this instrument,
             or ``None`` when a global guard or this instrument's cumulative is
             untrusted.
@@ -295,6 +338,8 @@ class PnlInstrumentContribution:
     """
 
     instrument_public_id: str
+    native_symbol: str | None
+    exchange: str | None
     realized_pnl: float | None
     fee_pnl: float | None
     accrual_pnl: float | None
@@ -320,6 +365,47 @@ class PnlAttributionContribution:
 
 
 @dataclass(frozen=True)
+class PnlIncompletenessReasonEntry:
+    """One causal reason established by an actual withholding site."""
+
+    reason: PnlIncompletenessReason
+    withholding_tier: PnlWithholdingTier
+    withholding_scope: PnlWithholdingScope
+    trigger_instrument_public_id: str | None
+
+    def __post_init__(self) -> None:
+        """Reject instrument-scoped claims without a proven instrument identity."""
+        if self.withholding_scope == "instrument" and self.trigger_instrument_public_id is None:
+            raise ValueError("instrument-scoped incompleteness requires a triggering instrument")
+
+
+def _incompleteness_reason_sort_key(
+    entry: PnlIncompletenessReasonEntry,
+) -> tuple[str, str, str, str]:
+    """Return the stable scope, instrument, tier, and reason ordering."""
+    return (
+        entry.withholding_scope,
+        entry.trigger_instrument_public_id or "",
+        entry.withholding_tier,
+        entry.reason,
+    )
+
+
+def canonical_incompleteness_reasons(
+    reasons: Collection[PnlIncompletenessReasonEntry],
+) -> tuple[PnlIncompletenessReasonEntry, ...]:
+    """Deduplicate and deterministically order established causal reasons.
+
+    Args:
+        reasons: Causal entries stamped by withholding sites.
+
+    Returns:
+        Unique entries ordered by scope, trigger instrument, tier, and reason.
+    """
+    return tuple(sorted(set(reasons), key=_incompleteness_reason_sort_key))
+
+
+@dataclass(frozen=True)
 class PnlTimelinePoint:
     """One point on the P&L series.
 
@@ -339,6 +425,7 @@ class PnlTimelinePoint:
         net_pnl: ``realized_pnl + fee_pnl + accrual_pnl + (unrealized_pnl -
             opening_unrealized_value)``, or ``None`` when the point is incomplete.
         valuation_status: ``'complete'`` or ``'incomplete'``.
+        incompleteness_reasons: Canonical reasons stamped at withholding sites.
         per_instrument: Per-instrument contributions, ordered by instrument id.
         attribution: Composite origin/strategy contributions in stable order.
     """
@@ -350,8 +437,19 @@ class PnlTimelinePoint:
     unrealized_pnl: float | None
     net_pnl: float | None
     valuation_status: ValuationStatus
+    incompleteness_reasons: tuple[PnlIncompletenessReasonEntry, ...]
     per_instrument: tuple[PnlInstrumentContribution, ...]
     attribution: tuple[PnlAttributionContribution, ...]
+
+    def __post_init__(self) -> None:
+        """Enforce reason/status equivalence and canonical reason ordering."""
+        canonical = canonical_incompleteness_reasons(self.incompleteness_reasons)
+        if self.incompleteness_reasons != canonical:
+            raise ValueError("incompleteness reasons must be deduplicated and sorted")
+        if self.valuation_status == "complete" and canonical:
+            raise ValueError("a complete point cannot carry incompleteness reasons")
+        if self.valuation_status == "incomplete" and not canonical:
+            raise ValueError("an incomplete point must carry an incompleteness reason")
 
 
 @dataclass(frozen=True)
@@ -387,11 +485,59 @@ class _PreparedExecution:
     execution: TimelineExecution
 
 
+@dataclass(frozen=True)
+class _RegressionShadow:
+    """One globally withholding interval with its proven triggering instrument."""
+
+    start: datetime
+    end: datetime
+    reason: PnlIncompletenessReasonEntry
+
+
 _UNATTRIBUTED_KEY: Final[AttributionKey] = ("unattributed", None)
 """Composite fallback for lineage or inventory that cannot be proven."""
 
 _MANUAL_SURFACES: Final[frozenset[str]] = frozenset({"mcp", "rest", "ws"})
 """Command ingress surfaces that prove a human initiated the order."""
+
+
+def _global_incompleteness_reason(
+    reason: PnlIncompletenessReason,
+    tier: PnlWithholdingTier,
+    trigger_instrument_public_id: str | None = None,
+) -> PnlIncompletenessReasonEntry:
+    """Build one globally scoped causal reason."""
+    return PnlIncompletenessReasonEntry(
+        reason=reason,
+        withholding_tier=tier,
+        withholding_scope="global",
+        trigger_instrument_public_id=trigger_instrument_public_id,
+    )
+
+
+def _instrument_incompleteness_reason(
+    reason: PnlIncompletenessReason,
+    tier: PnlWithholdingTier,
+    instrument_public_id: str,
+) -> PnlIncompletenessReasonEntry:
+    """Build one instrument-scoped causal reason."""
+    return PnlIncompletenessReasonEntry(
+        reason=reason,
+        withholding_tier=tier,
+        withholding_scope="instrument",
+        trigger_instrument_public_id=instrument_public_id,
+    )
+
+
+def _add_instrument_untrusted_reason(
+    reasons_by_instrument: dict[str, set[PnlIncompletenessReasonEntry]],
+    instrument_public_id: str,
+    reason: PnlIncompletenessReason,
+) -> None:
+    """Latch one instrument-scoped UNTRUSTED reason for later points."""
+    reasons_by_instrument.setdefault(instrument_public_id, set()).add(
+        _instrument_incompleteness_reason(reason, "untrusted", instrument_public_id)
+    )
 
 
 def _attribution_sort_key(key: AttributionKey) -> tuple[str, int, str]:
@@ -601,7 +747,7 @@ def _minute_grid(from_time: datetime, to_time: datetime) -> list[datetime]:
 
 def _prepare_executions(
     executions: Sequence[TimelineExecution],
-) -> tuple[list[_PreparedExecution], list[tuple[datetime, datetime]]]:
+) -> tuple[list[_PreparedExecution], list[_RegressionShadow]]:
     """Clamp per-instrument event times monotone and collect regression shadows.
 
     Each instrument's fills are accumulated in the caller-supplied scope order.
@@ -617,13 +763,23 @@ def _prepare_executions(
         ``[economic_time, clamped_time)`` intervals produced by regressions.
     """
     last_effective: dict[str, datetime] = {}
-    shadows: list[tuple[datetime, datetime]] = []
+    shadows: list[_RegressionShadow] = []
     prepared: list[_PreparedExecution] = []
     for execution in executions:
         previous = last_effective.get(execution.instrument_public_id)
         if previous is not None and execution.event_time < previous:
             effective = previous
-            shadows.append((execution.event_time, previous))
+            shadows.append(
+                _RegressionShadow(
+                    start=execution.event_time,
+                    end=previous,
+                    reason=_global_incompleteness_reason(
+                        "scope_order_regression",
+                        "untrusted",
+                        execution.instrument_public_id,
+                    ),
+                )
+            )
         else:
             effective = execution.event_time
         last_effective[execution.instrument_public_id] = effective
@@ -643,6 +799,7 @@ def _untrusted_point(
     point_time: datetime,
     seen: Sequence[str],
     attribution_keys: Sequence[AttributionKey],
+    incompleteness_reasons: Collection[PnlIncompletenessReasonEntry],
 ) -> PnlTimelinePoint:
     """Build a fully-untrusted incomplete point (all components withheld).
 
@@ -654,6 +811,7 @@ def _untrusted_point(
         point_time: The grid instant.
         seen: Instruments to list (all with null contributions).
         attribution_keys: Composite buckets to list with null contributions.
+        incompleteness_reasons: Causes established before this early return.
 
     Returns:
         An incomplete :class:`PnlTimelinePoint` with every component ``None``.
@@ -661,6 +819,8 @@ def _untrusted_point(
     contributions = tuple(
         PnlInstrumentContribution(
             instrument_public_id=instrument_public_id,
+            native_symbol=None,
+            exchange=None,
             realized_pnl=None,
             fee_pnl=None,
             accrual_pnl=None,
@@ -687,6 +847,7 @@ def _untrusted_point(
         unrealized_pnl=None,
         net_pnl=None,
         valuation_status="incomplete",
+        incompleteness_reasons=canonical_incompleteness_reasons(incompleteness_reasons),
         per_instrument=contributions,
         attribution=attribution,
     )
@@ -709,8 +870,10 @@ def _value_point(
     fee_total: float,
     accrual_total: float,
     opening_unrealized_value: float,
-    globally_untrusted: bool,
-    untrusted_instruments: Collection[str],
+    global_reasons: Collection[PnlIncompletenessReasonEntry],
+    untrusted_reasons_by_instrument: Mapping[str, Collection[PnlIncompletenessReasonEntry]],
+    basis_reasons_by_instrument: Mapping[str, Collection[PnlIncompletenessReason]],
+    mark_incompleteness_reasons: MarkIncompletenessReasonMap,
 ) -> PnlTimelinePoint:
     """Value one grid point from the current pools, cumulatives, and marks.
 
@@ -732,53 +895,101 @@ def _value_point(
         fee_total: Aggregate cumulative fee P&L.
         accrual_total: Aggregate cumulative accrual P&L.
         opening_unrealized_value: The anchor's opening unrealized value.
-        globally_untrusted: Whether a scope-order regression or activation
-            boundary makes every contribution untrusted at this minute.
-        untrusted_instruments: Instruments whose basis or realized cumulative
-            is untrusted. Their contributions and every aggregate are withheld,
-            while independent finite instrument contributions remain visible.
+        global_reasons: Global causes established before valuation starts.
+        untrusted_reasons_by_instrument: Latched instrument-scoped causes.
+        basis_reasons_by_instrument: Causes of currently unavailable entry bases.
+        mark_incompleteness_reasons: Caller-stamped mark conversion failures.
 
     Returns:
         The valued :class:`PnlTimelinePoint`.
     """
-    if globally_untrusted or not math.isfinite(opening_unrealized_value):
-        return _untrusted_point(point_time, seen, attribution_seen)
-    instrument_untrusted = set(untrusted_instruments)
-    instrument_untrusted.update(
-        instrument_public_id
-        for instrument_public_id in seen
-        if not math.isfinite(realized_by_instrument.get(instrument_public_id, 0.0))
-        or not math.isfinite(fee_by_instrument.get(instrument_public_id, 0.0))
-        or not math.isfinite(accrual_by_instrument.get(instrument_public_id, 0.0))
-    )
+    established_global_reasons = set(global_reasons)
+    if not math.isfinite(opening_unrealized_value):
+        established_global_reasons.add(
+            _global_incompleteness_reason(
+                "activation_baseline_non_finite",
+                "untrusted",
+            )
+        )
+    if established_global_reasons:
+        for instrument_reasons in untrusted_reasons_by_instrument.values():
+            established_global_reasons.update(instrument_reasons)
+        return _untrusted_point(
+            point_time,
+            seen,
+            attribution_seen,
+            established_global_reasons,
+        )
+    instrument_untrusted_reasons = {
+        instrument_public_id: set(reasons)
+        for instrument_public_id, reasons in untrusted_reasons_by_instrument.items()
+        if reasons
+    }
+    for instrument_public_id in seen:
+        if (
+            not math.isfinite(realized_by_instrument.get(instrument_public_id, 0.0))
+            or not math.isfinite(fee_by_instrument.get(instrument_public_id, 0.0))
+            or not math.isfinite(accrual_by_instrument.get(instrument_public_id, 0.0))
+        ):
+            instrument_untrusted_reasons.setdefault(instrument_public_id, set()).add(
+                _instrument_incompleteness_reason(
+                    "cumulative_non_finite",
+                    "untrusted",
+                    instrument_public_id,
+                )
+            )
     aggregate_cumulatives_finite = (
         math.isfinite(realized_total) and math.isfinite(fee_total) and math.isfinite(accrual_total)
     )
-    if not aggregate_cumulatives_finite and not instrument_untrusted:
-        return _untrusted_point(point_time, seen, attribution_seen)
+    if not aggregate_cumulatives_finite and not instrument_untrusted_reasons:
+        return _untrusted_point(
+            point_time,
+            seen,
+            attribution_seen,
+            {
+                _global_incompleteness_reason(
+                    "cumulative_non_finite",
+                    "untrusted",
+                )
+            },
+        )
     attribution_keys = _sorted_attribution_keys(
         set(attribution_seen)
         | set(realized_by_attribution)
         | set(fee_by_attribution)
         | set(accrual_by_attribution)
     )
-    if not instrument_untrusted and any(
+    if not instrument_untrusted_reasons and any(
         not math.isfinite(realized_by_attribution.get(key, 0.0))
         or not math.isfinite(fee_by_attribution.get(key, 0.0))
         or not math.isfinite(accrual_by_attribution.get(key, 0.0))
         for key in attribution_keys
     ):
-        return _untrusted_point(point_time, seen, attribution_keys)
+        return _untrusted_point(
+            point_time,
+            seen,
+            attribution_keys,
+            {
+                _global_incompleteness_reason(
+                    "attribution_value_non_finite",
+                    "untrusted",
+                )
+            },
+        )
     unrealized_total = 0.0
-    incomplete = False
+    point_reasons = {
+        reason for reasons in instrument_untrusted_reasons.values() for reason in reasons
+    }
     contributions: list[PnlInstrumentContribution] = []
     unrealized_by_attribution: defaultdict[AttributionKey, float] = defaultdict(float)
     unrealized_incomplete: set[AttributionKey] = set()
     for instrument_public_id in seen:
-        if instrument_public_id in instrument_untrusted:
+        if instrument_public_id in instrument_untrusted_reasons:
             contributions.append(
                 PnlInstrumentContribution(
                     instrument_public_id=instrument_public_id,
+                    native_symbol=None,
+                    exchange=None,
                     realized_pnl=None,
                     fee_pnl=None,
                     accrual_pnl=None,
@@ -794,20 +1005,44 @@ def _value_point(
             instrument_unrealized: float | None = 0.0
         else:
             mark = marks.get((instrument_public_id, point_time))
-            if (
-                mark is None
-                or not math.isfinite(mark)
-                or pool.entry_price is None
-                or not math.isfinite(pool.entry_price)
-            ):
+            mark_unavailable = mark is None or not math.isfinite(mark)
+            basis_unavailable = pool.entry_price is None or not math.isfinite(pool.entry_price)
+            if mark_unavailable or basis_unavailable:
                 instrument_unrealized = None
-                incomplete = True
+                if mark_unavailable:
+                    mark_reason = mark_incompleteness_reasons.get(
+                        (instrument_public_id, point_time),
+                        "mark_unavailable",
+                    )
+                    point_reasons.add(
+                        _instrument_incompleteness_reason(
+                            mark_reason,
+                            "mark_incomplete",
+                            instrument_public_id,
+                        )
+                    )
+                if basis_unavailable:
+                    basis_reasons = basis_reasons_by_instrument.get(instrument_public_id)
+                    if not basis_reasons:
+                        raise ValueError(
+                            "an unavailable entry basis requires a stamped causal reason"
+                        )
+                    for basis_reason in basis_reasons:
+                        point_reasons.add(
+                            _instrument_incompleteness_reason(
+                                basis_reason,
+                                "mark_incomplete",
+                                instrument_public_id,
+                            )
+                        )
                 instrument_keys = _sorted_attribution_keys(
                     set(weights_by_instrument.get(instrument_public_id, {}))
                 )
                 unrealized_incomplete.update(instrument_keys or [_UNATTRIBUTED_KEY])
             else:
-                instrument_unrealized = pool.position_qty * (mark - pool.entry_price)
+                trusted_mark = cast(float, mark)
+                trusted_entry_price = cast(float, pool.entry_price)
+                instrument_unrealized = pool.position_qty * (trusted_mark - trusted_entry_price)
                 if math.isfinite(instrument_unrealized):
                     unrealized_total += instrument_unrealized
                     allocations = _allocate_by_weights(
@@ -818,9 +1053,22 @@ def _value_point(
                         unrealized_by_attribution[key] += amount
                         if not math.isfinite(unrealized_by_attribution[key]):
                             unrealized_incomplete.add(key)
+                            point_reasons.add(
+                                _instrument_incompleteness_reason(
+                                    "attribution_value_non_finite",
+                                    "mark_incomplete",
+                                    instrument_public_id,
+                                )
+                            )
                 else:
                     instrument_unrealized = None
-                    incomplete = True
+                    point_reasons.add(
+                        _instrument_incompleteness_reason(
+                            "unrealized_non_finite",
+                            "mark_incomplete",
+                            instrument_public_id,
+                        )
+                    )
                     instrument_keys = _sorted_attribution_keys(
                         set(weights_by_instrument.get(instrument_public_id, {}))
                     )
@@ -828,6 +1076,8 @@ def _value_point(
         contributions.append(
             PnlInstrumentContribution(
                 instrument_public_id=instrument_public_id,
+                native_symbol=None,
+                exchange=None,
                 realized_pnl=realized,
                 fee_pnl=fee,
                 accrual_pnl=accrual,
@@ -844,9 +1094,7 @@ def _value_point(
             for key in instrument_weights
         }
     )
-    if unrealized_incomplete:
-        incomplete = True
-    if instrument_untrusted:
+    if instrument_untrusted_reasons:
         attribution = tuple(
             PnlAttributionContribution(
                 origin=origin,
@@ -866,6 +1114,7 @@ def _value_point(
             unrealized_pnl=None,
             net_pnl=None,
             valuation_status="incomplete",
+            incompleteness_reasons=canonical_incompleteness_reasons(point_reasons),
             per_instrument=tuple(contributions),
             attribution=attribution,
         )
@@ -877,13 +1126,35 @@ def _value_point(
         accrual_by_attribution, attribution_keys, accrual_total
     )
     if realized_attribution is None or fee_attribution is None or accrual_attribution is None:
-        return _untrusted_point(point_time, seen, attribution_keys)
-    if not incomplete and math.isfinite(unrealized_total) and not unrealized_incomplete:
+        point_reasons.add(
+            _global_incompleteness_reason(
+                "attribution_reconciliation_failed",
+                "untrusted",
+            )
+        )
+        return _untrusted_point(
+            point_time,
+            seen,
+            attribution_keys,
+            point_reasons,
+        )
+    if not point_reasons and math.isfinite(unrealized_total) and not unrealized_incomplete:
         reconciled_unrealized = _values_with_residue(
             unrealized_by_attribution, attribution_keys, unrealized_total
         )
         if reconciled_unrealized is None:
-            return _untrusted_point(point_time, seen, attribution_keys)
+            point_reasons.add(
+                _global_incompleteness_reason(
+                    "attribution_reconciliation_failed",
+                    "untrusted",
+                )
+            )
+            return _untrusted_point(
+                point_time,
+                seen,
+                attribution_keys,
+                point_reasons,
+            )
     else:
         reconciled_unrealized = dict(unrealized_by_attribution)
     attribution = tuple(
@@ -901,7 +1172,7 @@ def _value_point(
         )
         for origin, strategy_name in attribution_keys
     )
-    if incomplete:
+    if point_reasons:
         return PnlTimelinePoint(
             point_time=point_time,
             realized_pnl=realized_total,
@@ -910,11 +1181,26 @@ def _value_point(
             unrealized_pnl=None,
             net_pnl=None,
             valuation_status="incomplete",
+            incompleteness_reasons=canonical_incompleteness_reasons(point_reasons),
             per_instrument=tuple(contributions),
             attribution=attribution,
         )
     net = realized_total + fee_total + accrual_total + (unrealized_total - opening_unrealized_value)
-    if incomplete or not math.isfinite(unrealized_total) or not math.isfinite(net):
+    if not math.isfinite(unrealized_total):
+        point_reasons.add(
+            _global_incompleteness_reason(
+                "unrealized_non_finite",
+                "mark_incomplete",
+            )
+        )
+    if not math.isfinite(net):
+        point_reasons.add(
+            _global_incompleteness_reason(
+                "net_non_finite",
+                "mark_incomplete",
+            )
+        )
+    if point_reasons:
         return PnlTimelinePoint(
             point_time=point_time,
             realized_pnl=realized_total,
@@ -923,6 +1209,7 @@ def _value_point(
             unrealized_pnl=None,
             net_pnl=None,
             valuation_status="incomplete",
+            incompleteness_reasons=canonical_incompleteness_reasons(point_reasons),
             per_instrument=tuple(contributions),
             attribution=attribution,
         )
@@ -934,6 +1221,7 @@ def _value_point(
         unrealized_pnl=unrealized_total,
         net_pnl=net,
         valuation_status="complete",
+        incompleteness_reasons=(),
         per_instrument=tuple(contributions),
         attribution=attribution,
     )
@@ -968,7 +1256,10 @@ def build_pnl_timeline(
     window: TimelineWindow,
     opening: TimelineOpening | None = None,
     lineage: Mapping[str, TimelineExecutionLineage] | None = None,
-    untrusted_price_instruments: Collection[str] = (),
+    untrusted_price_reasons_by_instrument: (
+        Mapping[str, Collection[PnlIncompletenessReason]] | None
+    ) = None,
+    mark_incompleteness_reasons: MarkIncompletenessReasonMap | None = None,
 ) -> PnlTimelineResult:
     """Build the Net-P&L-since-activation series for one wallet/mode scope.
 
@@ -991,10 +1282,13 @@ def build_pnl_timeline(
             from empty pools with a zero opening unrealized value.
         lineage: Order-keyed initiating command and signal lineage. Missing or
             ambiguous orders are intentionally absent and become unattributed.
-        untrusted_price_instruments: Instrument identities whose execution-price
-            quote or owning venue the caller could not prove. Their fills are
-            never passed to the accounting kernel and latch instrument-scoped
-            untrust when replay reaches them.
+        untrusted_price_reasons_by_instrument: Caller-stamped execution-price
+            proof failures keyed by instrument. Their fills are never passed to
+            the accounting kernel and their exact reasons latch when replay
+            reaches them.
+        mark_incompleteness_reasons: Exact caller-stamped causes for mark values
+            omitted during conversion. Other absent or non-finite marks are
+            classified only as unavailable when the builder needs them.
 
     Returns:
         The built :class:`PnlTimelineResult` at the requested granularity.
@@ -1009,19 +1303,30 @@ def build_pnl_timeline(
     pools: dict[str, _Pool] = {}
     weights_by_instrument: dict[str, dict[AttributionKey, float]] = {}
     resolved_lineage = {} if lineage is None else lineage
-    resolved_untrusted_price_instruments = frozenset(untrusted_price_instruments)
+    resolved_untrusted_price_reasons = (
+        {}
+        if untrusted_price_reasons_by_instrument is None
+        else untrusted_price_reasons_by_instrument
+    )
+    resolved_mark_incompleteness_reasons = (
+        {} if mark_incompleteness_reasons is None else mark_incompleteness_reasons
+    )
     opening_unrealized_value = 0.0
     seen: set[str] = set()
     attribution_seen: set[AttributionKey] = set()
-    basis_unknown: set[str] = set()
-    realized_untrusted: set[str] = set()
+    basis_reasons_by_instrument: dict[str, set[PnlIncompletenessReason]] = {}
+    untrusted_reasons_by_instrument: dict[str, set[PnlIncompletenessReasonEntry]] = {}
     activation_time: datetime | None = None
     if opening is not None:
         for instrument_public_id, seed in opening.positions.items():
             pools[instrument_public_id] = _Pool(seed.position_qty, seed.entry_price)
             seen.add(instrument_public_id)
             if not math.isfinite(seed.position_qty):
-                realized_untrusted.add(instrument_public_id)
+                _add_instrument_untrusted_reason(
+                    untrusted_reasons_by_instrument,
+                    instrument_public_id,
+                    "seed_quantity_non_finite",
+                )
             else:
                 if abs(seed.position_qty) > 0.0:
                     weights_by_instrument[instrument_public_id] = {
@@ -1029,7 +1334,22 @@ def build_pnl_timeline(
                     }
                     attribution_seen.add(_UNATTRIBUTED_KEY)
                 if seed.entry_price is None and abs(seed.position_qty) >= FLAT_EPSILON:
-                    basis_unknown.add(instrument_public_id)
+                    _add_instrument_untrusted_reason(
+                        untrusted_reasons_by_instrument,
+                        instrument_public_id,
+                        "cost_basis_unavailable",
+                    )
+                    basis_reasons_by_instrument.setdefault(instrument_public_id, set()).add(
+                        "cost_basis_unavailable"
+                    )
+                elif (
+                    seed.entry_price is not None
+                    and not math.isfinite(seed.entry_price)
+                    and abs(seed.position_qty) >= FLAT_EPSILON
+                ):
+                    basis_reasons_by_instrument.setdefault(instrument_public_id, set()).add(
+                        "cost_basis_unavailable"
+                    )
         opening_unrealized_value = opening.opening_unrealized_value
         activation_time = opening.t0
 
@@ -1067,15 +1387,35 @@ def build_pnl_timeline(
             seen.add(instrument_public_id)
             attribution_key = _execution_attribution(execution, resolved_lineage)
             attribution_seen.add(attribution_key)
-            if instrument_public_id in resolved_untrusted_price_instruments:
-                realized_untrusted.add(instrument_public_id)
+            if execution.fee_incompleteness_reason is not None:
+                _add_instrument_untrusted_reason(
+                    untrusted_reasons_by_instrument,
+                    instrument_public_id,
+                    execution.fee_incompleteness_reason,
+                )
+            price_proof_reasons = resolved_untrusted_price_reasons.get(
+                instrument_public_id,
+                (),
+            )
+            for price_proof_reason in price_proof_reasons:
+                _add_instrument_untrusted_reason(
+                    untrusted_reasons_by_instrument,
+                    instrument_public_id,
+                    price_proof_reason,
+                )
+            if price_proof_reasons:
                 continue
             if not math.isfinite(execution.size) or execution.size < 0.0:
-                realized_untrusted.add(instrument_public_id)
+                _add_instrument_untrusted_reason(
+                    untrusted_reasons_by_instrument,
+                    instrument_public_id,
+                    "execution_size_invalid",
+                )
                 continue
             signed_qty = execution.size if execution.side == "buy" else -execution.size
             pool = pools.get(instrument_public_id, _Pool(0.0, None))
             pre_fill_weights = dict(weights_by_instrument.get(instrument_public_id, {}))
+            pre_fill_basis_reasons = set(basis_reasons_by_instrument.get(instrument_public_id, ()))
             price_is_trusted = is_positive_finite(execution.price)
             outcome = apply_fill(
                 pool.position_qty,
@@ -1085,17 +1425,49 @@ def build_pnl_timeline(
                 execution.price if price_is_trusted else math.nan,
             )
             if not price_is_trusted and outcome.closed_qty > 0.0:
-                realized_untrusted.add(instrument_public_id)
+                price_reason = execution.price_incompleteness_reason or "execution_price_invalid"
+                _add_instrument_untrusted_reason(
+                    untrusted_reasons_by_instrument,
+                    instrument_public_id,
+                    price_reason,
+                )
+                for basis_reason in basis_reasons_by_instrument.get(
+                    instrument_public_id,
+                    (),
+                ):
+                    _add_instrument_untrusted_reason(
+                        untrusted_reasons_by_instrument,
+                        instrument_public_id,
+                        basis_reason,
+                    )
                 continue
             pools[instrument_public_id] = _Pool(outcome.position_qty, outcome.entry_price)
+            if not price_is_trusted and abs(outcome.position_qty) >= FLAT_EPSILON:
+                price_reason = execution.price_incompleteness_reason or "execution_price_invalid"
+                basis_reasons_by_instrument.setdefault(instrument_public_id, set()).add(
+                    price_reason
+                )
+            if (
+                abs(outcome.position_qty) >= FLAT_EPSILON
+                and (outcome.entry_price is None or not math.isfinite(outcome.entry_price))
+                and not basis_reasons_by_instrument.get(instrument_public_id)
+            ):
+                basis_reasons_by_instrument.setdefault(instrument_public_id, set()).add(
+                    "cost_basis_unavailable"
+                )
             opened_opposite_side = outcome.closed_qty > 0.0 and outcome.opened_new_side
-            realized_by_instrument[instrument_public_id] += outcome.realized_delta
-            realized_total += outcome.realized_delta
+            realized_delta = (
+                0.0
+                if outcome.closed_qty > 0.0 and pre_fill_basis_reasons
+                else outcome.realized_delta
+            )
+            realized_by_instrument[instrument_public_id] += realized_delta
+            realized_total += realized_delta
             if outcome.closed_qty > 0.0:
-                realized_allocation = _allocate_by_weights(outcome.realized_delta, pre_fill_weights)
+                realized_allocation = _allocate_by_weights(realized_delta, pre_fill_weights)
                 _add_allocations(realized_by_attribution, realized_allocation)
                 attribution_seen.update(realized_allocation)
-            fee_pnl = -execution.fee
+            fee_pnl = 0.0 if execution.fee_incompleteness_reason is not None else -execution.fee
             fee_by_instrument[instrument_public_id] += fee_pnl
             fee_total += fee_pnl
             if opened_opposite_side:
@@ -1129,18 +1501,30 @@ def build_pnl_timeline(
                 post_fill_weights, abs(outcome.position_qty)
             )
             attribution_seen.update(weights_by_instrument[instrument_public_id])
-            if instrument_public_id in basis_unknown:
+            instrument_basis_reasons = basis_reasons_by_instrument.get(instrument_public_id)
+            if instrument_basis_reasons:
                 if outcome.closed_qty > 0.0:
-                    realized_untrusted.add(instrument_public_id)
+                    for basis_reason in instrument_basis_reasons:
+                        _add_instrument_untrusted_reason(
+                            untrusted_reasons_by_instrument,
+                            instrument_public_id,
+                            basis_reason,
+                        )
                 if abs(outcome.position_qty) < FLAT_EPSILON:
-                    basis_unknown.discard(instrument_public_id)
+                    basis_reasons_by_instrument.pop(instrument_public_id, None)
         while (
             accrual_index < len(sorted_accruals)
             and sorted_accruals[accrual_index].accrued_at <= point_time
         ):
             accrual = sorted_accruals[accrual_index]
-            accrual_by_instrument[accrual.instrument_public_id] += -accrual.amount_usd
-            accrual_pnl = -accrual.amount_usd
+            if accrual.incompleteness_reason is not None:
+                _add_instrument_untrusted_reason(
+                    untrusted_reasons_by_instrument,
+                    accrual.instrument_public_id,
+                    accrual.incompleteness_reason,
+                )
+            accrual_pnl = 0.0 if accrual.incompleteness_reason is not None else -accrual.amount_usd
+            accrual_by_instrument[accrual.instrument_public_id] += accrual_pnl
             accrual_total += accrual_pnl
             seen.add(accrual.instrument_public_id)
             accrual_weights = weights_by_instrument.get(accrual.instrument_public_id, {})
@@ -1148,9 +1532,17 @@ def build_pnl_timeline(
             _add_allocations(accrual_by_attribution, accrual_allocation)
             attribution_seen.update(accrual_allocation)
             accrual_index += 1
-        tainted = any(start <= point_time < end for start, end in shadows)
-        before_activation = activation_time is not None and point_time < activation_time
-        globally_untrusted = tainted or before_activation
+        global_reasons: set[PnlIncompletenessReasonEntry] = set()
+        for shadow in shadows:
+            if shadow.start <= point_time < shadow.end:
+                global_reasons.add(shadow.reason)
+        if activation_time is not None and point_time < activation_time:
+            global_reasons.add(
+                _global_incompleteness_reason(
+                    "before_activation",
+                    "untrusted",
+                )
+            )
         minute_points.append(
             _value_point(
                 point_time,
@@ -1169,8 +1561,10 @@ def build_pnl_timeline(
                 fee_total,
                 accrual_total,
                 opening_unrealized_value,
-                globally_untrusted,
-                basis_unknown | realized_untrusted,
+                global_reasons,
+                untrusted_reasons_by_instrument,
+                basis_reasons_by_instrument,
+                resolved_mark_incompleteness_reasons,
             )
         )
 

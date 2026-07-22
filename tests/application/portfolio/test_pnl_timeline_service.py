@@ -18,6 +18,7 @@ from sqlalchemy import create_engine
 
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
+from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARKER_LIMIT
@@ -57,6 +58,19 @@ _FX_SESSION = "00000000-0000-7000-8000-000000000b03"
 def _m(minute: int) -> datetime:
     """Return the grid minute ``_T0 + minute``."""
     return _T0 + timedelta(minutes=minute)
+
+
+def _reason_rows(point: PnlTimelinePoint) -> list[tuple[str, str, str, str | None]]:
+    """Project structured point reasons into concise assertion rows."""
+    return [
+        (
+            entry.reason,
+            entry.withholding_tier,
+            entry.withholding_scope,
+            entry.trigger_instrument_public_id,
+        )
+        for entry in point.incompleteness_reasons
+    ]
 
 
 @pytest.fixture()
@@ -499,6 +513,8 @@ class TestToTimelineExecution:
         assert mapped.price == 100.0
         assert mapped.fee == 0.5
         assert mapped.fee_asset == "USD"
+        assert mapped.price_incompleteness_reason is None
+        assert mapped.fee_incompleteness_reason is None
 
     def test_non_valuation_currency_fee_is_unknown_not_zero(self) -> None:
         """A fee in another asset is UNKNOWN (NaN), never a silent zero.
@@ -511,6 +527,7 @@ class TestToTimelineExecution:
         mapped = _to_timeline_execution(row, "USD", {})
         assert math.isnan(mapped.fee)
         assert mapped.fee_asset == "EUR"
+        assert mapped.fee_incompleteness_reason == "fx_conversion_unproven"
 
     def test_exact_zero_fee_is_currency_invariant_with_empty_asset(self) -> None:
         """Production's fee-free empty asset maps to a real zero, not NaN."""
@@ -518,6 +535,20 @@ class TestToTimelineExecution:
         mapped = _to_timeline_execution(row, "USD", {})
         assert mapped.fee == 0.0
         assert mapped.fee_asset == ""
+        assert mapped.fee_incompleteness_reason is None
+
+    def test_missing_price_conversion_stamps_exact_cause(self) -> None:
+        """A failed positive foreign price conversion carries the FX cause."""
+        row = _exec_row(_I1, 1, 3, "buy", 2.0, 100.0, 0.0, "USD")
+        mapped = _to_timeline_execution(
+            row,
+            "USD",
+            {},
+            price_currency="EUR",
+            venues={},
+        )
+        assert math.isnan(mapped.price)
+        assert mapped.price_incompleteness_reason == "fx_conversion_unproven"
 
 
 class TestBuildExecutionLineage:
@@ -575,16 +606,19 @@ class TestToTimelineAccrual:
         assert mapped.instrument_public_id == _I1
         assert mapped.accrued_at == _m(1)
         assert mapped.amount_usd == 3.0
+        assert mapped.incompleteness_reason is None
 
     def test_exact_zero_is_currency_invariant(self) -> None:
         """A zero accrual needs no FX conversion even with a foreign asset."""
         mapped = _to_timeline_accrual(_accrual_row(_I1, 1, 0.0, "EUR"), "USD", {})
         assert mapped.amount_usd == 0.0
+        assert mapped.incompleteness_reason is None
 
     def test_nonzero_foreign_amount_is_unknown(self) -> None:
         """A nonzero foreign accrual maps to NaN for builder withholding."""
         mapped = _to_timeline_accrual(_accrual_row(_I1, 1, 3.0, "EUR"), "USD", {})
         assert math.isnan(mapped.amount_usd)
+        assert mapped.incompleteness_reason == "fx_conversion_unproven"
 
 
 class TestBuildMarks:
@@ -675,6 +709,9 @@ class TestBuildWalletPnlSeries:
         assert result.points[0].fee_pnl == -0.5
         assert result.points[0].unrealized_pnl == 5.0
         assert result.points[0].net_pnl == 4.5
+        contribution = result.points[0].per_instrument[0]
+        assert contribution.native_symbol == "BTC-USD"
+        assert contribution.exchange == "kraken"
         assert result.points[2].unrealized_pnl == 20.0
         assert result.points[2].net_pnl == 19.5
         assert len(result.points[0].attribution) == 1
@@ -701,6 +738,25 @@ class TestBuildWalletPnlSeries:
         assert [point.valuation_status for point in result.points] == ["complete", "complete"]
         assert [point.fee_pnl for point in result.points] == [0.0, 0.0]
         assert [point.net_pnl for point in result.points] == [0.0, 0.0]
+
+    async def test_accrual_only_contribution_uses_the_same_as_of_identity_read(self) -> None:
+        """A uniquely proven accrual-only identity is resolved without a second lookup."""
+        as_of = _m(1)
+        repo = FakeRepo(
+            accruals=[
+                _accrual_row(_I2, 0, 3.0, "USD"),
+                _accrual_row(_I2, 1, 2.0, "USD"),
+            ],
+            refs=[_ref(_I2, "ETH-USD", "USD")],
+        )
+        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(1), "1m", as_of)
+        contribution = result.points[0].per_instrument[0]
+        assert contribution.instrument_public_id == _I2
+        assert contribution.native_symbol == "ETH-USD"
+        assert contribution.exchange == "kraken"
+        assert result.points[1].per_instrument[0].native_symbol == "ETH-USD"
+        assert repo.symbol_ref_calls == [[_I2]]
+        assert repo.symbol_ref_as_of_calls == [as_of]
 
     @pytest.mark.parametrize("bad_close", [0.0, -5.0])
     async def test_non_positive_mark_close_is_mark_incomplete(self, bad_close: float) -> None:
@@ -735,6 +791,10 @@ class TestBuildWalletPnlSeries:
         ]
         assert all(point.fee_pnl is None for point in result.points)
         assert all(point.net_pnl is None for point in result.points)
+        assert all(
+            _reason_rows(point) == [("fx_conversion_unproven", "untrusted", "instrument", _I1)]
+            for point in result.points
+        )
 
     @pytest.mark.parametrize("direct_close", [0.0, -1.25])
     async def test_non_positive_direct_fx_fee_withholds_series(self, direct_close: float) -> None:
@@ -809,6 +869,9 @@ class TestBuildWalletPnlSeries:
         assert result.points[1].valuation_status == "incomplete"
         assert result.points[1].accrual_pnl is None
         assert result.points[1].net_pnl is None
+        assert _reason_rows(result.points[1]) == [
+            ("fx_conversion_unproven", "untrusted", "instrument", _I1)
+        ]
 
     async def test_paper_instrument_uses_source_venue_marks_with_paper_key(self) -> None:
         """A PAPER instrument resolves Kraken candles and remains the mark key."""
@@ -843,12 +906,14 @@ class TestBuildWalletPnlSeries:
         assert repo.candle_calls[0][0] == refs
         assert repo.candle_calls[0][0][0]["exchange"] == "kraken"
         assert result.points[0].per_instrument[0].instrument_public_id == _I1
+        assert result.points[0].per_instrument[0].native_symbol == "BTC-USD"
+        assert result.points[0].per_instrument[0].exchange == "kraken"
 
     async def test_proven_fill_gap_withholds_every_monetary_field(self) -> None:
         """Any scoped shard gap makes every aggregate and contribution untrusted."""
         executions = [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.5, "USD")]
         refs = [_ref(_I1, "BTC-USD", "USD")]
-        candles = [_candle(_m(-1), 105.0), _candle(_m(0), 110.0)]
+        candles = [_candle(_m(-1), 105.0)]
         repo = FakeRepo(
             executions=executions,
             lineage=[
@@ -870,7 +935,7 @@ class TestBuildWalletPnlSeries:
             ("clean-shard", "w1", "live", _T0),
             ("gapped-shard", "w1", "live", _T0),
         ]
-        for point in result.points:
+        for index, point in enumerate(result.points):
             assert point.valuation_status == "incomplete"
             assert point.realized_pnl is None
             assert point.fee_pnl is None
@@ -880,6 +945,8 @@ class TestBuildWalletPnlSeries:
             assert len(point.per_instrument) == 1
             contribution = point.per_instrument[0]
             assert contribution.instrument_public_id == _I1
+            assert contribution.native_symbol == "BTC-USD"
+            assert contribution.exchange == "kraken"
             assert contribution.realized_pnl is None
             assert contribution.fee_pnl is None
             assert contribution.accrual_pnl is None
@@ -892,6 +959,10 @@ class TestBuildWalletPnlSeries:
             assert attribution.fee_pnl is None
             assert attribution.accrual_pnl is None
             assert attribution.unrealized_pnl is None
+            expected_reasons = [("fill_evidence_gap", "untrusted", "global", None)]
+            if index == 1:
+                expected_reasons.append(("mark_unavailable", "mark_incomplete", "instrument", _I1))
+            assert _reason_rows(point) == expected_reasons
 
     async def test_ambiguous_lineage_falls_back_to_unattributed(self) -> None:
         """Conflicting command candidates are omitted instead of choosing one."""
@@ -1081,6 +1152,48 @@ class TestExecutionQuoteCurrencyProof:
         assert point.valuation_status == "incomplete"
         assert point.realized_pnl is None
         assert point.net_pnl is None
+        assert _reason_rows(point) == [
+            (
+                "execution_price_provenance_unproven",
+                "untrusted",
+                "instrument",
+                _I1,
+            )
+        ]
+
+    async def test_response_time_successor_does_not_relabel_proven_fill_identity(self) -> None:
+        """A later display revision cannot replace the ref that covered replay."""
+        executions = [
+            _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 0, "sell", 1.0, 110.0, 0.0, "USD"),
+        ]
+        refs = [
+            _ref(_I1, "BTC-USD", "USD", valid_to=_m(1)),
+            _ref(
+                _I1,
+                "XBT-USD",
+                "USD",
+                exchange="coinbase",
+                instrument_exchange="coinbase",
+                base="BTC",
+                valid_from=_m(1),
+            ),
+        ]
+        result = await build_wallet_pnl_series(
+            FakeRepo(executions=executions, refs=refs),
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(2),
+        )
+        point = result.points[0]
+        assert point.valuation_status == "complete"
+        assert point.realized_pnl == 10.0
+        contribution = point.per_instrument[0]
+        assert contribution.native_symbol == "BTC-USD"
+        assert contribution.exchange == "kraken"
 
     async def test_symbol_and_exchange_revision_inside_fill_span_withholds(self) -> None:
         """No single identity can certify fills that straddle a venue re-key."""
@@ -1120,6 +1233,11 @@ class TestExecutionQuoteCurrencyProof:
         assert all(point.valuation_status == "incomplete" for point in result.points)
         assert all(point.realized_pnl is None for point in result.points)
         assert all(point.net_pnl is None for point in result.points)
+        assert all(
+            contribution.native_symbol is None and contribution.exchange is None
+            for point in result.points
+            for contribution in point.per_instrument
+        )
 
     async def test_quote_revision_after_closed_span_withholds_prior_prices(self) -> None:
         """A later quote correction invalidates the earlier denomination claim."""
@@ -1150,6 +1268,9 @@ class TestExecutionQuoteCurrencyProof:
             point.unrealized_pnl,
             point.net_pnl,
         ) == (None, None, None, None, None)
+        contribution = point.per_instrument[0]
+        assert contribution.native_symbol == "BTC-X"
+        assert contribution.exchange == "kraken"
 
     async def test_same_projection_revisions_are_merged_before_price_proof(self) -> None:
         """Metadata-only version churn does not blank a covered round trip."""
@@ -1213,6 +1334,11 @@ class TestExecutionQuoteCurrencyProof:
         )
         assert all(point.valuation_status == "incomplete" for point in result.points)
         assert all(point.realized_pnl is None for point in result.points)
+        assert all(
+            contribution.native_symbol is None and contribution.exchange is None
+            for point in result.points
+            for contribution in point.per_instrument
+        )
 
     async def test_execution_venue_must_match_historical_instrument_venue(self) -> None:
         """A unique same-quote ref cannot certify fills from another venue."""
@@ -1256,6 +1382,9 @@ class TestExecutionQuoteCurrencyProof:
         assert point.valuation_status == "incomplete"
         assert point.realized_pnl is None
         assert point.net_pnl is None
+        contribution = point.per_instrument[0]
+        assert contribution.native_symbol == "BTC-USD"
+        assert contribution.exchange == "kraken"
 
     async def test_missing_symbol_reference_withholds_round_trip(self) -> None:
         """An absent reference cannot prove the execution-price currency."""
@@ -1282,6 +1411,9 @@ class TestExecutionQuoteCurrencyProof:
             point.unrealized_pnl,
             point.net_pnl,
         ) == (None, None, None, None, None)
+        contribution = point.per_instrument[0]
+        assert contribution.native_symbol is None
+        assert contribution.exchange is None
 
     async def test_multiple_symbol_references_withhold_round_trip(self) -> None:
         """One matching candidate cannot override a second ambiguous reference."""
@@ -2825,6 +2957,9 @@ class TestCrossCurrencyPrices:
             contribution.accrual_pnl,
             contribution.unrealized_pnl,
         ) == (0.0, 0.0, 0.0, None)
+        assert _reason_rows(point) == [
+            ("fx_conversion_unproven", "mark_incomplete", "instrument", _I1)
+        ]
         recovered = result.points[2]
         assert recovered.valuation_status == "complete"
         assert recovered.unrealized_pnl == 38.0
@@ -2857,6 +2992,9 @@ class TestCrossCurrencyPrices:
             point.unrealized_pnl,
             point.net_pnl,
         ) == (0.0, 0.0, 0.0, None, None)
+        assert _reason_rows(point) == [
+            ("fx_conversion_unproven", "mark_incomplete", "instrument", _I1)
+        ]
 
     async def test_missing_same_side_add_rate_keeps_mark_independent_cumulatives(self) -> None:
         """An unconvertible add poisons basis but does not invent a realization."""
@@ -2941,6 +3079,7 @@ class TestCrossCurrencyPrices:
             contribution.accrual_pnl,
             contribution.unrealized_pnl,
         ) == (None, None, None, None)
+        assert _reason_rows(point) == [("fx_conversion_unproven", "untrusted", "instrument", _I1)]
 
     async def test_shared_foreign_quote_loads_one_pair_set_per_rate_plane(self) -> None:
         """Two EUR instruments request pair evidence by currency, not instrument."""
@@ -3004,6 +3143,23 @@ class TestCrossCurrencyPrices:
 
 class TestBuildWalletPnlTimeline:
     """Cover independent marker sourcing, outcomes, ordering, and capping."""
+
+    async def test_null_signal_price_needs_no_denomination_span(self) -> None:
+        """A source signal with no price remains a marker without price proof."""
+        repo = FakeRepo(signals=[_signal_row("signal-null-price", _T0, False, price=None)])
+        result = await build_wallet_pnl_timeline(
+            repo,
+            "w1",
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+        )
+        assert len(result.markers) == 1
+        marker = result.markers[0]
+        assert isinstance(marker, PnlSignalMarker)
+        assert marker.price is None
 
     async def test_emits_all_marker_kinds_and_preserves_no_fill_decisions(self) -> None:
         """Rejected and never-executed decisions survive without fill lineage."""
@@ -3399,7 +3555,7 @@ def test_provenance_constants_are_stable() -> None:
     Then: The documented source, version, and total-work limit remain stable.
     """
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
-    assert PNL_TIMELINE_CALC_VERSION == "5A.9"
+    assert PNL_TIMELINE_CALC_VERSION == "5A.11"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
 
@@ -3509,6 +3665,9 @@ class TestForeignFeeConversion:
             after_point.unrealized_pnl,
             after_point.net_pnl,
         ) == (None, None, None, None, None)
+        assert _reason_rows(after_point) == [
+            ("fx_conversion_unproven", "untrusted", "instrument", _I1)
+        ]
         assert after.rate_sources == ()
 
     async def test_rate_from_another_minute_is_not_borrowed(self) -> None:

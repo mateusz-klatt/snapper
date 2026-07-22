@@ -2,7 +2,7 @@
 
 Pins the strict-body contract: every monetary field accepts ``None`` (honest
 incompleteness), unknown fields are rejected (``extra='forbid'``), and the
-valuation-status discriminator is a closed literal.
+valuation status is equivalent to a required list of closed causal reasons.
 """
 
 from datetime import UTC
@@ -15,6 +15,7 @@ from snapper.api.schemas.pnl_timeline import PnlAiDecisionMarkerData
 from snapper.api.schemas.pnl_timeline import PnlAttributionContributionData
 from snapper.api.schemas.pnl_timeline import PnlFillMarkerData
 from snapper.api.schemas.pnl_timeline import PnlFxRateSourceData
+from snapper.api.schemas.pnl_timeline import PnlIncompletenessReasonData
 from snapper.api.schemas.pnl_timeline import PnlInstrumentContributionData
 from snapper.api.schemas.pnl_timeline import PnlSeriesData
 from snapper.api.schemas.pnl_timeline import PnlSeriesResponse
@@ -31,6 +32,8 @@ def _contribution() -> PnlInstrumentContributionData:
     """Build a fully-null contribution (an untrusted point's shape)."""
     return PnlInstrumentContributionData(
         instrument_public_id="i1",
+        native_symbol=None,
+        exchange=None,
         realized_pnl=None,
         fee_pnl=None,
         accrual_pnl=None,
@@ -50,6 +53,24 @@ def _attribution() -> PnlAttributionContributionData:
     )
 
 
+def _multi_cause_reasons() -> list[PnlIncompletenessReasonData]:
+    """Build one MARK and one UNTRUSTED instrument-scoped cause."""
+    return [
+        PnlIncompletenessReasonData(
+            reason="mark_unavailable",
+            withholding_tier="mark_incomplete",
+            withholding_scope="instrument",
+            trigger_instrument_public_id="i1",
+        ),
+        PnlIncompletenessReasonData(
+            reason="execution_price_invalid",
+            withholding_tier="untrusted",
+            withholding_scope="instrument",
+            trigger_instrument_public_id="i2",
+        ),
+    ]
+
+
 def _point(status: PnlValuationStatus = "complete") -> PnlTimelinePointData:
     """Build one valued point with the given valuation status."""
     return PnlTimelinePointData(
@@ -60,9 +81,12 @@ def _point(status: PnlValuationStatus = "complete") -> PnlTimelinePointData:
         unrealized_pnl=2.0,
         net_pnl=2.5,
         valuation_status=status,
+        incompleteness_reasons=[] if status == "complete" else _multi_cause_reasons(),
         per_instrument=[
             PnlInstrumentContributionData(
                 instrument_public_id="i1",
+                native_symbol="BTC-USD",
+                exchange="kraken",
                 realized_pnl=1.0,
                 fee_pnl=-0.5,
                 accrual_pnl=0.0,
@@ -204,12 +228,81 @@ class TestStrictContract:
             unrealized_pnl=None,
             net_pnl=None,
             valuation_status="incomplete",
+            incompleteness_reasons=_multi_cause_reasons(),
             per_instrument=[_contribution()],
             attribution=[_attribution()],
         )
         assert point.net_pnl is None
+        assert [reason.reason for reason in point.incompleteness_reasons] == [
+            "mark_unavailable",
+            "execution_price_invalid",
+        ]
+        assert point.incompleteness_reasons[0].withholding_tier == "mark_incomplete"
+        assert point.incompleteness_reasons[1].trigger_instrument_public_id == "i2"
         assert point.per_instrument[0].realized_pnl is None
         assert point.attribution[0].realized_pnl is None
+
+    def test_valuation_status_and_reason_presence_are_equivalent(self) -> None:
+        """Both directions of the status-to-reason invariant are enforced."""
+        complete_payload = _point().model_dump()
+        complete_payload["incompleteness_reasons"] = [
+            PnlIncompletenessReasonData(
+                reason="fill_evidence_gap",
+                withholding_tier="untrusted",
+                withholding_scope="global",
+                trigger_instrument_public_id=None,
+            ).model_dump()
+        ]
+        with pytest.raises(ValidationError):
+            PnlTimelinePointData.model_validate(complete_payload)
+        incomplete_payload = _point().model_dump()
+        incomplete_payload["valuation_status"] = "incomplete"
+        with pytest.raises(ValidationError):
+            PnlTimelinePointData.model_validate(incomplete_payload)
+
+    def test_reason_contract_is_required_closed_and_strict(self) -> None:
+        """Reason records are required and reject unknown literals and fields."""
+        missing = _point().model_dump()
+        missing.pop("incompleteness_reasons")
+        with pytest.raises(ValidationError):
+            PnlTimelinePointData.model_validate(missing)
+        entry = _multi_cause_reasons()[0].model_dump()
+        entry["reason"] = "unknown"
+        with pytest.raises(ValidationError):
+            PnlIncompletenessReasonData.model_validate(entry)
+        entry = _multi_cause_reasons()[0].model_dump()
+        entry["withholding_tier"] = "partial"
+        with pytest.raises(ValidationError):
+            PnlIncompletenessReasonData.model_validate(entry)
+        entry = _multi_cause_reasons()[0].model_dump()
+        entry["withholding_scope"] = "wallet"
+        with pytest.raises(ValidationError):
+            PnlIncompletenessReasonData.model_validate(entry)
+        entry = _multi_cause_reasons()[0].model_dump()
+        entry["surprise"] = True
+        with pytest.raises(ValidationError):
+            PnlIncompletenessReasonData.model_validate(entry)
+
+    def test_contribution_identity_is_required_but_nullable(self) -> None:
+        """Display identity accepts honest nulls but cannot disappear from the contract."""
+        contribution = _contribution()
+        assert contribution.native_symbol is None
+        assert contribution.exchange is None
+        missing_symbol = contribution.model_dump()
+        missing_symbol.pop("native_symbol")
+        with pytest.raises(ValidationError):
+            PnlInstrumentContributionData.model_validate(missing_symbol)
+        missing_exchange = contribution.model_dump()
+        missing_exchange.pop("exchange")
+        with pytest.raises(ValidationError):
+            PnlInstrumentContributionData.model_validate(missing_exchange)
+
+    def test_instrument_scope_requires_a_triggering_instrument(self) -> None:
+        """Instrument-scoped reason records cannot erase causal identity."""
+        payload = _multi_cause_reasons()[0].model_dump()
+        payload["trigger_instrument_public_id"] = None
+        with pytest.raises(ValidationError):
+            PnlIncompletenessReasonData.model_validate(payload)
 
     def test_fill_marker_price_can_be_withheld(self) -> None:
         """A fill marker retains its identity when its native price is unproved."""
@@ -235,6 +328,7 @@ class TestStrictContract:
             "unrealized_pnl": 0.0,
             "net_pnl": 1.0,
             "valuation_status": "complete",
+            "incompleteness_reasons": [],
             "per_instrument": [],
             "attribution": [],
             "surprise": 1,
@@ -252,6 +346,7 @@ class TestStrictContract:
             "unrealized_pnl": 0.0,
             "net_pnl": 1.0,
             "valuation_status": "partial",
+            "incompleteness_reasons": [],
             "per_instrument": [],
             "attribution": [],
         }
