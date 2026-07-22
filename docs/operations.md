@@ -261,7 +261,7 @@ at-most-once ZMQ bus:
 - `docker compose restart snapper-strategies` — strategies-only restart:
   in-memory strategy state is lost (candle buffers rebuild via DB
   warmup; open-position beliefs and one-decision floors do NOT — the
-  P6 signal-safety gate governs arming anything beyond paper), the
+  signal-safety re-assertion gate governs arming anything beyond paper), the
   backend and feed keep running, and consults in flight time out and
   retry on the next window.
 - `docker compose restart snapper-egress` — tunnel-routed public feeds
@@ -274,8 +274,8 @@ at-most-once ZMQ bus:
 
 ### Flat-restart discipline (MANDATORY until venue-truth reconciliation lands)
 
-A strategies-container restart orphans every standing target: the P6
-re-assert layer is IN-SESSION repair only (`_target` starts empty), so
+A strategies-container restart orphans every standing target: the target
+re-assertion layer is in-session repair only (`_target` starts empty), so
 after ANY restart that touches `snapper-strategies` — including a full
 stack down/up — the operator MUST verify positions are flat and flatten
 anything standing (`GET /api/positions`, then close) BEFORE trusting
@@ -284,12 +284,12 @@ This discipline is the compensating control for the documented pre-LIVE
 gap (venue-truth position reconciliation + strategy target-state
 recovery are NOT built yet).
 
-### Paper-soak checklist + LIVE go/no-go (P7)
+### Paper-soak checklist and live go/no-go
 
-The 2026-07-03 P7 drill run verified on the split topology: all six
+The 2026-07-03 drill run verified on the split topology: all six
 restart domains heal (API ~25s, strategies ~30s incl. DB warmup,
 feed ~20s, broker ~30s with bus auto-reconnect, egress ~13s, full cold
-start), the P6 conventions live-fire (entry re-assert repriced each
+start), the signal-safety conventions live-fire (entry re-assert repriced each
 bar, `long_only` flat exits at `strength=0.0`, no same-bar duplicates),
 one poisoned bus frame is skipped without killing the listen loop, and
 the full MCP wake loop works container-to-host (consult admission →
@@ -969,32 +969,50 @@ wallet instances, not the bare templates.
 
 ## Persistent process control across containers
 
+The read-side process catalog routes (`GET /api/processes/available`,
+`/configured`, `/schema/<name>`, and `/runs`) require effective
+`READ_PROCESSES`; `GET /api/processes/summary` requires effective
+`READ_SYSTEM_STATUS`. The current `viewer` named set contains both read
+permissions, so a viewer can inspect the same process surface as an operator
+but has none of the lifecycle permissions described below.
+
 `POST /api/processes/<name>/start` and `/stop` are LOCAL runtime
 operations on the node that receives them, so in the split topology
 (feed in `snapper-feed`, strategies in `snapper-strategies`, executors
 under their coordinator) they cannot control a process owned by a
-different container. The persistent, cross-container-safe control is
-`PATCH /api/processes/<name>/desired-state` (gated by `MANAGE_PROCESSES`
-+ CSRF): it mutates only the DB desired-state (`enabled` /
-`restart_nonce`) of the `process_<name>` config — the source of truth —
-and NEVER starts or stops anything locally; the owning coordinator's
-reconcile loop converges the running state. The payload `action` is
-`enable`, `disable`, or `restart`. A `restart` requires the process to
-be enabled (409 otherwise) and a client-minted `restart_nonce`
-(`^[A-Za-z0-9_-]+$`, 8-64 chars, 422 if missing; idempotent — resending
-the same nonce does not double-bounce). A per-wallet executor instance
-(404) and a bare executor template (422) have no desired-state row;
-enabling a STRATEGY re-runs the operator/wallet/grant scope check
-fail-closed before the write.
+different container. For STRATEGY targets, local start requires effective
+`START_STRATEGIES` and local stop requires effective `STOP_STRATEGIES`; both
+operations require effective `MANAGE_PROCESSES` for non-strategy targets. The
+persistent, cross-container-safe control is
+`PATCH /api/processes/<name>/desired-state`. Non-strategy targets require
+effective `MANAGE_PROCESSES`; a STRATEGY `enable` requires effective
+`START_STRATEGIES`, `disable` requires effective `STOP_STRATEGIES`, and
+`restart` requires both. These mutation routes also require CSRF on the
+cookie-authenticated path; `Authorization: Bearer` requests bypass CSRF per the
+project-wide auth contract. The desired-state endpoint mutates only the DB state
+(`enabled` / `restart_nonce`) of the `process_<name>` config — the source of
+truth — and never starts or stops anything locally; the owning coordinator's
+reconcile loop converges the running state. A `restart` requires the process
+to be enabled (409 otherwise) and a client-minted `restart_nonce`
+(`^[A-Za-z0-9_-]+$`, 8-64 chars, 422 if missing; idempotent — resending the
+same nonce does not double-bounce). A per-wallet executor instance (404) and a
+bare executor template (422) have no desired-state row; enabling a STRATEGY
+re-runs the operator/wallet/grant scope check fail-closed before the write.
+
+`POST /api/processes` uses the same target-aware model when it creates a
+configuration. A STRATEGY target requires effective `CONFIGURE_STRATEGIES` and,
+when created enabled, effective `START_STRATEGIES`; a non-strategy target
+requires effective `MANAGE_PROCESSES`.
 
 ### Retargeting a strategy's scope (restart required)
 
 `PATCH /api/processes/<name>/config` retargets an existing STRATEGY
 config's scope (operator / wallet / AI-reviewer reference-identity
-params) without hand-editing the config JSON. It is gated by
-`MANAGE_PROCESSES` + CSRF and FULLY enforces the caller's authorization
-at edit time via `_enforce_strategy_scope` (operator membership, wallet
-grant, output coverage → 403/400). A non-strategy target → 400, an
+params) without hand-editing the config JSON. It requires effective
+`CONFIGURE_STRATEGIES`; cookie-authenticated requests also require CSRF. The
+route fully enforces the caller's authorization at edit time via
+`_enforce_strategy_scope` (operator membership, wallet grant, output coverage
+→ 403/400). A non-strategy target → 400, an
 executor instance / unknown name → 404, a bare executor template → 422,
 and an undeclared reference-identity key → 400. `operator_public_id` /
 `wallet_public_id` may be a concrete public_id or a `label:<name>`

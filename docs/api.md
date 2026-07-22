@@ -19,23 +19,47 @@ as a Bearer token instead.
 
 ### Roles and Permissions
 
-| Role | Access |
-| ---- | ------ |
-| `viewer` | Read-only market data, orders, positions, account state, strategies, system status, backtests, notifications; can register and manage the caller's own notification devices |
-| `ai_delegate` | Scoped automation principal for MCP and AI-review workflows; can read market/orders/positions/strategies/signals/backtests/system status and create/cancel/manage scoped orders/positions, but cannot manage users, settings, processes, credentials, scope grants, or paired execution, and cannot subscribe to `alerts.` WebSocket topics (device-registration and alert-history REST routes require only authentication) |
-| `operator` | Viewer permissions plus trade execution, process and strategy lifecycle management, backtest management, and paired-execution terminalization |
-| `admin` | Full access including user management, system configuration, wallet/credential management, scope grant management, operator impersonation |
+Every capability decision is based on effective permissions. A role is only a
+stable name for a base permission set, plus a user-management value and display
+label; it is not an authorization hierarchy.
 
-Multi-tenant permissions (ADMIN only): ``read:wallet_credentials``,
-``manage:wallet_credentials``, ``manage:scope_grants``,
-``impersonate:operator``.
+| Named set | Count | Access summary |
+| --------- | ----: | -------------- |
+| `ai_researcher` | 3 | Research-only access: read market data and market views, then submit market views. It has no signal, order, position, process, or health access. |
+| `ai_reviewer` | 11 | Read market data, market views, orders, positions, strategies, signals, system status, and backtests; create backtest comparisons; control runtime diagnostics; and see the MCP AI-review decision tool in its catalog. It has no order-execution or position-management permission, so current invocation of that tool remains unavailable. |
+| `ai_delegate` | 14 | Scoped MCP and AI-review automation: the reviewer set plus scoped order creation, cancellation, and position management. It cannot manage users, settings, processes, AI integration, credentials, scope grants, or paired execution, and cannot subscribe to `alerts.` WebSocket topics. |
+| `viewer` | 14 | Full read-only operator visibility: account state; operator-scoped wallets and portfolio; market data and views; orders and positions; signals and AI-review decisions; P&L timeline and attribution; backtests; strategies; process state; health; AI integration; and notifications. It cannot trade, manage positions, create backtest comparisons, control runtime diagnostics, configure or control strategies and processes, manage AI integration, or perform administrative mutations. Self-service notification-device management remains available. |
+| `operator` | 26 | The complete viewer read set plus trade execution, position management, strategy configuration and lifecycle control, non-strategy process management, AI-integration management, runtime diagnostics, backtest comparisons and run management, and paired-execution terminalization. |
+| `admin` | 34 | Every permission in the current `Permission` catalog, including user and system configuration, wallet credentials, scope grants, and operator impersonation. The mapping is defined as the complete catalog, so newly introduced permissions are included automatically. |
 
-JWT access is the intersection of the role grant and the token's optional
-`permissions` claim. The role remains an immutable ceiling: a token may remove
-permissions but cannot add one the role lacks. Tokens minted without an
-explicit scope retain the complete role grant. For compatibility, an older
-access token with no `permissions` claim also receives the complete role
-grant until it expires.
+The viewer's wallet and portfolio reads use its explicit operator memberships
+and active scope grants, exactly like an operator's reads. Runtime scope
+decisions consume effective `impersonate:operator`; the current `admin` set is
+the only set containing it. This structural permission is non-downscopable, so
+an explicitly narrowed admin token retains the historical system-wide operator
+and wallet scope.
+
+JWT access is the intersection of the named role set and the token's optional
+`permissions` claim, plus any non-downscopable structural grant in that named
+set. The named set remains an immutable ceiling: a token may remove ordinary
+permissions but cannot add one outside that set or remove
+`impersonate:operator`. Tokens minted without an explicit scope retain the
+complete named set. For compatibility, an older access token with no
+`permissions` claim also receives the complete named set until it expires.
+Authenticated profile responses expose the result as `effective_permissions`;
+clients use that field for capability decisions.
+
+Version-two explicit scopes are migrated by capability equivalence. An exact
+full named-set scope adopts the current named set. For a narrowed `operator` or
+`admin` scope, retained `read:signals` adds `read:ai_reviews`, while retained
+`manage:processes` adds the process and AI-integration read and management
+permissions plus the strategy configure/start/stop permissions that replace
+its historical controls. For every named set, retained `read:backtests` adds
+`create:backtest_comparisons`, and retained `read:system_status` adds
+`manage:runtime_diagnostics`, only when that named set contains the replacement
+permission. The `viewer` set contains none of those mutation permissions, and
+an intentionally narrowed version-two viewer scope does not inherit the new
+read permissions.
 
 ### POST /api/auth/login
 
@@ -104,7 +128,14 @@ Content-Type: application/json
             "operator_public_ids": [],
             "primary_operator_public_id": null,
             "active_wallet_public_id": null,
-            "default_language": null
+            "default_language": null,
+            "effective_permissions": [
+                "impersonate:operator",
+                "read:market_data",
+                "read:orders",
+                "read:positions"
+            ],
+            "delegate_public_id": null
         },
         "access_token": null,
         "refresh_token": null
@@ -129,10 +160,10 @@ both carry the standard provenance fields (`type`, `sequence_id`, `public_id`,
 `?return_tokens=true` for headless integrations.
 
 `payload.permissions` is optional. When supplied, every value must already
-belong to the authenticated user's role; otherwise login returns 422 rather
-than silently dropping the invalid permission. Omit the field for the existing
-full-role behavior. A refresh preserves the selected scope, including an
-intentionally empty list, and cannot re-broaden it.
+belong to the authenticated user's named role set; otherwise login returns 422
+rather than silently dropping the invalid permission. Omit the field for the
+complete named-set behavior. A refresh preserves the selected scope,
+including an intentionally empty list, and cannot re-broaden it.
 
 `remember_me` is currently accepted for compatibility but is not wired into
 `/api/auth/login`: refresh JWTs use `auth_refresh_token_expire_days`, and
@@ -199,7 +230,14 @@ POST /api/auth/refresh
             "operator_public_ids": [],
             "primary_operator_public_id": null,
             "active_wallet_public_id": null,
-            "default_language": null
+            "default_language": null,
+            "effective_permissions": [
+                "impersonate:operator",
+                "read:market_data",
+                "read:orders",
+                "read:positions"
+            ],
+            "delegate_public_id": null
         },
         "access_token": null,
         "refresh_token": null
@@ -343,28 +381,37 @@ wrapping the full `UserProfile` payload, which carries the multi-tenant trio:
         "operator_public_ids": ["019d6ca4-..."],
         "primary_operator_public_id": "019d6ca4-...",
         "active_wallet_public_id": "019d7e9a-...",
-        "default_language": "pl"
+        "default_language": "pl",
+        "effective_permissions": [
+            "impersonate:operator",
+            "read:market_data",
+            "read:orders",
+            "read:positions"
+        ],
+        "delegate_public_id": null
     }
 }
 ```
 
-Only `/api/auth/me` enriches the full `UserProfile`. The
-`operator_public_ids` / `primary_operator_public_id` fields are
-populated from `user_operator_memberships` (ADMIN receives every
-active operator; OPERATOR/VIEWER receive only their explicit
-memberships); `active_wallet_public_id` reflects the active
-wallet selection. These fields power the frontend OperatorPicker
-without a second round trip. The login / refresh responses
-return the `UserProfile` from `authenticate_user()` /
-`get_user_by_id()` with the active wallet overlaid from the
-request principal — operator memberships are NOT resolved on
-those two surfaces (`operator_public_ids` = `[]`,
-`primary_operator_public_id` = `null`). Active-wallet semantics
-differ between the two: login lands `active_wallet_public_id`
-= `null` (no wallet selected at first auth); refresh propagates
-whatever wallet the refresh JWT carries (or the request hint).
-Clients should call `/api/auth/me` to get a fully-resolved
-profile.
+Only `/api/auth/me` resolves the `operator_public_ids` and
+`primary_operator_public_id` membership fields. A caller with effective
+`impersonate:operator` receives every active operator; all other callers,
+including the current `operator` and `viewer` sets, receive only their
+explicit memberships. `active_wallet_public_id` reflects the active wallet
+selection. These fields power the frontend OperatorPicker without a second
+round trip. `effective_permissions` is the role-bounded token grant that
+clients use for capability checks, and `delegate_public_id` identifies an
+operational AI-delegate lifecycle identity when one exists.
+
+The login and refresh responses return the `UserProfile` from
+`authenticate_user()` / `get_user_by_id()` with the active wallet overlaid
+from the request principal. Operator memberships are not resolved on those
+two surfaces (`operator_public_ids` = `[]`,
+`primary_operator_public_id` = `null`). Active-wallet semantics differ
+between the two: login lands `active_wallet_public_id = null` because no
+wallet is selected at first authentication; refresh propagates whatever
+wallet the refresh JWT carries or the request hint. Clients should call
+`/api/auth/me` to get a fully resolved profile.
 
 ### POST /api/auth/me/update
 
@@ -444,9 +491,10 @@ WebSocket close fanout; auth listeners also poll the committed
 
 ### POST /api/auth/users/{user_id}/change-password
 
-Change a password. Users may change their own password; admins may
-change any password. Requires CSRF for cookie auth and is account-rate
-limited. Body is `ChangePasswordRequest` with current and new password.
+Change a password. Users may change their own password; a caller with
+`manage:users` may change another user's password. Requires CSRF for cookie
+auth and is account-rate limited. Body is `ChangePasswordRequest` with current
+and new password.
 
 ### POST /api/auth/users/{user_id}/admin-reset-password
 
@@ -619,7 +667,7 @@ detection across the ZMQ bridge and per-session REST client detectors.
 
 ### GET /api/health/egress
 
-Operator egress route snapshot. Requires `read:system_status`
+Egress route snapshot. Requires `read:system_status`
 permission and uses the same CSRF guard as the detailed monitoring
 health routes.
 
@@ -815,7 +863,7 @@ still-forming bar when `false`, and the final bar for its window when
 
 ### GET /api/candles/db
 
-Explicit DB-only candle read for operators. Parameters and response
+Explicit DB-only candle read for tokens with `read:market_data`. Parameters and response
 shape match `GET /api/candles` except the `start`/`end` market-time
 window pair is not accepted; the route bypasses the in-process market
 cache unconditionally so incident response can verify persisted
@@ -1218,7 +1266,7 @@ GET /api/positions
 The `position_cycle_public_id` field is `null` when no open position cycle exists
 for the position (e.g. flat positions or positions without cycle tracking).
 
-Truthful-valuation semantics (PnL Phase 2): rows are written by the trader's
+Truthful-valuation semantics: rows are written by the trader's
 position projection and NULLs are honest, never zero-coerced. `average_price`
 is `null` when an aggregate of opposing paper strategy shards has no single
 truthful entry (or a component entry is unknown). `mark_price` / `marked_at`
@@ -1234,16 +1282,18 @@ when unknown.
 Fetch truthful venue account state and portfolio-reconciliation truth per
 (wallet, exchange, mode). The venue observation remains distinct from the
 fill-derived position projection, while the nested reconciliation view compares
-the two truth planes (PnL Phase 4). Requires `read:account_state` permission. AI
-delegates are denied. There is no `as_of` parameter: an account state has no
-truthful historical projection, only its current observation.
+the two truth planes. Requires `read:account_state`; the current `ai_delegate`
+named set does not contain that permission. There is no `as_of` parameter: an
+account state has no truthful historical projection, only its current
+observation.
 
 Live clients subscribe to `portfolio.accounts.`. Executors publish a thin
 `account_state_changed_event` after snapshot and reconciliation commits; the
 event is an invalidation signal, not an account payload. Clients refetch this
 REST endpoint to rebuild the read-time fail-closed view and retain a 60-second
 safety-net poll for missed frames. The bridge enforces the same accessible-wallet
-scope per frame, with an ADMIN bypass and fail-closed malformed-frame handling.
+scope per frame, with system-wide scope for callers holding effective
+`impersonate:operator` and fail-closed malformed-frame handling.
 
 **Request:**
 
@@ -1340,7 +1390,7 @@ GET /api/portfolio/accounts
 }
 ```
 
-Fail-closed read semantics (PnL Phase 3): `sync_status` is the raw stored
+Fail-closed read semantics: `sync_status` is the raw stored
 outcome of the last observation attempt (`observed` / `simulated` /
 `unsupported` / `error`), while `effective_status` is DERIVED at read time and
 is the one consumers must trust. It demotes an `observed` row to `stale` once
@@ -1354,7 +1404,7 @@ only when the state is corrupt. A stale row can retain labeled last-known
 values. Balance and positions are
 independent reads, each carrying its own `*_observed_at` timestamp and
 `*_payload_source_observation_id` provenance. Values are venue-native only
-(`valuation_status` = `native_only`); USD valuation is Phase 5.
+(`valuation_status` = `native_only`); no currency conversion is synthesized.
 
 The strict `reconciliation` object is always present. With no persisted
 reconciliation state it has `effective_status="incomplete"`, is not
@@ -1368,6 +1418,43 @@ revalidated current `matched` or `mismatched` verdict is authoritative. Stale
 views retain their validated `expected`, `actual`, `difference`, and
 `tolerance` JSON objects and continue to surface an open drift episode; raw
 persisted JSON strings are never exposed.
+
+## Portfolio P&L
+
+The P&L surfaces are read-only and require `read:positions`. The current
+`viewer` set contains this permission. Both routes enforce the same wallet and
+operator-membership scope as the positions surface; a caller cannot use the
+query parameters to broaden its accessible wallets.
+
+### GET /api/portfolio/pnl/series
+
+Reconstruct one wallet and mode's net-P&L-since-activation series. The response
+decomposes realized, fee, accrual, unrealized, and net P&L at the requested
+granularity, with per-exchange and per-instrument attribution and a single
+bitemporal `as_of` horizon shared by every source read.
+
+### GET /api/portfolio/pnl/timeline
+
+Return the same P&L series plus bounded attribution markers for fills,
+signals, and AI-review decisions. This route is the read-only decision timeline
+used to explain when trading and review events affected the portfolio; it does
+not grant authority to mutate any of those resources.
+
+**Query parameters shared by both routes:**
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `wallet_public_id` | string | yes | Single wallet scope; 403 when inaccessible |
+| `operator_public_id` | string | no | Optional operator scope; 403 when inaccessible |
+| `mode` | string | no | Trading mode, default `live` |
+| `granularity` | string | no | `1m`, `5m`, `1h`, or `1d`; default `1m` |
+| `from` | datetime | yes | Inclusive UTC window start |
+| `to` | datetime | yes | Inclusive UTC window end |
+| `as_of` | datetime | no | Bitemporal knowledge horizon |
+| `valuation_ccy` | string | no | Three-letter valuation currency, default `USD` |
+
+Invalid or excessive windows return 400. Both routes return 403 for a wallet
+outside the caller's permission-derived accessible set.
 
 ### POST /api/execution-plans
 
@@ -1459,8 +1546,8 @@ reduce_only market close on breach.
 **Response (409):** Cycle not open or duplicate trailing stop on same cycle.
 
 **Response (422):** Invalid params, missing capability, no truthful live
-position for the cycle (the historical peak-quantity fallback was removed in
-PnL Phase 2), or a position without a usable entry price.
+position for the cycle (the historical peak-quantity fallback is not used), or
+a position without a usable entry price.
 
 ### POST /api/trailing-stops/{plan_public_id}/cancel
 
@@ -1498,8 +1585,9 @@ current_stop from the evaluator's in-memory state.
 
 The paired-execution operator surface exposes halted or exposed multi-leg
 groups and the manual attestation used after an operator resolves a
-`manual_intervention` group at the venue. Non-admin callers are filtered to
-their accessible wallets; `admin` is unscoped.
+`manual_intervention` group at the venue. Callers lacking effective
+`impersonate:operator` are filtered to their accessible wallets; callers with
+that effective permission are unscoped.
 
 ### GET /api/paired-execution/incidents
 
@@ -1544,14 +1632,16 @@ repository backend.
 
 ### GET /api/position-cycles/open
 
-List all open position cycles with age information. Admin-only endpoint for
-diagnosing orphaned cycles (open cycles without a matching trading engine).
+List all open position cycles with age information. Requires `manage:users`
+for diagnosing orphaned cycles (open cycles without a matching trading
+engine).
 
 **Query parameters:**
 
 - `min_age_hours` (float, optional, default 0): Only return cycles open longer than this.
 
-**Permission:** `manage:users` (admin only).
+**Permission:** `manage:users`, which is present only in the current `admin`
+set.
 
 **Response (200):** `PositionCycleListResponse` envelope whose payload
 items carry `cycle_public_id`, `shard_key`, `instrument_public_id`,
@@ -1567,7 +1657,8 @@ Close a specific orphaned position cycle. The operator should verify via
 
 - `cycle_public_id` (string, required): Public ID of the cycle to close.
 
-**Permission:** `manage:users` (admin only). CSRF token required.
+**Permission:** `manage:users`, which is present only in the current `admin`
+set. CSRF token required.
 
 **Response (200):** `OrphanSweepResponse` envelope with payload
 `{ "closed_count": 1, "closed_cycle_ids": ["<id>"] }`.
@@ -1584,7 +1675,8 @@ before running.
 
 - `min_age_hours` (float, optional, default 72, minimum 1): Minimum age threshold.
 
-**Permission:** `manage:users` (admin only). CSRF token required.
+**Permission:** `manage:users`, which is present only in the current `admin`
+set. CSRF token required.
 
 **Response (200):** `OrphanSweepResponse` envelope with payload
 `{ "closed_count": N, "closed_cycle_ids": [...] }`.
@@ -1858,13 +1950,18 @@ Current per-symbol feed-health rows. Requires `read:system_status`.
 ## Process Management
 
 Process endpoints manage background services (feeds, strategies, executors,
-brokers). Most require `manage:processes` permission (operator/admin). The
-summary endpoint requires only `read:system_status` (viewer+).
+brokers). Read endpoints require `read:processes`; the lightweight summary
+uses `read:system_status` because it is part of the health surface.
+Non-strategy mutations require `manage:processes`. Strategy targets use the
+narrow permissions `configure:strategies`, `start:strategies`, and
+`stop:strategies` according to the requested operation. The current `operator`
+and `admin` sets contain all three strategy permissions; `viewer` contains the
+read permissions and no process or strategy mutation permission.
 
 ### GET /api/processes/available
 
 List registered process templates that can be instantiated. Requires
-`manage:processes` permission.
+`read:processes` permission.
 
 **Response (200):**
 
@@ -1901,7 +1998,7 @@ List registered process templates that can be instantiated. Requires
 ### GET /api/processes/configured
 
 List configured process instances with runtime state. Requires
-`manage:processes` permission.
+`read:processes` permission.
 
 **Response (200):**
 
@@ -1981,8 +2078,10 @@ Lightweight process category counts for the overview dashboard. Requires
 
 ### POST /api/processes
 
-Create a new process configuration from a registered template. Requires
-`manage:processes` permission. Returns 201 on success.
+Create a new process configuration from a registered template. A non-strategy
+template requires `manage:processes`. A strategy template requires
+`configure:strategies`; creating it enabled also requires `start:strategies`.
+Returns 201 on success.
 
 **Request:**
 
@@ -2037,7 +2136,7 @@ X-CSRF-Token: <csrf_token>
 ### GET /api/processes/schema/{name}
 
 Get the configuration schema and defaults for a registered process template.
-Requires `manage:processes` permission.
+Requires `read:processes` permission.
 
 **Response (200):**
 
@@ -2070,7 +2169,8 @@ Requires `manage:processes` permission.
 
 ### POST /api/processes/{name}/start
 
-Start a configured process. Requires `manage:processes` permission.
+Start a configured process. A strategy target requires `start:strategies`; a
+non-strategy target requires `manage:processes`.
 
 **Request:**
 
@@ -2127,7 +2227,8 @@ the generated `executor_<exchange>_w<wallet_short>` instance instead.
 
 ### POST /api/processes/{name}/stop
 
-Stop a running process. Requires `manage:processes` permission.
+Stop a running process. A strategy target requires `stop:strategies`; a
+non-strategy target requires `manage:processes`.
 
 **Request:**
 
@@ -2166,8 +2267,10 @@ Set the persistent desired state (`enable`, `disable`, or `restart`) of the
 `process_<name>` config — the source of truth for the reconcile loop. This
 NEVER starts or stops anything locally, so it is safe for a process owned by
 another container: the owning coordinator's reconcile loop converges the
-running state to what is written here. Requires `manage:processes` permission
-and CSRF for cookie auth.
+running state to what is written here. A non-strategy target requires
+`manage:processes`. For a strategy, `enable` requires `start:strategies`,
+`disable` requires `stop:strategies`, and `restart` requires both permissions.
+Cookie-authenticated requests also require CSRF.
 
 **Request:**
 
@@ -2230,12 +2333,12 @@ disabled process), 403/400 (strategy operator/wallet/grant scope denied).
 
 Retarget an existing **strategy** config's scope (operator / wallet /
 AI-reviewer reference-identity params) without hand-editing the config JSON.
-Requires `manage:processes` permission and CSRF for cookie auth. The endpoint
-does NOT restart the process — the response carries `restart_required: true`
-(surfaced by the UI as a "restart required" banner) and the change applies on
-the next (re)start. Authorization is FULLY enforced at edit time against the
-caller's principal (it does not defer cross-tenant checks to the trusted
-(re)start resolver).
+Requires `configure:strategies` and CSRF for cookie auth. The endpoint does not
+restart the process: the response carries `restart_required: true` (surfaced by
+the UI as a "restart required" banner), and the change applies on the next
+start or restart. Authorization is fully enforced at edit time against the
+caller's principal; it does not defer cross-tenant checks to the trusted start
+resolver.
 
 **Request:**
 
@@ -2314,7 +2417,7 @@ failure), 403
 
 ### GET /api/processes/runs
 
-List historical process runs. Requires `manage:processes` permission.
+List historical process runs. Requires `read:processes` permission.
 
 **Parameters:**
 
@@ -2362,7 +2465,7 @@ List historical process runs. Requires `manage:processes` permission.
 ### GET /api/strategies
 
 List configured strategy processes with lightweight status. Requires
-`read:strategies` permission (viewer+).
+`read:strategies` permission.
 
 **Response (200):**
 
@@ -2393,10 +2496,17 @@ List configured strategy processes with lightweight status. Requires
 }
 ```
 
+Strategy mutations use the process routes described above:
+`configure:strategies` controls creation and scope edits,
+`start:strategies` controls starts and enables, and `stop:strategies` controls
+stops and disables. A restart requires both start and stop permissions, and
+creating an enabled strategy requires both configure and start permissions.
+
 ## Settings
 
 Settings-management endpoints require `configure:system` permission
-(admin only). `GET /api/settings/features` is the public exception.
+(present only in the current `admin` set). `GET /api/settings/features` is
+the public exception.
 
 ### GET /api/settings
 
@@ -2487,7 +2597,8 @@ List distinct setting category names.
 Return the active push-beta gate configuration. Requires
 `configure:system`. If the underlying `push_beta_config` setting is
 absent or malformed, the endpoint returns the default disabled gate with
-an empty allowlist so admins can see the effective routing state.
+an empty allowlist so a permission-bearing caller can see the effective
+routing state.
 
 ### POST /api/settings/push-beta/users
 
@@ -2645,11 +2756,11 @@ creation.
 
 ### POST /api/ai-delegates
 
-Create an AI delegate owned by the authenticated operator and mint a long-lived
+Create an AI delegate owned by the authenticated caller and mint a long-lived
 access JWT.
 
-**Permission:** `operator` role or higher with `manage:processes` retained in
-the token scope. CSRF token required for cookie-authenticated requests.
+**Permission:** `manage:ai_integration`. CSRF token required for
+cookie-authenticated requests.
 
 **Body (`DelegateCreateRequest` envelope):**
 
@@ -2682,13 +2793,16 @@ the token scope. CSRF token required for cookie-authenticated requests.
 }
 ```
 
-`operator_public_id` must be one of the caller's operator memberships; `null`
-uses the caller's primary operator. All caps are optional; `null` means the
-delegate inherits the Snapper-wide fallback for that cap.
+When supplied, `operator_public_id` must be one of the caller's operator
+memberships unless its effective grant contains `impersonate:operator`; that
+structural permission allows any explicit operator. A `null` value uses the
+caller's primary operator. All caps are optional; `null` means the delegate
+inherits the Snapper-wide fallback for that cap.
 
 `permissions` is optional and chooses the delegate access token's actual
-grant. Omission keeps the complete `ai_delegate` role grant. Every requested
-permission must belong to that role; the server rejects a superset with 422.
+grant. Omission keeps the complete `ai_delegate` named permission set. Every
+requested permission must belong to that set; the server rejects a superset
+with 422.
 
 **Response (200):** `DelegateCreatedResponse` with the delegate projection and
 one-shot `access_token`. List and detail endpoints never re-serve the token.
@@ -2697,35 +2811,40 @@ one-shot `access_token`. List and detail endpoints never re-serve the token.
 owner has reached the per-owner delegate cap.
 
 **Response (422):** The requested operator binding is outside the caller's
-claim set, or the requested token permission scope exceeds the delegate role.
+claim set, or the requested token permission scope exceeds the
+`ai_delegate` named set.
 
 ### GET /api/ai-delegates
 
-List the caller's active delegates. Deactivated delegates are omitted.
+List active delegates visible to the caller. A token with
+`manage:ai_integration` keeps the creator-owned management view; a read-only
+token is narrowed to delegates bound to the caller's operator memberships.
+Deactivated delegates are omitted.
 
-**Permission:** `operator` role or higher with `manage:processes` retained in
-the token scope.
+**Permission:** `read:ai_integration`.
 
 **Response (200):** `DelegateListResponse` with `DelegateRead` payload items.
 
 ### GET /api/ai-delegates/{delegate_public_id}
 
-Fetch one active delegate owned by the caller.
+Fetch one active delegate in the caller's permission-appropriate scope. A
+management token uses creator ownership; a read-only token uses operator
+memberships. An absent or out-of-scope identifier returns 404.
 
-**Permission:** `operator` role or higher with `manage:processes` retained in
-the token scope.
+**Permission:** `read:ai_integration`.
 
 **Response (200):** `DelegateResponse`.
 
-**Response (404):** The delegate does not exist or is not owned by the caller.
+**Response (404):** The delegate does not exist or is outside the caller's
+permission-appropriate scope.
 
 ### PATCH /api/ai-delegates/{delegate_public_id}
 
 Replace a delegate's trading caps while preserving username and label
 immutability. The write is SCD2-preserved so cap history remains auditable.
 
-**Permission:** `operator` role or higher with `manage:processes` retained in
-the token scope. CSRF token required for cookie-authenticated requests.
+**Permission:** `manage:ai_integration`. CSRF token required for
+cookie-authenticated requests.
 
 **Body (`DelegateCapsUpdateRequest` envelope):**
 
@@ -2757,8 +2876,8 @@ Deactivate a delegate using the shared user kill-switch flow. The server closes
 the active delegate row, revokes active tokens, and publishes the same
 deactivation event used by admin user deactivation.
 
-**Permission:** `operator` role or higher with `manage:processes` retained in
-the token scope. CSRF token required for cookie-authenticated requests.
+**Permission:** `manage:ai_integration`. CSRF token required for
+cookie-authenticated requests.
 
 **Body:** Optional `DelegateDeactivateRequest` envelope with
 `payload.reason` for audit context.
@@ -2860,33 +2979,38 @@ for invalid parameters and 404 when the underlying cannot be resolved.
 
 ## Multi-Tenant (Wallets, Operators, Scope Grants, Credentials)
 
-ADMIN principals see the full catalogue; AI_DELEGATE, VIEWER, and
-OPERATOR principals see only the subset covered by their operator
-memberships and active scope grants.
+Effective `impersonate:operator` provides global operator and wallet scope on
+these read surfaces. Every other principal sees only its explicit operator
+memberships, and wallet reads are further limited by active scope grants.
+Credential endpoints enforce their own permissions independently. This means
+`viewer` resolves wallet scope exactly like `operator`: both are membership
+based, never system-wide.
 
 ### GET /api/wallets
 
-List wallets accessible to the current principal. ADMIN sees all;
-OPERATOR/VIEWER sees only wallets covered by at least one active
-scope grant from their operator set.
+List wallets accessible to the current principal. Effective
+`impersonate:operator` exposes all wallets; every other caller sees only wallets
+covered by at least one active scope grant from its operator set.
 
 ### GET /api/operators
 
-List operators accessible to the current principal. ADMIN sees all;
-OPERATOR/VIEWER sees only operators in ``principal.operator_public_ids``.
+List operators accessible to the current principal. Effective
+`impersonate:operator` exposes all operators; every other caller sees only
+operators in `principal.operator_public_ids`.
 
 ### GET /api/scope-grants
 
-List active scope grants on a given wallet. Non-ADMIN callers must
-have visibility into the target wallet; otherwise 403. Required
-query parameter: ``wallet_public_id``.
+List active scope grants on a given wallet. Callers lacking effective
+`impersonate:operator` must have visibility into the target wallet; otherwise
+the route returns 403. Required query parameter: `wallet_public_id`.
 
 ### POST /api/scope-grants
 
-Create a new scope grant. Requires ``manage:scope_grants`` (ADMIN only).
-Returns 409 on overlap conflict. Body fields: ``operator_public_id``,
-``wallet_public_id``, ``scope_kind`` (``underlying`` or ``instrument``),
-``underlying_public_id`` or ``instrument_public_id``, optional ``note``.
+Create a new scope grant. Requires `manage:scope_grants`, which is present
+only in the current `admin` set. Returns 409 on overlap conflict. Body fields:
+`operator_public_id`, `wallet_public_id`, `scope_kind` (`underlying` or
+`instrument`), `underlying_public_id` or `instrument_public_id`, and optional
+`note`.
 
 ### POST /api/scope-grants/handover
 
@@ -2898,22 +3022,24 @@ grant missing, 400 on self-handover, 409 on cross-scope overlap.
 ### POST /api/scope-grants/{grant_public_id}/revoke
 
 Atomic SCD2 close (no replacement row) of an active scope grant + emits
-``admin.scope_revoked`` on the bus for live AI_DELEGATE subscription
-revalidation. Requires ``manage:scope_grants`` (ADMIN only).
-Body: optional ``reason`` (flows to event payload, NOT to the closed
+`admin.scope_revoked` on the bus for live AI-delegate subscription
+revalidation. Requires `manage:scope_grants`, which is present only in the
+current `admin` set. Body: optional `reason` (flows to event payload, not to the closed
 row). Returns 404 if the grant does not exist or is already closed
 (double-revoke).
 
 ### POST /api/wallets
 
-Create a new wallet. Requires ``manage:wallet_credentials`` (ADMIN only).
-Returns 409 if ``(label, is_paper)`` active-unique index is violated.
-Body: ``label``, optional ``description``, ``is_paper`` (default false).
+Create a new wallet. Requires `manage:wallet_credentials`, which is present
+only in the current `admin` set. Returns 409 if `(label, is_paper)` active
+unique index is violated. Body: `label`, optional `description`, and
+`is_paper` (default false).
 
 ### GET /api/wallets/{wallet_public_id}/credentials
 
 List active credentials on a wallet as summaries (no encrypted payload
-on the wire). Requires ``read:wallet_credentials`` (ADMIN only).
+on the wire). Requires `read:wallet_credentials`, which is present only in
+the current `admin` set.
 
 ### POST /api/wallets/{wallet_public_id}/credentials
 
@@ -2965,7 +3091,8 @@ the fallback. Missing or invalid upgrade auth is rejected with close code
 3. Server sends `auth_required` message
 4. Client sends `authenticate` message with a WebSocket token
 5. Server validates the token and sends `auth_ok`
-6. Server sends `auth_complete` with available topics for the user's role
+6. Server sends `auth_complete` with topics allowed by the token's effective
+    permissions
 7. Client can now subscribe to topics
 
 **Obtaining a WebSocket token:**
@@ -3059,12 +3186,13 @@ Client-originated control frames (`authenticate`, `reauth`,
 }
 ```
 
-`available_topics` contains allowed registry roots for the user's role.
-Subscriptions may use a registry root such as `market.` or a full
-concrete topic such as `market.kraken.BTC-USD.candles.1h`.
+`available_topics` contains the registry roots derived from the token's
+effective permissions. Subscriptions may use a registry root such as
+`market.` or a full concrete topic such as
+`market.kraken.BTC-USD.candles.1h`.
 Intermediate prefixes such as `market.kraken.` are rejected. Backtests
 also allow scoped prefixes: `backtest.`, `backtest.{wallet_public_id}.`,
-and `backtest.{wallet_public_id}.{run_public_id}.`, subject to RBAC and
+and `backtest.{wallet_public_id}.{run_public_id}.`, subject to permission and
 wallet scope.
 
 **Server sends on failure:**
@@ -3486,7 +3614,7 @@ the scoped prefixes documented in the WebSocket auth section above.
 - `system.heartbeats.host.disk` -- API-host disk-pressure heartbeat emitted by the system metrics snapshotter
 - `system.egress.snapshot` -- Egress pool route snapshots
 - `system.egress.transfer` -- WireGuard transfer samples
-- `admin.{resource}` -- Administrative events (admin only)
+- `admin.{resource}` -- Administrative events requiring `manage:users`
 - `processes.events.summary.{coord_slug}` -- Process summary snapshots
 - `processes.events.configured.{coord_slug}` -- Configured process-name snapshots
 - `processes.events.runs.{process_name}` -- Per-process lifecycle transitions
@@ -3498,7 +3626,7 @@ the scoped prefixes documented in the WebSocket auth section above.
 - `ai_research.{round_public_id}.request` -- Committed research-round wake, available through the `ai_research.` subscription root gated by `submit:market_view`
 - `plans.decisions.{plan_public_id}` -- Execution-plan decision events
 - `ai_reviews.{user_public_id}.{strategy_public_id}.{suffix}` -- AI delegate review frames
-- `accruals.{exchange}.{instrument}.{accrual_type}` -- Funding, rollover, and borrow accruals (internal ZMQ bus topic; not currently subscribable over the WebSocket -- no role's category set includes `accruals`)
+- `accruals.{exchange}.{instrument}.{accrual_type}` -- Funding, rollover, and borrow accruals (internal ZMQ bus topic; not currently subscribable over the WebSocket because no permission-derived category includes `accruals`)
 - `backtest.{wallet_public_id}.{run_public_id}.{event}` -- Backtest lifecycle and progress frames
 
 ## Error Handling
@@ -3632,16 +3760,20 @@ async function connect() {
 ## Backtests
 
 Backtest endpoints manage strategy backtesting runs. Read endpoints require
-`read:backtests` permission (viewer+). Mutation endpoints require
-`manage:backtests` (operator+). Every read and mutation is wallet-scoped
-and fails with 400 when the caller has no active wallet selected.
+`read:backtests`; run creation, cancellation, and reruns require
+`manage:backtests`. Comparison creation is a deliberately separate capability,
+`create:backtest_comparisons`, held by the current `ai_reviewer`,
+`ai_delegate`, `operator`, and `admin` sets. The `viewer` and `ai_researcher`
+sets cannot create comparisons. Every wallet-bound read and mutation fails with
+400 when the caller has no active wallet selected. The global
+`GET /api/backtests/strategy-classes` registry read is the exception.
 
 ### POST /api/backtests
 
 Create and launch a new backtest run. Requires an active wallet
-selection. The route accepts a `BacktestCreateCommand` envelope
-wrapping a `BacktestCreateBody` payload, creates a pending run row,
-and starts a one-shot `BacktestRunnerProcess`.
+selection and `manage:backtests`. The route accepts a
+`BacktestCreateCommand` envelope wrapping a `BacktestCreateBody` payload,
+creates a pending run row, and starts a one-shot `BacktestRunnerProcess`.
 
 **Request body:**
 
@@ -3700,19 +3832,21 @@ Create or return an idempotent existing comparison row for two terminal
 runs. Manual mode supplies `run_a_public_id` and `run_b_public_id`; auto
 mode supplies `config_hash` and optionally `anchor_run_public_id`.
 The route accepts a `BacktestCompareRequest` envelope wrapping
-`BacktestCompareBody`. Requires an active wallet and `read:backtests`.
-See [backtesting.md](backtesting.md#comparison) for pairing semantics.
+`BacktestCompareBody`. Requires an active wallet and
+`create:backtest_comparisons`. See
+[backtesting.md](backtesting.md#comparison) for pairing semantics.
 
 ### GET /api/backtests/compare
 
-List recent comparison rows for the caller's active wallet.
+List recent comparison rows for the caller's active wallet. Requires
+`read:backtests`.
 
 **Query parameters:** `limit`, `offset`, and `as_of`.
 
 ### GET /api/backtests/compare/{comparison_public_id}
 
 Fetch comparison metadata plus recomputed metrics, equity, trades, and
-signals diffs from the current artifact rows.
+signals diffs from the current artifact rows. Requires `read:backtests`.
 
 ### GET /api/backtests/{run_id}
 
@@ -3724,11 +3858,12 @@ Cancel a pending or running backtest. The route accepts a
 `BacktestCancelCommand` envelope wrapping `BacktestCancelBody`
 (`reason` is optional), sets status to `cancel_requested` via SCD2
 close-and-insert, and returns 409 if the run is already in a terminal
-state.
+state. Requires `manage:backtests`.
 
 ### POST /api/backtests/{run_id}/rerun
 
 Create a new backtest run with the same configuration as the original.
+Requires `manage:backtests`.
 
 ### GET /api/backtests/{run_id}/trades
 
@@ -3758,7 +3893,7 @@ registered AI delegate replies via these routes.
 
 ### POST /api/ai-reviews/{review_public_id}/decision
 
-REST mirror of the `submit_ai_review_decision` MCP tool. Body is
+REST counterpart to the `submit_ai_review_decision` MCP tool. Body is
 `AiReviewDecisionCommand`, an envelope wrapping an inner
 `AiReviewDecisionRequest`:
 
@@ -3807,11 +3942,13 @@ authorized for this review), `409` (already resolved by peer),
 
 List pending CONSULT reviews where the caller is the selected
 AI delegate. Used by the bridge for catch-up after WS reconnect
-and by operator dashboards. Snapshot is bounded by `limit` and
+and by delegate-aware dashboards. Snapshot is bounded by `limit` and
 ordered by `fanout_after ASC` (oldest first). The route first
 requires `Permission.READ_SIGNALS` (callers without it receive
-`403`); callers that pass that gate but are not registered as an
-AI delegate principal receive `422`.
+`403`) and then requires the operational delegate lifecycle identity exposed
+as `delegate_public_id`. Callers that pass the permission gate without an
+active delegate lifecycle identity receive `422`; this is a state check, not a
+role capability check.
 
 **Query parameters:**
 
@@ -3833,9 +3970,9 @@ visible between the review's `created_at` and one captured `as_of` instant,
 inclusive. The route is read-only: it does not transition the review, write an
 audit event, or grant authority to place an order.
 
-Requires `Permission.READ_SIGNALS`, a populated AI-delegate identity, and an
-active delegate scope grant for the review's wallet and instrument. Unknown
-and out-of-scope identifiers both return `404` with
+Requires `Permission.READ_SIGNALS`, a populated operational
+`delegate_public_id`, and an active delegate scope grant for the review's wallet
+and instrument. Unknown and out-of-scope identifiers both return `404` with
 `error_code="review_not_found"`; a non-terminal review returns `409` with
 `error_code="review_not_terminal"`; a permission-bearing caller without a
 delegate identity returns `422` with `error_code="not_a_delegate"`.
@@ -3868,13 +4005,15 @@ no position returns an empty list.
 
 ### GET /api/ai-reviews
 
-Operator/admin audit list of AI reviews, newest first — the read-only
+Permission-gated audit list of AI reviews, newest first: the read-only
 counterpart to `/pending` that answers "what did the AI decide, and why?".
-Unlike `/pending` it is NOT keyed by the delegate identity (so it never returns
-`422`) and it includes terminal decided rows, not just pending ones. Requires
-the `operator` role (operator or admin); callers lacking it receive `403`. An
-ADMIN sees every operator's reviews; a non-admin OPERATOR is narrowed
-server-side to the operators it is a member of.
+Unlike `/pending`, it is not keyed by the delegate identity, so it never
+returns `422` for a missing delegate identity, and it includes terminal
+decided rows rather than only pending ones. Requires `read:ai_reviews`; the
+current `viewer`, `operator`, and `admin` sets contain that permission. A
+caller with effective `impersonate:operator` sees every operator's reviews;
+every other reader is narrowed server-side to its explicit operator
+memberships.
 
 **Query parameters:**
 
@@ -4043,12 +4182,13 @@ Ring-buffer depth is capped by `SYSTEM_METRICS_HISTORY_CAP`
 
 Arm Python `tracemalloc` with an auto-stop deadline. Body-less;
 `duration_s` is supplied as a query parameter. Returns
-`TracemallocStateResponse`.
+`TracemallocStateResponse`. Requires `manage:runtime_diagnostics`.
 
 ### POST /api/metrics/system/tracemalloc/stop
 
 Disarm `tracemalloc` and cancel any pending auto-stop deadline.
-Returns `TracemallocStateResponse`.
+Returns `TracemallocStateResponse`. Requires
+`manage:runtime_diagnostics`.
 
 ### GET /api/metrics/retention
 
@@ -4076,15 +4216,15 @@ Read from the in-process `RestCallTracker` snapshot. Returns
 
 ## AI Delegates
 
-AI delegate management is feature-gated by `ai_integration_enabled`;
+AI delegate access is feature-gated by `ai_integration_enabled`;
 when disabled, these routes return a 503 `feature_disabled` envelope
 matching `/api/mcp`.
 
 | Route | Description |
 | ----- | ----------- |
 | `POST /api/ai-delegates` | Create a delegate and return its 90-day access JWT once |
-| `GET /api/ai-delegates` | List active delegates owned by the caller |
-| `GET /api/ai-delegates/{delegate_public_id}` | Fetch one owned delegate; 404 also covers foreign IDs |
+| `GET /api/ai-delegates` | List active delegates in the caller's creator-owned management scope or read-only operator-membership scope |
+| `GET /api/ai-delegates/{delegate_public_id}` | Fetch one delegate in the same permission-appropriate scope; 404 also covers out-of-scope IDs |
 | `PATCH /api/ai-delegates/{delegate_public_id}` | SCD2 close+insert new caps for an owned delegate |
 | `POST /api/ai-delegates/{delegate_public_id}/deactivate` | Deactivate via the shared kill-switch flow and revoke active tokens |
 
@@ -4092,29 +4232,30 @@ The routes are documented end-to-end in
 [ai-integration.md](ai-integration.md) alongside the Claude Code /
 Claude Desktop / Cursor / Windsurf wire-up instructions. They follow
 the same `PayloadResponse` envelope convention used by the auth routes
-above. All delegate-management routes require `OPERATOR` or higher;
-mutating routes also require CSRF for cookie-authenticated requests.
+above. List and detail reads require `read:ai_integration`; create, update,
+deactivate, and researcher provisioning require `manage:ai_integration`.
+Mutating routes also require CSRF for cookie-authenticated requests.
 On create, omitted `operator_public_id` binds to the caller's
 `primary_operator_public_id` and returns 422 when no primary exists.
-Non-admin callers that supply `operator_public_id` must choose one of
-their authenticated operators; ADMIN callers may bind explicitly using
-the admin operator bypass.
+Callers lacking effective `impersonate:operator` must choose one of their
+authenticated operators when supplying `operator_public_id`; callers with
+that effective permission may bind explicitly to any operator.
 
 ## AI Researchers
 
 Researcher provisioning shares the `ai_integration_enabled` feature gate but
-uses a separate principal role and cap from AI delegates.
+uses a separate principal named permission set and cap from AI delegates.
 
 | Route | Description |
 | ----- | ----------- |
 | `POST /api/ai-researchers` | Create a research-only principal and return its 90-day access JWT once |
 
-The route requires `OPERATOR` or higher with `manage:processes` retained in
-the caller token, plus CSRF for cookie authentication. The request is a
-`ResearcherCreateRequest` envelope whose payload contains `label` and an
-optional narrower `permissions` list. The role ceiling is exactly
-`read:market_data`, `read:market_views`, and `submit:market_view`; a requested
-permission outside that set returns 422.
+The route requires `manage:ai_integration`, plus CSRF for cookie
+authentication. The request is a `ResearcherCreateRequest` envelope whose
+payload contains `label` and an optional narrower `permissions` list. The
+`ai_researcher` named-set ceiling is exactly `read:market_data`,
+`read:market_views`, and `submit:market_view`; a requested permission outside
+that set returns 422.
 
 At most two active researchers may be provisioned per owner. Researcher
 creation writes only the user identity and access-token inventory: it creates

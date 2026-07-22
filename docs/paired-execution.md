@@ -10,6 +10,14 @@ flag is off). This runbook covers the operator's share of the lifecycle:
 reading incidents, resolving `manual_intervention` groups at the venue, and
 attesting the resolution so the halt clears.
 
+Authorization is based on effective permissions from Snapper's 34-permission
+catalogue:
+
+| Surface | Required permission | Current named permission sets |
+| --- | --- | --- |
+| `GET /api/paired-execution/incidents` | `read:positions` | `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, `admin` |
+| `POST /api/paired-execution/groups/{id}/terminalize` | `manage:paired_execution` | `operator`, `admin` |
+
 ## State model in sixty seconds
 
 A multi-leg signal creates one **group**
@@ -87,11 +95,14 @@ per-leg exposure: `status`, `filled_signed_qty`, `compensated_signed_qty`,
     is surfaced so you never lose sight of exposure.
 - A `broken` group with zero-fill legs (e.g. an assembly timeout) is NOT an
     incident — the guard deliberately leaves it free to re-assemble.
-- Requires `READ_POSITIONS`; non-admin callers see only their wallets.
-- Use an OPERATOR or ADMIN access token. An AI-delegate PAT (the only
-    PAT-style token Snapper mints, e.g. via `make mcp-pat`) can read
-    incidents — AI_DELEGATE holds `READ_POSITIONS` — but always gets `403`
-    on terminalize, because AI_DELEGATE lacks `MANAGE_PAIRED_EXECUTION`.
+- Requires `read:positions`. Effective `impersonate:operator` exposes every
+    wallet; every other caller, including `viewer`, `operator`, and
+    `ai_delegate`, sees only its accessible wallets.
+- Any token retaining `read:positions` can inspect incidents. A long-lived
+    AI-delegate token can therefore read incidents, but it receives `403` on
+    terminalize because its effective grant lacks
+    `manage:paired_execution`. The `viewer` set is read-only for the same
+    reason.
 
 ## Resolve at the venue
 
@@ -117,11 +128,12 @@ curl -s -X POST -H "Authorization: Bearer $SNAPPER_TOKEN" \
     "$SNAPPER_BASE_URL/api/paired-execution/groups/$GROUP_ID/terminalize" | jq
 ```
 
-Requires `MANAGE_PAIRED_EXECUTION` (OPERATOR or ADMIN). On success the group
-becomes `completed` with `terminalized_by=<you>` stamped into its
-`failure_reason`, legs keep their true accounting, and the scanner clears
-the scope's durable halt and every coordinator's in-memory mirror within one
-cycle — the pair can trade again. Responses:
+Requires `manage:paired_execution`, which is present in the current `operator`
+and `admin` sets. On success the group becomes `completed` with
+`terminalized_by=<you>` stamped into its `failure_reason`, legs keep their true
+accounting, and the scanner clears the scope's durable halt and every
+coordinator's in-memory mirror within one cycle — the pair can trade again.
+Responses:
 
 - `404` — no such group in your accessible wallets.
 - `409` — not attestable right now. The detail's `status` is freshly read.
@@ -181,7 +193,7 @@ re-attestation path accepts a `compensating` group with a manual leg).
 
 ## Enablement
 
-The guard ships dark. Enabling real-money multi-leg execution
-(`PAIRED_EXECUTION_GUARD_ENABLED=true`) should follow the staged enablement
-plan (staging trial, outbox-gate query plan check on the production
-database, rollback criteria) maintained alongside the deployment docs.
+The guard ships dark. Before enabling real-money multi-leg execution with
+`PAIRED_EXECUTION_GUARD_ENABLED=true`, complete a staging trial, verify the
+outbox-gate query plan on the production database, and define rollback
+criteria.

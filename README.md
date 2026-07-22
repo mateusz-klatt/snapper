@@ -68,6 +68,32 @@ or rotate after first login via
 - **CLI** — Full system management via Typer CLI
 - **Backtesting** — Strategy testing on historical data
 
+## Authorization model
+
+Capabilities are decided from the authenticated token's effective
+permissions. A role is only a stable, named permission set used for account
+management and display; application code does not use role rank to authorize
+an action.
+
+The `viewer` set is a read-only operator. It has the same read-side capability
+coverage as an operator across market data and views, account state, operator-scoped
+wallets and portfolio, orders, positions, signals, AI-review decisions, P&L
+timeline and attribution, backtests, strategies, process state, health, AI
+integration, and notifications. It cannot create or cancel orders, manage
+positions, control processes or strategies, run backtests, manage AI
+integration, or perform administrative mutations. It also cannot create
+backtest comparisons or control runtime diagnostics. Wallet visibility follows
+the viewer's explicit operator memberships and active scope grants; it is not
+the system-wide scope provided by effective `impersonate:operator`. That
+structural permission is non-downscopable for the `admin` named set so
+historically global admin scope cannot disappear when an admin token is
+narrowed. AI-delegate list and detail are the deliberate scope split: a
+read-only token uses operator memberships, while a token with the management
+permission uses creator ownership.
+
+See [Roles and Permissions](docs/api.md#roles-and-permissions) for every named
+set and the token-downscoping rules.
+
 ## Quick Start
 
 ### Requirements
@@ -196,8 +222,8 @@ reruns the disposition.
 A durable `live_trading_mode` kill-switch setting gates every
 non-paper submit, read fresh per order by the executor interlock
 (`src/snapper/messaging/executors/base.py`): only `enabled` proceeds,
-`halted` blocks, `reduce_only` currently blocks like `halted` (Phase
-0), and an unreadable, missing, or invalid value fails closed as
+`halted` blocks, `reduce_only` currently blocks like `halted`, and an
+unreadable, missing, or invalid value fails closed as
 `live_trading_mode_unavailable`. Paper venues — discriminated by the
 executor's own venue, never the caller-supplied order mode — always
 pass. A blocked submit runs a distinct interlock disposition: a

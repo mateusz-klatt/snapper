@@ -308,23 +308,23 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
 
     Each tunnel id maps to `{"status": "up", "reason": null}`.
 
-4. **Backend egress snapshot visible?** From an authenticated operator
-   session with `read:system_status`, call `GET /api/health/egress`.
-   Expect `payload.enabled=true`, one row per configured route, route
-   metadata (`region`, `exit_ip`, `provider`) when configured,
-   quarantine state, merged `in_use_count`, per-reservation `container`,
-   `connections` rows for open WebSocket host counts and capped REST
-   last-seen hostnames, and a `transfer` object on SOCKS5 routes when
-   `snapper-egress` has reported matching WireGuard counters for that
-   listener port. Transfer rows include cumulative rx/tx bytes, current
-   byte rates when a reliable delta exists, the latest WireGuard
-   handshake timestamp, sample age, and stale/reset flags. Direct routes,
-   missing samples, and ambiguous shared ports show `transfer=null`.
-   Connection rows expose hostnames only, never URL paths, query strings,
-   headers, request bodies, or credentials. A missing `snapper-feed` row
-   means the API process has not received a `system.egress.snapshot`
-   frame from that container yet; a stale row remains visible with
-   `stale=true`.
+4. **Backend egress snapshot visible?** From an authenticated session whose
+    effective grant contains `read:system_status` (including a read-only
+    `viewer` session), call `GET /api/health/egress`. Expect
+    `payload.enabled=true`, one row per configured route, route metadata
+    (`region`, `exit_ip`, `provider`) when configured, quarantine state,
+    merged `in_use_count`, per-reservation `container`, `connections` rows for
+    open WebSocket host counts and capped REST last-seen hostnames, and a
+    `transfer` object on SOCKS5 routes when `snapper-egress` has reported
+    matching WireGuard counters for that listener port. Transfer rows include
+    cumulative rx/tx bytes, current byte rates when a reliable delta exists,
+    the latest WireGuard handshake timestamp, sample age, and stale/reset
+    flags. Direct routes, missing samples, and ambiguous shared ports show
+    `transfer=null`. Connection rows expose hostnames only, never URL paths,
+    query strings, headers, request bodies, or credentials. A missing
+    `snapper-feed` row means the API process has not received a
+    `system.egress.snapshot` frame from that container yet; a stale row remains
+    visible with `stale=true`.
 
 5. **WireGuard handshake established?** (operator debugging — uses
    `iproute2` shipped in the image)

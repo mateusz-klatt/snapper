@@ -24,6 +24,31 @@ flowchart TB
     Broker -->|orders.commands.*| Executor["Order Executor"]
 ```
 
+## Authorization
+
+Authorization uses effective token permissions from Snapper's 34-permission
+catalogue, not a role hierarchy. The frontend opens the Strategies resource
+with `read:strategies`, derives each control from its exact mutation
+permission, and rechecks that permission when the action runs.
+
+| Surface | Required permission | Current named permission sets |
+| --- | --- | --- |
+| `GET /api/strategies` | `read:strategies` | `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, `admin` |
+| Read the process catalogue, configured rows, schemas, and runs | `read:processes` | `viewer`, `operator`, `admin` |
+| Register a disabled strategy or edit its scope | `configure:strategies` | `operator`, `admin` |
+| Register an enabled strategy | `configure:strategies` and `start:strategies` | `operator`, `admin` |
+| Start or enable a strategy | `start:strategies` | `operator`, `admin` |
+| Stop or disable a strategy | `stop:strategies` | `operator`, `admin` |
+| Restart desired state | `start:strategies` and `stop:strategies` | `operator`, `admin` |
+| Create a backtest from a strategy card | `manage:backtests` | `operator`, `admin` |
+
+The current `viewer` set contains both read permissions, so it sees the full
+operator read surface while every strategy mutation remains unavailable.
+Strategy targets use these target-specific permissions; `manage:processes`
+continues to authorize only non-strategy process targets. Scope configuration
+and launch also validate operator membership, wallet grants, and live-output
+coverage.
+
 ## Creating Strategies
 
 ### Basic Structure
@@ -169,7 +194,7 @@ A strategy can also declare identity references nested inside `params`:
 `REFERENCE_IDENTITY_PARAMS = {"ai_review_user_public_id": "user"}` and
 `SEEDED_IDENTITY_PARAMS = ("ai_review_strategy_public_id",)`.
 
-### Candle history warm-up (A3-smoke)
+### Candle history warm-up
 
 A strategy that needs historical bars before it can compute indicators overrides
 `required_candle_history() -> int` (e.g. `CointegrationPairs` returns its
@@ -178,7 +203,7 @@ candle buffer from history BEFORE subscribing to the live feed, so the strategy 
 indicator-ready from a cold start instead of waiting that many live periods (a
 restart re-warms the same way).
 
-Warm-up is **DB-first** (Phase 3 slice 5) and **opt-in via
+Warm-up is **DB-first** and **opt-in via
 `required_candle_history() > 0`**: it reads the persisted plane of each leg's own
 timeframe (`get_candles` under the leg's live venue) so the warmed
 series is continuous with the live synthesized bars and the read path is
@@ -207,9 +232,8 @@ that fallback alone is crypto-scoped and `1d`-only.
   spread can never start date-misaligned. A warm-up error never crashes startup.
 
 Note: warm-up does NOT arm a strategy. For the FET/RENDER daily cointegration
-forward-test, the spread's per-leg positional alignment is a separate hard
-pre-arming gate (it must align legs by `open_at`, not list position) — see the A3
-plan.
+forward test, the spread's per-leg positional alignment is a separate hard
+pre-arming gate: it aligns legs by `open_at`, not list position.
 
 ### AI delegate consultation
 
@@ -419,8 +443,8 @@ Two processes register this class out of the box:
 candles with the defaults above, and
 `strategy_cointegration_fet_render` is a forward-test preset that
 trades daily FET-USD/RENDER-USD paper candles with a screened hedge
-ratio (`beta=0.257463`, `lookback_window=60`). It opts into the
-A3-smoke Polygon crypto daily warm-up and sets `buffer_size=100`, so a
+ratio (`beta=0.257463`, `lookback_window=60`). It opts into the Polygon
+crypto daily warm-up fallback and sets `buffer_size=100`, so a
 fresh default process can prefill the 60-bar spread window from the
 persisted 1d history (falling back to the local Polygon crypto cache
 only when the DB plane is short for a leg).
@@ -1084,8 +1108,8 @@ public delayed feed. Ticks carry ``TickData.is_delayed`` accordingly.
   launch if zero or several match) and then
   ``enforce_strategy_outputs_covered`` checks that every instrument in
   ``StrategyConfig.outputs`` falls within the operator's active scope
-  grants — operator-only launches do NOT skip the check. The coverage
-  check applies to live outputs only (paper-exchange configs return
+  grants — a config with only `operator_public_id` populated does not skip the
+  check. Coverage applies to live outputs only (paper-exchange configs return
   early), and the fully-unscoped paper path (neither field set) is still
   permitted for backwards compatibility on the REST start route; live
   launches without an operator are rejected.

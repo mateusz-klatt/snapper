@@ -271,12 +271,12 @@ signal: it never carries balances or a precomputed reconciliation view.
 
 The ZMQ-WebSocket bridge requires `read:account_state` at subscribe time and
 filters every frame against the destination principal's accessible-wallet set
-(ADMIN bypass; malformed payloads and topic/payload wallet mismatches fail
-closed). The browser invalidates the
-active `GET /api/portfolio/accounts` query so the REST read path remains the
-only builder of the time-sensitive, fail-closed view. A 60-second safety-net
-poll covers lossy bridge delivery and raises the client transport-staleness
-ceiling after three missed polls.
+(global scope with effective `impersonate:operator`; malformed
+payloads and topic/payload wallet mismatches fail closed). The browser
+invalidates the active `GET /api/portfolio/accounts` query so the REST read
+path remains the only builder of the time-sensitive, fail-closed view. A
+60-second safety-net poll covers lossy bridge delivery and raises the client
+transport-staleness ceiling after three missed polls.
 
 ### Spot precision certification
 
@@ -297,7 +297,7 @@ exchange identity. A newer complete-provenance row with `NULL` decimals is an
 explicit plane revocation; neither a sibling plane nor an older ratcheted
 maximum can restore certification.
 
-### Spot anchor bootstrap (S4c-3)
+### Spot anchor bootstrap
 
 The immutable `portfolio_spot_reconciliation_anchors` row is the base case of
 spot execution replay: it certifies that one venue-reported balance snapshot at
@@ -323,9 +323,9 @@ birth. Everything fails closed: any missing read, unmappable exec id, witness
 inconsistency, or named refusal degrades to no-anchor-retry-next-cycle (the
 observer's balance snapshot is never at risk), and only a fully proven
 observation is sealed — once, immutably. The anchor's `venue_cursor_value`
-(`H0`) is the left endpoint S4c-4's replay-range proof folds from.
+(`H0`) is the left endpoint for the subsequent replay-range proof.
 
-Once an anchor exists, spot execution replay is LIVE (S4c-4a): the dispatch
+Once an anchor exists, spot execution replay is live: the dispatch
 feeds the evaluator a transactionally consistent bundle — the anchor, the
 replay range `(W_anchor, W_boundary]` proven contiguous by count, instrument
 identities and specs pinned to the capture's `as_of`, the certified precision
@@ -344,7 +344,7 @@ false `mismatched`. That exact amount is sealed into the execution hash chain
 sealed, so no committed tip is invalidated.
 
 Real balance divergence therefore fires `mismatched` immediately, and
-`matched` is gated behind the venue-cursor certificate (S4c-4b): for an
+`matched` is gated behind the venue-cursor certificate: for an
 anchored account the observer additionally captures the history tip `H_E`
 before the watermark, then — after the snapshot commits — the fill legs of
 every in-range order, the confirming tip, and the ascending history range
@@ -704,10 +704,32 @@ Authentication system:
 
 - JWT tokens with access/refresh via HTTP-only cookies
 - CSRF protection
-- Role-based access (`viewer`, `operator`, `admin`, `ai_delegate`). The
-  `ai_delegate` role is the principal type minted by the AI Delegates
-  flow (see [ai-integration.md](ai-integration.md)) and is gated by
-  its own permission matrix separate from human operators.
+- Permission-based authorization. Roles are only stable names for the
+    `ai_researcher`, `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, and
+    `admin` base permission sets, plus user-management values and display
+    labels. Every REST, WebSocket, frontend, iOS, and MCP capability decision
+    consumes effective permissions rather than role identity or rank.
+- Role-bounded token downscoping. A token can remove permissions from its
+    named set but cannot add permissions outside it. The structural
+    `impersonate:operator` grant is non-downscopable, preserving historical
+    admin-wide scope while allowing runtime scoping to consume effective
+    permissions. Session profiles expose the resulting
+    `effective_permissions` to clients.
+- Read-only operator visibility for `viewer`, including market data and views,
+    account state, membership-scoped wallets and portfolio, orders, positions,
+    signals, AI-review decisions, P&L, backtests, strategies, process state,
+    health, AI integration, and notifications. It has no trading, process,
+    strategy, backtest, diagnostic, AI-integration, or administrative control
+    permissions; ownership-constrained notification-device self-service
+    remains available.
+- Complete-catalog mapping for `admin`. Its named set is constructed from
+    all 34 `Permission` values, including `impersonate:operator` for global
+    wallet and operator scope.
+- Dedicated mutation permissions keep read grants read-only:
+    `create:backtest_comparisons` controls comparison creation,
+    `manage:runtime_diagnostics` controls tracemalloc, and strategy
+    configuration/start/stop use their matching strategy permissions rather
+    than the coarse non-strategy `manage:processes` permission.
 - WebSocket authentication
 
 ### MCP (`src/snapper/mcp/`)
@@ -939,8 +961,9 @@ Five order-safety layers sit on the dispatch path:
   through verification rounds instead of starving its tail or blowing
   the cycle's time budget), and the engine holds the in-flight guard
   until resolution.
-  An `order_unknown` safety-critical alert (user-scoped, with admin
-  fan-out for strategy orders) fires while an order is parked.
+  An `order_unknown` safety-critical alert (user-scoped, with
+  `read:system_status` recipient fan-out for strategy orders) fires while an
+  order is parked.
 - **Breaker-open disposition**: a submit refused by the venue circuit
   breaker (typed `CircuitBreakerOpenError`) is authoritative
   not-submitted but NOT a venue rejection, and it must not blind-retry
@@ -956,9 +979,9 @@ Five order-safety layers sit on the dispatch path:
   submit reads the durable `live_trading_mode` setting fresh from the DB
   (2 s timeout, fail-closed to blocked) via
   `_is_live_trading_interlocked` (`messaging/executors/base.py`). Only
-  `enabled` proceeds; `halted` and `reduce_only` both block (in Phase 0
-  `reduce_only` blocks like `halted`, differing only in the
-  observability reason), and an unreadable/missing/unrecognized mode
+  `enabled` proceeds; `halted` and `reduce_only` both block (`reduce_only`
+  currently differs from `halted` only in the observability reason), and an
+  unreadable, missing, or unrecognized mode
   blocks as `live_trading_mode_unavailable`. Paper venues always pass. A
   block runs a redispatch-safe disposition mirroring the breaker-open
   path — a durable `order_interlock_blocked` terminal event, CAS the

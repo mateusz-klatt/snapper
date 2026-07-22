@@ -2,8 +2,8 @@
 
 Snapper exposes a **Model Context Protocol (MCP)** endpoint at
 `/api/mcp` so Claude Desktop, Cursor, Windsurf, or a plain `curl` client
-can authenticate with a long-lived AI delegate access JWT and call a
-narrow set of trading + market-data tools. The surface is
+can authenticate with a long-lived AI delegate or researcher access JWT
+and call a permission-filtered set of trading and market-data tools. The surface is
 vendor-neutral — no Anthropic or OpenAI SDK is bundled in Snapper
 core.
 
@@ -30,12 +30,12 @@ The `/api/mcp` sub-app is always mounted and gated by the
 
 1. The flag **defaults to `true`** — a fresh install exposes the MCP
     endpoint and the AI Integration navigation entry with no manual
-    setup. Admins who need to disable the feature flip the
-    setting to `false` via the Settings UI (admin) or directly:
+    setup. A caller with `configure:system` can disable the feature through
+    the Settings UI or directly:
 
     ```bash
     curl -X POST http://localhost:8000/api/settings/ai_integration_enabled/set \
-      -H "Authorization: Bearer <admin-jwt>" \
+      -H "Authorization: Bearer <settings-manager-jwt>" \
       -H "Content-Type: application/json" \
       -d '{"session_id":"cli","sequence_id":1,"public_id":"'$(uuidgen)'","timestamp":"2026-04-20T00:00:00Z","payload":{"value":"false","category":"system"}}'
     ```
@@ -46,11 +46,13 @@ The `/api/mcp` sub-app is always mounted and gated by the
     are loaded at startup).
 
 2. The feature endpoint itself is public, but the frontend route and
-    navigation entry are role/permission-gated. After authentication,
-    the AI Integration page reads `GET /api/settings/features` and
-    renders the enabled or disabled state. The MCP endpoint and
-    `/api/ai-delegates/*` and `/api/ai-researchers` return
-    `503 feature_disabled` only when the flag is explicitly set to
+    navigation entry require `read:ai_integration`. The page derives all
+    management controls separately from `manage:ai_integration`, so the
+    current `viewer` set can inspect its operator-scoped integration state
+    without gaining a mutation. After authentication, the page reads
+    `GET /api/settings/features` and renders the enabled or disabled state.
+    The MCP endpoint, `/api/ai-delegates/*`, and `/api/ai-researchers`
+    return `503 feature_disabled` only when the flag is explicitly set to
     `false`.
 
 3. When the flag is on, the MCP endpoint requires every request to
@@ -59,12 +61,22 @@ The `/api/mcp` sub-app is always mounted and gated by the
     all requests — anonymous or authenticated — short-circuit to
     `503 feature_disabled` before any token verification runs.
 
+Authorization uses each token's effective grant from Snapper's 34-permission
+catalogue, not a role hierarchy. Roles are named permission sets. The current
+`viewer` set includes `read:ai_integration` and `read:ai_reviews`, uses its
+operator memberships for read-only integration visibility, and contains no
+AI-integration management permission. A token with `manage:ai_integration`
+instead receives the creator-owned delegate view. Only an effective
+`impersonate:operator` grant provides global operator scope on surfaces that
+support global scoping.
+
 ---
 
 ## Creating an AI delegate
 
-An **AI delegate** is a dedicated `AI_DELEGATE`-role user an operator
-mints per MCP client. Delegates:
+An **AI delegate** is a dedicated user assigned the `ai_delegate` named
+permission set and minted per MCP client by a caller with
+`manage:ai_integration`. Delegates:
 
 - Cannot log in via the web UI password form (the placeholder password
     hash is opaque to humans).
@@ -73,14 +85,14 @@ mints per MCP client. Delegates:
 - Carry per-delegate safety caps independent of the operating
     operator's caps.
 
-Each operator may own at most 5 active delegates (deactivated
+Each integration owner may own at most 5 active delegates (deactivated
 delegates do not count toward the cap, so rotation is unbounded).
 
 Create one via `POST /api/ai-delegates`:
 
 ```bash
 curl -X POST http://localhost:8000/api/ai-delegates \
-  -H "Authorization: Bearer <operator-jwt>" \
+  -H "Authorization: Bearer <integration-manager-jwt>" \
   -H "Content-Type: application/json" \
   -H "X-CSRF-Token: <csrf>" \
   -d '{
@@ -112,19 +124,19 @@ curl -X POST http://localhost:8000/api/ai-delegates \
 `payload.operator_public_id` is optional. When omitted, Snapper binds the
 delegate to the caller's `primary_operator_public_id`; if the caller has
 no primary operator, create returns 422 until an explicit operator is
-supplied. When supplied by a non-admin caller, the operator must be in
-the caller's authenticated operator claims. Admin callers have the admin
-operator bypass and may bind explicitly to any operator. The minted
-delegate token inherits scope from that bound operator, so later scope
-grant changes for that operator control which wallets/instruments the
-delegate can act on.
+supplied. When the caller's effective grant lacks `impersonate:operator`, a
+supplied operator must be in the caller's authenticated operator claims. An
+effective grant containing `impersonate:operator` may bind explicitly to any
+operator. The minted delegate token inherits scope from that bound operator,
+so later scope grant changes for that operator control which wallets and
+instruments the delegate can act on.
 
 `payload.permissions` independently downscopes what that credential may do.
-The consult-only example above omits order creation, cancellation, and
-position management even though the `ai_delegate` role holds them. The server
-enforces the intersection of the role and token grants and returns 422 if the
-request includes a permission outside the role. Omit `permissions` to retain
-the historical full-role token behavior.
+The read-only monitoring example above omits order creation, cancellation, and
+position management even though the `ai_delegate` named set contains them.
+The server enforces the intersection of the named set and token grants and
+returns 422 if the request includes a permission outside that set. Omit
+`permissions` to retain the complete named-set grant.
 
 The response is **one-shot**. Copy the token out of the HTTP session
 immediately — Snapper never re-serves it:
@@ -142,7 +154,7 @@ immediately — Snapper never re-serves it:
       "public_id": "019da9e...",
       "username": "ai-claudedesktop-a1b2c3",
       "label": "claudedesktop",
-      "created_by_user_public_id": "<operator-id>",
+      "created_by_user_public_id": "<creator-user-id>",
       "created_at": "2026-04-20T00:00:00Z",
       "is_active": true,
       "caps": { "max_open_orders": 3, "max_daily_notional_usd": 1000.0, "max_cancels_per_minute": 10 }
@@ -155,23 +167,27 @@ immediately — Snapper never re-serves it:
 
 Other endpoints on `/api/ai-delegates`:
 
-- `GET /api/ai-delegates` — list the caller's delegates (no
-    tokens re-served).
-- `GET /api/ai-delegates/{id}` — single delegate detail.
+- `GET /api/ai-delegates` — requires `read:ai_integration`; a management
+    token sees creator-owned delegates, while a read-only token sees delegates
+    bound to its operator memberships. Tokens are never re-served.
+- `GET /api/ai-delegates/{id}` — requires `read:ai_integration` and applies
+    the same creator-owned or membership-scoped view.
 - `PATCH /api/ai-delegates/{id}` — update caps (SCD2 close+insert).
-    `label`/`username` are immutable post-mint.
+    Requires `manage:ai_integration`; `label` and `username` are immutable
+    post-mint.
 - `POST /api/ai-delegates/{id}/deactivate` — kill switch. Publishes
-    `admin.user_deactivated` on the bus for immediate fanout; every
-    Snapper instance also polls the DB-backed deactivation registry so
-    matching WebSocket sessions close and token LRU entries are evicted
-    even if the broker is unavailable.
+    `admin.user_deactivated` on the bus for immediate fanout. Requires
+    `manage:ai_integration`; every Snapper instance also polls the DB-backed
+    deactivation registry so matching WebSocket sessions close and token LRU
+    entries are evicted even if the broker is unavailable.
 
 ---
 
 ## Creating an AI researcher
 
-An **AI researcher** is a dedicated `AI_RESEARCHER` principal for contexts
-that ingest hostile third-party material. Its role grant is exactly:
+An **AI researcher** is a dedicated principal assigned the `ai_researcher`
+named permission set for contexts that ingest hostile third-party material.
+That set is exactly:
 
 - `read:market_data`
 - `read:market_views`
@@ -223,14 +239,14 @@ row, publishes `admin.user_deactivated` on the bus, and each
 Snapper instance evicts matching verify-cache entries on receipt
 or through the DB-backed fallback scanner. The local JTI blacklist
 uses a 10-second grace window for requests that raced the kill
-switch. The 90-day `exp` is a ceiling, not a commitment; operators
+switch. The 90-day `exp` is a ceiling, not a commitment; integration owners
 are expected to rotate delegate tokens on the cadence that fits
 their key-management hygiene.
 
 Researcher tokens use the same active-token inventory and shared user
 deactivation enforcement. The dedicated researcher surface currently provisions
-principals only; an administrator uses the standard user deactivation route to
-revoke one.
+principals only; a caller with `manage:users` uses the standard user-deactivation
+route to revoke one.
 
 ---
 
@@ -373,8 +389,8 @@ to `caps_enforcer_getter` at registration.
 
 - **`list_instruments(exchange: str)`** — returns sorted native symbols
     for the exchange inventory. It is not wallet/operator scoped;
-    read-only access is gated by `READ_MARKET_DATA` permission
-    (AI_DELEGATE role satisfies).
+    read-only access is gated by `READ_MARKET_DATA`; the current
+    `ai_delegate` named set contains this permission.
 
 - **`list_orders(wallet_public_id?, status?, exchange?, instrument?,
     limit=50, offset=0)`** — paged read of the delegate's order
@@ -403,9 +419,9 @@ to `caps_enforcer_getter` at registration.
     wallet/exchange/mode) across the caller's accessible wallets, each
     mapped through the same fail-closed read surface as REST and carrying an
     always-present strict `reconciliation` object. Requires
-    `READ_ACCOUNT_STATE`; AI delegates do **not** hold this permission
-    by default, so a delegate call returns `permission_denied`. Wallet
-    scope violations return `account_state_not_found`
+    `READ_ACCOUNT_STATE`; the current `ai_delegate` named set does **not**
+    contain this permission, so a delegate call returns `permission_denied`.
+    Wallet scope violations return `account_state_not_found`
     (anti-enumeration). Consumers must trust the account's derived
     `effective_status` and its reconciliation object's independently derived
     `effective_status` / `is_authoritative` fields, not raw stored statuses.
@@ -460,8 +476,8 @@ to `caps_enforcer_getter` at registration.
     enqueues a trade command under the delegate's user_public_id
     with `source_surface='mcp'` + the caps check from
     `TradingCapsEnforcer.guard`. Requires `CREATE_ORDERS`, rejects
-    non-admin `operator_public_id` values outside the caller's
-    authenticated operator set, rechecks wallet scope against active
+    out-of-membership `operator_public_id` values when the caller's effective
+    grant lacks `impersonate:operator`, rechecks wallet scope against active
     grants on every call, and fails closed on any cap violation.
     Validates order params with the same evaluator rule as REST:
     `price` is required for `limit`/`stop_limit` and `stop_price` is
@@ -480,15 +496,19 @@ to `caps_enforcer_getter` at registration.
     `order_not_found` (anti-enumeration).
 
 - **`submit_ai_review_decision(review_id, decision, rationale?)`** —
-    REST mirror of the
+    REST counterpart to the
     `POST /api/ai-reviews/{review_public_id}/decision` route for
     the in-process MCP surface; lets the delegate approve or
     reject a pending CONSULT review. `review_id` is the UUID7 of
-    the `ai_reviews` row. Requires `CREATE_ORDERS`; the review
-    service additionally verifies the caller is a registered AI
-    delegate that still holds an active scope grant for the
-    review wallet and instrument. Any such delegate may decide —
-    the selected delegate is who was consulted, not an exclusive
+    the `ai_reviews` row. Current tool-catalog visibility requires
+    `submit:ai_review_decision`; legacy version-one decision-capable tokens
+    remain visible when they retained `create:orders`. Invoking the MCP tool
+    also requires `create:orders`, and the REST route uses that same permission.
+    A usable current delegate token therefore retains both permissions. The
+    review service also
+    verifies the caller has an active operational delegate lifecycle identity
+    and scope grant for the review wallet and instrument. Any such delegate
+    may decide — the selected delegate is who was consulted, not an exclusive
     decision authority — and a delegate racing an already-resolved
     review receives `review_already_resolved_by_peer`. Not gated
     by the caps enforcer (the underlying review-decision path does
@@ -550,7 +570,7 @@ envelope. No proxy series is substituted during a closure. Macro and
 traded-market snapshot failures are independent and fail-soft, so either
 section may be omitted without preventing the consult.
 
-Operator steps to arm the wake surface:
+Integration-owner steps to arm the wake surface:
 
 1. Mint a delegate (`POST /api/ai-delegates`) and grant it scope on
     the strategy's `(wallet, instrument)` pair.
@@ -574,7 +594,10 @@ default creation + 30s) has already opened while the delegate was
 offline. Short-deadline rounds such as `HeartbeatConsult` (25s) time
 out before that window opens, so a missed heartbeat frame is simply
 lost and the next 1h round retries — the catch-up read matters for
-strategies configured with deadlines longer than the fanout window.
+strategies configured with deadlines longer than the fanout window. The route
+requires `READ_SIGNALS` plus the caller's active operational
+`delegate_public_id`; the second condition is lifecycle state rather than a
+role gate.
 
 For a round that already became terminal while the delegate was away,
 call `get_ai_review_aftermath(review_public_id)` or its REST mirror,
@@ -583,16 +606,17 @@ anchors every temporal row in the projection, while `window_started_at`
 is the review's persisted `created_at`. This is retrospective evidence only:
 it does not reopen the review and grants no order authority.
 
-Operators and admins audit what the AI decided across the whole book
-via `GET /api/ai-reviews` (OPERATOR-gated; an ADMIN sees every
-operator's reviews, a non-admin OPERATOR is narrowed server-side to its
-own operators). It returns `AdminAiReviewListResponse` (`items` +
-`count`) with the full per-row outcome — `status`, `decision`,
-`rationale`, `resolution_mode`, and the responding delegate — and
-accepts optional exact-match `status`, `wallet_public_id`, and
-`strategy_public_id` filters plus a `limit` (1-500, default 100),
-newest first. Unlike `/pending` it is not keyed by the delegate
-identity and returns terminal decided rows, not only pending ones.
+Callers with `read:ai_reviews`, including the current `viewer`, `operator`,
+and `admin` sets, audit what the AI decided through
+`GET /api/ai-reviews`. A caller with effective `impersonate:operator` sees
+every operator's reviews; every other reader is narrowed server-side to its
+explicit operator memberships. The route returns
+`AdminAiReviewListResponse` (`items` + `count`) with the full per-row outcome:
+`status`, `decision`, `rationale`, `resolution_mode`, and the responding
+delegate. It accepts optional exact-match `status`, `wallet_public_id`, and
+`strategy_public_id` filters plus a `limit` (1-500, default 100), newest first.
+Unlike `/pending`, it is not keyed by the delegate identity and returns
+terminal decided rows rather than only pending ones.
 
 ---
 
@@ -632,15 +656,16 @@ service emits a venue cancel command for a plan with a child venue order
 (`submit_ai_review_decision`, etc.) are not currently wired to
 `caps_enforcer_getter` at registration.
 
-Update caps via `PATCH /api/ai-delegates/{id}` — the write is SCD2
-close+insert, so cap history is auditable.
+Update caps via `PATCH /api/ai-delegates/{id}` with
+`manage:ai_integration`. The write is SCD2 close+insert, so cap history is
+auditable.
 
 ---
 
 ## Kill switch + deactivation
 
 `POST /api/ai-delegates/{id}/deactivate` runs the same code path as
-operator deactivation:
+the shared user-deactivation flow:
 
 1. SCD2 close+insert on the `users` row flipping `is_active=False`.
 2. `TokenManager.revoke_user_sessions` loads every
@@ -709,23 +734,24 @@ migrated.
 | 429    | `rate_limit_exceeded`      | Per-principal MCP middleware quota exhausted     | Back off and retry after `Retry-After` seconds        |
 | 503    | `mcp_unavailable`          | Repository dep unavailable (lifespan not ready)  | Retry with backoff                                    |
 | 401    | `missing_bearer_token`     | No `Authorization: Bearer …` header              | Prompt user to authenticate                           |
-| 401    | `invalid_bearer_token`     | JWT signature/expiry/blacklist/inventory failure | AI delegates have no refresh token (90-day PAT); deactivate + recreate the delegate in Snapper, then update the client's bearer token. Operator (cookie) sessions can fall back to `POST /api/auth/refresh`. |
+| 401    | `invalid_bearer_token`     | JWT signature/expiry/blacklist/inventory failure | Long-lived AI-principal tokens have no refresh token; deactivate and recreate the principal, then update the client's bearer token. Interactive sessions can use `POST /api/auth/refresh`. |
 | 401    | `user_deactivated`         | Owner account deactivated                        | Prompt re-login; don't auto-refresh                   |
 | 401    | Refresh token redeemed     | Replay of a spent refresh JWT                    | Re-login                                              |
 | 401    | Authentication required *(detail string, no error_code)* | Session cookie flow — deactivated account, revoked session, or expired token fails DB-backed verify; require_authentication collapses all of these into one generic 401 | Re-login |
 | 403    | MCP write helpers: `wallet_out_of_scope:` *(prefixed message)* / REST: `"Wallet not in accessible set"` *(detail string)* | Mutating tool targets a wallet outside the caller's scope. The helper path raises `PermissionError(f"wallet_out_of_scope: ...")` lifted by FastMCP into a `ToolError`; REST raises `HTTPException(403, detail="Wallet not in accessible set")` from `server/scoping.py`. Tool-level read/cancel paths may instead return structured anti-enumeration envelopes such as `order_not_found`, `position_not_found`, or `signal_not_found`. | Pick a wallet the caller still has a live grant on    |
-| 403    | MCP write helpers: `operator_out_of_scope:` *(prefixed message)* / REST: `"Operator not in accessible set"` *(detail string)* | Same write-helper shape as the wallet variant. Non-admin callers must pick an operator from their authenticated set; ADMIN bypasses the operator-set check. Read/cancel tools can intentionally collapse out-of-scope and not-found cases into structured not-found envelopes to avoid leaking resource existence. | Pick an operator from the caller's authenticated set unless the caller is ADMIN |
+| 403    | MCP write helpers: `operator_out_of_scope:` *(prefixed message)* / REST: `"Operator not in accessible set"` *(detail string)* | Same write-helper shape as the wallet variant. Callers lacking effective `impersonate:operator` must pick an operator from their authenticated set; an effective grant containing that permission has global operator scope. Read/cancel tools can intentionally collapse out-of-scope and not-found cases into structured not-found envelopes to avoid leaking resource existence. | Pick an operator from the caller's authenticated set unless its effective grant contains `impersonate:operator` |
 
 Delegate CRUD:
 
 | Status | Detail                                 | When it fires                                               |
 | ------ | -------------------------------------- | ----------------------------------------------------------- |
 | 401    | Requires populated `user_public_id`    | Principal has blank `user_public_id` (older token rollout)  |
-| 403    | `require_role(OPERATOR)`               | AI_DELEGATE or VIEWER trying to manage delegates            |
+| 403    | `Permission 'read:ai_integration' required` | Token lacks delegate list/detail visibility |
+| 403    | `Permission 'manage:ai_integration' required` | Token attempts delegate or researcher creation, delegate update, or delegate deactivation without the management permission |
 | 404    | `Delegate not found`                   | Unknown ID OR cross-tenant (no existence leak)              |
 | 409    | `Could not derive a unique username …` | Label slug collides 8+ times (pathological)                 |
 | 409    | `Operator … already owns N active AI delegates (limit 5)` | Owner hit the 5-active-delegates-per-operator cap; deactivate an existing delegate before creating another |
-| 422    | `Operator '<id>' is not in …`          | Non-admin caller picked `operator_public_id` outside their claim set |
+| 422    | `Operator '<id>' is not in …`          | Caller without effective `impersonate:operator` picked `operator_public_id` outside its claim set |
 | 422    | `Caller has no primary operator …`     | No explicit operator and no primary → binding is ambiguous  |
 
 ---
@@ -734,12 +760,12 @@ Delegate CRUD:
 
 ### Token lifetime
 
-- **Operator** access tokens live **15 minutes** (configurable via
-    `auth_access_token_expire_minutes`). **AI delegate** access
+- Interactive session access tokens live **15 minutes** (configurable via
+    `auth_access_token_expire_minutes`). AI delegate and researcher access
     tokens are PAT-style and live for `LONG_LIVED_TOKEN_EXPIRE_DAYS`
-    (~3 months / 90 days); operators rotate them on the cadence that
-    fits their key-management hygiene, and revocation is immediate via
-    deactivating the delegate rather than waiting for expiry.
+    (about 3 months / 90 days); integration owners rotate them on the cadence
+    that fits their key-management hygiene, and revocation is immediate through
+    principal deactivation rather than waiting for expiry.
 - Refresh tokens on the login/refresh route path currently live
     `auth_refresh_token_expire_days` (default **7 days**). The
     `remember_me` request field is accepted by the schema but is not
@@ -760,7 +786,7 @@ matching entry on receipt.
 ### No secrets leaked at rest
 
 Delegate password hashes are bcrypt-derived from 32 bytes of
-cryptographically random data the operator never sees. An attacker
+cryptographically random data the integration owner never sees. An attacker
 with DB read rights cannot brute-force the hash.
 
 ### Single-publisher invariant
@@ -769,7 +795,7 @@ with DB read rights cannot brute-force the hash.
 `admin.user_deactivated` across the entire process. `TokenManager`
 and `WebSocketAuthManager` are pure subscribers/fallback readers: they
 evict + close on receipt or on DB scan, but never emit the event
-themselves. This holds for operator deactivation AND delegate
+themselves. This holds for interactive-user deactivation and delegate
 deactivation (the route reuses `UserService.deactivate_user`).
 
 ### MCP transport = Streamable HTTP

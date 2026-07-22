@@ -158,8 +158,10 @@ disambiguate by reading the payload.
 The host disk heartbeat reuses the existing `critical_system_error`
 pipeline. The snapshotter publishes HEALTHY, WARNING, and ERROR frames
 every tick when the API publisher is wired; the notify rule owns the
-three-consecutive non-HEALTHY gate, per-admin fan-out, rolling cooldown,
-and dedup.
+three-consecutive non-HEALTHY gate, rolling cooldown, dedup, and fan-out to
+active users whose named permission set contains `read:system_status`. The
+current matching sets are `ai_reviewer`, `ai_delegate`, `viewer`, `operator`,
+and `admin`.
 
 Pool-bearing processes publish `system.egress.snapshot` on the heartbeat
 cadence with an `EgressPoolSnapshotEventData` payload. The payload
@@ -262,7 +264,7 @@ cannot double-page.
 | ----- | ----------- |
 | `alerts.<user_public_id>.order_fill_full` | Order filled in full |
 | `alerts.<user_public_id>.order_rejected` | Venue rejected the order |
-| `alerts.<user_public_id>.order_unknown` | Order submit outcome ambiguous — parked as non-terminal UNKNOWN pending venue verification (safety-critical; user-scoped with admin fan-out for strategy orders) |
+| `alerts.<user_public_id>.order_unknown` | Order submit outcome ambiguous — parked as non-terminal UNKNOWN pending venue verification (safety-critical; user-scoped, with `read:system_status` recipient fan-out for strategy orders) |
 | `alerts.<user_public_id>.position_stop_loss_fired` | Stop-loss fired on an open position |
 | `alerts.<user_public_id>.margin_warning` | Margin warning |
 | `alerts.<user_public_id>.critical_system_error` | Critical system error |
@@ -319,14 +321,15 @@ check the delegate's grant before forwarding.
 
 `ai_research.` is the registered WebSocket subscription root for research-round
 wakes. It belongs to its own `ai_research` authorization category and requires
-`submit:market_view`. An `AI_RESEARCHER` can subscribe to this root but cannot
-subscribe to `ai_reviews.`, whose combined `read:signals` and `create:orders`
-gate remains reserved for decision-capable principals. Concrete research frame
-shape is `ai_research.{round_public_id}.request` (3 segments), where the round
-identifier is UUID7 and `request` is the only valid suffix. The
-`ai_research.request` payload repeats `round_public_id` and carries the
-server-owned `trigger`. The round is already committed before this best-effort
-wake is published.
+the effective `submit:market_view` permission. The current `ai_researcher`
+named set contains it. The `ai_reviews.` category instead requires both
+effective `read:signals` and `create:orders`; the current `ai_delegate`,
+`operator`, and `admin` named sets contain both, while `ai_researcher` does not.
+Concrete research frame shape is `ai_research.{round_public_id}.request` (3
+segments), where the round identifier is UUID7 and `request` is the only valid
+suffix. The `ai_research.request` payload repeats `round_public_id` and carries
+the server-owned `trigger`. The round is already committed before this
+best-effort wake is published.
 
 ### Backtest
 
@@ -1361,33 +1364,34 @@ a uniform provenance envelope.
 Two destination tables provide always-available observability for non-domain traffic:
 
 - **control** — Always-on audit for commands, authentication events, subscribe/unsubscribe
-  messages, and REST mutation requests. Recording is wired in three places:
-  - **WS handlers** — `_record_ws_control()` records auth, subscribe, unsubscribe,
-    and error events with `transport="ws"`. Client causation linkage is extracted
-    from inbound messages via `_extract_client_provenance()` and stored as
-    `client_session_id` and `client_public_id` on the control row.
-  - **REST middleware** — `ClientProvenanceMiddleware._record_control()` records
-    every mutation (`POST` / `PUT` / `DELETE` / `PATCH` per
-    `_MUTATION_METHODS`) with `transport="rest"`, redacted payload,
-    outcome (`ok`/`error`/`exception`), and server-side provenance.
-  - **ZMQ bridge** — `_record_bridge_control()` records subscribe errors and
-    client disconnects with `transport="zmq"`.
+    messages, and REST mutation requests. Recording is wired in three places:
 
-  The REST middleware performs its control write in a `finally` block so mutations
-  are recorded even when the handler raises; the WS dispatch loop records
-  success/error outcomes inline and records an `exception` outcome from its
-  top-level exception handler; the bridge records at its explicit
-  error/disconnect sites. The write is non-blocking: any DB failure
-  is logged and swallowed so the response already sent to the client is never
-  invalidated.
+    - **WS handlers** — `_record_ws_control()` records auth, subscribe, unsubscribe,
+      and error events with `transport="ws"`. Client causation linkage is extracted
+      from inbound messages via `_extract_client_provenance()` and stored as
+      `client_session_id` and `client_public_id` on the control row.
+    - **REST middleware** — `ClientProvenanceMiddleware._record_control()` records
+      every mutation (`POST` / `PUT` / `DELETE` / `PATCH` per
+      `_MUTATION_METHODS`) with `transport="rest"`, redacted payload,
+      outcome (`ok`/`error`/`exception`), and server-side provenance.
+    - **ZMQ bridge** — `_record_bridge_control()` records subscribe errors and
+      client disconnects with `transport="zmq"`.
+
+    The REST middleware performs its control write in a `finally` block so mutations
+    are recorded even when the handler raises; the WS dispatch loop records
+    success/error outcomes inline and records an `exception` outcome from its
+    top-level exception handler; the bridge records at its explicit
+    error/disconnect sites. The write is non-blocking: any DB failure is logged and
+    swallowed so the response already sent to the client is never invalidated.
 
 - **telemetry** — Toggleable high-volume table for pings, heartbeats, pongs, and
-  GET read requests. Recording is gated by the `TELEMETRY_RECORDING_ENABLED`
-  environment variable (default `false`). When disabled, `SequenceTracker` counters
-  still increment — only the DB write is skipped. Recording is wired in:
-  - **WS handlers** — `_record_ws_telemetry()` records ping/pong/heartbeat events
-  - **REST middleware** — `_record_telemetry()` records GET reads (health, status,
-    entity endpoints)
+    GET read requests. Recording is gated by the `TELEMETRY_RECORDING_ENABLED`
+    environment variable (default `false`). When disabled, `SequenceTracker`
+    counters still increment — only the DB write is skipped. Recording is wired in:
+
+    - **WS handlers** — `_record_ws_telemetry()` records ping/pong/heartbeat events
+    - **REST middleware** — `_record_telemetry()` records GET reads (health, status,
+      entity endpoints)
 
 The non-blocking audit invariant applies to both tables: audit writes never reject,
 delay, or invalidate the primary request/message flow.

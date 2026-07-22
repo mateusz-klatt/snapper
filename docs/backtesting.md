@@ -4,6 +4,24 @@ Snapper ships two backtest execution engines, both producing the same
 artifacts (signals, trades, equity points) so a strategy author can pick
 either path with confidence.
 
+## Authorization
+
+Authorization uses the token's effective permissions from Snapper's
+34-permission catalogue. The frontend opens the Backtests resource with
+`read:backtests` and independently hides and rechecks each mutation.
+
+| Surface | Required permission | Current named permission sets |
+| --- | --- | --- |
+| List strategy classes, runs, artifacts, and comparisons | `read:backtests` | `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, `admin` |
+| Create, cancel, or rerun a backtest | `manage:backtests` | `operator`, `admin` |
+| Create a comparison | `create:backtest_comparisons` | `ai_reviewer`, `ai_delegate`, `operator`, `admin` |
+| Subscribe to backtest progress | `read:backtests` | `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, `admin` |
+
+The current `viewer` set therefore has the full operator read surface but no
+backtest mutation. Wallet-bound REST reads and writes use the active wallet in
+the token. Viewer and operator wallet choices come from the same operator
+memberships; neither receives global wallet visibility.
+
 ## Execution modes
 
 The `execution_mode` field on `BacktestConfig` selects which engine the
@@ -183,11 +201,11 @@ every subscribed client.
   step do not collide), and fires `started` / terminal events
   once. Degrades gracefully when `total_candles=None` by disabling
   milestones and pinning `progress_pct=0.0`.
-- Per-subscription RBAC: admins subscribe to any wallet prefix;
-  non-admin roles subscribe only to prefixes matching their
-  `active_wallet_public_id`. Foreign-wallet or bare `backtest.`
-  subscriptions are denied at the handler before the bridge is
-  touched.
+- Per-subscription wallet scope: `read:backtests` admits the topic category,
+    then effective `impersonate:operator` permits subscription to any wallet
+    prefix. Every other caller may subscribe only to prefixes matching its
+    `active_wallet_public_id`. Foreign-wallet or bare `backtest.` subscriptions
+    are denied at the handler before the bridge is touched.
 - `BacktestProgressData.milestone` carries a `@model_validator`
   enforcing the cross-field invariant `milestone is not None iff
   event == 'milestone'` so a malformed payload cannot reach the
@@ -215,10 +233,14 @@ indexed on `(wallet_public_id, config_hash, timestamp)`.
 ### Comparison
 
 `POST /api/backtests/compare` creates (or returns existing) a
-comparison row; `GET /api/backtests/compare/{id}` returns the
-comparison metadata plus the diff **recomputed from current
-artifact rows** so metric-schema changes never stale a persisted
-diff. The diff surfaces four shapes:
+comparison row and requires `create:backtest_comparisons`. The current
+`ai_reviewer`, `ai_delegate`, `operator`, and `admin` sets contain that
+permission; `viewer` and `ai_researcher` do not. This preserves historical
+comparison creation for review and delegate principals without widening the
+read-only viewer. `GET /api/backtests/compare/{id}` requires `read:backtests`
+and returns the comparison metadata plus the diff **recomputed from current
+artifact rows** so metric-schema changes never stale a persisted diff. The diff
+surfaces four shapes:
 
 - `metrics_diff` — per-name `{run_a, run_b, delta, pct}` with
   explicit `is not None` precedence.
@@ -239,8 +261,8 @@ submit is idempotent via SELECT-then-INSERT with an
 
 ### No-active-wallet fail-closed
 
-Every backtest read endpoint (list, detail, trades, signals,
-events, equity, compare) returns **400 `no active wallet selected`**
+Every wallet-bound backtest read endpoint (list, detail, trades, signals,
+events, equity, and comparison reads) returns **400 `no active wallet selected`**
 when `principal.active_wallet_public_id is None`. WS subscribes
 respond with a `subscription_success` frame whose `status` is
 `denied` (or `partial` when some requested topics succeeded), with
@@ -249,6 +271,10 @@ triggers a `selectWalletAndRefresh` on change that mints a new JWT
 carrying the chosen wallet claim before swapping the client
 scope, so REST and WS both authorise against the same wallet
 after the picker moves.
+
+`GET /api/backtests/strategy-classes` is the exception: it requires
+`read:backtests` but is a global registry read and does not require an active
+wallet.
 
 ## Cross-asset execution
 

@@ -251,13 +251,16 @@ credential; maintainers may have a proprietary override with live
 wallet credentials. On a fresh database, `db-seed` creates the default
 operator, every `[[wallets]]` entry, nested
 `[[wallets.credentials]]` rows, each requested live reconciliation-method
-config, and the first admin user's primary operator membership. If the
-profile has no wallets, the loader falls back to a single `default`
-paper wallet with a `10000.0` initial balance. Re-running seed on an
-established database does not merge wallets: users are skipped when any
-user exists, settings are inserted only when the key is absent, and the
-whole operator/wallet bootstrap is skipped when either operators or
-wallets already exist.
+config, and a primary membership on the default operator for every seeded user
+whose named permission set contains `read:account_state` (currently `admin`,
+`operator`, and `viewer`). No default scope grants are inserted, so callers
+without global `impersonate:operator` still need an active grant before a
+wallet becomes visible. If the profile has no wallets, the loader falls back
+to a single `default` paper wallet with a `10000.0` initial balance. Re-running
+seed on an established database does not merge wallets: users are skipped when
+any user exists, settings are inserted only when the key is absent, and the
+whole operator/wallet bootstrap is skipped when either operators or wallets
+already exist.
 
 The seed loader supports the `api_key_secret`, `rsa_pem`, and `paper`
 envelope shapes. The `oauth` shape is accepted at the
@@ -381,8 +384,8 @@ failure mode — no settings service, timeout, query/decrypt error, a
 duplicate active row, a missing row, or a value that is not exactly one
 of the three accepted strings — blocks the submit with reason
 `live_trading_mode_unavailable`, a blocking sentinel distinct from a
-deliberate `halted`. In the current phase `reduce_only` blocks like
-`halted` (differing only in the observability reason). A blocked submit
+deliberate `halted`. Currently, `reduce_only` blocks like `halted` (differing
+only in the observability reason). A blocked submit
 gets a durable `order_interlock_blocked` disposition and is then
 REJECTED, so a replayed frame can never execute after the mode later
 flips to `enabled`. Flipping to `enabled` is an explicit operator
@@ -403,7 +406,7 @@ controlled by these settings so high-volume feeds can be cache-first:
 | `spot_candle_source` | Kraken Spot live 1m source. Default `native` keeps venue OHLC unchanged; explicit `trade_built` switches live 1m bars to the trade stream. Read at feed startup: the live subscription source is fixed when the publisher subscribes, so a change takes effect only after a `snapper-feed` restart (a live settings broadcast refreshes the cached value but does not re-subscribe). |
 | `trade_built_finalize_grace_seconds` | Seconds to wait after a trade-built minute closes before finalizing it. Default `12` absorbs late Kraken trades. |
 | `candle_forward_fill` | When `false` (default) the higher-TF synthesis flush emits only data-backed bars; `true` forward-fills empty higher-TF windows with a flat carried-close bar. Enable ONLY for continuous-corpus venues (24/7 crypto like Kraken spot); leave off for session-based equities where it would manufacture non-trading-day bars. |
-| `candle_single_source` | When `false` (default) the `/api/candles` smart route derives `5m/15m/30m` on-read from the 1m cache; `true` serves those frames from the persisted `candles` plane (Phase 3 read-cutover, closing the cache-vs-persisted dual-source hazard). Keep off until the persisted higher-TF plane is populated and `verify-candle-coverage` passes. `1m` stays cache-served and `1h/4h/1d` are already DB-served. |
+| `candle_single_source` | When `false` (default) the `/api/candles` smart route derives `5m/15m/30m` on-read from the 1m cache; `true` serves those frames from the persisted `candles` plane, closing the cache-vs-persisted dual-source hazard. Keep off until the persisted higher-TF plane is populated and `verify-candle-coverage` passes. `1m` stays cache-served and `1h/4h/1d` are already DB-served. |
 | `market_persist_extra` | Explicit extra instrument allowlist |
 | `market_persist_exclude` | Explicit instrument denylist |
 

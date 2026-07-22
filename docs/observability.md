@@ -1,23 +1,24 @@
 # Observability
 
-Snapper exposes operator-facing health metrics so a dashboard can see
-the gradient toward exhaustion before a crash. The current observability
-surface is **Cluster A** of the three-cluster monitoring initiative:
-process-level counters sampled into an in-memory ring buffer with a
-REST query API.
-
-Cluster B (per-table SCD2 DB stats — `/api/metrics/db/tables`) and
-Cluster C (retention policy framework — `/api/metrics/retention`)
-are both live alongside Cluster A. Cluster C defines what
-"archivable" means, which Cluster B's `archivable` counter then
-mirrors.
+Snapper exposes permission-gated health metrics so a dashboard can see
+the gradient toward exhaustion before a crash. The observability surface
+includes process-level counters sampled into an in-memory ring buffer,
+per-table SCD2 database statistics at `/api/metrics/db/tables`, and retention
+policy state at `/api/metrics/retention`. The retention definition of
+"archivable" drives the database statistics `archivable` counter.
 
 ## Endpoints
 
-All metrics routes are gated by `Permission.READ_SYSTEM_STATUS` (held by
-`AI_DELEGATE`, `VIEWER`, `OPERATOR`, `ADMIN`). The two `POST` routes
-also require CSRF (cookie-auth path); `Authorization: Bearer` requests
-bypass CSRF per the project-wide auth contract.
+Metrics reads require effective `Permission.READ_SYSTEM_STATUS`; the current
+`ai_reviewer`, `ai_delegate`, `viewer`, `operator`, and `admin` named sets
+contain that permission. The two tracemalloc mutations instead require
+effective `Permission.MANAGE_RUNTIME_DIAGNOSTICS`, which is present in the
+current `ai_reviewer`, `ai_delegate`, `operator`, and `admin` sets but not
+`viewer` or `ai_researcher`. Those `POST` routes also require CSRF on the
+cookie-authenticated path; `Authorization: Bearer` requests bypass CSRF per
+the project-wide auth contract. On this surface, `viewer` is a read-only
+operator: it can call every `GET` route below but cannot start or stop
+tracemalloc.
 
 | Method | Path                                                | Purpose |
 |--------|-----------------------------------------------------|---------|
@@ -30,10 +31,10 @@ bypass CSRF per the project-wide auth contract.
 | GET    | `/api/metrics/retention`                            | Retention scheduler status and policy counters |
 | GET    | `/api/metrics/db/tables`                            | Per-table row-count and SCD2 lifecycle counters |
 
-### Sibling operator health endpoint
+### Sibling health endpoint
 
-`GET /api/health/egress` is a sibling operator health endpoint outside
-the `/api/metrics/*` surface. It shares the same
+`GET /api/health/egress` is a sibling health endpoint outside the
+`/api/metrics/*` surface. It shares the same
 `Permission.READ_SYSTEM_STATUS` gate as the metrics routes and returns a
 per-container egress pool status snapshot, aggregated cross-process over
 the `system.egress.snapshot` ZMQ topic, with sidecar
@@ -49,10 +50,10 @@ subscription that receives no data for `data_stale_threshold_s` (default
 `300.0`s; `ack_timeout_s` default `15.0`s guards the initial subscribe
 ACK) is marked stale and emits a one-shot log line. Beyond the one-shot
 log line, each publisher periodically flushes the tracker's current
-state into the `instrument_feed_health` table, and operators can query
-it via `GET /api/market/feed-health` (optional `exchange` and
-`fresh_within_seconds` filters; same `Permission.READ_SYSTEM_STATUS`
-gate as the metrics routes).
+state into the `instrument_feed_health` table. A token retaining
+`read:system_status` can query it through `GET /api/market/feed-health`
+(optional `exchange` and `fresh_within_seconds` filters; same
+`Permission.READ_SYSTEM_STATUS` gate as the metrics routes).
 
 ### Market-data watchdog (whole-exchange silence)
 
@@ -242,10 +243,10 @@ process also publishes the same status as a `system.heartbeats.host.disk`
 `HeartbeatData` frame when its shared ZMQ publisher is available. The
 existing `critical_system_error` rule consumes that heartbeat, gates on
 three consecutive non-HEALTHY frames in its rolling window, dedups by
-host/disk/hour, and fans out one alert row per current user SCD2 row
-whose role grants `read:system_status` (AI_DELEGATE, VIEWER, OPERATOR,
-ADMIN); the fan-out helper excludes deactivated users
-(`users.is_active = FALSE`).
+host/disk/hour, and fans out one alert row per current user SCD2 row whose
+named permission set contains `read:system_status`. The current matching sets
+are `ai_reviewer`, `ai_delegate`, `viewer`, `operator`, and `admin`; the fan-out
+helper excludes deactivated users (`users.is_active = FALSE`).
 
 | Field             | Type                          | Description |
 |-------------------|-------------------------------|-------------|
@@ -320,9 +321,10 @@ Runs at every sample and degrades silently when paths are absent:
 ## Tracemalloc
 
 Off by default — enabling tracemalloc costs **5-10% CPU** while active
-and holds extra metadata in process memory. Operators arm it briefly to
-capture the `python_traced_bytes` byte counter for the `native_bytes`
-diagnostic, then auto-stop fires after a bounded window.
+and holds extra metadata in process memory. A caller with
+`manage:runtime_diagnostics` arms it briefly to capture the
+`python_traced_bytes` byte counter for the `native_bytes` diagnostic, then
+auto-stop fires after a bounded window.
 
 | Knob                       | Default | Cap |
 |----------------------------|---------|-----|
@@ -330,8 +332,8 @@ diagnostic, then auto-stop fires after a bounded window.
 
 Calling `start` while already armed REPLACES the deadline (cancels the
 previous timer, starts a fresh one with the new duration). The route
-response carries the clamped `requested_duration_seconds`, so the
-operator sees what was actually applied.
+response carries the clamped `requested_duration_seconds`, so the caller sees
+what was actually applied.
 
 ## Example invocations
 
@@ -354,7 +356,8 @@ curl -fsS \
   | jq '.count, [.payload[].memory.rss_bytes]'
 ```
 
-Arm tracemalloc for 5 minutes to inspect the native gap:
+Arm tracemalloc for 5 minutes to inspect the native gap. The token used here
+must retain `manage:runtime_diagnostics`:
 
 ```bash
 curl -fsS -X POST \
@@ -371,13 +374,13 @@ curl -fsS \
 ## Multi-instance note
 
 The ring buffer is per-process. With `N>1` instances each hosts its own
-buffer; aggregation across instances is out of scope for Cluster A.
+buffer; aggregation across instances is outside the process-metrics scope.
 Operators who need cross-instance views should poll each instance
 directly; no cross-instance collector exists.
 
 # Retention
 
-Cluster C ships a **policy-driven retention loop** that periodically
+Snapper runs a **policy-driven retention loop** that periodically
 archives + purges old rows from event tables, complementing the
 existing manual `snapper archive` CLI. Policies are declarative
 (`RetentionPolicy(table, retain_days, backlog_lookback_days)`) and
@@ -470,7 +473,7 @@ instances, `RETENTION_DISABLED=true` on `N-1` instances avoids
 double-archive / double-purge races. A coordinator-based extension is
 a future iteration.
 
-## Cluster B — per-table SCD2 stats (DB metrics)
+## Per-table SCD2 stats (DB metrics)
 
 `GET /api/metrics/db/tables` returns the latest sampled per-table row
 counters for every registered event + state SCD2 table. The endpoint
@@ -478,7 +481,7 @@ is operator telemetry: at a glance it answers "is `telemetry` growing
 as expected", "are there orders accumulating closed versions", "how
 many rows are eligible for the next retention cycle".
 
-### Cluster B endpoint
+### Database metrics endpoint
 
 `GET /api/metrics/db/tables` — `READ_SYSTEM_STATUS` permission gate.
 Returns a `DbStatsResponse` envelope wrapping a `DbStatsData` payload
@@ -486,7 +489,7 @@ with `tables: list[TableStatsItem]` in the sampler's deterministic
 order (STATE-table block first alphabetical, EVENT-table block second
 alphabetical).
 
-### Cluster B failure / cold-start contract
+### Database metrics failure / cold-start contract
 
 | State | Status | Detail | `Retry-After` |
 |---|---|---|---|
@@ -553,9 +556,9 @@ for frontend dashboards, not an upper-bound SLA — poll-with-backoff.
   PostgreSQL `total` and `closed` remain estimates. `archivable`
   is `null` until a policy is registered for the table.
 
-## Cluster B/C alignment
+## Database metrics and retention alignment
 
-The `archivable` counter computes the same window as Cluster C's
+The `archivable` counter computes the same window as the retention service's
 `compute_retention_window(today_utc, policy)`: the half-open
 `timestamp >= day_start midnight UTC AND timestamp < day_end + 1d
 midnight UTC` predicate, with the policy's
@@ -565,7 +568,7 @@ exactly — if they drift, one of the two has a boundary bug. The
 `tests/application/db_stats/test_cluster_alignment.py` integration
 test pins the equality contract.
 
-## Cluster B configuration
+## Database metrics configuration
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -590,13 +593,13 @@ publishes with EVENT entries marked `is_stale=True` from a prior run.
 
 ## `telemetry.timestamp` index
 
-Cluster B's `archivable` query on `telemetry` filters on
+The database metrics `archivable` query on `telemetry` filters on
 `Telemetry.timestamp` (the bus-time column inherited from
 `TemporalMixin`). Without an index on that column, the query is a
 full table scan over a high-volume audit table. The
 `ix_telemetry_timestamp` index over `Telemetry.timestamp` is part
 of the consolidated `0001_init` migration
 (`src/snapper/data/migrations/versions/0001_init.py`), so both
-Cluster B's counter and Cluster C's existing retention scan run
+the database metrics counter and the retention scan run
 in `O(log n + k)` (an index-assisted seek plus a scan of the `k`
 matching entries) from the first deployed schema.
