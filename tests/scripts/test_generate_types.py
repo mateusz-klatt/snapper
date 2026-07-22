@@ -811,6 +811,38 @@ class TestJsonTypeToSwift:
         result = json_type_to_swift(prop, {})
         assert result == "SomeType?"
 
+    def test_ref_to_object_definition_keeps_name(self) -> None:
+        """A $ref targeting an object definition keeps the generated name."""
+        prop = {"$ref": "#/definitions/SomeType"}
+        definitions = {"SomeType": {"type": "object", "properties": {}}}
+        result = json_type_to_swift(prop, definitions)
+        assert result == "SomeType?"
+
+    def test_ref_to_anyof_union_resolves_to_anycodable(self) -> None:
+        """A $ref targeting an anyOf union resolves to AnyCodable, not a dangling name.
+
+        Union definitions are never emitted as named Swift types, so referring to
+        them by name would break Codable conformance of the enclosing struct.
+        """
+        prop = {"$ref": "#/definitions/MarkerUnion"}
+        definitions = {
+            "MarkerUnion": {
+                "anyOf": [
+                    {"$ref": "#/definitions/A"},
+                    {"$ref": "#/definitions/B"},
+                ]
+            }
+        }
+        result = json_type_to_swift(prop, definitions, optional=False)
+        assert result == "AnyCodable"
+
+    def test_ref_to_oneof_union_resolves_to_anycodable(self) -> None:
+        """A $ref targeting a oneOf union also resolves to AnyCodable."""
+        prop = {"$ref": "#/definitions/OneOfUnion"}
+        definitions = {"OneOfUnion": {"oneOf": [{"type": "string"}, {"type": "integer"}]}}
+        result = json_type_to_swift(prop, definitions)
+        assert result == "AnyCodable?"
+
     def test_handles_anyof_single_non_null(self) -> None:
         """Handles anyOf with single non-null type."""
         prop = {"anyOf": [{"type": "string"}, {"type": "null"}]}
@@ -991,6 +1023,23 @@ class TestGenerateSwiftEnum:
         result = "\n".join(lines)
         assert 'case classValue = "class"' in result
         assert 'case defaultValue = "default"' in result
+
+    def test_handles_scope_colon_values(self) -> None:
+        """Colon-scoped values map to camelCase identifiers keeping raw values.
+
+        Guards the regression where ``read:market_data`` was emitted as the
+        invalid identifier ``read:marketData`` because only ``_`` was treated as
+        a word separator.
+        """
+        lines = generate_swift_enum(
+            "Permission",
+            ["read:market_data", "read:signals", "impersonate:operator"],
+        )
+        result = "\n".join(lines)
+        assert 'case readMarketData = "read:market_data"' in result
+        assert 'case readSignals = "read:signals"' in result
+        assert 'case impersonateOperator = "impersonate:operator"' in result
+        assert "case read:" not in result
 
 
 class TestGetAnyCodableHelper:
@@ -1329,6 +1378,39 @@ class TestGenerateIosTypes:
         assert "struct OrderData" in api_content
         assert "struct OrderData" not in ws_content
         assert "struct SystemStatus" in api_content
+
+    def test_permission_enum_owned_by_permissions_file_only(self, tmp_path: Path) -> None:
+        """Permission stays in Permissions.swift only, never in APITypes/WSMessages.
+
+        The OpenAPI schema exposes ``Permission`` as a top-level enum whose
+        colon-scoped values are invalid Swift identifiers; ``Permissions.swift``
+        is its authoritative source, so re-emitting it here would both duplicate
+        the declaration and break the build.
+        """
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        permission_schema = {
+            "definitions": {
+                "Permission": {
+                    "type": "string",
+                    "enum": ["read:market_data", "read:signals"],
+                },
+            }
+        }
+        (build_dir / "openapi-schemas.json").write_text(json.dumps(permission_schema))
+        (build_dir / "ws-schemas.json").write_text(json.dumps(permission_schema))
+        ios_dir = tmp_path / "ios" / "Snapper" / "Models" / "Generated"
+        ios_dir.mkdir(parents=True)
+
+        generate_ios_types(tmp_path)
+
+        api_content = (ios_dir / "APITypes.swift").read_text()
+        ws_content = (ios_dir / "WSMessages.swift").read_text()
+        permissions_content = (ios_dir / "Permissions.swift").read_text()
+        assert "enum Permission" not in api_content
+        assert "read:market_data" not in api_content
+        assert "enum Permission" not in ws_content
+        assert "enum Permission" in permissions_content
 
 
 class TestGenerateIosPermissions:

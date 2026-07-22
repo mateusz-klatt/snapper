@@ -60,6 +60,14 @@ _LEGACY_DEFS_REF_PREFIX = "#/$defs/"
 _COMPONENTS_REF_PREFIX = "#/components/schemas/"
 _WS_SCHEMAS_FILE = "ws-schemas.json"
 _OPENAPI_FILE = "openapi.json"
+_PERMISSIONS_SWIFT_ENUMS = frozenset({"Permission"})
+"""Enums authoritatively emitted by ``generate_ios_permissions`` into
+``Permissions.swift``. They are excluded from the OpenAPI-driven
+``APITypes.swift``/``WSMessages.swift`` generation so the module keeps a single
+``Permission`` declaration. The OpenAPI schema now exposes ``Permission`` as a
+top-level enum whose values (``read:market_data``) carry colons that are not
+valid Swift identifier characters, so ``Permissions.swift`` is the only correct
+source for it."""
 _DEFS_KEY = "$defs"
 _STRIP_ESLINT_DISABLE_TARGET = Path("frontend") / "src" / "types" / "ws.generated.ts"
 _OPENAPI_TYPESCRIPT_TARGET = Path("frontend") / "src" / "types" / "api.generated.ts"
@@ -536,17 +544,34 @@ def _swift_object_type(prop: dict[str, Any], definitions: dict[str, Any], suffix
     return f"[String: AnyCodable]{suffix}"
 
 
-def _swift_ref_type(prop: dict[str, Any], suffix: str) -> str:
+def _swift_ref_type(prop: dict[str, Any], definitions: dict[str, Any], suffix: str) -> str:
     """Resolve Swift type for a JSON Schema $ref property.
+
+    A ``$ref`` that targets a union definition (a top-level ``anyOf``/``oneOf``
+    with no ``type: object`` and no ``enum``) resolves to ``AnyCodable`` instead
+    of the bare definition name. Such unions are not emitted as named Swift
+    types, so referring to them by name produces a dangling type and breaks
+    ``Codable`` conformance of the enclosing struct. This mirrors the inline
+    ``anyOf`` handling in ``_swift_anyof_type``. Object and enum targets keep
+    their generated name.
 
     Args:
         prop: Property schema with $ref.
+        definitions: Schema definitions for reference resolution.
         suffix: Optional suffix (e.g., '?').
 
     Returns:
         Swift type string.
     """
     ref_name = prop["$ref"].split("/")[-1]
+    target = definitions.get(ref_name, {})
+    is_union = (
+        ("anyOf" in target or "oneOf" in target)
+        and target.get("type") != "object"
+        and "enum" not in target
+    )
+    if is_union:
+        return f"AnyCodable{suffix}"
     return f"{ref_name}{suffix}"
 
 
@@ -600,7 +625,7 @@ def json_type_to_swift(
     suffix = "?" if optional else ""
 
     if "$ref" in prop:
-        return _swift_ref_type(prop, suffix)
+        return _swift_ref_type(prop, definitions, suffix)
 
     if "anyOf" in prop:
         return _swift_anyof_type(prop, definitions, suffix)
@@ -691,6 +716,12 @@ def generate_swift_struct(
 def generate_swift_enum(name: str, values: list[str]) -> list[str]:
     """Generate Swift enum from JSON Schema enum.
 
+    Both ``_`` and ``:`` are treated as word separators when deriving the Swift
+    case identifier, because scope-style enum values such as ``read:market_data``
+    contain a colon that is not a valid Swift identifier character. The colon is
+    normalised to an underscore before camel-casing so the identifier becomes
+    ``readMarketData`` while the raw value keeps the original ``read:market_data``.
+
     Args:
         name: Name of the enum to generate.
         values: List of enum case values.
@@ -701,7 +732,7 @@ def generate_swift_enum(name: str, values: list[str]) -> list[str]:
     lines: list[str] = []
     lines.append(f"enum {name}: String, Codable, Sendable {{")
     for value in values:
-        swift_case = to_camel_case(value) if "_" in value else value
+        swift_case = to_camel_case(value.replace(":", "_"))
         renamed = SWIFT_KEYWORD_RENAMES.get(swift_case)
         if renamed:
             lines.append(f'    case {renamed} = "{value}"')
@@ -914,6 +945,7 @@ def generate_ios_types(project_root: Path) -> None:
             api_schema_path,
             ios_gen_dir / "APITypes.swift",
             include_any_codable=False,
+            exclude_enums=set(_PERMISSIONS_SWIFT_ENUMS),
         )
 
     if ws_schema_path.exists():
@@ -922,7 +954,7 @@ def generate_ios_types(project_root: Path) -> None:
             ws_schema_path,
             ios_gen_dir / "WSMessages.swift",
             include_any_codable=False,
-            exclude_enums=api_enums,
+            exclude_enums=api_enums | set(_PERMISSIONS_SWIFT_ENUMS),
             exclude_structs=api_structs,
         )
 
