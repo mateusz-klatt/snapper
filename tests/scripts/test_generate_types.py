@@ -55,6 +55,9 @@ from scripts.generate_types import strip_eslint_disable_file
 from scripts.generate_types import strip_primitive_titles
 from scripts.generate_types import to_camel_case
 from scripts.generate_types import topological_sort_schemas
+from snapper.auth.domain.permissions import RESOURCE_PERMISSIONS
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.roles import UserRole
 from snapper.core.json_types import JsonObject
 
 
@@ -1429,15 +1432,18 @@ class TestGenerateIosPermissions:
         assert output.exists()
         content = output.read_text()
         assert "enum Permission:" in content
+        assert "enum ResourceRequirement: Sendable" in content
         assert "rolePermissions" in content
-        assert "resourceAccess" in content
+        assert "resourceRequirements" in content
+        assert "resourceAccess" not in content
+        assert "[String: [UserRole]]" not in content
         assert "read:market_data" in content
         assert "manage:users" in content
         captured = capsys.readouterr()
         assert "Generated" in captured.out
-        assert "28 permissions" in captured.out
-        assert "6 roles" in captured.out
-        assert "15 resources" in captured.out
+        assert f"{len(list(Permission))} permissions" in captured.out
+        assert f"{len(list(UserRole))} roles" in captured.out
+        assert f"{len(RESOURCE_PERMISSIONS)} resources" in captured.out
 
     def test_includes_all_roles(self, tmp_path: Path) -> None:
         """Generated file includes every service and human role.
@@ -1457,26 +1463,34 @@ class TestGenerateIosPermissions:
         assert ".operatorRole:" in content
         assert ".admin:" in content
 
-    def test_resource_access_derives_from_permissions(self, tmp_path: Path) -> None:
-        """Resource access entries are derived from RESOURCE_PERMISSIONS and ROLE_PERMISSIONS.
+    def test_resource_requirements_cover_backend_permission_alternatives(
+        self, tmp_path: Path
+    ) -> None:
+        """Every backend resource emits its authenticated or any-permission requirement.
 
-        Given: Backend RESOURCE_PERMISSIONS and ROLE_PERMISSIONS,
+        Given: Backend RESOURCE_PERMISSIONS with empty, singleton, and composite sets,
         When: generate_ios_permissions is called,
-        Then: resourceAccess grants all roles to overview (None permission)
-              and restricts admin-only resources correctly.
+        Then: Every resource is emitted without materializing role arrays.
         """
         generate_ios_permissions(tmp_path)
 
         output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
         content = output.read_text()
-        assert (
-            '"overview": [.aiResearcher, .aiReviewer, .aiDelegate, .viewer, '
-            ".operatorRole, .admin]" in content
-        )
-        assert '"signals": [.aiReviewer, .aiDelegate, .viewer, .operatorRole, .admin]' in content
-        assert '"admin": [.admin]' in content
-        assert '"settings": [.admin]' in content
-        assert '"processes": [.operatorRole, .admin]' in content
+        for resource, requirements in RESOURCE_PERMISSIONS.items():
+            if not requirements:
+                expected = f'    "{resource}": .authenticated,'
+            else:
+                cases = ", ".join(
+                    f".{generate_types._perm_name_to_swift_case(permission.name)}"
+                    for permission in sorted(requirements, key=lambda item: item.value)
+                )
+                expected = f'    "{resource}": .anyPermission([{cases}]),'
+            assert expected in content
+        assert '"overview": .authenticated' in content
+        assert '"market": .anyPermission([.readMarketData])' in content
+        assert '"ai-reviews": .anyPermission([.readAiReviews, .submitAiReviewDecision])' in content
+        assert "resourceAccess" not in content
+        assert "[String: [UserRole]]" not in content
 
     def test_user_role_not_redeclared(self, tmp_path: Path) -> None:
         """UserRole enum is not redeclared since WSMessages.swift already defines it.
@@ -2565,14 +2579,16 @@ class TestGeneratePermissions:
         assert "export const Permission" in content
         assert "export type Permission" in content
         assert "ROLE_PERMISSIONS" in content
-        assert "RESOURCE_ACCESS" in content
+        assert "RESOURCE_PERMISSIONS" in content
+        assert "RESOURCE_ACCESS" not in content
+        assert "readonly UserRole[]" not in content
         assert "read:market_data" in content
         assert "manage:users" in content
         captured = capsys.readouterr()
         assert "Generated" in captured.out
-        assert "28 permissions" in captured.out
-        assert "6 roles" in captured.out
-        assert "15 resources" in captured.out
+        assert f"{len(list(Permission))} permissions" in captured.out
+        assert f"{len(list(UserRole))} roles" in captured.out
+        assert f"{len(RESOURCE_PERMISSIONS)} resources" in captured.out
 
     def test_includes_all_roles(self, tmp_path: Path) -> None:
         """Generated file includes every service and human role."""
@@ -2587,27 +2603,28 @@ class TestGeneratePermissions:
         assert "operator:" in content
         assert "admin:" in content
 
-    def test_resource_access_derives_from_permissions(self, tmp_path: Path) -> None:
-        """RESOURCE_ACCESS is derived from RESOURCE_PERMISSIONS and ROLE_PERMISSIONS.
+    def test_resource_permissions_cover_backend_any_of_requirements(self, tmp_path: Path) -> None:
+        """Every backend resource emits its permission alternatives directly.
 
-        Given: Backend RESOURCE_PERMISSIONS and ROLE_PERMISSIONS,
+        Given: Backend RESOURCE_PERMISSIONS with empty, singleton, and composite sets,
         When: Permissions are generated,
-        Then: RESOURCE_ACCESS grants all roles to overview (None permission)
-              and restricts admin-only resources correctly.
+        Then: Every resource is emitted without materializing role arrays.
         """
         generate_permissions(tmp_path)
 
         output = tmp_path / "frontend" / "src" / "types" / "permissions.generated.ts"
         content = output.read_text()
-        assert (
-            "'overview': ['ai_researcher', 'ai_reviewer', 'ai_delegate', 'viewer', "
-            "'operator', 'admin']" in content
-        )
-        assert "'signals': ['ai_reviewer', 'ai_delegate', 'viewer', 'operator', 'admin']" in content
-        assert "'admin': ['admin']" in content
-        assert "'settings': ['admin']" in content
-        assert "'processes': ['operator', 'admin']" in content
-        assert "'ai-integration': ['operator', 'admin']" in content
+        for resource, requirements in RESOURCE_PERMISSIONS.items():
+            values = ", ".join(
+                f"'{permission.value}'"
+                for permission in sorted(requirements, key=lambda item: item.value)
+            )
+            assert f"  '{resource}': [{values}]," in content
+        assert "'overview': []" in content
+        assert "'market': ['read:market_data']" in content
+        assert "'ai-reviews': ['read:ai_reviews', 'submit:ai_review_decision']" in content
+        assert "RESOURCE_ACCESS" not in content
+        assert "readonly UserRole[]" not in content
 
     def test_user_role_type_not_exported(self, tmp_path: Path) -> None:
         """UserRole type is file-local, not exported."""

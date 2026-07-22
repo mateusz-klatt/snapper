@@ -21,6 +21,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from typing import cast
 
 from pydantic import BaseModel
 
@@ -302,7 +303,7 @@ def discover_ws_schemas() -> list[tuple[str, type[BaseModel]]]:
             and obj is not StrictDataSchema
             and name.endswith("Data")
         ):
-            discovered.append((name, obj))
+            discovered.append((name, cast(type[BaseModel], obj)))
 
     for name, obj in inspect.getmembers(ws_schemas):
         if (
@@ -1815,9 +1816,10 @@ _IOS_PERMISSIONS_TARGET = Path("ios") / "Snapper" / "Models" / "Generated" / "Pe
 def generate_permissions(project_root: Path) -> None:
     """Generate TypeScript permissions constants from backend source of truth.
 
-    Reads ``Permission`` enum and ``ROLE_PERMISSIONS`` mapping from the backend
-    auth domain and produces a generated TypeScript module that the frontend
-    imports instead of duplicating the data.
+    Reads the ``Permission`` enum, ``ROLE_PERMISSIONS`` mapping, and resource
+    permission alternatives from the backend auth domain. The generated module
+    preserves role sets for token/display use while resource decisions consume
+    permission requirements directly.
 
     Args:
         project_root: Root directory of the project.
@@ -1836,12 +1838,10 @@ def generate_permissions(project_root: Path) -> None:
         role_entries.append(f"  {role.value}: [{perm_list}],")
 
     resource_entries: list[str] = []
-    for resource, required_perm in BACKEND_RESOURCE_PERMISSIONS.items():
-        allowed_roles: list[str] = []
-        for role in UserRole:
-            if required_perm is None or required_perm in BACKEND_ROLE_PERMISSIONS[role]:
-                allowed_roles.append(f"'{role.value}'")
-        resource_entries.append(f"  '{resource}': [{', '.join(allowed_roles)}],")
+    for resource, required_permissions in BACKEND_RESOURCE_PERMISSIONS.items():
+        permissions = sorted(required_permissions, key=lambda permission: permission.value)
+        permission_list = ", ".join(f"'{permission.value}'" for permission in permissions)
+        resource_entries.append(f"  '{resource}': [{permission_list}],")
 
     lines = [
         "/**",
@@ -1861,7 +1861,7 @@ def generate_permissions(project_root: Path) -> None:
         *role_entries,
         _TS_CONST_OBJECT_CLOSE,
         "",
-        "export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {",
+        "export const RESOURCE_PERMISSIONS: Record<string, readonly Permission[]> = {",
         *resource_entries,
         _TS_CONST_OBJECT_CLOSE,
         "",
@@ -1895,7 +1895,7 @@ def _role_value_to_swift_case(value: str) -> str:
     in ``APITypes.swift``: snake_case values like ``"ai_delegate"`` become
     camelCase (``"aiDelegate"``), then ``SWIFT_KEYWORD_RENAMES`` maps reserved
     words (e.g. ``"operator"`` → ``"operatorRole"``). Without the snake→camel
-    step, the generated ``rolePermissions`` / ``resourceAccess`` dictionaries
+    step, the generated ``rolePermissions`` dictionary
     reference enum cases that do not exist.
 
     Args:
@@ -1912,8 +1912,8 @@ def generate_ios_permissions(project_root: Path) -> None:
     """Generate Swift permissions constants from backend source of truth.
 
     Produces ``Permissions.swift`` in ``ios/Snapper/Models/Generated/`` with a
-    ``Permission`` enum, ``rolePermissions`` dictionary, and ``resourceAccess``
-    dictionary that mirror ``permissions.generated.ts`` used by the frontend.
+    ``Permission`` enum, ``rolePermissions`` dictionary, and permission-based
+    ``resourceRequirements`` dictionary that mirror the frontend contract.
     ``UserRole`` is deliberately omitted because it is already emitted by the
     API schema generator in ``APITypes.swift``.
 
@@ -1935,12 +1935,16 @@ def generate_ios_permissions(project_root: Path) -> None:
         role_perm_entries.append(f"    .{swift_role}: [{perm_list}],")
 
     resource_entries: list[str] = []
-    for resource, required_perm in BACKEND_RESOURCE_PERMISSIONS.items():
-        allowed_roles: list[str] = []
-        for role in UserRole:
-            if required_perm is None or required_perm in BACKEND_ROLE_PERMISSIONS[role]:
-                allowed_roles.append(f".{_role_value_to_swift_case(role.value)}")
-        resource_entries.append(f'    "{resource}": [{", ".join(allowed_roles)}],')
+    for resource, required_permissions in BACKEND_RESOURCE_PERMISSIONS.items():
+        if not required_permissions:
+            requirement = ".authenticated"
+        else:
+            permissions = sorted(required_permissions, key=lambda permission: permission.value)
+            permission_list = ", ".join(
+                f".{_perm_name_to_swift_case(permission.name)}" for permission in permissions
+            )
+            requirement = f".anyPermission([{permission_list}])"
+        resource_entries.append(f'    "{resource}": {requirement},')
 
     lines = [
         *_SWIFT_HEADER_LINES,
@@ -1948,11 +1952,16 @@ def generate_ios_permissions(project_root: Path) -> None:
         *perm_cases,
         "}",
         "",
+        "enum ResourceRequirement: Sendable {",
+        "    case authenticated",
+        "    case anyPermission([Permission])",
+        "}",
+        "",
         "let rolePermissions: [UserRole: [Permission]] = [",
         *role_perm_entries,
         "]",
         "",
-        "let resourceAccess: [String: [UserRole]] = [",
+        "let resourceRequirements: [String: ResourceRequirement] = [",
         *resource_entries,
         "]",
         "",
