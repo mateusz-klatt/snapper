@@ -113,6 +113,7 @@ from snapper.api.schemas.process import StrategyStatusPayload
 from snapper.api.schemas.process import SystemStatusData
 from snapper.api.schemas.process import SystemStatusResponse
 from snapper.application.ai_research.trigger import AiResearchTriggerService
+from snapper.application.ai_review.maintenance import AiReviewMaintenanceService
 from snapper.application.ai_review.service import AiReviewService
 from snapper.application.ai_review.service import get_ai_review_service
 from snapper.application.ai_review.watchdog import AiDelegateWatchdog
@@ -618,6 +619,49 @@ async def _stop_ai_research_trigger(app: FastAPI) -> None:
     await trigger.stop()
 
 
+async def _start_ai_review_maintenance(
+    app: FastAPI,
+    *,
+    db_url: str,
+) -> None:
+    """Build and start the :class:`AiReviewMaintenanceService`.
+
+    The state attribute is attached only after startup succeeds. A
+    failure is logged without blocking the rest of the API lifespan.
+
+    Args:
+        app: FastAPI application whose state holds the driver.
+        db_url: SQLAlchemy URL used to resolve a repository per pass.
+    """
+    try:
+        maintenance = AiReviewMaintenanceService(
+            service=get_ai_review_service(),
+            repository_factory=lambda: get_repository(db_url),
+        )
+        await maintenance.start()
+    except Exception:
+        logger.exception(
+            "AiReviewMaintenanceService startup failed — review maintenance is offline"
+        )
+        return
+    app.state.ai_review_maintenance = maintenance
+    logger.info("AiReviewMaintenanceService started")
+
+
+async def _stop_ai_review_maintenance(app: FastAPI) -> None:
+    """Stop the :class:`AiReviewMaintenanceService` when attached.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    maintenance: AiReviewMaintenanceService | None = getattr(
+        app.state, "ai_review_maintenance", None
+    )
+    if maintenance is None:
+        return
+    await maintenance.stop()
+
+
 async def _start_ai_delegate_watchdog(
     app: FastAPI,
     *,
@@ -1016,6 +1060,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.db_stats_snapshotter = None
     app.state.market_data_watchdog = None
     app.state.ai_research_trigger = None
+    app.state.ai_review_maintenance = None
     app.state.ai_delegate_watchdog = None
     app.state.market_persist_policy = None
     app.state.market_cache = None
@@ -1127,6 +1172,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         )
         await _start_market_data_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_ai_research_trigger(app, db_url=settings.db_url, msg_publisher=user_publisher)
+        await _start_ai_review_maintenance(app, db_url=settings.db_url)
         await _start_ai_delegate_watchdog(app, db_url=settings.db_url, msg_publisher=user_publisher)
         await _start_retention_scheduler(app, db_url=settings.db_url)
         await _start_db_stats_snapshotter(app, db_url=settings.db_url)
@@ -1182,6 +1228,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _stop_db_stats_snapshotter(app)
         await _stop_retention_scheduler(app)
         await _stop_ai_delegate_watchdog(app)
+        await _stop_ai_review_maintenance(app)
         await _stop_ai_research_trigger(app)
         await _stop_market_data_watchdog(app)
         await _stop_system_metrics_snapshotter(app)

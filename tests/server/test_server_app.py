@@ -215,6 +215,8 @@ class TestLifespan:
         lifespan_settings.coordinator_instance_count = 1
         start_ai_research_trigger = AsyncMock()
         stop_ai_research_trigger = AsyncMock()
+        start_ai_review_maintenance = AsyncMock()
+        stop_ai_review_maintenance = AsyncMock()
         with (
             patch("snapper.server.app.discover_processes") as mock_discover,
             patch(
@@ -263,6 +265,8 @@ class TestLifespan:
                 _stop_market_data_watchdog=AsyncMock(),
                 _start_ai_research_trigger=start_ai_research_trigger,
                 _stop_ai_research_trigger=stop_ai_research_trigger,
+                _start_ai_review_maintenance=start_ai_review_maintenance,
+                _stop_ai_review_maintenance=stop_ai_review_maintenance,
                 _start_ai_delegate_watchdog=AsyncMock(),
                 _stop_ai_delegate_watchdog=AsyncMock(),
                 _start_retention_scheduler=AsyncMock(),
@@ -305,6 +309,8 @@ class TestLifespan:
         mock_factory.stop_all_processes.assert_awaited_once()
         start_ai_research_trigger.assert_awaited_once()
         stop_ai_research_trigger.assert_awaited_once()
+        start_ai_review_maintenance.assert_awaited_once()
+        stop_ai_review_maintenance.assert_awaited_once()
         mock_manager.cleanup.assert_called_once()
 
     @pytest.mark.asyncio

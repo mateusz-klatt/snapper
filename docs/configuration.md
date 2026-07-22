@@ -169,6 +169,7 @@ underlying snapshots and the retention window math.
 | `DB_METRICS_INTERVAL_SECONDS` | `60` | Cadence for the per-table SCD2 row-count sampler |
 | `DB_METRICS_DISABLED` | `false` | Disable the DB stats sampler |
 | `AI_RESEARCH_TRIGGER_INTERVAL_SECONDS` | `1800` | Periodic latest-wins AI-research round cadence (floor 60) |
+| `AI_REVIEW_MAINTENANCE_INTERVAL_SECONDS` | `60` | Cadence for expired-review reaping and offline-delegate fanout (floor 60) |
 | `MARKET_DATA_WATCHDOG_DISABLED` | `false` | Park the silent-exchange market-data watchdog entirely |
 | `MARKET_DATA_WATCHDOG_INTERVAL_SECONDS` | `60` | Poll cadence for the per-exchange candle-freshness check (floor 5) |
 | `MARKET_DATA_WATCHDOG_THRESHOLD_SECONDS` | `600` | Whole-exchange silence threshold before the `critical_system_error` alert path fires (floor 120) |
@@ -510,6 +511,9 @@ SYSTEM_METRICS_DISK_MOUNT_PATH=/
 
 # AI-research trigger
 AI_RESEARCH_TRIGGER_INTERVAL_SECONDS=1800
+
+# AI-review maintenance
+AI_REVIEW_MAINTENANCE_INTERVAL_SECONDS=60
 
 # Market-data watchdog (silent-exchange alerting)
 MARKET_DATA_WATCHDOG_DISABLED=false

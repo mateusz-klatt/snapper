@@ -41,6 +41,7 @@ import difflib
 from pathlib import Path
 
 from snapper.application.ai_research.trigger import ENV_VARS as AI_RESEARCH_TRIGGER_ENV_VARS
+from snapper.application.ai_review.maintenance import ENV_VARS as AI_REVIEW_MAINTENANCE_ENV_VARS
 from snapper.application.db_stats.snapshotter import ENV_VARS as DB_STATS_ENV_VARS
 from snapper.application.market_data_watchdog.watchdog import ENV_VARS as MARKET_WATCHDOG_ENV_VARS
 from snapper.application.notify.portfolio_drift_recovery import (
@@ -104,6 +105,7 @@ stay aligned with the actual loader fields.
 KNOWN_ENV_KEYS: frozenset[str] = (
     BOOTSTRAP_ENV_VARS
     | AI_RESEARCH_TRIGGER_ENV_VARS
+    | AI_REVIEW_MAINTENANCE_ENV_VARS
     | DB_ENGINE_ENV_VARS
     | DB_STATS_ENV_VARS
     | MARKET_WATCHDOG_ENV_VARS

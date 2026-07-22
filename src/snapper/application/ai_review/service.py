@@ -1362,6 +1362,25 @@ class AiReviewService:
         )
         return True
 
+    async def maintenance_tick(
+        self,
+        *,
+        repo: Repository,
+        now: datetime | None = None,
+    ) -> tuple[int, int]:
+        """Run the periodic reaper followed by the offline scanner.
+
+        Args:
+            repo: Repository handle shared by both maintenance operations.
+            now: Optional wall-clock override passed to both operations.
+
+        Returns:
+            Reaped-review and dispatched-fanout counts, in that order.
+        """
+        reaped = await self._reaper_tick(repo=repo, now=now)
+        dispatched = await self._offline_scanner_tick(repo=repo, now=now)
+        return reaped, dispatched
+
     async def _reaper_tick(self, *, repo: Repository, now: datetime | None = None) -> int:
         """Single-tick reaper iteration.
 

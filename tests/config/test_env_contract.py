@@ -24,6 +24,7 @@ import pytest
 from pydantic import ValidationError
 
 from snapper.application.ai_research.trigger import ENV_VARS as AI_RESEARCH_TRIGGER_ENV_VARS
+from snapper.application.ai_review.maintenance import ENV_VARS as AI_REVIEW_MAINTENANCE_ENV_VARS
 from snapper.application.db_stats.snapshotter import ENV_VARS as DB_STATS_ENV_VARS
 from snapper.application.notify.portfolio_drift_recovery import (
     ENV_VARS as PORTFOLIO_DRIFT_RECOVERY_ENV_VARS,
@@ -76,6 +77,11 @@ class TestKnownEnvKeys:
         """The AI-research trigger contributes its cadence key."""
         assert AI_RESEARCH_TRIGGER_ENV_VARS.issubset(KNOWN_ENV_KEYS)
         assert "AI_RESEARCH_TRIGGER_INTERVAL_SECONDS" in KNOWN_ENV_KEYS
+
+    def test_includes_ai_review_maintenance_key(self) -> None:
+        """The AI-review maintenance driver contributes its cadence key."""
+        assert AI_REVIEW_MAINTENANCE_ENV_VARS.issubset(KNOWN_ENV_KEYS)
+        assert "AI_REVIEW_MAINTENANCE_INTERVAL_SECONDS" in KNOWN_ENV_KEYS
 
     def test_includes_retention_keys(self) -> None:
         """The retention subsystem contributes its ENV_VARS."""
