@@ -30,6 +30,24 @@ class TestIterPythonFiles:
         assert tmp_path / "src" / "snapper" / "services" / "a.py" in files
         assert tmp_path / "src" / "snapper" / "services" / "b.py" in files
 
+    def test_collects_files_under_delegate_scan_root(self, tmp_path: Path) -> None:
+        """Verify iter_python_files includes the managed delegate package.
+
+        Given: Python files under the delegate source and test directories,
+        When: ``iter_python_files`` is called,
+        Then: It returns both delegate files alongside core files.
+        """
+        delegate_dir = tmp_path / "integrations" / "snapper-delegate" / "src"
+        delegate_dir.mkdir(parents=True)
+        delegate_file = delegate_dir / "client.py"
+        delegate_file.write_text('"""Client."""\n')
+        delegate_tests_dir = tmp_path / "integrations" / "snapper-delegate" / "tests"
+        delegate_tests_dir.mkdir(parents=True)
+        delegate_test_file = delegate_tests_dir / "test_client.py"
+        delegate_test_file.write_text('"""Client tests."""\n')
+
+        assert checker.iter_python_files(tmp_path) == [delegate_file, delegate_test_file]
+
     def test_skips_pycache(self, tmp_path: Path) -> None:
         """Verify __pycache__ entries are excluded.
 
@@ -411,7 +429,7 @@ class TestRunScan:
         result = checker.run_scan(tmp_path, strict_mode=True)
 
         assert result == 0
-        assert "Core stays vendor-neutral." in capsys.readouterr().out
+        assert "Generic runtime packages stay vendor-neutral." in capsys.readouterr().out
 
     def test_strict_mode_fails_on_violation(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

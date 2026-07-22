@@ -1,12 +1,11 @@
-"""Scan Python source files for vendor-specific names that leak into core.
+"""Scan generic runtime packages for vendor-specific names.
 
-`src/snapper/` must stay vendor-neutral so the MCP surface cannot assume any
-single AI client (Claude Desktop, Cursor, Windsurf, ChatGPT, Gemini, Copilot,
-...). Vendor-specific wrappers belong in adjacent public repos (e.g.
-`integrations/snapper-mcp/`), not the core engine.
+The core and managed delegate must stay vendor-neutral so their surfaces cannot
+assume any single AI client. Vendor-specific wrappers belong outside these
+generic runtime packages.
 
-The check regex-scans every `*.py` file under `src/snapper/` for the terms
-listed in `VENDOR_PATTERN`.  A line with a same-line real Python
+The check regex-scans every `*.py` file under the configured roots for the
+terms listed in `VENDOR_PATTERN`. A line with a same-line real Python
 `# vendor-neutral-ok` comment is treated as an intentional, reviewed
 exemption.
 """
@@ -18,7 +17,10 @@ import tokenize
 from pathlib import Path
 from typing import Final
 
-SCAN_ROOT: Final[str] = "src/snapper"
+SCAN_ROOTS: Final[tuple[str, ...]] = (
+    "src/snapper",
+    "integrations/snapper-delegate",
+)
 
 SKIP_DIRS: Final[set[str]] = {
     "__pycache__",
@@ -61,14 +63,15 @@ def iter_python_files(root: Path) -> list[Path]:
     Returns:
         Sorted list of Python file paths under the scan root.
     """
-    search_root = root / SCAN_ROOT
-    if not search_root.exists():
-        return []
     python_files: list[Path] = []
-    for python_file in search_root.rglob("*.py"):
-        if any(part in SKIP_DIRS for part in python_file.parts):
+    for relative_root in SCAN_ROOTS:
+        search_root = root / relative_root
+        if not search_root.exists():
             continue
-        python_files.append(python_file)
+        for python_file in search_root.rglob("*.py"):
+            if any(part in SKIP_DIRS for part in python_file.parts):
+                continue
+            python_files.append(python_file)
     return sorted(python_files)
 
 
@@ -259,7 +262,8 @@ def run_scan(root: Path, strict_mode: bool) -> int:
     print("=" * 70)
     print("Vendor-Neutrality Scanner")
     print("=" * 70)
-    print(f"\nScanning: {root / SCAN_ROOT}")
+    scan_paths = ", ".join(str(root / relative_root) for relative_root in SCAN_ROOTS)
+    print(f"\nScanning: {scan_paths}")
     print(f"Mode: {'STRICT (will fail on findings)' if strict_mode else 'Report only'}")
     results = scan_files(root)
     print("\n" + "-" * 70)
@@ -273,13 +277,13 @@ def run_scan(root: Path, strict_mode: bool) -> int:
     if total > 0:
         print(
             "\nAdd a same-line '# vendor-neutral-ok' comment to intentional "
-            "references, or move vendor-specific code to adjacent public repos."
+            "references, or move vendor-specific code outside generic runtime packages."
         )
         if strict_mode:
             print("\nSTRICT MODE: Failing due to violations found.")
             return 1
     else:
-        print("\nCore stays vendor-neutral.")
+        print("\nGeneric runtime packages stay vendor-neutral.")
     return 0
 
 
