@@ -30,6 +30,7 @@ from snapper.core.types import ProcessAutostartProfileEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.core.types import StartProcessStatusEnum
 from snapper_delegate.runner import DelegateRunner
 
 _VALID_PARAMETERS: dict[str, object] = {
@@ -374,7 +375,7 @@ async def test_delegate_runner_routes_process_signals_through_clean_stop(
             return True
 
     signal_loop = _SignalLoop()
-    monkeypatch.setattr(runner_module.asyncio, "get_running_loop", lambda: signal_loop)
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: signal_loop)
     runner = DelegateRunner(
         model_alias="research-primary",
         base_url="https://delegate.invalid/v1",
@@ -423,21 +424,21 @@ def test_delegate_profile_owns_only_delegate_processes() -> None:
     delegate_settings = AppSettings(
         BootstrapSettingsLoader(
             DB_URL="sqlite+aiosqlite:///:memory:",
-            PROCESS_AUTOSTART_PROFILE="delegate",
+            PROCESS_AUTOSTART_PROFILE=ProcessAutostartProfileEnum.DELEGATE,
         ),
         settings_service=None,
     )
     api_settings = AppSettings(
         BootstrapSettingsLoader(
             DB_URL="sqlite+aiosqlite:///:memory:",
-            PROCESS_AUTOSTART_PROFILE="api",
+            PROCESS_AUTOSTART_PROFILE=ProcessAutostartProfileEnum.API,
         ),
         settings_service=None,
     )
     all_settings = AppSettings(
         BootstrapSettingsLoader(
             DB_URL="sqlite+aiosqlite:///:memory:",
-            PROCESS_AUTOSTART_PROFILE="all",
+            PROCESS_AUTOSTART_PROFILE=ProcessAutostartProfileEnum.ALL,
         ),
         settings_service=None,
     )
@@ -475,7 +476,7 @@ def test_api_profile_rejects_direct_delegate_start(
     settings = AppSettings(
         BootstrapSettingsLoader(
             DB_URL="sqlite+aiosqlite:///:memory:",
-            PROCESS_AUTOSTART_PROFILE="api",
+            PROCESS_AUTOSTART_PROFILE=ProcessAutostartProfileEnum.API,
         ),
         settings_service=None,
     )
@@ -485,7 +486,7 @@ def test_api_profile_rejects_direct_delegate_start(
         "delegate_runner", _delegate_config(config_tags), config_dict
     )
     assert result is not None
-    assert result.status == "error"
+    assert result.status == StartProcessStatusEnum.ERROR
     assert "delegate engine" in result.message
 
 
