@@ -59,6 +59,7 @@ from snapper.application.ai_review.service import get_ai_review_service
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.settings import get_settings
+from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
 from snapper.utils.logging import resolve_subprocess_logfile
 from snapper.utils.logging import set_log_context
@@ -197,6 +198,16 @@ async def _await_result_with_listener[Result](awaitable: Awaitable[Result]) -> R
         return await _await_result(awaitable)
 
 
+def _uses_ai_review_listener(process_role: object) -> bool:
+    """Return whether a process role needs the strategy decision listener.
+
+    A missing role preserves compatibility with process commands written
+    before role metadata was included. Explicit non-strategy roles use only
+    the generic process lifecycle path.
+    """
+    return process_role is None or process_role == ProcessRoleEnum.STRATEGY.value
+
+
 def main() -> int:
     """Main entry point for subprocess process runner.
 
@@ -233,6 +244,7 @@ def main() -> int:
     method = config["method"]
     class_parameters = config.get("parameters", {})
     template_name = config.get("template_name")
+    uses_ai_review_listener = _uses_ai_review_listener(config.get("role"))
     set_log_context(f"proc:{name}")
     logger.info(f"Process '{name}' starting (PID: {os.getpid()})")
     try:
@@ -241,11 +253,17 @@ def main() -> int:
         target_method = getattr(instance, method)
         logger.info(f"Process '{name}' calling {class_path}.{method}()")
         if inspect.iscoroutinefunction(target_method):
-            _run_event_loop(_run_async_method_with_listener(target_method))
+            if uses_ai_review_listener:
+                _run_event_loop(_run_async_method_with_listener(target_method))
+            else:
+                _run_event_loop(_run_async_method(target_method))
         else:
             result = target_method()
             if inspect.isawaitable(result):
-                _run_event_loop(_await_result_with_listener(result))
+                if uses_ai_review_listener:
+                    _run_event_loop(_await_result_with_listener(result))
+                else:
+                    _run_event_loop(_await_result(result))
         logger.info(f"Process '{name}' completed successfully")
         return 0
     except Exception as e:

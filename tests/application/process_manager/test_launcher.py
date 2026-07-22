@@ -630,6 +630,7 @@ class TestStartProcess:
                 method="run",
                 parameters={},
                 template_name=None,
+                role=ProcessRoleEnum.CORE,
             )
             assert launcher.started_processes["test_subprocess"] is mock_process_info
 

@@ -10,6 +10,7 @@ Server & Infrastructure:
     - ``executor``: Run exchange order executor service
     - ``zmq-logger``: Monitor ZMQ message traffic
     - ``feed``: Run market data publisher
+    - ``delegate-engine``: Run managed delegate workloads
 
 Database:
     - ``db-init``: Initialize database schema
@@ -761,7 +762,7 @@ async def _run_strategies_engine() -> None:
             listener_started = True
         await launcher.sync_registry_to_database()
         await launcher.start_all_processes()
-        summary_task = asyncio.ensure_future(_strategies_summary_loop(launcher))
+        summary_task = asyncio.ensure_future(_engine_summary_loop(launcher))
         if (
             getattr(app_settings, "process_autostart_profile", None)
             is ProcessAutostartProfileEnum.STRATEGY
@@ -793,17 +794,21 @@ async def _run_strategies_engine() -> None:
         shutdown_audit_publisher(publisher, zmq_ctx)
 
 
-async def _strategies_summary_loop(launcher: ProcessLauncherService) -> None:
-    """Emit the launcher summary snapshot every 5s, best-effort.
+async def _engine_summary_loop(launcher: ProcessLauncherService) -> None:
+    """Emit an engine launcher's summary snapshot every 5s, best-effort.
 
     Keeps the API-side RemoteSummaryCache (15s TTL) fresh for a
-    THREAD-only container; an individual emission failure logs at the
-    publisher layer and never stops the loop.
+    dedicated coordinator, including when it currently owns zero
+    workloads. An individual emission failure logs at the publisher
+    layer and never stops the loop.
     """
     while True:
         with contextlib.suppress(Exception):
             await launcher.emit_summary_snapshot()
         await asyncio.sleep(5.0)
+
+
+_strategies_summary_loop = _engine_summary_loop
 
 
 _RECONCILE_INTERVAL_SECONDS = 10.0
@@ -845,6 +850,89 @@ def strategies_engine() -> None:
         asyncio.run(_run_strategies_engine())
     except CoreProcessStartupError as exc:
         typer.echo(f"Strategies engine startup failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+async def _run_delegate_engine() -> None:
+    """Run the dedicated delegate coordinator until shutdown.
+
+    Discovers the standard registry and every configured extra package,
+    syncs their process definitions, and starts only configs selected by
+    the ``delegate`` autostart profile. The registered integration runner
+    uses ``mode=PROCESS`` so the existing launcher owns subprocess status,
+    restart, parking, desired-state reconciliation, and clean termination.
+
+    This entrypoint wires process-management services only. Model clients,
+    consult handling, and network egress are deliberately absent from this
+    foundation.
+    """
+    settings = get_settings()
+    if (
+        getattr(settings, "process_autostart_profile", None)
+        is not ProcessAutostartProfileEnum.DELEGATE
+    ):
+        typer.echo(
+            "Delegate engine requires PROCESS_AUTOSTART_PROFILE=delegate; refusing to start.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    settings_service = await get_settings_service(settings.db_url, settings.zmq_broker_xsub)
+    app_settings = get_settings_with_service(settings_service)
+    discover_processes()
+    launcher = ProcessLauncherService(app_settings)
+    zmq_ctx: zmq.asyncio.Context | None = None
+    publisher: MessagePublisher | None = None
+    try:
+        publisher, zmq_ctx = build_audit_publisher(app_settings.zmq_broker_xsub)
+    except Exception as exc:
+        typer.echo(
+            f"Delegate engine: summary publisher unavailable ({exc}); "
+            "continuing without summary emission.",
+            err=True,
+        )
+        shutdown_audit_publisher(publisher, zmq_ctx)
+        zmq_ctx = None
+        publisher = None
+    launcher.set_msg_publisher(publisher)
+    summary_task: asyncio.Task[None] | None = None
+    reconcile_task: asyncio.Task[None] | None = None
+    command_listener: ProcessCommandListener | None = None
+    try:
+        await launcher.sync_registry_to_database()
+        await launcher.start_all_processes()
+        summary_task = asyncio.ensure_future(_engine_summary_loop(launcher))
+        reconcile_task = asyncio.ensure_future(_reconcile_loop(launcher))
+        command_listener = ProcessCommandListener(launcher)
+        await command_listener.start(getattr(app_settings, "zmq_broker_xpub", ""))
+        typer.echo("Delegate engine running — managed delegate processes started. Ctrl+C to stop.")
+        await _await_shutdown_signal()
+    finally:
+        if summary_task is not None:
+            summary_task.cancel()
+            await asyncio.gather(summary_task, return_exceptions=True)
+        if reconcile_task is not None:
+            reconcile_task.cancel()
+            await asyncio.gather(reconcile_task, return_exceptions=True)
+        if command_listener is not None:
+            await command_listener.stop()
+        await launcher.stop_all_processes()
+        await settings_service.shutdown()
+        shutdown_audit_publisher(publisher, zmq_ctx)
+
+
+@app.command(name="delegate-engine")
+def delegate_engine() -> None:
+    """Run generic delegate workloads as managed subprocesses.
+
+    Requires ``PROCESS_AUTOSTART_PROFILE=delegate`` and a loadable extra
+    package that registers the generic runner. The command only operates
+    process lifecycle plumbing; no model, consult, or egress behavior is
+    implemented here.
+    """
+    try:
+        asyncio.run(_run_delegate_engine())
+    except CoreProcessStartupError as exc:
+        typer.echo(f"Delegate engine startup failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
 

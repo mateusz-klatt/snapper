@@ -473,7 +473,7 @@ def test_main_covers_directory_exists_branches(monkeypatch: pytest.MonkeyPatch) 
     original_exists = check_docstrings.Path.exists
 
     def fake_exists(path: Path) -> bool:
-        if path.name in {"src", "tests", "proprietary", "scripts"}:
+        if path.name in {"src", "tests", "proprietary", "snapper-delegate", "scripts"}:
             return False
         return original_exists(path)
 

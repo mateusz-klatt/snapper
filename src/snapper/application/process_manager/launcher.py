@@ -101,6 +101,7 @@ _STRATEGIES_LIST_STREAM = "strategies.events.list"
 _BROADCAST_FAILURE_TEMPLATE = "Failed to broadcast {}: {}"
 _CORE_HEALTH_CACHE_TTL_S: Final[float] = 5.0
 _MARKET_DATA_PUBLISHER_TAGS: Final[frozenset[str]] = frozenset({"market-data", "publisher"})
+_DELEGATE_PROCESS_TAGS: Final[frozenset[str]] = frozenset({"delegate", "runner"})
 _ZMQ_BROKER_TAGS: Final[frozenset[str]] = frozenset({"zmq", "broker"})
 
 _RESTART_BASE_DELAY_S: Final[float] = 1.0
@@ -281,6 +282,18 @@ def is_market_data_publisher(tags: Iterable[str]) -> bool:
         ``publisher``, False otherwise.
     """
     return _MARKET_DATA_PUBLISHER_TAGS.issubset(set(tags))
+
+
+def is_delegate_process(tags: Iterable[str]) -> bool:
+    """Return whether tags identify a generic delegate runner workload.
+
+    Args:
+        tags: The registered tags of a process.
+
+    Returns:
+        True when both the ``delegate`` and ``runner`` tags are present.
+    """
+    return _DELEGATE_PROCESS_TAGS.issubset(set(tags))
 
 
 def is_zmq_broker(tags: Iterable[str]) -> bool:
@@ -1155,8 +1168,9 @@ class ProcessLauncherService:
     def _validate_parameters(self, config: ProcessConfigModel) -> dict[str, Any]:
         """Validate process parameters against the registered model.
 
-        If a parameters_model is registered for this process, validates
-        the parameters dict against it. Otherwise returns parameters as-is.
+        If a parameters_model is registered for this process or its source
+        template, validates the parameters dict against it. Otherwise returns
+        parameters as-is.
 
         Args:
             config: Process configuration with parameters to validate.
@@ -1166,6 +1180,8 @@ class ProcessLauncherService:
         """
         registry = get_registered_processes()
         entry = registry.get(config.name)
+        if entry is None and config.template is not None:
+            entry = registry.get(config.template)
         parameters_dict: dict[str, Any] = dict(config.parameters)
         if entry and entry.parameters_model:
             validated = entry.parameters_model.model_validate(parameters_dict)
@@ -1185,6 +1201,7 @@ class ProcessLauncherService:
             method=config.method,
             parameters=validated_params,
             template_name=config.template,
+            role=config.role,
         )
         logger.info(f"Process '{config.name}' started with PID {process_info.pid}")
         process_info.run_public_id = self.active_runs.get(config.name)
@@ -1379,6 +1396,8 @@ class ProcessLauncherService:
                 when a live predecessor cannot be reaped — the successor
                 must not start while the name is still live.
         """
+        if is_delegate_process(config.tags) and config.mode != ProcessModeEnum.PROCESS:
+            raise ValueError(f"Delegate process '{config.name}' requires process mode")
         await self._reap_superseded_instance(config.name)
         self._launch_generation[config.name] = self._launch_generation.get(config.name, 0) + 1
         self.process_lifecycles[config.name] = config.lifecycle
@@ -1429,8 +1448,10 @@ class ProcessLauncherService:
         :attr:`AppSettings.process_autostart_profile`:
 
         - ``ALL``: every process is included (single-container / dev).
-        - ``API``: every process EXCEPT market-data publishers (backend).
+        - ``API``: every process EXCEPT market-data publishers and delegate
+          workloads (backend).
         - ``FEED``: ONLY market-data publishers (dedicated feed container).
+        - ``DELEGATE``: ONLY generic delegate runner workloads.
 
         Identity uses :func:`is_market_data_publisher` on the config tags.
         Comparison is by ``is`` against the enum singletons so a mocked
@@ -1460,6 +1481,8 @@ class ProcessLauncherService:
             return is_market_data_publisher(config.tags)
         if profile is ProcessAutostartProfileEnum.STRATEGY:
             return config.role is ProcessRoleEnum.STRATEGY
+        if profile is ProcessAutostartProfileEnum.DELEGATE:
+            return is_delegate_process(config.tags)
         if getattr(self.settings, "zmq_broker_embedded", True) is False and is_zmq_broker(
             config.tags
         ):
@@ -1470,7 +1493,9 @@ class ProcessLauncherService:
         ):
             return False
         if profile is ProcessAutostartProfileEnum.API:
-            return not is_market_data_publisher(config.tags)
+            return not is_market_data_publisher(config.tags) and not is_delegate_process(
+                config.tags
+            )
         return True
 
     async def _resolve_autostart_strategy_scope(
@@ -3964,6 +3989,19 @@ class ProcessLauncherService:
                     "container (API autostart profile) — starting a local duplicate "
                     "would open a second exchange connection; manage it via the feed "
                     "container"
+                ),
+            )
+        if getattr(
+            self.settings, "process_autostart_profile", ProcessAutostartProfileEnum.ALL
+        ) is ProcessAutostartProfileEnum.API and (
+            is_delegate_process(config.tags) or is_delegate_process(raw_tags)
+        ):
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=(
+                    f"Process '{name}' is owned by the delegate engine "
+                    "(API autostart profile) — starting a local duplicate would "
+                    "run the delegate twice; manage it via the delegate coordinator"
                 ),
             )
         return None

@@ -138,14 +138,17 @@ class ProcessAutostartProfileEnum(StrEnum):
     runs in its own container without sharing one asyncio event loop:
 
     - ``ALL``: start every enabled process (single-container / dev default).
-    - ``API``: start everything EXCEPT market-data publishers — the
-      backend container keeps the broker, executors, strategies, and API
-      while the publishers move out so the FastAPI loop stops sharing CPU
-      with them under NYSE burst.
+    - ``API``: start everything EXCEPT market-data publishers and delegate
+      workloads — the backend container keeps the broker, executors,
+      strategies, and API while dedicated coordinators own the excluded
+      workloads.
     - ``FEED``: start ONLY market-data publishers — the dedicated feed
       container. Used by the publishers-only feed CLI entrypoint, which
       runs each publisher as its own OS process; the FastAPI server is
       never launched with this profile.
+    - ``DELEGATE``: start ONLY generic delegate runner workloads in the
+      dedicated delegate engine. The API profile excludes these workloads
+      so one enabled config has exactly one owning coordinator.
 
     A market-data publisher is any registered process whose tags carry
     both ``"market-data"`` and ``"publisher"``.
@@ -160,6 +163,7 @@ class ProcessAutostartProfileEnum(StrEnum):
     API = "api"
     FEED = "feed"
     STRATEGY = "strategy"
+    DELEGATE = "delegate"
 
 
 class ProcessLifecycleEnum(StrEnum):

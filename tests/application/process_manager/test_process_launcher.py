@@ -3171,6 +3171,7 @@ async def test_start_process_process_mode_filters_parameters() -> None:
         method="start",
         parameters={"keep": "value"},
         template_name=None,
+        role=ProcessRoleEnum.CORE,
     )
     assert factory.started_processes["os_process"].pid == 1234
     assert factory.process_tasks == {}

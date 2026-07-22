@@ -26,6 +26,7 @@ from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.core.json_types import JsonObject
+from snapper.core.types import ProcessRoleEnum
 
 IS_WINDOWS = sys.platform == "win32"
 CREATE_NEW_PROCESS_GROUP = 0x00000200 if IS_WINDOWS else 0
@@ -51,6 +52,7 @@ def _build_process_command(
     method: str,
     parameters: dict[str, Any],
     template_name: str | None = None,
+    role: ProcessRoleEnum | None = None,
 ) -> list[str]:
     """Build command line for subprocess execution.
 
@@ -63,6 +65,7 @@ def _build_process_command(
         parameters: Constructor parameters dict.
         template_name: Optional source-template registry name the runner
             resolves before attempting a dynamic class_path import.
+        role: Process role used to select role-specific subprocess plumbing.
 
     Returns:
         Command list for subprocess.Popen.
@@ -74,6 +77,8 @@ def _build_process_command(
         "parameters": parameters,
         "template_name": template_name,
     }
+    if role is not None:
+        config["role"] = role.value
     config_json = json.dumps(config)
     return [
         sys.executable,
@@ -273,6 +278,7 @@ class ProcessSpawnerService:
         method: str,
         parameters: dict[str, Any],
         template_name: str | None = None,
+        role: ProcessRoleEnum | None = None,
     ) -> ProcessInstanceInfo:
         """Spawn a new subprocess.
 
@@ -286,6 +292,7 @@ class ProcessSpawnerService:
             parameters: Constructor parameters dict.
             template_name: Optional source-template registry name for
                 class resolution (function-local class_paths).
+            role: Process role used to select role-specific runner services.
 
         Returns:
             ProcessInstanceInfo with subprocess details.
@@ -297,7 +304,7 @@ class ProcessSpawnerService:
             raise RuntimeError(f"Process '{name}' already exists")
         logger.info(f"Spawning process '{name}' (class: {class_path}, method: {method})")
         self._validate_class_path(name, class_path, template_name)
-        cmd = _build_process_command(name, class_path, method, parameters, template_name)
+        cmd = _build_process_command(name, class_path, method, parameters, template_name, role)
         process = self._launch_subprocess(cmd)
         time.sleep(0.1)
         status = process.poll()

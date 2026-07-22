@@ -141,7 +141,8 @@ class AppSettings:
         Selects which registered processes this node autostarts so the
         market-data ingest tier can run in its own container off the
         FastAPI event loop. ``ALL`` starts everything, ``API`` skips
-        market-data publishers, ``FEED`` starts only them.
+        market-data publishers and delegate workloads, ``FEED`` starts
+        only publishers, and ``DELEGATE`` starts only delegate workloads.
 
         Returns:
             The configured :class:`ProcessAutostartProfileEnum` member.
@@ -155,9 +156,9 @@ class AppSettings:
         Maps the autostart profile to the operator-facing container name shown
         wherever the raw ``coord-<id>`` slug appears in the UI (process cards'
         "managed by" notice, the overview coordinator groups): ``API`` -> "API",
-        ``FEED`` -> "Feed", ``STRATEGY`` -> "Strategies". ``ALL`` (single-container
-        / dev) has no distinct role, so it returns ``None`` and the UI falls back
-        to the slug.
+        ``FEED`` -> "Feed", ``STRATEGY`` -> "Strategies", ``DELEGATE`` ->
+        "Delegate". ``ALL`` (single-container / dev) has no distinct role,
+        so it returns ``None`` and the UI falls back to the slug.
 
         Returns:
             The container label, or ``None`` for the ``ALL`` profile.
@@ -169,6 +170,8 @@ class AppSettings:
                 return "Feed"
             case ProcessAutostartProfileEnum.STRATEGY:
                 return "Strategies"
+            case ProcessAutostartProfileEnum.DELEGATE:
+                return "Delegate"
             case _:
                 return None
 
@@ -268,9 +271,9 @@ class AppSettings:
     def strategy_extra_packages(self) -> str:
         """Return the comma-separated extra discovery packages.
 
-        Process discovery imports each listed top-level package
-        (fail-soft) so out-of-tree strategy modules can register their
-        processes.
+        Process discovery imports each listed top-level package fail-soft
+        so out-of-tree workloads can register their processes. The legacy
+        setting name is shared by strategy and delegate packages.
 
         Returns:
             The raw comma-separated package list (may be empty).

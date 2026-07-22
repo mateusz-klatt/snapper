@@ -715,6 +715,15 @@ def main() -> int:
             enforce_google_sections=enforce_google_sections,
         )
 
+    delegate_dir = root / "integrations" / "snapper-delegate"
+    if delegate_dir.exists():
+        scan_directory(
+            delegate_dir,
+            result,
+            enforce_bdd=enforce_bdd,
+            enforce_google_sections=enforce_google_sections,
+        )
+
     scripts_dir = root / "scripts"
     if scripts_dir.exists():
         scan_directory(

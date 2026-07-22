@@ -98,11 +98,11 @@ class BootstrapSettingsLoader(BaseSettings):
             for the full per-bus-topic dedup contract.
         process_autostart_profile: Selects which registered processes a
             node autostarts. ``all`` (default) starts everything; ``api``
-            starts everything EXCEPT market-data publishers (backend
-            container); ``feed`` starts ONLY market-data publishers
-            (dedicated feed container). Splits the ingest tier off the
-            FastAPI event loop so publishers no longer share CPU with the
-            API under NYSE burst. Orthogonal to ``server_api_only`` (which
+            starts everything EXCEPT market-data publishers and delegate
+            workloads (backend container); ``feed`` starts ONLY market-data
+            publishers (dedicated feed container); ``delegate`` starts ONLY
+            generic delegate workloads. Splits managed workloads onto their
+            owning coordinators. Orthogonal to ``server_api_only`` (which
             skips ALL autostart). See
             :class:`snapper.core.types.ProcessAutostartProfileEnum`.
         server_proxy_headers: Enable parsing proxy headers in uvicorn.
@@ -134,10 +134,10 @@ class BootstrapSettingsLoader(BaseSettings):
             from autostart and ownership and refuses manual local
             starts, so the same strategy can never run twice.
         strategy_extra_packages: Comma-separated extra top-level
-            packages whose modules process discovery imports (fail-soft
-            per package) so out-of-tree strategies (e.g. a mounted
-            proprietary tree on PYTHONPATH) register their processes.
-            Empty default imports nothing extra.
+            packages whose modules process discovery imports fail-soft so
+            out-of-tree workloads can register their processes. The legacy
+            environment-variable name is shared by strategy and delegate
+            packages. Empty default imports nothing extra.
         telemetry_recording_enabled: When True, data-plane messages
             (ping/pong, heartbeat, GET reads) are persisted to the
             telemetry table. Default is False (counters still increment).

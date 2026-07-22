@@ -153,9 +153,8 @@ def discover_processes() -> None:
     Imports all modules under snapper to trigger @register_process
     decorators, then every extra top-level package listed in the
     ``STRATEGY_EXTRA_PACKAGES`` bootstrap setting (comma-separated) —
-    fail-soft per package, so a missing or broken out-of-tree strategy
-    mount (e.g. proprietary code on PYTHONPATH) logs a warning instead
-    of aborting discovery for OSS deployments.
+    fail-soft per package, so a missing or broken out-of-tree workload
+    mount logs a warning instead of aborting discovery.
     """
     import_all_under("snapper")
     extra = get_bootstrap_settings().strategy_extra_packages
@@ -164,6 +163,6 @@ def discover_processes() -> None:
             continue
         try:
             imported = import_all_under(package)
-            logger.info(f"Discovered {imported} extra strategy modules under '{package}'")
+            logger.info(f"Discovered {imported} extra process modules under '{package}'")
         except Exception as exc:
-            logger.warning(f"Extra strategy package '{package}' not imported: {exc}")
+            logger.warning(f"Extra process package '{package}' not imported: {exc}")

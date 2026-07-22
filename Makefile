@@ -167,7 +167,7 @@ GENSCRIPT := @$(VENV_PY) scripts/generate_types.py
 PNPM := @cd $(UI_DIR) && pnpm
 PRETTIER := $(PNPM) exec prettier --write
 PYTEST_PARALLEL := $(shell $(PYTHON) -c "import math,os; cpus = os.cpu_count() or 1; print('' if cpus <= 1 else '-n ' + str(min(6, max(1, math.ceil(cpus / 2)))))")
-PY_DIRS := src tests scripts $(wildcard proprietary/src) $(wildcard proprietary/tests)
+PY_DIRS := src tests scripts $(wildcard proprietary/src) $(wildcard proprietary/tests) $(wildcard integrations/snapper-delegate/src) $(wildcard integrations/snapper-delegate/tests)
 
 system-deps:
 ifeq ($(OS),Windows_NT)

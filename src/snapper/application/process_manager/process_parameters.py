@@ -15,6 +15,7 @@ parameters externally, then instantiates via keyword unpacking.
 from datetime import date
 from datetime import datetime
 
+from pydantic import Field
 from pydantic import model_validator
 
 from snapper.api.schemas.base import StrictBody
@@ -69,6 +70,29 @@ class PublisherSymbolsParameters(StrictBody):
     """
 
     symbols: list[str] = []
+
+
+class DelegateProcessParameters(StrictBody):
+    """Parameters for a generic managed delegate workload.
+
+    This foundation validates and serializes configuration only. The
+    delegate integration does not open the configured files or connect
+    to the endpoint until later workload increments provide those
+    capabilities.
+
+    Attributes:
+        model_alias: Operator-facing model route alias.
+        base_url: Base endpoint reserved for the later client seam.
+        api_key_file: Path reserved for later credential loading.
+        delegate_token_file: Path reserved for later delegate-token loading.
+        max_tool_rounds: Positive limit reserved for later tool orchestration.
+    """
+
+    model_alias: str = Field(min_length=1)
+    base_url: str = Field(min_length=1)
+    api_key_file: str = Field(min_length=1)
+    delegate_token_file: str = Field(min_length=1)
+    max_tool_rounds: int = Field(ge=1)
 
 
 class PaperPublisherParameters(StrictBody):

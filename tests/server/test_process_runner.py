@@ -197,6 +197,29 @@ async def test_await_result_with_listener_drives_awaitable_inside_seam() -> None
     assert invocation_order == ["start", "awaitable", "stop"]
 
 
+@pytest.mark.parametrize(
+    ("process_role", "expected"),
+    [
+        (None, True),
+        ("strategy", True),
+        ("core", False),
+        ("task", False),
+        ("backtest", False),
+    ],
+)
+def test_ai_review_listener_is_limited_to_strategy_roles(
+    process_role: object,
+    expected: bool,
+) -> None:
+    """Role metadata gates strategy-only subprocess services.
+
+    Given: Legacy, strategy, and explicit non-strategy process roles,
+    When: The subprocess runner selects its optional decision listener,
+    Then: Only legacy and strategy workloads receive that listener.
+    """
+    assert process_runner._uses_ai_review_listener(process_role) is expected
+
+
 def test_run_event_loop_uses_uvloop_when_supported(monkeypatch: pytest.MonkeyPatch) -> None:
     """POSIX subprocesses keep the uvloop event-loop runner.
 
@@ -287,7 +310,7 @@ def test_main_async_path_uses_listener_wrapper(monkeypatch: pytest.MonkeyPatch) 
     fake_module.FakeStrategy = _Instance
     config = (
         '{"name": "fake", "class_path": "fake.module.FakeStrategy", '
-        '"method": "start", "parameters": {}}'
+        '"method": "start", "parameters": {}, "role": "strategy"}'
     )
     monkeypatch.setattr("sys.argv", ["process_runner", "--config", config])
     with (
@@ -306,6 +329,92 @@ def test_main_async_path_uses_listener_wrapper(monkeypatch: pytest.MonkeyPatch) 
     assert exit_code == 0
     assert captured.get("instance_start_called") is None
     mock_wrapper.assert_awaited_once()
+
+
+def test_main_core_async_path_skips_listener_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-strategy subprocesses use only generic target invocation.
+
+    Given: A core-role process with an asynchronous start method,
+    When: The subprocess runner invokes it,
+    Then: The target runs without entering the strategy decision listener.
+    """
+    captured: dict[str, bool] = {}
+
+    class _Instance:
+        async def start(self) -> None:
+            captured["started"] = True
+            await asyncio.sleep(0)
+
+    def _run(awaitable: Awaitable[object]) -> object:
+        return asyncio.run(awaitable)
+
+    config = (
+        '{"name": "fake", "class_path": "fake.module.CoreProcess", '
+        '"method": "start", "parameters": {}, "role": "core"}'
+    )
+    monkeypatch.setattr("sys.argv", ["process_runner", "--config", config])
+    with (
+        patch("snapper.server.process_runner.setup_logging"),
+        patch("snapper.server.process_runner.log_kraken_sdk_patches_status"),
+        patch("snapper.server.process_runner._resolve_process_class", return_value=_Instance),
+        patch("snapper.server.process_runner._run_event_loop", side_effect=_run),
+        patch(
+            "snapper.server.process_runner._run_async_method_with_listener",
+            new_callable=AsyncMock,
+        ) as mock_wrapper,
+    ):
+        exit_code = process_runner.main()
+    assert exit_code == 0
+    assert captured == {"started": True}
+    mock_wrapper.assert_not_awaited()
+
+
+def test_main_core_sync_awaitable_path_skips_listener_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-strategy synchronous factories await results without strategy services.
+
+    Given: A core-role process whose synchronous start method returns an awaitable,
+    When: The subprocess runner drives that returned awaitable,
+    Then: The generic await path runs without entering the decision listener wrapper.
+    """
+    captured: dict[str, bool] = {}
+
+    class _Instance:
+        def start(self) -> Awaitable[None]:
+            async def _start() -> None:
+                captured["started"] = True
+                await asyncio.sleep(0)
+
+            return _start()
+
+    def _run(awaitable: Awaitable[object]) -> object:
+        return asyncio.run(awaitable)
+
+    async def _listener_wrapper(awaitable: Awaitable[None]) -> None:
+        await awaitable
+
+    config = (
+        '{"name": "fake", "class_path": "fake.module.CoreProcess", '
+        '"method": "start", "parameters": {}, "role": "core"}'
+    )
+    monkeypatch.setattr("sys.argv", ["process_runner", "--config", config])
+    with (
+        patch("snapper.server.process_runner.setup_logging"),
+        patch("snapper.server.process_runner.log_kraken_sdk_patches_status"),
+        patch("snapper.server.process_runner._resolve_process_class", return_value=_Instance),
+        patch("snapper.server.process_runner._run_event_loop", side_effect=_run),
+        patch(
+            "snapper.server.process_runner._await_result_with_listener",
+            side_effect=_listener_wrapper,
+        ) as mock_wrapper,
+    ):
+        exit_code = process_runner.main()
+    assert exit_code == 0
+    assert captured == {"started": True}
+    mock_wrapper.assert_not_awaited()
 
 
 def test_main_logs_to_container_subprocess_logfile(monkeypatch: pytest.MonkeyPatch) -> None:

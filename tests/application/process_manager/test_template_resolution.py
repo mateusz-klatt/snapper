@@ -26,6 +26,7 @@ from snapper.application.process_manager.registry import discover_processes
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.application.process_manager.spawner import _build_process_command
 from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.server.process_runner import _resolve_process_class
 
 _LOCALS_PATH = "snapper.strategies.process_wrapper.create_strategy_process.<locals>.StrategyProcess"
@@ -234,9 +235,11 @@ class TestSpawnerTemplateSupport:
             "start",
             {},
             "strategy_heartbeat_consult_btc_1h",
+            ProcessRoleEnum.STRATEGY,
         )
         config = json.loads(cmd[cmd.index("--config") + 1])
         assert config["template_name"] == "strategy_heartbeat_consult_btc_1h"
+        assert config["role"] == "strategy"
 
 
 class TestRunnerTemplateResolution:

@@ -18,6 +18,8 @@ DEFAULT_RELATIVE_ROOTS: Final[tuple[str, ...]] = (
     "scripts",
     "proprietary/src",
     "proprietary/tests",
+    "integrations/snapper-delegate/src",
+    "integrations/snapper-delegate/tests",
 )
 SKIP_DIRS: Final[set[str]] = {
     ".venv",

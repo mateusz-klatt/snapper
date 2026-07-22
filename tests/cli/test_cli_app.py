@@ -5096,6 +5096,352 @@ def test_strategies_engine_skips_listener_without_xpub(
     assert listener_calls == ["ai_set_publisher:False"]
 
 
+def test_delegate_engine_starts_and_shuts_down(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """delegate-engine boots its management services and tears them down.
+
+    Given: Delegate-profile settings, a mocked launcher, and an in-memory publisher,
+    When: The delegate-engine command runs through one scheduling turn,
+    Then: Processes, summaries, reconciliation, and the command listener run before cleanup.
+    """
+    calls: list[str] = []
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            calls.append("shutdown")
+
+    class DummyLauncher:
+        def __init__(self, settings: object) -> None:
+            del settings
+            calls.append("init")
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            calls.append(f"set_publisher:{publisher is not None}")
+
+        async def sync_registry_to_database(self) -> None:
+            calls.append("sync")
+
+        async def start_all_processes(self) -> None:
+            calls.append("start_all")
+
+        async def emit_summary_snapshot(self) -> None:
+            calls.append("summary")
+
+        async def reconcile_desired_state(self) -> None:
+            calls.append("reconcile")
+
+        async def stop_all_processes(self) -> None:
+            calls.append("stop")
+
+    class DummyCommandListener:
+        def __init__(self, launcher: object) -> None:
+            del launcher
+            calls.append("listener_init")
+
+        async def start(self, endpoint: str) -> None:
+            calls.append(f"listener_start:{endpoint}")
+
+        async def stop(self) -> None:
+            calls.append("listener_stop")
+
+    class FakeSocket:
+        def setsockopt(self, option: int, value: int) -> None:
+            del option, value
+
+        def connect(self, addr: str) -> None:
+            del addr
+
+        def close(self) -> None:
+            calls.append("sock_close")
+
+    class FakeContext:
+        def socket(self, kind: object) -> FakeSocket:
+            del kind
+            return FakeSocket()
+
+        def term(self) -> None:
+            calls.append("ctx_term")
+
+    fake_zmq = SimpleNamespace(PUB="PUB", LINGER=17, asyncio=SimpleNamespace(Context=FakeContext))
+
+    def _fake_get_settings() -> SimpleNamespace:
+        return SimpleNamespace(
+            db_url=ASYNC_MEMORY_DB_URL,
+            zmq_broker_xsub="tcp://broker:7500",
+            process_autostart_profile=ProcessAutostartProfileEnum.DELEGATE,
+        )
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        del db_url, xsub
+        calls.append("get_service")
+        return DummyService()
+
+    def _fake_get_app_settings(service: DummyService) -> SimpleNamespace:
+        del service
+        return SimpleNamespace(
+            zmq_broker_xsub="tcp://broker:7500",
+            zmq_broker_xpub="tcp://broker:7501",
+            process_autostart_profile=ProcessAutostartProfileEnum.DELEGATE,
+        )
+
+    def _apply_hwm(socket: FakeSocket, *, sndhwm: int) -> None:
+        del socket, sndhwm
+
+    def _validated_publisher(socket: FakeSocket) -> FakeSocket:
+        return socket
+
+    def _message_publisher(socket: FakeSocket, tracker: object) -> FakeSocket:
+        del tracker
+        return socket
+
+    def _discover_processes() -> None:
+        calls.append("discover")
+
+    async def _no_wait() -> None:
+        calls.append("wait")
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(publisher_module, "zmq", fake_zmq)
+    monkeypatch.setattr(publisher_module, "apply_hwm", _apply_hwm)
+    monkeypatch.setattr(publisher_module, "ValidatedPublisher", _validated_publisher)
+    monkeypatch.setattr(publisher_module, "MessagePublisher", _message_publisher)
+    monkeypatch.setattr(app_module, "get_settings", _fake_get_settings)
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(app_module, "get_settings_with_service", _fake_get_app_settings)
+    monkeypatch.setattr(app_module, "discover_processes", _discover_processes)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "ProcessCommandListener", DummyCommandListener)
+    monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
+    result = cli_runner.invoke(app, ["delegate-engine"])
+    assert result.exit_code == 0
+    assert calls == [
+        "get_service",
+        "discover",
+        "init",
+        "set_publisher:True",
+        "sync",
+        "start_all",
+        "listener_init",
+        "listener_start:tcp://broker:7501",
+        "wait",
+        "summary",
+        "reconcile",
+        "listener_stop",
+        "stop",
+        "shutdown",
+        "sock_close",
+        "ctx_term",
+    ]
+
+
+def test_delegate_engine_exits_nonzero_on_core_failure(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """A delegate CORE startup failure exits after unconditional teardown.
+
+    Given: A delegate-profile launcher whose core process cannot start,
+    When: The delegate-engine command invokes the launcher,
+    Then: It exits with code one without constructing scheduled management services.
+    """
+    calls: list[str] = []
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            calls.append("shutdown")
+
+    class DummyLauncher:
+        def __init__(self, settings: object) -> None:
+            del settings
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            del publisher
+
+        async def sync_registry_to_database(self) -> None:
+            calls.append("sync")
+
+        async def start_all_processes(self) -> None:
+            raise CoreProcessStartupError(["delegate_runner"])
+
+        async def stop_all_processes(self) -> None:
+            calls.append("stop")
+
+    class DummyCommandListener:
+        def __init__(self, launcher: object) -> None:
+            del launcher
+            calls.append("listener_init")
+
+    def _fake_get_settings() -> SimpleNamespace:
+        return SimpleNamespace(
+            db_url=ASYNC_MEMORY_DB_URL,
+            zmq_broker_xsub="tcp://broker:7500",
+            process_autostart_profile=ProcessAutostartProfileEnum.DELEGATE,
+        )
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        del db_url, xsub
+        return DummyService()
+
+    def _fake_get_app_settings(service: DummyService) -> SimpleNamespace:
+        del service
+        return SimpleNamespace(
+            zmq_broker_xsub="tcp://broker:7500",
+            zmq_broker_xpub="tcp://broker:7501",
+            process_autostart_profile=ProcessAutostartProfileEnum.DELEGATE,
+        )
+
+    def _build_publisher(xsub: str) -> tuple[None, None]:
+        del xsub
+        return None, None
+
+    def _discover_processes() -> None:
+        calls.append("discover")
+
+    monkeypatch.setattr(app_module, "get_settings", _fake_get_settings)
+    monkeypatch.setattr(app_module, "build_audit_publisher", _build_publisher)
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(app_module, "get_settings_with_service", _fake_get_app_settings)
+    monkeypatch.setattr(app_module, "discover_processes", _discover_processes)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "ProcessCommandListener", DummyCommandListener)
+    result = cli_runner.invoke(app, ["delegate-engine"])
+    assert result.exit_code == 1
+    assert "Delegate engine startup failed" in result.output
+    assert calls == ["discover", "sync", "stop", "shutdown"]
+
+
+def test_delegate_engine_degrades_without_publisher(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """A delegate publisher failure leaves process management operational.
+
+    Given: A delegate profile whose summary publisher cannot be constructed,
+    When: The delegate-engine command starts and stops normally,
+    Then: The launcher receives no publisher and both cleanup paths remain safe.
+    """
+    captured: dict[str, object] = {}
+    publisher_shutdowns: list[tuple[object | None, object | None]] = []
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            captured["settings_shutdown"] = True
+
+    class DummyLauncher:
+        def __init__(self, settings: object) -> None:
+            del settings
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            captured["publisher"] = publisher
+
+        async def sync_registry_to_database(self) -> None:
+            return None
+
+        async def start_all_processes(self) -> None:
+            return None
+
+        async def emit_summary_snapshot(self) -> None:
+            return None
+
+        async def reconcile_desired_state(self) -> None:
+            return None
+
+        async def stop_all_processes(self) -> None:
+            captured["processes_stopped"] = True
+
+    class DummyCommandListener:
+        def __init__(self, launcher: object) -> None:
+            del launcher
+
+        async def start(self, endpoint: str) -> None:
+            del endpoint
+
+        async def stop(self) -> None:
+            captured["listener_stopped"] = True
+
+    def _fake_get_settings() -> SimpleNamespace:
+        return SimpleNamespace(
+            db_url=ASYNC_MEMORY_DB_URL,
+            zmq_broker_xsub="tcp://broker:7500",
+            process_autostart_profile=ProcessAutostartProfileEnum.DELEGATE,
+        )
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        del db_url, xsub
+        return DummyService()
+
+    def _fake_get_app_settings(service: DummyService) -> SimpleNamespace:
+        del service
+        return SimpleNamespace(
+            zmq_broker_xsub="tcp://broker:7500",
+            zmq_broker_xpub="tcp://broker:7501",
+            process_autostart_profile=ProcessAutostartProfileEnum.DELEGATE,
+        )
+
+    def _build_publisher(xsub: str) -> tuple[None, None]:
+        del xsub
+        raise RuntimeError("broker away")
+
+    def _shutdown_publisher(publisher: object | None, context: object | None) -> None:
+        publisher_shutdowns.append((publisher, context))
+
+    async def _no_wait() -> None:
+        return None
+
+    monkeypatch.setattr(app_module, "get_settings", _fake_get_settings)
+    monkeypatch.setattr(app_module, "build_audit_publisher", _build_publisher)
+    monkeypatch.setattr(app_module, "shutdown_audit_publisher", _shutdown_publisher)
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(app_module, "get_settings_with_service", _fake_get_app_settings)
+    monkeypatch.setattr(app_module, "discover_processes", lambda: None)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "ProcessCommandListener", DummyCommandListener)
+    monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
+    result = cli_runner.invoke(app, ["delegate-engine"])
+    assert result.exit_code == 0
+    assert "summary publisher unavailable" in result.output
+    assert captured == {
+        "publisher": None,
+        "listener_stopped": True,
+        "processes_stopped": True,
+        "settings_shutdown": True,
+    }
+    assert publisher_shutdowns == [(None, None), (None, None)]
+
+
+def test_delegate_engine_rejects_non_delegate_profile(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """The delegate command fails closed before creating services on profile mismatch.
+
+    Given: Raw settings assigning the delegate command to the API profile,
+    When: The delegate-engine command validates coordinator ownership,
+    Then: It exits with code one without constructing the settings service.
+    """
+    service_calls: list[tuple[str, str]] = []
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            return None
+
+    def _fake_get_settings() -> SimpleNamespace:
+        return SimpleNamespace(
+            db_url=ASYNC_MEMORY_DB_URL,
+            zmq_broker_xsub="tcp://broker:7500",
+            process_autostart_profile=ProcessAutostartProfileEnum.API,
+        )
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        service_calls.append((db_url, xsub))
+        return DummyService()
+
+    monkeypatch.setattr(app_module, "get_settings", _fake_get_settings)
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    result = cli_runner.invoke(app, ["delegate-engine"])
+    assert result.exit_code == 1
+    assert "requires PROCESS_AUTOSTART_PROFILE=delegate" in result.output
+    assert service_calls == []
+
+
 @pytest.mark.asyncio
 async def test_strategies_summary_loop_ticks_and_survives_errors() -> None:
     """The summary loop emits every tick and swallows emission errors.
