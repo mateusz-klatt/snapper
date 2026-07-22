@@ -66,7 +66,7 @@ from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
-from snapper.auth.domain.permissions import role_grants_permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.scope_grant_service import get_scope_grant_service
@@ -605,7 +605,12 @@ async def _resolve_target_wallets_for_mcp(
     :meth:`Repository.list_accessible_wallets_for_operators` keyed by
     every operator their token claims membership in.
     """
-    if role_grants_permission(claims.role, Permission.IMPERSONATE_OPERATOR):
+    if has_effective_permission(
+        claims.role,
+        claims.permissions,
+        claims.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    ):
         if wallet_public_id is not None:
             return [wallet_public_id], False
         return None, False

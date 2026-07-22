@@ -23,7 +23,7 @@ from fastapi import HTTPException
 from fastapi import status
 
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import role_grants_permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 
@@ -57,7 +57,12 @@ async def resolve_target_wallets(
             wallet outside their accessible set.
     """
     now = datetime.now(UTC)
-    has_global_scope = role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR)
+    has_global_scope = has_effective_permission(
+        principal.role,
+        principal.permissions,
+        principal.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    )
 
     if operator_public_id is not None:
         if not has_global_scope and operator_public_id not in principal.operator_public_ids:

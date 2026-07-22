@@ -29,8 +29,9 @@ class AuthPrincipal(StrictBody):
       until the login + refresh flows populate it from the DB lookup.
     - ``operator_public_ids`` is the set of operators a user may act AS,
       derived from ``user_operator_memberships`` at token issue time.
-      ADMIN gets every active operator; OPERATOR gets only their explicit
-      memberships; VIEWER stays empty until read-scope grants are issued.
+      A principal effectively granted ``IMPERSONATE_OPERATOR`` gets every
+      active operator; every other permission set, including OPERATOR and
+      VIEWER, gets its explicit memberships.
     - ``primary_operator_public_id`` is the membership row marked
       ``is_primary=TRUE`` and is the default scope when a user logs in.
       Empty string when the user has no primary membership yet.

@@ -41,7 +41,7 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import role_grants_permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.auth.scope_grant_service import get_scope_grant_service
@@ -188,7 +188,12 @@ async def list_scope_grants(
         HTTPException: 403 if the caller cannot see the target wallet.
     """
     now = datetime.now(UTC)
-    if not role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR):
+    if not has_effective_permission(
+        principal.role,
+        principal.permissions,
+        principal.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    ):
         accessible = await repo.list_accessible_wallets_for_operators(
             principal.operator_public_ids, now
         )

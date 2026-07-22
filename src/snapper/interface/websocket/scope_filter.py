@@ -33,7 +33,7 @@ from datetime import datetime
 from typing import Any
 
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import role_grants_permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.core.json_types import JsonValue
@@ -80,7 +80,12 @@ def wallet_access_cache_key(principal: AuthPrincipal) -> WalletAccessCacheKey:
         cache key.
     """
     return (
-        role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR),
+        has_effective_permission(
+            principal.role,
+            principal.permissions,
+            principal.permission_scope_version,
+            Permission.IMPERSONATE_OPERATOR,
+        ),
         principal.user_public_id,
         tuple(principal.operator_public_ids),
         principal.primary_operator_public_id,
@@ -379,7 +384,12 @@ async def _enforce_wallet_scope(
         return True
     if connection_principal is None:
         return False
-    if role_grants_permission(connection_principal.role, Permission.IMPERSONATE_OPERATOR):
+    if has_effective_permission(
+        connection_principal.role,
+        connection_principal.permissions,
+        connection_principal.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    ):
         return True
     wallet_public_id = payload.get("wallet_public_id")
     if not isinstance(wallet_public_id, str):
@@ -454,7 +464,12 @@ def enforce_alerts_scope(
         return True
     if connection_principal is None:
         return False
-    if role_grants_permission(connection_principal.role, Permission.IMPERSONATE_OPERATOR):
+    if has_effective_permission(
+        connection_principal.role,
+        connection_principal.permissions,
+        connection_principal.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    ):
         return True
     payload_user_pid = payload.get("user_public_id")
     if not isinstance(payload_user_pid, str):

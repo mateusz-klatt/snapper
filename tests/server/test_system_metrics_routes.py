@@ -176,13 +176,23 @@ def _make_request_with_snapshotter(
     return req
 
 
-def _viewer_principal() -> AuthPrincipal:
-    """Return a VIEWER principal — has ``READ_SYSTEM_STATUS``."""
+def _role_principal(role: UserRole) -> AuthPrincipal:
+    """Return a principal for one named permission set."""
     return AuthPrincipal(
-        username="viewer",
-        role=UserRole.VIEWER,
-        user_public_id="viewer-1",
+        username=role.value,
+        role=role,
+        user_public_id=f"{role.value}-1",
     )
+
+
+def _viewer_principal() -> AuthPrincipal:
+    """Return a VIEWER principal with read-only system visibility."""
+    return _role_principal(UserRole.VIEWER)
+
+
+def _runtime_diagnostics_principal() -> AuthPrincipal:
+    """Return an OPERATOR principal allowed to mutate runtime diagnostics."""
+    return _role_principal(UserRole.OPERATOR)
 
 
 @pytest.fixture(autouse=True)
@@ -385,7 +395,7 @@ class TestPostTracemallocStart:
 
         response = await post_system_metrics_tracemalloc_start(
             request=_make_request_with_snapshotter(snapshotter),
-            _principal=_viewer_principal(),
+            _principal=_runtime_diagnostics_principal(),
             _csrf=None,
             duration_s=1.0,
         )
@@ -403,7 +413,7 @@ class TestPostTracemallocStart:
 
         response = await post_system_metrics_tracemalloc_start(
             request=_make_request_with_snapshotter(snapshotter),
-            _principal=_viewer_principal(),
+            _principal=_runtime_diagnostics_principal(),
             _csrf=None,
             duration_s=99999.0,
         )
@@ -419,7 +429,7 @@ class TestPostTracemallocStart:
 
         await post_system_metrics_tracemalloc_start(
             request=_make_request_with_snapshotter(snapshotter),
-            _principal=_viewer_principal(),
+            _principal=_runtime_diagnostics_principal(),
             _csrf=None,
             duration_s=0.05,
         )
@@ -433,7 +443,7 @@ class TestPostTracemallocStart:
         with pytest.raises(HTTPException) as exc:
             await post_system_metrics_tracemalloc_start(
                 request=_make_request_with_snapshotter(None),
-                _principal=_viewer_principal(),
+                _principal=_runtime_diagnostics_principal(),
                 _csrf=None,
                 duration_s=1.0,
             )
@@ -453,7 +463,7 @@ class TestPostTracemallocStop:
 
         response = await post_system_metrics_tracemalloc_stop(
             request=_make_request_with_snapshotter(snapshotter),
-            _principal=_viewer_principal(),
+            _principal=_runtime_diagnostics_principal(),
             _csrf=None,
         )
 
@@ -469,7 +479,7 @@ class TestPostTracemallocStop:
 
         response = await post_system_metrics_tracemalloc_stop(
             request=_make_request_with_snapshotter(snapshotter),
-            _principal=_viewer_principal(),
+            _principal=_runtime_diagnostics_principal(),
             _csrf=None,
         )
 
@@ -481,7 +491,7 @@ class TestPostTracemallocStop:
         with pytest.raises(HTTPException) as exc:
             await post_system_metrics_tracemalloc_stop(
                 request=_make_request_with_snapshotter(None),
-                _principal=_viewer_principal(),
+                _principal=_runtime_diagnostics_principal(),
                 _csrf=None,
             )
         assert exc.value.status_code == 503
@@ -492,6 +502,7 @@ def _build_app_with_snapshotter(
     auth_override: bool,
     csrf_override: bool,
     pre_populate: bool = True,
+    role: UserRole = UserRole.VIEWER,
 ) -> tuple[object, SystemMetricsSnapshotter]:
     """Build a fresh app with a synthetic snapshotter on ``state``.
 
@@ -501,7 +512,7 @@ def _build_app_with_snapshotter(
     """
     app = create_app()
     if auth_override:
-        app.dependency_overrides[require_authentication] = lambda: _viewer_principal()
+        app.dependency_overrides[require_authentication] = lambda: _role_principal(role)
     if csrf_override:
         app.dependency_overrides[validate_csrf_token] = lambda: None
     snapshotter = _make_snapshotter()
@@ -579,6 +590,59 @@ class TestRouteAuthAndCsrf:
         assert start_response.status_code == 401
         assert stop_response.status_code == 401
 
+    @pytest.mark.parametrize(
+        ("role", "expected_status"),
+        [
+            pytest.param(UserRole.AI_RESEARCHER, 403, id="ai-researcher-denied"),
+            pytest.param(UserRole.AI_REVIEWER, 200, id="ai-reviewer-allowed"),
+            pytest.param(UserRole.AI_DELEGATE, 200, id="ai-delegate-allowed"),
+            pytest.param(UserRole.VIEWER, 403, id="viewer-denied"),
+            pytest.param(UserRole.OPERATOR, 200, id="operator-allowed"),
+            pytest.param(UserRole.ADMIN, 200, id="admin-allowed"),
+        ],
+    )
+    def test_tracemalloc_role_permission_matrix(
+        self,
+        role: UserRole,
+        expected_status: int,
+    ) -> None:
+        """Start and stop mutations follow MANAGE_RUNTIME_DIAGNOSTICS.
+
+        Given: Each named permission set and valid CSRF,
+        When: The principal starts and stops tracemalloc,
+        Then: Granted principals receive 200 and denied principals receive 403.
+        """
+        app, _ = _build_app_with_snapshotter(
+            auth_override=True,
+            csrf_override=True,
+            role=role,
+        )
+        client = TestClient(app)
+        try:
+            start_response = client.post("/api/metrics/system/tracemalloc/start?duration_s=1")
+            stop_response = client.post("/api/metrics/system/tracemalloc/stop")
+        finally:
+            with contextlib.suppress(Exception):
+                client.close()
+        assert start_response.status_code == expected_status
+        assert stop_response.status_code == expected_status
+
+    def test_tracemalloc_routes_bind_runtime_diagnostics_permission(self) -> None:
+        """Both mutation signatures bind MANAGE_RUNTIME_DIAGNOSTICS."""
+        for handler in (
+            post_system_metrics_tracemalloc_start,
+            post_system_metrics_tracemalloc_stop,
+        ):
+            signature = inspect.signature(handler)
+            principal_annotation = signature.parameters["_principal"].annotation
+            guard_closure = principal_annotation.__metadata__[0].dependency
+            bound_permissions = [
+                cell.cell_contents
+                for cell in (guard_closure.__closure__ or [])
+                if hasattr(cell, "cell_contents")
+            ]
+            assert Permission.MANAGE_RUNTIME_DIAGNOSTICS in bound_permissions
+
     def test_tracemalloc_routes_require_csrf(self) -> None:
         """Without CSRF override + no Bearer header, POST returns 403.
 
@@ -586,7 +650,11 @@ class TestRouteAuthAndCsrf:
         test exercises the cookie-auth path by leaving CSRF live and
         sending no CSRF cookie / header.
         """
-        app, _ = _build_app_with_snapshotter(auth_override=True, csrf_override=False)
+        app, _ = _build_app_with_snapshotter(
+            auth_override=True,
+            csrf_override=False,
+            role=UserRole.OPERATOR,
+        )
         client = TestClient(app)
         try:
             response = client.post("/api/metrics/system/tracemalloc/start")

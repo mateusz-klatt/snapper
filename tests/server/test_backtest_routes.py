@@ -1203,19 +1203,35 @@ class TestNoActiveWalletGuards:
 class TestCompareCreate:
     """POST /api/backtests/compare — auto + manual flows."""
 
-    def test_viewer_cannot_create_comparison(self) -> None:
-        """A read-only operator cannot persist a backtest comparison.
+    @pytest.mark.parametrize(
+        ("role", "expected_status"),
+        [
+            pytest.param(UserRole.AI_RESEARCHER, 403, id="ai-researcher-denied"),
+            pytest.param(UserRole.AI_REVIEWER, 409, id="ai-reviewer-allowed"),
+            pytest.param(UserRole.AI_DELEGATE, 409, id="ai-delegate-allowed"),
+            pytest.param(UserRole.VIEWER, 403, id="viewer-denied"),
+            pytest.param(UserRole.OPERATOR, 409, id="operator-allowed"),
+            pytest.param(UserRole.ADMIN, 409, id="admin-allowed"),
+        ],
+    )
+    def test_role_permission_matrix(self, role: UserRole, expected_status: int) -> None:
+        """Comparison persistence follows CREATE_BACKTEST_COMPARISONS.
 
-        Given: A VIEWER principal with a selected wallet,
-        When: The principal requests comparison creation,
-        Then: The permission dependency rejects the mutation with 403.
+        Given: Each named permission set with a selected wallet,
+        When: The principal requests a valid auto comparison with no runs,
+        Then: Granted principals reach the handler's 409 and denied principals get 403.
         """
         bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[])
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, role=UserRole.VIEWER)
+            client = _create_client(bt, role=role)
             body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
             response = client.post("/api/backtests/compare", json=body)
-            assert response.status_code == 403
+            assert response.status_code == expected_status
+            if expected_status == 403:
+                bt.list_runs.assert_not_awaited()
+            else:
+                bt.list_runs.assert_awaited_once()
             client.close()
 
     def test_no_active_wallet_returns_400(self) -> None:

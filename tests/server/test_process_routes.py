@@ -39,6 +39,7 @@ from snapper.application.process_manager.strategy_scope import StrategyProcessCl
 from snapper.application.process_manager.strategy_scope import StrategyWalletScope
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import ProcessLifecycleEnum
@@ -77,6 +78,31 @@ def _make_rest_request() -> MagicMock:
     mock_request = MagicMock()
     mock_request.app.state.rest_tracker = SequenceTracker()
     return mock_request
+
+
+def _operator_principal(
+    operator_public_ids: list[str] | None = None,
+) -> AuthPrincipal:
+    """Build an operator principal with its complete named permission set."""
+    return AuthPrincipal(
+        username="alice",
+        role=UserRole.OPERATOR,
+        operator_public_ids=operator_public_ids or [],
+    )
+
+
+def _scoped_operator(
+    *permissions: Permission,
+    operator_public_ids: list[str] | None = None,
+) -> AuthPrincipal:
+    """Build an operator token narrowed to an explicit permission subset."""
+    return AuthPrincipal(
+        username="scoped-operator",
+        role=UserRole.OPERATOR,
+        operator_public_ids=operator_public_ids or [],
+        permissions=[permission.value for permission in permissions],
+        permission_scope_version=3,
+    )
 
 
 async def _noop_lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -1408,6 +1434,7 @@ class TestStartProcess:
         Then: Process is started with specified parameters.
         """
         mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(return_value=[])
         mock_factory.start_process_by_name = AsyncMock(
             return_value=ProcessStartResult(
                 status="success", message="started", public_id="run-001"
@@ -1428,7 +1455,7 @@ class TestStartProcess:
             name="zmq_broker",
             body=body,
             factory=mock_factory,
-            user=MagicMock(operator_public_ids=[]),
+            user=_operator_principal(),
             repo=MagicMock(),
             _csrf=None,
         )
@@ -1450,6 +1477,7 @@ class TestStartProcess:
         Then: Process is started with None parameters.
         """
         mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(return_value=[])
         mock_factory.start_process_by_name = AsyncMock(
             return_value=ProcessStartResult(status="success", message="started")
         )
@@ -1468,7 +1496,7 @@ class TestStartProcess:
             name="zmq_broker",
             body=body,
             factory=mock_factory,
-            user=MagicMock(operator_public_ids=[]),
+            user=_operator_principal(),
             repo=MagicMock(),
             _csrf=None,
         )
@@ -1499,7 +1527,7 @@ class TestStartProcess:
                 name="executor_kraken",
                 body=body,
                 factory=mock_factory,
-                user=MagicMock(operator_public_ids=[]),
+                user=_operator_principal(),
                 repo=MagicMock(),
                 _csrf=None,
             )
@@ -1512,6 +1540,7 @@ class TestStartProcess:
     async def test_start_per_wallet_executor_instance_succeeds(self) -> None:
         """Per-wallet instance name passes through to ``start_process_by_name``."""
         mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(return_value=[])
         mock_factory.start_process_by_name = AsyncMock(
             return_value=ProcessStartResult(
                 status="success", message="started", public_id="run-002"
@@ -1529,7 +1558,7 @@ class TestStartProcess:
             name="executor_kraken_w0000000000a1",
             body=body,
             factory=mock_factory,
-            user=MagicMock(operator_public_ids=[]),
+            user=_operator_principal(),
             repo=MagicMock(),
             _csrf=None,
         )
@@ -1552,6 +1581,8 @@ class TestStopProcess:
         Then: Process is stopped and status is returned.
         """
         mock_factory = MagicMock()
+        mock_factory.process_roles = {}
+        mock_factory.get_process_configs = AsyncMock(return_value=[])
         mock_factory.stop_process_by_name = AsyncMock(
             return_value=ProcessStopResult(status="success", message="stopped")
         )
@@ -1559,12 +1590,341 @@ class TestStopProcess:
             request=_make_rest_request(),
             name="zmq_broker",
             factory=mock_factory,
-            _user=MagicMock(),
+            user=_operator_principal(),
             _csrf=None,
         )
         assert result.payload.status == "success"
         assert result.payload.name == "zmq_broker"
         mock_factory.stop_process_by_name.assert_awaited_once_with("zmq_broker")
+
+
+class TestProcessLifecyclePermissionSubsets:
+    """Pin dynamic process lifecycle gates to synthetic token subsets."""
+
+    @staticmethod
+    def _config(
+        name: str,
+        role: ProcessRoleEnum,
+        *,
+        parameters: dict[str, object] | None = None,
+    ) -> ProcessConfigModel:
+        """Build one configured process for target classification."""
+        return ProcessConfigModel(
+            name=name,
+            enabled=False,
+            mode="thread",
+            class_path="snapper.fake.Process",
+            method="start",
+            parameters=parameters or {},
+            role=role,
+        )
+
+    @staticmethod
+    def _entry(role: ProcessRoleEnum, *, enabled: bool = False) -> ProcessRegistryEntry:
+        """Build one authoritative registry entry for create tests."""
+        process_class = MagicMock()
+        process_class.get_default_parameters.return_value = {}
+        return ProcessRegistryEntry(
+            class_ref=process_class,
+            class_path="snapper.fake.Process",
+            method="start",
+            description="permission target",
+            priority=1,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=role,
+            tags=(),
+            parameters_model=None,
+            parameters_schema=None,
+            enabled=enabled,
+            mode="thread",
+        )
+
+    @staticmethod
+    def _create_body(*, enabled: bool) -> ProcessCreateRequest:
+        """Build one process-create request."""
+        return ProcessCreateRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessCreateBody(
+                name="permission_target",
+                template="target",
+                enabled=enabled,
+                mode=None,
+                parameters=None,
+                note=None,
+            ),
+        )
+
+    @staticmethod
+    def _start_body() -> ProcessStartRequest:
+        """Build one process-start request."""
+        return ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+
+    @pytest.mark.asyncio
+    async def test_strategy_create_requires_start_only_when_enabled(self) -> None:
+        """Config-only tokens may persist disabled strategies but not autostart them."""
+        factory = MagicMock()
+        factory.create_process_config = AsyncMock()
+        entry = self._entry(ProcessRoleEnum.STRATEGY)
+        with patch(
+            "snapper.server.process_routes.get_registered_processes", return_value={"target": entry}
+        ):
+            await create_process_configuration(
+                http_request=_make_rest_request(),
+                factory=factory,
+                settings=MagicMock(),
+                user=_scoped_operator(Permission.CONFIGURE_STRATEGIES),
+                repo=MagicMock(),
+                _csrf=None,
+                body=self._create_body(enabled=False),
+            )
+        factory.create_process_config.assert_awaited_once()
+
+        factory.create_process_config.reset_mock()
+        with (
+            patch(
+                "snapper.server.process_routes.get_registered_processes",
+                return_value={"target": entry},
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await create_process_configuration(
+                http_request=_make_rest_request(),
+                factory=factory,
+                settings=MagicMock(),
+                user=_scoped_operator(Permission.CONFIGURE_STRATEGIES),
+                repo=MagicMock(),
+                _csrf=None,
+                body=self._create_body(enabled=True),
+            )
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "Permission 'start:strategies' required"
+        factory.create_process_config.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_nonstrategy_create_requires_manage_processes(self) -> None:
+        """A strategy configuration grant cannot create core processes."""
+        factory = MagicMock()
+        factory.create_process_config = AsyncMock()
+        entry = self._entry(ProcessRoleEnum.CORE)
+        with (
+            patch(
+                "snapper.server.process_routes.get_registered_processes",
+                return_value={"target": entry},
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await create_process_configuration(
+                http_request=_make_rest_request(),
+                factory=factory,
+                settings=MagicMock(),
+                user=_scoped_operator(Permission.CONFIGURE_STRATEGIES),
+                repo=MagicMock(),
+                _csrf=None,
+                body=self._create_body(enabled=False),
+            )
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "Permission 'manage:processes' required"
+        factory.create_process_config.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_strategy_start_accepts_start_without_manage(self) -> None:
+        """A START_STRATEGIES token can start a classified strategy."""
+        config = self._config(
+            "strategy_target",
+            ProcessRoleEnum.STRATEGY,
+            parameters=_strategy_params(),
+        )
+        factory = MagicMock()
+        factory.get_process_configs = AsyncMock(return_value=[config])
+        factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="started")
+        )
+        with patch(
+            "snapper.server.process_routes._resolve_start_launch_parameters",
+            new=AsyncMock(return_value=config.parameters),
+        ):
+            await start_process(
+                http_request=_make_rest_request(),
+                name=config.name,
+                factory=factory,
+                user=_scoped_operator(Permission.START_STRATEGIES),
+                repo=MagicMock(),
+                _csrf=None,
+                body=self._start_body(),
+            )
+        factory.start_process_by_name.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_strategy_start_rejects_manage_only_without_mutation(self) -> None:
+        """Generic process management does not authorize strategy start."""
+        config = self._config(
+            "strategy_target",
+            ProcessRoleEnum.STRATEGY,
+            parameters=_strategy_params(),
+        )
+        factory = MagicMock()
+        factory.get_process_configs = AsyncMock(return_value=[config])
+        factory.start_process_by_name = AsyncMock()
+        with pytest.raises(HTTPException) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name=config.name,
+                factory=factory,
+                user=_scoped_operator(Permission.MANAGE_PROCESSES),
+                repo=MagicMock(),
+                _csrf=None,
+                body=self._start_body(),
+            )
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "Permission 'start:strategies' required"
+        factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_nonstrategy_start_requires_manage_processes(self) -> None:
+        """Core starts reject strategy-only tokens and accept generic management."""
+        config = self._config("core_target", ProcessRoleEnum.CORE)
+        factory = MagicMock()
+        factory.get_process_configs = AsyncMock(return_value=[config])
+        factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="started")
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name=config.name,
+                factory=factory,
+                user=_scoped_operator(Permission.START_STRATEGIES),
+                repo=MagicMock(),
+                _csrf=None,
+                body=self._start_body(),
+            )
+        assert exc_info.value.status_code == 403
+        factory.start_process_by_name.assert_not_awaited()
+
+        await start_process(
+            http_request=_make_rest_request(),
+            name=config.name,
+            factory=factory,
+            user=_scoped_operator(Permission.MANAGE_PROCESSES),
+            repo=MagicMock(),
+            _csrf=None,
+            body=self._start_body(),
+        )
+        factory.start_process_by_name.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_fallback_rejects_ambiguous_strategy_shape(self) -> None:
+        """A launcher-only strategy shape with no trusted strategy role fails closed."""
+        config = self._config(
+            "ambiguous_target",
+            ProcessRoleEnum.CORE,
+            parameters=_strategy_params(),
+        )
+        factory = MagicMock()
+        factory.get_process_configs = AsyncMock(return_value=[config])
+        factory.start_process_by_name = AsyncMock()
+        with pytest.raises(HTTPException) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name=config.name,
+                factory=factory,
+                user=_operator_principal(),
+                repo=MagicMock(),
+                _csrf=None,
+                body=self._start_body(),
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "unable to classify persisted strategy process"
+        factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_live_strategy_stop_requires_stop_strategies(self) -> None:
+        """Live strategy role tracking selects STOP_STRATEGIES before mutation."""
+        factory = MagicMock()
+        factory.process_roles = {"strategy_target": ProcessRoleEnum.STRATEGY}
+        factory.get_process_configs = AsyncMock()
+        factory.stop_process_by_name = AsyncMock(
+            return_value=ProcessStopResult(status="success", message="stopped")
+        )
+        await stop_process(
+            request=_make_rest_request(),
+            name="strategy_target",
+            factory=factory,
+            user=_scoped_operator(Permission.STOP_STRATEGIES),
+            _csrf=None,
+        )
+        factory.get_process_configs.assert_not_awaited()
+        factory.stop_process_by_name.assert_awaited_once()
+
+        factory.stop_process_by_name.reset_mock()
+        with pytest.raises(HTTPException) as exc_info:
+            await stop_process(
+                request=_make_rest_request(),
+                name="strategy_target",
+                factory=factory,
+                user=_scoped_operator(Permission.MANAGE_PROCESSES),
+                _csrf=None,
+            )
+        assert exc_info.value.status_code == 403
+        factory.stop_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_persisted_strategy_stop_accepts_stop_without_manage(self) -> None:
+        """A stopped configured strategy resolves through the persisted catalogue."""
+        config = self._config("strategy_target", ProcessRoleEnum.STRATEGY)
+        factory = MagicMock()
+        factory.process_roles = {}
+        factory.get_process_configs = AsyncMock(return_value=[config])
+        factory.stop_process_by_name = AsyncMock(
+            return_value=ProcessStopResult(status="not_running", message="not running")
+        )
+        await stop_process(
+            request=_make_rest_request(),
+            name=config.name,
+            factory=factory,
+            user=_scoped_operator(Permission.STOP_STRATEGIES),
+            _csrf=None,
+        )
+        factory.stop_process_by_name.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unknown_stop_requires_manage_and_preserves_generic_result(self) -> None:
+        """Unknown targets deny STOP-only tokens and retain generic management behavior."""
+        factory = MagicMock()
+        factory.process_roles = {}
+        factory.get_process_configs = AsyncMock(return_value=[])
+        factory.stop_process_by_name = AsyncMock(
+            return_value=ProcessStopResult(status="not_running", message="not running")
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await stop_process(
+                request=_make_rest_request(),
+                name="unknown",
+                factory=factory,
+                user=_scoped_operator(Permission.STOP_STRATEGIES),
+                _csrf=None,
+            )
+        assert exc_info.value.status_code == 403
+        factory.stop_process_by_name.assert_not_awaited()
+
+        result = await stop_process(
+            request=_make_rest_request(),
+            name="unknown",
+            factory=factory,
+            user=_scoped_operator(Permission.MANAGE_PROCESSES),
+            _csrf=None,
+        )
+        assert result.payload.status == "not_running"
+        factory.stop_process_by_name.assert_awaited_once()
 
 
 class TestResolveStrategyStartLaunchParameters:
@@ -1718,7 +2078,7 @@ class TestCreateProcessConfiguration:
             body=request,
             factory=mock_factory,
             settings=settings,
-            user=MagicMock(operator_public_ids=[]),
+            user=_operator_principal(),
             repo=MagicMock(),
             _csrf=None,
         )
@@ -1777,7 +2137,7 @@ class TestCreateProcessConfiguration:
                 body=request,
                 factory=factory,
                 settings=settings,
-                user=MagicMock(operator_public_ids=[]),
+                user=_operator_principal(),
                 repo=MagicMock(),
                 _csrf=None,
             )
@@ -1842,7 +2202,7 @@ class TestCreateProcessConfiguration:
                 body=request,
                 factory=mock_factory,
                 settings=MagicMock(),
-                user=MagicMock(operator_public_ids=[]),
+                user=_operator_principal(),
                 repo=MagicMock(),
                 _csrf=None,
             )
@@ -1940,7 +2300,7 @@ class TestProcessRoutesEdgeCases:
             body=request,
             factory=mock_factory,
             settings=MagicMock(),
-            user=MagicMock(operator_public_ids=[]),
+            user=_operator_principal(),
             repo=MagicMock(),
             _csrf=None,
         )
@@ -1998,7 +2358,7 @@ class TestProcessRoutesEdgeCases:
             body=request,
             factory=mock_factory,
             settings=MagicMock(),
-            user=MagicMock(operator_public_ids=[]),
+            user=_operator_principal(),
             repo=MagicMock(),
             _csrf=None,
         )
@@ -2055,7 +2415,7 @@ class TestProcessRoutesEdgeCases:
             body=request,
             factory=mock_factory,
             settings=MagicMock(),
-            user=MagicMock(operator_public_ids=[]),
+            user=_operator_principal(),
             repo=MagicMock(),
             _csrf=None,
         )
@@ -2506,13 +2866,15 @@ class TestStartProcessScopeRecheck:
                 parameters={"wallet_public_id": "w-x"},
             ),
         )
+        factory = MagicMock()
+        factory.get_process_configs = AsyncMock(return_value=[])
         with pytest.raises(HTTPException) as exc_info:
             await start_process(
                 http_request=_make_rest_request(),
                 name="any",
                 body=body,
-                factory=MagicMock(),
-                user=MagicMock(operator_public_ids=[]),
+                factory=factory,
+                user=_operator_principal(),
                 repo=MagicMock(),
                 _csrf=None,
             )
@@ -2531,13 +2893,15 @@ class TestStartProcessScopeRecheck:
                 parameters={"operator_public_id": "op-x"},
             ),
         )
+        factory = MagicMock()
+        factory.get_process_configs = AsyncMock(return_value=[])
         with pytest.raises(HTTPException) as exc_info:
             await start_process(
                 http_request=_make_rest_request(),
                 name="any",
                 body=body,
-                factory=MagicMock(),
-                user=MagicMock(operator_public_ids=[]),
+                factory=factory,
+                user=_operator_principal(),
                 repo=MagicMock(),
                 _csrf=None,
             )
@@ -2592,7 +2956,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -2651,7 +3015,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -2702,7 +3066,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -2758,7 +3122,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -2814,7 +3178,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -2862,7 +3226,7 @@ class TestStartProcessScopeRecheck:
                 name="backfill",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -2909,7 +3273,7 @@ class TestStartProcessScopeRecheck:
                 name="core",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -2956,7 +3320,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -3006,7 +3370,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -3060,7 +3424,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -3114,7 +3478,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -3172,7 +3536,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -3227,7 +3591,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -3280,7 +3644,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -3333,7 +3697,7 @@ class TestStartProcessScopeRecheck:
                 name="strategy",
                 body=body,
                 factory=factory,
-                user=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                user=_operator_principal(["op-1"]),
                 repo=repo,
                 _csrf=None,
             )
@@ -3508,7 +3872,7 @@ class TestResolveRoleForClassPath:
                     name="strat-foreign",
                     body=body,
                     factory=mock_factory,
-                    user=MagicMock(operator_public_ids=["op-mine"], username="alice"),
+                    user=_operator_principal(["op-mine"]),
                     repo=repo,
                     _csrf=None,
                 )
@@ -3583,11 +3947,7 @@ class TestResolveRoleForClassPath:
                     name="strat-listparams",
                     body=body,
                     factory=mock_factory,
-                    user=MagicMock(
-                        operator_public_ids=["op-mine"],
-                        primary_operator_public_id="op-mine",
-                        username="alice",
-                    ),
+                    user=_operator_principal(["op-mine"]),
                     repo=repo,
                     _csrf=None,
                 )
@@ -3644,7 +4004,7 @@ class TestResolveRoleForClassPathHit:
             name="no-class",
             body=body,
             factory=mock_factory,
-            user=MagicMock(operator_public_ids=[]),
+            user=_operator_principal(),
             repo=repo,
             _csrf=None,
         )
@@ -3677,7 +4037,7 @@ class TestResolveRoleForClassPathHit:
             name="unreg",
             body=body,
             factory=mock_factory,
-            user=MagicMock(operator_public_ids=[]),
+            user=_operator_principal(),
             repo=repo,
             _csrf=None,
         )
@@ -3733,7 +4093,7 @@ class TestResolveRoleForClassPathHit:
                 name="listparams",
                 body=body,
                 factory=mock_factory,
-                user=MagicMock(operator_public_ids=[]),
+                user=_operator_principal(),
                 repo=repo,
                 _csrf=None,
             )
@@ -3788,7 +4148,7 @@ class TestResolveRoleForClassPathHit:
                 name="core-listparams",
                 body=body,
                 factory=mock_factory,
-                user=MagicMock(operator_public_ids=[]),
+                user=_operator_principal(),
                 repo=repo,
                 _csrf=None,
             )
@@ -3838,7 +4198,7 @@ class TestResolveRoleForClassPathHit:
                 name="strat-no-override",
                 body=body,
                 factory=MagicMock(),
-                user=MagicMock(operator_public_ids=[]),
+                user=_operator_principal(),
                 repo=repo,
                 _csrf=None,
             )
@@ -3927,6 +4287,7 @@ class TestSetProcessDesiredState:
         cache: MagicMock | None = None,
         repo: MagicMock | None = None,
         registry: MagicMock | None = None,
+        principal: AuthPrincipal | None = None,
     ) -> ProcessDesiredStateResponse:
         """Invoke the handler directly with mocked dependencies.
 
@@ -3937,6 +4298,7 @@ class TestSetProcessDesiredState:
             cache: Cross-coordinator cache (None degrades to local view).
             repo: Repository for the scope check.
             registry: Command-ack registry (None skips the nudge).
+            principal: Caller, or a full operator when omitted.
 
         Returns:
             The handler response.
@@ -3948,7 +4310,7 @@ class TestSetProcessDesiredState:
             cache=cache,
             registry=registry,
             repo=repo or MagicMock(),
-            principal=MagicMock(username="alice", operator_public_ids=[]),
+            principal=principal or _operator_principal(),
             _csrf=None,
             body=body,
         )
@@ -4052,6 +4414,105 @@ class TestSetProcessDesiredState:
         kwargs = factory.update_process_config.await_args.kwargs
         assert kwargs["enabled"] is True
         assert kwargs["is_strategy"] is True
+
+    @pytest.mark.asyncio
+    async def test_strategy_enable_requires_start_permission_before_scope(self) -> None:
+        """A strategy enable uses START_STRATEGIES and denies before scope or write."""
+        config = self._config("strategy_x", enabled=False, role=ProcessRoleEnum.STRATEGY)
+        factory = self._factory(config, autostart_includes=True)
+        with patch(
+            "snapper.server.process_routes._enforce_strategy_scope",
+            new_callable=AsyncMock,
+        ) as mock_scope:
+            await self._patch(
+                "strategy_x",
+                factory,
+                self._body("enable"),
+                principal=_scoped_operator(Permission.START_STRATEGIES),
+            )
+        mock_scope.assert_awaited_once()
+        factory.update_process_config.assert_awaited_once()
+
+        factory.update_process_config.reset_mock()
+        mock_scope.reset_mock()
+        with pytest.raises(HTTPException) as exc_info:
+            await self._patch(
+                "strategy_x",
+                factory,
+                self._body("enable"),
+                principal=_scoped_operator(Permission.STOP_STRATEGIES),
+            )
+        assert exc_info.value.status_code == 403
+        mock_scope.assert_not_awaited()
+        factory.update_process_config.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_strategy_disable_requires_stop_permission(self) -> None:
+        """A strategy disable accepts STOP_STRATEGIES without generic management."""
+        config = self._config("strategy_x", enabled=True, role=ProcessRoleEnum.STRATEGY)
+        factory = self._factory(config, autostart_includes=True)
+        await self._patch(
+            "strategy_x",
+            factory,
+            self._body("disable"),
+            principal=_scoped_operator(Permission.STOP_STRATEGIES),
+        )
+        factory.update_process_config.assert_awaited_once()
+
+        factory.update_process_config.reset_mock()
+        with pytest.raises(HTTPException) as exc_info:
+            await self._patch(
+                "strategy_x",
+                factory,
+                self._body("disable"),
+                principal=_scoped_operator(Permission.START_STRATEGIES),
+            )
+        assert exc_info.value.status_code == 403
+        factory.update_process_config.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_strategy_restart_requires_start_and_stop_permissions(self) -> None:
+        """A strategy restart enforces the lifecycle permission pair before write."""
+        config = self._config("strategy_x", enabled=True, role=ProcessRoleEnum.STRATEGY)
+        factory = self._factory(config, autostart_includes=True)
+        body = self._body("restart", restart_nonce="nonce-restart-01")
+        with pytest.raises(HTTPException) as exc_info:
+            await self._patch(
+                "strategy_x",
+                factory,
+                body,
+                principal=_scoped_operator(Permission.START_STRATEGIES),
+            )
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "Permission 'stop:strategies' required"
+        factory.update_process_config.assert_not_awaited()
+
+        await self._patch(
+            "strategy_x",
+            factory,
+            body,
+            principal=_scoped_operator(
+                Permission.START_STRATEGIES,
+                Permission.STOP_STRATEGIES,
+            ),
+        )
+        factory.update_process_config.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_nonstrategy_desired_state_requires_manage_processes(self) -> None:
+        """Strategy lifecycle permissions cannot mutate core desired state."""
+        config = self._config("core_x", enabled=True, role=ProcessRoleEnum.CORE)
+        factory = self._factory(config, autostart_includes=True)
+        with pytest.raises(HTTPException) as exc_info:
+            await self._patch(
+                "core_x",
+                factory,
+                self._body("disable"),
+                principal=_scoped_operator(Permission.STOP_STRATEGIES),
+            )
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "Permission 'manage:processes' required"
+        factory.update_process_config.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_enable_strategy_scope_failure_propagates(self) -> None:
@@ -4269,6 +4730,7 @@ class TestUpdateProcessScopeConfig:
         body: ProcessConfigScopeRequest,
         *,
         operator_public_ids: list[str] | None = None,
+        principal: AuthPrincipal | None = None,
     ) -> object:
         """Invoke the scope-config handler with mocked dependencies."""
         return await update_process_scope_config(
@@ -4276,7 +4738,7 @@ class TestUpdateProcessScopeConfig:
             name=name,
             factory=factory,
             repo=MagicMock(),
-            principal=MagicMock(username="alice", operator_public_ids=operator_public_ids or []),
+            principal=principal or _operator_principal(operator_public_ids),
             _csrf=None,
             body=body,
         )
@@ -4328,6 +4790,37 @@ class TestUpdateProcessScopeConfig:
         assert merged["wallet_public_id"] == "wal-1"
         assert merged["params"]["ai_review_user_public_id"] == "label:bob"
         assert merged["params"]["ai_review_strategy_public_id"] == "uuid-seed"
+
+    @pytest.mark.asyncio
+    async def test_scope_config_requires_configure_strategies_before_mutation(self) -> None:
+        """The strategy editor admits CONFIGURE only and denies START only."""
+        config = self._config("strategy_x", parameters={})
+        factory = self._factory(config, persisted={})
+        with patch(self._ENFORCE, new_callable=AsyncMock) as mock_enforce:
+            await self._invoke(
+                "strategy_x",
+                factory,
+                self._body(),
+                principal=_scoped_operator(Permission.CONFIGURE_STRATEGIES),
+            )
+        mock_enforce.assert_awaited_once()
+        factory.update_process_config_parameters.assert_awaited_once()
+
+        factory.update_process_config_parameters.reset_mock()
+        with (
+            patch(self._ENFORCE, new_callable=AsyncMock) as denied_scope,
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await self._invoke(
+                "strategy_x",
+                factory,
+                self._body(),
+                principal=_scoped_operator(Permission.START_STRATEGIES),
+            )
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "Permission 'configure:strategies' required"
+        denied_scope.assert_not_awaited()
+        factory.update_process_config_parameters.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_scope_enforcement_rejection_propagates_and_skips_write(self) -> None:

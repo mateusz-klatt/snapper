@@ -18,8 +18,9 @@ Process Types:
     - **Long-running**: Continuous services (feeds, executors)
     - **One-shot**: Tasks that complete (backfill, sync)
 
-Most endpoints require MANAGE_PROCESSES permission (operator/admin role).
-The summary endpoint requires only READ_SYSTEM_STATUS.
+Read endpoints require READ_PROCESSES or READ_SYSTEM_STATUS. Lifecycle
+mutations select START_STRATEGIES, STOP_STRATEGIES, CONFIGURE_STRATEGIES,
+or MANAGE_PROCESSES from the classified process target and requested action.
 
 Example:
     Start a process::
@@ -99,6 +100,9 @@ from snapper.application.process_manager.strategy_scope import (
     reference_identity_params_for_registry_name,
 )
 from snapper.application.process_manager.strategy_scope import resolve_role_for_class_path
+from snapper.auth.dependencies import enforce_permission
+from snapper.auth.dependencies import enforce_permissions
+from snapper.auth.dependencies import require_any_permission
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
@@ -655,6 +659,91 @@ async def _classify_persisted_process_for_start(
     return classification, raw_params_dict
 
 
+async def _find_configured_process(
+    factory: ProcessLauncherService,
+    name: str,
+) -> ProcessConfigModel | None:
+    """Find one process in the launcher's read-only configured catalogue.
+
+    Args:
+        factory: Process launcher whose persisted catalogue is queried.
+        name: Process name to locate.
+
+    Returns:
+        Matching configuration, or ``None`` when the name is not configured.
+    """
+    configs = await factory.get_process_configs()
+    return next((config for config in configs if config.name == name), None)
+
+
+async def _classify_process_for_start(
+    repo: Repository,
+    factory: ProcessLauncherService,
+    name: str,
+) -> tuple[StrategyProcessClassification | None, dict[str, object] | None]:
+    """Classify a start target using persisted data, then launcher data.
+
+    The repository row is authoritative when available. A launcher-catalogue
+    fallback covers non-SQL repositories and live configurations. Both paths
+    use the same fail-closed strategy-shape classifier.
+
+    Args:
+        repo: Repository used for the direct persisted-row read.
+        factory: Launcher used for the read-only catalogue fallback.
+        name: Process name being started.
+
+    Returns:
+        Strategy classification and mutable parameter copy when the target is
+        known, otherwise ``(None, None)``.
+
+    Raises:
+        HTTPException: 400 when a process has an ambiguous strategy shape.
+    """
+    classification, raw_params = await _classify_persisted_process_for_start(repo, name)
+    if classification is not None:
+        return classification, raw_params
+    config = await _find_configured_process(factory, name)
+    if config is None:
+        return None, None
+    fallback_params: dict[str, object] = dict(config.parameters)
+    try:
+        fallback_classification = classify_strategy_process(
+            raw_role=config.role,
+            class_path=config.class_path,
+            raw_parameters=fallback_params,
+            registry_name=config.template or name,
+        )
+    except StrategyScopeError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    return fallback_classification, fallback_params
+
+
+async def _resolve_process_role_for_stop(
+    factory: ProcessLauncherService,
+    name: str,
+) -> ProcessRoleEnum | None:
+    """Resolve a stop target's role without mutating launcher state.
+
+    Live role tracking is authoritative for running and task-only survivors.
+    The configured catalogue supplies the role for a known process that is not
+    currently tracked. An unknown target stays unclassified so the caller must
+    hold the generic process-management capability before receiving the
+    launcher's normal not-running result.
+
+    Args:
+        factory: Process launcher whose live and configured state is queried.
+        name: Process name being stopped.
+
+    Returns:
+        Resolved process role, or ``None`` for an unknown target.
+    """
+    live_role = factory.process_roles.get(name)
+    if isinstance(live_role, ProcessRoleEnum):
+        return live_role
+    config = await _find_configured_process(factory, name)
+    return config.role if config is not None else None
+
+
 def _classification_treats_as_strategy(
     classification: StrategyProcessClassification | None,
 ) -> bool:
@@ -1055,7 +1144,15 @@ async def create_process_configuration(
     http_request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     settings: Annotated[AppSettings, Depends(get_settings)],
-    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    user: Annotated[
+        AuthPrincipal,
+        Depends(
+            require_any_permission(
+                Permission.CONFIGURE_STRATEGIES,
+                Permission.MANAGE_PROCESSES,
+            )
+        ),
+    ],
     repo: Annotated[Repository, Depends(get_repository_for_processes)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     body: Annotated[ProcessCreateRequest, Depends(json_body(ProcessCreateRequest))],
@@ -1067,7 +1164,7 @@ async def create_process_configuration(
         body: Process creation request with template name and config.
         factory: Process launcher service.
         settings: Application settings.
-        user: Authenticated user with MANAGE_PROCESSES permission.
+        user: Authenticated user with a process-configuration capability.
         repo: Repository dependency for route consistency.
         _csrf: CSRF token validation.
 
@@ -1091,6 +1188,12 @@ async def create_process_configuration(
         base_parameters.update(payload.parameters)
     final_mode = payload.mode or resolve_mode(entry.mode, payload.name)
     final_enabled = entry.enabled if payload.enabled is None else payload.enabled
+    if entry.role is ProcessRoleEnum.STRATEGY:
+        enforce_permission(user, Permission.CONFIGURE_STRATEGIES)
+        if final_enabled:
+            enforce_permission(user, Permission.START_STRATEGIES)
+    else:
+        enforce_permission(user, Permission.MANAGE_PROCESSES)
     try:
         await factory.create_process_config(
             name=payload.name,
@@ -1197,7 +1300,15 @@ async def start_process(
     http_request: Request,
     name: str,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
-    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    user: Annotated[
+        AuthPrincipal,
+        Depends(
+            require_any_permission(
+                Permission.START_STRATEGIES,
+                Permission.MANAGE_PROCESSES,
+            )
+        ),
+    ],
     repo: Annotated[Repository, Depends(get_repository_for_processes)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     body: Annotated[ProcessStartRequest, Depends(json_body(ProcessStartRequest))],
@@ -1220,8 +1331,12 @@ async def start_process(
     _reject_executor_template_start(name)
     payload = body.payload
     overrides = payload.parameters or {}
-    classification, raw_params = await _classify_persisted_process_for_start(repo, name)
+    classification, raw_params = await _classify_process_for_start(repo, factory, name)
     treat_as_strategy = _classification_treats_as_strategy(classification)
+    enforce_permission(
+        user,
+        Permission.START_STRATEGIES if treat_as_strategy else Permission.MANAGE_PROCESSES,
+    )
     _reject_strategy_start_parameter_overrides(treat_as_strategy, overrides)
     _reject_start_scope_overrides(overrides)
     launch_parameters = await _resolve_start_launch_parameters(
@@ -1261,9 +1376,26 @@ async def stop_process(
     request: Request,
     name: str,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
-    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    user: Annotated[
+        AuthPrincipal,
+        Depends(
+            require_any_permission(
+                Permission.STOP_STRATEGIES,
+                Permission.MANAGE_PROCESSES,
+            )
+        ),
+    ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> ProcessStopResponse:
+    role = await _resolve_process_role_for_stop(factory, name)
+    enforce_permission(
+        user,
+        (
+            Permission.STOP_STRATEGIES
+            if role is ProcessRoleEnum.STRATEGY
+            else Permission.MANAGE_PROCESSES
+        ),
+    )
     result = await factory.stop_process_by_name(name)
     sid, seq, pid, ts = _mint_provenance(request)
     data = ProcessStopData(
@@ -1296,7 +1428,16 @@ async def set_process_desired_state(
     cache: Annotated[RemoteSummaryCache | None, Depends(get_remote_summary_cache)],
     registry: Annotated[ProcessCommandAckRegistry | None, Depends(get_command_ack_registry)],
     repo: Annotated[Repository, Depends(get_repository_for_processes)],
-    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    principal: Annotated[
+        AuthPrincipal,
+        Depends(
+            require_any_permission(
+                Permission.START_STRATEGIES,
+                Permission.STOP_STRATEGIES,
+                Permission.MANAGE_PROCESSES,
+            )
+        ),
+    ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     body: Annotated[ProcessDesiredStateRequest, Depends(json_body(ProcessDesiredStateRequest))],
 ) -> ProcessDesiredStateResponse:
@@ -1306,7 +1447,9 @@ async def set_process_desired_state(
     the ``process_<name>`` config — the source of truth — and NEVER starts or
     stops anything locally, so it is safe for a process owned by a different
     container. The owning coordinator's reconcile loop converges the actual
-    running state to what is written here. Gated by MANAGE_PROCESSES + CSRF.
+    running state to what is written here. Strategy actions require their
+    corresponding START_STRATEGIES / STOP_STRATEGIES capabilities; generic
+    process actions require MANAGE_PROCESSES. CSRF is always enforced.
 
     Targets that have no controllable desired-state row are rejected: a
     per-wallet executor instance has no ``process_<name>`` Setting (404), and
@@ -1349,6 +1492,19 @@ async def set_process_desired_state(
     if config is None:
         raise HTTPException(status_code=404, detail=f"Process '{name}' is not configured")
     is_strategy = config.role is ProcessRoleEnum.STRATEGY
+    if is_strategy:
+        if action == "enable":
+            enforce_permission(principal, Permission.START_STRATEGIES)
+        elif action == "disable":
+            enforce_permission(principal, Permission.STOP_STRATEGIES)
+        else:
+            enforce_permissions(
+                principal,
+                Permission.START_STRATEGIES,
+                Permission.STOP_STRATEGIES,
+            )
+    else:
+        enforce_permission(principal, Permission.MANAGE_PROCESSES)
     enabled: bool | None = None
     restart_nonce: str | None = None
     if action == "enable":
@@ -1420,7 +1576,7 @@ def _reject_undeclared_reference_params(
     The scope editor may only set a strategy's DECLARED reference-identity
     params (e.g. ``ai_review_user_public_id``); it is NOT a general parameters
     editor. Whitelisting the submitted keys against the registry's declared set
-    stops a MANAGE_PROCESSES caller from reaching non-scope runtime knobs
+    stops a CONFIGURE_STRATEGIES caller from reaching non-scope runtime knobs
     (thresholds, sizing, deadlines) under ``parameters.params`` through the
     audited "scope" endpoint.
 
@@ -1456,7 +1612,10 @@ async def update_process_scope_config(
     name: str,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     repo: Annotated[Repository, Depends(get_repository_for_processes)],
-    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.CONFIGURE_STRATEGIES)),
+    ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     body: Annotated[ProcessConfigScopeRequest, Depends(json_body(ProcessConfigScopeRequest))],
 ) -> ProcessConfigScopeResponse:
@@ -1468,7 +1627,7 @@ async def update_process_scope_config(
     (re)start — but it FULLY enforces the caller's authorization AT EDIT TIME
     (it does NOT defer cross-tenant checks to the trusted (re)start resolver,
     which resolves with ``principal_operator_public_ids=None``). Gated by
-    MANAGE_PROCESSES + CSRF.
+    CONFIGURE_STRATEGIES + CSRF.
 
     Enforcement, all fail-closed against the CALLER's principal:
     - Only STRATEGY-role configs are editable (executor instance 404, unknown
@@ -1519,6 +1678,7 @@ async def update_process_scope_config(
             status_code=400,
             detail=f"Process '{name}' is not a strategy; only strategy scope is editable",
         )
+    enforce_permission(principal, Permission.CONFIGURE_STRATEGIES)
     scope = body.payload
     new_parameters: dict[str, object] = dict(config.parameters)
     if scope.operator_public_id is not None:

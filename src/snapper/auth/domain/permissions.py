@@ -40,6 +40,7 @@ class Permission(StrEnum):
     STOP_STRATEGIES = "stop:strategies"
     CONFIGURE_STRATEGIES = "configure:strategies"
     READ_SYSTEM_STATUS = "read:system_status"
+    MANAGE_RUNTIME_DIAGNOSTICS = "manage:runtime_diagnostics"
     READ_PROCESSES = "read:processes"
     MANAGE_PROCESSES = "manage:processes"
     READ_AI_REVIEWS = "read:ai_reviews"
@@ -52,6 +53,7 @@ class Permission(StrEnum):
     MANAGE_SCOPE_GRANTS = "manage:scope_grants"
     IMPERSONATE_OPERATOR = "impersonate:operator"
     READ_BACKTESTS = "read:backtests"
+    CREATE_BACKTEST_COMPARISONS = "create:backtest_comparisons"
     MANAGE_BACKTESTS = "manage:backtests"
     READ_NOTIFICATIONS = "read:notifications"
     MANAGE_NOTIFICATION_DEVICES = "manage:notification_devices"
@@ -102,7 +104,9 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_STRATEGIES,
         Permission.READ_SIGNALS,
         Permission.READ_SYSTEM_STATUS,
+        Permission.MANAGE_RUNTIME_DIAGNOSTICS,
         Permission.READ_BACKTESTS,
+        Permission.CREATE_BACKTEST_COMPARISONS,
         Permission.SUBMIT_AI_REVIEW_DECISION,
     },
     UserRole.AI_DELEGATE: {
@@ -116,7 +120,9 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_STRATEGIES,
         Permission.READ_SIGNALS,
         Permission.READ_SYSTEM_STATUS,
+        Permission.MANAGE_RUNTIME_DIAGNOSTICS,
         Permission.READ_BACKTESTS,
+        Permission.CREATE_BACKTEST_COMPARISONS,
         Permission.SUBMIT_AI_REVIEW_DECISION,
     },
     UserRole.VIEWER: {
@@ -147,8 +153,10 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_STRATEGIES,
         Permission.START_STRATEGIES,
         Permission.STOP_STRATEGIES,
+        Permission.CONFIGURE_STRATEGIES,
         Permission.READ_SIGNALS,
         Permission.READ_SYSTEM_STATUS,
+        Permission.MANAGE_RUNTIME_DIAGNOSTICS,
         Permission.READ_PROCESSES,
         Permission.MANAGE_PROCESSES,
         Permission.READ_AI_REVIEWS,
@@ -156,6 +164,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.MANAGE_AI_INTEGRATION,
         Permission.MANAGE_PAIRED_EXECUTION,
         Permission.READ_BACKTESTS,
+        Permission.CREATE_BACKTEST_COMPARISONS,
         Permission.MANAGE_BACKTESTS,
         Permission.READ_NOTIFICATIONS,
         Permission.MANAGE_NOTIFICATION_DEVICES,
@@ -205,9 +214,28 @@ _PERMISSION_SCOPE_V3_ADDITIONS: frozenset[Permission] = frozenset(
         Permission.READ_AI_REVIEWS,
         Permission.READ_AI_INTEGRATION,
         Permission.MANAGE_AI_INTEGRATION,
+        Permission.MANAGE_RUNTIME_DIAGNOSTICS,
+        Permission.CREATE_BACKTEST_COMPARISONS,
     }
 )
-"""Permissions introduced after version-two token scopes were minted."""
+"""Catalog entries introduced after version-two token scopes were minted."""
+
+
+_PERMISSION_SCOPE_V3_ROLE_ADDITIONS: dict[UserRole, frozenset[Permission]] = {
+    UserRole.OPERATOR: frozenset({Permission.CONFIGURE_STRATEGIES}),
+}
+"""Existing catalog entries newly granted to a named set in scope v3."""
+
+
+_NON_DOWNSCOPABLE_PERMISSIONS: frozenset[Permission] = frozenset({Permission.IMPERSONATE_OPERATOR})
+"""Structural grants that historical explicit scopes could not remove.
+
+Before token-effective permissions became the sole capability input, global
+operator and wallet visibility consulted the canonical role set directly.
+Retaining these grants during token intersection preserves that established
+scope contract while allowing every runtime decision to consume effective
+permissions instead of a role identity.
+"""
 
 
 def role_grants_permission(role: UserRole, permission: Permission) -> bool:
@@ -256,10 +284,15 @@ def get_effective_permissions(
     effective_permissions = {
         permission for permission in role_permissions if permission.value in token_permission_values
     }
+    effective_permissions.update(role_permissions & _NON_DOWNSCOPABLE_PERMISSIONS)
     if permission_scope_version != 2:
         return effective_permissions
 
-    v2_role_permissions = role_permissions - _PERMISSION_SCOPE_V3_ADDITIONS
+    v2_role_permissions = (
+        role_permissions
+        - _PERMISSION_SCOPE_V3_ADDITIONS
+        - _PERMISSION_SCOPE_V3_ROLE_ADDITIONS.get(role, frozenset())
+    )
     if token_permission_values == {permission.value for permission in v2_role_permissions}:
         return set(role_permissions)
 
@@ -278,13 +311,54 @@ def get_effective_permissions(
             Permission.READ_PROCESSES,
             Permission.READ_AI_INTEGRATION,
             Permission.MANAGE_AI_INTEGRATION,
+            Permission.START_STRATEGIES,
+            Permission.STOP_STRATEGIES,
+            Permission.CONFIGURE_STRATEGIES,
         }
         effective_permissions.update(
             permission
             for permission in process_replacements
             if role_grants_permission(role, permission)
         )
+    compatibility_replacements = {
+        Permission.READ_BACKTESTS: Permission.CREATE_BACKTEST_COMPARISONS,
+        Permission.READ_SYSTEM_STATUS: Permission.MANAGE_RUNTIME_DIAGNOSTICS,
+    }
+    effective_permissions.update(
+        replacement
+        for historical, replacement in compatibility_replacements.items()
+        if historical in effective_permissions and role_grants_permission(role, replacement)
+    )
     return effective_permissions
+
+
+def has_effective_permission(
+    role: UserRole,
+    token_permissions: list[str] | None,
+    permission_scope_version: int | None,
+    permission: Permission,
+) -> bool:
+    """Return whether one authenticated token effectively grants a capability.
+
+    Runtime authorization and visibility decisions use this projection. Role
+    identities enter only through the canonical named permission-set ceiling
+    inside :func:`get_effective_permissions`.
+
+    Args:
+        role: Authenticated principal's named permission set.
+        token_permissions: Explicit permission strings carried by the token.
+        permission_scope_version: Permission-scope compatibility version.
+        permission: Capability being decided.
+
+    Returns:
+        True when the role-bounded, compatibility-projected token grant
+        contains ``permission``.
+    """
+    return permission in get_effective_permissions(
+        role,
+        token_permissions,
+        permission_scope_version,
+    )
 
 
 def is_ai_review_decision_capable(

@@ -47,7 +47,7 @@ from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import role_grants_permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.json_types import JsonObject
 from snapper.core.types import TradeCommandStatusEnum
@@ -312,7 +312,12 @@ async def _enforce_scope(
     as_of: datetime,
 ) -> None:
     """Raise :class:`PlanScopeError` when the caller cannot reach the plan's wallet."""
-    if role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR):
+    if has_effective_permission(
+        principal.role,
+        principal.permissions,
+        principal.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    ):
         return
     accessible = await repo.list_accessible_wallets_for_operators(
         list(principal.operator_public_ids), as_of

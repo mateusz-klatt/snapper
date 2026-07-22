@@ -1,6 +1,7 @@
 """``/api/metrics/*`` — operator observability surface.
 
-Two route families, both gated by ``Permission.READ_SYSTEM_STATUS``:
+Read routes are gated by ``Permission.READ_SYSTEM_STATUS``. Runtime
+diagnostic mutations are gated by ``Permission.MANAGE_RUNTIME_DIAGNOSTICS``:
 
 * ``/notifications`` — iOS Push Foundation ops metrics.
   DB-derived outbox counters + per-status totals so an oncall
@@ -418,7 +419,7 @@ async def post_system_metrics_tracemalloc_start(
     request: Request,
     _principal: Annotated[
         AuthPrincipal,
-        Depends(require_permission(Permission.READ_SYSTEM_STATUS)),
+        Depends(require_permission(Permission.MANAGE_RUNTIME_DIAGNOSTICS)),
     ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     duration_s: Annotated[float, Query(gt=0)] = DEFAULT_DURATION_SECONDS,
@@ -466,7 +467,7 @@ async def post_system_metrics_tracemalloc_stop(
     request: Request,
     _principal: Annotated[
         AuthPrincipal,
-        Depends(require_permission(Permission.READ_SYSTEM_STATUS)),
+        Depends(require_permission(Permission.MANAGE_RUNTIME_DIAGNOSTICS)),
     ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
 ) -> TracemallocStateResponse:

@@ -30,7 +30,7 @@ from datetime import UTC
 from datetime import datetime
 
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import role_grants_permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.data.repository import Repository
 
@@ -89,7 +89,12 @@ def ensure_operator_in_claims(
     """
     if operator_public_id is None:
         return
-    if role_grants_permission(claims.role, Permission.IMPERSONATE_OPERATOR):
+    if has_effective_permission(
+        claims.role,
+        claims.permissions,
+        claims.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    ):
         return
     if operator_public_id in claims.operator_public_ids:
         return
@@ -143,7 +148,12 @@ async def validate_user_wallet_scope(
             message includes :data:`WALLET_SCOPE_ERROR_CODE` so
             FastMCP-surfaced errors carry a stable classifier.
     """
-    if role_grants_permission(claims.role, Permission.IMPERSONATE_OPERATOR):
+    if has_effective_permission(
+        claims.role,
+        claims.permissions,
+        claims.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    ):
         return
     if not claims.operator_public_ids:
         raise PermissionError(

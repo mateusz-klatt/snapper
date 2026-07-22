@@ -33,7 +33,7 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import role_grants_permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.data.repository import WalletConflictError
@@ -86,7 +86,12 @@ async def list_wallets(
         ``(is_paper, label)``.
     """
     now = datetime.now(UTC)
-    if role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR):
+    if has_effective_permission(
+        principal.role,
+        principal.permissions,
+        principal.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    ):
         rows = await repo.list_active_wallets(now)
     else:
         rows = await repo.list_accessible_wallets_for_operators(principal.operator_public_ids, now)

@@ -11,7 +11,7 @@ from uuid import uuid7
 from fastapi import WebSocket
 
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import role_grants_permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import SubscriptionActionEnum
@@ -56,7 +56,12 @@ def _extract_backtest_wallet_public_id(topic: str) -> str | None:
 
 def _is_backtest_topic_allowed(topic: str, principal: AuthPrincipal) -> bool:
     """Return whether the principal may subscribe to a backtest topic."""
-    if role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR):
+    if has_effective_permission(
+        principal.role,
+        principal.permissions,
+        principal.permission_scope_version,
+        Permission.IMPERSONATE_OPERATOR,
+    ):
         return True
     active_wallet = principal.active_wallet_public_id
     if active_wallet is None:

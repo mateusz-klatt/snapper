@@ -26,8 +26,6 @@ from snapper.auth.deactivation_fallback import list_inactive_user_public_ids
 from snapper.auth.deactivation_fallback import run_deactivation_fallback_loop
 from snapper.auth.deactivation_fallback import start_deactivation_fallback_task
 from snapper.auth.deactivation_fallback import stop_deactivation_fallback_task
-from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -288,7 +286,7 @@ class WebSocketAuthManager:
         if not token_data:
             return None
         delegate_public_id: str | None = None
-        if role_grants_permission(token_data.role, Permission.SUBMIT_AI_REVIEW_DECISION):
+        if token_data.user_public_id:
             delegate_row = await repository.get_ai_delegate_by_user_public_id(
                 token_data.user_public_id
             )

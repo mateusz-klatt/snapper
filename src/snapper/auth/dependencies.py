@@ -10,7 +10,7 @@ import secrets
 from datetime import UTC
 from datetime import datetime
 from typing import Annotated
-from typing import Any
+from typing import Protocol
 
 from fastapi import Depends
 from fastapi import HTTPException
@@ -20,7 +20,6 @@ from fastapi import status
 from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import get_effective_permissions
-from snapper.auth.domain.permissions import role_grants_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import get_token_manager
@@ -30,6 +29,14 @@ from snapper.config.settings import get_settings_with_service
 from snapper.data.repository import Repository
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.server.dependencies import get_repository_dependency
+
+
+class PermissionDependency(Protocol):
+    """Callable shape returned by permission dependency factories."""
+
+    def __call__(self, current_user: AuthPrincipal) -> AuthPrincipal:
+        """Validate and return the injected authenticated principal."""
+        ...
 
 
 def _extract_bearer_token(request: Request) -> str | None:
@@ -103,7 +110,7 @@ async def get_current_user(
     if not token_data:
         return None
     delegate_public_id: str | None = None
-    if role_grants_permission(token_data.role, Permission.SUBMIT_AI_REVIEW_DECISION):
+    if token_data.user_public_id:
         delegate_row = await repo.get_ai_delegate_by_user_public_id(token_data.user_public_id)
         if delegate_row is not None:
             delegate_public_id = delegate_row["public_id"]
@@ -146,7 +153,7 @@ def require_authentication(
     return current_user
 
 
-def require_permission(permission: Permission) -> Any:
+def require_permission(permission: Permission) -> PermissionDependency:
     """Create dependency that requires specific permission.
 
     Args:
@@ -159,15 +166,95 @@ def require_permission(permission: Permission) -> Any:
     def permission_checker(
         current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
     ) -> AuthPrincipal:
+        return enforce_permission(current_user, permission)
+
+    return permission_checker
+
+
+def enforce_permission(current_user: AuthPrincipal, permission: Permission) -> AuthPrincipal:
+    """Enforce one effective permission outside dependency injection.
+
+    Dynamic routes use this function after a read-only target classification
+    determines the exact capability required for that target. It applies the
+    same role-bounded token projection as :func:`require_permission`.
+
+    Args:
+        current_user: Authenticated principal whose token grant is enforced.
+        permission: Permission required for the classified operation.
+
+    Returns:
+        The authenticated principal when the permission is effective.
+
+    Raises:
+        HTTPException: 403 when the effective token grant lacks the permission.
+    """
+    user_permissions = get_effective_permissions(
+        current_user.role,
+        current_user.permissions,
+        current_user.permission_scope_version,
+    )
+    if permission not in user_permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission '{permission.value}' required",
+        )
+    return current_user
+
+
+def enforce_permissions(
+    current_user: AuthPrincipal,
+    *permissions: Permission,
+) -> AuthPrincipal:
+    """Enforce every permission in an all-of capability requirement.
+
+    Args:
+        current_user: Authenticated principal whose token grant is enforced.
+        permissions: Permissions that must all be effective.
+
+    Returns:
+        The authenticated principal when every permission is effective.
+
+    Raises:
+        HTTPException: 403 for the first missing permission.
+    """
+    for permission in permissions:
+        enforce_permission(current_user, permission)
+    return current_user
+
+
+def require_any_permission(
+    *permissions: Permission,
+) -> PermissionDependency:
+    """Create a dependency requiring at least one effective permission.
+
+    This dependency is an early boundary for routes whose exact capability
+    depends on a target that must first be classified through read-only data.
+
+    Args:
+        permissions: Alternative permissions, one of which must be effective.
+
+    Returns:
+        Dependency function that validates the any-of requirement.
+
+    Raises:
+        ValueError: When no permission alternatives are supplied.
+    """
+    if not permissions:
+        raise ValueError("At least one permission is required")
+
+    def permission_checker(
+        current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
+    ) -> AuthPrincipal:
         user_permissions = get_effective_permissions(
             current_user.role,
             current_user.permissions,
             current_user.permission_scope_version,
         )
-        if permission not in user_permissions:
+        if user_permissions.isdisjoint(permissions):
+            required = ", ".join(f"'{permission.value}'" for permission in permissions)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Permission '{permission.value}' required",
+                detail=f"Any of permissions {required} required",
             )
         return current_user
 

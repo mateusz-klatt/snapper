@@ -741,7 +741,10 @@ def _to_comparison_data(row: BacktestComparisonRow) -> BacktestComparisonData:
 async def create_comparison(
     request: Request,
     command: Annotated[BacktestCompareRequest, Depends(json_body(BacktestCompareRequest))],
-    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_BACKTESTS))],
+    principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.CREATE_BACKTEST_COMPARISONS)),
+    ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> BacktestComparisonResponse:
     """Create (or return idempotent existing) backtest comparison.
@@ -760,7 +763,7 @@ async def create_comparison(
     Args:
         request: FastAPI request (provides REST tracker).
         command: Validated compare-request envelope.
-        principal: Authenticated caller with READ_BACKTESTS.
+        principal: Authenticated caller with CREATE_BACKTEST_COMPARISONS.
         repo: Database repository dependency.
 
     Returns:

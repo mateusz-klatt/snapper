@@ -18,9 +18,11 @@ from fastapi import Request
 
 from snapper.application.services.settings import SettingsService
 from snapper.auth.dependencies import CSRFManager
+from snapper.auth.dependencies import enforce_permissions
 from snapper.auth.dependencies import get_csrf_manager
 from snapper.auth.dependencies import get_csrf_token
 from snapper.auth.dependencies import get_current_user
+from snapper.auth.dependencies import require_any_permission
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
@@ -1024,7 +1026,7 @@ class TestTokenManager:
         assert old_refresh_result is not None
 
     def test_refresh_tokens_preserves_narrow_and_empty_scopes(self) -> None:
-        """Refresh rotation never restores permissions omitted by the token grant."""
+        """Refresh preserves narrowing plus the structural global-scope grant."""
         token_manager = TokenManager()
         user = AuthPrincipal(username="scoped-refresh", role=UserRole.ADMIN)
 
@@ -1040,8 +1042,11 @@ class TestTokenManager:
         assert refreshed_empty is not None
         narrow_claims = token_manager.decode_fresh_token(refreshed_narrow.access_token)
         empty_claims = token_manager.decode_fresh_token(refreshed_empty.access_token)
-        assert narrow_claims.permissions == [Permission.READ_MARKET_DATA.value]
-        assert empty_claims.permissions == []
+        assert set(narrow_claims.permissions or []) == {
+            Permission.IMPERSONATE_OPERATOR.value,
+            Permission.READ_MARKET_DATA.value,
+        }
+        assert empty_claims.permissions == [Permission.IMPERSONATE_OPERATOR.value]
 
     def test_refresh_tokens_legacy_empty_claim_falls_back_to_full_role(self) -> None:
         """An in-flight legacy refresh token retains its historical semantics.
@@ -1092,6 +1097,9 @@ class TestTokenManager:
             Permission.READ_AI_REVIEWS,
             Permission.READ_AI_INTEGRATION,
             Permission.MANAGE_AI_INTEGRATION,
+            Permission.MANAGE_RUNTIME_DIAGNOSTICS,
+            Permission.CREATE_BACKTEST_COMPARISONS,
+            Permission.CONFIGURE_STRATEGIES,
         }
         old_permission_values = [
             permission.value
@@ -1681,17 +1689,17 @@ class TestGetCurrentUser:
             assert request.state.token_data == token_data
             mock_token_manager.verify_token_with_db.assert_awaited_once_with("valid_token", repo)
 
-    async def test_get_current_user_populates_delegate_public_id_for_ai_delegate(
+    async def test_get_current_user_populates_delegate_public_id_for_downscoped_ai_delegate(
         self,
     ) -> None:
-        """AI_DELEGATE role -> ``AuthPrincipal.delegate_public_id`` populated.
+        """Narrow AI delegate identity does not depend on a mutation grant.
 
         The AI_DELEGATE auth chain MUST forward
         ``ai_delegates.public_id`` onto the principal so downstream
         routes (``GET /api/ai-reviews/pending``, the WS hysteresis
         hooks) can key on the delegate identity without re-querying.
 
-        Given a valid AI_DELEGATE token,
+        Given a valid AI_DELEGATE token retaining only READ_SIGNALS,
         When get_current_user resolves the principal,
         Then it issues a delegate-row lookup keyed by user_public_id
         and sets ``delegate_public_id`` from the resulting row.
@@ -1705,7 +1713,8 @@ class TestGetCurrentUser:
             sub="user-delegate-1",
             username="delegate-1",
             role=UserRole.AI_DELEGATE,
-            permissions=["create:orders", "read:signals"],
+            permissions=[Permission.READ_SIGNALS.value],
+            permission_scope_version=3,
             exp=now + 3600,
             iat=now,
             jti="jwt-d",
@@ -1783,15 +1792,14 @@ class TestGetCurrentUser:
         assert request.state.token_data == token_data
         repo.get_ai_delegate_by_user_public_id.assert_awaited_once_with("user-reviewer-1")
 
-    async def test_get_current_user_skips_delegate_lookup_for_non_delegate_role(
+    async def test_get_current_user_skips_lifecycle_lookup_without_stable_user_id(
         self,
     ) -> None:
-        """Non-AI_DELEGATE roles -> ``delegate_public_id`` stays ``None``.
+        """Lifecycle identity resolution requires a stable user key.
 
         Given a valid OPERATOR token,
         When get_current_user resolves the principal,
-        Then no AiDelegate lookup is performed and the delegate field
-        remains ``None``.
+        Then no unkeyed lookup runs and the delegate field remains ``None``.
         """
         request = Mock(spec=Request)
         request.state = Mock()
@@ -1974,6 +1982,66 @@ class TestRequirePermission:
 
         assert result == user
 
+    def test_enforce_permissions_requires_every_permission(self) -> None:
+        """The reusable all-of guard rejects the first omitted capability."""
+        user = AuthPrincipal(
+            username="scoped-operator",
+            role=UserRole.OPERATOR,
+            permissions=[Permission.START_STRATEGIES.value],
+            permission_scope_version=3,
+        )
+
+        assert enforce_permissions(user, Permission.START_STRATEGIES) is user
+        with pytest.raises(HTTPException) as exc_info:
+            enforce_permissions(
+                user,
+                Permission.START_STRATEGIES,
+                Permission.STOP_STRATEGIES,
+            )
+
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "Permission 'stop:strategies' required"
+
+    def test_require_any_permission_accepts_one_effective_alternative(self) -> None:
+        """The reusable any-of dependency accepts a retained alternative."""
+        user = AuthPrincipal(
+            username="scoped-operator",
+            role=UserRole.OPERATOR,
+            permissions=[Permission.STOP_STRATEGIES.value],
+            permission_scope_version=3,
+        )
+        checker = require_any_permission(
+            Permission.START_STRATEGIES,
+            Permission.STOP_STRATEGIES,
+        )
+
+        assert checker(current_user=user) is user
+
+    def test_require_any_permission_rejects_disjoint_scope(self) -> None:
+        """The reusable any-of dependency rejects a disjoint token grant."""
+        user = AuthPrincipal(
+            username="scoped-operator",
+            role=UserRole.OPERATOR,
+            permissions=[Permission.READ_PROCESSES.value],
+            permission_scope_version=3,
+        )
+        checker = require_any_permission(
+            Permission.START_STRATEGIES,
+            Permission.MANAGE_PROCESSES,
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            checker(current_user=user)
+
+        assert exc_info.value.status_code == 403
+        assert "start:strategies" in exc_info.value.detail
+        assert "manage:processes" in exc_info.value.detail
+
+    def test_require_any_permission_rejects_empty_requirement(self) -> None:
+        """An empty any-of dependency is a configuration error."""
+        with pytest.raises(ValueError, match="At least one permission"):
+            require_any_permission()
+
 
 class TestResourcePermissions:
     """Tests for RESOURCE_PERMISSIONS mapping."""
@@ -2102,7 +2170,11 @@ class TestCapabilityPermissionSets:
             Permission.READ_AI_REVIEWS,
             Permission.READ_AI_INTEGRATION,
             Permission.MANAGE_AI_INTEGRATION,
+            Permission.MANAGE_RUNTIME_DIAGNOSTICS,
+            Permission.CREATE_BACKTEST_COMPARISONS,
         }
+        if role == UserRole.OPERATOR:
+            version_three_additions.add(Permission.CONFIGURE_STRATEGIES)
         return ROLE_PERMISSIONS[role] - version_three_additions
 
     def test_permission_values_are_dedicated_to_their_capabilities(self) -> None:
@@ -2111,6 +2183,8 @@ class TestCapabilityPermissionSets:
         assert Permission.READ_AI_REVIEWS.value == "read:ai_reviews"
         assert Permission.READ_AI_INTEGRATION.value == "read:ai_integration"
         assert Permission.MANAGE_AI_INTEGRATION.value == "manage:ai_integration"
+        assert Permission.MANAGE_RUNTIME_DIAGNOSTICS.value == "manage:runtime_diagnostics"
+        assert Permission.CREATE_BACKTEST_COMPARISONS.value == "create:backtest_comparisons"
 
     def test_new_role_grants_preserve_ai_roles_and_separate_viewer_mutations(self) -> None:
         """Only viewer, operator, and admin receive the newly introduced grants.
@@ -2146,6 +2220,37 @@ class TestCapabilityPermissionSets:
         }
         assert operator_reads <= ROLE_PERMISSIONS[UserRole.VIEWER]
 
+    @pytest.mark.parametrize(
+        ("role", "comparison_allowed", "diagnostics_allowed"),
+        [
+            pytest.param(UserRole.AI_RESEARCHER, False, False, id="researcher"),
+            pytest.param(UserRole.AI_REVIEWER, True, True, id="reviewer"),
+            pytest.param(UserRole.AI_DELEGATE, True, True, id="delegate"),
+            pytest.param(UserRole.VIEWER, False, False, id="viewer"),
+            pytest.param(UserRole.OPERATOR, True, True, id="operator"),
+            pytest.param(UserRole.ADMIN, True, True, id="admin"),
+        ],
+    )
+    def test_dedicated_mutation_grants_preserve_baseline_except_viewer(
+        self,
+        role: UserRole,
+        comparison_allowed: bool,
+        diagnostics_allowed: bool,
+    ) -> None:
+        """Dedicated writes preserve historical readers except read-only viewer."""
+        permissions = ROLE_PERMISSIONS[role]
+
+        assert (Permission.CREATE_BACKTEST_COMPARISONS in permissions) is comparison_allowed
+        assert (Permission.MANAGE_RUNTIME_DIAGNOSTICS in permissions) is diagnostics_allowed
+
+    def test_operator_holds_each_strategy_lifecycle_permission(self) -> None:
+        """Operator's established strategy controls have dedicated grants."""
+        assert {
+            Permission.CONFIGURE_STRATEGIES,
+            Permission.START_STRATEGIES,
+            Permission.STOP_STRATEGIES,
+        } <= ROLE_PERMISSIONS[UserRole.OPERATOR]
+
     def test_role_grants_permission_reads_only_the_named_permission_set(self) -> None:
         """Role capability projection delegates exclusively to ROLE_PERMISSIONS."""
         assert role_grants_permission(UserRole.VIEWER, Permission.READ_AI_REVIEWS) is True
@@ -2153,7 +2258,7 @@ class TestCapabilityPermissionSets:
 
     @pytest.mark.parametrize(
         "role",
-        [UserRole.VIEWER, UserRole.OPERATOR, UserRole.ADMIN],
+        list(UserRole),
     )
     def test_v2_full_role_claim_upgrades_to_current_role(self, role: UserRole) -> None:
         """An exact full v2 grant inherits its role's newly added permissions."""
@@ -2163,8 +2268,22 @@ class TestCapabilityPermissionSets:
 
         assert effective == ROLE_PERMISSIONS[role]
 
-    @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.ADMIN])
-    def test_v2_narrow_signal_scope_maps_to_ai_review_read(self, role: UserRole) -> None:
+    @pytest.mark.parametrize(
+        ("role", "structural"),
+        [
+            pytest.param(UserRole.OPERATOR, set(), id="operator"),
+            pytest.param(
+                UserRole.ADMIN,
+                {Permission.IMPERSONATE_OPERATOR},
+                id="admin",
+            ),
+        ],
+    )
+    def test_v2_narrow_signal_scope_maps_to_ai_review_read(
+        self,
+        role: UserRole,
+        structural: set[Permission],
+    ) -> None:
         """Narrow operational v2 signal grants retain equivalent review visibility."""
         effective = get_effective_permissions(
             role,
@@ -2172,15 +2291,26 @@ class TestCapabilityPermissionSets:
             2,
         )
 
-        assert effective == {
+        assert effective == structural | {
             Permission.READ_SIGNALS,
             Permission.READ_AI_REVIEWS,
         }
 
-    @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.ADMIN])
+    @pytest.mark.parametrize(
+        ("role", "structural"),
+        [
+            pytest.param(UserRole.OPERATOR, set(), id="operator"),
+            pytest.param(
+                UserRole.ADMIN,
+                {Permission.IMPERSONATE_OPERATOR},
+                id="admin",
+            ),
+        ],
+    )
     def test_v2_narrow_process_scope_maps_to_replacement_capabilities(
         self,
         role: UserRole,
+        structural: set[Permission],
     ) -> None:
         """Narrow operational v2 process grants retain their old effective surface."""
         effective = get_effective_permissions(
@@ -2189,12 +2319,123 @@ class TestCapabilityPermissionSets:
             2,
         )
 
-        assert effective == {
+        assert effective == structural | {
             Permission.MANAGE_PROCESSES,
             Permission.READ_PROCESSES,
             Permission.READ_AI_INTEGRATION,
             Permission.MANAGE_AI_INTEGRATION,
+            Permission.CONFIGURE_STRATEGIES,
+            Permission.START_STRATEGIES,
+            Permission.STOP_STRATEGIES,
         }
+
+    @pytest.mark.parametrize(
+        ("role", "expected"),
+        [
+            pytest.param(UserRole.AI_RESEARCHER, set(), id="researcher"),
+            pytest.param(
+                UserRole.AI_REVIEWER,
+                {
+                    Permission.READ_BACKTESTS,
+                    Permission.CREATE_BACKTEST_COMPARISONS,
+                },
+                id="reviewer",
+            ),
+            pytest.param(
+                UserRole.AI_DELEGATE,
+                {
+                    Permission.READ_BACKTESTS,
+                    Permission.CREATE_BACKTEST_COMPARISONS,
+                },
+                id="delegate",
+            ),
+            pytest.param(UserRole.VIEWER, {Permission.READ_BACKTESTS}, id="viewer"),
+            pytest.param(
+                UserRole.OPERATOR,
+                {
+                    Permission.READ_BACKTESTS,
+                    Permission.CREATE_BACKTEST_COMPARISONS,
+                },
+                id="operator",
+            ),
+            pytest.param(
+                UserRole.ADMIN,
+                {
+                    Permission.IMPERSONATE_OPERATOR,
+                    Permission.READ_BACKTESTS,
+                    Permission.CREATE_BACKTEST_COMPARISONS,
+                },
+                id="admin",
+            ),
+        ],
+    )
+    def test_v2_narrow_backtest_read_preserves_comparison_access(
+        self,
+        role: UserRole,
+        expected: set[Permission],
+    ) -> None:
+        """Legacy compare writers retain that action without widening viewer."""
+        effective = get_effective_permissions(
+            role,
+            [Permission.READ_BACKTESTS.value],
+            2,
+        )
+
+        assert effective == expected
+
+    @pytest.mark.parametrize(
+        ("role", "expected"),
+        [
+            pytest.param(UserRole.AI_RESEARCHER, set(), id="researcher"),
+            pytest.param(
+                UserRole.AI_REVIEWER,
+                {
+                    Permission.READ_SYSTEM_STATUS,
+                    Permission.MANAGE_RUNTIME_DIAGNOSTICS,
+                },
+                id="reviewer",
+            ),
+            pytest.param(
+                UserRole.AI_DELEGATE,
+                {
+                    Permission.READ_SYSTEM_STATUS,
+                    Permission.MANAGE_RUNTIME_DIAGNOSTICS,
+                },
+                id="delegate",
+            ),
+            pytest.param(UserRole.VIEWER, {Permission.READ_SYSTEM_STATUS}, id="viewer"),
+            pytest.param(
+                UserRole.OPERATOR,
+                {
+                    Permission.READ_SYSTEM_STATUS,
+                    Permission.MANAGE_RUNTIME_DIAGNOSTICS,
+                },
+                id="operator",
+            ),
+            pytest.param(
+                UserRole.ADMIN,
+                {
+                    Permission.IMPERSONATE_OPERATOR,
+                    Permission.READ_SYSTEM_STATUS,
+                    Permission.MANAGE_RUNTIME_DIAGNOSTICS,
+                },
+                id="admin",
+            ),
+        ],
+    )
+    def test_v2_narrow_status_read_preserves_runtime_diagnostics_access(
+        self,
+        role: UserRole,
+        expected: set[Permission],
+    ) -> None:
+        """Legacy diagnostics writers retain that action without widening viewer."""
+        effective = get_effective_permissions(
+            role,
+            [Permission.READ_SYSTEM_STATUS.value],
+            2,
+        )
+
+        assert effective == expected
 
     def test_v2_narrow_viewer_scope_does_not_inherit_new_reads(self) -> None:
         """An intentionally narrowed viewer remains narrower than the full role."""
@@ -2222,6 +2463,28 @@ class TestCapabilityPermissionSets:
             Permission.READ_SIGNALS,
             Permission.MANAGE_PROCESSES,
         }
+
+    @pytest.mark.parametrize("scope_version", [1, 2, 3])
+    def test_admin_structural_scope_cannot_be_downscoped(
+        self,
+        scope_version: int,
+    ) -> None:
+        """Explicit admin scopes retain the historically structural grant."""
+        assert get_effective_permissions(UserRole.ADMIN, [], scope_version) == {
+            Permission.IMPERSONATE_OPERATOR
+        }
+
+    @pytest.mark.parametrize("role", [UserRole.VIEWER, UserRole.OPERATOR])
+    def test_forged_structural_scope_cannot_exceed_named_set(self, role: UserRole) -> None:
+        """A token cannot acquire structural global scope outside its role set."""
+        assert (
+            get_effective_permissions(
+                role,
+                [Permission.IMPERSONATE_OPERATOR.value],
+                3,
+            )
+            == set()
+        )
 
     def test_absent_permission_claim_resolves_full_current_role(self) -> None:
         """A claimless historical token preserves full-role semantics."""

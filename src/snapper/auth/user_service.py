@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy import update
 
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import role_grants_permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.user import UserProfile
@@ -149,16 +149,20 @@ class UserService:
         memberships = await self.repository.get_user_operator_memberships(
             user_public_id=user.public_id, as_of=now
         )
-        if role_grants_permission(user.role, Permission.IMPERSONATE_OPERATOR):
+        if has_effective_permission(
+            user.role,
+            None,
+            None,
+            Permission.IMPERSONATE_OPERATOR,
+        ):
             operators = await self.repository.list_active_operators(now)
             operator_public_ids = [op["public_id"] for op in operators]
         else:
             operator_public_ids = [m["operator_public_id"] for m in memberships]
         delegate_public_id: str | None = None
-        if role_grants_permission(user.role, Permission.SUBMIT_AI_REVIEW_DECISION):
-            delegate_row = await self.repository.get_ai_delegate_by_user_public_id(user.public_id)
-            if delegate_row is not None:
-                delegate_public_id = delegate_row["public_id"]
+        delegate_row = await self.repository.get_ai_delegate_by_user_public_id(user.public_id)
+        if delegate_row is not None:
+            delegate_public_id = delegate_row["public_id"]
         primary_match = next((m for m in memberships if m["is_primary"]), None)
         primary_operator_public_id = (
             primary_match["operator_public_id"] if primary_match is not None else ""
@@ -253,7 +257,12 @@ class UserService:
         memberships = await self.repository.get_user_operator_memberships(
             user_public_id=profile.public_id, as_of=now
         )
-        if role_grants_permission(profile.role, Permission.IMPERSONATE_OPERATOR):
+        if has_effective_permission(
+            profile.role,
+            None,
+            None,
+            Permission.IMPERSONATE_OPERATOR,
+        ):
             operators = await self.repository.list_active_operators(now)
             operator_public_ids = [op["public_id"] for op in operators]
         else:

@@ -55,7 +55,7 @@ from snapper.application.ai_review.service import get_ai_review_service
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import role_grants_permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.core.json_types import JsonObject
@@ -548,7 +548,12 @@ async def list_ai_reviews_route(
     """
     operator_scope = (
         None
-        if role_grants_permission(principal.role, Permission.IMPERSONATE_OPERATOR)
+        if has_effective_permission(
+            principal.role,
+            principal.permissions,
+            principal.permission_scope_version,
+            Permission.IMPERSONATE_OPERATOR,
+        )
         else principal.operator_public_ids
     )
     rows = await repo.list_ai_reviews(

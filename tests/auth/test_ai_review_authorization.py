@@ -41,7 +41,9 @@ def test_ai_reviewer_role_and_grant_are_exact() -> None:
         Permission.READ_STRATEGIES,
         Permission.READ_SIGNALS,
         Permission.READ_SYSTEM_STATUS,
+        Permission.MANAGE_RUNTIME_DIAGNOSTICS,
         Permission.READ_BACKTESTS,
+        Permission.CREATE_BACKTEST_COMPARISONS,
         Permission.SUBMIT_AI_REVIEW_DECISION,
     }
 
@@ -93,15 +95,16 @@ def test_ai_delegate_holds_ai_review_decision_permission() -> None:
         "converted_reads_allowed",
         "process_mutations_allowed",
         "ai_integration_mutations_allowed",
-        "review_decisions_allowed",
+        "rest_review_decisions_allowed",
+        "submission_capability_allowed",
     ),
     [
-        pytest.param(UserRole.AI_RESEARCHER, False, False, False, False, id="researcher"),
-        pytest.param(UserRole.AI_REVIEWER, False, False, False, True, id="reviewer"),
-        pytest.param(UserRole.AI_DELEGATE, False, False, False, True, id="delegate"),
-        pytest.param(UserRole.VIEWER, True, False, False, False, id="viewer"),
-        pytest.param(UserRole.OPERATOR, True, True, True, False, id="operator"),
-        pytest.param(UserRole.ADMIN, True, True, True, True, id="admin"),
+        pytest.param(UserRole.AI_RESEARCHER, False, False, False, False, False, id="researcher"),
+        pytest.param(UserRole.AI_REVIEWER, False, False, False, False, True, id="reviewer"),
+        pytest.param(UserRole.AI_DELEGATE, False, False, False, True, True, id="delegate"),
+        pytest.param(UserRole.VIEWER, True, False, False, False, False, id="viewer"),
+        pytest.param(UserRole.OPERATOR, True, True, True, True, False, id="operator"),
+        pytest.param(UserRole.ADMIN, True, True, True, True, True, id="admin"),
     ],
 )
 def test_converted_surface_permission_matrix_is_exact(
@@ -109,7 +112,8 @@ def test_converted_surface_permission_matrix_is_exact(
     converted_reads_allowed: bool,
     process_mutations_allowed: bool,
     ai_integration_mutations_allowed: bool,
-    review_decisions_allowed: bool,
+    rest_review_decisions_allowed: bool,
+    submission_capability_allowed: bool,
 ) -> None:
     """Pin the effective access matrix for all converted authorization surfaces.
 
@@ -137,7 +141,10 @@ def test_converted_surface_permission_matrix_is_exact(
     assert (
         Permission.MANAGE_AI_INTEGRATION in role_permissions
     ) is ai_integration_mutations_allowed
-    assert (Permission.SUBMIT_AI_REVIEW_DECISION in role_permissions) is review_decisions_allowed
+    assert (Permission.CREATE_ORDERS in role_permissions) is rest_review_decisions_allowed
+    assert (
+        Permission.SUBMIT_AI_REVIEW_DECISION in role_permissions
+    ) is submission_capability_allowed
 
 
 def test_viewer_has_no_operational_or_administrative_mutation() -> None:
@@ -159,11 +166,13 @@ def test_viewer_has_no_operational_or_administrative_mutation() -> None:
         Permission.CONFIGURE_STRATEGIES,
         Permission.MANAGE_PROCESSES,
         Permission.MANAGE_AI_INTEGRATION,
+        Permission.MANAGE_RUNTIME_DIAGNOSTICS,
         Permission.CONFIGURE_SYSTEM,
         Permission.MANAGE_USERS,
         Permission.MANAGE_WALLET_CREDENTIALS,
         Permission.MANAGE_SCOPE_GRANTS,
         Permission.IMPERSONATE_OPERATOR,
+        Permission.CREATE_BACKTEST_COMPARISONS,
         Permission.MANAGE_BACKTESTS,
         Permission.MANAGE_PAIRED_EXECUTION,
     }

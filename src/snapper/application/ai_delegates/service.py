@@ -31,7 +31,7 @@ from snapper.api.schemas.ai_delegates import DelegateCreateBody
 from snapper.api.schemas.ai_delegates import DelegateCreatedPayload
 from snapper.api.schemas.ai_delegates import DelegateRead
 from snapper.auth.domain.permissions import Permission
-from snapper.auth.domain.permissions import role_grants_permission
+from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
@@ -394,7 +394,12 @@ class DelegateService:
         """
         explicit = body.operator_public_id
         if explicit is not None:
-            if role_grants_permission(owner.role, Permission.IMPERSONATE_OPERATOR):
+            if has_effective_permission(
+                owner.role,
+                owner.permissions,
+                owner.permission_scope_version,
+                Permission.IMPERSONATE_OPERATOR,
+            ):
                 return explicit
             if explicit not in owner.operator_public_ids:
                 raise DelegateOperatorBindingError(

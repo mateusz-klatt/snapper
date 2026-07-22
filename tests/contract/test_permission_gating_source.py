@@ -28,6 +28,7 @@ _ROLE_HELPERS = frozenset(
         "minimum_role",
         "require_role",
         "requirerole",
+        "role_grants_permission",
         "role_allows",
         "role_at_least",
     }
@@ -480,7 +481,13 @@ def _scan_python() -> list[Finding]:
         for node in ast.walk(tree):
             kind = ""
             if isinstance(node, ast.Call) and _call_name(node).lower() in _ROLE_HELPERS:
-                kind = "role-check-helper"
+                helper_name = _call_name(node).lower()
+                is_canonical_role_projection = (
+                    relative == "src/snapper/auth/domain/permissions.py"
+                    and helper_name == "role_grants_permission"
+                )
+                if not is_canonical_role_projection:
+                    kind = "role-check-helper"
             elif isinstance(node, ast.Compare) and _comparison_is_auth_role_decision(node):
                 kind = "role-comparison"
             elif isinstance(node, ast.Match) and _is_role_expression(node.subject):
@@ -594,7 +601,12 @@ def _format_occurrences(findings: Iterable[Finding]) -> str:
 
 
 def test_capability_decisions_never_branch_on_roles() -> None:
-    """Every executable role decision must be a reviewed legitimate exception."""
+    """Reject capability decisions that branch on an authentication role.
+
+    Given: Every handwritten backend, frontend, iOS, and MCP production source,
+    When: Executable role decisions are compared with the reviewed exceptions,
+    Then: Only mapping, display, role CRUD, and process-topology uses remain.
+    """
     findings = [*_scan_python(), *_scan_foreign_sources()]
     observed = Counter(finding.signature for finding in findings)
     allowed = Counter(item.signature for item in _ALLOWED_FINDINGS)
