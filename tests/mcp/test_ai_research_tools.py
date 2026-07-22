@@ -174,7 +174,12 @@ def _object(value: JsonValue) -> JsonObject:
 async def test_submit_market_view_uses_inline_sources_and_server_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A valid authored payload persists inline sources at server time."""
+    """A valid authored payload persists inline sources at server time.
+
+    Given: An authorized server with a repository, a frozen clock, and a valid payload.
+    When: The submit_market_view tool receives the payload with its inline source.
+    Then: It persists the exact view and source at the server time and returns success.
+    """
     repository = _repository()
     server = _server(repository, _claims())
     server_clock = _freeze_server_clock(monkeypatch)
@@ -227,7 +232,12 @@ async def test_submit_market_view_uses_inline_sources_and_server_clock(
 
 @pytest.mark.asyncio
 async def test_submit_market_view_rejects_forged_submitted_at() -> None:
-    """Strict payload validation rejects a caller-authored submission clock."""
+    """Strict payload validation rejects a caller-authored submission clock.
+
+    Given: A valid market-view payload extended with a caller-authored submitted_at.
+    When: The payload is passed to the submit_market_view tool.
+    Then: It returns invalid_market_view for submitted_at without inserting the view.
+    """
     repository = _repository()
     server = _server(repository, _claims())
 
@@ -249,7 +259,12 @@ async def test_submit_market_view_rejects_forged_submitted_at() -> None:
 
 @pytest.mark.asyncio
 async def test_submit_market_view_denies_role_without_permission() -> None:
-    """A role without SUBMIT_MARKET_VIEW receives a permission envelope."""
+    """A role without SUBMIT_MARKET_VIEW receives a permission envelope.
+
+    Given: An AI delegate server whose claims lack permission to submit market views.
+    When: The submit_market_view tool receives a valid payload.
+    Then: It returns permission_denied without asking the repository to insert the view.
+    """
     repository = _repository()
     server = _server(repository, _claims(role=UserRole.AI_DELEGATE))
 
@@ -269,7 +284,12 @@ async def test_submit_market_view_denies_role_without_permission() -> None:
 
 @pytest.mark.asyncio
 async def test_submit_market_view_reports_uninitialized_repository() -> None:
-    """A pre-lifespan repository returns service_unavailable."""
+    """A pre-lifespan repository returns service_unavailable.
+
+    Given: An authorized server whose repository dependency is not initialized.
+    When: The submit_market_view tool receives a valid payload.
+    Then: It returns an unsuccessful service_unavailable envelope.
+    """
     server = _server(None, _claims())
 
     result = await server._tool_manager.call_tool(
@@ -310,7 +330,12 @@ async def test_submit_market_view_maps_known_repository_rejections(
     repository_message: str,
     expected_error_code: str,
 ) -> None:
-    """Every repository validation outcome remains a clean envelope."""
+    """Every repository validation outcome remains a clean envelope.
+
+    Given: A repository that raises one parametrized known market-view rejection.
+    When: The submit_market_view tool receives an otherwise valid payload.
+    Then: It returns the mapped error code and preserves the repository message as reason.
+    """
     repository = _repository(insert_error=ValueError(repository_message))
     server = _server(repository, _claims())
 
@@ -331,7 +356,12 @@ async def test_submit_market_view_maps_known_repository_rejections(
 
 @pytest.mark.asyncio
 async def test_submit_market_view_does_not_mask_unknown_repository_error() -> None:
-    """An unknown repository ValueError remains observable through FastMCP."""
+    """An unknown repository ValueError remains observable through FastMCP.
+
+    Given: A repository that raises an unexpected market-view ValueError on insertion.
+    When: The submit_market_view tool receives a valid payload.
+    Then: FastMCP raises a ToolError containing the unexpected repository failure message.
+    """
     repository = _repository(insert_error=ValueError("unexpected market view failure"))
     server = _server(repository, _claims())
 
@@ -349,7 +379,12 @@ async def test_submit_market_view_does_not_mask_unknown_repository_error() -> No
 async def test_get_latest_research_returns_full_artifact_at_server_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The latest read returns every artifact and source field."""
+    """The latest read returns every artifact and source field.
+
+    Given: A repository with a complete latest market view and a frozen server clock.
+    When: The get_latest_research tool is called without arguments.
+    Then: It returns the exact serialized artifact and queries replay at the server time.
+    """
     repository = _repository(latest=_market_view())
     server = _server(repository, _claims())
     server_clock = _freeze_server_clock(monkeypatch)
@@ -401,7 +436,12 @@ async def test_get_latest_research_returns_full_artifact_at_server_clock(
 async def test_get_latest_research_returns_none_cleanly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No eligible view is a successful read with a null artifact."""
+    """No eligible view is a successful read with a null artifact.
+
+    Given: A repository with no latest market view and a frozen server clock.
+    When: The get_latest_research tool is called without arguments.
+    Then: It returns success with a null market_view after querying at the server time.
+    """
     repository = _repository(latest=None)
     server = _server(repository, _claims())
     _freeze_server_clock(monkeypatch)
@@ -418,7 +458,12 @@ async def test_get_latest_research_returns_none_cleanly(
 
 @pytest.mark.asyncio
 async def test_get_latest_research_denies_narrow_token_without_permission() -> None:
-    """A token without READ_MARKET_VIEWS receives a permission envelope."""
+    """A token without READ_MARKET_VIEWS receives a permission envelope.
+
+    Given: A server token limited to READ_MARKET_DATA despite an available latest view.
+    When: The get_latest_research tool is called without arguments.
+    Then: It returns permission_denied without querying the repository for a market view.
+    """
     repository = _repository(latest=_market_view())
     claims = _claims(permissions=[Permission.READ_MARKET_DATA.value])
     server = _server(repository, claims)
@@ -433,7 +478,12 @@ async def test_get_latest_research_denies_narrow_token_without_permission() -> N
 
 @pytest.mark.asyncio
 async def test_get_latest_research_reports_uninitialized_repository() -> None:
-    """A pre-lifespan repository returns service_unavailable."""
+    """A pre-lifespan repository returns service_unavailable.
+
+    Given: An authorized server whose repository dependency is not initialized.
+    When: The get_latest_research tool is called without arguments.
+    Then: It returns an unsuccessful service_unavailable envelope.
+    """
     server = _server(None, _claims())
 
     result = await server._tool_manager.call_tool("get_latest_research", {})
