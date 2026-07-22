@@ -552,6 +552,41 @@ class TestDelegateReadScopes:
     """Read scopes widen by operator membership without widening mutations."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("owner_public_id", "operator_public_ids"),
+        [
+            (None, None),
+            ("creator", ["operator-visible"]),
+        ],
+    )
+    async def test_list_and_detail_reject_missing_or_conflicting_read_scopes(
+        self,
+        repo: SQLAlchemyRepository,
+        owner_public_id: str | None,
+        operator_public_ids: list[str] | None,
+    ) -> None:
+        """Exactly one creator or membership scope is required for every read."""
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+
+        with pytest.raises(
+            InvalidOwnerPrincipalError,
+            match="Exactly one AI delegate read scope must be supplied",
+        ):
+            await service.list_delegates(
+                owner_public_id=owner_public_id,
+                operator_public_ids=operator_public_ids,
+            )
+        with pytest.raises(
+            InvalidOwnerPrincipalError,
+            match="Exactly one AI delegate read scope must be supplied",
+        ):
+            await service.get_delegate(
+                public_id="delegate",
+                owner_public_id=owner_public_id,
+                operator_public_ids=operator_public_ids,
+            )
+
+    @pytest.mark.asyncio
     async def test_manager_list_and_detail_remain_creator_owned(
         self,
         repo: SQLAlchemyRepository,
@@ -632,6 +667,46 @@ class TestDelegateReadScopes:
                 public_id=hidden.delegate.public_id,
                 operator_public_ids=["operator-visible"],
             )
+
+    @pytest.mark.asyncio
+    async def test_membership_scope_deduplicates_multi_operator_delegate(
+        self,
+        repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A delegate joined through two visible memberships appears only once."""
+        await _seed_owner(repo, public_id="creator-multi", username="creator-multi")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        monkeypatch.setattr(
+            "snapper.application.ai_delegates.service._now_for_join",
+            lambda: datetime.now(UTC) + _td(minutes=1),
+        )
+        created = await service.create_delegate(
+            owner=_make_owner_principal(
+                "creator-multi",
+                operator_public_id="operator-primary",
+            ),
+            body=DelegateCreateBody(label="Multi Scope", caps=DelegateCapsBody()),
+        )
+        now = datetime.now(UTC)
+        async with repo.session() as session:
+            session.add(
+                UserOperatorMembership(
+                    user_public_id=created.delegate.public_id,
+                    operator_public_id="operator-secondary",
+                    is_primary=False,
+                    timestamp=now,
+                    session_id="membership-test",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+
+        listed = await service.list_delegates(
+            operator_public_ids=["operator-primary", "operator-secondary"]
+        )
+
+        assert [delegate.public_id for delegate in listed] == [created.delegate.public_id]
 
     @pytest.mark.asyncio
     async def test_empty_and_unmatched_read_scopes_fail_closed(

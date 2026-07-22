@@ -19,6 +19,9 @@ from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.services.settings import CREDENTIAL_KEY_PATTERNS
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
+from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
@@ -133,6 +136,17 @@ def _make_rest_request() -> MagicMock:
     mock_request = MagicMock()
     mock_request.app.state.rest_tracker = SequenceTracker()
     return mock_request
+
+
+def _process_manager_principal() -> AuthPrincipal:
+    """Build a current-scope principal explicitly allowed to manage core processes."""
+    return AuthPrincipal(
+        username="process-manager",
+        role=UserRole.OPERATOR,
+        operator_public_ids=[],
+        permissions=[Permission.MANAGE_PROCESSES.value],
+        permission_scope_version=3,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -1697,7 +1711,7 @@ class TestProcessRoutesTagsFallback:
                 body=request,
                 factory=mock_factory,
                 settings=settings,
-                user=MagicMock(operator_public_ids=[]),
+                user=_process_manager_principal(),
                 repo=MagicMock(),
                 _csrf=None,
             )
@@ -1755,7 +1769,7 @@ class TestProcessRoutesTagsFallback:
                 body=request,
                 factory=mock_factory,
                 settings=settings,
-                user=MagicMock(operator_public_ids=[]),
+                user=_process_manager_principal(),
                 repo=MagicMock(),
                 _csrf=None,
             )
