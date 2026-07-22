@@ -18,6 +18,7 @@ from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.application.process_manager.spawner import _build_process_command
+from snapper.core.types import ProcessRoleEnum
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -109,7 +110,7 @@ class TestBuildProcessCommand:
     def test_command_contains_all_parts(self) -> None:
         """Verify _build_process_command includes all required arguments.
 
-        Given: Process configuration with class path and method,
+        Given: Process configuration with class path, method, and role,
         When: _build_process_command is called,
         Then: Command includes Python interpreter, module, and config.
         """
@@ -118,12 +119,14 @@ class TestBuildProcessCommand:
             class_path="my.module.MyClass",
             method="run",
             parameters={"key": "value"},
+            role=ProcessRoleEnum.CORE,
         )
         assert sys.executable in cmd
         assert "-m" in cmd
         assert "snapper.server.process_runner" in cmd
         assert "--config" in cmd
         assert any("my.module.MyClass" in arg for arg in cmd)
+        assert any('"role": "core"' in arg for arg in cmd)
 
 
 class TestSpawnerImmediateExitWithoutCapture:
@@ -821,7 +824,7 @@ def test_non_delegate_spawn_inherits_parent_environment(monkeypatch: MonkeyPatch
     When: The spawner launches the child through subprocess.Popen,
     Then: Popen receives no env keyword and inherits the parent byte-for-byte.
     """
-    monkeypatch.setenv("SNAPPER_LOG_FILE", "data/snapper-container-7.log")
+    monkeypatch.setenv("SNAPPER_LOG_FILE", "data/log/snapper-feed/snapper-feed.log")
     captured_kwargs: dict[str, object] = {}
 
     def fake_is_delegate_config(name: str, template_name: str | None) -> bool:
@@ -855,7 +858,7 @@ def test_delegate_spawn_receives_only_allowlisted_environment(
 
     Given: A delegate spawn from a coordinator environment containing secrets,
     When: The spawner launches the delegate through subprocess.Popen,
-    Then: Popen receives only the eight fixed allowlisted variables.
+    Then: Popen receives only the allowlist with a model-scoped logfile.
     """
     inherited_values = {
         "DB_URL": "postgresql+asyncpg://coordinator-secret",
@@ -919,7 +922,7 @@ def test_delegate_spawn_receives_only_allowlisted_environment(
         "PYTHONUNBUFFERED": "1",
         "PYTHONNOUSERSITE": "1",
         "PYTHONSAFEPATH": "1",
-        "SNAPPER_LOG_FILE": "data/snapper-delegate.log",
+        "SNAPPER_LOG_FILE": "data/log/delegate/research-primary/delegate.log",
         "STRATEGY_EXTRA_PACKAGES": "snapper_delegate",
     }
     assert environment == expected_environment

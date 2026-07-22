@@ -37,7 +37,7 @@ CREATE_NEW_PROCESS_GROUP = 0x00000200 if IS_WINDOWS else 0
 CTRL_BREAK_EVENT: Final[int] = getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM)
 SIGKILL_SIGNAL: Final[int] = getattr(signal, "SIGKILL", signal.SIGTERM)
 _DELEGATE_SAFE_PATH: Final[str] = "/opt/appenv/bin:/usr/local/bin:/usr/bin:/bin"
-_DELEGATE_LOG_FILE: Final[str] = "data/snapper-delegate.log"
+_DELEGATE_LOG_FILE: Final[str] = "data/log/delegate/{model_alias}/delegate.log"
 _preexec_setsid: Callable[[], None] | None
 _posix_killpg: Callable[[int, int], None] | None
 _posix_getpgid: Callable[[int], int] | None
@@ -52,8 +52,15 @@ else:
     _posix_getpgid = cast("Callable[[int], int]", _posix_os.getpgid)
 
 
-def _build_delegate_environment() -> dict[str, str]:
-    """Build the complete allowlisted environment for a delegate child."""
+def _build_delegate_environment(model_alias: str) -> dict[str, str]:
+    """Build the complete allowlisted environment for a delegate child.
+
+    Args:
+        model_alias: Validated route alias that scopes the delegate logfile.
+
+    Returns:
+        Exact environment exposed to the delegate subprocess.
+    """
     return {
         "PATH": _DELEGATE_SAFE_PATH,
         "LANG": "C.UTF-8",
@@ -61,7 +68,7 @@ def _build_delegate_environment() -> dict[str, str]:
         "PYTHONUNBUFFERED": "1",
         "PYTHONNOUSERSITE": "1",
         "PYTHONSAFEPATH": "1",
-        "SNAPPER_LOG_FILE": _DELEGATE_LOG_FILE,
+        "SNAPPER_LOG_FILE": _DELEGATE_LOG_FILE.format(model_alias=model_alias),
         "STRATEGY_EXTRA_PACKAGES": "snapper_delegate",
     }
 
@@ -342,7 +349,8 @@ class ProcessSpawnerService:
         self._validate_class_path(name, class_path, template_name)
         cmd = _build_process_command(name, class_path, method, parameters, template_name, role)
         if is_delegate_config(name, template_name):
-            process = self._launch_subprocess(cmd, _build_delegate_environment())
+            model_alias = cast(str, parameters["model_alias"])
+            process = self._launch_subprocess(cmd, _build_delegate_environment(model_alias))
         else:
             process = self._launch_subprocess(cmd)
         time.sleep(0.1)

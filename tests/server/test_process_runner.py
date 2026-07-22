@@ -324,7 +324,6 @@ def test_main_async_path_uses_listener_wrapper(monkeypatch: pytest.MonkeyPatch) 
             side_effect=_import_module,
         ),
     ):
-
         exit_code = process_runner.main()
     assert exit_code == 0
     assert captured.get("instance_start_called") is None
@@ -425,16 +424,17 @@ def test_main_logs_to_container_subprocess_logfile(monkeypatch: pytest.MonkeyPat
     When ``process_runner.main`` runs,
     Then setup_logging is called with that resolved logfile so the
         spawned publisher logs to its container's file rather than the
-        shared ``data/snapper.log``.
+        API service logfile.
     """
     captured: dict[str, object] = {}
 
     def _fake_setup_logging(*args: object, **kwargs: object) -> None:
         captured.update(kwargs)
 
-    monkeypatch.setenv("SNAPPER_LOG_FILE", "data/snapper-feed.log")
+    expected_logfile = "data/log/snapper-feed/snapper-feed.log"
+    monkeypatch.setenv("SNAPPER_LOG_FILE", expected_logfile)
     monkeypatch.setattr("snapper.server.process_runner.setup_logging", _fake_setup_logging)
     monkeypatch.setattr("snapper.server.process_runner.log_kraken_sdk_patches_status", lambda: None)
     monkeypatch.setattr("sys.argv", ["process_runner", "--config", "not-json"])
     assert process_runner.main() == 1
-    assert captured["logfile"] == "data/snapper-feed.log"
+    assert captured["logfile"] == expected_logfile

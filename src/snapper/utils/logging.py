@@ -50,6 +50,7 @@ __all__ = [
     "setup_logging",
     "set_log_context",
     "get_log_context",
+    "resolve_logfile_from_environment",
     "resolve_subprocess_logfile",
     "LOGFILE_ENV_VAR",
     "DEFAULT_LOGFILE",
@@ -364,7 +365,49 @@ def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | N
 
 
 LOGFILE_ENV_VAR = "SNAPPER_LOG_FILE"
-DEFAULT_LOGFILE = "data/snapper.log"
+DEFAULT_LOGFILE = "data/log/snapper/snapper.log"
+_LOGFILE_PATH_MAX_LENGTH = 4096
+
+
+def _is_valid_logfile_path(logfile: str) -> bool:
+    """Return whether a configured logfile has a safe filesystem shape.
+
+    Args:
+        logfile: Relative or absolute path supplied through the environment.
+
+    Returns:
+        True for a printable ``.log`` file path without traversal segments.
+    """
+    if (
+        not logfile
+        or len(logfile) > _LOGFILE_PATH_MAX_LENGTH
+        or logfile != logfile.strip()
+        or not logfile.isprintable()
+    ):
+        return False
+    normalized = logfile.replace("\\", "/")
+    parts = normalized.split("/")
+    if "://" in normalized or normalized.endswith("/") or "." in parts or ".." in parts:
+        return False
+    filename = parts[-1]
+    return filename != ".log" and filename.endswith(".log")
+
+
+def resolve_logfile_from_environment(default_logfile: str) -> str:
+    """Prefer a validated explicit logfile over a command default.
+
+    Args:
+        default_logfile: Command-specific fallback used when the environment
+            variable is absent or invalid.
+
+    Returns:
+        The validated :data:`LOGFILE_ENV_VAR` value when explicitly supplied,
+        otherwise ``default_logfile``.
+    """
+    configured_logfile = os.environ.get(LOGFILE_ENV_VAR)
+    if configured_logfile is not None and _is_valid_logfile_path(configured_logfile):
+        return configured_logfile
+    return default_logfile
 
 
 def resolve_subprocess_logfile() -> str:
@@ -375,8 +418,9 @@ def resolve_subprocess_logfile() -> str:
     entry point does, so the container entry point exports its resolved
     logfile in :data:`LOGFILE_ENV_VAR` and every child inherits it
     through the process environment. This keeps a feed-container
-    publisher writing to ``data/snapper-feed.log`` (its parent's file)
-    instead of the API container's ``data/snapper.log``, so each
+    publisher writing to ``data/log/snapper-feed/snapper-feed.log``
+    (its parent's file) instead of the API container's
+    ``data/log/snapper/snapper.log``, so each
     container — and its children — own a single dedicated log file.
     Falls back to :data:`DEFAULT_LOGFILE` when the variable is unset
     (e.g. a child spawned outside the managed entry point, or a test).
@@ -384,7 +428,7 @@ def resolve_subprocess_logfile() -> str:
     Returns:
         The logfile path the current subprocess should write to.
     """
-    return os.environ.get(LOGFILE_ENV_VAR, DEFAULT_LOGFILE)
+    return resolve_logfile_from_environment(DEFAULT_LOGFILE)
 
 
 _FILE_SINK_READY: list[bool] = [False]

@@ -377,34 +377,34 @@ dev-backend:
 	$(info Starting backend with hot reload...)
 	$(info Backend API: http://localhost:8000/api)
 	$(info WebSocket: ws://localhost:8000/api/ws)
-	$(info Backend log: data/snapper.log)
-	@mkdir -p data
-	@bash -c '$(PYRUN) snapper server --host 0.0.0.0 --reload 2>&1 | sed "s/\x1b\[[0-9;]*m//g" | tee data/snapper.log'
+	$(info Backend log: data/log/snapper/snapper.log)
+	@mkdir -p data/log/snapper
+	@bash -c '$(PYRUN) snapper server --host 0.0.0.0 --reload 2>&1 | sed "s/\x1b\[[0-9;]*m//g" | tee data/log/snapper/snapper.log'
 
 dev-notify:
 	$(info Starting iOS Push Foundation sidecar (ZMQ alerts -> APNs)...)
 	$(info Topic + APNs creds read from settings cache (apns_*).)
-	$(info Sidecar log: data/snapper-notify.log)
-	@mkdir -p data
-	@bash -c '$(PYRUN) snapper notify 2>&1 | sed "s/\x1b\[[0-9;]*m//g" | tee data/snapper-notify.log'
+	$(info Sidecar log: data/log/snapper-notify/snapper-notify.log)
+	@mkdir -p data/log/snapper-notify
+	@bash -c '$(PYRUN) snapper notify 2>&1 | sed "s/\x1b\[[0-9;]*m//g" | tee data/log/snapper-notify/snapper-notify.log'
 
 dev-all:
 	$(info Starting backend + notify sidecar in parallel...)
 	$(info Backend API: http://localhost:8000/api)
 	$(info WebSocket: ws://localhost:8000/api/ws)
 	$(info Notify sidecar fans out alerts.* -> APNs.)
-	$(info Logs: data/snapper.log + data/snapper-notify.log)
+	$(info Logs: data/log/snapper/snapper.log + data/log/snapper-notify/snapper-notify.log)
 	$(info Press Ctrl-C to stop both processes.)
-	@mkdir -p data
+	@mkdir -p data/log/snapper data/log/snapper-notify
 	@bash -c 'set -m; trap "kill 0 2>/dev/null; exit" SIGINT SIGTERM EXIT; \
 		($(PYRUN) snapper server --host 0.0.0.0 --reload 2>&1 \
 			| sed "s/\x1b\[[0-9;]*m//g" \
 			| awk "{print \"[backend] \" \$$0; fflush()}" \
-			| tee data/snapper.log) & \
+			| tee data/log/snapper/snapper.log) & \
 		($(PYRUN) snapper notify 2>&1 \
 			| sed "s/\x1b\[[0-9;]*m//g" \
 			| awk "{print \"[notify]  \" \$$0; fflush()}" \
-			| tee data/snapper-notify.log) & \
+			| tee data/log/snapper-notify/snapper-notify.log) & \
 		wait'
 
 dev-frontend:

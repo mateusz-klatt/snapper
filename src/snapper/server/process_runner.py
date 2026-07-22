@@ -218,8 +218,8 @@ def main() -> int:
     Logging is routed to the container's dedicated file resolved by
     :func:`snapper.utils.logging.resolve_subprocess_logfile` (inherited
     from the parent via ``SNAPPER_LOG_FILE``) so a feed-container
-    publisher logs to ``data/snapper-feed.log`` rather than the API
-    container's ``data/snapper.log``.
+    publisher logs to ``data/log/snapper-feed/snapper-feed.log`` rather
+    than the API container's ``data/log/snapper/snapper.log``.
 
     Returns:
         Exit code: 0 for success, 1 for configuration error or process failure.

@@ -153,6 +153,30 @@ def test_setup_logging_json_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert made_directories == [str(log_file.parent)]
 
 
+def test_add_file_logging_creates_parent_before_registering_sink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """File logging creates a fresh parent before the sink can open the file.
+
+    Given a logfile nested below a parent directory that does not exist,
+    When the file sink is registered,
+    Then the parent directory already exists at registration time.
+    """
+    log_file = tmp_path / "data" / "log" / "snapper" / "snapper.log"
+    parent_states: list[bool] = []
+
+    def _fake_add(sink: object, **kwargs: object) -> int:
+        assert callable(sink)
+        assert kwargs["level"] == "INFO"
+        parent_states.append(log_file.parent.is_dir())
+        return 1
+
+    monkeypatch.setattr(log_utils.logger, "add", _fake_add)
+    log_utils._add_file_logging("INFO", str(log_file))
+    assert parent_states == [True]
+
+
 def test_setup_logging_clears_third_party_handlers(monkeypatch: pytest.MonkeyPatch) -> None:
     """setup_logging strips handlers from every pre-existing named logger.
 
@@ -499,6 +523,16 @@ def test_get_context_bg_color_cached() -> None:
     assert first.startswith("\033[48;2;")
 
 
+def test_truncate_shortens_long_text() -> None:
+    """Long context labels are truncated to the configured width.
+
+    Given a context string longer than the display width,
+    When the logging formatter truncates it,
+    Then the result contains exactly the leading width characters.
+    """
+    assert log_utils._truncate("context-label-that-is-too-long") == "context-label-th"
+
+
 def test_filter_cancelled_errors_filters_cancelled() -> None:
     """Test _filter_cancelled_errors with explicit types.
 
@@ -714,10 +748,29 @@ def test_resolve_subprocess_logfile_uses_env(monkeypatch: pytest.MonkeyPatch) ->
         ``LOGFILE_ENV_VAR``,
     When a spawned subprocess calls ``resolve_subprocess_logfile``,
     Then it returns that value so the child logs to its container's
-        dedicated file (e.g. ``data/snapper-feed.log``).
+        dedicated file under ``data/log/snapper-feed``.
     """
-    monkeypatch.setenv(log_utils.LOGFILE_ENV_VAR, "data/snapper-feed.log")
-    assert log_utils.resolve_subprocess_logfile() == "data/snapper-feed.log"
+    configured = "data/log/snapper-feed/snapper-feed.log"
+    monkeypatch.setenv(log_utils.LOGFILE_ENV_VAR, configured)
+    assert log_utils.resolve_subprocess_logfile() == configured
+
+
+@pytest.mark.parametrize(
+    "configured_logfile",
+    ("../outside.log", "data/log/snapper-feed", "data/log/./outside.log"),
+)
+def test_resolve_subprocess_logfile_rejects_invalid_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_logfile: str,
+) -> None:
+    """Subprocess logfile resolution rejects unsafe environment values.
+
+    Given an invalid or traversal-bearing ``SNAPPER_LOG_FILE``,
+    When a subprocess resolves its logfile,
+    Then it receives the safe API default rather than the configured value.
+    """
+    monkeypatch.setenv(log_utils.LOGFILE_ENV_VAR, configured_logfile)
+    assert log_utils.resolve_subprocess_logfile() == log_utils.DEFAULT_LOGFILE
 
 
 def test_resolve_subprocess_logfile_defaults_when_unset(
@@ -728,8 +781,8 @@ def test_resolve_subprocess_logfile_defaults_when_unset(
     Given ``LOGFILE_ENV_VAR`` is not set (a child spawned outside the
         managed entry point, or a unit test),
     When ``resolve_subprocess_logfile`` is called,
-    Then it returns ``DEFAULT_LOGFILE`` (``data/snapper.log``).
+    Then it returns ``DEFAULT_LOGFILE`` under ``data/log/snapper``.
     """
     monkeypatch.delenv(log_utils.LOGFILE_ENV_VAR, raising=False)
     assert log_utils.resolve_subprocess_logfile() == log_utils.DEFAULT_LOGFILE
-    assert log_utils.DEFAULT_LOGFILE == "data/snapper.log"
+    assert log_utils.DEFAULT_LOGFILE == "data/log/snapper/snapper.log"

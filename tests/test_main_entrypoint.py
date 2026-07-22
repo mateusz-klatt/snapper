@@ -17,6 +17,17 @@ from snapper.utils.logging import LOGFILE_ENV_VAR
 from snapper.utils.logging import setup_logging
 
 
+@pytest.fixture(autouse=True)
+def _clear_logfile_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep entry-point logfile selection isolated from the host environment.
+
+    Given a test process that may inherit ``SNAPPER_LOG_FILE``,
+    When an entry-point test begins,
+    Then the variable is absent until that test explicitly supplies it.
+    """
+    monkeypatch.delenv(LOGFILE_ENV_VAR, raising=False)
+
+
 def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify main() initializes logging and starts CLI app.
 
@@ -46,19 +57,19 @@ def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
     assert kwargs == {
         "level": "INFO",
         "json_logs": False,
-        "logfile": "data/snapper.log",
+        "logfile": "data/log/snapper/snapper.log",
     }
     assert app_calls == [((), {})]
 
 
 def test_main_egress_subcommand_uses_egress_logfile(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify ``snapper egress`` switches the logfile to ``data/snapper-egress.log``.
+    """Verify ``snapper egress`` selects its per-service logfile.
 
     Given mocked setup_logging and app,
     And argv whose first positional arg is ``"egress"`` (matching
         the docker-compose CMD for the sidecar service),
     When main() is called,
-    Then setup_logging receives ``logfile="data/snapper-egress.log"``.
+    Then setup_logging receives the ``snapper-egress`` service logfile.
 
     This prevents the sidecar (which runs as ``root`` for
     ``CAP_NET_ADMIN``) from taking ownership of the API container's
@@ -78,7 +89,7 @@ def test_main_egress_subcommand_uses_egress_logfile(monkeypatch: pytest.MonkeyPa
     main()
     assert setup_calls
     _, kwargs = setup_calls[0]
-    assert kwargs["logfile"] == "data/snapper-egress.log"
+    assert kwargs["logfile"] == "data/log/snapper-egress/snapper-egress.log"
 
 
 def test_main_egress_with_extra_args_still_uses_egress_logfile(
@@ -89,7 +100,7 @@ def test_main_egress_with_extra_args_still_uses_egress_logfile(
     Given argv whose first positional arg is ``"egress"`` followed by
         additional trailing flags forwarded to the sidecar entrypoint,
     When main() is called,
-    Then setup_logging still receives ``logfile="data/snapper-egress.log"``
+    Then setup_logging still receives the ``snapper-egress`` service logfile
         — only the first positional arg is inspected by the dispatch
         in ``_resolve_logfile``.
     """
@@ -104,7 +115,7 @@ def test_main_egress_with_extra_args_still_uses_egress_logfile(
     monkeypatch.setattr(sys, "argv", ["snapper", "egress", "--instance-id", "snapper-egress"])
     main()
     _, kwargs = setup_calls[0]
-    assert kwargs["logfile"] == "data/snapper-egress.log"
+    assert kwargs["logfile"] == "data/log/snapper-egress/snapper-egress.log"
 
 
 def test_main_calls_log_patches_status_after_setup_logging(
@@ -119,7 +130,7 @@ def test_main_calls_log_patches_status_after_setup_logging(
         being live, which only happens once setup_logging has installed
         it. Reversing this order would recreate the original bug where
         patch confirmations were written to stderr before the file sink
-        existed and never reached ``data/snapper.log``.
+        existed and never reached ``data/log/snapper/snapper.log``.
     """
     call_order: list[str] = []
 
@@ -143,17 +154,17 @@ def test_main_calls_log_patches_status_after_setup_logging(
 def test_main_non_egress_subcommand_uses_default_logfile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Spec — a non-mapped sub-command keeps the shared ``data/snapper.log``.
+    """Spec — a non-mapped sub-command keeps the API service logfile.
 
     Given argv whose first positional arg is a command without a
         dedicated logfile (e.g. ``"server"``, the ``snapper-api``
         container),
     When main() is called,
-    Then setup_logging receives ``logfile="data/snapper.log"`` —
+    Then setup_logging receives ``data/log/snapper/snapper.log`` —
         ``feed-engine``, ``strategies-engine``, ``broker`` and
         ``egress`` map to dedicated files while ``server`` (and any
         other unmapped command) keeps the ``snapper-api`` container's
-        shared ``data/snapper.log``.
+        dedicated API logfile.
     """
     setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
@@ -166,20 +177,20 @@ def test_main_non_egress_subcommand_uses_default_logfile(
     monkeypatch.setattr(sys, "argv", ["snapper", "server"])
     main()
     _, kwargs = setup_calls[0]
-    assert kwargs["logfile"] == "data/snapper.log"
+    assert kwargs["logfile"] == "data/log/snapper/snapper.log"
 
 
 def test_main_feed_engine_subcommand_uses_feed_logfile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Spec — ``snapper feed-engine`` logs to ``data/snapper-feed.log``.
+    """Spec — ``snapper feed-engine`` logs to its per-service path.
 
     Given argv whose first positional arg is ``"feed-engine"`` (the
         docker-compose CMD for the ``snapper-feed`` container),
     When main() is called,
-    Then setup_logging receives ``logfile="data/snapper-feed.log"`` so
+    Then setup_logging receives the ``snapper-feed`` service logfile so
         the feed container does not write to the API container's
-        ``data/snapper.log`` on the shared ``./data`` bind mount.
+        logfile on the shared ``./data`` bind mount.
     """
     setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
@@ -190,24 +201,22 @@ def test_main_feed_engine_subcommand_uses_feed_logfile(
     monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
     monkeypatch.setattr("snapper.__main__.app", lambda: None)
     monkeypatch.setattr(sys, "argv", ["snapper", "feed-engine"])
-    monkeypatch.setenv(LOGFILE_ENV_VAR, "sentinel")
     main()
     _, kwargs = setup_calls[0]
-    assert kwargs["logfile"] == "data/snapper-feed.log"
+    assert kwargs["logfile"] == "data/log/snapper-feed/snapper-feed.log"
 
 
 def test_main_strategies_engine_subcommand_uses_strategies_logfile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Spec — ``snapper strategies-engine`` logs to ``data/snapper-strategies.log``.
+    """Spec — ``snapper strategies-engine`` logs to its per-service path.
 
     Given argv whose first positional arg is ``"strategies-engine"`` (the
         docker-compose CMD for the ``snapper-strategies`` container),
     When main() is called,
-    Then setup_logging receives ``logfile="data/snapper-strategies.log"``
+    Then setup_logging receives the ``snapper-strategies`` service logfile
         so the strategies container does not interleave its lines with the
-        API container's ``data/snapper.log`` on the shared ``./data`` bind
-        mount (both ran under the default before this dispatch existed).
+        API container's logfile on the shared ``./data`` bind mount.
     """
     setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
@@ -220,21 +229,21 @@ def test_main_strategies_engine_subcommand_uses_strategies_logfile(
     monkeypatch.setattr(sys, "argv", ["snapper", "strategies-engine"])
     main()
     _, kwargs = setup_calls[0]
-    assert kwargs["logfile"] == "data/snapper-strategies.log"
+    assert kwargs["logfile"] == "data/log/snapper-strategies/snapper-strategies.log"
 
 
 def test_main_broker_subcommand_uses_broker_logfile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Spec — ``snapper broker`` logs to ``data/snapper-broker.log``.
+    """Spec — ``snapper broker`` logs to its per-service path.
 
     Given argv whose first positional arg is ``"broker"`` (the
         docker-compose CMD for the ``snapper-broker`` container),
     When main() is called,
-    Then setup_logging receives ``logfile="data/snapper-broker.log"``.
+    Then setup_logging receives the ``snapper-broker`` service logfile.
         The ``snapper-broker`` service mounts ``./data`` so this dedicated
         file is host-visible; without the mapping the broker fell through
-        to ``data/snapper.log`` and, running as an unprivileged uid over
+        to the API logfile and, running as an unprivileged uid over
         the image's ``/app/data`` with no bind mount, could only emit a
         swallowed PermissionError instead of logging.
     """
@@ -249,7 +258,28 @@ def test_main_broker_subcommand_uses_broker_logfile(
     monkeypatch.setattr(sys, "argv", ["snapper", "broker"])
     main()
     _, kwargs = setup_calls[0]
-    assert kwargs["logfile"] == "data/snapper-broker.log"
+    assert kwargs["logfile"] == "data/log/snapper-broker/snapper-broker.log"
+
+
+def test_main_notify_subcommand_uses_notify_logfile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spec — ``snapper notify`` does not share the API logfile.
+
+    Given argv whose first positional argument is ``notify``,
+    When main configures logging,
+    Then setup_logging receives the ``snapper-notify`` service logfile.
+    """
+    setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
+        setup_calls.append((args, kwargs))
+
+    monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
+    monkeypatch.setattr("snapper.__main__.app", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["snapper", "notify"])
+    main()
+    _, kwargs = setup_calls[0]
+    assert kwargs["logfile"] == "data/log/snapper-notify/snapper-notify.log"
 
 
 def test_main_exports_resolved_logfile_to_environment(
@@ -259,7 +289,7 @@ def test_main_exports_resolved_logfile_to_environment(
 
     Given argv for the feed container (``feed-engine``),
     When main() is called,
-    Then ``os.environ[LOGFILE_ENV_VAR]`` holds ``data/snapper-feed.log``
+    Then ``os.environ[LOGFILE_ENV_VAR]`` holds the feed service logfile
         so subprocesses spawned by the container inherit it and log to
         the SAME per-container file (see
         :func:`snapper.utils.logging.resolve_subprocess_logfile`).
@@ -268,9 +298,77 @@ def test_main_exports_resolved_logfile_to_environment(
     monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
     monkeypatch.setattr("snapper.__main__.app", lambda: None)
     monkeypatch.setattr(sys, "argv", ["snapper", "feed-engine"])
-    monkeypatch.setenv(LOGFILE_ENV_VAR, "sentinel")
     main()
-    assert os.environ[LOGFILE_ENV_VAR] == "data/snapper-feed.log"
+    assert os.environ[LOGFILE_ENV_VAR] == "data/log/snapper-feed/snapper-feed.log"
+
+
+@pytest.mark.parametrize(
+    "configured_logfile",
+    ("custom/logs/override.log", "/var/log/snapper/override.log"),
+)
+def test_main_valid_logfile_environment_overrides_command_default(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_logfile: str,
+) -> None:
+    """A valid explicit logfile takes precedence over the command mapping.
+
+    Given a relative or absolute ``SNAPPER_LOG_FILE`` and a broker command,
+    When main resolves and exports the logfile,
+    Then logging and child inheritance both use the explicit path.
+    """
+    captured: dict[str, object] = {}
+
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
+    monkeypatch.setattr("snapper.__main__.app", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["snapper", "broker"])
+    monkeypatch.setenv(LOGFILE_ENV_VAR, configured_logfile)
+    main()
+    assert captured["logfile"] == configured_logfile
+    assert os.environ[LOGFILE_ENV_VAR] == configured_logfile
+
+
+@pytest.mark.parametrize(
+    "configured_logfile",
+    (
+        "",
+        "data/log/snapper",
+        ".log",
+        "../outside.log",
+        "data/log/snapper/../outside.log",
+        r"data\log\..\outside.log",
+        " data/log/snapper/snapper.log",
+        "data/log/snapper/snapper.log/",
+        "https://logs.invalid/snapper.log",
+    ),
+)
+def test_main_invalid_logfile_environment_falls_back_to_command_default(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_logfile: str,
+) -> None:
+    """Invalid explicit log paths cannot escape the command mapping.
+
+    Given an invalid or traversal-bearing ``SNAPPER_LOG_FILE``,
+    When main resolves the logfile for ``feed-engine``,
+    Then logging and the exported environment use the safe feed default.
+    """
+    captured: dict[str, object] = {}
+
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    expected = "data/log/snapper-feed/snapper-feed.log"
+    monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
+    monkeypatch.setattr("snapper.__main__.app", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["snapper", "feed-engine"])
+    monkeypatch.setenv(LOGFILE_ENV_VAR, configured_logfile)
+    main()
+    assert captured["logfile"] == expected
+    assert os.environ[LOGFILE_ENV_VAR] == expected
 
 
 def test_run_module_executes_main(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -329,7 +427,7 @@ class TestMain:
         mock_setup_logging.assert_called_once_with(
             level="INFO",
             json_logs=False,
-            logfile="data/snapper.log",
+            logfile="data/log/snapper/snapper.log",
         )
         mock_log_patches_status.assert_called_once_with()
         mock_app.assert_called_once()

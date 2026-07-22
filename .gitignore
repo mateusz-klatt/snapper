@@ -45,6 +45,7 @@ data/*.db-shm
 data/*.db-wal
 data/*.db.bak*
 data/*.log
+data/log/
 data/*-pat.json
 data/seed/
 data/archive/
