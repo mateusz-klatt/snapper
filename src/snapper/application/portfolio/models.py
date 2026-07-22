@@ -131,7 +131,15 @@ class PortfolioTracker:
         self._clamp_cash()
 
     def update_fill(
-        self, instrument: str, side: str, size: float, price: float, fee: float
+        self,
+        instrument: str,
+        side: str,
+        size: float,
+        price: float,
+        fee: float,
+        *,
+        position_delta: float | None = None,
+        cash_fee: float | None = None,
     ) -> None:
         """Update portfolio state from a fill.
 
@@ -140,7 +148,7 @@ class PortfolioTracker:
 
         - Same-direction fills (adding to position): VWAP avg_price with abs(qty)
         - Opposite-direction fills (reducing/flipping): realize PnL, reset on flip
-        - Cash: BUY deducts notional+fee, SELL adds notional-fee
+        - Cash: BUY deducts notional+cash_fee, SELL adds notional-cash_fee
 
         Args:
             instrument: Symbol that was traded.
@@ -148,25 +156,38 @@ class PortfolioTracker:
             size: Fill quantity.
             price: Fill price.
             fee: Trading fee paid.
+            position_delta: Optional caller-resolved signed base-inventory
+                delta. The gross ``size`` remains authoritative for cash and
+                turnover when a base-denominated fee changes booked quantity.
+            cash_fee: Optional fee charged against the cash leg. Defaults to
+                ``fee``; callers pass ``0.0`` for a base-asset fee that already
+                reduced ``position_delta`` so the fee is never counted in both
+                position quantity and cash.
         """
         pos = self.positions.setdefault(instrument, PositionStateModel())
         self.turnover += size * price
-        signed_delta = size if side == TradeSideEnum.BUY else -size
+        signed_delta = (
+            position_delta
+            if position_delta is not None
+            else size if side == TradeSideEnum.BUY else -size
+        )
+        position_size = abs(signed_delta)
         is_increasing = (pos.quantity >= 0 and signed_delta > 0) or (
             pos.quantity <= 0 and signed_delta < 0
         )
         if is_increasing:
-            self._increase_position(pos, size, price)
+            self._increase_position(pos, position_size, price)
         else:
-            self._decrease_position(pos, size, price)
+            self._decrease_position(pos, position_size, price)
         pos.quantity += signed_delta
         if abs(pos.quantity) < EPSILON_PICO:
             pos.quantity = 0.0
             pos.average_price = 0.0
+        charged_fee = fee if cash_fee is None else cash_fee
         if side == TradeSideEnum.BUY:
-            self.cash -= size * price + fee
+            self.cash -= size * price + charged_fee
         else:
-            self.cash += size * price - fee
+            self.cash += size * price - charged_fee
         self._clamp_cash()
 
     @staticmethod

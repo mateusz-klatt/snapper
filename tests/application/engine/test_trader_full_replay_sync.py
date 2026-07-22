@@ -37,6 +37,8 @@ def _make_execution(
     price: float,
     instrument: str = "BTC-USD",
     exchange: str = "kraken",
+    fee: float = 0.0,
+    fee_asset: str = "USD",
     wallet_public_id: str | None = None,
     timestamp_minute: int = 0,
 ) -> ExecutionRow:
@@ -59,8 +61,8 @@ def _make_execution(
         "side": side,
         "size": size,
         "price": price,
-        "fee": 0.0,
-        "fee_asset": "USD",
+        "fee": fee,
+        "fee_asset": fee_asset,
         "status": "filled",
         "executed_at": ts,
         "wallet_public_id": wallet_public_id,
@@ -167,6 +169,40 @@ class TestFullReplaySync:
         expected_vwap = (1.0 * 100.0 + 2.0 * 110.0) / 3.0
         assert engine.entry_price == pytest.approx(expected_vwap)
         assert shard.position.entry_price == pytest.approx(expected_vwap)
+
+    @pytest.mark.asyncio
+    async def test_full_replay_rebuilds_net_base_fee_quantity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fresh immutable-ledger replay self-heals an overstated position.
+
+        Given: The production-shaped EUR-PLN BUY ledger fill of 20.04 EUR with
+            a 0.04 EUR base fee and no checkpoint,
+        When: full recovery rebuilds the engine and TradeService projection,
+        Then: both book the venue-received 20.00 EUR without mutating the fill.
+        """
+        coord = _make_coord(monkeypatch)
+        execution = _make_execution(
+            trade_id="eur-base-fee",
+            side="buy",
+            size=20.04,
+            price=4.3836,
+            instrument="EUR-PLN",
+            exchange="walutomat",
+            fee=0.04,
+            fee_asset="EUR",
+        )
+        _stub_repo(coord, [execution])
+
+        await coord._recover_engine_state()
+
+        engine = coord.engines["EUR-PLN@walutomat-live"]
+        shard = coord.trade_service._shards[engine._shard_key]
+        assert engine.position_qty == pytest.approx(20.0)
+        assert engine.portfolio.position_qty("EUR-PLN") == pytest.approx(20.0)
+        assert shard.position.position_qty == pytest.approx(20.0)
+        assert execution["size"] == pytest.approx(20.04)
+        assert execution["fee"] == pytest.approx(0.04)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

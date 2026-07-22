@@ -18,9 +18,13 @@ def _make_venue_event(
     event_id: int,
     event_type: str = "fill_observed",
     shard_key: str = "kraken.BTC-USD.live",
+    instrument: str = "BTC-USD",
+    exchange: str = "kraken",
     side: str | None = "buy",
     fill_price: float | None = 50000.0,
     fill_size: float | None = 0.5,
+    fee: float | None = 0.5,
+    fee_asset: str | None = "USD",
     status: str | None = "filled",
     exec_id: str | None = _USE_DEFAULT_EXEC_ID,
     trade_id: str | None = None,
@@ -42,8 +46,8 @@ def _make_venue_event(
         "event_type": event_type,
         "shard_key": shard_key,
         "command_public_id": None,
-        "exchange": "kraken",
-        "instrument": "BTC-USD",
+        "exchange": exchange,
+        "instrument": instrument,
         "mode": "live",
         "exchange_order_id": exchange_order_id,
         "client_order_id": None,
@@ -53,8 +57,8 @@ def _make_venue_event(
         "fill_price": fill_price,
         "fill_size": fill_size,
         "cum_fill_size": fill_size,
-        "fee": 0.5,
-        "fee_asset": "USD",
+        "fee": fee,
+        "fee_asset": fee_asset,
         "exec_id": f"exec-{event_id}" if exec_id == _USE_DEFAULT_EXEC_ID else exec_id,
         "trade_id": trade_id,
         "error": None,
@@ -119,6 +123,145 @@ def test_apply_fill_buy() -> None:
     pos = svc.get_position("kraken.BTC-USD.live")
     assert pos.position_qty == 0.5
     assert pos.entry_price == 50000.0
+
+
+def test_apply_fill_buy_base_fee_books_received_quantity() -> None:
+    """A BUY books only the base asset actually received from the venue.
+
+    Given: A 20.04 EUR BUY with a 0.04 EUR fee on EUR-PLN,
+    When: the replay projection applies the fill,
+    Then: the booked position is exactly the received 20.00 EUR.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(
+        _make_venue_event(
+            event_id=1,
+            shard_key="walutomat.EUR-PLN.live",
+            instrument="EUR-PLN",
+            side="buy",
+            fill_price=4.3836,
+            fill_size=20.04,
+            fee=0.04,
+            fee_asset="EUR",
+        )
+    )
+    pos = svc.get_position("walutomat.EUR-PLN.live")
+    assert pos.position_qty == pytest.approx(20.0)
+    assert svc.get_equity("walutomat.EUR-PLN.live") == pytest.approx(10_000.0 - 20.04 * 4.3836)
+
+
+def test_apply_fill_quote_fee_keeps_gross_quantity() -> None:
+    """A quote-denominated fee does not change booked base quantity.
+
+    Given: A 20.04 EUR BUY whose fee is charged in PLN,
+    When: the replay projection applies the fill,
+    Then: the position increases by the full 20.04 EUR.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(
+        _make_venue_event(
+            event_id=1,
+            shard_key="walutomat.EUR-PLN.live",
+            instrument="EUR-PLN",
+            side="buy",
+            fill_price=4.3836,
+            fill_size=20.04,
+            fee=0.04,
+            fee_asset="PLN",
+        )
+    )
+    pos = svc.get_position("walutomat.EUR-PLN.live")
+    assert pos.position_qty == pytest.approx(20.04)
+    assert svc.get_equity("walutomat.EUR-PLN.live") == pytest.approx(
+        10_000.0 - 20.04 * 4.3836 - 0.04
+    )
+
+
+def test_apply_fill_sell_base_fee_debits_traded_size_and_fee() -> None:
+    """A SELL base fee removes both sold and fee quantities from the position.
+
+    Given: A flat EUR-PLN position and a 2.00 EUR SELL with a 0.01 EUR fee,
+    When: the replay projection applies the fill,
+    Then: the booked position is short 2.01 EUR as reflected by venue balances.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(
+        _make_venue_event(
+            event_id=1,
+            shard_key="walutomat.EUR-PLN.live",
+            instrument="EUR-PLN",
+            side="sell",
+            fill_price=4.4,
+            fill_size=2.0,
+            fee=0.01,
+            fee_asset="EUR",
+        )
+    )
+    pos = svc.get_position("walutomat.EUR-PLN.live")
+    assert pos.position_qty == pytest.approx(-2.01)
+
+
+def test_apply_fill_sell_base_fee_flip_books_net_venue_delta() -> None:
+    """A base-fee SELL flip opens the overshoot implied by the venue asset delta.
+
+    Given: A 1.00 EUR long followed by a 1.50 EUR SELL with a 0.10 EUR base fee,
+    When: the replay projection applies both fills,
+    Then: it closes one EUR and opens a 0.60 EUR short at the SELL price.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(
+        _make_venue_event(
+            event_id=1,
+            shard_key="walutomat.EUR-PLN.live",
+            instrument="EUR-PLN",
+            side="buy",
+            fill_price=4.0,
+            fill_size=1.0,
+            fee=0.0,
+            fee_asset="PLN",
+        )
+    )
+    svc.apply_venue_event(
+        _make_venue_event(
+            event_id=2,
+            shard_key="walutomat.EUR-PLN.live",
+            instrument="EUR-PLN",
+            side="sell",
+            fill_price=4.5,
+            fill_size=1.5,
+            fee=0.1,
+            fee_asset="EUR",
+        )
+    )
+    pos = svc.get_position("walutomat.EUR-PLN.live")
+    assert pos.position_qty == pytest.approx(-0.6)
+    assert pos.entry_price == pytest.approx(4.5)
+    assert pos.realized_pnl == pytest.approx(0.5)
+
+
+def test_apply_fill_futures_base_fee_keeps_contract_quantity() -> None:
+    """A futures collateral fee does not change booked contract count.
+
+    Given: A five-contract ETH perpetual BUY with a 0.001 ETH fee,
+    When: the replay projection applies the fill from Kraken Futures,
+    Then: the position increases by five contracts rather than 4.999 ETH.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(
+        _make_venue_event(
+            event_id=1,
+            shard_key="kraken_futures.ETH-USD-PERP.live",
+            instrument="ETH-USD-PERP",
+            exchange="kraken_futures",
+            side="buy",
+            fill_price=3000.0,
+            fill_size=5.0,
+            fee=0.001,
+            fee_asset="ETH",
+        )
+    )
+    pos = svc.get_position("kraken_futures.ETH-USD-PERP.live")
+    assert pos.position_qty == pytest.approx(5.0)
 
 
 def test_apply_fill_sell_clears_position() -> None:

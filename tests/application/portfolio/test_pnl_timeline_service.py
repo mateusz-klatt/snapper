@@ -516,6 +516,39 @@ class TestToTimelineExecution:
         assert mapped.price_incompleteness_reason is None
         assert mapped.fee_incompleteness_reason is None
 
+    def test_maps_base_fee_to_net_position_delta_before_fee_conversion(self) -> None:
+        """A base fee changes quantity using its native amount before FX conversion.
+
+        Given: A 20.04 EUR BUY with a 0.04 EUR fee and a USD P&L valuation,
+        When: the repository row is mapped to the pure timeline input,
+        Then: its position delta is 20.00 EUR even though fee P&L needs FX evidence.
+        """
+        row = _exec_row(_I1, 1, 3, "buy", 20.04, 4.3836, 0.04, "EUR")
+        mapped = _to_timeline_execution(row, "USD", {}, base_asset="EUR")
+        assert mapped.position_delta == pytest.approx(20.0)
+        assert math.isnan(mapped.fee)
+
+    def test_maps_futures_base_fee_without_changing_contract_delta(self) -> None:
+        """A futures collateral fee remains separate from contract exposure.
+
+        Given: A five-contract ETH perpetual fill with a 0.001 ETH fee,
+        When: it is mapped into the P&L replay using its futures venue identity,
+        Then: the position delta remains five contracts.
+        """
+        row = _exec_row(
+            _I1,
+            1,
+            3,
+            "buy",
+            5.0,
+            3000.0,
+            0.001,
+            "ETH",
+            exchange="kraken_futures",
+        )
+        mapped = _to_timeline_execution(row, "USD", {}, base_asset="ETH")
+        assert mapped.position_delta == pytest.approx(5.0)
+
     def test_non_valuation_currency_fee_is_unknown_not_zero(self) -> None:
         """A fee in another asset is UNKNOWN (NaN), never a silent zero.
 
@@ -3555,7 +3588,7 @@ def test_provenance_constants_are_stable() -> None:
     Then: The documented source, version, and total-work limit remain stable.
     """
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
-    assert PNL_TIMELINE_CALC_VERSION == "5A.11"
+    assert PNL_TIMELINE_CALC_VERSION == "5A.12"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
 

@@ -50,6 +50,8 @@ from typing import Literal
 from typing import cast
 
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
+from snapper.application.portfolio.fill_booking import booked_signed_quantity
+from snapper.application.portfolio.fill_booking import resolve_position_quantity_unit
 from snapper.application.portfolio.fx_rates import FxPairKey
 from snapper.application.portfolio.fx_rates import FxRateMap
 from snapper.application.portfolio.fx_rates import FxVenueMap
@@ -84,7 +86,7 @@ from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.11"
+PNL_TIMELINE_CALC_VERSION = "5A.12"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, mark resolution, or public point
@@ -246,6 +248,7 @@ def _to_timeline_execution(
     row: PnlTimelineExecutionRow,
     valuation_ccy: str,
     rates: FxRateMap,
+    base_asset: str | None = None,
     price_currency: str | None = None,
     venues: FxVenueMap | None = None,
 ) -> TimelineExecution:
@@ -264,6 +267,7 @@ def _to_timeline_execution(
         row: One ``get_pnl_timeline_executions`` row.
         valuation_ccy: Currency the series is valued in.
         rates: Minute-keyed FX rates used for price and fee conversion.
+        base_asset: Proven base asset of the execution instrument.
         price_currency: Proven quote currency of the execution price. ``None``
             leaves the raw price unchanged for callers that enforce trust
             separately.
@@ -313,6 +317,14 @@ def _to_timeline_execution(
         event_time=row["timestamp"],
         side=row["side"],
         size=row["size"],
+        position_delta=booked_signed_quantity(
+            row["side"],
+            row["size"],
+            row["fee"],
+            row["fee_asset"],
+            base_asset or "",
+            resolve_position_quantity_unit(row["exchange"]),
+        ),
         price=price,
         fee=fee,
         fee_asset=row["fee_asset"],
@@ -1037,6 +1049,7 @@ def _add_fx_minute(
 def _event_fx_minutes(
     execution_rows: Sequence[PnlTimelineExecutionRow],
     accrual_rows: Sequence[PnlTimelineAccrualRow],
+    base_by_instrument: Mapping[str, str],
     quote_by_instrument: Mapping[str, str],
     valuation_ccy: str,
 ) -> _FxInstrumentRequirements:
@@ -1052,6 +1065,7 @@ def _event_fx_minutes(
     Args:
         execution_rows: Trusted scope executions replayed by the kernel.
         accrual_rows: Scope accruals, whose amount carries ``amount_asset``.
+        base_by_instrument: Proven base asset of each execution instrument.
         quote_by_instrument: Proven execution-price denominations.
         valuation_ccy: Currency the series is valued in.
 
@@ -1075,11 +1089,19 @@ def _event_fx_minutes(
             untrusted_at[instrument_public_id] = effective_time
             continue
         old_qty = position_qty.get(instrument_public_id, 0.0)
-        signed_size = size if row["side"] == "buy" else -size
+        signed_size = booked_signed_quantity(
+            row["side"],
+            size,
+            row["fee"],
+            row["fee_asset"],
+            base_by_instrument[instrument_public_id],
+            resolve_position_quantity_unit(row["exchange"]),
+        )
+        position_size = abs(signed_size)
         is_increasing = (old_qty >= 0.0 and signed_size > 0.0) or (
             old_qty <= 0.0 and signed_size < 0.0
         )
-        closed_qty = 0.0 if is_increasing else min(size, abs(old_qty))
+        closed_qty = 0.0 if is_increasing else min(position_size, abs(old_qty))
         price_is_known_valid = is_positive_finite(row["price"])
         if closed_qty > 0.0 and (not price_is_known_valid or instrument_public_id in basis_unknown):
             untrusted_at[instrument_public_id] = effective_time
@@ -1088,7 +1110,7 @@ def _event_fx_minutes(
         quote_currency = quote_by_instrument.get(instrument_public_id)
         if (
             quote_currency is not None
-            and size > 0.0
+            and position_size > 0.0
             and price_is_known_valid
             and instrument_public_id not in basis_unknown
         ):
@@ -1111,7 +1133,7 @@ def _event_fx_minutes(
         if abs(new_qty) < FLAT_EPSILON:
             new_qty = 0.0
             basis_unknown.discard(instrument_public_id)
-        elif size > 0.0 and not price_is_known_valid:
+        elif position_size > 0.0 and not price_is_known_valid:
             basis_unknown.add(instrument_public_id)
         position_qty[instrument_public_id] = new_qty
     for accrual in accrual_rows:
@@ -1130,6 +1152,7 @@ def _event_fx_minutes(
 def _mark_fx_minutes(
     candles: Sequence[PnlTimelineCandleRow],
     execution_rows: Sequence[PnlTimelineExecutionRow],
+    base_by_instrument: Mapping[str, str],
     quote_by_instrument: Mapping[str, str],
     valuation_ccy: str,
     from_time: datetime,
@@ -1147,6 +1170,7 @@ def _mark_fx_minutes(
     Args:
         candles: Raw finalized mark candles already bounded to the chart window.
         execution_rows: Complete scope fills in replay order through the chart end.
+        base_by_instrument: Proven base asset of each execution instrument.
         quote_by_instrument: Proven denomination of each candle close.
         valuation_ccy: Currency the series is valued in.
         from_time: Requested chart start whose minute floor anchors the grid.
@@ -1170,14 +1194,27 @@ def _mark_fx_minutes(
             continue
         size = row["size"]
         invalid_size = not math.isfinite(size) or size < 0.0
-        signed_size = 0.0 if invalid_size else size if row["side"] == "buy" else -size
+        resolved_signed_size = (
+            0.0
+            if invalid_size
+            else booked_signed_quantity(
+                row["side"],
+                size,
+                row["fee"],
+                row["fee_asset"],
+                base_by_instrument[instrument_public_id],
+                resolve_position_quantity_unit(row["exchange"]),
+            )
+        )
+        signed_size = resolved_signed_size
+        position_size = abs(signed_size)
         effective_events.setdefault(instrument_public_id, []).append(
             (
                 effective_time,
                 row["exchange"],
                 row["scope_sequence"],
                 signed_size,
-                invalid_size or (size > 0.0 and not is_positive_finite(row["price"])),
+                invalid_size or (position_size > 0.0 and not is_positive_finite(row["price"])),
             )
         )
     candles_by_instrument: dict[str, list[PnlTimelineCandleRow]] = {}
@@ -1766,6 +1803,7 @@ async def build_wallet_pnl_series(
     quote_by_instrument = {
         ref["instrument_public_id"]: cast(str, ref["quote_currency"]) for ref in trusted_refs
     }
+    base_by_instrument = {ref["instrument_public_id"]: ref["base_currency"] for ref in trusted_refs}
     mark_candles = await _load_mark_candles(
         repo,
         trusted_refs,
@@ -1798,6 +1836,7 @@ async def build_wallet_pnl_series(
     mark_requirements = _mark_fx_minutes(
         mark_candles,
         loaded_execution_rows,
+        base_by_instrument,
         quote_by_instrument,
         valuation_ccy,
         from_time,
@@ -1806,6 +1845,7 @@ async def build_wallet_pnl_series(
     event_requirements = _event_fx_minutes(
         trusted_replayed_rows,
         replayed_accrual_rows,
+        base_by_instrument,
         quote_by_instrument,
         valuation_ccy,
     )
@@ -1837,8 +1877,9 @@ async def build_wallet_pnl_series(
             row,
             valuation_ccy,
             rates,
-            quote_by_instrument.get(row["instrument_public_id"]),
-            planes_by_instrument.get(row["instrument_public_id"], {}),
+            base_asset=base_by_instrument.get(row["instrument_public_id"]),
+            price_currency=quote_by_instrument.get(row["instrument_public_id"]),
+            venues=planes_by_instrument.get(row["instrument_public_id"], {}),
         )
         for row in loaded_execution_rows
     ]

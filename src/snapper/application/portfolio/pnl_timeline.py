@@ -195,6 +195,8 @@ class TimelineExecution:
             place the fill on the minute grid.
         side: ``'buy'`` (positive signed quantity) or ``'sell'`` (negative).
         size: Unsigned fill quantity.
+        position_delta: Caller-resolved signed base-inventory delta after any
+            fee charged in the instrument's base asset.
         price: Execution price already resolved into the valuation currency.
         fee: Execution fee, assumed denominated in the window valuation currency
             after any API-layer conversion.
@@ -214,6 +216,7 @@ class TimelineExecution:
     event_time: datetime
     side: str
     size: float
+    position_delta: float
     price: float
     fee: float
     fee_asset: str
@@ -1405,23 +1408,28 @@ def build_pnl_timeline(
                 )
             if price_proof_reasons:
                 continue
-            if not math.isfinite(execution.size) or execution.size < 0.0:
+            if (
+                not math.isfinite(execution.size)
+                or execution.size < 0.0
+                or not math.isfinite(execution.position_delta)
+            ):
                 _add_instrument_untrusted_reason(
                     untrusted_reasons_by_instrument,
                     instrument_public_id,
                     "execution_size_invalid",
                 )
                 continue
-            signed_qty = execution.size if execution.side == "buy" else -execution.size
+            signed_qty = execution.position_delta
+            position_size = abs(signed_qty)
             pool = pools.get(instrument_public_id, _Pool(0.0, None))
             pre_fill_weights = dict(weights_by_instrument.get(instrument_public_id, {}))
             pre_fill_basis_reasons = set(basis_reasons_by_instrument.get(instrument_public_id, ()))
-            price_is_trusted = is_positive_finite(execution.price)
+            price_is_trusted = position_size == 0.0 or is_positive_finite(execution.price)
             outcome = apply_fill(
                 pool.position_qty,
                 pool.entry_price,
                 signed_qty,
-                execution.size,
+                position_size,
                 execution.price if price_is_trusted else math.nan,
             )
             if not price_is_trusted and outcome.closed_qty > 0.0:
@@ -1471,7 +1479,7 @@ def build_pnl_timeline(
             fee_by_instrument[instrument_public_id] += fee_pnl
             fee_total += fee_pnl
             if opened_opposite_side:
-                closing_fee_pnl = fee_pnl * outcome.closed_qty / execution.size
+                closing_fee_pnl = fee_pnl * outcome.closed_qty / position_size
                 closing_fee_allocation = _allocate_by_weights(closing_fee_pnl, pre_fill_weights)
                 _add_allocations(fee_by_attribution, closing_fee_allocation)
                 attribution_seen.update(closing_fee_allocation)

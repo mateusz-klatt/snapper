@@ -32,6 +32,7 @@ from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
+from snapper.core.types import OrderExchange
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -220,7 +221,13 @@ class TestEngineApplyFillShortSelling:
         )
 
     def _make_fill(
-        self, side: str, last_size: float, last_price: float, trade_id: str = "t1"
+        self,
+        side: str,
+        last_size: float,
+        last_price: float,
+        trade_id: str = "t1",
+        fee: float = 0.0,
+        fee_asset: str = "USD",
     ) -> ExecutionData:
         """Create an ExecutionData fill event."""
         return ExecutionData(
@@ -238,11 +245,25 @@ class TestEngineApplyFillShortSelling:
             price=last_price,
             last_size=last_size,
             last_price=last_price,
-            fee=0.0,
-            fee_asset="USD",
+            fee=fee,
+            fee_asset=fee_asset,
             status="filled",
             executed_at=datetime.now(UTC),
         )
+
+    def test_base_fee_single_counts_quantity_and_cash(self) -> None:
+        """A base-asset fee reduces booked quantity and never re-hits cash.
+
+        Given: A 1.0 BTC BUY at 100 with a 0.01 BTC base fee,
+        When: the live engine applies the fill,
+        Then: quantity is the received 0.99 BTC and cash falls by the notional
+            only, so equity counts the base fee exactly once.
+        """
+        engine = self._make_engine()
+        fill = self._make_fill("buy", 1.0, 100.0, fee=0.01, fee_asset="BTC")
+        engine.apply_fill(fill)
+        assert engine.position_qty == pytest.approx(0.99)
+        assert engine.portfolio.cash == pytest.approx(10_000.0 - 100.0)
 
     def test_sell_from_flat_opens_short(self) -> None:
         """Verify SELL from flat opens a short position.
@@ -1068,15 +1089,17 @@ def _make_engine(
     *,
     risk: _RiskStub | None = None,
     instrument_specs: dict[str, dict[str, float]] | None = None,
+    instrument: str = "BTC-USD",
+    exchange: OrderExchange = "paper",
 ) -> tuple[TradingEngineService, _SocketStub]:
     socket = _SocketStub()
     engine = TradingEngineService(
-        instrument="BTC-USD",
+        instrument=instrument,
         execution_socket=cast(Any, socket),
         risk=cast(Any, risk),
         cfg=EngineConfigModel(initial_cash=1_000.0, fee_bps=10.0),
         instrument_specs=instrument_specs,
-        exchange="paper",
+        exchange=exchange,
     )
     return engine, socket
 
@@ -1750,11 +1773,11 @@ async def test_send_order_live_strips_reference_price() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_fill_to_trade_service() -> None:
-    """Coordinator sync fills to TradeService and BalanceService on applied fill.
+    """Live and replay projections book the same base-fee-adjusted quantity.
 
-    Given: a TraderCoordinator with trade_service and balance_service,
-    When: _sync_fill_to_trade_service is called with a fill,
-    Then: trade_service projection is updated and balance_service receives position change.
+    Given: A live engine and replay projection consuming the same base-fee BUY,
+    When: the engine applies it and the coordinator shadows it to TradeService,
+    Then: both positions equal the venue-received quantity and BalanceService is updated.
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.trade_service = TradeService()
@@ -1764,32 +1787,69 @@ async def test_sync_fill_to_trade_service() -> None:
     coord._tracker.session_id = "s-test"
     coord._tracker.next_sequence = MagicMock(return_value=1)
 
-    engine, _ = _make_engine()
+    engine, _ = _make_engine(instrument="EUR-PLN", exchange="walutomat")
     fill = ExecutionData(
         type="execution",
         public_id="fill-1",
         timestamp=datetime.now(UTC),
         session_id="s1",
         sequence_id=1,
-        exchange="paper",
-        instrument="BTC-USD",
+        exchange="walutomat",
+        instrument="EUR-PLN",
         side="buy",
-        size=0.5,
-        price=50000.0,
-        last_size=0.5,
-        last_price=50000.0,
-        fee=0.5,
-        fee_asset="USD",
+        size=20.04,
+        price=4.3836,
+        last_size=20.04,
+        last_price=4.3836,
+        fee=0.04,
+        fee_asset="EUR",
         status="filled",
         client_order_id="cid-1",
         exchange_order_id="ex-1",
         trade_id="t-1",
         executed_at=datetime.now(UTC),
     )
+    assert engine.apply_fill(fill) is True
     await coord._sync_fill_to_trade_service(fill, engine)
     pos = coord.trade_service.get_position(engine._shard_key)
-    assert pos.position_qty == 0.5
+    assert engine.position_qty == pytest.approx(20.0)
+    assert engine.portfolio.position_qty("EUR-PLN") == pytest.approx(20.0)
+    assert pos.position_qty == pytest.approx(engine.position_qty)
     assert coord.balance_service.get_cash(engine._shard_key) != 0.0
+
+
+def test_engine_futures_base_fee_keeps_contract_quantity() -> None:
+    """The live engine does not deduct a collateral fee from contract count.
+
+    Given: A five-contract ETH perpetual BUY with a 0.001 ETH fee,
+    When: the Kraken Futures engine applies the execution,
+    Then: both engine and tracker book five contracts.
+    """
+    engine, _ = _make_engine(instrument="ETH-USD-PERP", exchange="kraken_futures")
+    fill = ExecutionData(
+        type="execution",
+        public_id="fill-futures-base-fee",
+        timestamp=datetime.now(UTC),
+        session_id="s1",
+        sequence_id=1,
+        exchange="kraken_futures",
+        instrument="ETH-USD-PERP",
+        side="buy",
+        size=5.0,
+        price=3000.0,
+        last_size=5.0,
+        last_price=3000.0,
+        fee=0.001,
+        fee_asset="ETH",
+        status="filled",
+        client_order_id="cid-futures-base-fee",
+        exchange_order_id="ex-futures-base-fee",
+        trade_id="trade-futures-base-fee",
+        executed_at=datetime.now(UTC),
+    )
+    assert engine.apply_fill(fill) is True
+    assert engine.position_qty == pytest.approx(5.0)
+    assert engine.portfolio.position_qty("ETH-USD-PERP") == pytest.approx(5.0)
 
 
 def test_setup_trade_services_without_sqlalchemy_repo_skips_outbox() -> None:

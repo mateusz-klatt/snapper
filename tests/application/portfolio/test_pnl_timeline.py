@@ -51,8 +51,12 @@ def _exec(
     price: float,
     fee: float = 0.0,
     exchange: str = "kraken",
+    position_delta: float | None = None,
 ) -> TimelineExecution:
     """Build one timeline execution at the given grid minute."""
+    resolved_position_delta = (
+        position_delta if position_delta is not None else size if side == "buy" else -size
+    )
     return TimelineExecution(
         instrument_public_id=instrument,
         exchange=exchange,
@@ -60,6 +64,7 @@ def _exec(
         event_time=_m(minute),
         side=side,
         size=size,
+        position_delta=resolved_position_delta,
         price=price,
         fee=fee,
         fee_asset="USD",
@@ -236,6 +241,7 @@ class TestMachineReadableIncompletenessReasons:
             event_time=_m(0),
             side="buy",
             size=1.0,
+            position_delta=1.0,
             price=float("nan"),
             fee=0.0,
             fee_asset="USD",
@@ -266,6 +272,7 @@ class TestMachineReadableIncompletenessReasons:
             event_time=_m(0),
             side="buy",
             size=1.0,
+            position_delta=1.0,
             price=float("nan"),
             fee=0.0,
             fee_asset="USD",
@@ -433,6 +440,57 @@ class TestAttribution:
         assert ("unattributed", None) in {
             (bucket.origin, bucket.strategy_name) for bucket in closed.attribution
         }
+
+    def test_base_fee_flip_allocates_fee_by_net_position_delta(self) -> None:
+        """A base-fee flip allocates its fee across the net closed and opened legs.
+
+        Given: A manual one-unit long and a system SELL whose gross 1.5 units
+            plus 0.1 base fee produce a negative 1.6-unit position delta,
+        When: the fill flips the pool into a 0.6-unit short,
+        Then: fee attribution uses the net delta without overallocating the close.
+        """
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0),
+            _exec(
+                "I1",
+                2,
+                1,
+                "sell",
+                1.5,
+                110.0,
+                fee=0.1,
+                position_delta=-1.6,
+            ),
+        )
+        lineage = {
+            "order-I1-1": TimelineExecutionLineage(
+                source_surface="rest",
+                plan_public_id=None,
+                signal_public_id=None,
+                origin="live",
+                strategy_name=None,
+            ),
+            "order-I1-2": TimelineExecutionLineage(
+                source_surface="strategy",
+                plan_public_id=None,
+                signal_public_id="signal-flip",
+                origin="live",
+                strategy_name="flip-strategy",
+            ),
+        }
+        point = build_pnl_timeline(
+            executions,
+            (),
+            {("I1", _m(1)): 111.0},
+            _window(1, 1),
+            lineage=lineage,
+        ).points[0]
+        buckets = {(bucket.origin, bucket.strategy_name): bucket for bucket in point.attribution}
+        assert buckets[("manual", None)].fee_pnl == pytest.approx(-0.0625)
+        assert buckets[("system", "flip-strategy")].fee_pnl == pytest.approx(-0.0375)
+        assert point.fee_pnl == pytest.approx(-0.1)
+        assert point.unrealized_pnl == pytest.approx(-0.6)
+        _assert_exact_attribution_sums(point)
 
     def test_missing_unknown_and_replay_lineage_are_unattributed(self) -> None:
         """A plan id alone, absent row, and replay provenance never get guessed."""
@@ -754,6 +812,31 @@ class TestRoundTrip:
         assert point.unrealized_pnl == pytest.approx(10.0)
         assert point.net_pnl == pytest.approx(9.5)
         assert point.valuation_status == "complete"
+
+    def test_open_point_uses_base_fee_adjusted_position_delta(self) -> None:
+        """The pure pool values only the net base inventory received by a BUY.
+
+        Given: A gross 20.04-unit BUY mapped to a 20.00-unit position delta,
+        When: the timeline values it one price unit above entry,
+        Then: unrealized P&L is based on 20.00 units rather than the gross fill.
+        """
+        execution = _exec(
+            "I1",
+            1,
+            0,
+            "buy",
+            20.04,
+            4.0,
+            fee=0.04,
+            position_delta=20.0,
+        )
+        point = build_pnl_timeline(
+            (execution,),
+            (),
+            {("I1", _m(0)): 5.0},
+            _window(0, 0),
+        ).points[0]
+        assert point.unrealized_pnl == pytest.approx(20.0)
 
     def test_hold_point_tracks_mark_move(self) -> None:
         """A held minute revalues the open position against its own mark."""
@@ -1348,6 +1431,15 @@ class TestCorruptInputGuards:
     def test_negative_fill_size_is_untrusted(self) -> None:
         """A negative fill size is tainted, not sign-inverted into a short."""
         executions = (_exec("I1", 1, 0, "buy", -1.0, 100.0),)
+        result = build_pnl_timeline(executions, (), {("I1", _m(0)): 90.0}, _window())
+        assert all(point.valuation_status == "incomplete" for point in result.points)
+        assert _reason_rows(result.points[0]) == [
+            ("execution_size_invalid", "untrusted", "instrument", "I1")
+        ]
+
+    def test_non_finite_position_delta_is_untrusted(self) -> None:
+        """A non-finite caller-resolved inventory delta never enters the pool."""
+        executions = (_exec("I1", 1, 0, "buy", 1.0, 100.0, position_delta=float("nan")),)
         result = build_pnl_timeline(executions, (), {("I1", _m(0)): 90.0}, _window())
         assert all(point.valuation_status == "incomplete" for point in result.points)
         assert _reason_rows(result.points[0]) == [

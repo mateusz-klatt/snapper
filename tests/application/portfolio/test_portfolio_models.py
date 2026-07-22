@@ -108,6 +108,48 @@ def test_portfolio_fill_buy_sell() -> None:
     assert p.positions["BTC-USD"].realized_pnl > 0
 
 
+def test_position_delta_changes_inventory_without_changing_gross_cash_flow() -> None:
+    """A net position delta leaves gross turnover and cash economics intact.
+
+    Given: A 20.04 EUR BUY at 4 PLN with a 0.04 fee and 20.00 EUR received,
+    When: PortfolioTracker books the caller-resolved position delta,
+    Then: inventory is net while turnover and cash still use the gross fill.
+    """
+    portfolio = PortfolioTracker(cash=100.0)
+    portfolio.update_fill(
+        "EUR-PLN",
+        "buy",
+        size=20.04,
+        price=4.0,
+        fee=0.04,
+        position_delta=20.0,
+    )
+    assert portfolio.position_qty("EUR-PLN") == pytest.approx(20.0)
+    assert portfolio.turnover == pytest.approx(80.16)
+    assert portfolio.cash == pytest.approx(19.8)
+
+
+def test_base_asset_cash_fee_is_not_double_counted() -> None:
+    """A base fee already in quantity is not subtracted from cash again.
+
+    Given: A 20.04 EUR BUY at 4 PLN whose 0.04 EUR base fee reduced quantity,
+    When: the tracker books it with a zero cash-leg fee,
+    Then: cash falls by the notional only, so equity counts the fee once.
+    """
+    portfolio = PortfolioTracker(cash=100.0)
+    portfolio.update_fill(
+        "EUR-PLN",
+        "buy",
+        size=20.04,
+        price=4.0,
+        fee=0.04,
+        position_delta=20.0,
+        cash_fee=0.0,
+    )
+    assert portfolio.position_qty("EUR-PLN") == pytest.approx(20.0)
+    assert portfolio.cash == pytest.approx(19.84)
+
+
 def test_portfolio_position_qty() -> None:
     """Verify position_qty returns correct quantity.
 

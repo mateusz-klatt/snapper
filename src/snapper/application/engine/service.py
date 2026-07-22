@@ -18,6 +18,10 @@ import zmq
 from loguru import logger
 
 from snapper.application.engine.config import EngineConfigModel
+from snapper.application.portfolio.fill_booking import booked_signed_quantity
+from snapper.application.portfolio.fill_booking import cash_fee
+from snapper.application.portfolio.fill_booking import native_base_asset
+from snapper.application.portfolio.fill_booking import resolve_position_quantity_unit
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
@@ -497,14 +501,28 @@ class TradingEngineService:
         self.seen_exec_ids[guard_key] = None
         if len(self.seen_exec_ids) > 10_000:
             self.seen_exec_ids.popitem(last=False)
+        base_asset = native_base_asset(self.instrument)
+        quantity_unit = resolve_position_quantity_unit(self.exchange)
+        position_delta = booked_signed_quantity(
+            fill.side,
+            fill.last_size,
+            fill.fee,
+            fill.fee_asset,
+            base_asset,
+            quantity_unit,
+        )
+        position_size = abs(position_delta)
         self.portfolio.update_fill(
-            self.instrument, fill.side, fill.last_size, fill.last_price, fill.fee
+            self.instrument,
+            fill.side,
+            fill.last_size,
+            fill.last_price,
+            fill.fee,
+            position_delta=position_delta,
+            cash_fee=cash_fee(fill.last_size, fill.fee, fill.fee_asset, base_asset, quantity_unit),
         )
         old_qty = self.position_qty
-        if fill.side == TradeSideEnum.BUY:
-            self.position_qty += fill.last_size
-        else:
-            self.position_qty -= fill.last_size
+        self.position_qty += position_delta
         if abs(self.position_qty) < 1e-12:
             self.position_qty = 0.0
             self.entry_price = None
@@ -514,7 +532,7 @@ class TradingEngineService:
             old_abs = abs(old_qty)
             new_abs = abs(self.position_qty)
             self.entry_price = (
-                old_abs * self.entry_price + fill.last_size * fill.last_price
+                old_abs * self.entry_price + position_size * fill.last_price
             ) / new_abs
         if (
             fill.client_order_id == self.pending_client_order_id

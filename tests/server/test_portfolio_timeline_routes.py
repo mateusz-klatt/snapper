@@ -237,7 +237,7 @@ class TestHappyPath:
         assert payload["valuation_ccy"] == "USD"
         assert payload["mark_source"] == "finalized_1m_candle_close"
         assert payload["rate_sources"] == []
-        assert payload["calc_version"] == "5A.11"
+        assert payload["calc_version"] == "5A.12"
         points = payload["points"]
         assert len(points) == 3
         assert points[0]["valuation_status"] == "complete"

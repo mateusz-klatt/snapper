@@ -24,6 +24,10 @@ from loguru import logger
 from snapper.application.portfolio.average_cost import CycleTransition
 from snapper.application.portfolio.average_cost import apply_fill
 from snapper.application.portfolio.average_cost import classify_transition
+from snapper.application.portfolio.fill_booking import booked_signed_quantity
+from snapper.application.portfolio.fill_booking import cash_fee
+from snapper.application.portfolio.fill_booking import native_base_asset
+from snapper.application.portfolio.fill_booking import resolve_position_quantity_unit
 from snapper.core.types import FillStatusEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.core.types import TradeSideEnum
@@ -465,9 +469,30 @@ class TradeService:
         event_time = event.get("venue_timestamp") or event["received_at"]
 
         if side_lower in (TradeSideEnum.BUY, TradeSideEnum.SELL):
-            signed_qty = fill_size if side_lower == TradeSideEnum.BUY else -fill_size
-            self._update_position(shard.position, signed_qty, fill_size, fill_price, event_time)
-            self._update_cash(shard, side_lower, notional, fee)
+            fee_asset = event.get("fee_asset")
+            base_asset = native_base_asset(event["instrument"])
+            quantity_unit = resolve_position_quantity_unit(event["exchange"])
+            signed_qty = booked_signed_quantity(
+                side_lower,
+                fill_size,
+                fee,
+                fee_asset,
+                base_asset,
+                quantity_unit,
+            )
+            self._update_position(
+                shard.position,
+                signed_qty,
+                abs(signed_qty),
+                fill_price,
+                event_time,
+            )
+            self._update_cash(
+                shard,
+                side_lower,
+                notional,
+                cash_fee(fill_size, fee, fee_asset, base_asset, quantity_unit),
+            )
 
         shard.turnover += notional
         self._update_command_fill_status(shard, event)
