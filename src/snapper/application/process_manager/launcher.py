@@ -44,6 +44,9 @@ from snapper.application.process_manager.config_resolver import resolve_paramete
 from snapper.application.process_manager.config_resolver import resolve_restart_policy
 from snapper.application.process_manager.config_resolver import resolve_role
 from snapper.application.process_manager.config_resolver import resolve_tags
+from snapper.application.process_manager.delegate_config_guard import (
+    validate_delegate_config_references,
+)
 from snapper.application.process_manager.executor_naming import is_executor_instance
 from snapper.application.process_manager.executor_naming import is_executor_template
 from snapper.application.process_manager.executor_naming import parse_executor_instance
@@ -1258,6 +1261,7 @@ class ProcessLauncherService:
         Returns:
             The public_id string, or None if persistence failed.
         """
+        validate_delegate_config_references(config.name, config.template, config.parameters)
         run_parameters: JsonObject = {
             "mode": config.mode,
             "parameters": config.parameters,
@@ -4657,6 +4661,7 @@ class ProcessLauncherService:
             note: Optional descriptive note.
             template: Source-template registry name persisted on the row.
         """
+        validate_delegate_config_references(name, template, parameters)
         await self._registry_syncer.create_process_config(
             name=name,
             class_path=class_path,

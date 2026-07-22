@@ -85,14 +85,14 @@ class DelegateProcessParameters(StrictBody):
         base_url: Base endpoint reserved for the later client seam.
         api_key_file: Path reserved for later credential loading.
         delegate_token_file: Path reserved for later delegate-token loading.
-        max_tool_rounds: Positive limit reserved for later tool orchestration.
+        max_tool_rounds: Bounded limit reserved for later tool orchestration.
     """
 
     model_alias: str = Field(min_length=1)
     base_url: str = Field(min_length=1)
     api_key_file: str = Field(min_length=1)
     delegate_token_file: str = Field(min_length=1)
-    max_tool_rounds: int = Field(ge=1)
+    max_tool_rounds: int = Field(ge=1, le=8)
 
 
 class PaperPublisherParameters(StrictBody):

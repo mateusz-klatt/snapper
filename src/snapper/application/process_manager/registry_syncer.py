@@ -17,6 +17,9 @@ from uuid import uuid7
 from loguru import logger
 from sqlalchemy import select
 
+from snapper.application.process_manager.delegate_config_guard import (
+    validate_delegate_config_references,
+)
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
@@ -410,6 +413,7 @@ class ProcessRegistrySyncer:
         Raises:
             ValueError: If process name already exists.
         """
+        validate_delegate_config_references(name, template, parameters)
         repository = get_repository(self.settings.db_url)
         config_key = f"process_{name}"
         _mint_missing_seeded_identities(
@@ -565,6 +569,12 @@ class ProcessRegistrySyncer:
             if existing is None:
                 raise KeyError(f"Process '{name}' is not configured")
             config_dict = json.loads(existing.value)
+            template_name = config_dict.get("template")
+            validate_delegate_config_references(
+                name,
+                str(template_name) if template_name is not None else None,
+                parameters,
+            )
             config_dict["parameters"] = parameters
             _mint_missing_seeded_identities(
                 config_dict.get("parameters"),

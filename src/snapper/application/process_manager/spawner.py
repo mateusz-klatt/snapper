@@ -22,6 +22,9 @@ from typing import cast
 
 from loguru import logger
 
+from snapper.application.process_manager.delegate_config_guard import (
+    validate_delegate_config_references,
+)
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.registry import get_registered_processes
@@ -79,6 +82,7 @@ def _build_process_command(
     }
     if role is not None:
         config["role"] = role.value
+    validate_delegate_config_references(name, template_name, parameters)
     config_json = json.dumps(config)
     return [
         sys.executable,
