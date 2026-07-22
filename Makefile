@@ -306,8 +306,8 @@ check: fmt lint typecheck check-docstrings check-no-comments check-main-guard ch
 
 fix: fmt-fix lint-fix move-imports
 
-check-all: check ui-check ui-check-types check-exclusions cov ui-cov
-	$(info All quality checks passed [backend + frontend + type drift + 100% coverage TDD])
+check-all: check ui-check ui-check-types bridge-check check-exclusions cov ui-cov
+	$(info All quality checks passed [backend + frontend + mcp bridge + type drift + 100% coverage TDD])
 
 fix-all: fix ui-fix
 	$(info All quality fixes applied [backend + frontend])
