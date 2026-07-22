@@ -22,6 +22,7 @@ from typing import cast
 
 from loguru import logger
 
+from snapper.application.process_manager.delegate_config_guard import is_delegate_config
 from snapper.application.process_manager.delegate_config_guard import (
     validate_delegate_config_references,
 )
@@ -35,6 +36,8 @@ IS_WINDOWS = sys.platform == "win32"
 CREATE_NEW_PROCESS_GROUP = 0x00000200 if IS_WINDOWS else 0
 CTRL_BREAK_EVENT: Final[int] = getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM)
 SIGKILL_SIGNAL: Final[int] = getattr(signal, "SIGKILL", signal.SIGTERM)
+_DELEGATE_SAFE_PATH: Final[str] = "/opt/appenv/bin:/usr/local/bin:/usr/bin:/bin"
+_DELEGATE_LOG_FILE: Final[str] = "data/snapper-delegate.log"
 _preexec_setsid: Callable[[], None] | None
 _posix_killpg: Callable[[int, int], None] | None
 _posix_getpgid: Callable[[int], int] | None
@@ -47,6 +50,20 @@ else:
     _preexec_setsid = cast("Callable[[], None]", _posix_os.setsid)
     _posix_killpg = cast("Callable[[int, int], None]", _posix_os.killpg)
     _posix_getpgid = cast("Callable[[int], int]", _posix_os.getpgid)
+
+
+def _build_delegate_environment() -> dict[str, str]:
+    """Build the complete allowlisted environment for a delegate child."""
+    return {
+        "PATH": _DELEGATE_SAFE_PATH,
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
+        "SNAPPER_LOG_FILE": _DELEGATE_LOG_FILE,
+        "STRATEGY_EXTRA_PACKAGES": "snapper_delegate",
+    }
 
 
 def _build_process_command(
@@ -226,11 +243,17 @@ class ProcessSpawnerService:
             detail_suffix = "; see console output for details"
         return detail_suffix
 
-    def _launch_subprocess(self, cmd: list[str]) -> subprocess.Popen[bytes]:
+    def _launch_subprocess(
+        self,
+        cmd: list[str],
+        environment: dict[str, str] | None = None,
+    ) -> subprocess.Popen[bytes]:
         """Create and start a subprocess with platform-appropriate settings.
 
         Args:
             cmd: Command list for subprocess.Popen.
+            environment: Explicit environment for a restricted child, or None
+                to preserve native parent-environment inheritance.
 
         Returns:
             Started Popen handle.
@@ -239,6 +262,15 @@ class ProcessSpawnerService:
         creation_flags = CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
         stdout_stream: int | None = subprocess.PIPE if self._capture_output else None
         stderr_stream: int | None = subprocess.PIPE if self._capture_output else None
+        if environment is not None:
+            return subprocess.Popen(
+                cmd,
+                stdout=stdout_stream,
+                stderr=stderr_stream,
+                preexec_fn=preexec_fn,
+                creationflags=creation_flags,
+                env=environment,
+            )
         return subprocess.Popen(
             cmd,
             stdout=stdout_stream,
@@ -309,7 +341,10 @@ class ProcessSpawnerService:
         logger.info(f"Spawning process '{name}' (class: {class_path}, method: {method})")
         self._validate_class_path(name, class_path, template_name)
         cmd = _build_process_command(name, class_path, method, parameters, template_name, role)
-        process = self._launch_subprocess(cmd)
+        if is_delegate_config(name, template_name):
+            process = self._launch_subprocess(cmd, _build_delegate_environment())
+        else:
+            process = self._launch_subprocess(cmd)
         time.sleep(0.1)
         status = process.poll()
         if status is None:

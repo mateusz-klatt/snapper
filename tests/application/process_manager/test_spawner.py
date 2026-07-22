@@ -814,38 +814,26 @@ def test_spawn_success_registers_process(monkeypatch: MonkeyPatch) -> None:
     assert "snapper.server.process_runner" in captured_cmd
 
 
-def test_spawn_inherits_parent_environment_for_logfile(monkeypatch: MonkeyPatch) -> None:
-    """Guard the per-container logfile environment-inheritance contract.
+def test_non_delegate_spawn_inherits_parent_environment(monkeypatch: MonkeyPatch) -> None:
+    """Non-delegate children retain implicit full environment inheritance.
 
-    Per-container log files work because ``snapper.__main__.main`` exports
-    ``SNAPPER_LOG_FILE`` into the parent process environment and the native
-    spawner launches children via ``subprocess.Popen`` WITHOUT an ``env``
-    mapping. With no ``env`` argument the child inherits the full parent
-    environment, so ``snapper.utils.logging.resolve_subprocess_logfile`` reads
-    the inherited ``SNAPPER_LOG_FILE`` and every subprocess (including the feed
-    publishers that run as subprocesses) appends to the correct per-container
-    log file instead of the default ``data/snapper.log``.
-
-    This is a regression guard. It passes today because no ``env`` is forwarded
-    to ``Popen`` (full inheritance), and it fails loudly if a future refactor
-    introduces a curated ``env`` dict that omits ``SNAPPER_LOG_FILE`` — a change
-    that would silently turn the per-container logfile feature into a no-op for
-    subprocess feed publishers.
-
-    Given ``SNAPPER_LOG_FILE`` is set in the parent process environment,
-    When ``ProcessSpawnerService.spawn`` launches a child via ``subprocess.Popen``,
-    Then either no ``env`` mapping is passed (the child inherits the full parent
-        environment) or any ``env`` that is passed still carries
-        ``SNAPPER_LOG_FILE`` — so the spawned subprocess always resolves its
-        container's dedicated log file.
+    Given: A non-delegate process and a parent-scoped logfile variable,
+    When: The spawner launches the child through subprocess.Popen,
+    Then: Popen receives no env keyword and inherits the parent byte-for-byte.
     """
     monkeypatch.setenv("SNAPPER_LOG_FILE", "data/snapper-container-7.log")
     captured_kwargs: dict[str, object] = {}
+
+    def fake_is_delegate_config(name: str, template_name: str | None) -> bool:
+        assert name == "feed-publisher"
+        assert template_name is None
+        return False
 
     def fake_popen(cmd: list[str], **kwargs: object) -> DummyProcess:
         captured_kwargs.update(kwargs)
         return DummyProcess(initial_returncode=None)
 
+    monkeypatch.setattr(spawner_module, "is_delegate_config", fake_is_delegate_config)
     monkeypatch.setattr(
         "snapper.application.process_manager.spawner.subprocess.Popen",
         fake_popen,
@@ -857,8 +845,103 @@ def test_spawn_inherits_parent_environment_for_logfile(monkeypatch: MonkeyPatch)
         method="run",
         parameters={"bar": 1},
     )
-    env = captured_kwargs.get("env")
-    assert env is None or (isinstance(env, dict) and "SNAPPER_LOG_FILE" in env)
+    assert "env" not in captured_kwargs
+
+
+def test_delegate_spawn_receives_only_allowlisted_environment(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Delegate children receive an exact secret-free environment.
+
+    Given: A delegate spawn from a coordinator environment containing secrets,
+    When: The spawner launches the delegate through subprocess.Popen,
+    Then: Popen receives only the eight fixed allowlisted variables.
+    """
+    inherited_values = {
+        "DB_URL": "postgresql+asyncpg://coordinator-secret",
+        "MASTER_PASSWORD": "master-secret",
+        "ZMQ_BROKER_XSUB_ENDPOINT": "tcp://broker:5555",
+        "ZMQ_BROKER_XPUB_ENDPOINT": "tcp://broker:5556",
+        "SNAPPER_COORDINATOR_INSTANCE_ID": "coordinator-secret",
+        "KRAKEN_API_KEY": "venue-secret",
+        "HTTP_PROXY": "http://proxy.invalid",
+        "HTTPS_PROXY": "http://proxy.invalid",
+        "ALL_PROXY": "socks5://proxy.invalid",
+        "NO_PROXY": "broker,database",
+    }
+    for key, value in inherited_values.items():
+        monkeypatch.setenv(key, value)
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_is_delegate_config(name: str, template_name: str | None) -> bool:
+        assert name == "delegate_research_primary"
+        assert template_name == "delegate_runner"
+        return True
+
+    def fake_popen(cmd: list[str], **kwargs: object) -> DummyProcess:
+        captured_kwargs.update(kwargs)
+        return DummyProcess(initial_returncode=None)
+
+    def fake_registered_processes() -> dict[str, object]:
+        return {"delegate_runner": object()}
+
+    monkeypatch.setattr(spawner_module, "is_delegate_config", fake_is_delegate_config)
+    monkeypatch.setattr(
+        spawner_module,
+        "get_registered_processes",
+        fake_registered_processes,
+    )
+    monkeypatch.setattr(
+        "snapper.application.process_manager.spawner.subprocess.Popen",
+        fake_popen,
+    )
+    service = ProcessSpawnerService()
+    service.spawn(
+        name="delegate_research_primary",
+        class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
+        method="run",
+        parameters={
+            "model_alias": "research-primary",
+            "base_url": "https://delegate.invalid/v1",
+            "api_key_file": "/run/secrets/delegate/api_key",
+            "delegate_token_file": "/run/secrets/delegate/delegate_token",
+            "max_tool_rounds": 4,
+        },
+        template_name="delegate_runner",
+    )
+    environment_value = captured_kwargs.get("env")
+    assert isinstance(environment_value, dict)
+    environment = cast("dict[str, str]", environment_value)
+    expected_environment = {
+        "PATH": "/opt/appenv/bin:/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
+        "SNAPPER_LOG_FILE": "data/snapper-delegate.log",
+        "STRATEGY_EXTRA_PACKAGES": "snapper_delegate",
+    }
+    assert environment == expected_environment
+    assert set(environment) == set(expected_environment)
+    for forbidden_key in inherited_values:
+        assert forbidden_key not in environment
+    assert not any(key.startswith("ZMQ_BROKER_") for key in environment)
+    assert not any(key.upper().endswith("_PROXY") for key in environment)
+
+
+def test_cleanup_missing_process_is_unchanged() -> None:
+    """Cleaning an unknown process remains a no-op.
+
+    Given: A spawner with no registered process under the requested name,
+    When: Cleanup is requested for that missing process,
+    Then: The process registry remains empty without attempting termination.
+    """
+    service = ProcessSpawnerService()
+
+    service.cleanup("missing")
+
+    assert service.processes == {}
 
 
 def test_spawn_duplicate_name_raises(monkeypatch: MonkeyPatch) -> None:

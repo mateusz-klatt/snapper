@@ -12,6 +12,7 @@ import snapper.application.process_manager.delegate_config_guard as guard_module
 import snapper.application.process_manager.registry_syncer as registry_syncer_module
 import snapper.application.process_manager.spawner as spawner_module
 from snapper.application.process_manager.delegate_config_guard import DelegateConfigReferenceError
+from snapper.application.process_manager.delegate_config_guard import is_delegate_config
 from snapper.application.process_manager.delegate_config_guard import (
     validate_delegate_config_references,
 )
@@ -230,6 +231,53 @@ def test_delegate_validator_accepts_reference_only_config(
     validate_delegate_config_references(name, template, parameters)
 
     assert parameters == before
+
+
+@pytest.mark.parametrize(
+    ("name", "template", "entries", "expected"),
+    (
+        (_DELEGATE_NAME, None, {_DELEGATE_NAME: _delegate_entry()}, True),
+        (
+            "delegate_research_primary",
+            _DELEGATE_NAME,
+            {_DELEGATE_NAME: _delegate_entry()},
+            True,
+        ),
+        ("ordinary", None, {"ordinary": _entry(("core",), False)}, False),
+        (
+            "partial",
+            None,
+            {"partial": _entry(("delegate", "runner"), False)},
+            False,
+        ),
+        ("missing", None, {}, False),
+        (
+            _DELEGATE_NAME,
+            "ordinary_template",
+            {
+                _DELEGATE_NAME: _delegate_entry(),
+                "ordinary_template": _entry(("core",), False),
+            },
+            False,
+        ),
+    ),
+)
+def test_delegate_predicate_uses_authoritative_registry_metadata(
+    name: str,
+    template: str | None,
+    entries: dict[str, ProcessRegistryEntry],
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delegate classification uses only the owning registry entry.
+
+    Given: Native, template-derived, partial, ordinary, or absent registry metadata,
+    When: The public delegate configuration predicate classifies the process,
+    Then: Only entries with both delegate tags and the exact parameter model match.
+    """
+    _install_registry(monkeypatch, entries)
+
+    assert is_delegate_config(name, template) is expected
 
 
 @pytest.mark.parametrize(

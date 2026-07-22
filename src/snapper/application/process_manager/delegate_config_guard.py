@@ -63,6 +63,20 @@ def _entry_for_config(name: str, template_name: str | None) -> ProcessRegistryEn
     return get_registered_processes().get(registry_name)
 
 
+def is_delegate_config(name: str, template_name: str | None) -> bool:
+    """Return whether registry metadata identifies a delegate configuration.
+
+    Args:
+        name: Configured process name used by registry-native workloads.
+        template_name: Source registry template for configured process copies.
+
+    Returns:
+        True when the authoritative registry entry has the delegate tag pair
+        and exact delegate parameter model.
+    """
+    return _is_delegate_entry(_entry_for_config(name, template_name))
+
+
 def _is_route_alias(value: object) -> bool:
     """Return whether a value is a non-empty route-alias token."""
     return (
@@ -158,6 +172,5 @@ def validate_delegate_config_references(
         DelegateConfigReferenceError: When an authoritative delegate entry has
             parameters outside the reference-only structural contract.
     """
-    entry = _entry_for_config(name, template_name)
-    if _is_delegate_entry(entry):
+    if is_delegate_config(name, template_name):
         _validate_reference_shape(parameters)
