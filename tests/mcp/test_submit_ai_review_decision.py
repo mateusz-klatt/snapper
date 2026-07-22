@@ -39,6 +39,8 @@ from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.core.types import AiReviewResolutionModeEnum
 from snapper.core.types import AiReviewStatusEnum
 from snapper.mcp.error_envelope import to_call_tool_result
+from snapper.mcp.server import TOKEN_CLAIMS_CTX
+from snapper.mcp.server import PermissionAwareFastMCP
 from snapper.mcp.tools import register_mcp_tools
 
 
@@ -67,9 +69,9 @@ def _make_claims(
 def _build_server(
     repository: Any = None,
     claims: TokenClaims | None = None,
-) -> FastMCP:
+) -> PermissionAwareFastMCP:
     """Construct a FastMCP instance with tools registered + getters wired."""
-    server = FastMCP("test")
+    server = PermissionAwareFastMCP("test")
     register_mcp_tools(
         server,
         repository_getter=lambda: repository,
@@ -243,11 +245,11 @@ class TestSubmitAiReviewDecisionTool:
     async def test_v1_delegate_create_scope_keeps_approval_happy_path(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A historical v1 delegate scope still reaches the unchanged live gate.
+        """A historical v1 delegate still sees and calls the decision tool.
 
         Given: An explicit v1 AI_DELEGATE token carrying only historical CREATE_ORDERS.
-        When: The token submits an approve decision through the MCP tool.
-        Then: The unchanged CREATE_ORDERS gate admits it and the decision succeeds.
+        When: The token lists tools and submits an approve decision through MCP.
+        Then: The v1 projector lists the tool and its unchanged CREATE_ORDERS call gate succeeds.
         """
         stub = self._stub_submit_decision(
             monkeypatch,
@@ -268,11 +270,18 @@ class TestSubmitAiReviewDecisionTool:
         )
         server = _build_server(repository=AsyncMock(), claims=claims)
 
+        context_token = TOKEN_CLAIMS_CTX.set(claims)
+        try:
+            visible_names = {tool.name for tool in await server.list_tools()}
+        finally:
+            TOKEN_CLAIMS_CTX.reset(context_token)
+
         result = await server._tool_manager.call_tool(
             "submit_ai_review_decision",
             {"review_id": "rev-v1", "decision": "approve"},
         )
 
+        assert "submit_ai_review_decision" in visible_names
         envelope = _decode_call_tool_result(result)
         assert envelope["success"] is True
         assert envelope["error_code"] is None

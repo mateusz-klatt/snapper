@@ -22,6 +22,7 @@ from typing import Any
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import Tool as MCPTool
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -36,6 +37,7 @@ from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
 from snapper.auth.tokens import get_token_manager
 from snapper.data.repository import Repository
 from snapper.mcp.rate_limiting import PrincipalRateLimitMiddleware
+from snapper.mcp.tool_catalog import filter_mcp_tools
 from snapper.mcp.tools import register_mcp_tools
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
@@ -53,6 +55,23 @@ the FastMCP dispatch layer. ContextVars propagate through the asyncio
 task that serves a single MCP call, so the authenticated claims and the
 tool handler always see the same context.
 """
+
+
+class PermissionAwareFastMCP(FastMCP[None]):
+    """FastMCP server whose tool catalog reflects authenticated permissions."""
+
+    async def list_tools(self) -> list[MCPTool]:
+        """Return tools visible to the current authenticated principal.
+
+        Returns:
+            The complete registered catalog when request claims are absent,
+            or the permission-filtered catalog for authenticated requests.
+        """
+        tools = await super().list_tools()
+        claims = TOKEN_CLAIMS_CTX.get()
+        if claims is None:
+            return tools
+        return filter_mcp_tools(tools, claims)
 
 
 def get_current_claims() -> TokenClaims:
@@ -398,7 +417,7 @@ def build_mcp_app(
     Returns:
         A Starlette sub-app ready for ``FastAPI.mount("/api/mcp",...)``.
     """
-    mcp_server = FastMCP(
+    mcp_server = PermissionAwareFastMCP(
         _MCP_SERVER_NAME,
         instructions=f"Snapper MCP endpoint (v{_MCP_SERVER_VERSION}).",
         stateless_http=True,
