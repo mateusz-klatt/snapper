@@ -40,6 +40,17 @@ the complete quality gate using the consolidated Makefile targets before creatin
 - Run `make test` for the default warning-clean suite (`tests/` plus `proprietary/tests/` when present). For targeted coroutine-warning debugging, run pytest with `-W error::RuntimeWarning` against the same paths under the isolated test DB.
 - Warnings degrade signal quality and mask real issues. Fix immediately, never leave for later.
 
+**Function Complexity (MANDATORY):**
+
+- New and changed functions must satisfy Ruff `C901 <= 10`, `PLR0912 <= 12`, `PLR0913 <= 5`, and
+  `PLR0915 <= 50`.
+- Existing debt is grandfathered per exact file and rule, then pinned by symbol and metric in
+  `scripts/complexity_baseline.json`. Never refresh that baseline to admit unrelated new debt.
+- The adoption snapshot is complete and the shipped checker has no re-baselining command. Never regenerate the
+  baseline wholesale.
+- Run `make check-complexity-ratchet` after refactoring a grandfathered file. Improvements require lowering or
+  removing the corresponding baseline and per-file entry so the ratchet cannot become stale.
+
 **Language Requirements (MANDATORY):**
 
 - Keep all content inside source code files (identifiers, docstrings, comments, log messages, UI strings, CLI output, runtime content) in English.
@@ -83,6 +94,7 @@ every agent, every session, and every host sees the same notes.
 4) Backend policy scans
 
 - `make check-docstrings`
+- `make check-complexity-ratchet`
 - `make check-no-comments`
 - `make check-main-guard`
 - `make check-init-files`

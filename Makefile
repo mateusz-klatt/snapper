@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-gitlinks sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-gitlinks sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-complexity-ratchet check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -35,6 +35,7 @@ help:
 	$(info fix                       Backend quality fixes [fmt-fix + lint-fix + move-imports])
 	$(info check-all                 Complete quality gate [check + ui + type drift + exclusions + cov])
 	$(info check-exclusions          Fail if pragma/noqa/ignore comments exist [strict])
+	$(info check-complexity-ratchet  Reject new or increased Ruff complexity debt)
 	$(info check-docstrings          Check docstring compliance [Google/BDD style])
 	$(info check-no-comments         Fail if Python hash comments exist [strict])
 	$(info check-main-guard          Validate __main__ blocks use raise SystemExit)
@@ -255,7 +256,7 @@ fmt-fix:
 	$(PYRUN) isort $(PY_DIRS)
 	$(PYRUN) black $(PY_DIRS)
 
-lint:
+lint: check-complexity-ratchet
 	$(PYRUN) ruff check $(PY_DIRS)
 
 lint-fix:
@@ -315,6 +316,9 @@ fix-all: fix ui-fix
 
 check-exclusions:
 	$(VENV_PY) scripts/check_coverage_exclusions.py --strict
+
+check-complexity-ratchet:
+	$(VENV_PY) scripts/check_complexity_ratchet.py
 
 check-docstrings:
 	$(VENV_PY) scripts/check_docstrings.py --strict --verbose --enforce-bdd --enforce-google-sections

@@ -1,0 +1,2432 @@
+{
+  "schema_version": 1,
+  "limits": {
+    "C901": 10,
+    "PLR0912": 12,
+    "PLR0913": 5,
+    "PLR0915": 50
+  },
+  "violations": {
+    "proprietary/tests/strategies/test_parlay_cascade.py": {
+      "_cleanup_strategy": {
+        "C901": 11
+      },
+      "_make_config": {
+        "PLR0913": 8
+      },
+      "_warmup_drift": {
+        "PLR0913": 6
+      }
+    },
+    "proprietary/tests/strategies/test_spy_btc_momentum.py": {
+      "_cleanup_strategy": {
+        "C901": 11
+      }
+    },
+    "scripts/backfill_synth_candles.py": {
+      "_process_instrument": {
+        "PLR0913": 11
+      },
+      "run": {
+        "C901": 15,
+        "PLR0915": 67
+      }
+    },
+    "scripts/check_docstrings.py": {
+      "_validate_docstring_style": {
+        "PLR0913": 7
+      }
+    },
+    "scripts/generate_types.py": {
+      "generate_entities": {
+        "PLR0915": 54
+      }
+    },
+    "scripts/pnl_uat_fixture.py": {
+      "_execution": {
+        "PLR0913": 10
+      },
+      "_instrument": {
+        "PLR0913": 6
+      },
+      "_order": {
+        "PLR0913": 9
+      },
+      "_signal": {
+        "PLR0913": 6
+      },
+      "_trade_command": {
+        "PLR0913": 14
+      }
+    },
+    "scripts/resilience_fault_injection.py": {
+      "await_recovery": {
+        "PLR0913": 7
+      },
+      "run_outage_cycle": {
+        "PLR0913": 10
+      }
+    },
+    "scripts/seed_demo.py": {
+      "_insert_alert_event": {
+        "PLR0913": 15
+      },
+      "_insert_backtest_run": {
+        "PLR0913": 14
+      },
+      "_insert_execution": {
+        "PLR0913": 13
+      },
+      "_insert_order": {
+        "PLR0913": 13
+      },
+      "_insert_position": {
+        "PLR0913": 9
+      },
+      "_seed_demo_alerts_for_user": {
+        "PLR0913": 6
+      },
+      "main": {
+        "PLR0915": 54
+      }
+    },
+    "scripts/test_live_orders.py": {
+      "run_kraken_futures": {
+        "PLR0915": 63
+      },
+      "run_kraken_spot": {
+        "PLR0915": 59
+      },
+      "run_walutomat": {
+        "PLR0915": 65
+      }
+    },
+    "src/snapper/application/ai_review/service.py": {
+      "AiReviewService._publish_decision_ack_external_frame": {
+        "PLR0913": 12
+      },
+      "AiReviewService._publish_decision_bus_event": {
+        "PLR0913": 7
+      },
+      "AiReviewService._publish_request_external_frame": {
+        "PLR0913": 10
+      },
+      "AiReviewService.submit_decision": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/application/ai_review/strategy_primitive.py": {
+      "_await_terminal_state": {
+        "PLR0913": 7
+      },
+      "create_ai_review_and_await": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/ai_review/watchdog.py": {
+      "AiDelegateWatchdog.__init__": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/backtest/batch_processor.py": {
+      "_process_signal": {
+        "PLR0913": 9
+      },
+      "_resolve_target_fill_price": {
+        "PLR0913": 10
+      },
+      "process_time_batch": {
+        "PLR0913": 10
+      }
+    },
+    "src/snapper/application/backtest/candle_stream.py": {
+      "stream_candles_for_instrument": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/backtest/direct_engine.py": {
+      "DirectDbEngine.__init__": {
+        "PLR0913": 6
+      },
+      "DirectDbEngine._process_time_batch": {
+        "PLR0913": 8
+      }
+    },
+    "src/snapper/application/backtest/fill_model.py": {
+      "simulate_market_fill": {
+        "PLR0913": 10
+      }
+    },
+    "src/snapper/application/backtest/result_collector.py": {
+      "ResultCollector.maybe_record_equity": {
+        "PLR0913": 7
+      },
+      "ResultCollector.record_signal": {
+        "PLR0913": 10
+      },
+      "ResultCollector.record_trade": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/application/backtest/runner.py": {
+      "BacktestRunnerProcess.start": {
+        "C901": 11,
+        "PLR0915": 71
+      }
+    },
+    "src/snapper/application/engine/guard_scanner.py": {
+      "PairedExecutionGuardScanner._flatten_command_row": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/engine/service.py": {
+      "TradingEngineService.__init__": {
+        "PLR0913": 13
+      },
+      "TradingEngineService._build_strategy_insert_row": {
+        "PLR0913": 13
+      },
+      "TradingEngineService._send_order": {
+        "PLR0913": 11
+      },
+      "TradingEngineService.execute_desired_units": {
+        "PLR0913": 10
+      }
+    },
+    "src/snapper/application/engine/trader.py": {
+      "TraderCoordinator._accrue_one_boundary": {
+        "PLR0913": 7
+      },
+      "TraderCoordinator._bootstrap_reconciled_position_cycle": {
+        "PLR0913": 7
+      },
+      "TraderCoordinator._build_checkpoint_upsert_row": {
+        "PLR0913": 6
+      },
+      "TraderCoordinator._build_position_cycle_insert_row": {
+        "PLR0913": 8
+      },
+      "TraderCoordinator._checkpoint_fill_evidence_certain": {
+        "C901": 11
+      },
+      "TraderCoordinator._correct_checkpoint_fill_gap": {
+        "PLR0913": 6
+      },
+      "TraderCoordinator._fill_digest_matches": {
+        "C901": 11
+      },
+      "TraderCoordinator._hydrate_reconciled_position_cycle": {
+        "PLR0913": 6
+      },
+      "TraderCoordinator._rebuild_shard_if_gapped": {
+        "C901": 14,
+        "PLR0912": 13,
+        "PLR0915": 59
+      },
+      "TraderCoordinator._reconcile_direction_mismatch_cycle": {
+        "PLR0913": 8
+      },
+      "TraderCoordinator._reconcile_existing_position_cycle": {
+        "PLR0913": 8
+      },
+      "TraderCoordinator._recover_checkpoint_row": {
+        "C901": 16,
+        "PLR0912": 15,
+        "PLR0915": 56
+      },
+      "TraderCoordinator._recover_execution_group": {
+        "C901": 14,
+        "PLR0912": 14,
+        "PLR0913": 7
+      },
+      "TraderCoordinator._replay_checkpoint_accruals": {
+        "PLR0913": 7
+      },
+      "TraderCoordinator._sync_flip_position_cycle": {
+        "PLR0913": 6
+      },
+      "TraderCoordinator._write_position_projection_locked": {
+        "C901": 12
+      }
+    },
+    "src/snapper/application/market_data_watchdog/watchdog.py": {
+      "MarketDataWatchdog.__init__": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/notify/apns_client.py": {
+      "ApnsClientPool.send": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/application/notify/portfolio_drift_paging.py": {
+      "build_open_portfolio_drift_alert_rows": {
+        "PLR0913": 8
+      }
+    },
+    "src/snapper/application/notify/rules/critical_system_error.py": {
+      "CriticalSystemErrorRule.evaluate": {
+        "C901": 12
+      }
+    },
+    "src/snapper/application/notify/sidecar.py": {
+      "NotifySidecar.__init__": {
+        "PLR0913": 10
+      }
+    },
+    "src/snapper/application/plans/cancel_service.py": {
+      "PlansCancelService._claim_cancel_transition": {
+        "PLR0913": 7
+      },
+      "PlansCancelService._compensate_failed_cancel": {
+        "PLR0913": 6
+      },
+      "PlansCancelService._execute_cancel": {
+        "PLR0913": 8
+      },
+      "PlansCancelService.cancel_by_plan_public_id": {
+        "PLR0913": 7
+      },
+      "_build_cancel_trade_command": {
+        "PLR0913": 10
+      }
+    },
+    "src/snapper/application/plans/service.py": {
+      "PlanExecutorService._apply_fill_update_locally": {
+        "PLR0913": 6
+      },
+      "PlanExecutorService._emit_trade_command": {
+        "PLR0913": 6
+      },
+      "PlanExecutorService._log_decision": {
+        "PLR0913": 8
+      }
+    },
+    "src/snapper/application/plans/trailing_stop.py": {
+      "TrailingStopEvaluator._evaluate_long": {
+        "PLR0913": 6
+      },
+      "TrailingStopEvaluator._evaluate_short": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/portfolio/account_view.py": {
+      "_row_is_coherent": {
+        "C901": 13
+      }
+    },
+    "src/snapper/application/portfolio/fill_booking.py": {
+      "booked_signed_quantity": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/portfolio/futures_reconciliation.py": {
+      "_evaluation_row": {
+        "PLR0913": 12
+      },
+      "_specification": {
+        "C901": 15,
+        "PLR0912": 16
+      },
+      "evaluate": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/portfolio/fx_rates.py": {
+      "convert_amount": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/portfolio/models.py": {
+      "PortfolioTracker.update_fill": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/application/portfolio/pnl_timeline.py": {
+      "_value_point": {
+        "C901": 36,
+        "PLR0912": 39,
+        "PLR0913": 21,
+        "PLR0915": 110
+      },
+      "build_pnl_timeline": {
+        "C901": 48,
+        "PLR0912": 26,
+        "PLR0913": 8,
+        "PLR0915": 184
+      },
+      "build_pnl_timeline.apply_execution_event": {
+        "C901": 19,
+        "PLR0912": 20,
+        "PLR0915": 72
+      },
+      "derive_timeline_opening": {
+        "C901": 26,
+        "PLR0912": 25,
+        "PLR0915": 74
+      }
+    },
+    "src/snapper/application/portfolio/pnl_timeline_service.py": {
+      "_event_fx_minutes": {
+        "C901": 11,
+        "PLR0913": 6
+      },
+      "_load_request_fx_rates": {
+        "PLR0913": 6
+      },
+      "_load_series_replay_inputs": {
+        "PLR0913": 7
+      },
+      "_mark_fx_minutes": {
+        "C901": 12,
+        "PLR0913": 8
+      },
+      "_opening_marks_from_candles": {
+        "PLR0913": 7
+      },
+      "_to_timeline_execution": {
+        "PLR0913": 6
+      },
+      "build_marks": {
+        "PLR0913": 8
+      },
+      "build_wallet_pnl_series": {
+        "PLR0913": 10
+      },
+      "build_wallet_pnl_timeline": {
+        "PLR0913": 9
+      },
+      "ensure_wallet_pnl_anchor": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/portfolio/reconciliation_dispatch.py": {
+      "dispatch_portfolio_reconciliation": {
+        "C901": 14,
+        "PLR0912": 13,
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/application/portfolio/reconciliation_invariants.py": {
+      "validate_portfolio_reconciliation_evaluation_config": {
+        "C901": 14,
+        "PLR0912": 14
+      }
+    },
+    "src/snapper/application/portfolio/spot_anchor_bootstrap.py": {
+      "spot_anchor_bootstrap_refusals": {
+        "C901": 23,
+        "PLR0912": 22
+      }
+    },
+    "src/snapper/application/portfolio/spot_precision_certification.py": {
+      "kraken_instrument_precision_version": {
+        "PLR0913": 8
+      },
+      "spot_precision_plane_certification_failures": {
+        "C901": 11
+      }
+    },
+    "src/snapper/application/portfolio/spot_reconciliation.py": {
+      "_evaluate_cash": {
+        "C901": 20,
+        "PLR0912": 20,
+        "PLR0913": 10,
+        "PLR0915": 69
+      },
+      "_evaluation_row": {
+        "PLR0913": 10
+      },
+      "_replay_executions": {
+        "C901": 23,
+        "PLR0912": 24,
+        "PLR0913": 8,
+        "PLR0915": 73
+      },
+      "evaluate": {
+        "C901": 11,
+        "PLR0913": 12
+      }
+    },
+    "src/snapper/application/portfolio/walutomat_history_certificate.py": {
+      "certify_walutomat_history_range": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/application/process_manager/launcher.py": {
+      "ProcessLauncherService._emit_run_event": {
+        "PLR0913": 7
+      },
+      "ProcessLauncherService.create_process_config": {
+        "PLR0913": 12
+      }
+    },
+    "src/snapper/application/process_manager/registry.py": {
+      "register_process": {
+        "PLR0913": 13
+      }
+    },
+    "src/snapper/application/process_manager/registry_syncer.py": {
+      "ProcessRegistrySyncer.create_process_config": {
+        "PLR0913": 12
+      }
+    },
+    "src/snapper/application/process_manager/spawner.py": {
+      "ProcessSpawnerService._build_process_info": {
+        "PLR0913": 6
+      },
+      "ProcessSpawnerService._register_spawned_process": {
+        "PLR0913": 6
+      },
+      "ProcessSpawnerService.spawn": {
+        "PLR0913": 6
+      },
+      "_build_process_command": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/process_manager/strategy_scope.py": {
+      "_resolve_nested_reference_labels": {
+        "PLR0913": 7
+      },
+      "_resolve_no_operator_strategy_scope": {
+        "PLR0913": 6
+      },
+      "enforce_classified_strategy_scope_complete": {
+        "PLR0913": 6
+      },
+      "enforce_strategy_process_scope_complete": {
+        "PLR0913": 8
+      },
+      "resolve_classified_strategy_scope": {
+        "PLR0913": 6
+      },
+      "resolve_strategy_process_scope": {
+        "PLR0913": 8
+      }
+    },
+    "src/snapper/application/services/candle_coverage.py": {
+      "_build_coverage_entry": {
+        "PLR0913": 9
+      },
+      "_evaluate_grid": {
+        "PLR0913": 6
+      },
+      "verify_candle_coverage": {
+        "PLR0913": 9
+      }
+    },
+    "src/snapper/application/services/candle_query.py": {
+      "fetch_cache_only": {
+        "PLR0913": 6
+      },
+      "fetch_candles": {
+        "PLR0913": 8
+      },
+      "fetch_db_only": {
+        "PLR0913": 6
+      },
+      "fetch_db_range": {
+        "PLR0913": 8
+      }
+    },
+    "src/snapper/application/services/continuous_contract_builder.py": {
+      "ContinuousContractBuilder._load_candles": {
+        "PLR0913": 6
+      },
+      "ContinuousContractBuilder._resolve_roll_info": {
+        "PLR0913": 7
+      },
+      "ContinuousContractBuilder._stitch": {
+        "PLR0913": 6
+      },
+      "ContinuousContractBuilder._stitch_contract_candles": {
+        "PLR0913": 7
+      },
+      "ContinuousContractBuilder.build": {
+        "PLR0913": 9
+      }
+    },
+    "src/snapper/application/services/market_stats.py": {
+      "MarketStatsWorker._merge_stats": {
+        "PLR0913": 9
+      }
+    },
+    "src/snapper/application/services/settings.py": {
+      "SettingsService._close_and_insert_setting": {
+        "PLR0913": 7
+      },
+      "SettingsService.update_setting": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/services/signals/service.py": {
+      "SignalReadService.get_recent_signals": {
+        "PLR0913": 6
+      },
+      "SignalReadService.store_signal": {
+        "PLR0913": 12
+      }
+    },
+    "src/snapper/application/system_metrics/snapshotter.py": {
+      "SystemMetricsSnapshotter.__init__": {
+        "PLR0913": 10
+      }
+    },
+    "src/snapper/application/trade/balance_service.py": {
+      "BalanceService.on_position_changed": {
+        "PLR0913": 6
+      },
+      "BalanceService.restore_from_checkpoint": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/trade/outbox.py": {
+      "OutboxDispatcher.__init__": {
+        "PLR0913": 8
+      }
+    },
+    "src/snapper/application/trade/trade_service.py": {
+      "TradeService.restore_from_checkpoint": {
+        "PLR0913": 11
+      }
+    },
+    "src/snapper/application/updaters/historical/aggregates.py": {
+      "PolygonAggregatesBackfillService.__init__": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/application/updaters/historical/candle_rows.py": {
+      "build_candle_rows": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/updaters/historical/kraken_equities_aggregates.py": {
+      "KrakenEquitiesAggregatesBackfillService._build_candle_rows": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/updaters/historical/kraken_futures_aggregates.py": {
+      "KrakenFuturesAggregatesBackfillService._build_candle_rows": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/updaters/historical/synthesized_candle_backfill.py": {
+      "SynthesizedCandleBackfillService.__init__": {
+        "PLR0913": 8
+      }
+    },
+    "src/snapper/application/updaters/historical/trade_candle_backfill.py": {
+      "TradeCandleBackfillService.__init__": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/application/updaters/symbols/base.py": {
+      "SymbolUpdaterService._deactivate_stale_capabilities": {
+        "PLR0913": 7
+      },
+      "SymbolUpdaterService._ensure_instrument_identity": {
+        "PLR0913": 6
+      },
+      "SymbolUpdaterService._reconcile_capabilities": {
+        "PLR0913": 8
+      },
+      "SymbolUpdaterService._resolve_funding_fields": {
+        "PLR0913": 6
+      },
+      "SymbolUpdaterService._revise_instrument_spec": {
+        "PLR0913": 13
+      },
+      "SymbolUpdaterService._upsert_alias": {
+        "PLR0913": 8
+      },
+      "SymbolUpdaterService._upsert_capability": {
+        "PLR0913": 10
+      },
+      "SymbolUpdaterService._upsert_symbol": {
+        "PLR0913": 8
+      }
+    },
+    "src/snapper/application/updaters/symbols/polygon.py": {
+      "PolygonSymbolUpdaterService._upsert_polygon_mapping": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/application/updaters/underlying_updater.py": {
+      "_InstrumentInfo.__init__": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/auth/scope_grant_service.py": {
+      "ScopeGrantService._publish_scope_granted": {
+        "PLR0913": 9
+      },
+      "ScopeGrantService._publish_scope_handed_over": {
+        "PLR0913": 10
+      },
+      "ScopeGrantService._publish_scope_revoked": {
+        "PLR0913": 9
+      },
+      "ScopeGrantService.handover": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/auth/tokens.py": {
+      "TokenManager._cache_verdict": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/auth/websocket_auth.py": {
+      "WebSocketAuthManager._drop_unscoped_subscriptions": {
+        "PLR0913": 6
+      },
+      "WebSocketAuthManager.register_connection": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/cli/app.py": {
+      "_rotate_single_setting": {
+        "PLR0913": 6
+      },
+      "_run_archive_export": {
+        "PLR0913": 11
+      },
+      "_run_strategies_engine": {
+        "PLR0915": 52
+      },
+      "_run_verify_candle_coverage_cmd": {
+        "PLR0913": 6
+      },
+      "archive_data": {
+        "PLR0913": 11
+      },
+      "backfill_synthesized_candles": {
+        "PLR0913": 7
+      },
+      "backtest_run": {
+        "PLR0913": 13
+      },
+      "build_continuous": {
+        "PLR0913": 8
+      },
+      "polygon_backfill_aggregates": {
+        "PLR0913": 7
+      },
+      "verify_candle_coverage_cmd": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/cli/dev_pat.py": {
+      "_create_delegate": {
+        "PLR0913": 6
+      },
+      "_login": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/core/wallet_resolution.py": {
+      "resolve_wallet_or_default": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/data/archiver.py": {
+      "CandleAuditArchiver._export_instrument": {
+        "PLR0913": 8
+      },
+      "CandleAuditArchiver.export": {
+        "PLR0913": 8
+      },
+      "CandleCacheArchiver._export_instrument": {
+        "PLR0913": 8
+      },
+      "CandleCacheArchiver.export": {
+        "PLR0913": 6
+      },
+      "EventArchiver._resolve_row_path": {
+        "PLR0913": 6
+      },
+      "EventArchiver.export": {
+        "PLR0913": 7
+      },
+      "StateArchiver.export": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/data/backtest_repository.py": {
+      "BacktestRepository.list_runs": {
+        "PLR0913": 7
+      },
+      "BacktestRepository.update_run_status": {
+        "PLR0913": 8
+      }
+    },
+    "src/snapper/data/migrations/versions/0001_init.py": {
+      "downgrade": {
+        "PLR0915": 74
+      },
+      "upgrade": {
+        "PLR0915": 282
+      }
+    },
+    "src/snapper/data/repository.py": {
+      "DatabaseRepository.revise_instrument_spec_sync": {
+        "PLR0913": 6
+      },
+      "Repository.atomic_resolve_review_with_audit_and_counter": {
+        "PLR0913": 7
+      },
+      "Repository.cancel_pending_deliveries_for_scope": {
+        "PLR0913": 6
+      },
+      "Repository.claim_execution_plan_cancel": {
+        "PLR0913": 6
+      },
+      "Repository.close_position_cycle": {
+        "PLR0913": 6
+      },
+      "Repository.create_wallet": {
+        "PLR0913": 6
+      },
+      "Repository.create_wallet_credential": {
+        "PLR0913": 9
+      },
+      "Repository.ensure_instrument": {
+        "PLR0913": 6
+      },
+      "Repository.get_candles": {
+        "PLR0913": 9
+      },
+      "Repository.get_execution_plans": {
+        "PLR0913": 7
+      },
+      "Repository.get_funding_rates": {
+        "PLR0913": 7
+      },
+      "Repository.get_orders": {
+        "PLR0913": 7
+      },
+      "Repository.get_pnl_timeline_ai_decisions": {
+        "PLR0913": 6
+      },
+      "Repository.get_pnl_timeline_signals": {
+        "PLR0913": 6
+      },
+      "Repository.get_signals": {
+        "PLR0913": 7
+      },
+      "Repository.get_spot_execution_chain_tip": {
+        "PLR0913": 6
+      },
+      "Repository.get_spot_reconciliation_bundle": {
+        "PLR0913": 6
+      },
+      "Repository.get_ticks": {
+        "PLR0913": 6
+      },
+      "Repository.handover_grant": {
+        "PLR0913": 7
+      },
+      "Repository.insert_execution_plan_checkpoint": {
+        "PLR0913": 8
+      },
+      "Repository.revise_instrument": {
+        "PLR0913": 6
+      },
+      "Repository.rotate_wallet_credential": {
+        "PLR0913": 6
+      },
+      "Repository.schedule_execution_plan_decision_outbox_retry": {
+        "PLR0913": 6
+      },
+      "Repository.set_portfolio_reconciliation_method_config": {
+        "PLR0913": 7
+      },
+      "Repository.update_delivery_retry_schedule": {
+        "PLR0913": 7
+      },
+      "Repository.update_execution_plan_status": {
+        "PLR0913": 12
+      },
+      "Repository.update_order": {
+        "PLR0913": 10
+      },
+      "Repository.upsert_instrument_underlying_mapping": {
+        "PLR0913": 7
+      },
+      "Repository.upsert_underlying_asset": {
+        "PLR0913": 8
+      },
+      "SQLAlchemyRepository._apply_leg_compensation": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository._atomic_transition_queued_delivery": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository._close_paired_execution_group_as_completed": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository._fold_execution_chain_tip": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository._leg_successor": {
+        "PLR0913": 10
+      },
+      "SQLAlchemyRepository._lock_active_drift_episode": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository._matching_pnl_timeline_fallback_witness": {
+        "C901": 11
+      },
+      "SQLAlchemyRepository._project_original_fill_fast": {
+        "PLR0913": 8
+      },
+      "SQLAlchemyRepository._project_original_fill_grouped": {
+        "PLR0913": 8
+      },
+      "SQLAlchemyRepository._revise_instrument_source": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository._scd2_transition_delivery": {
+        "PLR0913": 10
+      },
+      "SQLAlchemyRepository._set_portfolio_reconciliation_method_config_locked": {
+        "PLR0913": 8
+      },
+      "SQLAlchemyRepository._transition_execution_plan_decision_outbox": {
+        "PLR0913": 8
+      },
+      "SQLAlchemyRepository._validate_pnl_timeline_execution_prefix": {
+        "C901": 14,
+        "PLR0912": 13,
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository._validate_portfolio_pnl_anchor": {
+        "C901": 17,
+        "PLR0912": 16
+      },
+      "SQLAlchemyRepository._validate_spot_anchor_balances_json": {
+        "C901": 12
+      },
+      "SQLAlchemyRepository._version_drift_episode": {
+        "PLR0913": 8
+      },
+      "SQLAlchemyRepository._write_original_fill_successor": {
+        "PLR0913": 9
+      },
+      "SQLAlchemyRepository._write_portfolio_reconciliation": {
+        "C901": 23,
+        "PLR0912": 26,
+        "PLR0915": 123
+      },
+      "SQLAlchemyRepository.advance_trade_command_lifecycle": {
+        "PLR0913": 11
+      },
+      "SQLAlchemyRepository.atomic_resolve_review_with_audit_and_counter": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.cancel_pending_deliveries_for_scope": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.cas_paired_execution_group_status": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.cas_paired_execution_leg_status": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.cas_trade_command_status": {
+        "PLR0913": 8
+      },
+      "SQLAlchemyRepository.claim_execution_plan_cancel": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.claim_leg_and_insert_flatten_command": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.close_position_cycle": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.create_wallet": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.create_wallet_credential": {
+        "PLR0913": 9
+      },
+      "SQLAlchemyRepository.ensure_instrument": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.get_candles": {
+        "PLR0913": 9
+      },
+      "SQLAlchemyRepository.get_execution_plans": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.get_funding_rates": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.get_futures_reconciliation_bundle": {
+        "C901": 19,
+        "PLR0912": 18
+      },
+      "SQLAlchemyRepository.get_orders": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.get_pnl_timeline_ai_decisions": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.get_pnl_timeline_signals": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.get_portfolio_reconciliation_read_contexts": {
+        "C901": 12
+      },
+      "SQLAlchemyRepository.get_signals": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.get_spot_execution_chain_tip": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.get_spot_reconciliation_bundle": {
+        "C901": 22,
+        "PLR0912": 22,
+        "PLR0913": 6,
+        "PLR0915": 59
+      },
+      "SQLAlchemyRepository.get_ticks": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.handover_grant": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.insert_execution_plan_checkpoint": {
+        "PLR0913": 8
+      },
+      "SQLAlchemyRepository.project_paired_execution_leg_fill": {
+        "PLR0913": 8
+      },
+      "SQLAlchemyRepository.project_paired_execution_leg_terminal": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.revise_instrument": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.rotate_wallet_credential": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.schedule_execution_plan_decision_outbox_retry": {
+        "PLR0913": 6
+      },
+      "SQLAlchemyRepository.set_portfolio_reconciliation_method_config": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.update_delivery_retry_schedule": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.update_execution_plan_status": {
+        "PLR0913": 12
+      },
+      "SQLAlchemyRepository.update_order": {
+        "PLR0913": 10
+      },
+      "SQLAlchemyRepository.update_trade_command_status": {
+        "PLR0913": 11
+      },
+      "SQLAlchemyRepository.upsert_instrument_underlying_mapping": {
+        "PLR0913": 7
+      },
+      "SQLAlchemyRepository.upsert_underlying_asset": {
+        "PLR0913": 8
+      }
+    },
+    "src/snapper/indicators/keltner.py": {
+      "keltner": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/indicators/ta_lib_adapter.py": {
+      "keltner": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/infrastructure/exchanges/_subscription_health.py": {
+      "SubscriptionHealthTracker.__init__": {
+        "C901": 12,
+        "PLR0913": 12
+      }
+    },
+    "src/snapper/infrastructure/exchanges/base.py": {
+      "ExchangeClientBase._log_execution_to_db": {
+        "PLR0913": 9
+      },
+      "ExchangeClientBase._log_order_update_to_db": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/infrastructure/exchanges/implementations/kraken.py": {
+      "KrakenExchangeClient._create_order_via_native": {
+        "C901": 11
+      },
+      "KrakenExchangeClient._subscribe_executions_impl": {
+        "PLR0913": 6
+      },
+      "KrakenExchangeClient.subscribe_executions": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/infrastructure/exchanges/implementations/kraken_futures.py": {
+      "KrakenFuturesExchangeClient.create_order": {
+        "C901": 11
+      }
+    },
+    "src/snapper/infrastructure/exchanges/implementations/paper.py": {
+      "PaperExchangeClient.__init__": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/infrastructure/exchanges/implementations/polygon.py": {
+      "PolygonExchangeClient.__init__": {
+        "PLR0913": 7
+      },
+      "PolygonExchangeClient.list_aggregates": {
+        "PLR0913": 8
+      }
+    },
+    "src/snapper/infrastructure/exchanges/implementations/walutomat.py": {
+      "WalutomatExchangeClient.__init__": {
+        "PLR0913": 6
+      },
+      "WalutomatExchangeClient.create_order": {
+        "C901": 12
+      }
+    },
+    "src/snapper/infrastructure/exchanges/kraken_rest_egress.py": {
+      "route_kraken_rest_sync_call": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/infrastructure/historical/polygon/loader.py": {
+      "PolygonHistoricalLoader.fetch_aggregates": {
+        "PLR0913": 11
+      },
+      "load_recent_grouped_daily": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/infrastructure/network/egress_pool.py": {
+      "EgressPool._increment_connection_locked": {
+        "PLR0913": 6
+      },
+      "EgressPool.reserve": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/infrastructure/network/egress_reservation.py": {
+      "EgressReservation.__init__": {
+        "PLR0913": 7
+      },
+      "_finalize_release": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/infrastructure/network/egress_sidecar.py": {
+      "run_sidecar": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/infrastructure/network/wg_control.py": {
+      "_bring_up_sync": {
+        "PLR0913": 9
+      },
+      "bring_up": {
+        "PLR0913": 9
+      }
+    },
+    "src/snapper/interface/websocket/bridge.py": {
+      "ZmqWebSocketBridgeService._coalesce_account_frame": {
+        "PLR0913": 6
+      },
+      "ZmqWebSocketBridgeService._dispatch_to_subscription": {
+        "C901": 14,
+        "PLR0912": 13,
+        "PLR0913": 14
+      }
+    },
+    "src/snapper/interface/websocket/dispatcher.py": {
+      "_handle_one_message": {
+        "PLR0913": 9
+      },
+      "_record_ws_control": {
+        "PLR0913": 6
+      },
+      "dispatch_messages": {
+        "PLR0913": 6
+      },
+      "send_auth_complete": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/interface/websocket/handlers/auth.py": {
+      "handle_reauth": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/interface/websocket/helpers.py": {
+      "determine_topic_category": {
+        "C901": 14,
+        "PLR0912": 13
+      }
+    },
+    "src/snapper/interface/websocket/scope_filter.py": {
+      "_enforce_validated_account_state_scope": {
+        "PLR0913": 6
+      },
+      "_enforce_wallet_scope": {
+        "PLR0913": 7
+      },
+      "enforce_account_state_scope": {
+        "PLR0913": 6
+      },
+      "enforce_orders_events_scope": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/mcp/tools.py": {
+      "_cancel_order_tool": {
+        "PLR0913": 6
+      },
+      "_get_ohlcv_tool": {
+        "PLR0913": 8
+      },
+      "_list_orders_tool": {
+        "PLR0913": 8
+      },
+      "_list_recent_signals_tool": {
+        "PLR0913": 8
+      },
+      "_resolve_wallet_ids_or_envelope": {
+        "PLR0913": 6
+      },
+      "register_mcp_tools": {
+        "C901": 17
+      },
+      "register_mcp_tools.get_ohlcv": {
+        "PLR0913": 6
+      },
+      "register_mcp_tools.list_orders": {
+        "PLR0913": 6
+      },
+      "register_mcp_tools.list_recent_signals": {
+        "PLR0913": 6
+      },
+      "register_mcp_tools.submit_manual_order": {
+        "PLR0913": 12
+      }
+    },
+    "src/snapper/messaging/executors/base.py": {
+      "ExchangeExecutorService.__init__": {
+        "PLR0915": 53
+      },
+      "ExchangeExecutorService._assemble_spot_replay_boundary": {
+        "PLR0913": 8
+      },
+      "ExchangeExecutorService._bootstrap_spot_anchor": {
+        "C901": 12,
+        "PLR0915": 51
+      },
+      "ExchangeExecutorService._build_corrective_fill": {
+        "PLR0913": 6
+      },
+      "ExchangeExecutorService._capture_spot_history_range": {
+        "PLR0913": 7
+      },
+      "ExchangeExecutorService._consume_ghost_adoption_budget": {
+        "PLR0913": 6
+      },
+      "ExchangeExecutorService._publish_stream_terminal_event": {
+        "PLR0913": 6
+      },
+      "ExchangeExecutorService._record_correlated_fill_event": {
+        "PLR0913": 6
+      },
+      "ExchangeExecutorService._register_recovered_pending": {
+        "PLR0913": 6
+      },
+      "ExchangeExecutorService._schedule_portfolio_reconciliation": {
+        "PLR0913": 6
+      },
+      "ExchangeExecutorService.start": {
+        "PLR0915": 55
+      }
+    },
+    "src/snapper/messaging/publishers/base.py": {
+      "MarketDataPublisherService.__init__": {
+        "PLR0915": 64
+      },
+      "MarketDataPublisherService._read_writer_row_or_flush_timeout": {
+        "PLR0913": 6
+      },
+      "MarketDataPublisherService._seed_symbol_timeframe_from_db": {
+        "PLR0913": 9
+      },
+      "MarketDataPublisherService._seed_timeframe_from_db": {
+        "PLR0913": 8
+      },
+      "MarketDataPublisherService.start": {
+        "PLR0915": 66
+      }
+    },
+    "src/snapper/messaging/publishers/replay_publisher.py": {
+      "ReplayPublisher.__init__": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/messaging/topics/builders.py": {
+      "topic_for_message": {
+        "C901": 21,
+        "PLR0912": 21
+      }
+    },
+    "src/snapper/server/_plan_route_helpers.py": {
+      "_build_cancel_trade_command": {
+        "PLR0913": 7
+      },
+      "load_accessible_execution_plan": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/server/ai_review_routes.py": {
+      "list_ai_reviews_route": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/server/app.py": {
+      "_create_candles_signals_router.get_candles": {
+        "PLR0913": 9
+      },
+      "_create_candles_signals_router.get_candles_cache": {
+        "PLR0913": 6
+      },
+      "_create_candles_signals_router.get_candles_db": {
+        "PLR0913": 7
+      },
+      "_create_candles_signals_router.get_signals": {
+        "PLR0913": 10
+      },
+      "_create_monitoring_endpoints_router": {
+        "PLR0915": 58
+      },
+      "_create_orders_executions_router": {
+        "C901": 13,
+        "PLR0915": 74
+      },
+      "_create_orders_executions_router.get_executions": {
+        "PLR0913": 6
+      },
+      "_create_orders_executions_router.get_orders": {
+        "PLR0913": 9
+      },
+      "_get_continuous_series": {
+        "PLR0913": 11
+      },
+      "_get_contracts": {
+        "PLR0913": 7
+      },
+      "_get_front_month": {
+        "PLR0913": 6
+      },
+      "_get_related_instruments": {
+        "PLR0913": 6
+      },
+      "_handle_get_candles": {
+        "PLR0913": 9
+      },
+      "_handle_get_candles_cache": {
+        "PLR0913": 6
+      },
+      "_handle_get_candles_db": {
+        "PLR0913": 7
+      },
+      "_handle_get_signals": {
+        "PLR0913": 11
+      },
+      "create_app": {
+        "PLR0915": 53
+      },
+      "lifespan": {
+        "C901": 12,
+        "PLR0912": 13,
+        "PLR0915": 157
+      }
+    },
+    "src/snapper/server/authenticated_websocket.py": {
+      "_authenticate_and_dispatch": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/server/backtest_routes.py": {
+      "get_backtest_equity": {
+        "PLR0913": 7
+      },
+      "get_backtest_signals": {
+        "PLR0913": 7
+      },
+      "get_backtest_trades": {
+        "PLR0913": 7
+      },
+      "list_backtests": {
+        "PLR0913": 9
+      },
+      "list_comparisons": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/server/command_ack_registry.py": {
+      "ProcessCommandAckRegistry._publish_command": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/server/device_routes.py": {
+      "revoke_device_pref": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/server/egress_health_routes.py": {
+      "_data_from_snapshot": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/server/execution_plan_routes.py": {
+      "_build_bracket_plan_row": {
+        "PLR0913": 7
+      },
+      "cancel_bracket": {
+        "PLR0913": 6
+      },
+      "list_bracket_decisions": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/server/order_routes.py": {
+      "cancel_order": {
+        "PLR0913": 6
+      },
+      "cancel_order_by_client_order_id": {
+        "PLR0913": 6
+      },
+      "create_order": {
+        "PLR0915": 56
+      }
+    },
+    "src/snapper/server/paired_execution_routes.py": {
+      "_scope_incident": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/server/portfolio_timeline_routes.py": {
+      "_validate_timeline_request": {
+        "PLR0913": 10
+      },
+      "get_pnl_series": {
+        "PLR0913": 10
+      },
+      "get_pnl_timeline": {
+        "PLR0913": 10
+      }
+    },
+    "src/snapper/server/process_routes.py": {
+      "_nudge_owner_and_describe": {
+        "PLR0913": 7
+      },
+      "create_process_configuration": {
+        "PLR0913": 6
+      },
+      "set_process_desired_state": {
+        "C901": 12,
+        "PLR0912": 14,
+        "PLR0913": 8
+      },
+      "start_process": {
+        "PLR0913": 6
+      },
+      "update_process_scope_config": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/server/trailing_stop_routes.py": {
+      "_build_trailing_stop_plan_row": {
+        "PLR0913": 7
+      },
+      "cancel_trailing_stop": {
+        "PLR0913": 6
+      },
+      "list_trailing_stop_decisions": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/strategies/backtest_strategy.py": {
+      "make_backtest_replay_strategy": {
+        "PLR0913": 6
+      }
+    },
+    "src/snapper/strategies/base.py": {
+      "BaseStrategy.emit_signal": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/strategies/cointegration.py": {
+      "CointegrationPairs._build_paired_entry": {
+        "PLR0913": 7
+      },
+      "CointegrationPairs._build_signal": {
+        "PLR0913": 7
+      }
+    },
+    "src/snapper/strategies/process_wrapper.py": {
+      "create_strategy_process": {
+        "C901": 14
+      },
+      "create_strategy_process.StrategyProcess.__init__": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/ai_review/test_create_review.py": {
+      "_seed_grant": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/ai_review/test_supersede_reaper_scanner.py": {
+      "_seed_review": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/ai_review/test_watchdog.py": {
+      "_make_watchdog": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/backtest/test_compare.py": {
+      "_result": {
+        "PLR0913": 19
+      },
+      "_trade": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/backtest/test_cross_asset_reference_strategy.py": {
+      "_repo_stub.fake_get_candles": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/backtest/test_runner.py": {
+      "TestBacktestRunnerProcess.test_artifacts_persisted_with_cross_asset_blocked_fill_metrics": {
+        "PLR0915": 55
+      },
+      "TestBacktestRunnerProcess.test_artifacts_persisted_with_metrics": {
+        "PLR0915": 64
+      }
+    },
+    "tests/application/data_quality/test_candle_audit.py": {
+      "_candle": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/engine/test_checkpoint_recovery.py": {
+      "_make_checkpoint": {
+        "PLR0913": 12
+      },
+      "_make_venue_event": {
+        "PLR0913": 8
+      }
+    },
+    "tests/application/engine/test_engine_config.py": {
+      "TestEngineApplyFillShortSelling._make_fill": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/engine/test_engine_trader.py": {
+      "StubEngine.execute_desired_units": {
+        "PLR0913": 10
+      },
+      "_EngineStub.__init__": {
+        "PLR0913": 13
+      },
+      "_EngineStub.execute_desired_units": {
+        "PLR0913": 10
+      },
+      "_make_engine_with_inflight": {
+        "PLR0913": 6
+      },
+      "_make_fill": {
+        "PLR0913": 11
+      }
+    },
+    "tests/application/engine/test_guard_scanner.py": {
+      "_insert_group": {
+        "PLR0913": 8
+      },
+      "_insert_leg": {
+        "PLR0913": 9
+      },
+      "_stub_instrument_lookups": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/engine/test_logical_sharding.py": {
+      "TestCoordinatorSharding.test_order_shard_keys_populated_on_order._mock_execute": {
+        "PLR0913": 10
+      }
+    },
+    "tests/application/engine/test_paired_execution_arming.py": {
+      "_insert_fill_event": {
+        "PLR0913": 8
+      },
+      "_insert_flatten_cmd": {
+        "PLR0913": 7
+      },
+      "_insert_guard_leg": {
+        "PLR0913": 14
+      },
+      "_insert_scope_halt": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/engine/test_position_projection_engine.py": {
+      "_seed_shard": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/engine/test_trader_full_replay_sync.py": {
+      "_make_execution": {
+        "PLR0913": 10
+      }
+    },
+    "tests/application/notify/test_routing.py": {
+      "_pref": {
+        "PLR0913": 10
+      }
+    },
+    "tests/application/notify/test_sidecar.py": {
+      "_SingleRowRule.__init__": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/plans/test_cancel_service.py": {
+      "_build_repo": {
+        "PLR0913": 8
+      },
+      "_make_plan": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/plans/test_service.py": {
+      "_make_plan_row": {
+        "PLR0913": 8
+      }
+    },
+    "tests/application/plans/test_trailing_stop.py": {
+      "_make_plan": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/portfolio/test_account_view.py": {
+      "_make_row": {
+        "PLR0913": 20
+      }
+    },
+    "tests/application/portfolio/test_execution_chain.py": {
+      "_record": {
+        "PLR0913": 20
+      }
+    },
+    "tests/application/portfolio/test_futures_reconciliation.py": {
+      "_evaluate": {
+        "PLR0913": 6
+      },
+      "_position": {
+        "PLR0913": 7
+      },
+      "_spec": {
+        "PLR0913": 10
+      },
+      "test_configured_database_numeric_and_provenance_round_trip": {
+        "PLR0915": 60
+      }
+    },
+    "tests/application/portfolio/test_pnl_timeline.py": {
+      "_exec": {
+        "PLR0913": 10
+      }
+    },
+    "tests/application/portfolio/test_pnl_timeline_service.py": {
+      "FakeRepo.__init__": {
+        "PLR0913": 15
+      },
+      "FakeRepo.get_pnl_timeline_ai_decisions": {
+        "PLR0913": 6
+      },
+      "FakeRepo.get_pnl_timeline_signals": {
+        "PLR0913": 6
+      },
+      "_ai_decision_row": {
+        "PLR0913": 6
+      },
+      "_exec_row": {
+        "PLR0913": 10
+      },
+      "_lineage_row": {
+        "PLR0913": 6
+      },
+      "_ref": {
+        "PLR0913": 8
+      },
+      "_test_anchor_pool": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/portfolio/test_reconciliation_dispatch.py": {
+      "_account": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/portfolio/test_spot_anchor_assembly.py": {
+      "_item": {
+        "PLR0913": 8
+      }
+    },
+    "tests/application/portfolio/test_spot_anchor_witness.py": {
+      "_leg": {
+        "PLR0913": 6
+      },
+      "_totals": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/portfolio/test_spot_precision_certification.py": {
+      "test_plane_certification_adversarial_matrix": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/portfolio/test_spot_precision_evidence.py": {
+      "_balance": {
+        "PLR0913": 8
+      },
+      "_instrument": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/portfolio/test_spot_reconciliation.py": {
+      "_changed_precision_plane": {
+        "PLR0913": 6
+      },
+      "_evaluate": {
+        "PLR0913": 12
+      }
+    },
+    "tests/application/portfolio/test_walutomat_history_certificate.py": {
+      "_certify_fill": {
+        "PLR0913": 7
+      },
+      "_row": {
+        "PLR0913": 9
+      }
+    },
+    "tests/application/process_manager/test_launcher.py": {
+      "TestReconcileDesiredState._policy_cfg": {
+        "PLR0913": 8
+      }
+    },
+    "tests/application/process_manager/test_process_launcher.py": {
+      "TestBuildPerWalletInstanceConfig._make_entry": {
+        "PLR0913": 7
+      },
+      "_watchdog_config": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/retention/test_service.py": {
+      "_FakeArchiver.export": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/services/test_candle_coverage.py": {
+      "_StubRepo.get_candles": {
+        "PLR0913": 8
+      },
+      "_verify": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/services/test_continuous_contract_builder.py": {
+      "_candle": {
+        "PLR0913": 6
+      },
+      "_mock_repo._get_candles": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/services/test_market_cache.py": {
+      "_candle": {
+        "PLR0913": 9
+      }
+    },
+    "tests/application/system_metrics/test_snapshotter.py": {
+      "TestSnapshotter._make_snapshotter": {
+        "PLR0913": 9
+      }
+    },
+    "tests/application/trade/test_caps_enforcer.py": {
+      "_ai_review_row": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/trade/test_trade_service.py": {
+      "_make_venue_event": {
+        "PLR0913": 14
+      }
+    },
+    "tests/application/updaters/historical/test_grouped_candle_loader.py": {
+      "_StubAsyncRepo.get_candles": {
+        "PLR0913": 8
+      },
+      "_build_service": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/updaters/historical/test_historical_aggregates.py": {
+      "_DummyLoader.fetch_aggregates": {
+        "PLR0913": 9
+      },
+      "_StubLoader.fetch_aggregates": {
+        "PLR0913": 9
+      },
+      "_symbol_context": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/updaters/historical/test_polygon_load_csv.py": {
+      "_build_service": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/updaters/historical/test_synthesized_candle_backfill.py": {
+      "FakeRepository.get_candles": {
+        "PLR0913": 8
+      },
+      "_make_service": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/updaters/historical/test_trade_candle_backfill.py": {
+      "_trade": {
+        "PLR0913": 6
+      }
+    },
+    "tests/application/updaters/symbols/test_symbol_updater_base.py": {
+      "_seed_alias": {
+        "PLR0913": 6
+      },
+      "_seed_capability": {
+        "PLR0913": 7
+      }
+    },
+    "tests/application/updaters/symbols/test_walutomat_updater.py": {
+      "test_update_database_creates_and_updates_mappings": {
+        "PLR0915": 66
+      }
+    },
+    "tests/auth/test_ai_review_authorization.py": {
+      "test_converted_surface_permission_matrix_is_exact": {
+        "PLR0913": 6
+      }
+    },
+    "tests/auth/test_scope_grant_service.py": {
+      "_make_row": {
+        "PLR0913": 7
+      }
+    },
+    "tests/cli/test_cli_app.py": {
+      "test_delegate_engine_degrades_without_publisher": {
+        "C901": 18
+      },
+      "test_delegate_engine_exits_nonzero_on_core_failure": {
+        "C901": 13
+      },
+      "test_delegate_engine_starts_and_shuts_down": {
+        "C901": 25
+      },
+      "test_feed_engine_degrades_when_publisher_build_fails": {
+        "C901": 15
+      },
+      "test_feed_engine_disables_reconcile_loop_when_profile_not_feed": {
+        "C901": 11
+      },
+      "test_feed_engine_starts_publishers_and_shuts_down": {
+        "C901": 15
+      },
+      "test_polygon_backfill_aggregates_reports_error.DummyService.__init__": {
+        "PLR0913": 7
+      },
+      "test_rotate_encryption_decryption_failure": {
+        "PLR0913": 6
+      },
+      "test_rotate_encryption_dry_run": {
+        "PLR0913": 6
+      },
+      "test_rotate_encryption_success": {
+        "PLR0913": 6
+      },
+      "test_rotate_encryption_with_custom_old_password": {
+        "PLR0913": 6
+      },
+      "test_server_runs_with_reload.fake_run": {
+        "PLR0913": 10
+      },
+      "test_server_runs_without_reload.fake_run": {
+        "PLR0913": 9
+      },
+      "test_strategies_engine_degrades_without_publisher": {
+        "C901": 13
+      },
+      "test_strategies_engine_disables_reconcile_loop_when_profile_not_strategy": {
+        "C901": 15
+      },
+      "test_strategies_engine_exits_nonzero_on_core_failure": {
+        "C901": 11
+      },
+      "test_strategies_engine_skips_listener_without_xpub": {
+        "C901": 12
+      },
+      "test_strategies_engine_spawns_reconcile_loop_when_profile_strategy": {
+        "C901": 14
+      },
+      "test_strategies_engine_starts_and_shuts_down": {
+        "C901": 18
+      }
+    },
+    "tests/cli/test_dev_pat.py": {
+      "_build_mock_transport": {
+        "PLR0913": 6
+      }
+    },
+    "tests/config/test_credentials.py": {
+      "_seed_credential": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_0017_orders_fill_backfill_migration.py": {
+      "_insert_execution": {
+        "PLR0913": 6
+      },
+      "_insert_fill_event": {
+        "PLR0913": 9
+      }
+    },
+    "tests/data/test_0019_replay_provenance_migration.py": {
+      "_insert_command": {
+        "PLR0913": 7
+      }
+    },
+    "tests/data/test_0020_positions_truth_migration.py": {
+      "_insert_position": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_0023_instrument_metadata_migration.py": {
+      "_insert_spec": {
+        "PLR0913": 8
+      }
+    },
+    "tests/data/test_0026_reconciliation_method_config_migration.py": {
+      "_insert_config": {
+        "PLR0913": 7
+      },
+      "_insert_observation": {
+        "PLR0913": 8
+      },
+      "_insert_state": {
+        "PLR0913": 8
+      }
+    },
+    "tests/data/test_0028_spot_asset_precision_evidence_migration.py": {
+      "_insert": {
+        "PLR0913": 17
+      },
+      "test_0028_sqlite_upgrade_and_downgrade_create_scd2_evidence_plane": {
+        "PLR0915": 77
+      }
+    },
+    "tests/data/test_0029_execution_scope_counter_migration.py": {
+      "_old_writer_injected_at.inject": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_ai_review_aftermath_repository.py": {
+      "_cycle": {
+        "PLR0913": 7
+      }
+    },
+    "tests/data/test_ai_review_repository.py": {
+      "_add_instrument_grant": {
+        "PLR0913": 6
+      },
+      "_add_underlying_grant": {
+        "PLR0913": 6
+      },
+      "_audit_event_for": {
+        "PLR0913": 7
+      },
+      "_insert_review_row": {
+        "PLR0913": 7
+      },
+      "_make_review_payload": {
+        "PLR0913": 7
+      }
+    },
+    "tests/data/test_bitemporal.py": {
+      "_upsert_symbol_pattern": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_candle_audit_archiver.py": {
+      "_make_candle_audit_row": {
+        "PLR0913": 7
+      }
+    },
+    "tests/data/test_caps_repo_methods.py": {
+      "_insert_trade_command": {
+        "PLR0913": 10
+      }
+    },
+    "tests/data/test_event_archiver.py": {
+      "_build_execution": {
+        "PLR0913": 7
+      }
+    },
+    "tests/data/test_execution_chain_postgres.py": {
+      "_pair": {
+        "PLR0913": 11
+      }
+    },
+    "tests/data/test_execution_scope_counter_postgres.py": {
+      "test_migration_fence_refuses_a_crossed_wallet_writer_on_live_postgresql": {
+        "PLR0915": 62
+      },
+      "test_migration_fence_refuses_a_crossed_wallet_writer_on_live_postgresql.park_after_lineage_validation": {
+        "PLR0913": 6
+      },
+      "test_migration_named_validator_catches_crossed_writer_under_hostile_isolation": {
+        "PLR0915": 82
+      },
+      "test_migration_named_validator_catches_crossed_writer_under_hostile_isolation.park_before_the_fence_lock": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_front_month_repository.py": {
+      "_seed_future": {
+        "PLR0913": 7
+      }
+    },
+    "tests/data/test_instrument_feed_health_repository.py": {
+      "_row": {
+        "PLR0913": 11
+      }
+    },
+    "tests/data/test_instrument_source_mapping.py": {
+      "test_fill_events_for_order_identity_scopes_strictly._insert_event": {
+        "PLR0913": 7
+      }
+    },
+    "tests/data/test_instrument_symbol_refs_repository.py": {
+      "TestGetPnlTimelineCandles.test_batches_source_series_and_preserves_requested_ids._capture": {
+        "PLR0913": 6
+      },
+      "_candle": {
+        "PLR0913": 6
+      },
+      "_instrument": {
+        "PLR0913": 6
+      },
+      "_symbol": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_market_coverage_repository.py": {
+      "_add_capability": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_paired_execution_guard_migration.py": {
+      "_insert_leg": {
+        "PLR0913": 7
+      }
+    },
+    "tests/data/test_paired_execution_repository.py": {
+      "_group_insert_row": {
+        "PLR0913": 15
+      },
+      "_halt_insert_row": {
+        "PLR0913": 11
+      },
+      "_insert_fill_event": {
+        "PLR0913": 6
+      },
+      "_insert_flatten_command": {
+        "PLR0913": 9
+      },
+      "_leg_insert_row": {
+        "PLR0913": 23
+      },
+      "_seed_two_leg_group": {
+        "PLR0913": 10
+      }
+    },
+    "tests/data/test_pnl_fx_rate_repository.py": {
+      "_symbol": {
+        "PLR0913": 7
+      }
+    },
+    "tests/data/test_pnl_timeline_lineage_repository.py": {
+      "_command": {
+        "PLR0913": 11
+      }
+    },
+    "tests/data/test_pnl_timeline_marker_repository.py": {
+      "_signal": {
+        "PLR0913": 7
+      },
+      "_trade_command": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_pnl_timeline_repository.py": {
+      "_execution": {
+        "PLR0913": 9
+      }
+    },
+    "tests/data/test_portfolio_reconciliation_repository.py": {
+      "_evaluation": {
+        "PLR0913": 9
+      }
+    },
+    "tests/data/test_position_projection_repository.py": {
+      "_row": {
+        "PLR0913": 10
+      }
+    },
+    "tests/data/test_repository.py": {
+      "DummyRepository.get_candles": {
+        "PLR0913": 8
+      },
+      "DummyRepository.get_signals": {
+        "PLR0913": 6
+      },
+      "DummyRepository.revise_instrument": {
+        "PLR0913": 6
+      },
+      "DummyRepository.update_order": {
+        "PLR0913": 10
+      },
+      "_MinimalRepository.get_candles": {
+        "PLR0913": 8
+      },
+      "_MinimalRepository.get_signals": {
+        "PLR0913": 6
+      },
+      "_MinimalRepository.revise_instrument": {
+        "PLR0913": 6
+      },
+      "_MinimalRepository.update_order": {
+        "PLR0913": 10
+      },
+      "_collect_exchange_trades": {
+        "PLR0913": 6
+      },
+      "_gap_venue_row": {
+        "PLR0913": 7
+      },
+      "_insert_order_with_status": {
+        "PLR0913": 7
+      },
+      "_make_cycle_row": {
+        "PLR0913": 14
+      },
+      "_phase_e_command": {
+        "PLR0913": 6
+      },
+      "test_shard_has_fill_gap_emits_text_cast_identity_grouping._capture": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_schema_hygiene_0010_migration.py": {
+      "_insert_trade_command": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_scope_grants.py": {
+      "_make_request": {
+        "PLR0913": 8
+      }
+    },
+    "tests/data/test_split_repair_repository.py": {
+      "_add_candle": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_spot_asset_precision_evidence_repository.py": {
+      "_evidence": {
+        "PLR0913": 9
+      }
+    },
+    "tests/data/test_spot_reconciliation_anchor_repository.py": {
+      "_evaluation": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_state_archiver.py": {
+      "_make_instrument_row": {
+        "PLR0913": 6
+      }
+    },
+    "tests/data/test_symbol_market_data_channel_capabilities_0014_migration.py": {
+      "_insert_channel_capability": {
+        "PLR0913": 7
+      }
+    },
+    "tests/data/test_trade_command_lineage_carry.py": {
+      "_lineage_row": {
+        "PLR0913": 7
+      }
+    },
+    "tests/data/test_venue_account_repository.py": {
+      "_attempt_row": {
+        "PLR0913": 14
+      }
+    },
+    "tests/infrastructure/exchanges/implementations/test_walutomat_exchange.py": {
+      "_make_api_order": {
+        "PLR0913": 12
+      },
+      "_make_order_snapshot": {
+        "PLR0913": 9
+      }
+    },
+    "tests/infrastructure/historical/polygon/test_polygon_loader.py": {
+      "_StubPolygonClient.list_aggregates": {
+        "PLR0913": 8
+      }
+    },
+    "tests/infrastructure/network/test_egress_pool.py": {
+      "TestPreflightRoutes.test_socks5_route_with_resolvable_host_survives": {
+        "C901": 11
+      },
+      "TestSocks5GreetingProbe.test_socks5_route_auto_disabled_on_short_greeting_reply": {
+        "C901": 11
+      },
+      "TestSocks5GreetingProbe.test_socks5_route_auto_disabled_on_wrong_greeting_reply": {
+        "C901": 11
+      },
+      "TestSocks5GreetingProbe.test_socks5_route_with_reachable_listener_stays_enabled": {
+        "C901": 11
+      }
+    },
+    "tests/infrastructure/rest/test_tracker.py": {
+      "TestExchangeClientBaseWiring.test_base_helper_records_with_exchange_name": {
+        "C901": 15
+      }
+    },
+    "tests/integration/test_trailing_stop_e2e.py": {
+      "_seed_open_cycle": {
+        "PLR0913": 7
+      },
+      "_seed_trailing_stop_plan": {
+        "PLR0913": 11
+      }
+    },
+    "tests/interface/websocket/handlers/test_ws_auth.py": {
+      "AuthManagerStub.register_connection": {
+        "PLR0913": 6
+      },
+      "TestAuthenticateWebsocket.test_authentication_timeout": {
+        "PLR0913": 6
+      },
+      "TestAuthenticateWebsocket.test_invalid_json_message": {
+        "PLR0913": 6
+      },
+      "TestAuthenticateWebsocket.test_invalid_message_type": {
+        "PLR0913": 6
+      },
+      "TestAuthenticateWebsocket.test_missing_ws_token": {
+        "PLR0913": 6
+      },
+      "TestAuthenticateWebsocket.test_successful_authentication": {
+        "PLR0913": 7
+      },
+      "TestAuthenticateWebsocket.test_ws_token_already_used": {
+        "PLR0913": 6
+      },
+      "TestAuthenticateWebsocket.test_ws_token_invalid": {
+        "PLR0913": 6
+      },
+      "TestHandleReauth.test_successful_reauth": {
+        "PLR0913": 6
+      },
+      "test_handshake_success_dispatches_and_sends_payload.fake_send_auth_complete": {
+        "PLR0913": 6
+      }
+    },
+    "tests/interface/websocket/test_ws_bridge.py": {
+      "TestAccountStateScopeBridge.test_resubscribed_burst_delivers_newest_frame_to_replacement": {
+        "PLR0915": 58
+      }
+    },
+    "tests/messaging/executors/test_executor_account_observer.py": {
+      "TestObserveAccountOnce.test_snapshot_commit_schedules_reconciliation_before_invalidation.schedule_reconciliation": {
+        "PLR0913": 6
+      },
+      "TestPortfolioReconciliationOrchestration.test_stop_drains_observer_and_invalidation_tasks_spawned_during_drain": {
+        "PLR0915": 53
+      },
+      "_drift_transition": {
+        "PLR0913": 7
+      }
+    },
+    "tests/messaging/executors/test_executor_base.py": {
+      "_make_db_order": {
+        "PLR0913": 8
+      }
+    },
+    "tests/messaging/executors/test_executor_reconciliation.py": {
+      "_make_cmd_row": {
+        "PLR0913": 6
+      }
+    },
+    "tests/messaging/executors/test_paper_executor.py": {
+      "TestPaperMarketDataMethods.test_subscribe_candles_replay_multiple_symbols_sorted.MultiSymbolRepo.get_candles": {
+        "PLR0913": 6
+      },
+      "fake_get_candles": {
+        "PLR0913": 6
+      }
+    },
+    "tests/messaging/publishers/test_candle_aggregator.py": {
+      "_candle": {
+        "PLR0913": 9
+      }
+    },
+    "tests/messaging/publishers/test_kraken_futures_publisher.py": {
+      "_health_entry": {
+        "PLR0913": 8
+      }
+    },
+    "tests/messaging/publishers/test_publisher_base.py": {
+      "TestFeedHealthFlush._entry": {
+        "PLR0913": 8
+      },
+      "TestFeedPublisherCoverage.test_start_creates_sockets": {
+        "PLR0913": 6
+      },
+      "_candle_update": {
+        "PLR0913": 9
+      },
+      "_persisted_candle_row": {
+        "PLR0913": 9
+      }
+    },
+    "tests/messaging/publishers/test_replay_publisher.py": {
+      "_strategy_harness": {
+        "PLR0913": 8
+      }
+    },
+    "tests/scripts/test_backfill_synth_candles.py": {
+      "_FakeRepo.__init__": {
+        "PLR0913": 7
+      },
+      "_FakeRepo.get_candles": {
+        "PLR0913": 8
+      },
+      "_row": {
+        "PLR0913": 8
+      }
+    },
+    "tests/scripts/test_build_docs_pdf.py": {
+      "TestMain.test_main_creates_pdf": {
+        "PLR0913": 6
+      },
+      "TestMain.test_main_uses_provided_font": {
+        "PLR0913": 6
+      },
+      "TestMarkdownToPdf.test_write_pdf_creates_file": {
+        "PLR0913": 6
+      }
+    },
+    "tests/scripts/test_seed_demo.py": {
+      "_seed_instrument": {
+        "PLR0913": 6
+      }
+    },
+    "tests/scripts/test_test_live_orders.py": {
+      "_make_order_snapshot": {
+        "PLR0913": 6
+      },
+      "test_run_kraken_futures_scenario_places_expected_order": {
+        "PLR0913": 9
+      },
+      "test_run_kraken_spot_scenario_places_expected_order": {
+        "PLR0913": 8
+      },
+      "test_run_walutomat_scenario_places_expected_order": {
+        "PLR0913": 8
+      }
+    },
+    "tests/server/test_alerts_routes.py": {
+      "_alert_row": {
+        "PLR0913": 7
+      }
+    },
+    "tests/server/test_backtest_routes.py": {
+      "_create_client": {
+        "PLR0913": 6
+      }
+    },
+    "tests/server/test_device_routes.py": {
+      "_pref_row": {
+        "PLR0913": 6
+      }
+    },
+    "tests/server/test_order_wallet_autolookup.py": {
+      "_make_command": {
+        "PLR0913": 7
+      }
+    },
+    "tests/server/test_process_routes.py": {
+      "TestSetProcessDesiredState._patch": {
+        "PLR0913": 7
+      }
+    },
+    "tests/server/test_underlying_routes.py": {
+      "_make_related": {
+        "PLR0913": 7
+      }
+    },
+    "tests/strategies/test_heartbeat_consult.py": {
+      "TestHeartbeatConsultConsult._wire": {
+        "PLR0913": 9
+      },
+      "TestHeartbeatConsultConsult._wire.read_candles": {
+        "PLR0913": 9
+      }
+    },
+    "tests/strategies/test_strategy_base.py": {
+      "_StubWarmupRepo.get_candles": {
+        "PLR0913": 9
+      },
+      "test_emit_signal_persists_with_stamped_provenance.capture_store": {
+        "PLR0913": 12
+      }
+    },
+    "tests/strategies/test_warmup_generalization.py": {
+      "_StubRepo.get_candles": {
+        "PLR0913": 9
+      }
+    }
+  }
+}
