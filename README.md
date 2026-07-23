@@ -512,6 +512,32 @@ frontend OpenAPI/WebSocket/Zod/entity/permission types,
 `make bridge-regen`) refreshes the opt-in snapper-mcp bridge wire
 contract.
 
+### Deterministic P&L browser UAT
+
+`scripts/pnl_uat_fixture.py` seeds a one-shot paper-only P&L scenario and
+writes its credential-free browser manifest. It accepts the database URL
+only through `DB_URL` and refuses non-PostgreSQL, non-loopback,
+non-fresh/non-canonical OSS seed baselines, non-head, or
+non-`snapper_pnl_uat_*` targets, as well as any active non-paper
+credential.
+
+Prepare a new disposable local PostgreSQL database at Alembic head with
+the package-bundled OSS `dev` seed, then run:
+
+```bash
+export DB_URL='postgresql+asyncpg://<local-user>:<password>@127.0.0.1:5432/snapper_pnl_uat_<run-id>'
+.venv/bin/python scripts/pnl_uat_fixture.py \
+  --manifest /absolute/path/to/new-pnl-uat-manifest.json
+```
+
+The manifest path must not already exist. Fixture facts commit first;
+six activation anchors are then created through the production service
+in independent transactions. If anchor creation fails, discard the
+database rather than rerunning the fixture. Use `--anchor` only for an
+explicit non-future UTC minute; otherwise the script captures the
+current UTC minute. This command is never suitable for a shared,
+staging, or production database.
+
 ### Frontend
 
 ```bash
