@@ -69,6 +69,39 @@ def _finite_number(value: object) -> float:
     return number
 
 
+def _parse_balance_entry(item: object) -> AccountBalanceEntry:
+    """Validate and project one stored native balance entry."""
+    if not isinstance(item, dict):
+        raise ValueError(_PAYLOAD_ENTRY_NOT_OBJECT_MSG)
+    currency = item.get("currency")
+    if not isinstance(currency, str) or not currency:
+        raise ValueError(_BAD_CURRENCY_MSG)
+    free = item.get("free")
+    used = item.get("used")
+    total = _finite_number(item.get("total"))
+    total_decimal = _balance_decimal(item.get("total_decimal"), total)
+    free_number = None if free is None else _finite_number(free)
+    used_number = None if used is None else _finite_number(used)
+    free_decimal = _balance_decimal(item.get("free_decimal"), free_number)
+    used_decimal = _balance_decimal(item.get("used_decimal"), used_number)
+    provenance = item.get("numeric_provenance", "legacy_float")
+    if provenance not in ("venue_raw", "legacy_float"):
+        raise ValueError("balance numeric provenance is invalid")
+    decimals = (total_decimal, free_decimal, used_decimal)
+    if any(value is not None for value in decimals) and provenance != "venue_raw":
+        raise ValueError("raw balance decimal requires venue provenance")
+    return AccountBalanceEntry(
+        currency=currency,
+        total=total,
+        free=free_number,
+        used=used_number,
+        total_decimal=total_decimal,
+        free_decimal=free_decimal,
+        used_decimal=used_decimal,
+        numeric_provenance=provenance,
+    )
+
+
 def _parse_balances(raw: str) -> list[AccountBalanceEntry]:
     """Strictly parse the stored balances JSON into typed entries.
 
@@ -86,40 +119,7 @@ def _parse_balances(raw: str) -> list[AccountBalanceEntry]:
     data = json.loads(raw)
     if not isinstance(data, list):
         raise ValueError(_PAYLOAD_NOT_A_LIST_MSG)
-    entries: list[AccountBalanceEntry] = []
-    for item in data:
-        if not isinstance(item, dict):
-            raise ValueError(_PAYLOAD_ENTRY_NOT_OBJECT_MSG)
-        currency = item.get("currency")
-        if not isinstance(currency, str) or not currency:
-            raise ValueError(_BAD_CURRENCY_MSG)
-        free = item.get("free")
-        used = item.get("used")
-        total = _finite_number(item.get("total"))
-        total_decimal = _balance_decimal(item.get("total_decimal"), total)
-        free_number = None if free is None else _finite_number(free)
-        used_number = None if used is None else _finite_number(used)
-        free_decimal = _balance_decimal(item.get("free_decimal"), free_number)
-        used_decimal = _balance_decimal(item.get("used_decimal"), used_number)
-        provenance = item.get("numeric_provenance", "legacy_float")
-        if provenance not in ("venue_raw", "legacy_float"):
-            raise ValueError("balance numeric provenance is invalid")
-        if any(value is not None for value in (total_decimal, free_decimal, used_decimal)):
-            if provenance != "venue_raw":
-                raise ValueError("raw balance decimal requires venue provenance")
-        entries.append(
-            AccountBalanceEntry(
-                currency=currency,
-                total=total,
-                free=free_number,
-                used=used_number,
-                total_decimal=total_decimal,
-                free_decimal=free_decimal,
-                used_decimal=used_decimal,
-                numeric_provenance=provenance,
-            )
-        )
-    return entries
+    return [_parse_balance_entry(item) for item in data]
 
 
 def _balance_decimal(value: object, companion: float | None) -> str | None:
@@ -183,6 +183,62 @@ def _parse_positions(raw: str) -> list[AccountPositionEntry]:
     return entries
 
 
+def _structural_components_are_coherent(row: VenueAccountStateRow) -> bool:
+    """Return whether structurally absent components carry no retained data."""
+    if row["valuation_status"] != "native_only":
+        return False
+    if row["balance_status"] == "unsupported" and (
+        row["balances_json"] is not None or row["balance_observed_at"] is not None
+    ):
+        return False
+    return not (
+        row["position_status"] in ("not_applicable", "unsupported")
+        and (row["open_positions_json"] is not None or row["position_observed_at"] is not None)
+    )
+
+
+def _status_components_are_coherent(row: VenueAccountStateRow) -> bool:
+    """Return whether roll-up and component statuses agree with their evidence."""
+    if row["sync_status"] == "observed" and row["balance_status"] != "observed":
+        return False
+    if row["sync_status"] == "observed" and row["position_status"] not in (
+        "observed",
+        "not_applicable",
+    ):
+        return False
+    if (row["sync_status"] == "simulated" or row["balance_status"] == "simulated") and row[
+        "mode"
+    ] != "paper":
+        return False
+    if row["balance_status"] == "observed" and (
+        row["balances_json"] is None or row["balance_observed_at"] is None
+    ):
+        return False
+    if row["position_status"] == "observed" and (
+        row["open_positions_json"] is None or row["position_observed_at"] is None
+    ):
+        return False
+    return not (row["sync_status"] == "observed" and row["authoritative_until"] is None)
+
+
+def _payload_sources_are_coherent(row: VenueAccountStateRow) -> bool:
+    """Return whether payload presence and current-attempt lineage agree."""
+    if (row["balances_json"] is None) != (row["balance_payload_source_observation_id"] is None):
+        return False
+    if (row["open_positions_json"] is None) != (
+        row["position_payload_source_observation_id"] is None
+    ):
+        return False
+    if row["balance_status"] in ("observed", "simulated") and (
+        row["balance_payload_source_observation_id"] != row["current_attempt_observation_id"]
+    ):
+        return False
+    return not (
+        row["position_status"] == "observed"
+        and row["position_payload_source_observation_id"] != row["current_attempt_observation_id"]
+    )
+
+
 def _row_is_coherent(row: VenueAccountStateRow) -> bool:
     """Re-check the observed-row coherence invariants at read time.
 
@@ -208,50 +264,10 @@ def _row_is_coherent(row: VenueAccountStateRow) -> bool:
     Returns:
         True when the row satisfies every invariant, False otherwise.
     """
-    if row["valuation_status"] != "native_only":
-        return False
-    if row["balance_status"] == "unsupported" and (
-        row["balances_json"] is not None or row["balance_observed_at"] is not None
-    ):
-        return False
-    if row["position_status"] in ("not_applicable", "unsupported") and (
-        row["open_positions_json"] is not None or row["position_observed_at"] is not None
-    ):
-        return False
-    if row["sync_status"] == "observed" and row["balance_status"] != "observed":
-        return False
-    if row["sync_status"] == "observed" and row["position_status"] not in (
-        "observed",
-        "not_applicable",
-    ):
-        return False
-    if (row["sync_status"] == "simulated" or row["balance_status"] == "simulated") and row[
-        "mode"
-    ] != "paper":
-        return False
-    if row["balance_status"] == "observed" and (
-        row["balances_json"] is None or row["balance_observed_at"] is None
-    ):
-        return False
-    if row["position_status"] == "observed" and (
-        row["open_positions_json"] is None or row["position_observed_at"] is None
-    ):
-        return False
-    if row["sync_status"] == "observed" and row["authoritative_until"] is None:
-        return False
-    if (row["balances_json"] is None) != (row["balance_payload_source_observation_id"] is None):
-        return False
-    if (row["open_positions_json"] is None) != (
-        row["position_payload_source_observation_id"] is None
-    ):
-        return False
-    if row["balance_status"] in ("observed", "simulated") and (
-        row["balance_payload_source_observation_id"] != row["current_attempt_observation_id"]
-    ):
-        return False
-    return not (
-        row["position_status"] == "observed"
-        and row["position_payload_source_observation_id"] != row["current_attempt_observation_id"]
+    return (
+        _structural_components_are_coherent(row)
+        and _status_components_are_coherent(row)
+        and _payload_sources_are_coherent(row)
     )
 
 

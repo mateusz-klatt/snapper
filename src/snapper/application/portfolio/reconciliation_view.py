@@ -144,6 +144,49 @@ def _validate_context_identity(context: PortfolioReconciliationReadContextRow) -
         raise RuntimeError("reconciliation read context config identity is inconsistent")
 
 
+def _validate_retained_detail_shape(
+    state: PortfolioReconciliationStateRow,
+    status: str,
+    has_detail: bool,
+) -> None:
+    """Validate retained full-evidence lineage and current-result alignment."""
+    if has_detail and state["detail_source_observation_id"] != state["last_full_observation_id"]:
+        raise RuntimeError("reconciliation state retained evidence lineage is inconsistent")
+    if status in ("matched", "mismatched") and (
+        not has_detail
+        or state["current_observation_id"] != state["last_full_observation_id"]
+        or state["current_observation_id"] != state["detail_source_observation_id"]
+        or status != state["last_full_outcome"]
+    ):
+        raise RuntimeError("current full reconciliation evidence is incomplete")
+
+
+def _validate_mismatch_evidence_shape(
+    state: PortfolioReconciliationStateRow,
+    status: str,
+) -> None:
+    """Validate mismatch counters, error retention, and drift episode threshold."""
+    if state["last_full_outcome"] == "matched" and (
+        state["consecutive_full_mismatches"] != 0
+        or state["open_drift_episode_public_id"] is not None
+    ):
+        raise RuntimeError("matched reconciliation state retains mismatch evidence")
+    if status == "matched" and state["error"] is not None:
+        raise RuntimeError("matched reconciliation state retains error evidence")
+    if state["last_full_outcome"] == "mismatched" and (state["consecutive_full_mismatches"] < 1):
+        raise RuntimeError("mismatched reconciliation state has no mismatch evidence")
+    if state["last_full_outcome"] is None and (
+        state["consecutive_full_mismatches"] != 0
+        or state["open_drift_episode_public_id"] is not None
+    ):
+        raise RuntimeError("reconciliation state without a full result retains evidence")
+    open_episode_expected = (
+        state["last_full_outcome"] == "mismatched" and state["consecutive_full_mismatches"] >= 3
+    )
+    if (state["open_drift_episode_public_id"] is not None) != open_episode_expected:
+        raise RuntimeError("reconciliation state drift episode threshold is inconsistent")
+
+
 def _validate_state_authority_shape(state: PortfolioReconciliationStateRow) -> None:
     """Require the structural prerequisites for exposing retained evidence."""
     status = state["current_evaluation_status"]
@@ -165,34 +208,8 @@ def _validate_state_authority_shape(state: PortfolioReconciliationStateRow) -> N
     has_detail = all(value is not None for value in detail_fields)
     if has_detail != any(value is not None for value in detail_fields):
         raise RuntimeError("reconciliation state retained evidence is incomplete")
-    if has_detail and state["detail_source_observation_id"] != state["last_full_observation_id"]:
-        raise RuntimeError("reconciliation state retained evidence lineage is inconsistent")
-    if status in ("matched", "mismatched") and (
-        not has_detail
-        or state["current_observation_id"] != state["last_full_observation_id"]
-        or state["current_observation_id"] != state["detail_source_observation_id"]
-        or status != state["last_full_outcome"]
-    ):
-        raise RuntimeError("current full reconciliation evidence is incomplete")
-    if state["last_full_outcome"] == "matched" and (
-        state["consecutive_full_mismatches"] != 0
-        or state["open_drift_episode_public_id"] is not None
-    ):
-        raise RuntimeError("matched reconciliation state retains mismatch evidence")
-    if status == "matched" and state["error"] is not None:
-        raise RuntimeError("matched reconciliation state retains error evidence")
-    if state["last_full_outcome"] == "mismatched" and (state["consecutive_full_mismatches"] < 1):
-        raise RuntimeError("mismatched reconciliation state has no mismatch evidence")
-    if state["last_full_outcome"] is None and (
-        state["consecutive_full_mismatches"] != 0
-        or state["open_drift_episode_public_id"] is not None
-    ):
-        raise RuntimeError("reconciliation state without a full result retains evidence")
-    open_episode_expected = (
-        state["last_full_outcome"] == "mismatched" and state["consecutive_full_mismatches"] >= 3
-    )
-    if (state["open_drift_episode_public_id"] is not None) != open_episode_expected:
-        raise RuntimeError("reconciliation state drift episode threshold is inconsistent")
+    _validate_retained_detail_shape(state, status, has_detail)
+    _validate_mismatch_evidence_shape(state, status)
 
 
 def _parse_evidence(raw: str | None) -> JsonObject | None:

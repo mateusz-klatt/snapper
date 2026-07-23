@@ -111,6 +111,17 @@ class _Candidate:
     reason: str | None
 
 
+@dataclass(frozen=True)
+class _CandidateEvaluation:
+    """Canonical evidence and outcome for one comparison candidate."""
+
+    expected: _ExpectedInstrument
+    actual: _ActualInstrument
+    difference: _DifferenceInstrument
+    tolerance: _ToleranceInstrument
+    status: str
+
+
 def _decimal(value: float | Decimal) -> Decimal | None:
     """Convert one numeric boundary value to a finite exact decimal.
 
@@ -300,6 +311,80 @@ def _projection_watermark(projection: Sequence[PositionRow]) -> tuple[int | None
     return (max(watermarks, default=0), valid)
 
 
+def _group_internal_candidates(
+    projection: Sequence[PositionRow],
+    venue_account: PortfolioAccountState,
+    instrument_public_ids_by_symbol: Mapping[str, str],
+) -> tuple[dict[str, list[PositionRow]], dict[str, str], list[_Candidate]]:
+    """Group internal rows and retain unresolved or invalid evidence."""
+    groups: dict[str, list[PositionRow]] = {}
+    reasons: dict[str, str] = {}
+    unresolved: list[_Candidate] = []
+    for row in projection:
+        instrument_public_id = row["instrument_public_id"]
+        reason = _internal_reason(row, venue_account, instrument_public_ids_by_symbol)
+        if not instrument_public_id:
+            unresolved.append(
+                _Candidate(None, row, None, row["instrument"], row["instrument"], reason)
+            )
+            continue
+        groups.setdefault(instrument_public_id, []).append(row)
+        if reason is not None:
+            reasons.setdefault(instrument_public_id, reason)
+    return groups, reasons, unresolved
+
+
+def _group_venue_candidates(
+    venue_positions: Sequence[AccountPositionEntry],
+    instrument_public_ids_by_symbol: Mapping[str, str],
+) -> tuple[dict[str, list[AccountPositionEntry]], list[_Candidate]]:
+    """Group venue rows and retain symbols without a stable instrument identity."""
+    groups: dict[str, list[AccountPositionEntry]] = {}
+    unresolved: list[_Candidate] = []
+    for position in venue_positions:
+        instrument_public_id = instrument_public_ids_by_symbol.get(position.symbol)
+        if not instrument_public_id:
+            unresolved.append(
+                _Candidate(
+                    None,
+                    None,
+                    position,
+                    position.symbol,
+                    position.symbol,
+                    "unresolved_venue_symbol",
+                )
+            )
+            continue
+        groups.setdefault(instrument_public_id, []).append(position)
+    return groups, unresolved
+
+
+def _resolved_candidate(
+    instrument_public_id: str,
+    internal_rows: list[PositionRow],
+    venue_rows: list[AccountPositionEntry],
+    internal_reason: str | None,
+) -> _Candidate:
+    """Build one deterministic candidate for a resolved instrument identity."""
+    internal = internal_rows[0] if len(internal_rows) == 1 else None
+    venue = venue_rows[0] if len(venue_rows) == 1 else None
+    internal_symbol = min((row["instrument"] for row in internal_rows), default="")
+    venue_symbol = min((row.symbol for row in venue_rows), default="")
+    reason = internal_reason
+    if len(internal_rows) > 1:
+        reason = "duplicate_internal_position"
+    elif len(venue_rows) > 1:
+        reason = "duplicate_venue_position"
+    return _Candidate(
+        instrument_public_id,
+        internal,
+        venue,
+        internal_symbol or venue_symbol,
+        venue_symbol or internal_symbol,
+        reason,
+    )
+
+
 def _build_candidates(
     projection: Sequence[PositionRow],
     venue_positions: Sequence[AccountPositionEntry],
@@ -317,61 +402,26 @@ def _build_candidates(
     Returns:
         Candidates sorted by instrument identity and native symbol.
     """
-    internal_groups: dict[str, list[PositionRow]] = {}
-    internal_reasons: dict[str, str] = {}
-    unresolved_internal: list[_Candidate] = []
-    for row in projection:
-        instrument_public_id = row["instrument_public_id"]
-        reason = _internal_reason(row, venue_account, instrument_public_ids_by_symbol)
-        if not instrument_public_id:
-            unresolved_internal.append(
-                _Candidate(None, row, None, row["instrument"], row["instrument"], reason)
-            )
-            continue
-        internal_groups.setdefault(instrument_public_id, []).append(row)
-        if reason is not None:
-            internal_reasons.setdefault(instrument_public_id, reason)
-
-    venue_groups: dict[str, list[AccountPositionEntry]] = {}
-    unresolved_venue: list[_Candidate] = []
-    for position in venue_positions:
-        venue_instrument_public_id = instrument_public_ids_by_symbol.get(position.symbol)
-        if venue_instrument_public_id is None or not venue_instrument_public_id:
-            unresolved_venue.append(
-                _Candidate(
-                    None,
-                    None,
-                    position,
-                    position.symbol,
-                    position.symbol,
-                    "unresolved_venue_symbol",
-                )
-            )
-            continue
-        venue_groups.setdefault(venue_instrument_public_id, []).append(position)
-
+    internal_groups, internal_reasons, unresolved_internal = _group_internal_candidates(
+        projection,
+        venue_account,
+        instrument_public_ids_by_symbol,
+    )
+    venue_groups, unresolved_venue = _group_venue_candidates(
+        venue_positions,
+        instrument_public_ids_by_symbol,
+    )
     candidates: list[_Candidate] = []
     instrument_ids = sorted(set(internal_groups) | set(venue_groups))
     for instrument_public_id in instrument_ids:
         internal_rows = internal_groups.get(instrument_public_id, [])
         venue_rows = venue_groups.get(instrument_public_id, [])
-        internal = internal_rows[0] if len(internal_rows) == 1 else None
-        venue = venue_rows[0] if len(venue_rows) == 1 else None
-        internal_symbol = min((row["instrument"] for row in internal_rows), default="")
-        venue_symbol = min((row.symbol for row in venue_rows), default="")
-        reason = internal_reasons.get(instrument_public_id)
-        if len(internal_rows) > 1:
-            reason = "duplicate_internal_position"
-        elif len(venue_rows) > 1:
-            reason = "duplicate_venue_position"
         candidates.append(
-            _Candidate(
+            _resolved_candidate(
                 instrument_public_id,
-                internal,
-                venue,
-                internal_symbol or venue_symbol,
-                venue_symbol or internal_symbol,
-                reason,
+                internal_rows,
+                venue_rows,
+                internal_reasons.get(instrument_public_id),
             )
         )
     candidates.extend(unresolved_internal)
@@ -385,6 +435,53 @@ def _build_candidates(
             item.venue_symbol,
         ),
     )
+
+
+def _specification_evidence(
+    instrument_public_id: str,
+    symbol: str,
+    spec: InstrumentSpecRow,
+) -> tuple[_ToleranceInstrument, Decimal | None]:
+    """Project safe tolerance evidence and resolve the stored contract size."""
+    evidence = _ToleranceInstrument(
+        instrument_public_id=instrument_public_id,
+        symbol=symbol,
+        quantity_unit=spec["quantity_unit"],
+    )
+    if spec["spec_source"]:
+        evidence["spec_source"] = spec["spec_source"]
+    if spec["spec_version"]:
+        evidence["spec_version"] = spec["spec_version"]
+    if spec["spec_observed_at"] is not None:
+        evidence["spec_observed_at"] = spec["spec_observed_at"].isoformat()
+    contract_size = _decimal(spec["contract_size"]) if spec["contract_size"] is not None else None
+    if contract_size is not None:
+        evidence["contract_size"] = _decimal_string(contract_size)
+    return evidence, contract_size
+
+
+def _certified_lot_step(
+    spec: InstrumentSpecRow,
+    now: datetime,
+    contract_size: Decimal | None,
+) -> tuple[Decimal | None, str | None]:
+    """Return the certified lot step or its first fail-closed reason."""
+    if not is_effective_unit_certified(spec, now):
+        return None, "stale_or_uncertified_unit"
+    if spec["quantity_unit"] != "contract_count":
+        return None, "mismatched_unit"
+    if contract_size is None or contract_size <= 0:
+        return None, "invalid_contract_size"
+    lot_step = _decimal(spec["lot_size"]) if spec["lot_size"] is not None else None
+    if lot_step is None or lot_step <= 0:
+        return None, "invalid_lot_step"
+    if not spec["spec_source"] or not spec["spec_version"] or spec["spec_observed_at"] is None:
+        return None, "missing_spec_provenance"
+    if spec["status"] != "active":
+        return None, "inactive_spec"
+    if spec["instrument_kind"] not in ("perpetual", "future"):
+        return None, "unsupported_instrument_kind"
+    return lot_step, None
 
 
 def _specification(
@@ -404,10 +501,7 @@ def _specification(
     Returns:
         Certified lot step, safe tolerance evidence, and incomplete reason.
     """
-    evidence = _ToleranceInstrument(
-        instrument_public_id=instrument_public_id,
-        symbol=symbol,
-    )
+    evidence = _ToleranceInstrument(instrument_public_id=instrument_public_id, symbol=symbol)
     if instrument_public_id is None:
         evidence["reason"] = "unresolved_venue_symbol"
         return None, evidence, "unresolved_venue_symbol"
@@ -417,44 +511,16 @@ def _specification(
     if spec["instrument_public_id"] != instrument_public_id:
         evidence["reason"] = "mismatched_spec_instrument"
         return None, evidence, "mismatched_spec_instrument"
-
-    evidence["quantity_unit"] = spec["quantity_unit"]
-    if spec["spec_source"]:
-        evidence["spec_source"] = spec["spec_source"]
-    if spec["spec_version"]:
-        evidence["spec_version"] = spec["spec_version"]
-    if spec["spec_observed_at"] is not None:
-        evidence["spec_observed_at"] = spec["spec_observed_at"].isoformat()
-    contract_size = _decimal(spec["contract_size"]) if spec["contract_size"] is not None else None
-    if contract_size is not None:
-        evidence["contract_size"] = _decimal_string(contract_size)
-
-    reason: str | None = None
-    if not is_effective_unit_certified(spec, now):
-        reason = "stale_or_uncertified_unit"
-    elif spec["quantity_unit"] != "contract_count":
-        reason = "mismatched_unit"
-    elif contract_size is None or contract_size <= 0:
-        reason = "invalid_contract_size"
-    else:
-        lot_step = _decimal(spec["lot_size"]) if spec["lot_size"] is not None else None
-        if lot_step is None or lot_step <= 0:
-            reason = "invalid_lot_step"
-        elif (
-            not spec["spec_source"] or not spec["spec_version"] or spec["spec_observed_at"] is None
-        ):
-            reason = "missing_spec_provenance"
-        elif spec["status"] != "active":
-            reason = "inactive_spec"
-        elif spec["instrument_kind"] not in ("perpetual", "future"):
-            reason = "unsupported_instrument_kind"
-        else:
-            rendered_lot = _decimal_string(lot_step)
-            evidence["lot_step"] = rendered_lot
-            evidence["absolute_tolerance"] = rendered_lot
-            return lot_step, evidence, None
-    evidence["reason"] = reason
-    return None, evidence, reason
+    evidence, contract_size = _specification_evidence(instrument_public_id, symbol, spec)
+    lot_step, reason = _certified_lot_step(spec, now, contract_size)
+    if lot_step is not None:
+        rendered_lot = _decimal_string(lot_step)
+        evidence["lot_step"] = rendered_lot
+        evidence["absolute_tolerance"] = rendered_lot
+        return lot_step, evidence, None
+    resolved_reason = reason or "invalid_lot_step"
+    evidence["reason"] = resolved_reason
+    return None, evidence, resolved_reason
 
 
 def _candidate_quantities(
@@ -486,6 +552,75 @@ def _candidate_quantities(
         else:
             return internal_quantity, None, "invalid_venue_side"
     return internal_quantity, venue_quantity, None
+
+
+def _evaluate_candidate(
+    candidate: _Candidate,
+    specs_by_instrument_public_id: Mapping[str, InstrumentSpecRow | None],
+    now: datetime,
+) -> _CandidateEvaluation:
+    """Build canonical evidence and status for one comparison candidate."""
+    symbol = candidate.venue_symbol or candidate.internal_symbol
+    internal_quantity, venue_quantity, quantity_reason = _candidate_quantities(candidate)
+    internal_watermark = (
+        candidate.internal["source_venue_event_id"] if candidate.internal is not None else None
+    )
+    expected = _ExpectedInstrument(
+        instrument_public_id=candidate.instrument_public_id,
+        signed_qty=_decimal_string(internal_quantity) if internal_quantity is not None else None,
+        source_venue_event_id=internal_watermark,
+        symbol=candidate.internal_symbol or symbol,
+    )
+    actual = _ActualInstrument(
+        instrument_public_id=candidate.instrument_public_id,
+        side=candidate.venue.side if candidate.venue is not None else None,
+        signed_qty=_decimal_string(venue_quantity) if venue_quantity is not None else None,
+        symbol=candidate.venue_symbol or symbol,
+    )
+    spec = (
+        specs_by_instrument_public_id.get(candidate.instrument_public_id)
+        if candidate.instrument_public_id is not None
+        else None
+    )
+    lot_step, tolerance, spec_reason = _specification(
+        candidate.instrument_public_id,
+        symbol,
+        spec,
+        now,
+    )
+    reason = candidate.reason or quantity_reason or spec_reason
+    difference = _DifferenceInstrument(
+        instrument_public_id=candidate.instrument_public_id,
+        status="incomplete" if reason is not None else "matched",
+        symbol=symbol,
+    )
+    if (
+        reason is None
+        and internal_quantity is not None
+        and venue_quantity is not None
+        and lot_step is not None
+    ):
+        signed_delta = internal_quantity - venue_quantity
+        absolute_delta = abs(signed_delta)
+        status = "mismatched" if absolute_delta >= lot_step else "matched"
+        difference["status"] = status
+        difference["signed_delta"] = _decimal_string(signed_delta)
+        difference["absolute_delta"] = _decimal_string(absolute_delta)
+    else:
+        status = "incomplete"
+        difference["reason"] = reason or "evaluation_incomplete"
+        if tolerance.get("reason") is None:
+            tolerance["reason"] = difference["reason"]
+    return _CandidateEvaluation(expected, actual, difference, tolerance, status)
+
+
+def _aggregate_status(statuses: Sequence[str], watermark_valid: bool) -> str:
+    """Return the fail-closed account status for candidate outcomes."""
+    if not watermark_valid or "incomplete" in statuses:
+        return "incomplete"
+    if "mismatched" in statuses:
+        return "mismatched"
+    return "matched"
 
 
 def _evaluate_supported(
@@ -521,77 +656,18 @@ def _evaluate_supported(
     statuses: list[str] = []
 
     for candidate in candidates:
-        symbol = candidate.venue_symbol or candidate.internal_symbol
-        internal_quantity, venue_quantity, quantity_reason = _candidate_quantities(candidate)
-        internal_watermark = (
-            candidate.internal["source_venue_event_id"] if candidate.internal is not None else None
-        )
-        expected.append(
-            {
-                "instrument_public_id": candidate.instrument_public_id,
-                "signed_qty": (
-                    _decimal_string(internal_quantity) if internal_quantity is not None else None
-                ),
-                "source_venue_event_id": internal_watermark,
-                "symbol": candidate.internal_symbol or symbol,
-            }
-        )
-        actual.append(
-            {
-                "instrument_public_id": candidate.instrument_public_id,
-                "side": candidate.venue.side if candidate.venue is not None else None,
-                "signed_qty": (
-                    _decimal_string(venue_quantity) if venue_quantity is not None else None
-                ),
-                "symbol": candidate.venue_symbol or symbol,
-            }
-        )
-        spec = (
-            specs_by_instrument_public_id.get(candidate.instrument_public_id)
-            if candidate.instrument_public_id is not None
-            else None
-        )
-        lot_step, tolerance, spec_reason = _specification(
-            candidate.instrument_public_id,
-            symbol,
-            spec,
+        evaluation = _evaluate_candidate(
+            candidate,
+            specs_by_instrument_public_id,
             now,
         )
-        reason = candidate.reason or quantity_reason or spec_reason
-        difference = _DifferenceInstrument(
-            instrument_public_id=candidate.instrument_public_id,
-            status="incomplete" if reason is not None else "matched",
-            symbol=symbol,
-        )
-        if (
-            reason is None
-            and internal_quantity is not None
-            and venue_quantity is not None
-            and lot_step is not None
-        ):
-            signed_delta = internal_quantity - venue_quantity
-            absolute_delta = abs(signed_delta)
-            status = "mismatched" if absolute_delta >= lot_step else "matched"
-            difference["status"] = status
-            difference["signed_delta"] = _decimal_string(signed_delta)
-            difference["absolute_delta"] = _decimal_string(absolute_delta)
-        else:
-            status = "incomplete"
-            difference["reason"] = reason or "evaluation_incomplete"
-            if tolerance.get("reason") is None:
-                tolerance["reason"] = difference["reason"]
-        statuses.append(status)
-        differences.append(difference)
-        tolerances.append(tolerance)
+        expected.append(evaluation.expected)
+        actual.append(evaluation.actual)
+        differences.append(evaluation.difference)
+        tolerances.append(evaluation.tolerance)
+        statuses.append(evaluation.status)
 
-    if not watermark_valid:
-        statuses.append("incomplete")
-    if "incomplete" in statuses:
-        account_status = "incomplete"
-    elif "mismatched" in statuses:
-        account_status = "mismatched"
-    else:
-        account_status = "matched"
+    account_status = _aggregate_status(statuses, watermark_valid)
 
     expected_json = _json(_ExpectedPayload(instruments=expected))
     actual_json = _json(_ActualPayload(instruments=actual))

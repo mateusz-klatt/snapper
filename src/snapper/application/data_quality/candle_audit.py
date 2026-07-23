@@ -65,6 +65,16 @@ class CandleAnomaly:
     detail: str
 
 
+@dataclass(frozen=True)
+class _AuditSettings:
+    """Normalized settings shared across one candle-series audit."""
+
+    interval_seconds: int
+    split_threshold: float
+    anchor_offset_seconds: int
+    expected_gap: Callable[[datetime, datetime], bool] | None
+
+
 def _timeframe_to_seconds(timeframe: str) -> int:
     """Return the interval length of a timeframe in seconds.
 
@@ -196,6 +206,126 @@ def _row_anomalies(
     return anomalies
 
 
+def _delivery_anomalies(
+    candles: Sequence[CandleRow],
+    settings: _AuditSettings,
+) -> tuple[list[CandleAnomaly], set[datetime]]:
+    """Return row, duplicate, and ordering findings in delivered order."""
+    anomalies: list[CandleAnomaly] = []
+    seen: set[datetime] = set()
+    duplicated: set[datetime] = set()
+    previous_open: datetime | None = None
+    for row in candles:
+        anomalies.extend(
+            _row_anomalies(
+                row,
+                settings.interval_seconds,
+                settings.anchor_offset_seconds,
+            )
+        )
+        current_open = _as_utc(row["open_at"])
+        if current_open in seen:
+            duplicated.add(current_open)
+            anomalies.append(
+                CandleAnomaly(
+                    CandleAnomalyType.DUPLICATE_OPEN_AT,
+                    current_open,
+                    f"duplicate open_at {current_open.isoformat()}",
+                )
+            )
+        if previous_open is not None and current_open < previous_open:
+            anomalies.append(
+                CandleAnomaly(
+                    CandleAnomalyType.OUT_OF_ORDER,
+                    current_open,
+                    f"{current_open.isoformat()} precedes {previous_open.isoformat()}",
+                )
+            )
+        seen.add(current_open)
+        previous_open = current_open
+    return anomalies, duplicated
+
+
+def _pair_anomalies(
+    previous_time: datetime,
+    current_time: datetime,
+    unique_rows: dict[datetime, CandleRow],
+    duplicated: set[datetime],
+    settings: _AuditSettings,
+) -> list[CandleAnomaly]:
+    """Return gap and split findings for one chronological candle pair."""
+    anomalies: list[CandleAnomaly] = []
+    missing = (
+        _grid_slot(
+            current_time,
+            settings.interval_seconds,
+            settings.anchor_offset_seconds,
+        )
+        - _grid_slot(
+            previous_time,
+            settings.interval_seconds,
+            settings.anchor_offset_seconds,
+        )
+        - 1
+    )
+    gap_expected = (
+        missing > 0
+        and settings.expected_gap is not None
+        and settings.expected_gap(
+            previous_time,
+            current_time,
+        )
+    )
+    if missing > 0 and not gap_expected:
+        anomalies.append(
+            CandleAnomaly(
+                CandleAnomalyType.GAP,
+                current_time,
+                f"{missing} missing bar(s) after {previous_time.isoformat()}",
+            )
+        )
+    previous_close = unique_rows[previous_time]["close"]
+    current_close = unique_rows[current_time]["close"]
+    split_eligible = (
+        previous_close > 0.0 and previous_time not in duplicated and current_time not in duplicated
+    )
+    if split_eligible:
+        change = abs(current_close - previous_close) / previous_close
+        if change > settings.split_threshold:
+            anomalies.append(
+                CandleAnomaly(
+                    CandleAnomalyType.SPLIT_SUSPECT,
+                    current_time,
+                    f"close {previous_close} -> {current_close} ({change:.1%})",
+                )
+            )
+    return anomalies
+
+
+def _chronology_anomalies(
+    candles: Sequence[CandleRow],
+    duplicated: set[datetime],
+    settings: _AuditSettings,
+) -> list[CandleAnomaly]:
+    """Return gap and split findings over sorted unique timestamps."""
+    unique_rows = {_as_utc(row["open_at"]): row for row in candles}
+    anomalies: list[CandleAnomaly] = []
+    previous_time: datetime | None = None
+    for current_time in sorted(unique_rows):
+        if previous_time is not None:
+            anomalies.extend(
+                _pair_anomalies(
+                    previous_time,
+                    current_time,
+                    unique_rows,
+                    duplicated,
+                    settings,
+                )
+            )
+        previous_time = current_time
+    return anomalies
+
+
 def audit_candle_series(
     candles: Sequence[CandleRow],
     timeframe: str,
@@ -234,69 +364,12 @@ def audit_candle_series(
     Raises:
         ValueError: If the timeframe is not supported.
     """
-    interval_seconds = _timeframe_to_seconds(timeframe)
-    anomalies: list[CandleAnomaly] = []
-    seen: set[datetime] = set()
-    duplicated: set[datetime] = set()
-    previous_open: datetime | None = None
-    for row in candles:
-        anomalies.extend(_row_anomalies(row, interval_seconds, anchor_offset_seconds))
-        current_open = _as_utc(row["open_at"])
-        if current_open in seen:
-            duplicated.add(current_open)
-            anomalies.append(
-                CandleAnomaly(
-                    CandleAnomalyType.DUPLICATE_OPEN_AT,
-                    current_open,
-                    f"duplicate open_at {current_open.isoformat()}",
-                )
-            )
-        if previous_open is not None and current_open < previous_open:
-            anomalies.append(
-                CandleAnomaly(
-                    CandleAnomalyType.OUT_OF_ORDER,
-                    current_open,
-                    f"{current_open.isoformat()} precedes {previous_open.isoformat()}",
-                )
-            )
-        seen.add(current_open)
-        previous_open = current_open
-    unique_rows: dict[datetime, CandleRow] = {}
-    for row in candles:
-        unique_rows[_as_utc(row["open_at"])] = row
-    previous_time: datetime | None = None
-    for current_time in sorted(unique_rows):
-        if previous_time is not None:
-            missing = (
-                _grid_slot(current_time, interval_seconds, anchor_offset_seconds)
-                - _grid_slot(previous_time, interval_seconds, anchor_offset_seconds)
-                - 1
-            )
-            if missing > 0 and (
-                expected_gap is None or not expected_gap(previous_time, current_time)
-            ):
-                anomalies.append(
-                    CandleAnomaly(
-                        CandleAnomalyType.GAP,
-                        current_time,
-                        f"{missing} missing bar(s) after {previous_time.isoformat()}",
-                    )
-                )
-            previous_close = unique_rows[previous_time]["close"]
-            current_close = unique_rows[current_time]["close"]
-            if (
-                previous_close > 0.0
-                and previous_time not in duplicated
-                and current_time not in duplicated
-            ):
-                change = abs(current_close - previous_close) / previous_close
-                if change > split_threshold:
-                    anomalies.append(
-                        CandleAnomaly(
-                            CandleAnomalyType.SPLIT_SUSPECT,
-                            current_time,
-                            f"close {previous_close} -> {current_close} ({change:.1%})",
-                        )
-                    )
-        previous_time = current_time
+    settings = _AuditSettings(
+        interval_seconds=_timeframe_to_seconds(timeframe),
+        split_threshold=split_threshold,
+        anchor_offset_seconds=anchor_offset_seconds,
+        expected_gap=expected_gap,
+    )
+    anomalies, duplicated = _delivery_anomalies(candles, settings)
+    anomalies.extend(_chronology_anomalies(candles, duplicated, settings))
     return anomalies

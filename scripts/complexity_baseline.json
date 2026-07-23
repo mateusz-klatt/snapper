@@ -289,11 +289,6 @@
         "PLR0913": 6
       }
     },
-    "src/snapper/application/portfolio/account_view.py": {
-      "_row_is_coherent": {
-        "C901": 13
-      }
-    },
     "src/snapper/application/portfolio/fill_booking.py": {
       "booked_signed_quantity": {
         "PLR0913": 6
@@ -302,10 +297,6 @@
     "src/snapper/application/portfolio/futures_reconciliation.py": {
       "_evaluation_row": {
         "PLR0913": 12
-      },
-      "_specification": {
-        "C901": 15,
-        "PLR0912": 16
       },
       "evaluate": {
         "PLR0913": 6
@@ -386,12 +377,6 @@
         "PLR0913": 7
       }
     },
-    "src/snapper/application/portfolio/reconciliation_invariants.py": {
-      "validate_portfolio_reconciliation_evaluation_config": {
-        "C901": 14,
-        "PLR0912": 14
-      }
-    },
     "src/snapper/application/portfolio/spot_anchor_bootstrap.py": {
       "spot_anchor_bootstrap_refusals": {
         "C901": 23,
@@ -408,19 +393,13 @@
     },
     "src/snapper/application/portfolio/spot_reconciliation.py": {
       "_evaluate_cash": {
-        "C901": 20,
-        "PLR0912": 20,
-        "PLR0913": 10,
-        "PLR0915": 69
+        "PLR0913": 10
       },
       "_evaluation_row": {
         "PLR0913": 10
       },
       "_replay_executions": {
-        "C901": 23,
-        "PLR0912": 24,
-        "PLR0913": 8,
-        "PLR0915": 73
+        "PLR0913": 8
       },
       "evaluate": {
         "C901": 11,

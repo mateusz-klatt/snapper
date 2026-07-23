@@ -77,6 +77,44 @@ def unclassified_state_has_no_retained_evidence(
     )
 
 
+def _validate_evaluation_method_status(
+    evaluation: PortfolioReconciliationEvaluationRow,
+    method: str,
+    status: str,
+) -> None:
+    """Validate method-specific status and evidence constraints."""
+    if method in ("futures_position", "spot_execution_replay"):
+        if status not in ("matched", "mismatched", "incomplete", "unsupported", "error"):
+            raise RuntimeError("portfolio reconciliation status is incompatible with method")
+        return
+    if method == "margin_ledger_replay":
+        if status != "error":
+            raise RuntimeError("margin ledger reconciliation permits only error status")
+        if not portfolio_reconciliation_evaluation_has_no_nonfull_evidence(evaluation):
+            raise RuntimeError("margin ledger reconciliation cannot carry full evidence")
+        return
+    if method == "unclassified":
+        if status not in ("incomplete", "error"):
+            raise RuntimeError("unclassified reconciliation status is invalid")
+        if not portfolio_reconciliation_evaluation_has_no_nonfull_evidence(evaluation):
+            raise RuntimeError("unclassified reconciliation cannot carry full evidence")
+        return
+    raise RuntimeError("portfolio reconciliation method is invalid")
+
+
+def _validate_evaluation_config(
+    method: str,
+    config: PortfolioReconciliationMethodConfigRow | None,
+) -> None:
+    """Validate active method configuration against an evaluation method."""
+    if method == "unclassified":
+        if config is not None:
+            raise RuntimeError("unclassified reconciliation conflicts with active config")
+        return
+    if config is None or config["method"] != method:
+        raise RuntimeError("reconciliation evaluation conflicts with active method config")
+
+
 def validate_portfolio_reconciliation_evaluation_config(
     evaluation: PortfolioReconciliationEvaluationRow,
     config: PortfolioReconciliationMethodConfigRow | None,
@@ -99,28 +137,10 @@ def validate_portfolio_reconciliation_evaluation_config(
     exchange = evaluation["exchange"]
     if evaluation["mode"] != "live" or not exchange or exchange.strip().lower() != exchange:
         raise RuntimeError("portfolio reconciliation identity is invalid")
-    if method in ("futures_position", "spot_execution_replay"):
-        if status not in ("matched", "mismatched", "incomplete", "unsupported", "error"):
-            raise RuntimeError("portfolio reconciliation status is incompatible with method")
-    elif method == "margin_ledger_replay":
-        if status != "error":
-            raise RuntimeError("margin ledger reconciliation permits only error status")
-        if not portfolio_reconciliation_evaluation_has_no_nonfull_evidence(evaluation):
-            raise RuntimeError("margin ledger reconciliation cannot carry full evidence")
-    elif method == "unclassified":
-        if status not in ("incomplete", "error"):
-            raise RuntimeError("unclassified reconciliation status is invalid")
-        if not portfolio_reconciliation_evaluation_has_no_nonfull_evidence(evaluation):
-            raise RuntimeError("unclassified reconciliation cannot carry full evidence")
-    else:
-        raise RuntimeError("portfolio reconciliation method is invalid")
+    _validate_evaluation_method_status(evaluation, method, status)
     if status == "error" and not (evaluation["error"] or "").strip():
         raise RuntimeError("error reconciliation requires a non-empty reason")
-    if method == "unclassified":
-        if config is not None:
-            raise RuntimeError("unclassified reconciliation conflicts with active config")
-    elif config is None or config["method"] != method:
-        raise RuntimeError("reconciliation evaluation conflicts with active method config")
+    _validate_evaluation_config(method, config)
 
 
 def validate_portfolio_reconciliation_method_transition(

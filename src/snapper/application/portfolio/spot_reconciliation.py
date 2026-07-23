@@ -108,6 +108,69 @@ class _ToleranceAccumulator:
     sources: set[str]
 
 
+@dataclass(frozen=True)
+class _ReplayPrecision:
+    """Certified price and quantity quanta for one replay execution."""
+
+    tick: Decimal
+    quantity: Decimal
+    cost: Decimal
+
+
+@dataclass(frozen=True)
+class _ReplayOperands:
+    """Resolved exact operands and side sign for one replay execution."""
+
+    price: _ResolvedNumber
+    size: _ResolvedNumber
+    fee: _ResolvedNumber
+    sign: Decimal
+
+
+@dataclass
+class _ReplayAccumulator:
+    """Mutable replay outputs owned by one evaluator invocation."""
+
+    delta: dict[str, Decimal]
+    fee_assets: set[str]
+    tolerances: dict[str, _ToleranceAccumulator]
+
+
+@dataclass(frozen=True)
+class _PrecisionContext:
+    """Inputs needed to accumulate one asset's certified tolerance."""
+
+    exchange: str
+    asset_precisions: Mapping[str, SpotAssetPrecisionEvidenceRow]
+    now: datetime
+    fee_assets: set[str]
+    venue_legacy: dict[str, bool]
+    replay: Sequence[SpotReplayExecutionRow]
+    boundary: SpotReplayBoundary
+
+
+@dataclass(frozen=True)
+class _CashLedger:
+    """Normalized per-asset inputs for deterministic cash comparison."""
+
+    anchor: dict[str, Decimal]
+    replay: dict[str, Decimal]
+    liabilities: dict[str, Decimal]
+    venue: dict[str, Decimal]
+    tolerances: dict[str, _ToleranceAccumulator]
+
+
+@dataclass
+class _CashEvidence:
+    """Mutable canonical evidence maps for one cash comparison."""
+
+    expected: dict[str, object]
+    actual: dict[str, object]
+    difference: dict[str, object]
+    tolerance: dict[str, object]
+    mismatched: bool
+
+
 def _decimal_string(value: Decimal) -> str:
     """Render a finite decimal canonically without exponent notation."""
     rendered = format(value, "f")
@@ -439,6 +502,178 @@ def _add_error(tolerances: dict[str, _ToleranceAccumulator], asset: str, amount:
     item.legacy_terms += 1
 
 
+def _validate_replay_row(
+    row: SpotReplayExecutionRow,
+    anchor: SpotReconciliationAnchorRow,
+    boundary: SpotReplayBoundary,
+    venue_account: PortfolioAccountState,
+    seen: set[int],
+) -> bool:
+    """Validate replay ordering and account scope, returning whether to consume the row."""
+    if isinstance(row.scope_sequence, bool):
+        raise _IncompleteError("duplicate_or_invalid_execution_sequence")
+    if row.scope_sequence > boundary.source_watermark:
+        return False
+    if row.scope_sequence in seen:
+        raise _IncompleteError("duplicate_or_invalid_execution_sequence")
+    seen.add(row.scope_sequence)
+    if row.scope_sequence <= anchor["source_watermark"]:
+        raise _IncompleteError("execution_before_anchor_watermark")
+    scope_matches = (
+        row.wallet_public_id == venue_account.wallet_public_id
+        and row.exchange == str(venue_account.exchange).lower()
+        and row.mode == _MODE
+    )
+    if not scope_matches:
+        raise _IncompleteError("execution_scope_mismatch")
+    if row.status not in ("filled", "partial"):
+        raise _IncompleteError("invalid_execution_status")
+    return True
+
+
+def _resolve_replay_identity(
+    row: SpotReplayExecutionRow,
+    instruments: Mapping[str, SpotInstrumentIdentity],
+) -> tuple[str, str]:
+    """Validate and return the canonical base and quote assets for one execution."""
+    identity = instruments.get(row.instrument_public_id)
+    identity_matches = (
+        identity is not None
+        and identity.instrument_public_id == row.instrument_public_id
+        and identity.symbol == row.symbol
+        and identity.base_asset == row.base_asset
+        and identity.quote_asset == row.quote_asset
+    )
+    if not identity_matches:
+        raise _IncompleteError("unresolved_or_conflicting_instrument")
+    base = _canonical_asset(row.base_asset, "invalid_base_asset")
+    quote = _canonical_asset(row.quote_asset, "invalid_quote_asset")
+    if base == quote:
+        raise _IncompleteError("asset_alias_collision")
+    return base, quote
+
+
+def _resolve_replay_precision(
+    row: SpotReplayExecutionRow,
+    venue_account: PortfolioAccountState,
+    specs: Mapping[str, InstrumentSpecRow | None],
+    now: datetime,
+) -> _ReplayPrecision:
+    """Return certified price, quantity, and cost quanta for one execution."""
+    spec = specs.get(row.instrument_public_id)
+    if spec is None or spec["instrument_public_id"] != row.instrument_public_id:
+        raise _IncompleteError("missing_spot_precision")
+    if not is_effective_spot_precision_certified(
+        str(venue_account.exchange).lower(),
+        spec,
+        now,
+    ):
+        raise _IncompleteError("stale_or_uncertified_spot_precision")
+    quantity = _quantum(spec["qty_decimals"])
+    cost = _quantum(spec["cost_decimals"])
+    if quantity is None or cost is None:
+        raise _IncompleteError("invalid_spot_precision")
+    return _ReplayPrecision(Decimal(str(spec["tick_size"])), quantity, cost)
+
+
+def _resolve_replay_operands(row: SpotReplayExecutionRow) -> _ReplayOperands:
+    """Resolve exact execution operands and validate side and economics."""
+    price = _resolve_number(
+        row.price,
+        row.price_decimal,
+        row.numeric_provenance,
+        "execution_price",
+    )
+    size = _resolve_number(
+        row.size,
+        row.size_decimal,
+        row.numeric_provenance,
+        "execution_size",
+    )
+    fee = _resolve_number(
+        row.fee,
+        row.fee_decimal,
+        row.numeric_provenance,
+        "execution_fee",
+    )
+    if price.value <= 0 or size.value <= 0 or fee.value < 0:
+        raise _IncompleteError("invalid_execution_economics")
+    if row.side == "buy":
+        sign = Decimal(1)
+    elif row.side == "sell":
+        sign = Decimal(-1)
+    else:
+        raise _IncompleteError("invalid_execution_side")
+    return _ReplayOperands(price, size, fee, sign)
+
+
+def _apply_replay_notional(
+    row: SpotReplayExecutionRow,
+    assets: tuple[str, str],
+    precision: _ReplayPrecision,
+    operands: _ReplayOperands,
+    accumulator: _ReplayAccumulator,
+) -> None:
+    """Apply exact base and quote deltas plus legacy numeric error bounds."""
+    base, quote = assets
+    accumulator.delta[base] = (
+        accumulator.delta.get(base, Decimal(0)) + operands.sign * operands.size.value
+    )
+    _add_floor(accumulator.tolerances, base, precision.quantity, "quantity")
+    _add_floor(accumulator.tolerances, quote, precision.cost, "cost")
+    size_error = Decimal(0)
+    if operands.size.legacy:
+        size_error = precision.quantity / 2
+        _add_error(accumulator.tolerances, base, size_error)
+    if row.counter_amount_decimal is not None:
+        if row.numeric_provenance != "venue_raw":
+            raise _IncompleteError("raw_numeric_provenance_conflict")
+        counter = _finite_decimal_string(row.counter_amount_decimal)
+        if counter <= 0:
+            raise _IncompleteError("invalid_execution_economics")
+        accumulator.delta[quote] = (
+            accumulator.delta.get(quote, Decimal(0)) - operands.sign * counter
+        )
+        return
+    accumulator.delta[quote] = (
+        accumulator.delta.get(quote, Decimal(0))
+        - operands.sign * operands.size.value * operands.price.value
+    )
+    _add_floor(
+        accumulator.tolerances,
+        quote,
+        abs(operands.size.value) * precision.tick,
+        "price_tick_contribution",
+    )
+    price_error = precision.tick / 2 if operands.price.legacy else Decimal(0)
+    if operands.size.legacy or operands.price.legacy:
+        notional_error = (
+            abs(operands.price.value) * size_error
+            + abs(operands.size.value) * price_error
+            + size_error * price_error
+            + precision.cost / 2
+        )
+        _add_error(accumulator.tolerances, quote, notional_error)
+
+
+def _apply_replay_fee(
+    row: SpotReplayExecutionRow,
+    operands: _ReplayOperands,
+    accumulator: _ReplayAccumulator,
+) -> None:
+    """Apply fee deltas and retain every asset requiring fee precision."""
+    if operands.fee.value != 0:
+        fee_asset = _canonical_asset(row.fee_asset, "missing_fee_asset")
+        accumulator.delta[fee_asset] = (
+            accumulator.delta.get(fee_asset, Decimal(0)) - operands.fee.value
+        )
+        accumulator.fee_assets.add(fee_asset)
+    elif row.fee_asset:
+        accumulator.fee_assets.add(_canonical_asset(row.fee_asset, "invalid_fee_asset"))
+    if operands.fee.legacy and row.fee_asset:
+        accumulator.fee_assets.add(row.fee_asset)
+
+
 def _replay_executions(
     replay: Sequence[SpotReplayExecutionRow],
     anchor: SpotReconciliationAnchorRow,
@@ -450,101 +685,153 @@ def _replay_executions(
     tolerances: dict[str, _ToleranceAccumulator],
 ) -> tuple[dict[str, Decimal], set[str]]:
     """Replay the fixed scope-sequence range and derive precision bounds."""
-    delta: dict[str, Decimal] = {}
-    fee_assets: set[str] = set()
+    accumulator = _ReplayAccumulator({}, set(), tolerances)
     seen: set[int] = set()
     ordered = sorted(replay, key=lambda item: item.scope_sequence)
     for row in ordered:
-        if isinstance(row.scope_sequence, bool):
-            raise _IncompleteError("duplicate_or_invalid_execution_sequence")
-        if row.scope_sequence > boundary.source_watermark:
+        if not _validate_replay_row(row, anchor, boundary, venue_account, seen):
             continue
-        if row.scope_sequence in seen:
-            raise _IncompleteError("duplicate_or_invalid_execution_sequence")
-        seen.add(row.scope_sequence)
-        if row.scope_sequence <= anchor["source_watermark"]:
-            raise _IncompleteError("execution_before_anchor_watermark")
-        if (
-            row.wallet_public_id != venue_account.wallet_public_id
-            or row.exchange != str(venue_account.exchange).lower()
-            or row.mode != _MODE
-        ):
-            raise _IncompleteError("execution_scope_mismatch")
-        if row.status not in ("filled", "partial"):
-            raise _IncompleteError("invalid_execution_status")
-        identity = instruments.get(row.instrument_public_id)
-        if (
-            identity is None
-            or identity.instrument_public_id != row.instrument_public_id
-            or identity.symbol != row.symbol
-            or identity.base_asset != row.base_asset
-            or identity.quote_asset != row.quote_asset
-        ):
-            raise _IncompleteError("unresolved_or_conflicting_instrument")
-        base = _canonical_asset(row.base_asset, "invalid_base_asset")
-        quote = _canonical_asset(row.quote_asset, "invalid_quote_asset")
-        if base == quote:
-            raise _IncompleteError("asset_alias_collision")
-        spec = specs.get(row.instrument_public_id)
-        if spec is None or spec["instrument_public_id"] != row.instrument_public_id:
-            raise _IncompleteError("missing_spot_precision")
-        if not is_effective_spot_precision_certified(
-            str(venue_account.exchange).lower(),
-            spec,
+        assets = _resolve_replay_identity(row, instruments)
+        precision = _resolve_replay_precision(
+            row,
+            venue_account,
+            specs,
             now,
-        ):
-            raise _IncompleteError("stale_or_uncertified_spot_precision")
-        tick = Decimal(str(spec["tick_size"]))
-        qty_quantum = _quantum(spec["qty_decimals"])
-        cost_quantum = _quantum(spec["cost_decimals"])
-        if qty_quantum is None or cost_quantum is None:
-            raise _IncompleteError("invalid_spot_precision")
-        price = _resolve_number(
-            row.price, row.price_decimal, row.numeric_provenance, "execution_price"
         )
-        size = _resolve_number(row.size, row.size_decimal, row.numeric_provenance, "execution_size")
-        fee = _resolve_number(row.fee, row.fee_decimal, row.numeric_provenance, "execution_fee")
-        if price.value <= 0 or size.value <= 0 or fee.value < 0:
-            raise _IncompleteError("invalid_execution_economics")
-        sign = Decimal(1) if row.side == "buy" else Decimal(-1) if row.side == "sell" else None
-        if sign is None:
-            raise _IncompleteError("invalid_execution_side")
-        delta[base] = delta.get(base, Decimal(0)) + sign * size.value
-        _add_floor(tolerances, base, qty_quantum, "quantity")
-        _add_floor(tolerances, quote, cost_quantum, "cost")
-        if size.legacy:
-            size_error = qty_quantum / 2
-            _add_error(tolerances, base, size_error)
-        else:
-            size_error = Decimal(0)
-        if row.counter_amount_decimal is not None:
-            if row.numeric_provenance != "venue_raw":
-                raise _IncompleteError("raw_numeric_provenance_conflict")
-            counter = _finite_decimal_string(row.counter_amount_decimal)
-            if counter <= 0:
-                raise _IncompleteError("invalid_execution_economics")
-            delta[quote] = delta.get(quote, Decimal(0)) - sign * counter
-        else:
-            delta[quote] = delta.get(quote, Decimal(0)) - sign * size.value * price.value
-            _add_floor(tolerances, quote, abs(size.value) * tick, "price_tick_contribution")
-            price_error = tick / 2 if price.legacy else Decimal(0)
-            if size.legacy or price.legacy:
-                notional_error = (
-                    abs(price.value) * size_error
-                    + abs(size.value) * price_error
-                    + size_error * price_error
-                    + cost_quantum / 2
-                )
-                _add_error(tolerances, quote, notional_error)
-        if fee.value != 0:
-            fee_asset = _canonical_asset(row.fee_asset, "missing_fee_asset")
-            delta[fee_asset] = delta.get(fee_asset, Decimal(0)) - fee.value
-            fee_assets.add(fee_asset)
-        elif row.fee_asset:
-            fee_assets.add(_canonical_asset(row.fee_asset, "invalid_fee_asset"))
-        if fee.legacy and row.fee_asset:
-            fee_assets.add(row.fee_asset)
-    return delta, fee_assets
+        operands = _resolve_replay_operands(row)
+        _apply_replay_notional(row, assets, precision, operands, accumulator)
+        _apply_replay_fee(row, operands, accumulator)
+    return accumulator.delta, accumulator.fee_assets
+
+
+def _normalize_liabilities(
+    liability_totals: Mapping[str, Decimal],
+) -> dict[str, Decimal]:
+    """Validate and canonicalize caller-supplied liability totals."""
+    liabilities: dict[str, Decimal] = {}
+    for asset, value in liability_totals.items():
+        canonical = _canonical_asset(asset, "invalid_liability_asset")
+        if not isinstance(value, Decimal) or not value.is_finite():
+            raise _IncompleteError("invalid_liability")
+        liabilities[canonical] = value
+    return liabilities
+
+
+def _cash_assets(
+    anchor_totals: Mapping[str, Decimal],
+    replay_delta: Mapping[str, Decimal],
+    fee_assets: set[str],
+    liabilities: Mapping[str, Decimal],
+    venue_totals: Mapping[str, Decimal],
+) -> list[str]:
+    """Return the deterministic union of every relevant cash asset."""
+    return sorted(
+        set(anchor_totals) | set(replay_delta) | fee_assets | set(liabilities) | set(venue_totals)
+    )
+
+
+def _accumulate_asset_precision(
+    asset: str,
+    context: _PrecisionContext,
+    tolerances: dict[str, _ToleranceAccumulator],
+) -> None:
+    """Accumulate certified balance and fee precision for one asset."""
+    precision = _asset_precision(
+        context.exchange,
+        asset,
+        context.asset_precisions,
+        context.now,
+        asset in context.fee_assets,
+    )
+    balance_quantum = _quantum(precision["balance_decimals"])
+    if balance_quantum is None:
+        raise _IncompleteError("invalid_balance_precision")
+    _add_floor(tolerances, asset, balance_quantum, "balance")
+    if context.venue_legacy.get(asset, False):
+        _add_error(tolerances, asset, balance_quantum / 2)
+    if asset not in context.fee_assets:
+        return
+    fee_quantum = _quantum(precision["fee_decimals"])
+    if fee_quantum is None:
+        raise _IncompleteError("invalid_fee_precision")
+    _add_floor(tolerances, asset, fee_quantum, "fee")
+    for row in context.replay:
+        if row.scope_sequence > context.boundary.source_watermark or row.fee_asset != asset:
+            continue
+        resolved_fee = _resolve_number(
+            row.fee,
+            row.fee_decimal,
+            row.numeric_provenance,
+            "execution_fee",
+        )
+        if resolved_fee.legacy:
+            _add_error(tolerances, asset, fee_quantum / 2)
+
+
+def _build_cash_evidence(
+    assets: Sequence[str],
+    ledger: _CashLedger,
+) -> _CashEvidence:
+    """Build canonical per-asset comparison and tolerance evidence."""
+    evidence = _CashEvidence({}, {}, {}, {}, False)
+    for asset in assets:
+        expected = (
+            ledger.anchor.get(asset, Decimal(0))
+            + ledger.replay.get(asset, Decimal(0))
+            - ledger.liabilities.get(asset, Decimal(0))
+        )
+        actual = ledger.venue.get(asset, Decimal(0))
+        signed_delta = expected - actual
+        absolute_delta = abs(signed_delta)
+        tolerance = ledger.tolerances.get(asset)
+        if tolerance is None or tolerance.floor <= 0:
+            raise _IncompleteError("zero_or_missing_tolerance")
+        absolute_tolerance = tolerance.floor + tolerance.accumulation
+        status = "mismatched" if absolute_delta >= absolute_tolerance else "matched"
+        evidence.mismatched = evidence.mismatched or status == "mismatched"
+        evidence.expected[asset] = {
+            "anchor_total": _decimal_string(ledger.anchor.get(asset, Decimal(0))),
+            "liability_delta": _decimal_string(ledger.liabilities.get(asset, Decimal(0))),
+            "replay_delta": _decimal_string(ledger.replay.get(asset, Decimal(0))),
+            "total": _decimal_string(expected),
+        }
+        evidence.actual[asset] = {
+            "absent_as_zero": asset not in ledger.venue,
+            "total": _decimal_string(actual),
+        }
+        evidence.difference[asset] = {
+            "absolute_delta": _decimal_string(absolute_delta),
+            "signed_delta": _decimal_string(signed_delta),
+            "status": status,
+        }
+        evidence.tolerance[asset] = {
+            "absolute_tolerance": _decimal_string(absolute_tolerance),
+            "accumulation_term": _decimal_string(tolerance.accumulation),
+            "comparison": "absolute_delta_gte_tolerance_is_mismatch",
+            "legacy_term_count": tolerance.legacy_terms,
+            "precision_floor": _decimal_string(tolerance.floor),
+            "precision_sources": sorted(tolerance.sources),
+        }
+    return evidence
+
+
+def _cash_status(
+    mismatched: bool,
+    anchor: SpotReconciliationAnchorRow,
+    boundary: SpotReplayBoundary,
+) -> str:
+    """Return the full cash status or fail closed on uncertified match evidence."""
+    if mismatched:
+        return "mismatched"
+    if anchor["inventory_status"] != "venue_reported_full" or not boundary.inventory_complete:
+        raise _IncompleteError("uncertified_inventory")
+    if (
+        anchor["boundary_status"] == "uncertified"
+        or not boundary.venue_cursor_certified
+        or not boundary.venue_cursor
+    ):
+        raise _IncompleteError("uncertified_boundary")
+    return "matched"
 
 
 def _evaluate_cash(
@@ -581,115 +868,47 @@ def _evaluate_cash(
         now,
         tolerances,
     )
-    liabilities: dict[str, Decimal] = {}
-    for asset, value in liability_totals.items():
-        canonical = _canonical_asset(asset, "invalid_liability_asset")
-        if not isinstance(value, Decimal) or not value.is_finite():
-            raise _IncompleteError("invalid_liability")
-        liabilities[canonical] = value
-    assets = sorted(
-        set(anchor_totals)
-        | set(replay_delta)
-        | set(fee_assets)
-        | set(liabilities)
-        | set(venue_totals)
+    liabilities = _normalize_liabilities(liability_totals)
+    assets = _cash_assets(
+        anchor_totals,
+        replay_delta,
+        fee_assets,
+        liabilities,
+        venue_totals,
     )
     if not assets:
         raise _IncompleteError("empty_inventory")
-    exchange = str(venue_account.exchange).lower()
+    precision_context = _PrecisionContext(
+        exchange=str(venue_account.exchange).lower(),
+        asset_precisions=asset_precisions,
+        now=now,
+        fee_assets=fee_assets,
+        venue_legacy=venue_legacy,
+        replay=replay,
+        boundary=boundary,
+    )
     for asset in assets:
-        precision = _asset_precision(
-            exchange,
-            asset,
-            asset_precisions,
-            now,
-            asset in fee_assets,
-        )
-        balance_quantum = _quantum(precision["balance_decimals"])
-        if balance_quantum is None:
-            raise _IncompleteError("invalid_balance_precision")
-        _add_floor(tolerances, asset, balance_quantum, "balance")
-        if venue_legacy.get(asset, False):
-            _add_error(tolerances, asset, balance_quantum / 2)
-        if asset in fee_assets:
-            fee_quantum = _quantum(precision["fee_decimals"])
-            if fee_quantum is None:
-                raise _IncompleteError("invalid_fee_precision")
-            _add_floor(tolerances, asset, fee_quantum, "fee")
-            for row in replay:
-                if row.scope_sequence > boundary.source_watermark or row.fee_asset != asset:
-                    continue
-                resolved_fee = _resolve_number(
-                    row.fee, row.fee_decimal, row.numeric_provenance, "execution_fee"
-                )
-                if resolved_fee.legacy:
-                    _add_error(tolerances, asset, fee_quantum / 2)
-    expected_assets: dict[str, object] = {}
-    actual_assets: dict[str, object] = {}
-    difference_assets: dict[str, object] = {}
-    tolerance_assets: dict[str, object] = {}
-    mismatched = False
-    for asset in assets:
-        expected = (
-            anchor_totals.get(asset, Decimal(0))
-            + replay_delta.get(asset, Decimal(0))
-            - liabilities.get(asset, Decimal(0))
-        )
-        actual = venue_totals.get(asset, Decimal(0))
-        signed_delta = expected - actual
-        absolute_delta = abs(signed_delta)
-        tolerance = tolerances.get(asset)
-        if tolerance is None or tolerance.floor <= 0:
-            raise _IncompleteError("zero_or_missing_tolerance")
-        absolute_tolerance = tolerance.floor + tolerance.accumulation
-        status = "mismatched" if absolute_delta >= absolute_tolerance else "matched"
-        mismatched = mismatched or status == "mismatched"
-        expected_assets[asset] = {
-            "anchor_total": _decimal_string(anchor_totals.get(asset, Decimal(0))),
-            "liability_delta": _decimal_string(liabilities.get(asset, Decimal(0))),
-            "replay_delta": _decimal_string(replay_delta.get(asset, Decimal(0))),
-            "total": _decimal_string(expected),
-        }
-        actual_assets[asset] = {
-            "absent_as_zero": asset not in venue_totals,
-            "total": _decimal_string(actual),
-        }
-        difference_assets[asset] = {
-            "absolute_delta": _decimal_string(absolute_delta),
-            "signed_delta": _decimal_string(signed_delta),
-            "status": status,
-        }
-        tolerance_assets[asset] = {
-            "absolute_tolerance": _decimal_string(absolute_tolerance),
-            "accumulation_term": _decimal_string(tolerance.accumulation),
-            "comparison": "absolute_delta_gte_tolerance_is_mismatch",
-            "legacy_term_count": tolerance.legacy_terms,
-            "precision_floor": _decimal_string(tolerance.floor),
-            "precision_sources": sorted(tolerance.sources),
-        }
-    if mismatched:
-        status = "mismatched"
-    elif anchor["inventory_status"] != "venue_reported_full" or not boundary.inventory_complete:
-        raise _IncompleteError("uncertified_inventory")
-    elif (
-        anchor["boundary_status"] == "uncertified"
-        or not boundary.venue_cursor_certified
-        or not boundary.venue_cursor
-    ):
-        raise _IncompleteError("uncertified_boundary")
-    else:
-        status = "matched"
+        _accumulate_asset_precision(asset, precision_context, tolerances)
+    ledger = _CashLedger(
+        anchor=anchor_totals,
+        replay=replay_delta,
+        liabilities=liabilities,
+        venue=venue_totals,
+        tolerances=tolerances,
+    )
+    evidence = _build_cash_evidence(assets, ledger)
+    status = _cash_status(evidence.mismatched, anchor, boundary)
     expected_json = _json(
         {
             "anchor_public_id": anchor["public_id"],
             "anchor_watermark": anchor["source_watermark"],
-            "assets": expected_assets,
+            "assets": evidence.expected,
             "source_watermark": boundary.source_watermark,
         }
     )
     actual_json = _json(
         {
-            "assets": actual_assets,
+            "assets": evidence.actual,
             "inventory_status": (
                 "certified_full" if boundary.inventory_complete else "uncertified"
             ),
@@ -698,8 +917,8 @@ def _evaluate_cash(
             "venue_cursor": boundary.venue_cursor,
         }
     )
-    difference_json = _json({"assets": difference_assets})
-    tolerance_json = _json({"assets": tolerance_assets})
+    difference_json = _json({"assets": evidence.difference})
+    tolerance_json = _json({"assets": evidence.tolerance})
     return _evaluation_row(
         venue_account,
         now,
