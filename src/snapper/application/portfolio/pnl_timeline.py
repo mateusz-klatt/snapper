@@ -33,11 +33,11 @@ checklist:
   quantity, realized P&L, and closing fees from pre-fill weights; flips close the
   old map before assigning only overshoot quantity and opening fees to the
   incoming key. Accruals and unrealized follow current weights. The final
-  stable-sorted composite key may absorb a one-unit-in-the-last-place rounding
-  residue at emission, so each component reconciles exactly to its aggregate
-  without independent origin and strategy maps choosing different residue
-  owners. A larger discrepancy withholds the point instead of transporting
-  cancellation residue into an unrelated bucket.
+  stable-sorted instrument and composite keys may each absorb a
+  one-unit-in-the-last-place rounding residue at emission, so every exposed
+  grouping reconciles exactly to its aggregate without independent maps choosing
+  different residue owners. A larger discrepancy withholds the point instead of
+  transporting cancellation residue into an unrelated bucket.
 - **Seed from t0, never from ``from_time`` (checklist #3).** Pools are seeded
   from the ``opening`` anchor; cumulative realized / fee / accrual start at zero
   at t0. Every execution the caller supplies is replayed onto the seeded pools;
@@ -47,20 +47,26 @@ checklist:
   does NOT additionally filter by t0 on the time axis (the scope-sequence
   watermark is the authoritative boundary; a time-axis filter would fight it
   under clock skew).
-- **Baseline leakage guard (checklist #4).** The anchor carries the OPENING
-  unrealized VALUE at t0. ``net_pnl`` plots the CHANGE in unrealized from that
-  baseline (``unrealized - opening_unrealized_value``), so pre-activation P&L
-  never leaks onto the series.
+- **Baseline leakage guard (checklist #4).** Every surviving opening SHARD is
+  rebased to its instrument's t0 mark before post-activation replay. Its
+  activation unrealized is therefore exactly zero, partial/full closes realize
+  only movement since activation, and ``net_pnl`` is the direct sum of the four
+  public components. Historical entry and raw opening unrealized remain audit
+  metadata on the derivation result; they are never hidden subtractions.
 - **Ordering (checklist #2).** ``Execution.executed_at`` is nullable, so pool
   accumulation is ordered by ``scope_sequence`` (the caller supplies executions
   in ``(exchange, scope_sequence)`` order and this builder preserves each
-  instrument's sub-order). The TIME AXIS uses ``event_time`` (the execution
-  ``timestamp``). When an instrument's event times are non-monotonic against its
+  pool's sub-order). The TIME AXIS uses ``event_time`` (the execution
+  ``timestamp``). When a pool's event times are non-monotonic against its
   scope order (a regression), the offending fill's effective grid time is clamped
   forward to preserve scope order, and the shadowed minutes — those at or after
   the fill's true economic time but before its clamped placement — are ``UNTRUSTED``
   (see below): their cumulatives would omit an economically-present fill, so every
-  component is withheld, not just the unrealized.
+  component is withheld, not just the unrealized. Executions and accruals are
+  merged at exact event timestamps. An accrual uses only inventory from strictly
+  earlier fills; if a position-changing fill for the same instrument shares its
+  timestamp, the accrual value remains valid but its ownership is unattributed.
+  Equal-time fills then retain ``(exchange, scope_sequence)`` order.
 - **Two-tier incompleteness (checklist #7).** A point is ``incomplete`` for one of
   two reasons that differ in what is trustworthy:
   (a) MARK-incomplete — a held (non-flat) instrument has no finite mark for that
@@ -86,7 +92,7 @@ checklist:
   on an opening or same-side add instead makes only the entry basis unknown, so its
   still-provable cumulatives survive while unrealized and net are withheld. Any
   monetary value — an aggregate cumulative total, a
-  PER-INSTRUMENT cumulative (realized / fee / accrual), the opening baseline, a
+  PER-INSTRUMENT cumulative (realized / fee / accrual), a
   per-instrument entry or unrealized, or the summed aggregate unrealized / net — is
   non-finite, whether a NaN/Inf price / fee / mark arrived directly or a VWAP entry
   or a sum overflowed from otherwise-finite inputs (including per-instrument
@@ -96,9 +102,12 @@ checklist:
   at any level.
 - **Activation baseline (checklist #3/#4/#6).** When an anchor is supplied, grid
   points before its ``t0`` are withheld as untrusted (no speculative backfill), and
-  pre-activation funding accruals (``accrued_at`` before ``t0``) are dropped so
-  ``net_pnl`` starts at zero at activation; pre-``t0`` executions are already
-  excluded by the caller's scope-sequence watermark.
+  funding accruals at or before ``t0`` are dropped. The t0 grid point is the
+  rebased opening before any post-watermark replay, so all public flows and net
+  are exactly zero there. Opening pools are keyed by durable
+  ``(instrument_public_id, shard_key)`` identity and rebased to their t0 marks.
+  Clock-skewed post-watermark executions at or before t0 are retained and first
+  become visible on a later grid point.
 - **Downsampling (checklist #6).** The 1m series carries CUMULATIVE realized /
   fee / accrual (integrals since t0) and STOCK unrealized / net. Downsampling to
   5m / 1h / 1d selects the LAST 1m point of each bucket. For the cumulative flow
@@ -106,6 +115,15 @@ checklist:
   through the bucket end (the flow-preserving reduction the checklist demands);
   for the stock components it is the required endpoint value. A bucket's
   ``valuation_status`` is therefore its endpoint minute's status.
+- **Work budget.** Pool keys are indexed once by instrument in deterministic
+  order. Each minute visits each indexed pool at most once for valuation, and an
+  accrual visits only its instrument's pools; neither path scans the full book
+  per instrument or per accrual. Event replay is one exact-time merge over the
+  bounded execution and accrual inputs. Regression shadows are reduced to
+  boundary changes of one lexically deterministic active trigger, so future-only
+  instruments never multiply minute work or public reason cardinality. The
+  application service, not this pure kernel, owns request-span and
+  instrument-count caps.
 
 The API layer builds the injected ``marks`` mapping from finalized DB 1m candles
 through ``Repository.get_pnl_timeline_candles``, using the close of the bar
@@ -118,11 +136,14 @@ and performs no candle reading or FX conversion itself.
 import math
 from collections import defaultdict
 from collections.abc import Collection
+from collections.abc import Hashable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timedelta
+from heapq import heappop
+from heapq import heappush
 from typing import Final
 from typing import Literal
 from typing import cast
@@ -151,6 +172,8 @@ PnlIncompletenessReason = Literal[
     "net_non_finite",
     "attribution_value_non_finite",
     "attribution_reconciliation_failed",
+    "instrument_reconciliation_failed",
+    "late_pre_activation_execution",
 ]
 """Closed causal taxonomy for a withheld P&L timeline value."""
 
@@ -166,6 +189,12 @@ OriginBucket = Literal["manual", "plan", "system", "unattributed"]
 type AttributionKey = tuple[OriginBucket, str | None]
 """Composite origin and signal-derived strategy identity used for allocation."""
 
+type PoolKey = tuple[str, str]
+"""Stable ``(instrument_public_id, shard_key)`` accounting-pool identity."""
+
+type PoolIndex = Mapping[str, tuple[PoolKey, ...]]
+"""Deterministic pool keys grouped by stable instrument identity."""
+
 type MarkMap = Mapping[tuple[str, datetime], float | None]
 """Valuation-currency mark lookup keyed by ``(instrument_public_id, point_minute)``.
 
@@ -178,6 +207,9 @@ that instrument at that minute".
 type MarkIncompletenessReasonMap = Mapping[tuple[str, datetime], PnlIncompletenessReason]
 """Causal mark failures stamped by the caller at conversion sites."""
 
+type OpeningMarkMap = Mapping[str, float | None]
+"""Trusted t0 marks keyed by instrument identity for opening derivation."""
+
 _GRANULARITY_MINUTES: Final[dict[str, int]] = {"1m": 1, "5m": 5, "1h": 60, "1d": 1440}
 """Downsampling bucket width in minutes per supported granularity."""
 
@@ -187,7 +219,9 @@ class TimelineExecution:
     """One execution on the P&L time axis.
 
     Attributes:
-        instrument_public_id: Instrument the fill belongs to; the pool key.
+        instrument_public_id: Stable instrument identity used for marks/output.
+        shard_key: Durable fill-observed shard identity; with the instrument it
+            forms the accounting pool key.
         exchange: Venue the fill executed on; part of the scope-order tiebreak.
         scope_sequence: Per-``(wallet, exchange, mode)`` commit-ordered counter;
             the authoritative accumulation order.
@@ -211,6 +245,7 @@ class TimelineExecution:
     """
 
     instrument_public_id: str
+    shard_key: str
     exchange: str
     scope_sequence: int
     event_time: datetime
@@ -269,15 +304,24 @@ class TimelineAccrual:
 
 
 @dataclass(frozen=True)
-class OpeningPosition:
-    """One instrument's seeded pool state at the activation anchor.
+class OpeningPool:
+    """One durable shard pool seeded at the activation anchor.
 
     Attributes:
+        instrument_public_id: Stable instrument identity used for marks/output.
+        shard_key: Exact durable ``fill_observed`` shard identity.
+        exchange: Immutable execution scope of this shard.
         position_qty: Signed position quantity at t0.
-        entry_price: Volume-weighted average entry price at t0, or ``None`` when
-            the seeded position is flat or its entry is unknown.
+        entry_price: Activation cost basis. A derived non-flat pool always carries
+            its positive finite t0 mark here, never the historical venue basis.
+            Invalid values remain accepted as defensive manually-constructed
+            corrupt seeds so the builder can preserve honest incompleteness
+            semantics.
     """
 
+    instrument_public_id: str
+    shard_key: str
+    exchange: str
     position_qty: float
     entry_price: float | None
 
@@ -287,18 +331,253 @@ class TimelineOpening:
     """The activation anchor seeding the replay.
 
     Attributes:
-        positions: Per-instrument seeded pool state at t0.
-        opening_unrealized_value: The mark-to-market unrealized VALUE of the
-            seeded book at t0, subtracted from every later unrealized so the
-            series plots the change since activation.
+        pools: Stable ``(instrument_public_id, shard_key)`` ordered shard seeds.
+            Non-flat derived pools are rebased to their instrument's t0 mark.
         t0: The anchor instant. Metadata only: the caller already bounds the
             supplied stream to the post-anchor watermark, so t0 is not used to
             re-filter events on the time axis.
     """
 
-    positions: Mapping[str, OpeningPosition]
-    opening_unrealized_value: float
+    pools: tuple[OpeningPool, ...]
     t0: datetime
+
+    def __post_init__(self) -> None:
+        """Require one stable, unambiguous pool tuple at a UTC grid minute."""
+        if self.t0.utcoffset() != timedelta(0) or self.t0.second != 0 or self.t0.microsecond != 0:
+            raise ValueError("opening t0 must be aligned to a UTC minute")
+        expected = tuple(
+            sorted(
+                self.pools,
+                key=lambda pool: (pool.instrument_public_id, pool.shard_key),
+            )
+        )
+        if self.pools != expected:
+            raise ValueError("opening pools must be stably ordered by instrument and shard")
+        seen_keys: set[PoolKey] = set()
+        scope_by_shard: dict[str, tuple[str, str]] = {}
+        exchange_by_instrument: dict[str, str] = {}
+        for pool in self.pools:
+            if not pool.instrument_public_id or not pool.shard_key or not pool.exchange:
+                raise ValueError("opening pool identities must be non-empty")
+            pool_key = (pool.instrument_public_id, pool.shard_key)
+            if pool_key in seen_keys:
+                raise ValueError("opening pools must have unique instrument and shard keys")
+            seen_keys.add(pool_key)
+            scope = (pool.instrument_public_id, pool.exchange)
+            previous_scope = scope_by_shard.setdefault(pool.shard_key, scope)
+            if previous_scope != scope:
+                raise ValueError("one opening shard cannot span instrument or exchange scopes")
+            previous_exchange = exchange_by_instrument.setdefault(
+                pool.instrument_public_id,
+                pool.exchange,
+            )
+            if previous_exchange != pool.exchange:
+                raise ValueError("one opening instrument cannot span multiple exchanges")
+
+
+@dataclass(frozen=True)
+class OpeningPoolValuation:
+    """One surviving historical shard pool and its t0 valuation audit.
+
+    Attributes:
+        instrument_public_id: Stable instrument identity used for valuation.
+        shard_key: Exact durable accounting shard.
+        exchange: Immutable execution scope of the shard.
+        position_qty: Historical signed quantity surviving the exact prefix.
+        historical_entry_price: Historical average-cost basis before rebasing.
+        t0_mark: Finite valuation-currency mark at the anchor instant.
+        opening_unrealized_value: Signed ``quantity * (mark - entry)`` value.
+    """
+
+    instrument_public_id: str
+    shard_key: str
+    exchange: str
+    position_qty: float
+    historical_entry_price: float
+    t0_mark: float
+    opening_unrealized_value: float
+
+
+@dataclass(frozen=True)
+class TimelineOpeningDerivation:
+    """A rebased activation opening and its historical per-pool audit.
+
+    Attributes:
+        opening: Seed accepted by :func:`build_pnl_timeline`.
+        per_pool: Stable pool-key ordered historical valuations.
+        raw_opening_unrealized_value: Accurate ``math.fsum`` of the stable
+            per-pool historical opening values. Audit metadata only; never
+            subtracted by the builder.
+    """
+
+    opening: TimelineOpening
+    per_pool: tuple[OpeningPoolValuation, ...]
+    raw_opening_unrealized_value: float
+
+
+def derive_timeline_opening(
+    executions: Sequence[TimelineExecution],
+    t0_marks: OpeningMarkMap,
+    t0: datetime,
+    untrusted_price_reasons_by_instrument: (
+        Mapping[str, Collection[PnlIncompletenessReason]] | None
+    ) = None,
+) -> TimelineOpeningDerivation:
+    """Derive a shard-aware rebased opening from an exact ledger prefix.
+
+    Replays every execution in its supplied per-exchange scope order through
+    the same average-cost kernel used by the timeline, independently for every
+    durable ``(instrument_public_id, shard_key)`` pool. The caller-resolved
+    ``position_delta`` is authoritative, including base-asset fee quantity
+    effects. Only non-flat pools survive. Their historical basis and raw t0
+    unrealized are retained in the returned audit, while each build seed is
+    rebased to the positive finite t0 mark. A same-shard round trip can therefore
+    disappear, but opposing non-flat shards on one instrument never cancel.
+
+    The caller remains responsible for proving that ``executions`` contains the
+    complete active prefix through its captured per-exchange watermarks and that
+    execution prices and t0 marks use the same valuation currency. This pure
+    function can verify ordering and numeric trust but cannot detect an omitted
+    database row.
+
+    Args:
+        executions: Exact active ledger prefix, ordered by scope sequence within
+            each exchange.
+        t0_marks: Caller-resolved t0 marks keyed by instrument identity.
+        t0: Time represented by the opening valuation.
+        untrusted_price_reasons_by_instrument: Caller-established price
+            provenance failures. Any reason affecting a replayed instrument
+            refuses the derivation even when its numeric price appears finite.
+
+    Returns:
+        The rebased opening and deterministic historical per-pool audit.
+
+    Raises:
+        ValueError: When temporal, ordering, shard scope, side, numeric, price
+            provenance, surviving basis, mark, or valuation evidence is unsafe.
+    """
+    if t0.utcoffset() != timedelta(0) or t0.second != 0 or t0.microsecond != 0:
+        raise ValueError("opening t0 must be aligned to a UTC minute")
+    resolved_untrusted_reasons = (
+        {}
+        if untrusted_price_reasons_by_instrument is None
+        else untrusted_price_reasons_by_instrument
+    )
+    pools: dict[PoolKey, _Pool] = {}
+    last_scope_sequence_by_exchange: dict[str, int] = {}
+    exchange_by_instrument: dict[str, str] = {}
+    scope_by_shard: dict[str, tuple[str, str]] = {}
+    for execution in executions:
+        instrument_public_id = execution.instrument_public_id
+        if not instrument_public_id:
+            raise ValueError("opening execution instrument identity must be non-empty")
+        if not execution.shard_key:
+            raise ValueError("opening execution shard identity must be non-empty")
+        if not execution.exchange:
+            raise ValueError("opening execution exchange identity must be non-empty")
+        previous_scope_sequence = last_scope_sequence_by_exchange.get(execution.exchange)
+        if execution.scope_sequence <= 0 or (
+            previous_scope_sequence is not None
+            and execution.scope_sequence <= previous_scope_sequence
+        ):
+            raise ValueError("opening executions must have increasing positive scope sequences")
+        last_scope_sequence_by_exchange[execution.exchange] = execution.scope_sequence
+        previous_exchange = exchange_by_instrument.setdefault(
+            instrument_public_id,
+            execution.exchange,
+        )
+        if previous_exchange != execution.exchange:
+            raise ValueError("one opening instrument cannot span multiple exchanges")
+        shard_scope = (instrument_public_id, execution.exchange)
+        previous_scope = scope_by_shard.setdefault(execution.shard_key, shard_scope)
+        if previous_scope != shard_scope:
+            raise ValueError("one opening shard cannot span instrument or exchange scopes")
+        if execution.side not in {"buy", "sell"}:
+            raise ValueError("opening execution side must be buy or sell")
+        if not math.isfinite(execution.size) or execution.size < 0.0:
+            raise ValueError("opening execution size must be non-negative and finite")
+        if not math.isfinite(execution.position_delta):
+            raise ValueError("opening execution position delta must be finite")
+        if execution.side == "buy" and execution.position_delta < 0.0:
+            raise ValueError("opening execution position delta must agree with side")
+        if execution.side == "sell" and execution.position_delta > 0.0:
+            raise ValueError("opening execution position delta must agree with side")
+        if resolved_untrusted_reasons.get(instrument_public_id):
+            raise ValueError("opening execution price provenance must be trusted")
+        if execution.position_delta == 0.0:
+            continue
+        if execution.price_incompleteness_reason is not None:
+            raise ValueError("opening execution price provenance must be trusted")
+        if not is_positive_finite(execution.price):
+            raise ValueError("opening execution price must be positive and finite")
+        pool_key = (instrument_public_id, execution.shard_key)
+        pool = pools.get(pool_key, _Pool(0.0, None))
+        outcome = apply_fill(
+            pool.position_qty,
+            pool.entry_price,
+            execution.position_delta,
+            abs(execution.position_delta),
+            execution.price,
+        )
+        if not math.isfinite(outcome.position_qty):
+            raise ValueError("opening position quantity arithmetic must remain finite")
+        if abs(outcome.position_qty) >= FLAT_EPSILON and not is_positive_finite(
+            outcome.entry_price
+        ):
+            raise ValueError("opening cost basis arithmetic must remain positive and finite")
+        pools[pool_key] = _Pool(outcome.position_qty, outcome.entry_price)
+
+    valuations: list[OpeningPoolValuation] = []
+    opening_pools: list[OpeningPool] = []
+    for instrument_public_id, shard_key in sorted(pools):
+        pool = pools[(instrument_public_id, shard_key)]
+        if abs(pool.position_qty) < FLAT_EPSILON:
+            continue
+        mark = t0_marks.get(instrument_public_id)
+        if not is_positive_finite(mark):
+            raise ValueError("surviving opening pool requires a positive finite t0 mark")
+        entry_price = cast(float, pool.entry_price)
+        resolved_mark = mark
+        unrealized = pool.position_qty * (resolved_mark - entry_price)
+        if not math.isfinite(unrealized):
+            raise ValueError("opening pool unrealized value must be finite")
+        exchange = scope_by_shard[shard_key][1]
+        opening_pools.append(
+            OpeningPool(
+                instrument_public_id=instrument_public_id,
+                shard_key=shard_key,
+                exchange=exchange,
+                position_qty=pool.position_qty,
+                entry_price=resolved_mark,
+            )
+        )
+        valuations.append(
+            OpeningPoolValuation(
+                instrument_public_id=instrument_public_id,
+                shard_key=shard_key,
+                exchange=exchange,
+                position_qty=pool.position_qty,
+                historical_entry_price=entry_price,
+                t0_mark=resolved_mark,
+                opening_unrealized_value=unrealized,
+            )
+        )
+    try:
+        raw_opening_unrealized_value = math.fsum(
+            valuation.opening_unrealized_value for valuation in valuations
+        )
+    except OverflowError as error:
+        raise ValueError("opening total unrealized value must be finite") from error
+    if not math.isfinite(raw_opening_unrealized_value):
+        raise ValueError("opening total unrealized value must be finite")
+    return TimelineOpeningDerivation(
+        opening=TimelineOpening(
+            pools=tuple(opening_pools),
+            t0=t0,
+        ),
+        per_pool=tuple(valuations),
+        raw_opening_unrealized_value=raw_opening_unrealized_value,
+    )
 
 
 @dataclass(frozen=True)
@@ -423,10 +702,10 @@ class PnlTimelinePoint:
             ``None`` under the same untrusted conditions as ``realized_pnl``.
         accrual_pnl: Cumulative funding accrual P&L since t0, or ``None`` under
             the same untrusted conditions.
-        unrealized_pnl: Aggregate mark-to-market unrealized at the point, or
+        unrealized_pnl: Aggregate activation-relative mark-to-market unrealized at
+            the point, or ``None`` when the point is incomplete.
+        net_pnl: ``realized_pnl + fee_pnl + accrual_pnl + unrealized_pnl``, or
             ``None`` when the point is incomplete.
-        net_pnl: ``realized_pnl + fee_pnl + accrual_pnl + (unrealized_pnl -
-            opening_unrealized_value)``, or ``None`` when the point is incomplete.
         valuation_status: ``'complete'`` or ``'incomplete'``.
         incompleteness_reasons: Canonical reasons stamped at withholding sites.
         per_instrument: Per-instrument contributions, ordered by instrument id.
@@ -472,7 +751,7 @@ class PnlTimelineResult:
 
 @dataclass(frozen=True)
 class _Pool:
-    """Internal signed average-cost pool state for one instrument."""
+    """Internal signed average-cost state for one durable shard pool."""
 
     position_qty: float
     entry_price: float | None
@@ -695,11 +974,11 @@ def _remaining_weights(
     return _reconcile_weights(remaining, remaining_qty)
 
 
-def _values_with_residue(
-    values: Mapping[AttributionKey, float],
-    keys: Sequence[AttributionKey],
+def _values_with_residue[KeyT: Hashable](
+    values: Mapping[KeyT, float],
+    keys: Sequence[KeyT],
     total: float,
-) -> dict[AttributionKey, float] | None:
+) -> dict[KeyT, float] | None:
     """Reconcile values through the final key or fail if floats cannot represent it.
 
     The accumulated final value is tried first. Its adjacent floats are also
@@ -707,19 +986,19 @@ def _values_with_residue(
     by one unit in the last place. A direct residual farther away is not proof of
     ownership and is never transported into the final bucket. If no allowed
     representation sums exactly, returning ``None`` lets the caller withhold the
-    point instead of publishing fabricated attribution.
+    point instead of publishing a fabricated keyed contribution.
 
     Args:
         values: Cumulative values before point-level reconciliation.
-        keys: Stable-sorted composite keys.
+        keys: Caller-provided deterministic key order.
         total: Aggregate value the buckets must equal exactly.
 
     Returns:
         Reconciled values, or ``None`` when exact float reconciliation fails.
     """
     if not keys:
-        return {}
-    reconciled: dict[AttributionKey, float] = {}
+        return {} if total == 0.0 else None
+    reconciled: dict[KeyT, float] = {}
     for key in keys[:-1]:
         reconciled[key] = values.get(key, 0.0)
     final_key = keys[-1]
@@ -751,10 +1030,10 @@ def _minute_grid(from_time: datetime, to_time: datetime) -> list[datetime]:
 def _prepare_executions(
     executions: Sequence[TimelineExecution],
 ) -> tuple[list[_PreparedExecution], list[_RegressionShadow]]:
-    """Clamp per-instrument event times monotone and collect regression shadows.
+    """Clamp per-pool event times monotone and collect regression shadows.
 
-    Each instrument's fills are accumulated in the caller-supplied scope order.
-    A fill whose ``event_time`` regresses below the instrument's running maximum
+    Each durable shard pool's fills are accumulated in caller-supplied scope order.
+    A fill whose ``event_time`` regresses below the pool's running maximum
     is placed at that maximum (so scope order survives the grid walk) and the
     interval it shadows is recorded so those minutes can be flagged incomplete.
 
@@ -765,11 +1044,12 @@ def _prepare_executions(
         The prepared executions sorted for the grid walk, and the shadowed
         ``[economic_time, clamped_time)`` intervals produced by regressions.
     """
-    last_effective: dict[str, datetime] = {}
+    last_effective: dict[PoolKey, datetime] = {}
     shadows: list[_RegressionShadow] = []
     prepared: list[_PreparedExecution] = []
     for execution in executions:
-        previous = last_effective.get(execution.instrument_public_id)
+        pool_key = (execution.instrument_public_id, execution.shard_key)
+        previous = last_effective.get(pool_key)
         if previous is not None and execution.event_time < previous:
             effective = previous
             shadows.append(
@@ -785,7 +1065,7 @@ def _prepare_executions(
             )
         else:
             effective = execution.event_time
-        last_effective[execution.instrument_public_id] = effective
+        last_effective[pool_key] = effective
         prepared.append(
             _PreparedExecution(
                 effective_time=effective,
@@ -796,6 +1076,120 @@ def _prepare_executions(
         )
     prepared.sort(key=lambda item: (item.effective_time, item.exchange, item.scope_sequence))
     return prepared, shadows
+
+
+def _minute_ceiling_index(point_time: datetime, grid_start: datetime) -> int:
+    """Return the first minute-grid index at or after one timestamp."""
+    minute = timedelta(minutes=1)
+    floor_index = (point_time - grid_start) // minute
+    return floor_index + int(grid_start + floor_index * minute < point_time)
+
+
+def _regression_shadow_deltas(
+    shadows: Sequence[_RegressionShadow],
+    grid_start: datetime,
+    point_count: int,
+) -> dict[int, dict[str, int]]:
+    """Index clipped half-open shadow intervals as minute reference deltas."""
+    deltas: dict[int, dict[str, int]] = {}
+    for shadow in shadows:
+        trigger = shadow.reason.trigger_instrument_public_id
+        if trigger is None:
+            raise ValueError("regression shadow requires a triggering instrument")
+        start_index = max(
+            0,
+            min(point_count, _minute_ceiling_index(shadow.start, grid_start)),
+        )
+        end_index = max(
+            0,
+            min(point_count, _minute_ceiling_index(shadow.end, grid_start)),
+        )
+        if start_index >= end_index:
+            continue
+        for point_index, delta in ((start_index, 1), (end_index, -1)):
+            trigger_deltas = deltas.setdefault(point_index, {})
+            trigger_deltas[trigger] = trigger_deltas.get(trigger, 0) + delta
+    return deltas
+
+
+def _apply_regression_shadow_deltas(
+    active: dict[str, int],
+    trigger_heap: list[str],
+    deltas: Mapping[str, int],
+) -> str | None:
+    """Apply one boundary and return its deterministic active trigger."""
+    for trigger, delta in deltas.items():
+        previous_count = active.get(trigger, 0)
+        active_count = previous_count + delta
+        if active_count > 0:
+            active[trigger] = active_count
+            if previous_count == 0:
+                heappush(trigger_heap, trigger)
+        else:
+            active.pop(trigger, None)
+    while trigger_heap and trigger_heap[0] not in active:
+        heappop(trigger_heap)
+    return trigger_heap[0] if trigger_heap else None
+
+
+def _regression_shadow_trigger_changes(
+    shadows: Sequence[_RegressionShadow],
+    grid_start: datetime,
+    point_count: int,
+) -> dict[int, str | None]:
+    """Return only boundary changes to the deterministic active trigger."""
+    deltas = _regression_shadow_deltas(shadows, grid_start, point_count)
+    active: dict[str, int] = {}
+    trigger_heap: list[str] = []
+    changes: dict[int, str | None] = {}
+    current_trigger: str | None = None
+    for point_index in range(point_count + 1):
+        boundary_deltas = deltas.get(point_index)
+        if boundary_deltas is None:
+            continue
+        next_trigger = _apply_regression_shadow_deltas(
+            active,
+            trigger_heap,
+            boundary_deltas,
+        )
+        if next_trigger != current_trigger:
+            changes[point_index] = next_trigger
+            current_trigger = next_trigger
+    return changes
+
+
+def _valuation_pool_index(
+    seeded_pool_keys: Mapping[str, set[PoolKey]],
+    prepared: Sequence[_PreparedExecution],
+    to_time: datetime,
+) -> PoolIndex:
+    """Return pools capable of affecting valuation inside the chart window."""
+    pool_keys_by_instrument = {
+        instrument_public_id: set(pool_keys)
+        for instrument_public_id, pool_keys in seeded_pool_keys.items()
+    }
+    for item in prepared:
+        if item.effective_time <= to_time:
+            execution = item.execution
+            pool_keys_by_instrument.setdefault(execution.instrument_public_id, set()).add(
+                (execution.instrument_public_id, execution.shard_key)
+            )
+    return {
+        instrument_public_id: tuple(sorted(pool_keys))
+        for instrument_public_id, pool_keys in pool_keys_by_instrument.items()
+    }
+
+
+def _position_changes_by_effective_time(
+    prepared: Sequence[_PreparedExecution],
+    to_time: datetime,
+) -> Mapping[datetime, set[str]]:
+    """Index only in-window position changes for accrual ambiguity checks."""
+    changing: defaultdict[datetime, set[str]] = defaultdict(set)
+    for item in prepared:
+        if item.effective_time <= to_time and item.execution.position_delta != 0.0:
+            changing[item.effective_time].add(item.execution.instrument_public_id)
+    return changing
 
 
 def _untrusted_point(
@@ -856,10 +1250,24 @@ def _untrusted_point(
     )
 
 
+def _combined_instrument_weights(
+    pool_keys: Sequence[PoolKey],
+    weights_by_pool: Mapping[PoolKey, Mapping[AttributionKey, float]],
+) -> dict[AttributionKey, float]:
+    """Combine current shard quantity ownership for one instrument."""
+    combined: defaultdict[AttributionKey, float] = defaultdict(float)
+    for pool_key in pool_keys:
+        pool_weights = weights_by_pool.get(pool_key, {})
+        for attribution_key in _sorted_attribution_keys(set(pool_weights)):
+            combined[attribution_key] += pool_weights[attribution_key]
+    return dict(combined)
+
+
 def _value_point(
     point_time: datetime,
-    pools: Mapping[str, _Pool],
-    weights_by_instrument: Mapping[str, Mapping[AttributionKey, float]],
+    pools: Mapping[PoolKey, _Pool],
+    pool_index: PoolIndex,
+    weights_by_pool: Mapping[PoolKey, Mapping[AttributionKey, float]],
     marks: MarkMap,
     seen: Sequence[str],
     attribution_seen: Sequence[AttributionKey],
@@ -872,48 +1280,14 @@ def _value_point(
     realized_total: float,
     fee_total: float,
     accrual_total: float,
-    opening_unrealized_value: float,
+    activation_time: datetime | None,
     global_reasons: Collection[PnlIncompletenessReasonEntry],
     untrusted_reasons_by_instrument: Mapping[str, Collection[PnlIncompletenessReasonEntry]],
-    basis_reasons_by_instrument: Mapping[str, Collection[PnlIncompletenessReason]],
+    basis_reasons_by_pool: Mapping[PoolKey, Collection[PnlIncompletenessReason]],
     mark_incompleteness_reasons: MarkIncompletenessReasonMap,
 ) -> PnlTimelinePoint:
-    """Value one grid point from the current pools, cumulatives, and marks.
-
-    Args:
-        point_time: The grid instant being valued.
-        pools: Current per-instrument pool state.
-        weights_by_instrument: Current composite quantity weights per pool.
-        marks: The injected valuation-currency mark lookup.
-        seen: Instruments with any activity or seeding through this point,
-            already ordered by the caller for deterministic output.
-        attribution_seen: Composite buckets observed through this point.
-        realized_by_instrument: Cumulative realized per instrument.
-        fee_by_instrument: Cumulative fee P&L per instrument (expense sign).
-        accrual_by_instrument: Cumulative accrual P&L per instrument.
-        realized_by_attribution: Cumulative realized per composite bucket.
-        fee_by_attribution: Cumulative fee P&L per composite bucket.
-        accrual_by_attribution: Cumulative accrual per composite bucket.
-        realized_total: Aggregate cumulative realized.
-        fee_total: Aggregate cumulative fee P&L.
-        accrual_total: Aggregate cumulative accrual P&L.
-        opening_unrealized_value: The anchor's opening unrealized value.
-        global_reasons: Global causes established before valuation starts.
-        untrusted_reasons_by_instrument: Latched instrument-scoped causes.
-        basis_reasons_by_instrument: Causes of currently unavailable entry bases.
-        mark_incompleteness_reasons: Caller-stamped mark conversion failures.
-
-    Returns:
-        The valued :class:`PnlTimelinePoint`.
-    """
+    """Value shard pools and aggregate marks and contributions by instrument."""
     established_global_reasons = set(global_reasons)
-    if not math.isfinite(opening_unrealized_value):
-        established_global_reasons.add(
-            _global_incompleteness_reason(
-                "activation_baseline_non_finite",
-                "untrusted",
-            )
-        )
     if established_global_reasons:
         for instrument_reasons in untrusted_reasons_by_instrument.values():
             established_global_reasons.update(instrument_reasons)
@@ -956,6 +1330,40 @@ def _value_point(
                 )
             },
         )
+    reconciled_realized_by_instrument: Mapping[str, float] = realized_by_instrument
+    reconciled_fee_by_instrument: Mapping[str, float] = fee_by_instrument
+    reconciled_accrual_by_instrument: Mapping[str, float] = accrual_by_instrument
+    if not instrument_untrusted_reasons:
+        realized_instruments = _values_with_residue(
+            realized_by_instrument,
+            seen,
+            realized_total,
+        )
+        fee_instruments = _values_with_residue(
+            fee_by_instrument,
+            seen,
+            fee_total,
+        )
+        accrual_instruments = _values_with_residue(
+            accrual_by_instrument,
+            seen,
+            accrual_total,
+        )
+        if realized_instruments is None or fee_instruments is None or accrual_instruments is None:
+            return _untrusted_point(
+                point_time,
+                seen,
+                attribution_seen,
+                {
+                    _global_incompleteness_reason(
+                        "instrument_reconciliation_failed",
+                        "untrusted",
+                    )
+                },
+            )
+        reconciled_realized_by_instrument = realized_instruments
+        reconciled_fee_by_instrument = fee_instruments
+        reconciled_accrual_by_instrument = accrual_instruments
     attribution_keys = _sorted_attribution_keys(
         set(attribution_seen)
         | set(realized_by_attribution)
@@ -1000,17 +1408,32 @@ def _value_point(
                 )
             )
             continue
-        pool = pools.get(instrument_public_id, _Pool(0.0, None))
-        realized = realized_by_instrument.get(instrument_public_id, 0.0)
-        fee = fee_by_instrument.get(instrument_public_id, 0.0)
-        accrual = accrual_by_instrument.get(instrument_public_id, 0.0)
-        if abs(pool.position_qty) < FLAT_EPSILON:
+        instrument_pool_keys: list[PoolKey] = []
+        combined_weights: defaultdict[AttributionKey, float] = defaultdict(float)
+        for pool_key in pool_index.get(instrument_public_id, ()):
+            pool_weights = weights_by_pool.get(pool_key, {})
+            for attribution_key in _sorted_attribution_keys(set(pool_weights)):
+                combined_weights[attribution_key] += pool_weights[attribution_key]
+            pool = pools.get(pool_key)
+            if pool is not None and abs(pool.position_qty) >= FLAT_EPSILON:
+                instrument_pool_keys.append(pool_key)
+        instrument_weights = dict(combined_weights)
+        realized = reconciled_realized_by_instrument.get(instrument_public_id, 0.0)
+        fee = reconciled_fee_by_instrument.get(instrument_public_id, 0.0)
+        accrual = reconciled_accrual_by_instrument.get(instrument_public_id, 0.0)
+        if not instrument_pool_keys:
             instrument_unrealized: float | None = 0.0
         else:
-            mark = marks.get((instrument_public_id, point_time))
-            mark_unavailable = mark is None or not math.isfinite(mark)
-            basis_unavailable = pool.entry_price is None or not math.isfinite(pool.entry_price)
-            if mark_unavailable or basis_unavailable:
+            is_activation_point = activation_time is not None and point_time == activation_time
+            mark = 0.0 if is_activation_point else marks.get((instrument_public_id, point_time))
+            mark_unavailable = not is_activation_point and (mark is None or not math.isfinite(mark))
+            unavailable_basis_keys = [
+                pool_key
+                for pool_key in instrument_pool_keys
+                if not is_positive_finite(pools[pool_key].entry_price)
+                or basis_reasons_by_pool.get(pool_key)
+            ]
+            if mark_unavailable or unavailable_basis_keys:
                 instrument_unrealized = None
                 if mark_unavailable:
                     mark_reason = mark_incompleteness_reasons.get(
@@ -1024,8 +1447,8 @@ def _value_point(
                             instrument_public_id,
                         )
                     )
-                if basis_unavailable:
-                    basis_reasons = basis_reasons_by_instrument.get(instrument_public_id)
+                for pool_key in unavailable_basis_keys:
+                    basis_reasons = basis_reasons_by_pool.get(pool_key)
                     if not basis_reasons:
                         raise ValueError(
                             "an unavailable entry basis requires a stamped causal reason"
@@ -1038,33 +1461,28 @@ def _value_point(
                                 instrument_public_id,
                             )
                         )
-                instrument_keys = _sorted_attribution_keys(
-                    set(weights_by_instrument.get(instrument_public_id, {}))
-                )
+                instrument_keys = _sorted_attribution_keys(set(instrument_weights))
                 unrealized_incomplete.update(instrument_keys or [_UNATTRIBUTED_KEY])
             else:
                 trusted_mark = cast(float, mark)
-                trusted_entry_price = cast(float, pool.entry_price)
-                instrument_unrealized = pool.position_qty * (trusted_mark - trusted_entry_price)
-                if math.isfinite(instrument_unrealized):
-                    unrealized_total += instrument_unrealized
-                    allocations = _allocate_by_weights(
-                        instrument_unrealized,
-                        weights_by_instrument.get(instrument_public_id, {}),
+                pool_values: list[tuple[PoolKey, float]] = []
+                instrument_unrealized = 0.0
+                for pool_key in instrument_pool_keys:
+                    pool = pools[pool_key]
+                    trusted_entry_price = cast(float, pool.entry_price)
+                    pool_unrealized = (
+                        0.0
+                        if is_activation_point
+                        else pool.position_qty * (trusted_mark - trusted_entry_price)
                     )
-                    for key, amount in allocations.items():
-                        unrealized_by_attribution[key] += amount
-                        if not math.isfinite(unrealized_by_attribution[key]):
-                            unrealized_incomplete.add(key)
-                            point_reasons.add(
-                                _instrument_incompleteness_reason(
-                                    "attribution_value_non_finite",
-                                    "mark_incomplete",
-                                    instrument_public_id,
-                                )
-                            )
-                else:
-                    instrument_unrealized = None
+                    instrument_unrealized += pool_unrealized
+                    if not math.isfinite(pool_unrealized) or not math.isfinite(
+                        instrument_unrealized
+                    ):
+                        instrument_unrealized = None
+                        break
+                    pool_values.append((pool_key, pool_unrealized))
+                if instrument_unrealized is None:
                     point_reasons.add(
                         _instrument_incompleteness_reason(
                             "unrealized_non_finite",
@@ -1072,10 +1490,26 @@ def _value_point(
                             instrument_public_id,
                         )
                     )
-                    instrument_keys = _sorted_attribution_keys(
-                        set(weights_by_instrument.get(instrument_public_id, {}))
-                    )
+                    instrument_keys = _sorted_attribution_keys(set(instrument_weights))
                     unrealized_incomplete.update(instrument_keys or [_UNATTRIBUTED_KEY])
+                else:
+                    unrealized_total += instrument_unrealized
+                    for pool_key, pool_unrealized in pool_values:
+                        allocations = _allocate_by_weights(
+                            pool_unrealized,
+                            weights_by_pool.get(pool_key, {}),
+                        )
+                        for key, amount in allocations.items():
+                            unrealized_by_attribution[key] += amount
+                            if not math.isfinite(unrealized_by_attribution[key]):
+                                unrealized_incomplete.add(key)
+                                point_reasons.add(
+                                    _instrument_incompleteness_reason(
+                                        "attribution_value_non_finite",
+                                        "mark_incomplete",
+                                        instrument_public_id,
+                                    )
+                                )
         contributions.append(
             PnlInstrumentContribution(
                 instrument_public_id=instrument_public_id,
@@ -1091,11 +1525,7 @@ def _value_point(
         set(attribution_keys)
         | set(unrealized_by_attribution)
         | set(unrealized_incomplete)
-        | {
-            key
-            for instrument_weights in weights_by_instrument.values()
-            for key in instrument_weights
-        }
+        | {key for pool_weights in weights_by_pool.values() for key in pool_weights}
     )
     if instrument_untrusted_reasons:
         attribution = tuple(
@@ -1121,6 +1551,43 @@ def _value_point(
             per_instrument=tuple(contributions),
             attribution=attribution,
         )
+    if not point_reasons and math.isfinite(unrealized_total):
+        unrealized_by_instrument = {
+            contribution.instrument_public_id: contribution.unrealized_pnl
+            for contribution in contributions
+            if contribution.unrealized_pnl is not None
+        }
+        reconciled_unrealized_by_instrument = _values_with_residue(
+            unrealized_by_instrument,
+            seen,
+            unrealized_total,
+        )
+        if reconciled_unrealized_by_instrument is None:
+            return _untrusted_point(
+                point_time,
+                seen,
+                attribution_keys,
+                {
+                    _global_incompleteness_reason(
+                        "instrument_reconciliation_failed",
+                        "untrusted",
+                    )
+                },
+            )
+        contributions = [
+            PnlInstrumentContribution(
+                instrument_public_id=contribution.instrument_public_id,
+                native_symbol=contribution.native_symbol,
+                exchange=contribution.exchange,
+                realized_pnl=contribution.realized_pnl,
+                fee_pnl=contribution.fee_pnl,
+                accrual_pnl=contribution.accrual_pnl,
+                unrealized_pnl=reconciled_unrealized_by_instrument[
+                    contribution.instrument_public_id
+                ],
+            )
+            for contribution in contributions
+        ]
     realized_attribution = _values_with_residue(
         realized_by_attribution, attribution_keys, realized_total
     )
@@ -1188,7 +1655,7 @@ def _value_point(
             per_instrument=tuple(contributions),
             attribution=attribution,
         )
-    net = realized_total + fee_total + accrual_total + (unrealized_total - opening_unrealized_value)
+    net = realized_total + fee_total + accrual_total + unrealized_total
     if not math.isfinite(unrealized_total):
         point_reasons.add(
             _global_incompleteness_reason(
@@ -1282,7 +1749,7 @@ def build_pnl_timeline(
             and minute.
         window: The requested from/to/granularity/valuation-currency window.
         opening: The activation anchor seeding the replay, or ``None`` to replay
-            from empty pools with a zero opening unrealized value.
+            from empty pools. Derived opening pools are already rebased to t0.
         lineage: Order-keyed initiating command and signal lineage. Missing or
             ambiguous orders are intentionally absent and become unattributed.
         untrusted_price_reasons_by_instrument: Caller-stamped execution-price
@@ -1303,8 +1770,8 @@ def build_pnl_timeline(
     if step is None:
         raise ValueError(f"unsupported granularity: {window.granularity!r}")
 
-    pools: dict[str, _Pool] = {}
-    weights_by_instrument: dict[str, dict[AttributionKey, float]] = {}
+    pools: dict[PoolKey, _Pool] = {}
+    weights_by_pool: dict[PoolKey, dict[AttributionKey, float]] = {}
     resolved_lineage = {} if lineage is None else lineage
     resolved_untrusted_price_reasons = (
         {}
@@ -1314,15 +1781,22 @@ def build_pnl_timeline(
     resolved_mark_incompleteness_reasons = (
         {} if mark_incompleteness_reasons is None else mark_incompleteness_reasons
     )
-    opening_unrealized_value = 0.0
     seen: set[str] = set()
     attribution_seen: set[AttributionKey] = set()
-    basis_reasons_by_instrument: dict[str, set[PnlIncompletenessReason]] = {}
+    basis_reasons_by_pool: dict[PoolKey, set[PnlIncompletenessReason]] = {}
     untrusted_reasons_by_instrument: dict[str, set[PnlIncompletenessReasonEntry]] = {}
     activation_time: datetime | None = None
+    scope_by_shard: dict[str, tuple[str, str]] = {}
+    exchange_by_instrument: dict[str, str] = {}
+    pool_keys_by_instrument: defaultdict[str, set[PoolKey]] = defaultdict(set)
     if opening is not None:
-        for instrument_public_id, seed in opening.positions.items():
-            pools[instrument_public_id] = _Pool(seed.position_qty, seed.entry_price)
+        for seed in opening.pools:
+            instrument_public_id = seed.instrument_public_id
+            pool_key = (instrument_public_id, seed.shard_key)
+            pools[pool_key] = _Pool(seed.position_qty, seed.entry_price)
+            pool_keys_by_instrument[instrument_public_id].add(pool_key)
+            scope_by_shard[seed.shard_key] = (instrument_public_id, seed.exchange)
+            exchange_by_instrument[instrument_public_id] = seed.exchange
             seen.add(instrument_public_id)
             if not math.isfinite(seed.position_qty):
                 _add_instrument_untrusted_reason(
@@ -1332,9 +1806,7 @@ def build_pnl_timeline(
                 )
             else:
                 if abs(seed.position_qty) > 0.0:
-                    weights_by_instrument[instrument_public_id] = {
-                        _UNATTRIBUTED_KEY: abs(seed.position_qty)
-                    }
+                    weights_by_pool[pool_key] = {_UNATTRIBUTED_KEY: abs(seed.position_qty)}
                     attribution_seen.add(_UNATTRIBUTED_KEY)
                 if seed.entry_price is None and abs(seed.position_qty) >= FLAT_EPSILON:
                     _add_instrument_untrusted_reason(
@@ -1342,26 +1814,42 @@ def build_pnl_timeline(
                         instrument_public_id,
                         "cost_basis_unavailable",
                     )
-                    basis_reasons_by_instrument.setdefault(instrument_public_id, set()).add(
-                        "cost_basis_unavailable"
-                    )
-                elif (
-                    seed.entry_price is not None
-                    and not math.isfinite(seed.entry_price)
-                    and abs(seed.position_qty) >= FLAT_EPSILON
+                    basis_reasons_by_pool.setdefault(pool_key, set()).add("cost_basis_unavailable")
+                elif abs(seed.position_qty) >= FLAT_EPSILON and not is_positive_finite(
+                    seed.entry_price
                 ):
-                    basis_reasons_by_instrument.setdefault(instrument_public_id, set()).add(
-                        "cost_basis_unavailable"
-                    )
-        opening_unrealized_value = opening.opening_unrealized_value
+                    basis_reasons_by_pool.setdefault(pool_key, set()).add("cost_basis_unavailable")
         activation_time = opening.t0
 
+    for execution in executions:
+        if not execution.instrument_public_id or not execution.shard_key or not execution.exchange:
+            raise ValueError("timeline execution pool identities must be non-empty")
+        execution_scope = (execution.instrument_public_id, execution.exchange)
+        previous_scope = scope_by_shard.setdefault(execution.shard_key, execution_scope)
+        if previous_scope != execution_scope:
+            raise ValueError("one timeline shard cannot span instrument or exchange scopes")
+        previous_exchange = exchange_by_instrument.setdefault(
+            execution.instrument_public_id,
+            execution.exchange,
+        )
+        if previous_exchange != execution.exchange:
+            raise ValueError("one timeline instrument cannot span multiple exchanges")
+
     prepared, shadows = _prepare_executions(executions)
+    pool_index = _valuation_pool_index(
+        pool_keys_by_instrument,
+        prepared,
+        window.to_time,
+    )
+    position_changing_instruments_by_effective_time = _position_changes_by_effective_time(
+        prepared,
+        window.to_time,
+    )
     sorted_accruals = sorted(
         (
             accrual
             for accrual in accruals
-            if activation_time is None or accrual.accrued_at >= activation_time
+            if activation_time is None or accrual.accrued_at > activation_time
         ),
         key=lambda item: (item.accrued_at, item.instrument_public_id),
     )
@@ -1376,174 +1864,225 @@ def build_pnl_timeline(
     fee_total = 0.0
     accrual_total = 0.0
 
-    execution_index = 0
-    accrual_index = 0
-    minute_points: list[PnlTimelinePoint] = []
-    for point_time in _minute_grid(window.from_time, window.to_time):
-        while (
-            execution_index < len(prepared)
-            and prepared[execution_index].effective_time <= point_time
-        ):
-            execution = prepared[execution_index].execution
-            instrument_public_id = execution.instrument_public_id
-            execution_index += 1
-            seen.add(instrument_public_id)
-            attribution_key = _execution_attribution(execution, resolved_lineage)
-            attribution_seen.add(attribution_key)
-            if execution.fee_incompleteness_reason is not None:
-                _add_instrument_untrusted_reason(
-                    untrusted_reasons_by_instrument,
-                    instrument_public_id,
-                    execution.fee_incompleteness_reason,
-                )
-            price_proof_reasons = resolved_untrusted_price_reasons.get(
+    def apply_execution_event(execution: TimelineExecution) -> None:
+        """Apply one execution after all same-time accruals."""
+        nonlocal fee_total
+        nonlocal realized_total
+
+        instrument_public_id = execution.instrument_public_id
+        pool_key = (instrument_public_id, execution.shard_key)
+        seen.add(instrument_public_id)
+        attribution_key = _execution_attribution(execution, resolved_lineage)
+        attribution_seen.add(attribution_key)
+        if execution.fee_incompleteness_reason is not None:
+            _add_instrument_untrusted_reason(
+                untrusted_reasons_by_instrument,
                 instrument_public_id,
-                (),
+                execution.fee_incompleteness_reason,
             )
-            for price_proof_reason in price_proof_reasons:
-                _add_instrument_untrusted_reason(
-                    untrusted_reasons_by_instrument,
-                    instrument_public_id,
-                    price_proof_reason,
-                )
-            if price_proof_reasons:
-                continue
-            if (
-                not math.isfinite(execution.size)
-                or execution.size < 0.0
-                or not math.isfinite(execution.position_delta)
-            ):
-                _add_instrument_untrusted_reason(
-                    untrusted_reasons_by_instrument,
-                    instrument_public_id,
-                    "execution_size_invalid",
-                )
-                continue
-            signed_qty = execution.position_delta
-            position_size = abs(signed_qty)
-            pool = pools.get(instrument_public_id, _Pool(0.0, None))
-            pre_fill_weights = dict(weights_by_instrument.get(instrument_public_id, {}))
-            pre_fill_basis_reasons = set(basis_reasons_by_instrument.get(instrument_public_id, ()))
-            price_is_trusted = position_size == 0.0 or is_positive_finite(execution.price)
-            outcome = apply_fill(
-                pool.position_qty,
-                pool.entry_price,
-                signed_qty,
-                position_size,
-                execution.price if price_is_trusted else math.nan,
+        price_proof_reasons = resolved_untrusted_price_reasons.get(
+            instrument_public_id,
+            (),
+        )
+        for price_proof_reason in price_proof_reasons:
+            _add_instrument_untrusted_reason(
+                untrusted_reasons_by_instrument,
+                instrument_public_id,
+                price_proof_reason,
             )
-            if not price_is_trusted and outcome.closed_qty > 0.0:
-                price_reason = execution.price_incompleteness_reason or "execution_price_invalid"
+        if price_proof_reasons:
+            return
+        if (
+            not math.isfinite(execution.size)
+            or execution.size < 0.0
+            or not math.isfinite(execution.position_delta)
+        ):
+            _add_instrument_untrusted_reason(
+                untrusted_reasons_by_instrument,
+                instrument_public_id,
+                "execution_size_invalid",
+            )
+            return
+        signed_qty = execution.position_delta
+        position_size = abs(signed_qty)
+        pool = pools.get(pool_key, _Pool(0.0, None))
+        pre_fill_weights = dict(weights_by_pool.get(pool_key, {}))
+        pre_fill_basis_reasons = set(basis_reasons_by_pool.get(pool_key, ()))
+        price_is_trusted = position_size == 0.0 or is_positive_finite(execution.price)
+        outcome = apply_fill(
+            pool.position_qty,
+            pool.entry_price,
+            signed_qty,
+            position_size,
+            execution.price if price_is_trusted else math.nan,
+        )
+        if not price_is_trusted and outcome.closed_qty > 0.0:
+            price_reason = execution.price_incompleteness_reason or "execution_price_invalid"
+            _add_instrument_untrusted_reason(
+                untrusted_reasons_by_instrument,
+                instrument_public_id,
+                price_reason,
+            )
+            for basis_reason in basis_reasons_by_pool.get(pool_key, ()):
                 _add_instrument_untrusted_reason(
                     untrusted_reasons_by_instrument,
                     instrument_public_id,
-                    price_reason,
+                    basis_reason,
                 )
-                for basis_reason in basis_reasons_by_instrument.get(
-                    instrument_public_id,
-                    (),
-                ):
+            return
+        pools[pool_key] = _Pool(outcome.position_qty, outcome.entry_price)
+        if not price_is_trusted and abs(outcome.position_qty) >= FLAT_EPSILON:
+            price_reason = execution.price_incompleteness_reason or "execution_price_invalid"
+            basis_reasons_by_pool.setdefault(pool_key, set()).add(price_reason)
+        if (
+            abs(outcome.position_qty) >= FLAT_EPSILON
+            and (outcome.entry_price is None or not math.isfinite(outcome.entry_price))
+            and not basis_reasons_by_pool.get(pool_key)
+        ):
+            basis_reasons_by_pool.setdefault(pool_key, set()).add("cost_basis_unavailable")
+        opened_opposite_side = outcome.closed_qty > 0.0 and outcome.opened_new_side
+        realized_delta = (
+            0.0 if outcome.closed_qty > 0.0 and pre_fill_basis_reasons else outcome.realized_delta
+        )
+        realized_by_instrument[instrument_public_id] += realized_delta
+        realized_total += realized_delta
+        if outcome.closed_qty > 0.0:
+            realized_allocation = _allocate_by_weights(realized_delta, pre_fill_weights)
+            _add_allocations(realized_by_attribution, realized_allocation)
+            attribution_seen.update(realized_allocation)
+        fee_pnl = 0.0 if execution.fee_incompleteness_reason is not None else -execution.fee
+        fee_by_instrument[instrument_public_id] += fee_pnl
+        fee_total += fee_pnl
+        if opened_opposite_side:
+            closing_fee_pnl = fee_pnl * outcome.closed_qty / position_size
+            closing_fee_allocation = _allocate_by_weights(closing_fee_pnl, pre_fill_weights)
+            _add_allocations(fee_by_attribution, closing_fee_allocation)
+            attribution_seen.update(closing_fee_allocation)
+            fee_by_attribution[attribution_key] += fee_pnl - closing_fee_pnl
+        elif outcome.closed_qty > 0.0:
+            closing_fee_allocation = _allocate_by_weights(fee_pnl, pre_fill_weights)
+            _add_allocations(fee_by_attribution, closing_fee_allocation)
+            attribution_seen.update(closing_fee_allocation)
+        else:
+            fee_by_attribution[attribution_key] += fee_pnl
+        if opened_opposite_side:
+            post_fill_weights = {attribution_key: outcome.added_qty}
+        elif outcome.closed_qty > 0.0:
+            post_fill_weights = _remaining_weights(
+                pre_fill_weights,
+                outcome.closed_qty,
+                abs(outcome.position_qty),
+            )
+        elif outcome.added_qty > 0.0:
+            post_fill_weights = dict(pre_fill_weights)
+            post_fill_weights[attribution_key] = (
+                post_fill_weights.get(attribution_key, 0.0) + outcome.added_qty
+            )
+        else:
+            post_fill_weights = pre_fill_weights
+        weights_by_pool[pool_key] = _reconcile_weights(
+            post_fill_weights,
+            abs(outcome.position_qty),
+        )
+        attribution_seen.update(weights_by_pool[pool_key])
+        pool_basis_reasons = basis_reasons_by_pool.get(pool_key)
+        if pool_basis_reasons:
+            if outcome.closed_qty > 0.0:
+                for basis_reason in pool_basis_reasons:
                     _add_instrument_untrusted_reason(
                         untrusted_reasons_by_instrument,
                         instrument_public_id,
                         basis_reason,
                     )
-                continue
-            pools[instrument_public_id] = _Pool(outcome.position_qty, outcome.entry_price)
-            if not price_is_trusted and abs(outcome.position_qty) >= FLAT_EPSILON:
-                price_reason = execution.price_incompleteness_reason or "execution_price_invalid"
-                basis_reasons_by_instrument.setdefault(instrument_public_id, set()).add(
-                    price_reason
-                )
-            if (
-                abs(outcome.position_qty) >= FLAT_EPSILON
-                and (outcome.entry_price is None or not math.isfinite(outcome.entry_price))
-                and not basis_reasons_by_instrument.get(instrument_public_id)
-            ):
-                basis_reasons_by_instrument.setdefault(instrument_public_id, set()).add(
-                    "cost_basis_unavailable"
-                )
-            opened_opposite_side = outcome.closed_qty > 0.0 and outcome.opened_new_side
-            realized_delta = (
-                0.0
-                if outcome.closed_qty > 0.0 and pre_fill_basis_reasons
-                else outcome.realized_delta
+            if abs(outcome.position_qty) < FLAT_EPSILON:
+                basis_reasons_by_pool.pop(pool_key, None)
+
+    def apply_accrual_event(
+        accrual: TimelineAccrual,
+        attribution_is_ambiguous: bool,
+    ) -> None:
+        """Apply one accrual against strictly earlier inventory ownership."""
+        nonlocal accrual_total
+
+        if accrual.incompleteness_reason is not None:
+            _add_instrument_untrusted_reason(
+                untrusted_reasons_by_instrument,
+                accrual.instrument_public_id,
+                accrual.incompleteness_reason,
             )
-            realized_by_instrument[instrument_public_id] += realized_delta
-            realized_total += realized_delta
-            if outcome.closed_qty > 0.0:
-                realized_allocation = _allocate_by_weights(realized_delta, pre_fill_weights)
-                _add_allocations(realized_by_attribution, realized_allocation)
-                attribution_seen.update(realized_allocation)
-            fee_pnl = 0.0 if execution.fee_incompleteness_reason is not None else -execution.fee
-            fee_by_instrument[instrument_public_id] += fee_pnl
-            fee_total += fee_pnl
-            if opened_opposite_side:
-                closing_fee_pnl = fee_pnl * outcome.closed_qty / position_size
-                closing_fee_allocation = _allocate_by_weights(closing_fee_pnl, pre_fill_weights)
-                _add_allocations(fee_by_attribution, closing_fee_allocation)
-                attribution_seen.update(closing_fee_allocation)
-                fee_by_attribution[attribution_key] += fee_pnl - closing_fee_pnl
-            elif outcome.closed_qty > 0.0:
-                closing_fee_allocation = _allocate_by_weights(fee_pnl, pre_fill_weights)
-                _add_allocations(fee_by_attribution, closing_fee_allocation)
-                attribution_seen.update(closing_fee_allocation)
-            else:
-                fee_by_attribution[attribution_key] += fee_pnl
-            if opened_opposite_side:
-                post_fill_weights = {attribution_key: outcome.added_qty}
-            elif outcome.closed_qty > 0.0:
-                post_fill_weights = _remaining_weights(
-                    pre_fill_weights,
-                    outcome.closed_qty,
-                    abs(outcome.position_qty),
-                )
-            elif outcome.added_qty > 0.0:
-                post_fill_weights = dict(pre_fill_weights)
-                post_fill_weights[attribution_key] = (
-                    post_fill_weights.get(attribution_key, 0.0) + outcome.added_qty
-                )
-            else:
-                post_fill_weights = pre_fill_weights
-            weights_by_instrument[instrument_public_id] = _reconcile_weights(
-                post_fill_weights, abs(outcome.position_qty)
+        accrual_pnl = 0.0 if accrual.incompleteness_reason is not None else -accrual.amount_usd
+        accrual_by_instrument[accrual.instrument_public_id] += accrual_pnl
+        accrual_total += accrual_pnl
+        seen.add(accrual.instrument_public_id)
+        if attribution_is_ambiguous:
+            accrual_allocation = {_UNATTRIBUTED_KEY: accrual_pnl}
+        else:
+            accrual_weights = _combined_instrument_weights(
+                pool_index.get(accrual.instrument_public_id, ()),
+                weights_by_pool,
             )
-            attribution_seen.update(weights_by_instrument[instrument_public_id])
-            instrument_basis_reasons = basis_reasons_by_instrument.get(instrument_public_id)
-            if instrument_basis_reasons:
-                if outcome.closed_qty > 0.0:
-                    for basis_reason in instrument_basis_reasons:
-                        _add_instrument_untrusted_reason(
-                            untrusted_reasons_by_instrument,
-                            instrument_public_id,
-                            basis_reason,
-                        )
-                if abs(outcome.position_qty) < FLAT_EPSILON:
-                    basis_reasons_by_instrument.pop(instrument_public_id, None)
-        while (
-            accrual_index < len(sorted_accruals)
-            and sorted_accruals[accrual_index].accrued_at <= point_time
-        ):
-            accrual = sorted_accruals[accrual_index]
-            if accrual.incompleteness_reason is not None:
-                _add_instrument_untrusted_reason(
-                    untrusted_reasons_by_instrument,
-                    accrual.instrument_public_id,
-                    accrual.incompleteness_reason,
-                )
-            accrual_pnl = 0.0 if accrual.incompleteness_reason is not None else -accrual.amount_usd
-            accrual_by_instrument[accrual.instrument_public_id] += accrual_pnl
-            accrual_total += accrual_pnl
-            seen.add(accrual.instrument_public_id)
-            accrual_weights = weights_by_instrument.get(accrual.instrument_public_id, {})
             accrual_allocation = _allocate_by_weights(accrual_pnl, accrual_weights)
-            _add_allocations(accrual_by_attribution, accrual_allocation)
-            attribution_seen.update(accrual_allocation)
-            accrual_index += 1
+        _add_allocations(accrual_by_attribution, accrual_allocation)
+        attribution_seen.update(accrual_allocation)
+
+    execution_index = 0
+    accrual_index = 0
+    minute_points: list[PnlTimelinePoint] = []
+    minute_grid = _minute_grid(window.from_time, window.to_time)
+    shadow_trigger_changes = _regression_shadow_trigger_changes(
+        shadows,
+        window.from_time.replace(second=0, microsecond=0),
+        len(minute_grid),
+    )
+    active_shadow_trigger: str | None = None
+    for point_index, point_time in enumerate(minute_grid):
+        if activation_time is None or point_time > activation_time:
+            while True:
+                pending_times: list[datetime] = []
+                if execution_index < len(prepared):
+                    pending_times.append(prepared[execution_index].effective_time)
+                if accrual_index < len(sorted_accruals):
+                    pending_times.append(sorted_accruals[accrual_index].accrued_at)
+                if not pending_times:
+                    break
+                event_time = min(pending_times)
+                if event_time > point_time:
+                    break
+                execution_end = execution_index
+                while (
+                    execution_end < len(prepared)
+                    and prepared[execution_end].effective_time == event_time
+                ):
+                    execution_end += 1
+                accrual_end = accrual_index
+                while (
+                    accrual_end < len(sorted_accruals)
+                    and sorted_accruals[accrual_end].accrued_at == event_time
+                ):
+                    accrual_end += 1
+                for accrual in sorted_accruals[accrual_index:accrual_end]:
+                    apply_accrual_event(
+                        accrual,
+                        accrual.instrument_public_id
+                        in position_changing_instruments_by_effective_time.get(event_time, set()),
+                    )
+                for item in prepared[execution_index:execution_end]:
+                    apply_execution_event(item.execution)
+                execution_index = execution_end
+                accrual_index = accrual_end
+        if point_index in shadow_trigger_changes:
+            active_shadow_trigger = shadow_trigger_changes[point_index]
         global_reasons: set[PnlIncompletenessReasonEntry] = set()
-        for shadow in shadows:
-            if shadow.start <= point_time < shadow.end:
-                global_reasons.add(shadow.reason)
+        if (
+            activation_time is None or point_time > activation_time
+        ) and active_shadow_trigger is not None:
+            global_reasons.add(
+                _global_incompleteness_reason(
+                    "scope_order_regression",
+                    "untrusted",
+                    active_shadow_trigger,
+                )
+            )
         if activation_time is not None and point_time < activation_time:
             global_reasons.add(
                 _global_incompleteness_reason(
@@ -1555,7 +2094,8 @@ def build_pnl_timeline(
             _value_point(
                 point_time,
                 pools,
-                weights_by_instrument,
+                pool_index,
+                weights_by_pool,
                 marks,
                 sorted(seen),
                 _sorted_attribution_keys(attribution_seen),
@@ -1568,10 +2108,10 @@ def build_pnl_timeline(
                 realized_total,
                 fee_total,
                 accrual_total,
-                opening_unrealized_value,
+                activation_time,
                 global_reasons,
                 untrusted_reasons_by_instrument,
-                basis_reasons_by_instrument,
+                basis_reasons_by_pool,
                 resolved_mark_incompleteness_reasons,
             )
         )

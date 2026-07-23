@@ -5,6 +5,10 @@ P&L series per (wallet, mode, valuation_ccy, point_time). v1 persists only the
 ``anchor`` row — the durable activation seed carrying the frozen opening basket,
 legacy unattributed weights, and per-exchange scope watermark map — so on-demand
 timeline reconstruction picks a stable t0 across reloads (accepted decision #6).
+The anchor's ``unrealized_pnl`` column is raw historical opening audit metadata,
+while each surviving shard is rebased to its frozen t0 mark for reconstruction;
+the public t0 components and net therefore remain exactly zero without subtracting
+a hidden baseline from later points.
 The continuous 1m ``sample`` writer, USD cash/position/equity valuation, and
 drawdown are Phase-5B additions that reuse the same table (nullable columns, no
 further migration). Purely additive: a brand-new table with no runtime writer,

@@ -37,6 +37,7 @@ an unconvertible nonzero flow is passed as ``NaN`` rather than silently zeroed o
 dropped.
 """
 
+import json
 import math
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -48,6 +49,14 @@ from datetime import timedelta
 from typing import Final
 from typing import Literal
 from typing import cast
+from uuid import UUID
+from uuid import uuid7
+
+from pydantic import BaseModel
+from pydantic import ConfigDict
+from pydantic import TypeAdapter
+from pydantic import ValidationError
+from pydantic import field_validator
 
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.fill_booking import booked_signed_quantity
@@ -57,8 +66,14 @@ from snapper.application.portfolio.fx_rates import FxRateMap
 from snapper.application.portfolio.fx_rates import FxVenueMap
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
+from snapper.application.portfolio.pnl_anchor_identity import normalize_portfolio_pnl_valuation_ccy
+from snapper.application.portfolio.pnl_anchor_identity import (
+    normalize_portfolio_pnl_wallet_public_id,
+)
+from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.pnl_timeline import MarkIncompletenessReasonMap
 from snapper.application.portfolio.pnl_timeline import MarkMap
+from snapper.application.portfolio.pnl_timeline import OpeningPool
 from snapper.application.portfolio.pnl_timeline import PnlAttributionContribution
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
@@ -68,10 +83,14 @@ from snapper.application.portfolio.pnl_timeline import PnlTimelineResult
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
 from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
+from snapper.application.portfolio.pnl_timeline import TimelineOpening
+from snapper.application.portfolio.pnl_timeline import TimelineOpeningDerivation
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
 from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
 from snapper.application.portfolio.pnl_timeline import canonical_incompleteness_reasons
+from snapper.application.portfolio.pnl_timeline import derive_timeline_opening
 from snapper.core.numeric import is_positive_finite
+from snapper.data.repository import PnlTimelineAnchorEvidenceMismatchError
 from snapper.data.repository import Repository
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRatePlane
@@ -80,13 +99,18 @@ from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
 from snapper.data.repository_types import PnlTimelineExecutionLineageRow
+from snapper.data.repository_types import PnlTimelineExecutionPrefix
+from snapper.data.repository_types import PnlTimelineExecutionPrefixBundle
 from snapper.data.repository_types import PnlTimelineExecutionRow
+from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
+from snapper.data.repository_types import PortfolioPnlAnchorRow
+from snapper.data.repository_types import PortfolioPnlAnchorWriteEvidence
 
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.12"
+PNL_TIMELINE_CALC_VERSION = "5A.13"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, mark resolution, or public point
@@ -109,6 +133,502 @@ Marker reads request one extra row from each independently bounded decision
 source. The response exposes both this limit and whether older markers were
 omitted, so a busy window never looks indistinguishable from a complete one.
 """
+
+_ANCHOR_SCHEMA_VERSION: Final[Literal[2]] = 2
+"""Persisted activation payload version owned by the 5A.13 replay contract."""
+
+_STRICT_ANCHOR_CONFIG: Final[ConfigDict] = ConfigDict(
+    extra="forbid",
+    strict=True,
+    frozen=True,
+    allow_inf_nan=False,
+)
+"""Strict finite configuration shared by every persisted anchor model."""
+
+
+class _AnchorPoolPayload(BaseModel):
+    """Raw historical valuation audit for one surviving opening shard."""
+
+    model_config = _STRICT_ANCHOR_CONFIG
+
+    instrument_public_id: str
+    shard_key: str
+    exchange: str
+    position_qty: float
+    historical_entry_price: float
+    t0_mark: float
+    opening_unrealized_value: float
+
+    @field_validator("instrument_public_id", "shard_key")
+    @classmethod
+    def _nonempty_identity(cls, value: str) -> str:
+        """Require canonical nonempty identities without hidden whitespace."""
+        if not value or value != value.strip():
+            raise ValueError("anchor pool identities must be nonempty and canonical")
+        return value
+
+    @field_validator("exchange")
+    @classmethod
+    def _canonical_exchange(cls, value: str) -> str:
+        """Require the repository's canonical lowercase exchange identity."""
+        if not value or value != value.strip().lower():
+            raise ValueError("anchor pool exchange must be canonical lowercase")
+        return value
+
+    @field_validator("position_qty")
+    @classmethod
+    def _nonflat_quantity(cls, value: float) -> float:
+        """Persist only genuinely surviving non-flat pools."""
+        if abs(value) < FLAT_EPSILON:
+            raise ValueError("anchor pool quantity must be non-flat")
+        return value
+
+    @field_validator("historical_entry_price", "t0_mark")
+    @classmethod
+    def _positive_price(cls, value: float) -> float:
+        """Require positive finite historical basis and t0 mark."""
+        if not is_positive_finite(value):
+            raise ValueError("anchor pool prices must be positive and finite")
+        return value
+
+
+class _AnchorOpeningPayload(BaseModel):
+    """Canonical v2 opening audit and aggregate native inventory basket."""
+
+    model_config = _STRICT_ANCHOR_CONFIG
+
+    schema_version: Literal[2]
+    pools: tuple[_AnchorPoolPayload, ...]
+    native_basket: dict[str, float]
+
+
+class _AnchorWeightPayload(BaseModel):
+    """One legacy unattributed quantity weight for an opening shard."""
+
+    model_config = _STRICT_ANCHOR_CONFIG
+
+    origin: Literal["unattributed"]
+    strategy_name: None
+    quantity: float
+
+    @field_validator("quantity")
+    @classmethod
+    def _positive_quantity(cls, value: float) -> float:
+        """Require a real positive inventory weight."""
+        if value <= 0.0:
+            raise ValueError("anchor contribution quantity must be positive")
+        return value
+
+
+class _AnchorContributionPoolPayload(BaseModel):
+    """Legacy attribution seed for one exact opening shard."""
+
+    model_config = _STRICT_ANCHOR_CONFIG
+
+    instrument_public_id: str
+    shard_key: str
+    exchange: str
+    weights: tuple[_AnchorWeightPayload, ...]
+
+    @field_validator("instrument_public_id", "shard_key")
+    @classmethod
+    def _nonempty_identity(cls, value: str) -> str:
+        """Require canonical nonempty identities without hidden whitespace."""
+        if not value or value != value.strip():
+            raise ValueError("anchor contribution identities must be nonempty and canonical")
+        return value
+
+    @field_validator("exchange")
+    @classmethod
+    def _canonical_exchange(cls, value: str) -> str:
+        """Require the repository's canonical lowercase exchange identity."""
+        if not value or value != value.strip().lower():
+            raise ValueError("anchor contribution exchange must be canonical lowercase")
+        return value
+
+
+class _AnchorContributionsPayload(BaseModel):
+    """Canonical v2 legacy attribution seeds for every opening shard."""
+
+    model_config = _STRICT_ANCHOR_CONFIG
+
+    schema_version: Literal[2]
+    pools: tuple[_AnchorContributionPoolPayload, ...]
+
+
+_WATERMARKS_ADAPTER: Final[TypeAdapter[dict[str, int]]] = TypeAdapter(
+    dict[str, int],
+    config=ConfigDict(strict=True),
+)
+"""Strict adapter for the canonical per-exchange execution prefix map."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedPnlAnchor:
+    """Validated rebased opening, frozen t0 marks, and replay watermarks."""
+
+    row: PortfolioPnlAnchorRow
+    opening: TimelineOpening
+    marks: dict[tuple[str, datetime], float]
+    watermarks: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _AnchorScope:
+    """Canonical activation scope and the exact evidence horizons it uses."""
+
+    wallet_public_id: str
+    mode: str
+    valuation_ccy: str
+    activation_time: datetime
+    knowledge_horizon: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _SeriesReadEvidence:
+    """One preloaded anchor read and its exact two-cut prefix bundle."""
+
+    visible_anchor: PortfolioPnlAnchorRow | None
+    execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
+
+
+@dataclass(frozen=True, slots=True)
+class _AnchorLoadRequest:
+    """One anchor boundary with optional preloaded request evidence."""
+
+    scope: _AnchorScope
+    allow_anchor_creation: bool
+    preloaded_evidence: _SeriesReadEvidence | None
+
+
+@dataclass(frozen=True, slots=True)
+class _AnchorLoadResult:
+    """The visible anchor and any request prefix already captured for it."""
+
+    anchor: _ResolvedPnlAnchor | None
+    execution_prefix_bundle: PnlTimelineExecutionPrefixBundle | None
+
+
+@dataclass(frozen=True, slots=True)
+class _SeriesReplayInputs:
+    """Bounded suffix rows, lineage, accruals, and global evidence reasons."""
+
+    loaded_execution_rows: list[PnlTimelineOpeningExecutionRow]
+    replayed_execution_rows: list[PnlTimelineOpeningExecutionRow]
+    accrual_rows: list[PnlTimelineAccrualRow]
+    lineage: dict[str, TimelineExecutionLineage]
+    fill_gap_reason: PnlIncompletenessReasonEntry | None
+    late_pre_activation_reason: PnlIncompletenessReasonEntry | None
+
+
+class PnlAnchorEvidenceError(ValueError):
+    """The durable evidence plane cannot support a truthful activation anchor."""
+
+
+def _canonical_anchor_json(model: BaseModel) -> str:
+    """Serialize one validated anchor payload deterministically and finitely."""
+    return json.dumps(
+        model.model_dump(mode="json"),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _canonical_watermarks(watermarks: Mapping[str, int]) -> str:
+    """Serialize one validated watermark map in canonical key order."""
+    return json.dumps(
+        dict(watermarks),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _watermarks_are_valid(watermarks: Mapping[str, int]) -> bool:
+    """Return whether every present exchange has a positive canonical sequence."""
+    return all(
+        bool(exchange)
+        and exchange == exchange.strip().lower()
+        and not isinstance(sequence, bool)
+        and sequence > 0
+        for exchange, sequence in watermarks.items()
+    )
+
+
+def _anchor_payloads(
+    derivation: TimelineOpeningDerivation,
+) -> tuple[_AnchorOpeningPayload, _AnchorContributionsPayload]:
+    """Build canonical v2 persisted payloads from a pure opening derivation."""
+    pools = tuple(
+        _AnchorPoolPayload(
+            instrument_public_id=valuation.instrument_public_id,
+            shard_key=valuation.shard_key,
+            exchange=valuation.exchange,
+            position_qty=valuation.position_qty,
+            historical_entry_price=valuation.historical_entry_price,
+            t0_mark=valuation.t0_mark,
+            opening_unrealized_value=valuation.opening_unrealized_value,
+        )
+        for valuation in derivation.per_pool
+    )
+    quantities_by_instrument: dict[str, list[float]] = {}
+    for pool in pools:
+        quantities_by_instrument.setdefault(pool.instrument_public_id, []).append(pool.position_qty)
+    native_basket = {
+        instrument_public_id: math.fsum(quantities_by_instrument[instrument_public_id])
+        for instrument_public_id in sorted(quantities_by_instrument)
+    }
+    opening = _AnchorOpeningPayload(
+        schema_version=_ANCHOR_SCHEMA_VERSION,
+        pools=pools,
+        native_basket=native_basket,
+    )
+    contributions = _AnchorContributionsPayload(
+        schema_version=_ANCHOR_SCHEMA_VERSION,
+        pools=tuple(
+            _AnchorContributionPoolPayload(
+                instrument_public_id=pool.instrument_public_id,
+                shard_key=pool.shard_key,
+                exchange=pool.exchange,
+                weights=(
+                    _AnchorWeightPayload(
+                        origin="unattributed",
+                        strategy_name=None,
+                        quantity=abs(pool.position_qty),
+                    ),
+                ),
+            )
+            for pool in pools
+        ),
+    )
+    return opening, contributions
+
+
+def _require_uuid(value: str, field_name: str) -> None:
+    """Require one canonical UUID string in persisted anchor metadata."""
+    try:
+        canonical = str(UUID(value))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise PnlAnchorEvidenceError(f"anchor {field_name} must be a UUID") from exc
+    if value != canonical:
+        raise PnlAnchorEvidenceError(f"anchor {field_name} must be canonical")
+
+
+def _validated_anchor_raw_unrealized(row: PortfolioPnlAnchorRow) -> float:
+    """Validate canonical row metadata and return its finite raw audit value."""
+    try:
+        normalized_ccy = normalize_portfolio_pnl_valuation_ccy(row["valuation_ccy"])
+        expected_public_id = portfolio_pnl_anchor_public_id(
+            row["wallet_public_id"],
+            row["mode"],
+            normalized_ccy,
+        )
+    except ValueError as exc:
+        raise PnlAnchorEvidenceError("anchor scope identity is invalid") from exc
+    if (
+        row["valuation_ccy"] != normalized_ccy
+        or row["public_id"] != expected_public_id
+        or row["epoch_public_id"] != row["public_id"]
+        or row["point_kind"] != "anchor"
+        or row["calc_version"] != PNL_TIMELINE_CALC_VERSION
+        or row["valuation_status"] != "complete"
+        or type(row["realized_pnl"]) is not float
+        or row["realized_pnl"] != 0.0
+        or type(row["fee_pnl"]) is not float
+        or row["fee_pnl"] != 0.0
+        or type(row["accrual_pnl"]) is not float
+        or row["accrual_pnl"] != 0.0
+        or type(row["external_flow_adjustment"]) is not float
+        or row["external_flow_adjustment"] != 0.0
+        or row["cash_usd"] is not None
+        or row["position_value_usd"] is not None
+        or row["drawdown"] is not None
+        or row["mark_source"] != PNL_TIMELINE_MARK_SOURCE
+        or row["mark_time"] != row["point_time"]
+        or row["watermarks_json"] is None
+        or row["opening_basket_json"] is None
+        or row["contributions_json"] is None
+    ):
+        raise PnlAnchorEvidenceError("anchor row metadata is not canonical for 5A.13")
+    _require_uuid(row["public_id"], "public_id")
+    _require_uuid(row["session_id"], "session_id")
+    _require_uuid(row["epoch_public_id"], "epoch_public_id")
+    if isinstance(row["sequence_id"], bool) or row["sequence_id"] <= 0:
+        raise PnlAnchorEvidenceError("anchor sequence_id must be positive")
+    if (
+        row["point_time"].utcoffset() != timedelta(0)
+        or row["point_time"].second != 0
+        or row["point_time"].microsecond != 0
+        or row["timestamp"].utcoffset() != timedelta(0)
+        or row["timestamp"] < row["point_time"]
+    ):
+        raise PnlAnchorEvidenceError("anchor timestamps must form a canonical UTC activation cut")
+    raw_unrealized = row["unrealized_pnl"]
+    if not isinstance(raw_unrealized, float) or not math.isfinite(raw_unrealized):
+        raise PnlAnchorEvidenceError("anchor raw opening unrealized audit must be finite")
+    return raw_unrealized
+
+
+def _decode_anchor_payloads(
+    row: PortfolioPnlAnchorRow,
+) -> tuple[_AnchorOpeningPayload, _AnchorContributionsPayload, dict[str, int]]:
+    """Strictly decode canonical JSON payloads from one validated anchor row."""
+    try:
+        opening_payload = _AnchorOpeningPayload.model_validate_json(
+            cast(str, row["opening_basket_json"]),
+            strict=True,
+        )
+        contributions_payload = _AnchorContributionsPayload.model_validate_json(
+            cast(str, row["contributions_json"]),
+            strict=True,
+        )
+        watermarks = _WATERMARKS_ADAPTER.validate_json(
+            cast(str, row["watermarks_json"]),
+            strict=True,
+        )
+    except ValidationError as exc:
+        raise PnlAnchorEvidenceError("anchor payload validation failed") from exc
+    if (
+        not _watermarks_are_valid(watermarks)
+        or row["watermarks_json"] != _canonical_watermarks(watermarks)
+        or row["opening_basket_json"] != _canonical_anchor_json(opening_payload)
+        or row["contributions_json"] != _canonical_anchor_json(contributions_payload)
+    ):
+        raise PnlAnchorEvidenceError("anchor payload JSON is not canonical")
+    return opening_payload, contributions_payload, watermarks
+
+
+def _validate_anchor_payload_topology(
+    opening_payload: _AnchorOpeningPayload,
+    contributions_payload: _AnchorContributionsPayload,
+) -> None:
+    """Require stable unique opening pools and matching contribution identities."""
+    expected_pool_order = tuple(
+        sorted(
+            opening_payload.pools,
+            key=lambda pool: (pool.instrument_public_id, pool.shard_key),
+        )
+    )
+    if opening_payload.pools != expected_pool_order:
+        raise PnlAnchorEvidenceError("anchor pools are not stably ordered")
+    opening_keys = [(pool.instrument_public_id, pool.shard_key) for pool in opening_payload.pools]
+    if len(opening_keys) != len(set(opening_keys)):
+        raise PnlAnchorEvidenceError("anchor pools are not unique")
+    contribution_keys = [
+        (pool.instrument_public_id, pool.shard_key) for pool in contributions_payload.pools
+    ]
+    if contribution_keys != opening_keys:
+        raise PnlAnchorEvidenceError("anchor contribution pools do not match opening pools")
+
+
+def _opening_pool_from_payload(
+    pool: _AnchorPoolPayload,
+    contribution: _AnchorContributionPoolPayload,
+) -> OpeningPool:
+    """Validate one pool's arithmetic and return its rebased kernel seed."""
+    expected_unrealized = pool.position_qty * (pool.t0_mark - pool.historical_entry_price)
+    if (
+        not math.isfinite(expected_unrealized)
+        or expected_unrealized != pool.opening_unrealized_value
+        or contribution.exchange != pool.exchange
+        or len(contribution.weights) != 1
+        or contribution.weights[0].origin != "unattributed"
+        or contribution.weights[0].strategy_name is not None
+        or contribution.weights[0].quantity != abs(pool.position_qty)
+    ):
+        raise PnlAnchorEvidenceError("anchor pool arithmetic or contribution is inconsistent")
+    return OpeningPool(
+        instrument_public_id=pool.instrument_public_id,
+        shard_key=pool.shard_key,
+        exchange=pool.exchange,
+        position_qty=pool.position_qty,
+        entry_price=pool.t0_mark,
+    )
+
+
+def _resolve_anchor_opening(
+    row: PortfolioPnlAnchorRow,
+    opening_payload: _AnchorOpeningPayload,
+    contributions_payload: _AnchorContributionsPayload,
+    raw_unrealized: float,
+) -> tuple[TimelineOpening, dict[tuple[str, datetime], float]]:
+    """Reconcile native/raw audits and rebuild rebased pools plus frozen marks."""
+    quantities_by_instrument: dict[str, list[float]] = {}
+    opening_pools: list[OpeningPool] = []
+    frozen_marks: dict[tuple[str, datetime], float] = {}
+    raw_values: list[float] = []
+    for pool, contribution in zip(
+        opening_payload.pools,
+        contributions_payload.pools,
+        strict=True,
+    ):
+        opening_pool = _opening_pool_from_payload(pool, contribution)
+        quantities_by_instrument.setdefault(pool.instrument_public_id, []).append(pool.position_qty)
+        mark_key = (pool.instrument_public_id, row["point_time"])
+        previous_mark = frozen_marks.setdefault(mark_key, pool.t0_mark)
+        if previous_mark != pool.t0_mark:
+            raise PnlAnchorEvidenceError("one anchor instrument carries conflicting t0 marks")
+        opening_pools.append(opening_pool)
+        raw_values.append(pool.opening_unrealized_value)
+    try:
+        expected_basket = {
+            instrument_public_id: math.fsum(quantities_by_instrument[instrument_public_id])
+            for instrument_public_id in sorted(quantities_by_instrument)
+        }
+    except OverflowError as exc:
+        raise PnlAnchorEvidenceError("anchor native basket audit overflows") from exc
+    if opening_payload.native_basket != expected_basket:
+        raise PnlAnchorEvidenceError("anchor native basket does not reconcile with its pools")
+    try:
+        expected_raw_unrealized = math.fsum(raw_values)
+    except OverflowError as exc:
+        raise PnlAnchorEvidenceError("anchor raw opening audit overflows") from exc
+    if expected_raw_unrealized != raw_unrealized:
+        raise PnlAnchorEvidenceError("anchor raw opening audit does not reconcile")
+    return (
+        TimelineOpening(
+            pools=tuple(opening_pools),
+            t0=row["point_time"],
+        ),
+        frozen_marks,
+    )
+
+
+def _parse_anchor(row: PortfolioPnlAnchorRow) -> _ResolvedPnlAnchor:
+    """Validate one persisted v2 anchor and rebuild its rebased kernel seed."""
+    raw_unrealized = _validated_anchor_raw_unrealized(row)
+    opening_payload, contributions_payload, watermarks = _decode_anchor_payloads(row)
+    _validate_anchor_payload_topology(opening_payload, contributions_payload)
+    opening, frozen_marks = _resolve_anchor_opening(
+        row,
+        opening_payload,
+        contributions_payload,
+        raw_unrealized,
+    )
+    return _ResolvedPnlAnchor(
+        row=row,
+        opening=opening,
+        marks=frozen_marks,
+        watermarks=dict(watermarks),
+    )
+
+
+def _parse_scoped_anchor(
+    row: PortfolioPnlAnchorRow,
+    wallet_public_id: str,
+    mode: str,
+    valuation_ccy: str,
+) -> _ResolvedPnlAnchor:
+    """Parse an anchor and require it to belong to the requested scope."""
+    parsed = _parse_anchor(row)
+    if (
+        row["wallet_public_id"] != wallet_public_id
+        or row["mode"] != mode
+        or row["valuation_ccy"] != valuation_ccy
+    ):
+        raise PnlAnchorEvidenceError("visible anchor crossed the requested scope")
+    return parsed
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +716,63 @@ class PnlTimelineWorkBudgetError(ValueError):
     """The requested raw grid and instrument fan-out exceed the work budget."""
 
 
+def _empty_pnl_series(granularity: str, valuation_ccy: str) -> PnlWalletSeriesResult:
+    """Return the honest no-anchor result without inventing pre-activation points."""
+    if granularity not in {"1m", "5m", "1h", "1d"}:
+        raise ValueError(f"Unsupported granularity: {granularity!r}")
+    return PnlWalletSeriesResult(
+        points=(),
+        granularity=granularity,
+        valuation_ccy=valuation_ccy,
+        rate_sources=(),
+    )
+
+
+def _preactivation_pnl_series(
+    anchor: _ResolvedPnlAnchor,
+    from_time: datetime,
+    to_time: datetime,
+    granularity: str,
+    valuation_ccy: str,
+) -> PnlWalletSeriesResult:
+    """Return a wholly pre-t0 grid without demanding post-activation evidence."""
+    result = build_pnl_timeline(
+        (),
+        (),
+        anchor.marks,
+        TimelineWindow(
+            from_time=from_time,
+            to_time=to_time,
+            granularity=granularity,
+            valuation_ccy=valuation_ccy,
+        ),
+        opening=anchor.opening,
+    )
+    return PnlWalletSeriesResult(
+        points=result.points,
+        granularity=result.granularity,
+        valuation_ccy=result.valuation_ccy,
+        rate_sources=(),
+    )
+
+
+def _execution_rows_effective_through(
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    to_time: datetime,
+) -> list[PnlTimelineOpeningExecutionRow]:
+    """Bound accounting consumers by the kernel's monotone-clamped event time."""
+    last_effective: dict[tuple[str, str], datetime] = {}
+    bounded: list[PnlTimelineOpeningExecutionRow] = []
+    for row in execution_rows:
+        pool_key = (row["instrument_public_id"], row["shard_key"])
+        event_time = row["timestamp"]
+        effective_time = max(last_effective.get(pool_key, event_time), event_time)
+        last_effective[pool_key] = effective_time
+        if effective_time <= to_time:
+            bounded.append(row)
+    return bounded
+
+
 def _rate_minute(moment: datetime) -> datetime:
     """Return the grid minute whose closing bar prices a flow at ``moment``.
 
@@ -245,7 +822,7 @@ def build_fx_rates(rows: Sequence[PnlFxRateRow]) -> FxRateMap:
 
 
 def _to_timeline_execution(
-    row: PnlTimelineExecutionRow,
+    row: PnlTimelineOpeningExecutionRow,
     valuation_ccy: str,
     rates: FxRateMap,
     base_asset: str | None = None,
@@ -312,6 +889,7 @@ def _to_timeline_execution(
     return TimelineExecution(
         order_public_id=row["order_public_id"],
         instrument_public_id=row["instrument_public_id"],
+        shard_key=row["shard_key"],
         exchange=row["exchange"],
         scope_sequence=row["scope_sequence"],
         event_time=row["timestamp"],
@@ -419,22 +997,20 @@ def _to_timeline_accrual(
     )
 
 
-def _withhold_series_for_fill_gap(
+def _withhold_series_for_global_reason(
     result: PnlTimelineResult,
-    fill_gap_reason: PnlIncompletenessReasonEntry,
+    global_reason: PnlIncompletenessReasonEntry,
 ) -> PnlTimelineResult:
-    """Post-transform a built series when durable fill evidence proves a gap.
+    """Post-transform a built series when one global ledger guard fails.
 
-    A recorded-versus-consumed fill mismatch means no cumulative monetary value
-    is defensible, including values from minutes before the visible execution
-    prefix. Every aggregate, per-instrument, and attribution monetary field is
-    therefore withheld while timestamps and contributing identities remain
-    available. The global gap cause is added to every point's already-established
-    reasons rather than replacing independent causes from the pure replay.
+    Fill gaps and late pre-activation suffix rows both invalidate every
+    cumulative monetary value. Timestamps and contributing identities remain
+    visible, while the exact global cause is merged with independent replay
+    reasons.
 
     Args:
         result: Series built from the currently visible execution prefix.
-        fill_gap_reason: Global cause stamped by the positive evidence read.
+        global_reason: Global cause stamped by the positive evidence read.
 
     Returns:
         The same grid and metadata with every point fully untrusted.
@@ -451,7 +1027,7 @@ def _withhold_series_for_fill_gap(
             incompleteness_reasons=canonical_incompleteness_reasons(
                 (
                     *point.incompleteness_reasons,
-                    fill_gap_reason,
+                    global_reason,
                 )
             ),
             per_instrument=tuple(
@@ -585,40 +1161,40 @@ async def _scope_has_fill_gap(
     wallet_public_id: str,
     mode: str,
     as_of: datetime,
+    execution_prefix: PnlTimelineExecutionPrefix,
 ) -> PnlIncompletenessReasonEntry | None:
-    """Consult durable gap evidence for every fill-bearing shard in the scope.
+    """Consult one bounded durable gap analysis for the complete scope.
 
-    Each shared shard cursor derives its venue prefix at ``as_of``; exact wallet
-    and mode filters then expose venue-only shards with zero consumed
-    executions. Each returned key is evaluated against the matching exact-scope
-    execution prefix. The recovery gap read is intentionally not reused because
-    it describes current state rather than historical P&L completeness.
+    The repository seals every shared venue shard in one exact-scope read,
+    resolves one execution prefix, aggregates both sides once by durable shard,
+    and compares the resulting multisets bidirectionally. The recovery gap read
+    is intentionally not reused because it describes current state rather than
+    historical P&L completeness.
 
     Args:
-        repo: Repository providing scoped shard keys and gap evidence.
+        repo: Repository providing one scope-level historical gap analysis.
         wallet_public_id: Full wallet scope.
         mode: Trading mode scope.
         as_of: Temporal anchor for consumed execution evidence.
+        execution_prefix: Already sealed execution evidence reused by replay.
 
     Returns:
-        The stamped global reason as soon as any scoped shard has a proven fill
-        gap, otherwise ``None``.
+        The stamped global reason when the scope has a proven fill gap,
+        otherwise ``None``.
     """
-    shard_keys = await repo.get_fill_shard_keys_for_scope(wallet_public_id, mode, as_of)
-    for shard_key in shard_keys:
-        if await repo.pnl_timeline_shard_has_fill_gap(
-            shard_key,
-            wallet_public_id,
-            mode,
-            as_of,
-        ):
-            return PnlIncompletenessReasonEntry(
-                reason="fill_evidence_gap",
-                withholding_tier="untrusted",
-                withholding_scope="global",
-                trigger_instrument_public_id=None,
-            )
-    return None
+    if not await repo.pnl_timeline_scope_has_fill_gap(
+        wallet_public_id,
+        mode,
+        as_of,
+        execution_prefix,
+    ):
+        return None
+    return PnlIncompletenessReasonEntry(
+        reason="fill_evidence_gap",
+        withholding_tier="untrusted",
+        withholding_scope="global",
+        trigger_instrument_public_id=None,
+    )
 
 
 def _enforce_total_work_budget(
@@ -1047,11 +1623,12 @@ def _add_fx_minute(
 
 
 def _event_fx_minutes(
-    execution_rows: Sequence[PnlTimelineExecutionRow],
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
     accrual_rows: Sequence[PnlTimelineAccrualRow],
     base_by_instrument: Mapping[str, str],
     quote_by_instrument: Mapping[str, str],
     valuation_ccy: str,
+    opening: TimelineOpening | None = None,
 ) -> _FxInstrumentRequirements:
     """Collect exact rate minutes needed by prices, fees, and accruals.
 
@@ -1068,27 +1645,35 @@ def _event_fx_minutes(
         base_by_instrument: Proven base asset of each execution instrument.
         quote_by_instrument: Proven execution-price denominations.
         valuation_ccy: Currency the series is valued in.
+        opening: Rebased per-shard quantities active before the suffix.
 
     Returns:
         Exact required minutes grouped by instrument and unordered currency pair.
     """
     needed: _FxInstrumentRequirements = {}
-    last_effective: dict[str, datetime] = {}
-    position_qty: dict[str, float] = {}
-    basis_unknown: set[str] = set()
+    last_effective: dict[tuple[str, str], datetime] = {}
+    position_qty = (
+        {}
+        if opening is None
+        else {
+            (pool.instrument_public_id, pool.shard_key): pool.position_qty for pool in opening.pools
+        }
+    )
+    basis_unknown: set[tuple[str, str]] = set()
     untrusted_at: dict[str, datetime] = {}
     for row in execution_rows:
         instrument_public_id = row["instrument_public_id"]
+        pool_key = (instrument_public_id, row["shard_key"])
         event_time = row["timestamp"]
-        effective_time = max(last_effective.get(instrument_public_id, event_time), event_time)
-        last_effective[instrument_public_id] = effective_time
+        effective_time = max(last_effective.get(pool_key, event_time), event_time)
+        last_effective[pool_key] = effective_time
         if instrument_public_id in untrusted_at:
             continue
         size = row["size"]
-        if not math.isfinite(size) or size < 0.0:
+        if not math.isfinite(size) or size < 0.0 or not row["shard_key"]:
             untrusted_at[instrument_public_id] = effective_time
             continue
-        old_qty = position_qty.get(instrument_public_id, 0.0)
+        old_qty = position_qty.get(pool_key, 0.0)
         signed_size = booked_signed_quantity(
             row["side"],
             size,
@@ -1103,16 +1688,16 @@ def _event_fx_minutes(
         )
         closed_qty = 0.0 if is_increasing else min(position_size, abs(old_qty))
         price_is_known_valid = is_positive_finite(row["price"])
-        if closed_qty > 0.0 and (not price_is_known_valid or instrument_public_id in basis_unknown):
+        if closed_qty > 0.0 and (not price_is_known_valid or pool_key in basis_unknown):
             untrusted_at[instrument_public_id] = effective_time
             continue
         minute = _rate_minute(row["timestamp"])
         quote_currency = quote_by_instrument.get(instrument_public_id)
         if (
             quote_currency is not None
-            and position_size > 0.0
+            and signed_size != 0.0
             and price_is_known_valid
-            and instrument_public_id not in basis_unknown
+            and pool_key not in basis_unknown
         ):
             _add_fx_minute(
                 needed,
@@ -1132,10 +1717,10 @@ def _event_fx_minutes(
         new_qty = old_qty + signed_size
         if abs(new_qty) < FLAT_EPSILON:
             new_qty = 0.0
-            basis_unknown.discard(instrument_public_id)
+            basis_unknown.discard(pool_key)
         elif position_size > 0.0 and not price_is_known_valid:
-            basis_unknown.add(instrument_public_id)
-        position_qty[instrument_public_id] = new_qty
+            basis_unknown.add(pool_key)
+        position_qty[pool_key] = new_qty
     for accrual in accrual_rows:
         invalid_at = untrusted_at.get(accrual["instrument_public_id"])
         if accrual["amount"] != 0.0 and (invalid_at is None or accrual["accrued_at"] < invalid_at):
@@ -1151,12 +1736,13 @@ def _event_fx_minutes(
 
 def _mark_fx_minutes(
     candles: Sequence[PnlTimelineCandleRow],
-    execution_rows: Sequence[PnlTimelineExecutionRow],
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
     base_by_instrument: Mapping[str, str],
     quote_by_instrument: Mapping[str, str],
     valuation_ccy: str,
     from_time: datetime,
     to_time: datetime,
+    opening: TimelineOpening | None = None,
 ) -> _FxInstrumentRequirements:
     """Collect exact rate minutes for positive marks of non-flat instruments.
 
@@ -1175,21 +1761,26 @@ def _mark_fx_minutes(
         valuation_ccy: Currency the series is valued in.
         from_time: Requested chart start whose minute floor anchors the grid.
         to_time: Inclusive requested chart end.
+        opening: Rebased durable shard pools active at t0, when present.
 
     Returns:
         Exact required minutes grouped by instrument and unordered currency pair.
     """
-    effective_events: dict[str, list[tuple[datetime, str, int, float, bool]]] = {}
-    last_effective: dict[str, datetime] = {}
+    effective_events: dict[
+        str,
+        list[tuple[datetime, str, int, str, float, bool]],
+    ] = {}
+    last_effective: dict[tuple[str, str], datetime] = {}
     regression_shadows: list[tuple[datetime, datetime]] = []
     for row in execution_rows:
         instrument_public_id = row["instrument_public_id"]
+        pool_key = (instrument_public_id, row["shard_key"])
         event_time = row["timestamp"]
-        previous_effective = last_effective.get(instrument_public_id)
+        previous_effective = last_effective.get(pool_key)
         if previous_effective is not None and event_time < previous_effective:
             regression_shadows.append((event_time, previous_effective))
         effective_time = max(previous_effective or event_time, event_time)
-        last_effective[instrument_public_id] = effective_time
+        last_effective[pool_key] = effective_time
         if instrument_public_id not in quote_by_instrument:
             continue
         size = row["size"]
@@ -1213,6 +1804,7 @@ def _mark_fx_minutes(
                 effective_time,
                 row["exchange"],
                 row["scope_sequence"],
+                row["shard_key"],
                 signed_size,
                 invalid_size or (position_size > 0.0 and not is_positive_finite(row["price"])),
             )
@@ -1222,27 +1814,38 @@ def _mark_fx_minutes(
         candles_by_instrument.setdefault(candle["instrument_public_id"], []).append(candle)
     needed: _FxInstrumentRequirements = {}
     grid_start = from_time.replace(second=0, microsecond=0)
+    opening_quantities: dict[tuple[str, str], float] = {}
+    if opening is not None:
+        opening_quantities = {
+            (pool.instrument_public_id, pool.shard_key): pool.position_qty for pool in opening.pools
+        }
     for instrument_public_id, instrument_candles in candles_by_instrument.items():
         events = sorted(effective_events.get(instrument_public_id, []))
         event_index = 0
-        position_qty = 0.0
+        pool_quantities = {
+            shard_key: quantity
+            for (opening_instrument, shard_key), quantity in opening_quantities.items()
+            if opening_instrument == instrument_public_id
+        }
         mark_eligible = True
         quote_currency = quote_by_instrument[instrument_public_id]
         for candle in sorted(instrument_candles, key=lambda item: item["open_at"]):
             mark_minute = candle["open_at"] + timedelta(minutes=1)
             while event_index < len(events) and events[event_index][0] <= mark_minute:
-                position_qty += events[event_index][3]
-                if events[event_index][4]:
+                shard_key = events[event_index][3]
+                pool_quantity = pool_quantities.get(shard_key, 0.0) + events[event_index][4]
+                if abs(pool_quantity) < FLAT_EPSILON:
+                    pool_quantity = 0.0
+                pool_quantities[shard_key] = pool_quantity
+                if events[event_index][5]:
                     mark_eligible = False
-                if abs(position_qty) < FLAT_EPSILON:
-                    position_qty = 0.0
                 event_index += 1
             if (
                 not is_positive_finite(candle["close"])
                 or not mark_eligible
                 or mark_minute < grid_start
                 or mark_minute > to_time
-                or abs(position_qty) < FLAT_EPSILON
+                or not any(abs(quantity) >= FLAT_EPSILON for quantity in pool_quantities.values())
                 or any(
                     shadow_start <= mark_minute < shadow_end
                     for shadow_start, shadow_end in regression_shadows
@@ -1728,6 +2331,571 @@ async def _load_request_fx_rates(
     return build_fx_rates(selected_rows), planes_by_instrument, used_planes
 
 
+def _opening_nonflat_instruments(
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    base_by_instrument: Mapping[str, str],
+) -> set[str]:
+    """Return instruments with at least one non-flat durable opening shard."""
+    quantities: dict[tuple[str, str], float] = {}
+    exchange_by_pool: dict[tuple[str, str], str] = {}
+    for row in execution_rows:
+        instrument_public_id = row["instrument_public_id"]
+        shard_key = row["shard_key"]
+        if not instrument_public_id or not shard_key:
+            raise PnlAnchorEvidenceError("opening execution pool identity is missing")
+        pool_key = (instrument_public_id, shard_key)
+        previous_exchange = exchange_by_pool.setdefault(pool_key, row["exchange"])
+        if previous_exchange != row["exchange"]:
+            raise PnlAnchorEvidenceError("one opening pool spans multiple exchanges")
+        size = row["size"]
+        if not math.isfinite(size) or size < 0.0:
+            raise PnlAnchorEvidenceError("opening execution size is invalid")
+        delta = booked_signed_quantity(
+            row["side"],
+            size,
+            row["fee"],
+            row["fee_asset"],
+            base_by_instrument[instrument_public_id],
+            resolve_position_quantity_unit(row["exchange"]),
+        )
+        if not math.isfinite(delta):
+            raise PnlAnchorEvidenceError("opening execution quantity arithmetic is invalid")
+        quantity = quantities.get(pool_key, 0.0) + delta
+        if not math.isfinite(quantity):
+            raise PnlAnchorEvidenceError("opening pool quantity arithmetic overflowed")
+        if abs(quantity) < FLAT_EPSILON:
+            quantity = 0.0
+        quantities[pool_key] = quantity
+    return {
+        instrument_public_id
+        for (instrument_public_id, _), quantity in quantities.items()
+        if abs(quantity) >= FLAT_EPSILON
+    }
+
+
+def _opening_mark_requirements(
+    candles: Sequence[PnlTimelineCandleRow],
+    nonflat_instruments: set[str],
+    quote_by_instrument: Mapping[str, str],
+    valuation_ccy: str,
+    t0: datetime,
+) -> _FxInstrumentRequirements:
+    """Collect exact t0 FX requirements only for surviving opening pools."""
+    requirements: _FxInstrumentRequirements = {}
+    for candle in candles:
+        instrument_public_id = candle["instrument_public_id"]
+        if (
+            instrument_public_id in nonflat_instruments
+            and candle["open_at"] + timedelta(minutes=1) == t0
+            and is_positive_finite(candle["close"])
+        ):
+            _add_fx_minute(
+                requirements,
+                instrument_public_id,
+                quote_by_instrument[instrument_public_id],
+                valuation_ccy,
+                t0,
+            )
+    return requirements
+
+
+def _opening_marks_from_candles(
+    candles: Sequence[PnlTimelineCandleRow],
+    nonflat_instruments: set[str],
+    quote_by_instrument: Mapping[str, str],
+    valuation_ccy: str,
+    rates: FxRateMap,
+    planes_by_instrument: Mapping[str, FxVenueMap],
+    t0: datetime,
+) -> dict[str, float]:
+    """Resolve exactly one positive finite t0 mark per surviving instrument."""
+    marks: dict[str, float] = {}
+    seen: set[str] = set()
+    for candle in candles:
+        instrument_public_id = candle["instrument_public_id"]
+        if (
+            instrument_public_id not in nonflat_instruments
+            or candle["open_at"] + timedelta(minutes=1) != t0
+        ):
+            continue
+        if instrument_public_id in seen:
+            raise PnlAnchorEvidenceError("opening mark evidence is duplicated")
+        seen.add(instrument_public_id)
+        if not is_positive_finite(candle["close"]):
+            raise PnlAnchorEvidenceError("opening mark evidence is not positive and finite")
+        converted = convert_amount(
+            candle["close"],
+            quote_by_instrument[instrument_public_id],
+            valuation_ccy,
+            t0,
+            rates,
+            planes_by_instrument.get(instrument_public_id, {}),
+        )
+        if not is_positive_finite(converted):
+            raise PnlAnchorEvidenceError("opening mark or FX evidence is unavailable")
+        marks[instrument_public_id] = converted
+    if set(marks) != nonflat_instruments:
+        raise PnlAnchorEvidenceError("opening mark evidence is incomplete")
+    return marks
+
+
+async def _derive_anchor_candidate(
+    repo: Repository,
+    scope: _AnchorScope,
+    execution_prefix: PnlTimelineExecutionPrefix,
+) -> PortfolioPnlAnchorRow:
+    """Derive one canonical anchor candidate from a single exact ledger prefix."""
+    wallet_public_id = scope.wallet_public_id
+    mode = cast(Literal["live", "paper"], scope.mode)
+    valuation_ccy = scope.valuation_ccy
+    activation_time = scope.activation_time
+    knowledge_horizon = scope.knowledge_horizon
+    prefix = execution_prefix
+    fill_gap_reason = await _scope_has_fill_gap(
+        repo,
+        wallet_public_id,
+        mode,
+        activation_time,
+        prefix,
+    )
+    if fill_gap_reason is not None:
+        raise PnlAnchorEvidenceError("durable fill evidence has a gap at activation")
+    execution_rows = prefix["executions"]
+    instrument_ids = sorted({row["instrument_public_id"] for row in execution_rows})
+    refs = await repo.get_instrument_symbol_refs(instrument_ids, knowledge_horizon)
+    trusted_refs, untrusted_reasons = _partition_series_execution_price_refs(
+        execution_rows,
+        refs,
+    )
+    trusted_by_instrument = {ref["instrument_public_id"]: ref for ref in trusted_refs}
+    if untrusted_reasons or set(trusted_by_instrument) != set(instrument_ids):
+        raise PnlAnchorEvidenceError("opening execution price provenance is unproven")
+    quote_by_instrument = {
+        instrument_public_id: cast(str, ref["quote_currency"])
+        for instrument_public_id, ref in trusted_by_instrument.items()
+    }
+    base_by_instrument = {
+        instrument_public_id: ref["base_currency"]
+        for instrument_public_id, ref in trusted_by_instrument.items()
+    }
+    nonflat_instruments = _opening_nonflat_instruments(
+        execution_rows,
+        base_by_instrument,
+    )
+    mark_refs = [
+        trusted_by_instrument[instrument_public_id]
+        for instrument_public_id in sorted(nonflat_instruments)
+    ]
+    mark_candles = await _load_mark_candles(
+        repo,
+        mark_refs,
+        activation_time,
+        activation_time,
+        knowledge_horizon,
+    )
+    event_requirements = _event_fx_minutes(
+        execution_rows,
+        (),
+        base_by_instrument,
+        quote_by_instrument,
+        valuation_ccy,
+    )
+    mark_requirements = _opening_mark_requirements(
+        mark_candles,
+        nonflat_instruments,
+        quote_by_instrument,
+        valuation_ccy,
+        activation_time,
+    )
+    all_requirements = _merge_instrument_fx_minutes(
+        mark_requirements,
+        event_requirements,
+    )
+    identity_planes = _identity_fx_planes(
+        trusted_refs,
+        all_requirements,
+    )
+    rates, planes_by_instrument, _ = await _load_request_fx_rates(
+        repo,
+        mark_requirements,
+        event_requirements,
+        identity_planes,
+        knowledge_horizon,
+        valuation_ccy,
+    )
+    opening_marks = _opening_marks_from_candles(
+        mark_candles,
+        nonflat_instruments,
+        quote_by_instrument,
+        valuation_ccy,
+        rates,
+        planes_by_instrument,
+        activation_time,
+    )
+    executions = [
+        _to_timeline_execution(
+            row,
+            valuation_ccy,
+            rates,
+            base_asset=base_by_instrument[row["instrument_public_id"]],
+            price_currency=quote_by_instrument[row["instrument_public_id"]],
+            venues=planes_by_instrument.get(row["instrument_public_id"], {}),
+        )
+        for row in execution_rows
+    ]
+    try:
+        derivation = derive_timeline_opening(
+            executions,
+            opening_marks,
+            activation_time,
+        )
+    except ValueError as exc:
+        raise PnlAnchorEvidenceError("opening replay or valuation cannot be proven") from exc
+    opening_payload, contributions_payload = _anchor_payloads(derivation)
+    public_id = portfolio_pnl_anchor_public_id(
+        wallet_public_id,
+        mode,
+        valuation_ccy,
+    )
+    return PortfolioPnlAnchorRow(
+        public_id=public_id,
+        session_id=str(uuid7()),
+        sequence_id=1,
+        timestamp=knowledge_horizon,
+        wallet_public_id=wallet_public_id,
+        mode=mode,
+        valuation_ccy=valuation_ccy,
+        point_time=activation_time,
+        point_kind="anchor",
+        epoch_public_id=public_id,
+        calc_version=PNL_TIMELINE_CALC_VERSION,
+        valuation_status="complete",
+        realized_pnl=0.0,
+        fee_pnl=0.0,
+        accrual_pnl=0.0,
+        unrealized_pnl=derivation.raw_opening_unrealized_value,
+        external_flow_adjustment=0.0,
+        cash_usd=None,
+        position_value_usd=None,
+        drawdown=None,
+        mark_source=PNL_TIMELINE_MARK_SOURCE,
+        mark_time=activation_time,
+        watermarks_json=_canonical_watermarks(prefix["watermarks"]),
+        opening_basket_json=_canonical_anchor_json(opening_payload),
+        contributions_json=_canonical_anchor_json(contributions_payload),
+    )
+
+
+def _validated_anchor_scope(scope: _AnchorScope) -> _AnchorScope:
+    """Normalize one anchor scope and validate both of its UTC horizons."""
+    if scope.mode not in ("live", "paper"):
+        raise ValueError("P&L anchor mode must be 'live' or 'paper'")
+    wallet_public_id = normalize_portfolio_pnl_wallet_public_id(scope.wallet_public_id)
+    valuation_ccy = normalize_portfolio_pnl_valuation_ccy(scope.valuation_ccy)
+    if (
+        scope.activation_time.utcoffset() != timedelta(0)
+        or scope.activation_time.second != 0
+        or scope.activation_time.microsecond != 0
+    ):
+        raise ValueError("P&L anchor activation_time must be a UTC minute")
+    if (
+        scope.knowledge_horizon.utcoffset() != timedelta(0)
+        or scope.activation_time > scope.knowledge_horizon
+    ):
+        raise ValueError("P&L anchor knowledge_horizon must be UTC and not precede activation")
+    return replace(
+        scope,
+        wallet_public_id=wallet_public_id,
+        valuation_ccy=valuation_ccy,
+    )
+
+
+async def _load_execution_prefix_bundle(
+    repo: Repository,
+    wallet_public_id: str,
+    mode: str,
+    request_as_of: datetime,
+    activation_as_of: datetime,
+) -> PnlTimelineExecutionPrefixBundle:
+    """Load independently proven request and activation cuts in one call."""
+    return await repo.get_pnl_timeline_execution_prefix_bundle(
+        wallet_public_id,
+        mode,
+        request_as_of,
+        activation_as_of,
+    )
+
+
+async def _load_anchor_execution_prefix_bundle(
+    repo: Repository,
+    scope: _AnchorScope,
+) -> PnlTimelineExecutionPrefixBundle:
+    """Normalize a failure to prove either exact activation bundle snapshot."""
+    try:
+        return await _load_execution_prefix_bundle(
+            repo,
+            scope.wallet_public_id,
+            scope.mode,
+            scope.knowledge_horizon,
+            scope.activation_time,
+        )
+    except Exception as exc:
+        raise PnlAnchorEvidenceError("execution prefix cannot be proven at activation") from exc
+
+
+async def _record_anchor_candidate(
+    repo: Repository,
+    scope: _AnchorScope,
+    execution_prefix_bundle: PnlTimelineExecutionPrefixBundle,
+) -> _ResolvedPnlAnchor:
+    """Derive, record, and fully validate one canonical activation candidate."""
+    request_watermarks = execution_prefix_bundle["request"]["watermarks"]
+    activation_prefix = execution_prefix_bundle["activation"]
+    activation_watermarks = activation_prefix["watermarks"]
+    if not _watermarks_are_valid(request_watermarks) or not _watermarks_are_valid(
+        activation_watermarks
+    ):
+        raise PnlAnchorEvidenceError("execution prefix watermarks are not canonical")
+    if any(
+        exchange not in request_watermarks or request_watermarks[exchange] < activation_watermark
+        for exchange, activation_watermark in activation_watermarks.items()
+    ):
+        raise PnlAnchorEvidenceError(
+            "request execution prefix regressed below the activation watermark"
+        )
+    candidate = await _derive_anchor_candidate(
+        repo,
+        scope,
+        activation_prefix,
+    )
+    evidence = PortfolioPnlAnchorWriteEvidence(
+        wallet_public_id=scope.wallet_public_id,
+        mode=cast(Literal["live", "paper"], scope.mode),
+        request_as_of=scope.knowledge_horizon,
+        activation_as_of=scope.activation_time,
+        execution_prefix_bundle=execution_prefix_bundle,
+    )
+    try:
+        winner = await repo.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            candidate,
+            evidence,
+        )
+    except PnlTimelineAnchorEvidenceMismatchError as exc:
+        raise PnlAnchorEvidenceError("execution prefix changed before anchor persistence") from exc
+    return _parse_scoped_anchor(
+        winner,
+        scope.wallet_public_id,
+        scope.mode,
+        scope.valuation_ccy,
+    )
+
+
+async def ensure_wallet_pnl_anchor(
+    repo: Repository,
+    wallet_public_id: str,
+    mode: str,
+    valuation_ccy: str,
+    activation_time: datetime,
+    knowledge_horizon: datetime,
+) -> PortfolioPnlAnchorRow:
+    """Return or durably create one exact ledger-derived activation anchor.
+
+    This is the only public fixture-safe writer. Explicit activation is accepted
+    only at a UTC minute no later than its UTC knowledge horizon. A concurrent
+    creator is resolved by the deterministic scope public id; the returned winner
+    is always parsed through the full v2 contract before use.
+
+    Args:
+        repo: Repository boundary providing durable evidence and anchor writes.
+        wallet_public_id: Canonical UUID identity of the portfolio wallet.
+        mode: Portfolio execution mode, either ``live`` or ``paper``.
+        valuation_ccy: Three-letter portfolio valuation currency.
+        activation_time: Exact UTC minute at which the anchor becomes active.
+        knowledge_horizon: UTC evidence horizon available to the derivation.
+
+    Returns:
+        The validated persisted anchor row, including a concurrent winner.
+
+    Raises:
+        PnlAnchorEvidenceError: If exact durable evidence cannot prove the anchor.
+        ValueError: If the requested scope or timestamps are invalid.
+    """
+    scope = _validated_anchor_scope(
+        _AnchorScope(
+            wallet_public_id=wallet_public_id,
+            mode=mode,
+            valuation_ccy=valuation_ccy,
+            activation_time=activation_time,
+            knowledge_horizon=knowledge_horizon,
+        )
+    )
+    existing = await repo.get_portfolio_pnl_anchor(
+        scope.wallet_public_id,
+        scope.mode,
+        scope.valuation_ccy,
+        None,
+    )
+    if existing is not None:
+        return _parse_scoped_anchor(
+            existing,
+            scope.wallet_public_id,
+            scope.mode,
+            scope.valuation_ccy,
+        ).row
+    execution_prefix_bundle = await _load_anchor_execution_prefix_bundle(
+        repo,
+        scope,
+    )
+    return (await _record_anchor_candidate(repo, scope, execution_prefix_bundle)).row
+
+
+async def _load_or_create_anchor(
+    repo: Repository,
+    request: _AnchorLoadRequest,
+) -> _AnchorLoadResult:
+    """Load or create an anchor while retaining its sealed request prefix."""
+    scope = _validated_anchor_scope(request.scope)
+    visible = (
+        await repo.get_portfolio_pnl_anchor(
+            scope.wallet_public_id,
+            scope.mode,
+            scope.valuation_ccy,
+            None if request.allow_anchor_creation else scope.knowledge_horizon,
+        )
+        if request.preloaded_evidence is None
+        else request.preloaded_evidence.visible_anchor
+    )
+    execution_prefix_bundle = (
+        None
+        if request.preloaded_evidence is None
+        else request.preloaded_evidence.execution_prefix_bundle
+    )
+    if visible is not None:
+        return _AnchorLoadResult(
+            anchor=_parse_scoped_anchor(
+                visible,
+                scope.wallet_public_id,
+                scope.mode,
+                scope.valuation_ccy,
+            ),
+            execution_prefix_bundle=execution_prefix_bundle,
+        )
+    if not request.allow_anchor_creation:
+        return _AnchorLoadResult(
+            anchor=None,
+            execution_prefix_bundle=execution_prefix_bundle,
+        )
+    if execution_prefix_bundle is None:
+        execution_prefix_bundle = await _load_anchor_execution_prefix_bundle(
+            repo,
+            scope,
+        )
+    anchor = await _record_anchor_candidate(
+        repo,
+        scope,
+        execution_prefix_bundle,
+    )
+    return _AnchorLoadResult(
+        anchor=anchor,
+        execution_prefix_bundle=execution_prefix_bundle,
+    )
+
+
+async def _load_series_replay_inputs(
+    repo: Repository,
+    wallet_public_id: str,
+    mode: str,
+    to_time: datetime,
+    as_of: datetime,
+    anchor: _ResolvedPnlAnchor,
+    execution_prefix_bundle: PnlTimelineExecutionPrefixBundle | None,
+) -> _SeriesReplayInputs:
+    """Load and bound the post-watermark accounting evidence for one series."""
+    loaded_bundle = (
+        await _load_execution_prefix_bundle(
+            repo,
+            wallet_public_id,
+            mode,
+            as_of,
+            as_of,
+        )
+        if execution_prefix_bundle is None
+        else execution_prefix_bundle
+    )
+    loaded_prefix = loaded_bundle["request"]
+    fill_gap_reason = await _scope_has_fill_gap(
+        repo,
+        wallet_public_id,
+        mode,
+        as_of,
+        loaded_prefix,
+    )
+    for exchange, anchor_watermark in anchor.watermarks.items():
+        if loaded_prefix["watermarks"].get(exchange, 0) < anchor_watermark:
+            raise PnlAnchorEvidenceError(
+                "current execution prefix regressed below the activation watermark"
+            )
+    loaded_execution_rows = [
+        row
+        for row in loaded_prefix["executions"]
+        if row["scope_sequence"] > anchor.watermarks.get(row["exchange"], 0)
+    ]
+    replayed_execution_rows = _execution_rows_effective_through(
+        loaded_execution_rows,
+        to_time,
+    )
+    late_pre_activation_reason = (
+        PnlIncompletenessReasonEntry(
+            reason="late_pre_activation_execution",
+            withholding_tier="untrusted",
+            withholding_scope="global",
+            trigger_instrument_public_id=None,
+        )
+        if any(row["timestamp"] <= anchor.opening.t0 for row in loaded_execution_rows)
+        else None
+    )
+    order_public_ids = list(
+        dict.fromkeys(row["order_public_id"] for row in replayed_execution_rows)
+    )
+    lineage_rows = await repo.get_pnl_timeline_execution_lineage(order_public_ids, as_of)
+    accrual_rows = [
+        row
+        for row in await repo.get_accruals_for_pnl(wallet_public_id, mode, as_of)
+        if anchor.opening.t0 < row["accrued_at"] <= to_time
+    ]
+    return _SeriesReplayInputs(
+        loaded_execution_rows=loaded_execution_rows,
+        replayed_execution_rows=replayed_execution_rows,
+        accrual_rows=accrual_rows,
+        lineage=_build_execution_lineage(lineage_rows),
+        fill_gap_reason=fill_gap_reason,
+        late_pre_activation_reason=late_pre_activation_reason,
+    )
+
+
+def _series_display_activity_spans(
+    opening: TimelineOpening,
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    accrual_rows: Sequence[PnlTimelineAccrualRow],
+) -> dict[str, tuple[datetime, datetime]]:
+    """Return exact activity bounds used for display-identity proof."""
+    activity = [(row["instrument_public_id"], row["timestamp"]) for row in execution_rows]
+    activity.extend((pool.instrument_public_id, opening.t0) for pool in opening.pools)
+    activity.extend((row["instrument_public_id"], row["accrued_at"]) for row in accrual_rows)
+    spans: dict[str, tuple[datetime, datetime]] = {}
+    for instrument_public_id, activity_time in activity:
+        existing = spans.get(instrument_public_id)
+        spans[instrument_public_id] = (
+            (activity_time, activity_time)
+            if existing is None
+            else (
+                min(existing[0], activity_time),
+                max(existing[1], activity_time),
+            )
+        )
+    return spans
+
+
 async def build_wallet_pnl_series(
     repo: Repository,
     wallet_public_id: str,
@@ -1737,21 +2905,18 @@ async def build_wallet_pnl_series(
     granularity: str,
     as_of: datetime,
     valuation_ccy: str = "USD",
-    execution_rows: Sequence[PnlTimelineExecutionRow] | None = None,
+    preloaded_evidence: _SeriesReadEvidence | None = None,
+    *,
+    allow_anchor_creation: bool = True,
 ) -> PnlWalletSeriesResult:
     """Reconstruct one wallet/mode scope's Net-P&L-since-activation series.
 
-    Reads the scope's append-only execution prefix, exact order lineage, and
-    funding accruals; proves each replayed instrument's quote and venue; converts
-    execution prices, marks, fees, and accruals from finalized exact-minute 1m
-    candles; and calls the pure builder with ``opening=None``. Every average-cost
-    pool input is therefore denominated in ``valuation_ccy`` before replay.
-    Missing execution rates become ``NaN`` for the builder's tiered D1 handling,
-    while missing mark rates simply omit that instrument-minute mark. Lineage is
-    accepted only when exactly one candidate row resolves an execution order.
-    Before the build, durable fill-gap evidence is consulted for every
-    fill-bearing shard in the exact wallet/mode scope; a proven gap withholds the
-    entire result.
+    Loads the visible durable activation anchor, captures one exact current
+    execution-prefix bundle, filters the per-exchange suffix above the frozen
+    watermarks, and seeds the shard-aware pure builder from rebased opening
+    pools. Historical requests never create an absent anchor and return an
+    honest empty series. Durable fill gaps and suffix rows whose timestamp is at
+    or before t0 globally withhold the result.
 
     Args:
         repo: Repository providing the scope reads and candle marks.
@@ -1763,8 +2928,11 @@ async def build_wallet_pnl_series(
         as_of: Effective knowledge horizon for the execution commit watermark,
             accrual SCD2 versions, and candle SCD2 versions.
         valuation_ccy: Currency the series components are expressed in.
-        execution_rows: Optional preloaded execution prefix used by the marker
-            endpoint to avoid issuing the same scope read twice.
+        preloaded_evidence: Optional anchor read and independently proven
+            request/activation snapshots used by the marker endpoint to avoid
+            issuing either durable boundary read twice.
+        allow_anchor_creation: Whether this current request may create a missing
+            activation anchor. Explicit historical routes always pass ``False``.
 
     Returns:
         The built :class:`PnlTimelineResult` at the requested granularity.
@@ -1775,31 +2943,99 @@ async def build_wallet_pnl_series(
         ValueError: When ``granularity`` is not a supported value (surfaced by
             the pure builder).
     """
-    fill_gap_reason = await _scope_has_fill_gap(repo, wallet_public_id, mode, as_of)
-    loaded_execution_rows = (
-        await repo.get_pnl_timeline_executions(wallet_public_id, mode, as_of)
-        if execution_rows is None
-        else list(execution_rows)
+    wallet_public_id = normalize_portfolio_pnl_wallet_public_id(wallet_public_id)
+    _enforce_total_work_budget(from_time, to_time, 0)
+    anchor_load = await _load_or_create_anchor(
+        repo,
+        _AnchorLoadRequest(
+            scope=_AnchorScope(
+                wallet_public_id=wallet_public_id,
+                mode=mode,
+                valuation_ccy=valuation_ccy,
+                activation_time=as_of.replace(second=0, microsecond=0),
+                knowledge_horizon=as_of,
+            ),
+            allow_anchor_creation=allow_anchor_creation,
+            preloaded_evidence=preloaded_evidence,
+        ),
     )
-    order_public_ids = list(dict.fromkeys(row["order_public_id"] for row in loaded_execution_rows))
-    lineage_rows = await repo.get_pnl_timeline_execution_lineage(order_public_ids, as_of)
-    lineage = _build_execution_lineage(lineage_rows)
-    accrual_rows = await repo.get_accruals_for_pnl(wallet_public_id, mode, as_of)
+    anchor = anchor_load.anchor
+    if anchor is None:
+        return _empty_pnl_series(granularity, valuation_ccy)
+    if to_time < anchor.opening.t0:
+        return _preactivation_pnl_series(
+            anchor,
+            from_time,
+            to_time,
+            granularity,
+            valuation_ccy,
+        )
+    replay = await _load_series_replay_inputs(
+        repo,
+        wallet_public_id,
+        mode,
+        to_time,
+        as_of,
+        anchor,
+        anchor_load.execution_prefix_bundle,
+    )
+    loaded_execution_rows = replay.loaded_execution_rows
+    replayed_execution_rows = replay.replayed_execution_rows
+    accrual_rows = replay.accrual_rows
     execution_instrument_ids = list(
-        dict.fromkeys(row["instrument_public_id"] for row in loaded_execution_rows)
+        dict.fromkeys(row["instrument_public_id"] for row in replayed_execution_rows)
+    )
+    opening_instrument_ids = list(
+        dict.fromkeys(pool.instrument_public_id for pool in anchor.opening.pools)
     )
     instrument_ids = list(
         dict.fromkeys(
-            execution_instrument_ids + [row["instrument_public_id"] for row in accrual_rows]
+            opening_instrument_ids
+            + execution_instrument_ids
+            + [row["instrument_public_id"] for row in accrual_rows]
         )
     )
-    _enforce_total_work_budget(from_time, to_time, len(instrument_ids))
-    refs = await repo.get_instrument_symbol_refs(instrument_ids, as_of)
-    replayed_execution_rows = [row for row in loaded_execution_rows if row["timestamp"] <= to_time]
-    trusted_refs, untrusted_price_reasons_by_instrument = _partition_series_execution_price_refs(
+    pool_keys = {(pool.instrument_public_id, pool.shard_key) for pool in anchor.opening.pools}
+    pool_keys.update(
+        (row["instrument_public_id"], row["shard_key"]) for row in replayed_execution_rows
+    )
+    pool_instruments = {instrument_public_id for instrument_public_id, _ in pool_keys}
+    accrual_only_instruments = {
+        row["instrument_public_id"] for row in accrual_rows
+    } - pool_instruments
+    _enforce_total_work_budget(
+        from_time,
+        to_time,
+        len(pool_keys) + len(accrual_only_instruments),
+    )
+    refs = await repo.get_instrument_symbol_refs(instrument_ids, as_of) if instrument_ids else []
+    suffix_refs, untrusted_price_reasons_by_instrument = _partition_series_execution_price_refs(
         replayed_execution_rows,
         refs,
     )
+    opening_spans = {
+        instrument_public_id: (
+            anchor.opening.t0,
+            max(anchor.opening.t0, to_time),
+        )
+        for instrument_public_id in opening_instrument_ids
+    }
+    opening_refs, _ = _partition_series_price_refs(
+        opening_spans,
+        refs,
+    )
+    untrusted_price_reasons_by_instrument = {
+        instrument_public_id: set(reasons)
+        for instrument_public_id, reasons in untrusted_price_reasons_by_instrument.items()
+    }
+    trusted_ref_by_instrument = {
+        ref["instrument_public_id"]: ref for ref in [*opening_refs, *suffix_refs]
+    }
+    trusted_refs = [
+        trusted_ref_by_instrument[instrument_public_id]
+        for instrument_public_id in instrument_ids
+        if instrument_public_id in trusted_ref_by_instrument
+    ]
     quote_by_instrument = {
         ref["instrument_public_id"]: cast(str, ref["quote_currency"]) for ref in trusted_refs
     }
@@ -1815,23 +3051,11 @@ async def build_wallet_pnl_series(
     trusted_replayed_rows = [
         row for row in replayed_execution_rows if row["instrument_public_id"] in trusted_instruments
     ]
-    replayed_accrual_rows = [row for row in accrual_rows if row["accrued_at"] <= to_time]
-    display_activity_spans: dict[str, tuple[datetime, datetime]] = {}
-    display_activity = [
-        (row["instrument_public_id"], row["timestamp"]) for row in replayed_execution_rows
-    ]
-    display_activity.extend(
-        (row["instrument_public_id"], row["accrued_at"]) for row in replayed_accrual_rows
+    display_activity_spans = _series_display_activity_spans(
+        anchor.opening,
+        replayed_execution_rows,
+        accrual_rows,
     )
-    for instrument_public_id, activity_time in display_activity:
-        existing = display_activity_spans.get(instrument_public_id)
-        if existing is None:
-            display_activity_spans[instrument_public_id] = (activity_time, activity_time)
-        else:
-            display_activity_spans[instrument_public_id] = (
-                min(existing[0], activity_time),
-                max(existing[1], activity_time),
-            )
     display_identities = _instrument_display_identities(display_activity_spans, refs)
     mark_requirements = _mark_fx_minutes(
         mark_candles,
@@ -1841,13 +3065,15 @@ async def build_wallet_pnl_series(
         valuation_ccy,
         from_time,
         to_time,
+        anchor.opening,
     )
     event_requirements = _event_fx_minutes(
         trusted_replayed_rows,
-        replayed_accrual_rows,
+        accrual_rows,
         base_by_instrument,
         quote_by_instrument,
         valuation_ccy,
+        anchor.opening,
     )
     instrument_requirements = _merge_instrument_fx_minutes(
         mark_requirements,
@@ -1872,6 +3098,8 @@ async def build_wallet_pnl_series(
         rates,
         planes_by_instrument,
     )
+    marks = dict(marks)
+    marks.update(anchor.marks)
     executions = [
         _to_timeline_execution(
             row,
@@ -1903,13 +3131,17 @@ async def build_wallet_pnl_series(
         accruals,
         marks,
         window,
-        opening=None,
-        lineage=lineage,
+        opening=anchor.opening,
+        lineage=replay.lineage,
         untrusted_price_reasons_by_instrument=untrusted_price_reasons_by_instrument,
         mark_incompleteness_reasons=mark_incompleteness_reasons,
     )
-    if fill_gap_reason is not None:
-        result = _withhold_series_for_fill_gap(result, fill_gap_reason)
+    for global_reason in (
+        replay.fill_gap_reason,
+        replay.late_pre_activation_reason,
+    ):
+        if global_reason is not None:
+            result = _withhold_series_for_global_reason(result, global_reason)
     result = _with_instrument_display_identities(
         result,
         display_identities,
@@ -2030,12 +3262,20 @@ async def build_wallet_pnl_timeline(
     granularity: str,
     as_of: datetime,
     valuation_ccy: str = "USD",
+    *,
+    allow_anchor_creation: bool = True,
 ) -> PnlWalletTimelineResult:
     """Build a wallet series plus independently sourced decision markers.
 
     The execution prefix is loaded once and reused by the existing series
     builder. Signals and append-only AI decision events are read independently,
     which retains declined decisions and signals that never reached an order.
+    The marker overlay intentionally remains active for a wholly pre-activation
+    window and for historical horizons where no anchor was yet visible.
+    Therefore the exact prefix remains required in both cases: an unprovable
+    prefix refuses the marker endpoint instead of silently omitting fills or
+    misclassifying signal outcomes, while the series-only endpoint can still
+    return its honest pre-activation or empty result.
     Each independent marker read asks for ``limit + 1`` newest rows. All marker
     kinds are merged by ``(time, kind, source id)``; if the combined set exceeds
     the public cap, only the latest markers remain and ``markers_truncated`` is
@@ -2051,6 +3291,8 @@ async def build_wallet_pnl_timeline(
         as_of: Effective knowledge horizon shared by the series, signals, and
             AI decision reads.
         valuation_ccy: Currency the series components are expressed in.
+        allow_anchor_creation: Whether a current request may create a missing
+            activation anchor.
 
     Returns:
         The existing P&L series and its capped marker overlay.
@@ -2059,7 +3301,38 @@ async def build_wallet_pnl_timeline(
         PnlTimelineWorkBudgetError: When the series work budget is exceeded.
         ValueError: When the pure builder rejects the requested window.
     """
-    execution_rows = await repo.get_pnl_timeline_executions(wallet_public_id, mode, as_of)
+    wallet_public_id = normalize_portfolio_pnl_wallet_public_id(wallet_public_id)
+    scope = _validated_anchor_scope(
+        _AnchorScope(
+            wallet_public_id=wallet_public_id,
+            mode=mode,
+            valuation_ccy=valuation_ccy,
+            activation_time=as_of.replace(second=0, microsecond=0),
+            knowledge_horizon=as_of,
+        )
+    )
+    visible_anchor = await repo.get_portfolio_pnl_anchor(
+        scope.wallet_public_id,
+        scope.mode,
+        scope.valuation_ccy,
+        None if allow_anchor_creation else scope.knowledge_horizon,
+    )
+    execution_prefix_bundle = (
+        await _load_anchor_execution_prefix_bundle(repo, scope)
+        if visible_anchor is None and allow_anchor_creation
+        else await _load_execution_prefix_bundle(
+            repo,
+            scope.wallet_public_id,
+            scope.mode,
+            scope.knowledge_horizon,
+            scope.knowledge_horizon,
+        )
+    )
+    preloaded_evidence = _SeriesReadEvidence(
+        visible_anchor=visible_anchor,
+        execution_prefix_bundle=execution_prefix_bundle,
+    )
+    execution_rows = execution_prefix_bundle["request"]["executions"]
     series = await build_wallet_pnl_series(
         repo,
         wallet_public_id,
@@ -2069,7 +3342,8 @@ async def build_wallet_pnl_timeline(
         granularity,
         as_of,
         valuation_ccy=valuation_ccy,
-        execution_rows=execution_rows,
+        preloaded_evidence=preloaded_evidence,
+        allow_anchor_creation=allow_anchor_creation,
     )
     read_limit = PNL_TIMELINE_MARKER_LIMIT + 1
     signal_rows = await repo.get_pnl_timeline_signals(

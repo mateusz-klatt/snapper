@@ -3,36 +3,49 @@
 Exercises :func:`build_pnl_timeline` across the soundness contract: the shared
 average-cost replay (realized decomposition), the separate fee and accrual
 components with their expense / holder-pays signs, anchor seeding with the
-baseline-leakage guard, honest-incomplete valuation on missing marks and unknown
-seeded entries, the event-time regression shadow guard, the flow/stock
+shard-aware t0 rebase guard, honest-incomplete valuation on missing marks and
+unknown seeded entries, the event-time regression shadow guard, the flow/stock
 downsampling reduction, and the degenerate empty and invalid-granularity edges.
 """
 
 import math
+from collections.abc import Iterable
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 
 import pytest
 
+from snapper.api.schemas.pnl_timeline import PnlIncompletenessReasonData
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.pnl_timeline import AttributionKey
 from snapper.application.portfolio.pnl_timeline import MarkMap
-from snapper.application.portfolio.pnl_timeline import OpeningPosition
+from snapper.application.portfolio.pnl_timeline import OpeningPool
+from snapper.application.portfolio.pnl_timeline import OpeningPoolValuation
+from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
 from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
 from snapper.application.portfolio.pnl_timeline import TimelineOpening
+from snapper.application.portfolio.pnl_timeline import TimelineOpeningDerivation
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
 from snapper.application.portfolio.pnl_timeline import _allocate_by_weights
 from snapper.application.portfolio.pnl_timeline import _Pool
+from snapper.application.portfolio.pnl_timeline import _prepare_executions
 from snapper.application.portfolio.pnl_timeline import _reconcile_weights
+from snapper.application.portfolio.pnl_timeline import _regression_shadow_deltas
+from snapper.application.portfolio.pnl_timeline import _regression_shadow_trigger_changes
+from snapper.application.portfolio.pnl_timeline import _RegressionShadow
+from snapper.application.portfolio.pnl_timeline import _valuation_pool_index
 from snapper.application.portfolio.pnl_timeline import _value_point
 from snapper.application.portfolio.pnl_timeline import _values_with_residue
 from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
 from snapper.application.portfolio.pnl_timeline import canonical_incompleteness_reasons
+from snapper.application.portfolio.pnl_timeline import derive_timeline_opening
 
 _T0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
 
@@ -52,6 +65,7 @@ def _exec(
     fee: float = 0.0,
     exchange: str = "kraken",
     position_delta: float | None = None,
+    shard_key: str | None = None,
 ) -> TimelineExecution:
     """Build one timeline execution at the given grid minute."""
     resolved_position_delta = (
@@ -59,6 +73,7 @@ def _exec(
     )
     return TimelineExecution(
         instrument_public_id=instrument,
+        shard_key=shard_key or f"shard-{instrument}",
         exchange=exchange,
         scope_sequence=scope,
         event_time=_m(minute),
@@ -69,6 +84,24 @@ def _exec(
         fee=fee,
         fee_asset="USD",
         order_public_id=f"order-{instrument}-{scope}",
+    )
+
+
+def _opening_pool(
+    instrument: str,
+    position_qty: float,
+    entry_price: float | None,
+    *,
+    shard_key: str | None = None,
+    exchange: str = "kraken",
+) -> OpeningPool:
+    """Build one stable opening shard seed."""
+    return OpeningPool(
+        instrument_public_id=instrument,
+        shard_key=shard_key or f"shard-{instrument}",
+        exchange=exchange,
+        position_qty=position_qty,
+        entry_price=entry_price,
     )
 
 
@@ -87,19 +120,36 @@ def _window(
 
 
 def _assert_exact_attribution_sums(point: PnlTimelinePoint) -> None:
-    """Assert every exposed attribution component exactly equals its aggregate."""
+    """Assert exact instrument/attribution sums and the direct public net identity."""
+    instrument_realized = [contribution.realized_pnl for contribution in point.per_instrument]
+    instrument_fees = [contribution.fee_pnl for contribution in point.per_instrument]
+    instrument_accruals = [contribution.accrual_pnl for contribution in point.per_instrument]
+    instrument_unrealized = [contribution.unrealized_pnl for contribution in point.per_instrument]
     realized = [contribution.realized_pnl for contribution in point.attribution]
     fees = [contribution.fee_pnl for contribution in point.attribution]
     accruals = [contribution.accrual_pnl for contribution in point.attribution]
     unrealized = [contribution.unrealized_pnl for contribution in point.attribution]
+    assert None not in instrument_realized
+    assert None not in instrument_fees
+    assert None not in instrument_accruals
+    assert None not in instrument_unrealized
     assert None not in realized
     assert None not in fees
     assert None not in accruals
     assert None not in unrealized
+    assert sum(value for value in instrument_realized if value is not None) == point.realized_pnl
+    assert sum(value for value in instrument_fees if value is not None) == point.fee_pnl
+    assert sum(value for value in instrument_accruals if value is not None) == point.accrual_pnl
+    assert (
+        sum(value for value in instrument_unrealized if value is not None) == point.unrealized_pnl
+    )
     assert sum(value for value in realized if value is not None) == point.realized_pnl
     assert sum(value for value in fees if value is not None) == point.fee_pnl
     assert sum(value for value in accruals if value is not None) == point.accrual_pnl
     assert sum(value for value in unrealized if value is not None) == point.unrealized_pnl
+    assert point.net_pnl == (
+        point.realized_pnl + point.fee_pnl + point.accrual_pnl + point.unrealized_pnl
+    )
 
 
 def _reason_rows(point: PnlTimelinePoint) -> list[tuple[str, str, str, str | None]]:
@@ -213,6 +263,23 @@ class TestMachineReadableIncompletenessReasons:
             first,
         )
 
+    def test_instrument_reconciliation_reason_is_shared_with_api_schema(self) -> None:
+        """The new global reason belongs to both domain and transport contracts."""
+        domain = PnlIncompletenessReasonEntry(
+            reason="instrument_reconciliation_failed",
+            withholding_tier="untrusted",
+            withholding_scope="global",
+            trigger_instrument_public_id=None,
+        )
+        transport = PnlIncompletenessReasonData(
+            reason=domain.reason,
+            withholding_tier=domain.withholding_tier,
+            withholding_scope=domain.withholding_scope,
+            trigger_instrument_public_id=domain.trigger_instrument_public_id,
+        )
+        assert canonical_incompleteness_reasons((domain,)) == (domain,)
+        assert transport.reason == "instrument_reconciliation_failed"
+
     def test_mark_and_untrusted_instruments_coexist_without_precedence(self) -> None:
         """A missing mark on A and invalid close on B remain two causal entries."""
         executions = (
@@ -236,6 +303,7 @@ class TestMachineReadableIncompletenessReasons:
         """A direct bad close does not erase an earlier FX-unprovable entry basis."""
         opening = TimelineExecution(
             instrument_public_id="I1",
+            shard_key="shard-I1",
             exchange="kraken",
             scope_sequence=1,
             event_time=_m(0),
@@ -267,6 +335,7 @@ class TestMachineReadableIncompletenessReasons:
         """Synthetic NaN realization cannot create a derivative cumulative reason."""
         opening = TimelineExecution(
             instrument_public_id="I1",
+            shard_key="shard-I1",
             exchange="kraken",
             scope_sequence=1,
             event_time=_m(0),
@@ -283,18 +352,17 @@ class TestMachineReadableIncompletenessReasons:
         point = build_pnl_timeline((opening, closing), (), {}, _window(1, 1)).points[0]
         assert _reason_rows(point) == [("fx_conversion_unproven", "untrusted", "instrument", "I1")]
 
-    def test_global_early_return_keeps_latched_untrusted_only(self) -> None:
-        """Pre-activation carries a latched size cause but does not inspect marks."""
-        opening = TimelineOpening(
-            positions={"I2": OpeningPosition(position_qty=1.0, entry_price=100.0)},
-            opening_unrealized_value=0.0,
-            t0=_m(1),
+    def test_global_early_return_keeps_latched_instrument_cause(self) -> None:
+        """A regression shadow retains an independently established size cause."""
+        executions = (
+            _exec("I2", 1, 0, "buy", -1.0, 100.0),
+            _exec("I1", 2, 3, "buy", 1.0, 100.0),
+            _exec("I1", 3, 1, "buy", 1.0, 100.0),
         )
-        execution = _exec("I1", 1, 0, "buy", -1.0, 100.0)
-        point = build_pnl_timeline((execution,), (), {}, _window(0, 0), opening).points[0]
+        point = build_pnl_timeline(executions, (), {}, _window(1, 1)).points[0]
         assert _reason_rows(point) == [
-            ("before_activation", "untrusted", "global", None),
-            ("execution_size_invalid", "untrusted", "instrument", "I1"),
+            ("scope_order_regression", "untrusted", "global", "I1"),
+            ("execution_size_invalid", "untrusted", "instrument", "I2"),
         ]
 
     def test_downsampling_keeps_only_endpoint_reasons(self) -> None:
@@ -320,7 +388,8 @@ class TestMachineReadableIncompletenessReasons:
         with pytest.raises(ValueError, match="requires a stamped causal reason"):
             _value_point(
                 _m(0),
-                {"I1": _Pool(position_qty=1.0, entry_price=None)},
+                {("I1", "shard-I1"): _Pool(position_qty=1.0, entry_price=None)},
+                {"I1": (("I1", "shard-I1"),)},
                 {},
                 {("I1", _m(0)): 100.0},
                 ["I1"],
@@ -334,7 +403,7 @@ class TestMachineReadableIncompletenessReasons:
                 0.0,
                 0.0,
                 0.0,
-                0.0,
+                None,
                 (),
                 {},
                 {},
@@ -396,7 +465,7 @@ class TestAttribution:
             ("I1", _m(2)): 120.0,
             ("I1", _m(3)): 120.0,
         }
-        accruals = (TimelineAccrual("I1", _m(1), 0.1),)
+        accruals = (TimelineAccrual("I1", _m(1) + timedelta(seconds=30), 0.1),)
         result = build_pnl_timeline(
             self._cycle(), accruals, marks, _window(0, 4), lineage=self._lineage()
         )
@@ -420,7 +489,7 @@ class TestAttribution:
             ("I1", _m(2)): 120.0,
             ("I1", _m(3)): 120.0,
         }
-        accruals = (TimelineAccrual("I1", _m(1), 0.1),)
+        accruals = (TimelineAccrual("I1", _m(1) + timedelta(seconds=30), 0.1),)
         result = build_pnl_timeline(
             self._cycle(), accruals, marks, _window(0, 4), lineage=self._lineage()
         )
@@ -621,16 +690,13 @@ class TestAttribution:
     def test_dust_pool_overshoot_assigns_new_side_to_incoming_fill(self) -> None:
         """A kernel ``open`` that closes dust still splits old and new ownership."""
         opening = TimelineOpening(
-            positions={
-                "I1": OpeningPosition(
-                    position_qty=FLAT_EPSILON / 2.0,
-                    entry_price=100.0,
-                )
-            },
-            opening_unrealized_value=0.0,
+            pools=(_opening_pool("I1", FLAT_EPSILON / 2.0, 100.0),),
             t0=_m(0),
         )
-        execution = _exec("I1", 1, 0, "sell", 1.0, 110.0, fee=1.0)
+        execution = replace(
+            _exec("I1", 1, 0, "sell", 1.0, 110.0, fee=1.0),
+            event_time=_m(0) + timedelta(seconds=1),
+        )
         lineage = {
             execution.order_public_id: TimelineExecutionLineage(
                 "strategy", None, "signal-1", "live", "momentum"
@@ -639,8 +705,8 @@ class TestAttribution:
         point = build_pnl_timeline(
             (execution,),
             (),
-            {("I1", _m(0)): 100.0},
-            _window(0, 0),
+            {("I1", _m(1)): 100.0},
+            _window(1, 1),
             opening,
             lineage,
         ).points[0]
@@ -746,11 +812,102 @@ class TestAttribution:
         assert reconciled[keys[-1]] == math.nextafter(values[keys[-1]], -math.inf)
         assert sum(reconciled[key] for key in keys) == total
 
+    def test_generic_residue_reconciliation_accepts_instrument_keys(self) -> None:
+        """The same bounded proof reconciles deterministic string-keyed maps."""
+        keys = ["I1", "I2", "I3"]
+        values = {
+            keys[0]: -552.6911013183604,
+            keys[1]: -647.3623389539209,
+            keys[2]: 619.8804889202258,
+        }
+        total = 0.0
+        for key in keys:
+            total += values[key]
+        reconciled = _values_with_residue(values, keys, total)
+        assert reconciled is not None
+        assert reconciled[keys[-1]] == math.nextafter(values[keys[-1]], -math.inf)
+        assert sum(reconciled[key] for key in keys) == total
+
+    def test_unrepresentable_instrument_cancellation_withholds_aggregate(self) -> None:
+        """Chronological totals are not rewritten to match a sorted instrument sum."""
+        executions = (
+            replace(
+                _exec("I1", 1, 0, "buy", 0.0, 100.0, fee=-1e16),
+                event_time=_T0 + timedelta(seconds=10),
+            ),
+            replace(
+                _exec("I2", 2, 0, "buy", 0.0, 100.0, fee=-1.0),
+                event_time=_T0 + timedelta(seconds=20),
+            ),
+            replace(
+                _exec("I3", 3, 0, "buy", 0.0, 100.0, fee=1e16),
+                event_time=_T0 + timedelta(seconds=30),
+            ),
+        )
+        point = build_pnl_timeline(executions, (), {}, _window(1, 1)).points[0]
+        assert point.realized_pnl is None
+        assert point.fee_pnl is None
+        assert point.accrual_pnl is None
+        assert point.unrealized_pnl is None
+        assert point.net_pnl is None
+        assert _reason_rows(point) == [
+            ("instrument_reconciliation_failed", "untrusted", "global", None)
+        ]
+
+    def test_adjacent_unrealized_instrument_residue_is_reconciled(self) -> None:
+        """A one-ULP instrument correction makes complete unrealized sums exact."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 1000.0),
+            _exec("I2", 2, 0, "buy", 1.0, 1000.0),
+            _exec("I3", 3, 0, "buy", 1.0, 1.0),
+        )
+        marks: MarkMap = {
+            ("I1", _m(0)): 447.30889868163956,
+            ("I2", _m(0)): 352.6376610460791,
+            ("I3", _m(0)): 620.8804889202258,
+        }
+        point = build_pnl_timeline(executions, (), marks, _window(0, 0)).points[0]
+        instrument_values = [contribution.unrealized_pnl for contribution in point.per_instrument]
+        assert point.valuation_status == "complete"
+        assert None not in instrument_values
+        assert instrument_values[-1] == math.nextafter(619.8804889202258, -math.inf)
+        assert (
+            sum(value for value in instrument_values if value is not None) == point.unrealized_pnl
+        )
+        _assert_exact_attribution_sums(point)
+
+    def test_unrepresentable_unrealized_instrument_residue_withholds_point(self) -> None:
+        """A larger sorted-instrument discrepancy is never transported."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 1.0),
+            _exec("I2", 2, 0, "buy", 1.0, 1.0),
+            _exec("I3", 3, 0, "buy", 1.0, 1e9),
+        )
+        marks: MarkMap = {
+            ("I1", _m(0)): 100000000010.1,
+            ("I2", _m(0)): 0.1,
+            ("I3", _m(0)): 0.05,
+        }
+        point = build_pnl_timeline(executions, (), marks, _window(0, 0)).points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.realized_pnl is None
+        assert point.unrealized_pnl is None
+        assert _reason_rows(point) == [
+            ("instrument_reconciliation_failed", "untrusted", "global", None)
+        ]
+
     def test_nonfinite_direct_residue_cannot_be_reconciled(self) -> None:
         """An overflowing final subtraction is rejected rather than transported."""
         keys: list[AttributionKey] = [("manual", None), ("system", None)]
         values = {keys[0]: -1e308, keys[1]: 0.0}
         assert _values_with_residue(values, keys, 1e308) is None
+
+    @pytest.mark.parametrize("total", [1.0, math.inf, -math.inf, math.nan])
+    def test_empty_reconciliation_keys_require_exact_zero(self, total: float) -> None:
+        """An empty exposed grouping cannot reconcile a nonzero or nonfinite total."""
+        values: dict[AttributionKey, float] = {}
+        assert _values_with_residue(values, [], 0.0) == {}
+        assert _values_with_residue(values, [], total) is None
 
     @pytest.mark.parametrize(
         ("values", "total"),
@@ -872,6 +1029,20 @@ class TestRoundTrip:
         assert contribution.fee_pnl == pytest.approx(-1.0)
         assert contribution.unrealized_pnl == 0.0
 
+    def test_incomplete_fee_stamps_its_instrument_cause(self) -> None:
+        """Caller-stamped fee conversion failure withholds the affected point."""
+        execution = replace(
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, fee=float("nan")),
+            fee_incompleteness_reason="fx_conversion_unproven",
+        )
+        point = build_pnl_timeline(
+            (execution,),
+            (),
+            {("I1", _m(0)): 100.0},
+            _window(0, 0),
+        ).points[0]
+        assert _reason_rows(point) == [("fx_conversion_unproven", "untrusted", "instrument", "I1")]
+
 
 class TestIncompleteMarks:
     """Cover the honest-incomplete valuation gates."""
@@ -901,50 +1072,525 @@ class TestIncompleteMarks:
         assert result.points[0].valuation_status == "incomplete"
 
 
-class TestOpeningAnchor:
-    """Cover anchor seeding and the baseline-leakage guard."""
+class TestOpeningDerivation:
+    """Prove shard-aware exact-prefix replay and fail-closed t0 rebasing."""
 
-    def test_opening_plots_change_from_baseline(self) -> None:
-        """Seeded unrealized nets only the change since the anchor baseline."""
+    def test_empty_prefix_produces_valid_empty_opening(self) -> None:
+        """An exact empty prefix needs no marks and seeds no pools."""
+        result = derive_timeline_opening((), {}, _T0)
+        assert result == TimelineOpeningDerivation(
+            opening=TimelineOpening(pools=(), t0=_T0),
+            per_pool=(),
+            raw_opening_unrealized_value=0.0,
+        )
+
+    def test_same_shard_offsetting_prefix_discards_flat_pool(self) -> None:
+        """A true same-shard round trip is flat and needs no t0 mark."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 2.0, 100.0),
+            _exec("I1", 2, 1, "sell", 1.0, 110.0),
+            _exec("I1", 3, 2, "sell", 1.0, 120.0),
+        )
+        result = derive_timeline_opening(executions, {}, _T0)
+        assert result.opening.pools == ()
+        assert result.per_pool == ()
+        assert result.raw_opening_unrealized_value == 0.0
+
+    def test_long_add_and_reduce_retain_average_cost_pool(self) -> None:
+        """Historical VWAP is audited while the build basis becomes the t0 mark."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 2.0, 100.0),
+            _exec("I1", 2, 1, "buy", 2.0, 120.0),
+            _exec("I1", 3, 2, "sell", 1.0, 130.0),
+        )
+        result = derive_timeline_opening(executions, {"I1": 125.0}, _T0)
+        assert result == TimelineOpeningDerivation(
+            opening=TimelineOpening(
+                pools=(_opening_pool("I1", 3.0, 125.0),),
+                t0=_T0,
+            ),
+            per_pool=(
+                OpeningPoolValuation(
+                    instrument_public_id="I1",
+                    shard_key="shard-I1",
+                    exchange="kraken",
+                    position_qty=3.0,
+                    historical_entry_price=110.0,
+                    t0_mark=125.0,
+                    opening_unrealized_value=45.0,
+                ),
+            ),
+            raw_opening_unrealized_value=45.0,
+        )
+
+    def test_short_add_and_reduce_retain_average_cost_pool(self) -> None:
+        """Short additions retain historical VWAP only in the audit."""
+        executions = (
+            _exec("I1", 1, 0, "sell", 2.0, 100.0),
+            _exec("I1", 2, 1, "sell", 2.0, 80.0),
+            _exec("I1", 3, 2, "buy", 1.0, 70.0),
+        )
+        result = derive_timeline_opening(executions, {"I1": 75.0}, _T0)
+        assert result.opening.pools == (_opening_pool("I1", -3.0, 75.0),)
+        assert result.per_pool[0].historical_entry_price == 90.0
+        assert result.per_pool[0].opening_unrealized_value == 45.0
+        assert result.raw_opening_unrealized_value == 45.0
+
+    def test_both_flip_directions_reset_basis_to_overshoot_fill(self) -> None:
+        """Historical audits reflect flips while build seeds use t0 marks."""
+        long_to_short = (
+            _exec("I1", 1, 0, "buy", 2.0, 100.0),
+            _exec("I1", 2, 1, "sell", 3.0, 120.0),
+        )
+        short_to_long = (
+            _exec("I2", 1, 0, "sell", 2.0, 100.0),
+            _exec("I2", 2, 1, "buy", 3.0, 80.0),
+        )
+        short_result = derive_timeline_opening(long_to_short, {"I1": 110.0}, _T0)
+        long_result = derive_timeline_opening(short_to_long, {"I2": 90.0}, _T0)
+        assert short_result.opening.pools == (_opening_pool("I1", -1.0, 110.0),)
+        assert short_result.per_pool[0].historical_entry_price == 120.0
+        assert short_result.raw_opening_unrealized_value == 10.0
+        assert long_result.opening.pools == (_opening_pool("I2", 1.0, 90.0),)
+        assert long_result.per_pool[0].historical_entry_price == 80.0
+        assert long_result.raw_opening_unrealized_value == 10.0
+
+    def test_opposing_shards_survive_zero_net_instrument(self) -> None:
+        """Distinct long/short shards never collapse through instrument netting."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, shard_key="shard-long"),
+            _exec("I1", 2, 0, "sell", 1.0, 120.0, shard_key="shard-short"),
+        )
+        result = derive_timeline_opening(executions, {"I1": 110.0}, _T0)
+        assert result.opening.pools == (
+            _opening_pool("I1", 1.0, 110.0, shard_key="shard-long"),
+            _opening_pool("I1", -1.0, 110.0, shard_key="shard-short"),
+        )
+        assert [audit.opening_unrealized_value for audit in result.per_pool] == [
+            10.0,
+            10.0,
+        ]
+        assert result.raw_opening_unrealized_value == 20.0
+        point = build_pnl_timeline(
+            (),
+            (),
+            {("I1", _T0): 110.0},
+            _window(0, 0),
+            result.opening,
+        ).points[0]
+        assert point.realized_pnl == 0.0
+        assert point.unrealized_pnl == 0.0
+        assert point.net_pnl == 0.0
+        assert point.per_instrument[0].unrealized_pnl == 0.0
+        assert point.attribution[0].unrealized_pnl == 0.0
+        _assert_exact_attribution_sums(point)
+
+    def test_caller_resolved_base_fee_quantity_is_authoritative(self) -> None:
+        """A resolved net quantity survives even when fee valuation is unavailable."""
+        execution = replace(
+            _exec(
+                "I1",
+                1,
+                0,
+                "buy",
+                20.04,
+                4.0,
+                fee=float("nan"),
+                position_delta=20.0,
+            ),
+            fee_incompleteness_reason="fx_conversion_unproven",
+        )
+        result = derive_timeline_opening((execution,), {"I1": 5.0}, _T0)
+        assert result.opening.pools == (_opening_pool("I1", 20.0, 5.0),)
+        assert result.per_pool[0].historical_entry_price == 4.0
+        assert result.raw_opening_unrealized_value == 20.0
+
+    def test_independent_prefix_interleaving_has_deterministic_output(self) -> None:
+        """Cross-exchange interleaving cannot change stable valuation ordering."""
+        first = _exec("I2", 1, 0, "buy", 0.1, 0.2, exchange="walutomat")
+        second = _exec("I1", 1, 0, "sell", 0.2, 0.3, exchange="kraken")
+        marks = {"I1": 0.1, "I2": 0.3}
+        left = derive_timeline_opening((first, second), marks, _T0)
+        right = derive_timeline_opening((second, first), marks, _T0)
+        assert left == right
+        assert [item.instrument_public_id for item in left.per_pool] == ["I1", "I2"]
+        expected_total = 0.0
+        for item in left.per_pool:
+            expected_total += item.opening_unrealized_value
+        assert left.raw_opening_unrealized_value == expected_total
+
+    def test_rebased_t0_components_are_zero_under_cancellation(self) -> None:
+        """Fsum retains ``[1e16, 1, -1e16]`` while public t0 stays rebased."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 1.0),
+            _exec("I2", 2, 0, "buy", 1.0, 1.0),
+            _exec("I3", 3, 0, "sell", 1.0, 1.0),
+        )
+        t0_marks = {"I1": 1e16, "I2": 2.0, "I3": 1e16}
+        derivation = derive_timeline_opening(executions, t0_marks, _T0)
+        marks: MarkMap = {
+            ("I1", _T0): t0_marks["I1"],
+            ("I2", _T0): t0_marks["I2"],
+            ("I3", _T0): t0_marks["I3"],
+        }
+        point = build_pnl_timeline(
+            (),
+            (),
+            marks,
+            _window(0, 0),
+            opening=derivation.opening,
+        ).points[0]
+        assert derivation.raw_opening_unrealized_value == 1.0
+        assert point.realized_pnl == 0.0
+        assert point.unrealized_pnl == 0.0
+        assert point.net_pnl == 0.0
+        assert all(item.unrealized_pnl == 0.0 for item in point.per_instrument)
+        _assert_exact_attribution_sums(point)
+
+    def test_zero_position_delta_is_a_harmless_no_op(self) -> None:
+        """A finite zero inventory delta matches the existing builder contract."""
+        execution = replace(
+            _exec("I1", 1, 0, "buy", 0.0, float("nan"), position_delta=0.0),
+            price_incompleteness_reason="fx_conversion_unproven",
+            fee=float("nan"),
+            fee_incompleteness_reason="fx_conversion_unproven",
+        )
+        result = derive_timeline_opening(
+            (execution,),
+            {},
+            _T0,
+        )
+        assert result.opening.pools == ()
+        assert result.raw_opening_unrealized_value == 0.0
+        assert result.per_pool == ()
+
+    def test_exact_epsilon_quantity_remains_non_flat(self) -> None:
+        """The shared kernel's exact flat boundary survives and requires a mark."""
+        execution = _exec(
+            "I1",
+            1,
+            0,
+            "buy",
+            FLAT_EPSILON,
+            100.0,
+        )
+        result = derive_timeline_opening((execution,), {"I1": 101.0}, _T0)
+        assert result.opening.pools[0].position_qty == FLAT_EPSILON
+
+    @pytest.mark.parametrize(
+        "t0",
+        [
+            datetime(2026, 7, 20, 10, 0),
+            datetime(
+                2026,
+                7,
+                20,
+                12,
+                0,
+                tzinfo=timezone(timedelta(hours=2)),
+            ),
+            datetime(2026, 7, 20, 10, 0, 1, tzinfo=UTC),
+            datetime(2026, 7, 20, 10, 0, 0, 1, tzinfo=UTC),
+        ],
+    )
+    def test_rejects_non_utc_or_non_minute_anchor_time(self, t0: datetime) -> None:
+        """An opening must identify one exact UTC grid minute."""
+        with pytest.raises(ValueError, match="aligned to a UTC minute"):
+            derive_timeline_opening((), {}, t0)
+
+    def test_rejects_invalid_identities_and_scope_order(self) -> None:
+        """Blank identities and non-increasing scope evidence refuse replay."""
+        valid = _exec("I1", 1, 0, "buy", 1.0, 100.0)
+        with pytest.raises(ValueError, match="instrument identity"):
+            derive_timeline_opening((replace(valid, instrument_public_id=""),), {}, _T0)
+        with pytest.raises(ValueError, match="shard identity"):
+            derive_timeline_opening((replace(valid, shard_key=""),), {}, _T0)
+        with pytest.raises(ValueError, match="exchange identity"):
+            derive_timeline_opening((replace(valid, exchange=""),), {}, _T0)
+        with pytest.raises(ValueError, match="increasing positive"):
+            derive_timeline_opening((replace(valid, scope_sequence=0),), {}, _T0)
+        with pytest.raises(ValueError, match="increasing positive"):
+            derive_timeline_opening((valid, replace(valid, order_public_id="order-2")), {}, _T0)
+
+    def test_rejects_instrument_or_shard_identity_spanning_scopes(self) -> None:
+        """One durable pool identity cannot span instruments or venues."""
+        executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, exchange="kraken"),
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, exchange="walutomat"),
+        )
+        with pytest.raises(ValueError, match="multiple exchanges"):
+            derive_timeline_opening(executions, {}, _T0)
+        crossed_shard = (
+            _exec("I1", 1, 0, "buy", 0.0, 1.0, shard_key="shared"),
+            _exec("I2", 2, 0, "buy", 0.0, 1.0, shard_key="shared"),
+        )
+        with pytest.raises(ValueError, match="shard cannot span"):
+            derive_timeline_opening(crossed_shard, {}, _T0)
+
+    def test_rejects_invalid_side_size_and_position_delta(self) -> None:
+        """Malformed fill dimensions never enter average-cost arithmetic."""
+        valid = _exec("I1", 1, 0, "buy", 1.0, 100.0)
+        invalid_sides = (
+            replace(valid, side="hold"),
+            replace(valid, side="buy", position_delta=-1.0),
+            replace(valid, side="sell", position_delta=1.0),
+        )
+        for execution in invalid_sides:
+            with pytest.raises(ValueError, match="side"):
+                derive_timeline_opening((execution,), {}, _T0)
+        invalid_sizes = (
+            replace(valid, size=-1.0),
+            replace(valid, size=float("nan")),
+        )
+        for execution in invalid_sizes:
+            with pytest.raises(ValueError, match="size"):
+                derive_timeline_opening((execution,), {}, _T0)
+        invalid_deltas = (replace(valid, position_delta=float("inf")),)
+        for execution in invalid_deltas:
+            with pytest.raises(ValueError, match="position delta"):
+                derive_timeline_opening((execution,), {}, _T0)
+
+    def test_rejects_numeric_and_causal_price_failures(self) -> None:
+        """Non-positive, non-finite, or causally untrusted prices refuse replay."""
+        valid = _exec("I1", 1, 0, "buy", 1.0, 100.0)
+        invalid_prices = (0.0, -1.0, float("nan"), float("inf"))
+        for price in invalid_prices:
+            with pytest.raises(ValueError, match="price must be positive"):
+                derive_timeline_opening((replace(valid, price=price),), {}, _T0)
+        stamped = replace(valid, price_incompleteness_reason="fx_conversion_unproven")
+        with pytest.raises(ValueError, match="provenance"):
+            derive_timeline_opening((stamped,), {}, _T0)
+        untrusted_reasons: dict[str, tuple[PnlIncompletenessReason, ...]] = {
+            "I1": ("execution_price_provenance_unproven",)
+        }
+        with pytest.raises(ValueError, match="provenance"):
+            derive_timeline_opening(
+                (valid,),
+                {},
+                _T0,
+                untrusted_reasons,
+            )
+
+    def test_rejects_non_finite_pool_arithmetic(self) -> None:
+        """Quantity overflow and VWAP overflow cannot become an opening seed."""
+        quantity_overflow = (
+            _exec("I1", 1, 0, "buy", 1e308, 1.0),
+            _exec("I1", 2, 0, "buy", 1e308, 1.0),
+        )
+        with pytest.raises(ValueError, match="quantity arithmetic"):
+            derive_timeline_opening(quantity_overflow, {}, _T0)
+        basis_overflow = (
+            _exec("I1", 1, 0, "buy", 1e308, 2.0),
+            _exec("I1", 2, 0, "buy", 1.0, 1.0),
+        )
+        with pytest.raises(ValueError, match="cost basis arithmetic"):
+            derive_timeline_opening(basis_overflow, {}, _T0)
+
+    @pytest.mark.parametrize(
+        "mark",
+        [None, float("nan"), float("inf"), 0.0, -10.0],
+    )
+    def test_rejects_missing_or_invalid_surviving_mark(self, mark: float | None) -> None:
+        """Every surviving pool needs a positive finite mark at exactly t0."""
+        execution = _exec("I1", 1, 0, "buy", 1.0, 100.0)
+        with pytest.raises(ValueError, match="positive finite t0 mark"):
+            derive_timeline_opening((execution,), {"I1": mark}, _T0)
+
+    def test_rejects_instrument_and_total_unrealized_overflow(self) -> None:
+        """Finite inputs must still produce finite per-pool and aggregate values."""
+        one = _exec("I1", 1, 0, "buy", 1e308, 1.0)
+        with pytest.raises(ValueError, match="pool unrealized"):
+            derive_timeline_opening((one,), {"I1": 3.0}, _T0)
+        two = _exec("I2", 1, 0, "buy", 1e308, 1.0, exchange="walutomat")
+        with pytest.raises(ValueError, match="total unrealized"):
+            derive_timeline_opening((one, two), {"I1": 2.0, "I2": 2.0}, _T0)
+
+    def test_rejects_nonfinite_fsum_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-finite aggregate result is refused even after finite pool audits."""
+
+        def nonfinite_fsum(_values: Iterable[float]) -> float:
+            """Stand in for a corrupt aggregate result."""
+            return math.inf
+
+        monkeypatch.setattr(math, "fsum", nonfinite_fsum)
+        with pytest.raises(ValueError, match="total unrealized"):
+            derive_timeline_opening((), {}, _T0)
+
+
+class TestOpeningAnchor:
+    """Cover rebased close mathematics and opening-pool validation."""
+
+    @staticmethod
+    def _long_opening(quantity: float = 2.0) -> TimelineOpening:
+        """Return a long seed rebased from historical 100 to t0 mark 110."""
+        return derive_timeline_opening(
+            (_exec("I1", 1, -1, "buy", quantity, 100.0),),
+            {"I1": 110.0},
+            _T0,
+        ).opening
+
+    def test_opening_plots_change_from_rebased_entry(self) -> None:
+        """The public unrealized component is directly activation-relative."""
         opening = TimelineOpening(
-            positions={"I1": OpeningPosition(position_qty=1.0, entry_price=100.0)},
-            opening_unrealized_value=5.0,
+            pools=(_opening_pool("I1", 1.0, 105.0),),
             t0=_m(-10),
         )
         marks: MarkMap = {("I1", _m(0)): 110.0}
         result = build_pnl_timeline((), (), marks, _window(0, 0), opening=opening)
         point = result.points[0]
-        assert point.unrealized_pnl == pytest.approx(10.0)
+        assert point.unrealized_pnl == pytest.approx(5.0)
         assert point.net_pnl == pytest.approx(5.0)
+
+    def test_t0_drops_equal_accrual_and_precedes_post_watermark_replay(self) -> None:
+        """The exact activation point exposes zero before any later-ledger flow."""
+        execution = _exec("I1", 1, 0, "buy", 1.0, 100.0, fee=2.0)
+        opening = TimelineOpening(
+            pools=(_opening_pool("I1", 1.0, 100.0),),
+            t0=_T0,
+        )
+        points = build_pnl_timeline(
+            (execution,),
+            (TimelineAccrual("I1", _T0, 3.0),),
+            {("I1", _m(1)): 100.0},
+            _window(0, 1),
+            opening,
+        ).points
+        assert (
+            points[0].realized_pnl,
+            points[0].fee_pnl,
+            points[0].accrual_pnl,
+            points[0].unrealized_pnl,
+            points[0].net_pnl,
+        ) == (0.0, 0.0, 0.0, 0.0, 0.0)
+        _assert_exact_attribution_sums(points[0])
+        assert points[1].fee_pnl == -2.0
+        assert points[1].accrual_pnl == 0.0
+        assert points[1].net_pnl == -2.0
+        _assert_exact_attribution_sums(points[1])
+
+    def test_partial_close_releases_only_since_activation_pnl(self) -> None:
+        """A partial close splits t0-relative P&L into realized and unrealized."""
+        closing = _exec("I1", 2, 1, "sell", 1.0, 120.0)
+        points = build_pnl_timeline(
+            (closing,),
+            (),
+            {("I1", _m(0)): 110.0, ("I1", _m(1)): 120.0},
+            _window(0, 1),
+            self._long_opening(),
+        ).points
+        assert (
+            points[0].realized_pnl,
+            points[0].unrealized_pnl,
+            points[0].net_pnl,
+        ) == (0.0, 0.0, 0.0)
+        assert (
+            points[1].realized_pnl,
+            points[1].unrealized_pnl,
+            points[1].net_pnl,
+        ) == (10.0, 10.0, 20.0)
+        _assert_exact_attribution_sums(points[1])
+
+    def test_full_close_moves_all_since_activation_pnl_to_realized(self) -> None:
+        """A full close has no hidden baseline after the shard becomes flat."""
+        closing = _exec("I1", 2, 1, "sell", 2.0, 120.0)
+        point = build_pnl_timeline(
+            (closing,),
+            (),
+            {},
+            _window(1, 1),
+            self._long_opening(),
+        ).points[0]
+        assert point.realized_pnl == 20.0
+        assert point.unrealized_pnl == 0.0
+        assert point.net_pnl == 20.0
+        _assert_exact_attribution_sums(point)
+
+    def test_same_side_add_then_reduce_uses_rebased_vwap(self) -> None:
+        """New inventory VWAPs with t0-valued legacy inventory before reduction."""
+        executions = (
+            _exec("I1", 2, 1, "buy", 1.0, 120.0),
+            _exec("I1", 3, 2, "sell", 1.0, 130.0),
+        )
+        point = build_pnl_timeline(
+            executions,
+            (),
+            {("I1", _m(2)): 130.0},
+            _window(2, 2),
+            self._long_opening(1.0),
+        ).points[0]
+        assert point.realized_pnl == 15.0
+        assert point.unrealized_pnl == 15.0
+        assert point.net_pnl == 30.0
+        _assert_exact_attribution_sums(point)
+
+    def test_flip_closes_rebased_legacy_then_opens_overshoot(self) -> None:
+        """A flip realizes the legacy t0 move and marks only the new side."""
+        flip = _exec("I1", 2, 1, "sell", 1.5, 120.0)
+        point = build_pnl_timeline(
+            (flip,),
+            (),
+            {("I1", _m(1)): 115.0},
+            _window(1, 1),
+            self._long_opening(1.0),
+        ).points[0]
+        assert point.realized_pnl == 10.0
+        assert point.unrealized_pnl == 2.5
+        assert point.net_pnl == 12.5
+        _assert_exact_attribution_sums(point)
+
+    def test_short_to_long_flip_is_symmetric_after_rebase(self) -> None:
+        """A short legacy pool closes at t0 basis before its long overshoot opens."""
+        opening = derive_timeline_opening(
+            (_exec("I1", 1, -1, "sell", 1.0, 100.0),),
+            {"I1": 90.0},
+            _T0,
+        ).opening
+        flip = _exec("I1", 2, 1, "buy", 1.5, 80.0)
+        point = build_pnl_timeline(
+            (flip,),
+            (),
+            {("I1", _m(1)): 85.0},
+            _window(1, 1),
+            opening,
+        ).points[0]
+        assert point.realized_pnl == 10.0
+        assert point.unrealized_pnl == 2.5
+        assert point.net_pnl == 12.5
+        _assert_exact_attribution_sums(point)
+
+    def test_opposing_nonflat_shards_require_instrument_mark(self) -> None:
+        """Gross exposure cannot look flat because shard quantities net to zero."""
+        opening = TimelineOpening(
+            pools=(
+                _opening_pool("I1", 1.0, 110.0, shard_key="long"),
+                _opening_pool("I1", -1.0, 110.0, shard_key="short"),
+            ),
+            t0=_T0,
+        )
+        point = build_pnl_timeline((), (), {}, _window(1, 1), opening).points[0]
+        assert _reason_rows(point) == [("mark_unavailable", "mark_incomplete", "instrument", "I1")]
 
     def test_seeded_position_without_entry_is_incomplete(self) -> None:
         """A held seed whose entry is unknown cannot be valued."""
         opening = TimelineOpening(
-            positions={"I1": OpeningPosition(position_qty=1.0, entry_price=None)},
-            opening_unrealized_value=0.0,
+            pools=(_opening_pool("I1", 1.0, None),),
             t0=_m(-10),
         )
         marks: MarkMap = {("I1", _m(0)): 110.0}
         result = build_pnl_timeline((), (), marks, _window(0, 0), opening=opening)
         assert result.points[0].valuation_status == "incomplete"
 
-    def test_nonfinite_activation_baseline_stamps_global_cause(self) -> None:
-        """The baseline finiteness gate carries its exact global reason."""
+    @pytest.mark.parametrize(
+        "entry_price",
+        [0.0, -1.0, math.inf, -math.inf, math.nan],
+    )
+    def test_nonpositive_or_nonfinite_seeded_entry_stamps_cost_basis_cause(
+        self,
+        entry_price: float,
+    ) -> None:
+        """A held seed accepts only a positive finite rebased entry."""
         opening = TimelineOpening(
-            positions={},
-            opening_unrealized_value=float("nan"),
-            t0=_m(0),
-        )
-        point = build_pnl_timeline((), (), {}, _window(0, 0), opening=opening).points[0]
-        assert _reason_rows(point) == [
-            ("activation_baseline_non_finite", "untrusted", "global", None)
-        ]
-
-    def test_nonfinite_seeded_entry_stamps_cost_basis_cause(self) -> None:
-        """A held finite-quantity seed retains its detected unusable basis cause."""
-        opening = TimelineOpening(
-            positions={"I1": OpeningPosition(position_qty=1.0, entry_price=float("nan"))},
-            opening_unrealized_value=0.0,
+            pools=(_opening_pool("I1", 1.0, entry_price),),
             t0=_m(0),
         )
         point = build_pnl_timeline(
@@ -957,6 +1603,126 @@ class TestOpeningAnchor:
         assert _reason_rows(point) == [
             ("cost_basis_unavailable", "mark_incomplete", "instrument", "I1")
         ]
+
+    def test_same_side_add_cannot_cleanse_invalid_seeded_basis(self) -> None:
+        """A positive computed VWAP cannot erase an invalid opening basis cause."""
+        opening = TimelineOpening(
+            pools=(_opening_pool("I1", 1.0, 0.0),),
+            t0=_m(0),
+        )
+        result = build_pnl_timeline(
+            (_exec("I1", 1, 1, "buy", 1.0, 100.0),),
+            (),
+            {("I1", _m(1)): 100.0},
+            _window(0, 1),
+            opening,
+        )
+        assert all(point.valuation_status == "incomplete" for point in result.points)
+        assert _reason_rows(result.points[1]) == [
+            ("cost_basis_unavailable", "mark_incomplete", "instrument", "I1")
+        ]
+
+    def test_opening_rejects_duplicate_unstable_and_cross_scope_pools(self) -> None:
+        """One stable tuple cannot duplicate or contradict durable pool identity."""
+        pool = _opening_pool("I1", 1.0, 100.0, shard_key="a")
+        with pytest.raises(ValueError, match="stably ordered"):
+            TimelineOpening(
+                pools=(
+                    _opening_pool("I1", 1.0, 100.0, shard_key="b"),
+                    pool,
+                ),
+                t0=_T0,
+            )
+        with pytest.raises(ValueError, match="unique instrument and shard"):
+            TimelineOpening(pools=(pool, pool), t0=_T0)
+        with pytest.raises(ValueError, match="shard cannot span"):
+            TimelineOpening(
+                pools=(
+                    pool,
+                    _opening_pool("I2", 1.0, 100.0, shard_key="a"),
+                ),
+                t0=_T0,
+            )
+        with pytest.raises(ValueError, match="instrument cannot span"):
+            TimelineOpening(
+                pools=(
+                    pool,
+                    _opening_pool(
+                        "I1",
+                        1.0,
+                        100.0,
+                        shard_key="b",
+                        exchange="walutomat",
+                    ),
+                ),
+                t0=_T0,
+            )
+
+    @pytest.mark.parametrize(
+        "pool",
+        [
+            OpeningPool("", "shard", "kraken", 1.0, 100.0),
+            OpeningPool("I1", "", "kraken", 1.0, 100.0),
+            OpeningPool("I1", "shard", "", 1.0, 100.0),
+        ],
+    )
+    def test_opening_rejects_empty_pool_identity(self, pool: OpeningPool) -> None:
+        """Every serialized seed carries all three durable scope identities."""
+        with pytest.raises(ValueError, match="identities must be non-empty"):
+            TimelineOpening(pools=(pool,), t0=_T0)
+
+    @pytest.mark.parametrize(
+        "t0",
+        [
+            _T0.astimezone(timezone(timedelta(hours=1))),
+            _T0.replace(second=1),
+            _T0.replace(microsecond=1),
+        ],
+    )
+    def test_opening_requires_an_exact_utc_grid_minute(self, t0: datetime) -> None:
+        """A manually constructed seed cannot bypass activation-time validation."""
+        with pytest.raises(ValueError, match="aligned to a UTC minute"):
+            TimelineOpening(pools=(), t0=t0)
+
+    @pytest.mark.parametrize(
+        "execution",
+        [
+            replace(_exec("I1", 1, 0, "buy", 1.0, 100.0), instrument_public_id=""),
+            replace(_exec("I1", 1, 0, "buy", 1.0, 100.0), shard_key=""),
+            replace(_exec("I1", 1, 0, "buy", 1.0, 100.0), exchange=""),
+        ],
+    )
+    def test_builder_rejects_empty_execution_pool_identity(
+        self,
+        execution: TimelineExecution,
+    ) -> None:
+        """Post-anchor replay requires the same durable pool identities as its seed."""
+        with pytest.raises(ValueError, match="pool identities must be non-empty"):
+            build_pnl_timeline((execution,), (), {}, _window(0, 0))
+
+    def test_builder_rejects_execution_pool_scope_collisions(self) -> None:
+        """A shard or instrument cannot change its durable scope during replay."""
+        crossed_shard = (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, shard_key="shared"),
+            _exec("I2", 2, 0, "buy", 1.0, 100.0, shard_key="shared"),
+        )
+        with pytest.raises(ValueError, match="shard cannot span"):
+            build_pnl_timeline(crossed_shard, (), {}, _window(0, 0))
+        crossed_instrument = (
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, shard_key="kraken"),
+            _exec(
+                "I1",
+                1,
+                0,
+                "buy",
+                1.0,
+                100.0,
+                shard_key="walutomat",
+                exchange="walutomat",
+            ),
+        )
+        with pytest.raises(ValueError, match="instrument cannot span"):
+            build_pnl_timeline(crossed_instrument, (), {}, _window(0, 0))
 
 
 class TestShortSide:
@@ -990,6 +1756,235 @@ class TestAccruals:
         accruals = (TimelineAccrual(instrument_public_id="I1", accrued_at=_m(1), amount_usd=3.0),)
         result = build_pnl_timeline((), accruals, {}, _window())
         assert result.points[0].per_instrument == ()
+
+    def test_instrument_accrual_combines_current_weights_from_all_shards(self) -> None:
+        """A shardless accrual allocates over the instrument's gross pool weights."""
+        executions = (
+            replace(
+                _exec("I1", 1, 0, "buy", 1.0, 100.0, shard_key="manual-shard"),
+                event_time=_m(0) + timedelta(seconds=10),
+            ),
+            replace(
+                _exec("I1", 2, 0, "buy", 3.0, 100.0, shard_key="system-shard"),
+                event_time=_m(0) + timedelta(seconds=20),
+            ),
+        )
+        lineage = {
+            executions[0].order_public_id: TimelineExecutionLineage(
+                "rest",
+                None,
+                None,
+                "live",
+                None,
+            ),
+            executions[1].order_public_id: TimelineExecutionLineage(
+                "strategy",
+                None,
+                "signal-1",
+                "live",
+                "momentum",
+            ),
+        }
+        point = build_pnl_timeline(
+            executions,
+            (TimelineAccrual("I1", _m(0) + timedelta(seconds=30), 4.0),),
+            {("I1", _m(1)): 110.0},
+            _window(1, 1),
+            lineage=lineage,
+        ).points[0]
+        buckets = {(bucket.origin, bucket.strategy_name): bucket for bucket in point.attribution}
+        assert buckets[("manual", None)].accrual_pnl == -1.0
+        assert buckets[("system", "momentum")].accrual_pnl == -3.0
+        assert buckets[("manual", None)].unrealized_pnl == 10.0
+        assert buckets[("system", "momentum")].unrealized_pnl == 30.0
+        assert point.unrealized_pnl == 40.0
+        _assert_exact_attribution_sums(point)
+
+    def test_exact_time_merge_uses_only_strictly_earlier_fill_weights(self) -> None:
+        """An intra-minute accrual precedes a later fill instead of seeing minute-end state."""
+        manual = replace(
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, shard_key="manual-shard"),
+            event_time=_T0 + timedelta(seconds=10),
+        )
+        system = replace(
+            _exec("I1", 2, 0, "buy", 3.0, 100.0, shard_key="system-shard"),
+            event_time=_T0 + timedelta(seconds=40),
+        )
+        lineage = {
+            manual.order_public_id: TimelineExecutionLineage("rest", None, None, "live", None),
+            system.order_public_id: TimelineExecutionLineage(
+                "strategy",
+                None,
+                "signal-1",
+                "live",
+                "momentum",
+            ),
+        }
+        point = build_pnl_timeline(
+            (manual, system),
+            (TimelineAccrual("I1", _T0 + timedelta(seconds=30), 4.0),),
+            {("I1", _m(1)): 100.0},
+            _window(1, 1),
+            lineage=lineage,
+        ).points[0]
+        buckets = {(bucket.origin, bucket.strategy_name): bucket for bucket in point.attribution}
+        assert buckets[("manual", None)].accrual_pnl == -4.0
+        assert buckets[("system", "momentum")].accrual_pnl == 0.0
+        assert point.accrual_pnl == -4.0
+        _assert_exact_attribution_sums(point)
+
+    def test_equal_time_position_change_makes_accrual_unattributed(self) -> None:
+        """Same-instant ownership ambiguity preserves value but refuses attribution."""
+        manual = replace(
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, shard_key="manual-shard"),
+            event_time=_T0 + timedelta(seconds=10),
+        )
+        system = replace(
+            _exec("I1", 2, 0, "buy", 3.0, 100.0, shard_key="system-shard"),
+            event_time=_T0 + timedelta(seconds=30),
+        )
+        lineage = {
+            manual.order_public_id: TimelineExecutionLineage("rest", None, None, "live", None),
+            system.order_public_id: TimelineExecutionLineage(
+                "strategy",
+                None,
+                "signal-1",
+                "live",
+                "momentum",
+            ),
+        }
+        point = build_pnl_timeline(
+            (manual, system),
+            (TimelineAccrual("I1", _T0 + timedelta(seconds=30), 4.0),),
+            {("I1", _m(1)): 100.0},
+            _window(1, 1),
+            lineage=lineage,
+        ).points[0]
+        buckets = {(bucket.origin, bucket.strategy_name): bucket for bucket in point.attribution}
+        assert point.accrual_pnl == -4.0
+        assert buckets[("manual", None)].accrual_pnl == 0.0
+        assert buckets[("system", "momentum")].accrual_pnl == 0.0
+        assert buckets[("unattributed", None)].accrual_pnl == -4.0
+        _assert_exact_attribution_sums(point)
+
+    def test_clamped_position_change_makes_effective_time_accrual_unattributed(
+        self,
+    ) -> None:
+        """A regressed fill participates in its clamped exact-time ambiguity batch."""
+        manual = replace(
+            _exec("I1", 1, 0, "buy", 1.0, 100.0),
+            event_time=_T0 + timedelta(seconds=10),
+        )
+        no_op = replace(
+            _exec("I1", 2, 0, "buy", 0.0, 100.0, position_delta=0.0),
+            event_time=_T0 + timedelta(seconds=30),
+        )
+        system = replace(
+            _exec("I1", 3, 0, "buy", 3.0, 100.0),
+            event_time=_T0 + timedelta(seconds=20),
+        )
+        lineage = {
+            manual.order_public_id: TimelineExecutionLineage(
+                "rest",
+                None,
+                None,
+                "live",
+                None,
+            ),
+            system.order_public_id: TimelineExecutionLineage(
+                "strategy",
+                None,
+                "signal-1",
+                "live",
+                "momentum",
+            ),
+        }
+        point = build_pnl_timeline(
+            (manual, no_op, system),
+            (TimelineAccrual("I1", _T0 + timedelta(seconds=30), 4.0),),
+            {("I1", _m(1)): 100.0},
+            _window(1, 1),
+            lineage=lineage,
+        ).points[0]
+        buckets = {(bucket.origin, bucket.strategy_name): bucket for bucket in point.attribution}
+        assert point.valuation_status == "complete"
+        assert point.accrual_pnl == -4.0
+        assert buckets[("manual", None)].accrual_pnl == 0.0
+        assert buckets[("system", "momentum")].accrual_pnl == 0.0
+        assert buckets[("unattributed", None)].accrual_pnl == -4.0
+        _assert_exact_attribution_sums(point)
+
+    def test_equal_time_zero_delta_does_not_create_ownership_ambiguity(self) -> None:
+        """A no-op fill at the accrual instant leaves strictly earlier weights usable."""
+        manual = replace(
+            _exec("I1", 1, 0, "buy", 1.0, 100.0, shard_key="manual-shard"),
+            event_time=_T0 + timedelta(seconds=10),
+        )
+        no_op = replace(
+            _exec(
+                "I1",
+                2,
+                0,
+                "buy",
+                0.0,
+                100.0,
+                position_delta=0.0,
+                shard_key="system-shard",
+            ),
+            event_time=_T0 + timedelta(seconds=30),
+        )
+        lineage = {
+            manual.order_public_id: TimelineExecutionLineage("rest", None, None, "live", None),
+            no_op.order_public_id: TimelineExecutionLineage(
+                "strategy",
+                None,
+                "signal-1",
+                "live",
+                "momentum",
+            ),
+        }
+        point = build_pnl_timeline(
+            (manual, no_op),
+            (TimelineAccrual("I1", _T0 + timedelta(seconds=30), 4.0),),
+            {("I1", _m(1)): 100.0},
+            _window(1, 1),
+            lineage=lineage,
+        ).points[0]
+        buckets = {(bucket.origin, bucket.strategy_name): bucket for bucket in point.attribution}
+        assert buckets[("manual", None)].accrual_pnl == -4.0
+        assert buckets[("system", "momentum")].accrual_pnl == 0.0
+        assert ("unattributed", None) not in buckets
+        _assert_exact_attribution_sums(point)
+
+    def test_equal_time_fills_retain_exchange_scope_sequence_order(self) -> None:
+        """Equal-time pool replay follows scope sequence even when input is reversed."""
+        event_time = _T0 + timedelta(seconds=30)
+        executions = (
+            replace(_exec("I1", 3, 0, "sell", 1.0, 150.0), event_time=event_time),
+            replace(_exec("I1", 2, 0, "buy", 1.0, 200.0), event_time=event_time),
+            replace(_exec("I1", 1, 0, "buy", 1.0, 100.0), event_time=event_time),
+        )
+        point = build_pnl_timeline(
+            executions,
+            (),
+            {("I1", _m(1)): 160.0},
+            _window(1, 1),
+        ).points[0]
+        assert point.realized_pnl == 0.0
+        assert point.unrealized_pnl == 10.0
+        assert point.net_pnl == 10.0
+        _assert_exact_attribution_sums(point)
+
+    def test_incomplete_accrual_stamps_its_instrument_cause(self) -> None:
+        """Caller-stamped accrual conversion failure withholds the affected point."""
+        accrual = TimelineAccrual(
+            "I1",
+            _m(0),
+            float("nan"),
+            incompleteness_reason="fx_conversion_unproven",
+        )
+        point = build_pnl_timeline((), (accrual,), {}, _window(0, 0)).points[0]
+        assert _reason_rows(point) == [("fx_conversion_unproven", "untrusted", "instrument", "I1")]
 
 
 class TestRegressionGuard:
@@ -1032,6 +2027,166 @@ class TestRegressionGuard:
         assert result.points[0].valuation_status == "complete"
         assert result.points[3].valuation_status == "complete"
         assert result.points[4].valuation_status == "complete"
+
+    def test_event_time_regression_clock_is_independent_per_shard(self) -> None:
+        """A later-listed second shard may have an earlier event time without taint."""
+        executions = (
+            _exec("I1", 1, 2, "buy", 1.0, 100.0, shard_key="shard-a"),
+            _exec("I1", 2, 0, "sell", 1.0, 100.0, shard_key="shard-b"),
+        )
+        point = build_pnl_timeline(
+            executions,
+            (),
+            {("I1", _m(0)): 100.0},
+            _window(0, 0),
+        ).points[0]
+        assert point.valuation_status == "complete"
+        assert point.incompleteness_reasons == ()
+        assert point.unrealized_pnl == 0.0
+
+    def test_future_only_regressed_pool_stays_outside_valuation_index(self) -> None:
+        """Regression proof retains future rows without unbudgeted valuation pools."""
+        executions = (
+            _exec("I1", 1, 10, "buy", 1.0, 100.0, shard_key="future-shard"),
+            _exec("I1", 2, 0, "sell", 1.0, 100.0, shard_key="future-shard"),
+        )
+
+        prepared, shadows = _prepare_executions(executions)
+        pool_index = _valuation_pool_index({}, prepared, _m(0))
+
+        assert pool_index == {}
+        assert [(shadow.start, shadow.end) for shadow in shadows] == [(_m(0), _m(10))]
+
+    def test_subminute_regression_shadow_rounds_to_grid_boundaries(self) -> None:
+        """Half-open shadow bounds activate only intersecting valuation minutes."""
+        executions = (
+            replace(
+                _exec("I1", 1, 2, "buy", 1.0, 100.0),
+                event_time=_m(2) + timedelta(seconds=30),
+            ),
+            replace(
+                _exec("I1", 2, 0, "sell", 1.0, 100.0),
+                event_time=_m(0) + timedelta(seconds=30),
+            ),
+        )
+        result = build_pnl_timeline(
+            executions,
+            (),
+            {("I1", _m(3)): 100.0},
+            _window(0, 3),
+        )
+
+        assert [point.valuation_status for point in result.points] == [
+            "complete",
+            "incomplete",
+            "incomplete",
+            "complete",
+        ]
+
+    def test_overlapping_shadows_emit_the_smallest_active_trigger(self) -> None:
+        """Boundary changes select one real trigger and restore its predecessor."""
+        executions = (
+            _exec("I2", 1, 3, "buy", 1.0, 100.0),
+            _exec("I2", 2, 0, "sell", 1.0, 100.0),
+            _exec("I1", 3, 2, "buy", 1.0, 100.0),
+            _exec("I1", 4, 1, "sell", 1.0, 100.0),
+        )
+
+        result = build_pnl_timeline(executions, (), {}, _window(0, 3))
+
+        assert [_reason_rows(point) for point in result.points] == [
+            [("scope_order_regression", "untrusted", "global", "I2")],
+            [("scope_order_regression", "untrusted", "global", "I1")],
+            [("scope_order_regression", "untrusted", "global", "I2")],
+            [],
+        ]
+
+    def test_same_trigger_shadow_intervals_merge_without_extra_changes(self) -> None:
+        """Reference counts retain one trigger across nested interval boundaries."""
+        reason = PnlIncompletenessReasonEntry(
+            reason="scope_order_regression",
+            withholding_tier="untrusted",
+            withholding_scope="global",
+            trigger_instrument_public_id="I1",
+        )
+        shadows = (
+            _RegressionShadow(_m(0), _m(3), reason),
+            _RegressionShadow(_m(1), _m(2), reason),
+        )
+
+        assert _regression_shadow_trigger_changes(shadows, _m(0), 4) == {
+            0: "I1",
+            3: None,
+        }
+
+    def test_shadow_without_trigger_is_rejected(self) -> None:
+        """The sparse schedule refuses an impossible anonymous regression."""
+        shadow = _RegressionShadow(
+            _m(0),
+            _m(1),
+            PnlIncompletenessReasonEntry(
+                reason="scope_order_regression",
+                withholding_tier="untrusted",
+                withholding_scope="global",
+                trigger_instrument_public_id=None,
+            ),
+        )
+
+        with pytest.raises(ValueError, match="requires a triggering instrument"):
+            _regression_shadow_deltas((shadow,), _m(0), 2)
+
+    def test_thousand_distinct_future_pools_use_bounded_shadow_changes(self) -> None:
+        """A 24-hour window emits one trigger without minute-instrument fan-out."""
+        executions = tuple(
+            execution
+            for index in range(1_000)
+            for execution in (
+                _exec(
+                    f"I{index:04d}",
+                    2 * index + 1,
+                    1_440,
+                    "buy",
+                    1.0,
+                    100.0,
+                    shard_key=f"future-shard-{index}",
+                ),
+                _exec(
+                    f"I{index:04d}",
+                    2 * index + 2,
+                    0,
+                    "sell",
+                    1.0,
+                    100.0,
+                    shard_key=f"future-shard-{index}",
+                ),
+            )
+        )
+
+        prepared, shadows = _prepare_executions(executions)
+        pool_index = _valuation_pool_index({}, prepared, _m(1_439))
+        deltas = _regression_shadow_deltas(shadows, _m(0), 1_440)
+        trigger_changes = _regression_shadow_trigger_changes(
+            shadows,
+            _m(0),
+            1_440,
+        )
+        result = build_pnl_timeline(
+            executions,
+            (),
+            {},
+            _window(0, 1_439),
+        )
+
+        assert len(shadows) == 1_000
+        assert pool_index == {}
+        assert set(deltas) == {0, 1_440}
+        assert sum(len(bucket) for bucket in deltas.values()) == 2_000
+        assert trigger_changes == {0: "I0000", 1_440: None}
+        assert len(result.points) == 1_440
+        assert {tuple(_reason_rows(point)) for point in result.points} == {
+            (("scope_order_regression", "untrusted", "global", "I0000"),)
+        }
+        assert all(point.per_instrument == () for point in result.points)
 
 
 class TestDownsampling:
@@ -1223,11 +2378,10 @@ class TestUntrustedCumulatives:
         seed guard distinguishes an unknown-cost holding from a flat placeholder.
         """
         opening = TimelineOpening(
-            positions={
-                "I1": OpeningPosition(position_qty=1.0, entry_price=None),
-                "I2": OpeningPosition(position_qty=0.0, entry_price=None),
-            },
-            opening_unrealized_value=5.0,
+            pools=(
+                _opening_pool("I1", 1.0, None),
+                _opening_pool("I2", 0.0, None),
+            ),
             t0=_m(0),
         )
         result = build_pnl_timeline((), (), {("I1", _m(0)): 105.0}, _window(), opening)
@@ -1246,8 +2400,7 @@ class TestUntrustedCumulatives:
         later point stays untrusted even though the pool is now flat.
         """
         opening = TimelineOpening(
-            positions={"I1": OpeningPosition(position_qty=1.0, entry_price=None)},
-            opening_unrealized_value=5.0,
+            pools=(_opening_pool("I1", 1.0, None),),
             t0=_m(0),
         )
         executions = (_exec("I1", 1, 1, "sell", 1.0, 110.0),)
@@ -1266,8 +2419,7 @@ class TestUntrustedCumulatives:
         untrusted.
         """
         opening = TimelineOpening(
-            positions={"I1": OpeningPosition(position_qty=1.0, entry_price=None)},
-            opening_unrealized_value=5.0,
+            pools=(_opening_pool("I1", 1.0, None),),
             t0=_m(0),
         )
         executions = (_exec("I1", 1, 1, "buy", 1.0, 100.0),)
@@ -1297,7 +2449,7 @@ class TestActivationBaseline:
         untrusted), where the dropped pre-t0 accrual must leave the accrual
         component and net P&L at zero.
         """
-        opening = TimelineOpening(positions={}, opening_unrealized_value=0.0, t0=_m(2))
+        opening = TimelineOpening(pools=(), t0=_m(2))
         accruals = (TimelineAccrual(instrument_public_id="I1", accrued_at=_m(1), amount_usd=3.0),)
         result = build_pnl_timeline((), accruals, {}, _window(), opening)
         assert result.points[2].accrual_pnl == 0.0
@@ -1306,7 +2458,7 @@ class TestActivationBaseline:
 
     def test_post_t0_accrual_is_kept(self) -> None:
         """An accrual at or after the anchor t0 contributes normally."""
-        opening = TimelineOpening(positions={}, opening_unrealized_value=0.0, t0=_m(0))
+        opening = TimelineOpening(pools=(), t0=_m(0))
         accruals = (TimelineAccrual(instrument_public_id="I1", accrued_at=_m(1), amount_usd=3.0),)
         result = build_pnl_timeline((), accruals, {}, _window(), opening)
         assert result.points[0].accrual_pnl == 0.0
@@ -1324,8 +2476,7 @@ class TestUntrustedEdgeCases:
         boundary-sized close would flush the position flat and escape the taint.
         """
         opening = TimelineOpening(
-            positions={"I1": OpeningPosition(position_qty=2 * FLAT_EPSILON, entry_price=None)},
-            opening_unrealized_value=0.0,
+            pools=(_opening_pool("I1", 2 * FLAT_EPSILON, None),),
             t0=_m(0),
         )
         executions = (
@@ -1391,8 +2542,7 @@ class TestActivationBoundary:
         own instant) is complete.
         """
         opening = TimelineOpening(
-            positions={"I1": OpeningPosition(position_qty=1.0, entry_price=100.0)},
-            opening_unrealized_value=5.0,
+            pools=(_opening_pool("I1", 1.0, 105.0),),
             t0=_m(2),
         )
         marks: MarkMap = {("I1", _m(0)): 90.0, ("I1", _m(1)): 95.0, ("I1", _m(2)): 105.0}
@@ -1417,8 +2567,7 @@ class TestCorruptInputGuards:
         kernel compares against NaN), so the instrument is withheld at ingestion.
         """
         opening = TimelineOpening(
-            positions={"I1": OpeningPosition(position_qty=float("nan"), entry_price=100.0)},
-            opening_unrealized_value=0.0,
+            pools=(_opening_pool("I1", float("nan"), 100.0),),
             t0=_m(0),
         )
         result = build_pnl_timeline((), (), {("I1", _m(0)): 110.0}, _window(), opening)

@@ -1421,24 +1421,33 @@ persisted JSON strings are never exposed.
 
 ## Portfolio P&L
 
-The P&L surfaces are read-only and require `read:positions`. The current
-`viewer` set contains this permission. Both routes enforce the same wallet and
-operator-membership scope as the positions surface; a caller cannot use the
-query parameters to broaden its accessible wallets.
+The P&L surfaces require `read:positions`; the current `viewer` set contains
+this permission. They never mutate trading, review, or portfolio-projection
+resources. A current-horizon request that omits `as_of` may atomically persist
+the wallet/mode/currency scope's missing immutable activation anchor before
+reconstruction. Supplying `as_of` disables anchor creation and performs a
+strict historical read; when no anchor was visible at that horizon, the series
+is empty. Both routes enforce the same wallet and operator-membership scope as
+the positions surface; a caller cannot use the query parameters to broaden its
+accessible wallets.
 
 ### GET /api/portfolio/pnl/series
 
 Reconstruct one wallet and mode's net-P&L-since-activation series. The response
 decomposes realized, fee, accrual, unrealized, and net P&L at the requested
-granularity, with per-exchange and per-instrument attribution and a single
-bitemporal `as_of` horizon shared by every source read.
+granularity, with per-exchange and per-instrument attribution. Normal
+reconstruction uses the response's bitemporal `as_of` horizon for source reads;
+first activation additionally certifies independent request-horizon and
+activation-minute execution-prefix cuts before persisting the anchor.
 
 ### GET /api/portfolio/pnl/timeline
 
 Return the same P&L series plus bounded attribution markers for fills,
-signals, and AI-review decisions. This route is the read-only decision timeline
-used to explain when trading and review events affected the portfolio; it does
-not grant authority to mutate any of those resources.
+signals, and AI-review decisions. Its marker overlay is read-only and explains
+when trading and review events affected the portfolio; it does not grant
+authority to mutate any of those resources. At a historical horizon with no
+visible activation anchor, the empty series may still carry independently read
+markers.
 
 **Query parameters shared by both routes:**
 
@@ -1450,7 +1459,7 @@ not grant authority to mutate any of those resources.
 | `granularity` | string | no | `1m`, `5m`, `1h`, or `1d`; default `1m` |
 | `from` | datetime | yes | Inclusive UTC window start |
 | `to` | datetime | yes | Inclusive UTC window end |
-| `as_of` | datetime | no | Bitemporal knowledge horizon |
+| `as_of` | datetime | no | Explicit bitemporal knowledge horizon; disables missing-anchor creation |
 | `valuation_ccy` | string | no | Three-letter valuation currency, default `USD` |
 
 Invalid or excessive windows return 400. Both routes return 403 for a wallet

@@ -1123,15 +1123,19 @@ class PortfolioPnlPoint(TemporalMixin, Base):
     cumulative price-realized, fee, and funding-accrual components since the
     epoch's t0 anchor (all exactly zero on the ``anchor`` row itself), kept as
     SEPARATE components so funding never double-counts against the funding-
-    inclusive ``Position.realized_pnl``. ``unrealized_pnl`` is the mark-to-market
-    value at ``point_time`` (the anchor stores the OPENING unrealized value at
-    t0, so consumers plot component CHANGES and pre-activation P&L never leaks).
+    inclusive ``Position.realized_pnl``. On an ``anchor`` row,
+    ``unrealized_pnl`` is raw historical opening audit metadata only. Runtime
+    reconstruction rebases every surviving shard's entry to its frozen t0 mark,
+    so the public t0 realized, fee, accrual, unrealized, and net components are
+    all exactly zero. No hidden baseline is subtracted from later public points.
 
     ``point_kind`` is ``anchor`` (the durable activation seed carrying the frozen
-    opening basket, legacy unattributed weights, and per-exchange scope watermark
-    map in ``opening_basket_json`` / ``watermarks_json``) or ``sample`` (a Phase-5B
-    continuous 1m point). v1 writes only the anchor; the on-demand timeline
-    reconstructs samples from the anchor plus the immutable execution ledger.
+    opening basket, each shard's historical-basis audit and rebased t0 mark,
+    legacy unattributed weights, and per-exchange scope watermark map in
+    ``opening_basket_json`` / ``contributions_json`` / ``watermarks_json``) or
+    ``sample`` (a Phase-5B continuous 1m point). v1 writes only the anchor; the
+    on-demand timeline reconstructs samples from the anchor plus the immutable
+    execution ledger.
 
     Valuation is honest: a minute with a missing mark is ``valuation_status =
     incomplete`` with ``unrealized_pnl`` NULL — never a carried-forward mark. USD

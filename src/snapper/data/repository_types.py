@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from typing import Literal
 from typing import NotRequired
 from typing import TypedDict
 
@@ -360,6 +361,81 @@ class PnlTimelineExecutionRow(TypedDict):
     timestamp: datetime
     exec_id: str | None
     trade_id: str | None
+
+
+class PnlTimelineOpeningExecutionRow(PnlTimelineExecutionRow):
+    """One exact opening-prefix execution with durable projection lineage."""
+
+    client_order_id: str
+    shard_key: str
+
+
+class PnlTimelineExecutionPrefix(TypedDict):
+    """Frozen per-exchange watermarks and their exact execution prefixes.
+
+    ``watermarks`` is captured before ``executions`` is read. Each exchange
+    watermark ``W`` therefore certifies that the returned rows contain exactly
+    that exchange's immutable scope-sequence range ``[1, W]``. Every row also
+    carries its exact durable fill shard so independent strategy pools remain
+    distinct during opening replay.
+    """
+
+    watermarks: dict[str, int]
+    executions: list[PnlTimelineOpeningExecutionRow]
+
+
+class PnlTimelineExecutionPrefixBundle(TypedDict):
+    """One-call request and activation prefixes with independent fill proof.
+
+    ``request`` is the exact identity-validated prefix at the public request
+    horizon. ``activation`` is independently captured and identity-validated
+    at the lazy anchor cut. Keeping both snapshots explicit prevents callers
+    from manufacturing an activation proof by timestamp-pruning a later
+    request prefix.
+    """
+
+    request: PnlTimelineExecutionPrefix
+    activation: PnlTimelineExecutionPrefix
+
+
+class PortfolioPnlAnchorRow(TypedDict):
+    """Persisted activation seed whose unrealized field is raw audit metadata."""
+
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    wallet_public_id: str
+    mode: Literal["live", "paper"]
+    valuation_ccy: str
+    point_time: datetime
+    point_kind: Literal["anchor"]
+    epoch_public_id: str
+    calc_version: str
+    valuation_status: Literal["complete"]
+    realized_pnl: float
+    fee_pnl: float
+    accrual_pnl: float
+    unrealized_pnl: float | None
+    external_flow_adjustment: float
+    cash_usd: float | None
+    position_value_usd: float | None
+    drawdown: float | None
+    mark_source: str | None
+    mark_time: datetime | None
+    watermarks_json: str | None
+    opening_basket_json: str | None
+    contributions_json: str | None
+
+
+class PortfolioPnlAnchorWriteEvidence(TypedDict):
+    """Frozen derivation cuts revalidated by the atomic anchor writer."""
+
+    wallet_public_id: str
+    mode: Literal["live", "paper"]
+    request_as_of: datetime
+    activation_as_of: datetime
+    execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
 
 
 class PnlTimelineExecutionLineageRow(TypedDict):

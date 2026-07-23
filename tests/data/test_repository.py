@@ -11378,19 +11378,16 @@ def test_venue_event_fill_identity_casts_all_operands_to_text_on_postgresql() ->
 
     Given: the venue-event fill dedup identity expression,
     When: it is compiled with the PostgreSQL dialect,
-    Then: it is a single COALESCE whose three operands (exec_id, trade_id,
-        public_id) are each CAST AS TEXT, because ``public_id`` is a native
-        ``uuid`` on PostgreSQL while the venue ids are ``varchar`` and a
-        mixed-type COALESCE raises DatatypeMismatchError (42804) there —
-        the SQLite test backend stores UUIDs as strings and cannot catch it.
+    Then: it is one COALESCE whose identifiers are cast to TEXT and whose
+        public UUID fallback passes through the strict canonical CASE.
     """
     sql = str(venue_event_fill_identity().compile(dialect=postgresql.dialect()))
     assert sql.lower().startswith("coalesce(")
-    assert sql.count("CAST(") == 3
-    assert sql.count("AS TEXT)") == 3
-    assert "venue_events.exec_id" in sql
-    assert "venue_events.trade_id" in sql
-    assert "venue_events.public_id" in sql
+    assert sql.count("CAST(venue_events.exec_id AS TEXT)") == 1
+    assert sql.count("CAST(venue_events.trade_id AS TEXT)") == 1
+    assert sql.count("CAST(venue_events.public_id AS TEXT)") >= 1
+    assert "CASE WHEN" in sql
+    assert "replace(" in sql
 
 
 @pytest.mark.asyncio

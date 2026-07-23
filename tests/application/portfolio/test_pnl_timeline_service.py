@@ -5,39 +5,55 @@ flow mapping, canonical-source PAPER marks, batched candle loading, total-work
 budgeting, durable fill-gap withholding, and end-to-end orchestration.
 """
 
+import json
 import math
+from collections import Counter
 from collections.abc import AsyncIterator
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Literal
+from typing import Never
+from typing import cast
 
 import pytest
 from sqlalchemy import create_engine
 
+from snapper.application.portfolio import pnl_timeline_service
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
+from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARKER_LIMIT
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MAX_WORK_UNITS
 from snapper.application.portfolio.pnl_timeline_service import PnlAiDecisionMarker
+from snapper.application.portfolio.pnl_timeline_service import PnlAnchorEvidenceError
 from snapper.application.portfolio.pnl_timeline_service import PnlFillMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlSignalMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import _build_execution_lineage
+from snapper.application.portfolio.pnl_timeline_service import _mark_fx_minutes
+from snapper.application.portfolio.pnl_timeline_service import _opening_mark_requirements
+from snapper.application.portfolio.pnl_timeline_service import _opening_marks_from_candles
+from snapper.application.portfolio.pnl_timeline_service import _opening_nonflat_instruments
+from snapper.application.portfolio.pnl_timeline_service import _parse_anchor
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_accrual
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_execution
 from snapper.application.portfolio.pnl_timeline_service import build_fx_rates
 from snapper.application.portfolio.pnl_timeline_service import build_marks
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_timeline
+from snapper.application.portfolio.pnl_timeline_service import ensure_wallet_pnl_anchor
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.models import Instrument
 from snapper.data.models import Symbol
+from snapper.data.repository import PnlTimelineAnchorEvidenceMismatchError
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRatePlane
@@ -46,18 +62,154 @@ from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
 from snapper.data.repository_types import PnlTimelineExecutionLineageRow
-from snapper.data.repository_types import PnlTimelineExecutionRow
+from snapper.data.repository_types import PnlTimelineExecutionPrefix
+from snapper.data.repository_types import PnlTimelineExecutionPrefixBundle
+from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
+from snapper.data.repository_types import PortfolioPnlAnchorRow
+from snapper.data.repository_types import PortfolioPnlAnchorWriteEvidence
 
 _T0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
 _I1 = "00000000-0000-7000-8000-000000000b01"
 _I2 = "00000000-0000-7000-8000-000000000b02"
 _FX_SESSION = "00000000-0000-7000-8000-000000000b03"
+_W1 = "00000000-0000-7000-8000-000000000b04"
+_ANCHOR_SESSION = "00000000-0000-7000-8000-000000000b05"
+_EMPTY_ANCHOR_T0 = _T0 - timedelta(days=365)
+
+
+@dataclass(frozen=True, slots=True)
+class _TestFillWitness:
+    """One exact fill identity visible to the fake bundle boundary."""
+
+    observed_at: datetime
+    exec_id: str
+    shard_key: str
+    size: float
 
 
 def _m(minute: int) -> datetime:
     """Return the grid minute ``_T0 + minute``."""
     return _T0 + timedelta(minutes=minute)
+
+
+def _empty_anchor(
+    wallet_public_id: str,
+    mode: Literal["live", "paper"],
+    valuation_ccy: str,
+    point_time: datetime = _EMPTY_ANCHOR_T0,
+    watermarks: dict[str, int] | None = None,
+) -> PortfolioPnlAnchorRow:
+    """Build one canonical empty v2 anchor immediately before the test window."""
+    public_id = portfolio_pnl_anchor_public_id(wallet_public_id, mode, valuation_ccy)
+    return {
+        "public_id": public_id,
+        "session_id": _ANCHOR_SESSION,
+        "sequence_id": 1,
+        "timestamp": point_time,
+        "wallet_public_id": wallet_public_id,
+        "mode": mode,
+        "valuation_ccy": valuation_ccy,
+        "point_time": point_time,
+        "point_kind": "anchor",
+        "epoch_public_id": public_id,
+        "calc_version": PNL_TIMELINE_CALC_VERSION,
+        "valuation_status": "complete",
+        "realized_pnl": 0.0,
+        "fee_pnl": 0.0,
+        "accrual_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+        "external_flow_adjustment": 0.0,
+        "cash_usd": None,
+        "position_value_usd": None,
+        "drawdown": None,
+        "mark_source": PNL_TIMELINE_MARK_SOURCE,
+        "mark_time": point_time,
+        "watermarks_json": json.dumps(
+            watermarks or {},
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        "opening_basket_json": json.dumps(
+            {"native_basket": {}, "pools": [], "schema_version": 2},
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        "contributions_json": json.dumps(
+            {"pools": [], "schema_version": 2},
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    }
+
+
+def _canonical_test_json(value: object) -> str:
+    """Serialize one test payload with the production canonical JSON shape."""
+    return json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True)
+
+
+def _test_anchor_pool(
+    *,
+    instrument_public_id: str = _I1,
+    shard_key: str = "shard-a",
+    exchange: str = "kraken",
+    position_qty: float = 1.0,
+    historical_entry_price: float = 100.0,
+    t0_mark: float = 110.0,
+    opening_unrealized_value: float = 10.0,
+) -> dict[str, object]:
+    """Build one canonical persisted opening-pool payload for parser tests."""
+    return {
+        "instrument_public_id": instrument_public_id,
+        "shard_key": shard_key,
+        "exchange": exchange,
+        "position_qty": position_qty,
+        "historical_entry_price": historical_entry_price,
+        "t0_mark": t0_mark,
+        "opening_unrealized_value": opening_unrealized_value,
+    }
+
+
+def _test_anchor_contribution(
+    *,
+    instrument_public_id: str = _I1,
+    shard_key: str = "shard-a",
+    exchange: str = "kraken",
+    quantity: float = 1.0,
+) -> dict[str, object]:
+    """Build one canonical persisted contribution-pool payload."""
+    return {
+        "instrument_public_id": instrument_public_id,
+        "shard_key": shard_key,
+        "exchange": exchange,
+        "weights": [
+            {
+                "origin": "unattributed",
+                "strategy_name": None,
+                "quantity": quantity,
+            }
+        ],
+    }
+
+
+def _one_pool_anchor() -> PortfolioPnlAnchorRow:
+    """Build one valid non-flat anchor for persisted-payload poison tests."""
+    row = _empty_anchor(_W1, "live", "USD", point_time=_m(1))
+    row["unrealized_pnl"] = 10.0
+    row["opening_basket_json"] = _canonical_test_json(
+        {
+            "schema_version": 2,
+            "pools": [_test_anchor_pool()],
+            "native_basket": {_I1: 1.0},
+        }
+    )
+    row["contributions_json"] = _canonical_test_json(
+        {
+            "schema_version": 2,
+            "pools": [_test_anchor_contribution()],
+        }
+    )
+    return row
 
 
 def _reason_rows(point: PnlTimelinePoint) -> list[tuple[str, str, str, str | None]]:
@@ -156,14 +308,17 @@ def _exec_row(
     fee: float,
     fee_asset: str,
     exchange: str = "kraken",
-) -> PnlTimelineExecutionRow:
-    """Build one execution row as ``get_pnl_timeline_executions`` returns it."""
+    shard_key: str | None = None,
+) -> PnlTimelineOpeningExecutionRow:
+    """Build one execution row as the exact prefix read returns it."""
     return {
         "public_id": f"execution-{instrument}-{scope}",
         "instrument_public_id": instrument,
         "exchange": exchange,
         "scope_sequence": scope,
         "order_public_id": f"order-{instrument}-{scope}",
+        "client_order_id": f"client-{instrument}-{scope}",
+        "shard_key": shard_key or f"{exchange}:live:{instrument}:untagged",
         "side": side,
         "status": "filled",
         "size": size,
@@ -310,17 +465,21 @@ class FakeRepo:
 
     def __init__(
         self,
-        executions: Sequence[PnlTimelineExecutionRow] = (),
+        executions: Sequence[PnlTimelineOpeningExecutionRow] = (),
         accruals: Sequence[PnlTimelineAccrualRow] = (),
         refs: Sequence[InstrumentSymbolRefRow] = (),
         candles: Sequence[PnlTimelineCandleRow] = (),
         signals: Sequence[PnlTimelineSignalMarkerRow] = (),
         ai_decisions: Sequence[PnlTimelineAiDecisionMarkerRow] = (),
         lineage: Sequence[PnlTimelineExecutionLineageRow] = (),
-        fill_shard_keys: Sequence[str] = (),
-        gapped_shards: set[str] | None = None,
+        has_fill_gap: bool = False,
         fx_rows: Sequence[PnlFxRateRow] | None = None,
         fx_repository: SQLAlchemyRepository | None = None,
+        has_anchor: bool = True,
+        anchor: PortfolioPnlAnchorRow | None = None,
+        record_winner: PortfolioPnlAnchorRow | None = None,
+        execution_prefix_error: Exception | None = None,
+        execution_watermarks: dict[str, int] | None = None,
     ) -> None:
         """Store the canned read results and record the calls made."""
         self._executions = list(executions)
@@ -330,10 +489,16 @@ class FakeRepo:
         self._signals = list(signals)
         self._ai_decisions = list(ai_decisions)
         self._lineage = list(lineage)
-        self._fill_shard_keys = list(fill_shard_keys)
-        self._gapped_shards = gapped_shards or set()
+        self._has_fill_gap = has_fill_gap
         self._fx_rows: list[PnlFxRateRow] = list(fx_rows or [])
         self._fx_repository = fx_repository
+        self._has_anchor = has_anchor
+        self._anchor = anchor
+        self._record_winner = record_winner
+        self._execution_prefix_error = execution_prefix_error
+        self._execution_watermarks = execution_watermarks
+        self.atomic_anchor_error: Exception | None = None
+        self._fill_witnesses: list[_TestFillWitness] | None = None
         self.fx_pair_calls: list[list[tuple[str, str]]] = []
         self.fx_plane_calls: list[list[PnlFxRatePlane]] = []
         self.fx_candidate_pair_calls: list[list[tuple[str, str]]] = []
@@ -343,42 +508,181 @@ class FakeRepo:
         self.candle_calls: list[
             tuple[list[InstrumentSymbolRefRow], datetime, datetime, datetime]
         ] = []
-        self.fill_scope_calls: list[tuple[str, str, datetime]] = []
-        self.fill_gap_calls: list[tuple[str, str, str, datetime]] = []
+        self.fill_gap_calls: list[tuple[str, str, datetime]] = []
+        self.fill_gap_prefixes: list[PnlTimelineExecutionPrefix] = []
         self.execution_calls: list[tuple[str, str, datetime]] = []
+        self.execution_bundle_calls: list[tuple[str, str, datetime, datetime]] = []
+        self.execution_prefix_bundles: list[PnlTimelineExecutionPrefixBundle] = []
+        self.execution_prefixes: list[PnlTimelineExecutionPrefix] = []
         self.lineage_calls: list[tuple[list[str], datetime]] = []
         self.accrual_calls: list[tuple[str, str, datetime]] = []
         self.symbol_ref_as_of_calls: list[datetime] = []
         self.signal_calls: list[tuple[str, str, datetime, datetime, datetime, int]] = []
         self.ai_decision_calls: list[tuple[str, str, datetime, datetime, datetime, int]] = []
+        self.anchor_calls: list[tuple[str, str, str, datetime | None]] = []
+        self.anchor_record_calls: list[PortfolioPnlAnchorRow] = []
+        self.anchor_write_evidence: list[PortfolioPnlAnchorWriteEvidence] = []
 
-    async def get_fill_shard_keys_for_scope(
+    async def pnl_timeline_scope_has_fill_gap(
         self,
         wallet_public_id: str,
         mode: str,
         as_of: datetime,
-    ) -> list[str]:
-        """Record the exact scope and return its fill-bearing shards."""
-        self.fill_scope_calls.append((wallet_public_id, mode, as_of))
-        return list(self._fill_shard_keys)
-
-    async def pnl_timeline_shard_has_fill_gap(
-        self,
-        shard_key: str,
-        wallet_public_id: str,
-        mode: str,
-        as_of: datetime,
+        execution_prefix: PnlTimelineExecutionPrefix | None = None,
     ) -> bool:
-        """Record the evidence lookup and return its canned gap status."""
-        self.fill_gap_calls.append((shard_key, wallet_public_id, mode, as_of))
-        return shard_key in self._gapped_shards
+        """Record one scope analysis and return its canned gap status."""
+        assert execution_prefix is not None
+        self.fill_gap_calls.append((wallet_public_id, mode, as_of))
+        self.fill_gap_prefixes.append(execution_prefix)
+        return self._has_fill_gap
 
     async def get_pnl_timeline_executions(
         self, wallet_public_id: str, mode: str, as_of: datetime
-    ) -> list[PnlTimelineExecutionRow]:
+    ) -> list[PnlTimelineOpeningExecutionRow]:
         """Return the canned execution rows."""
         self.execution_calls.append((wallet_public_id, mode, as_of))
         return list(self._executions)
+
+    async def get_pnl_timeline_execution_prefix(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> PnlTimelineExecutionPrefix:
+        """Return one canned exact bundle and record its single scope read."""
+        self.execution_calls.append((wallet_public_id, mode, as_of))
+        if self._execution_prefix_error is not None:
+            raise self._execution_prefix_error
+        prefix = self._execution_prefix_at(as_of)
+        self.execution_prefixes.append(prefix)
+        return prefix
+
+    def _execution_prefix_at(
+        self,
+        as_of: datetime,
+    ) -> PnlTimelineExecutionPrefix:
+        """Build one independently captured exact prefix at a test horizon."""
+        watermarks: dict[str, int] = {}
+        for row in self._executions:
+            if row["timestamp"] <= as_of:
+                watermarks[row["exchange"]] = max(
+                    watermarks.get(row["exchange"], 0),
+                    row["scope_sequence"],
+                )
+        if self._execution_watermarks is not None:
+            watermarks = dict(self._execution_watermarks)
+        executions = [
+            row
+            for row in self._executions
+            if row["scope_sequence"] <= watermarks.get(row["exchange"], 0)
+        ]
+        prefix = PnlTimelineExecutionPrefix(
+            watermarks=watermarks,
+            executions=executions,
+        )
+        return prefix
+
+    def require_exact_fill_witnesses(
+        self,
+        witnesses: Sequence[_TestFillWitness],
+    ) -> None:
+        """Make bundle construction prove exact bidirectional fill identities."""
+        self._fill_witnesses = list(witnesses)
+
+    def _validate_exact_fill_witnesses(
+        self,
+        prefix: PnlTimelineExecutionPrefix,
+        as_of: datetime,
+    ) -> None:
+        """Refuse aggregate-equal fill evidence with different identities."""
+        if self._fill_witnesses is None:
+            return
+        execution_evidence = Counter(
+            (
+                row["exec_id"] or row["trade_id"] or row["public_id"],
+                row["shard_key"],
+                row["size"],
+            )
+            for row in prefix["executions"]
+        )
+        fill_evidence = Counter(
+            (witness.exec_id, witness.shard_key, witness.size)
+            for witness in self._fill_witnesses
+            if witness.observed_at <= as_of
+        )
+        if execution_evidence != fill_evidence:
+            raise RuntimeError("exact fill identity mismatch")
+
+    async def get_pnl_timeline_execution_prefix_bundle(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        request_as_of: datetime,
+        activation_as_of: datetime,
+    ) -> PnlTimelineExecutionPrefixBundle:
+        """Return independently captured request and activation snapshots."""
+        self.execution_calls.append((wallet_public_id, mode, request_as_of))
+        self.execution_bundle_calls.append(
+            (wallet_public_id, mode, request_as_of, activation_as_of)
+        )
+        if self._execution_prefix_error is not None:
+            raise self._execution_prefix_error
+        bundle = PnlTimelineExecutionPrefixBundle(
+            request=self._execution_prefix_at(request_as_of),
+            activation=self._execution_prefix_at(activation_as_of),
+        )
+        self._validate_exact_fill_witnesses(
+            bundle["activation"],
+            activation_as_of,
+        )
+        self._validate_exact_fill_witnesses(
+            bundle["request"],
+            request_as_of,
+        )
+        self.execution_prefixes.append(bundle["request"])
+        self.execution_prefix_bundles.append(bundle)
+        return bundle
+
+    async def get_portfolio_pnl_anchor(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        valuation_ccy: str,
+        as_of: datetime | None,
+    ) -> PortfolioPnlAnchorRow | None:
+        """Return a canonical pre-window anchor unless a test disables it."""
+        self.anchor_calls.append((wallet_public_id, mode, valuation_ccy, as_of))
+        if not self._has_anchor:
+            return None
+        anchor = (
+            self._anchor
+            if self._anchor is not None
+            else _empty_anchor(wallet_public_id, mode, valuation_ccy)
+        )
+        if as_of is not None and anchor["timestamp"] > as_of:
+            return None
+        return anchor
+
+    async def record_portfolio_pnl_anchor(
+        self,
+        anchor: PortfolioPnlAnchorRow,
+    ) -> PortfolioPnlAnchorRow:
+        """Record and retain one candidate anchor."""
+        self.anchor_record_calls.append(anchor)
+        self._anchor = self._record_winner or anchor
+        self._has_anchor = True
+        return self._anchor
+
+    async def record_portfolio_pnl_anchor_if_execution_prefix_matches(
+        self,
+        anchor: PortfolioPnlAnchorRow,
+        evidence: PortfolioPnlAnchorWriteEvidence,
+    ) -> PortfolioPnlAnchorRow:
+        """Record one atomic candidate and its expected derivation evidence."""
+        self.anchor_write_evidence.append(evidence)
+        if self.atomic_anchor_error is not None:
+            raise self.atomic_anchor_error
+        return await self.record_portfolio_pnl_anchor(anchor)
 
     async def get_pnl_timeline_execution_lineage(
         self,
@@ -731,10 +1035,9 @@ class TestBuildWalletPnlSeries:
             lineage=lineage,
             refs=refs,
             candles=candles,
-            fill_shard_keys=["clean-shard"],
         )
         as_of = _m(3)
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(2), "1m", as_of)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(2), "1m", as_of)
         assert result.granularity == "1m"
         assert result.valuation_ccy == "USD"
         assert [p.valuation_status for p in result.points] == ["complete"] * 3
@@ -753,11 +1056,10 @@ class TestBuildWalletPnlSeries:
         assert attribution.strategy_name == "momentum"
         assert attribution.fee_pnl == -0.5
         assert attribution.unrealized_pnl == 5.0
-        assert repo.fill_scope_calls == [("w1", "live", as_of)]
-        assert repo.fill_gap_calls == [("clean-shard", "w1", "live", as_of)]
-        assert repo.execution_calls == [("w1", "live", as_of)]
+        assert repo.fill_gap_calls == [(_W1, "live", as_of)]
+        assert repo.execution_calls == [(_W1, "live", as_of)]
         assert repo.lineage_calls == [([executions[0]["order_public_id"]], as_of)]
-        assert repo.accrual_calls == [("w1", "live", as_of)]
+        assert repo.accrual_calls == [(_W1, "live", as_of)]
         assert repo.symbol_ref_as_of_calls == [as_of]
         assert repo.candle_calls[0][3] == as_of
 
@@ -767,7 +1069,7 @@ class TestBuildWalletPnlSeries:
         refs = [_ref(_I1, "BTC-USD", "USD")]
         candles = [_candle(_m(-1), 100.0), _candle(_m(0), 100.0)]
         repo = FakeRepo(executions=executions, refs=refs, candles=candles)
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(1), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(1), "1m", _T0)
         assert [point.valuation_status for point in result.points] == ["complete", "complete"]
         assert [point.fee_pnl for point in result.points] == [0.0, 0.0]
         assert [point.net_pnl for point in result.points] == [0.0, 0.0]
@@ -782,7 +1084,7 @@ class TestBuildWalletPnlSeries:
             ],
             refs=[_ref(_I2, "ETH-USD", "USD")],
         )
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(1), "1m", as_of)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(1), "1m", as_of)
         contribution = result.points[0].per_instrument[0]
         assert contribution.instrument_public_id == _I2
         assert contribution.native_symbol == "ETH-USD"
@@ -800,7 +1102,7 @@ class TestBuildWalletPnlSeries:
             refs=[_ref(_I1, "BTC-USD", "USD")],
             candles=[_candle(_m(-1), bad_close)],
         )
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _T0, "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _T0, "1m", _T0)
         point = result.points[0]
         assert point.valuation_status == "incomplete"
         assert (
@@ -817,7 +1119,7 @@ class TestBuildWalletPnlSeries:
         refs = [_ref(_I1, "BTC-USD", "USD")]
         candles = [_candle(_m(-1), 100.0), _candle(_m(0), 100.0)]
         repo = FakeRepo(executions=executions, refs=refs, candles=candles)
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(1), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(1), "1m", _T0)
         assert [point.valuation_status for point in result.points] == [
             "incomplete",
             "incomplete",
@@ -841,7 +1143,7 @@ class TestBuildWalletPnlSeries:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -865,7 +1167,7 @@ class TestBuildWalletPnlSeries:
             refs=refs,
             candles=candles,
         )
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(2), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(2), "1m", _T0)
         assert result.points[0].accrual_pnl == 0.0
         assert result.points[1].accrual_pnl == -3.0
         assert result.points[2].accrual_pnl == -3.0
@@ -877,7 +1179,7 @@ class TestBuildWalletPnlSeries:
         refs = [_ref(_I1, "BTC-USD", "USD")]
         candles = [_candle(_m(-1), 100.0), _candle(_m(0), 100.0), _candle(_m(1), 100.0)]
         repo = FakeRepo(executions=executions, accruals=accruals, refs=refs, candles=candles)
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(2), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(2), "1m", _T0)
         assert [point.valuation_status for point in result.points] == ["complete"] * 3
         assert [point.accrual_pnl for point in result.points] == [0.0, 0.0, 0.0]
 
@@ -897,7 +1199,7 @@ class TestBuildWalletPnlSeries:
             refs=refs,
             candles=candles,
         )
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(2), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(2), "1m", _T0)
         assert result.points[0].accrual_pnl == 0.0
         assert result.points[1].valuation_status == "incomplete"
         assert result.points[1].accrual_pnl is None
@@ -932,7 +1234,7 @@ class TestBuildWalletPnlSeries:
         ]
         candles = [_candle(_m(-1), 105.0), _candle(_m(0), 110.0)]
         repo = FakeRepo(executions=executions, refs=refs, candles=candles)
-        result = await build_wallet_pnl_series(repo, "w1", "paper", _T0, _m(1), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "paper", _T0, _m(1), "1m", _T0)
         assert [point.valuation_status for point in result.points] == ["complete", "complete"]
         assert result.points[0].unrealized_pnl == 5.0
         assert result.points[1].unrealized_pnl == 10.0
@@ -958,16 +1260,12 @@ class TestBuildWalletPnlSeries:
             ],
             refs=refs,
             candles=candles,
-            fill_shard_keys=["clean-shard", "gapped-shard", "unreached-shard"],
-            gapped_shards={"gapped-shard", "unreached-shard"},
+            has_fill_gap=True,
         )
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(1), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(1), "1m", _T0)
         assert result.granularity == "1m"
         assert result.valuation_ccy == "USD"
-        assert repo.fill_gap_calls == [
-            ("clean-shard", "w1", "live", _T0),
-            ("gapped-shard", "w1", "live", _T0),
-        ]
+        assert repo.fill_gap_calls == [(_W1, "live", _T0)]
         for index, point in enumerate(result.points):
             assert point.valuation_status == "incomplete"
             assert point.realized_pnl is None
@@ -1017,7 +1315,7 @@ class TestBuildWalletPnlSeries:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -1039,7 +1337,7 @@ class TestBuildWalletPnlSeries:
         second["order_public_id"] = first["order_public_id"]
         as_of = _m(4)
         repo = FakeRepo(executions=[first, second, third])
-        await build_wallet_pnl_series(repo, "w1", "live", _T0, _T0, "1m", as_of)
+        await build_wallet_pnl_series(repo, _W1, "live", _T0, _T0, "1m", as_of)
         assert repo.lineage_calls == [([first["order_public_id"], third["order_public_id"]], as_of)]
 
     async def test_total_work_budget_counts_execution_and_accrual_instruments(self) -> None:
@@ -1051,7 +1349,7 @@ class TestBuildWalletPnlSeries:
         with pytest.raises(PnlTimelineWorkBudgetError) as exc_info:
             await build_wallet_pnl_series(
                 repo,
-                "w1",
+                _W1,
                 "live",
                 _T0,
                 oversized_end,
@@ -1072,15 +1370,15 @@ class TestBuildWalletPnlSeries:
         ]
         refs = [_ref(_I1, "BTC-USD", "USD"), _ref(_I2, "ETH-USD", "USD")]
         repo = FakeRepo(executions=executions, refs=refs)
-        await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(2), "1m", _T0)
+        await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(2), "1m", _T0)
         assert repo.symbol_ref_calls == [[_I1, _I2]]
 
     async def test_empty_scope_yields_only_incomplete_or_flat_points(self) -> None:
         """With no executions the series still spans the grid at the granularity."""
         repo = FakeRepo()
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(2), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(2), "1m", _T0)
         assert len(result.points) == 3
-        assert repo.symbol_ref_calls == [[]]
+        assert repo.symbol_ref_calls == []
 
 
 class TestExecutionQuoteCurrencyProof:
@@ -1095,7 +1393,7 @@ class TestExecutionQuoteCurrencyProof:
         repo = FakeRepo(executions=executions, refs=[_ref(_I1, "BTC-USD", "USD")])
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -1139,7 +1437,7 @@ class TestExecutionQuoteCurrencyProof:
         repo = FakeRepo(executions=executions, refs=[_ref(_I1, "BTC-EUR", "EUR")])
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -1173,7 +1471,7 @@ class TestExecutionQuoteCurrencyProof:
         ]
         result = await build_wallet_pnl_series(
             FakeRepo(executions=executions, refs=refs),
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -1214,7 +1512,7 @@ class TestExecutionQuoteCurrencyProof:
         ]
         result = await build_wallet_pnl_series(
             FakeRepo(executions=executions, refs=refs),
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -1241,7 +1539,6 @@ class TestExecutionQuoteCurrencyProof:
                 110.0,
                 0.0,
                 "USD",
-                exchange="coinbase",
             ),
         ]
         refs = [
@@ -1256,7 +1553,7 @@ class TestExecutionQuoteCurrencyProof:
         ]
         result = await build_wallet_pnl_series(
             FakeRepo(executions=executions, refs=refs),
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(2),
@@ -1284,7 +1581,7 @@ class TestExecutionQuoteCurrencyProof:
         ]
         result = await build_wallet_pnl_series(
             FakeRepo(executions=executions, refs=refs),
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -1325,7 +1622,7 @@ class TestExecutionQuoteCurrencyProof:
         repo = FakeRepo(executions=executions, refs=refs)
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _m(2),
             _m(2),
@@ -1358,7 +1655,7 @@ class TestExecutionQuoteCurrencyProof:
         ]
         result = await build_wallet_pnl_series(
             FakeRepo(executions=executions, refs=refs),
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(2),
@@ -1404,7 +1701,7 @@ class TestExecutionQuoteCurrencyProof:
                 executions=executions,
                 refs=[_ref(_I1, "BTC-USD", "USD", instrument_exchange="kraken")],
             ),
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -1427,7 +1724,7 @@ class TestExecutionQuoteCurrencyProof:
         ]
         result = await build_wallet_pnl_series(
             FakeRepo(executions=executions),
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -1460,7 +1757,7 @@ class TestExecutionQuoteCurrencyProof:
         ]
         result = await build_wallet_pnl_series(
             FakeRepo(executions=executions, refs=refs),
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -1513,7 +1810,7 @@ class TestExecutionQuoteCurrencyProof:
                 refs=refs,
                 lineage=lineage,
             ),
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -1558,6 +1855,7 @@ class TestExecutionQuoteCurrencyProof:
         assert {(item.origin, item.strategy_name) for item in untrusted_point.attribution} == {
             ("manual", None),
             ("system", "momentum"),
+            ("unattributed", None),
         }
         assert all(
             contribution.realized_pnl is None
@@ -1643,7 +1941,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -1712,7 +2010,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -1755,7 +2053,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -1797,7 +2095,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -1862,7 +2160,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -1931,7 +2229,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -1990,7 +2288,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -2055,7 +2353,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(3),
@@ -2140,7 +2438,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(12),
@@ -2192,7 +2490,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(11),
@@ -2239,7 +2537,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(11),
@@ -2304,7 +2602,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(5),
@@ -2399,7 +2697,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(5),
@@ -2459,7 +2757,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(2),
@@ -2493,7 +2791,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(2),
@@ -2531,7 +2829,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(2),
@@ -2558,7 +2856,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -2593,7 +2891,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(2),
@@ -2629,7 +2927,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -2659,7 +2957,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -2689,7 +2987,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -2747,7 +3045,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -2852,7 +3150,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -2898,7 +3196,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(2),
@@ -2930,7 +3228,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -2965,7 +3263,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(2),
@@ -3008,7 +3306,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _m(1),
             _m(1),
@@ -3045,7 +3343,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _m(1),
             _m(1),
@@ -3087,7 +3385,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -3127,7 +3425,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -3158,7 +3456,7 @@ class TestCrossCurrencyPrices:
         )
         result = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -3177,12 +3475,94 @@ class TestCrossCurrencyPrices:
 class TestBuildWalletPnlTimeline:
     """Cover independent marker sourcing, outcomes, ordering, and capping."""
 
+    async def test_preactivation_window_still_emits_proven_fill_markers(self) -> None:
+        """Activation withholds P&L but does not erase earlier decision evidence."""
+        anchor = _empty_anchor(
+            _W1,
+            "live",
+            "USD",
+            point_time=_m(2),
+            watermarks={"kraken": 1},
+        )
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            anchor=anchor,
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(3),
+        )
+        assert result.series.points[0].valuation_status == "incomplete"
+        assert (
+            "before_activation",
+            "untrusted",
+            "global",
+            None,
+        ) in _reason_rows(result.series.points[0])
+        assert [
+            marker.execution_public_id
+            for marker in result.markers
+            if isinstance(marker, PnlFillMarker)
+        ] == [f"execution-{_I1}-1"]
+        assert repo.execution_calls == [(_W1, "live", _m(3))]
+
+    async def test_historical_no_anchor_keeps_independent_marker_overlay(self) -> None:
+        """An empty historical series may still carry exactly proven decisions."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            has_anchor=False,
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+            allow_anchor_creation=False,
+        )
+        assert result.series.points == ()
+        assert [
+            marker.execution_public_id
+            for marker in result.markers
+            if isinstance(marker, PnlFillMarker)
+        ] == [f"execution-{_I1}-1"]
+        assert repo.execution_calls == [(_W1, "live", _m(1))]
+        assert repo.anchor_record_calls == []
+
+    async def test_marker_overlay_refuses_an_unprovable_exact_prefix(self) -> None:
+        """Pre-activation and no-anchor timelines never silently omit fill markers."""
+        repo = FakeRepo(
+            has_anchor=False,
+            execution_prefix_error=RuntimeError("forced marker-prefix failure"),
+        )
+        with pytest.raises(RuntimeError, match="marker-prefix"):
+            await build_wallet_pnl_timeline(
+                repo,
+                _W1,
+                "live",
+                _T0,
+                _T0,
+                "1m",
+                _m(1),
+                allow_anchor_creation=False,
+            )
+        assert repo.execution_calls == [(_W1, "live", _m(1))]
+
     async def test_null_signal_price_needs_no_denomination_span(self) -> None:
         """A source signal with no price remains a marker without price proof."""
         repo = FakeRepo(signals=[_signal_row("signal-null-price", _T0, False, price=None)])
         result = await build_wallet_pnl_timeline(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -3251,7 +3631,7 @@ class TestBuildWalletPnlTimeline:
         )
         result = await build_wallet_pnl_timeline(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(2),
@@ -3261,12 +3641,12 @@ class TestBuildWalletPnlTimeline:
         assert result.marker_limit == PNL_TIMELINE_MARKER_LIMIT
         assert result.markers_truncated is False
         assert len(result.series.points) == 3
-        assert repo.execution_calls == [("w1", "live", _m(3))]
+        assert repo.execution_calls == [(_W1, "live", _m(3))]
         assert repo.signal_calls == [
-            ("w1", "live", _T0, _m(2), _m(3), PNL_TIMELINE_MARKER_LIMIT + 1)
+            (_W1, "live", _T0, _m(2), _m(3), PNL_TIMELINE_MARKER_LIMIT + 1)
         ]
         assert repo.ai_decision_calls == [
-            ("w1", "live", _T0, _m(2), _m(3), PNL_TIMELINE_MARKER_LIMIT + 1)
+            (_W1, "live", _T0, _m(2), _m(3), PNL_TIMELINE_MARKER_LIMIT + 1)
         ]
         assert [marker.marker_time for marker in result.markers] == sorted(
             marker.marker_time for marker in result.markers
@@ -3317,7 +3697,7 @@ class TestBuildWalletPnlTimeline:
         )
         result = await build_wallet_pnl_timeline(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -3360,7 +3740,7 @@ class TestBuildWalletPnlTimeline:
         )
         result = await build_wallet_pnl_timeline(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -3406,7 +3786,7 @@ class TestBuildWalletPnlTimeline:
         )
         result = await build_wallet_pnl_timeline(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _m(1),
@@ -3440,7 +3820,7 @@ class TestBuildWalletPnlTimeline:
         )
         result = await build_wallet_pnl_timeline(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -3462,7 +3842,7 @@ class TestBuildWalletPnlTimeline:
         )
         result = await build_wallet_pnl_timeline(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -3471,7 +3851,7 @@ class TestBuildWalletPnlTimeline:
         )
         signal = next(marker for marker in result.markers if isinstance(marker, PnlSignalMarker))
         assert signal.price == 250.0
-        assert repo.symbol_ref_calls == [[], [_I2]]
+        assert repo.symbol_ref_calls == [[_I2]]
 
     @pytest.mark.parametrize("bad_price", [0.0, -1.25])
     async def test_signal_price_needs_value_proof_not_only_currency_proof(
@@ -3491,7 +3871,7 @@ class TestBuildWalletPnlTimeline:
         )
         result = await build_wallet_pnl_timeline(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -3517,7 +3897,7 @@ class TestBuildWalletPnlTimeline:
         )
         result = await build_wallet_pnl_timeline(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -3545,7 +3925,7 @@ class TestBuildWalletPnlTimeline:
         ]
         exact = await build_wallet_pnl_timeline(
             FakeRepo(signals=exact_rows),
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -3561,7 +3941,7 @@ class TestBuildWalletPnlTimeline:
         over_repo = FakeRepo(signals=over_rows)
         over = await build_wallet_pnl_timeline(
             over_repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -3588,7 +3968,7 @@ def test_provenance_constants_are_stable() -> None:
     Then: The documented source, version, and total-work limit remain stable.
     """
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
-    assert PNL_TIMELINE_CALC_VERSION == "5A.12"
+    assert PNL_TIMELINE_CALC_VERSION == "5A.13"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
 
@@ -3614,7 +3994,7 @@ class TestForeignFeeConversion:
         point is complete again.
         """
         repo = self._repo([_fx_row("EUR", "USD", 0, 1.25)])
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(0), "1m", _T0)
         point = result.points[0]
         assert point.valuation_status == "complete"
         assert point.fee_pnl == pytest.approx(-0.05)
@@ -3625,7 +4005,7 @@ class TestForeignFeeConversion:
     async def test_inverse_pair_also_converts(self) -> None:
         """Only a USD-EUR listing still prices the fee, by reciprocal."""
         repo = self._repo([_fx_row("USD", "EUR", 0, 0.8)])
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(0), "1m", _T0)
         assert result.points[0].fee_pnl == pytest.approx(-0.05)
         assert repo.fx_candidate_pair_calls == [[("EUR", "USD"), ("USD", "EUR")]]
         assert repo.fx_pair_calls == [[("USD", "EUR")]]
@@ -3637,7 +4017,7 @@ class TestForeignFeeConversion:
         unpriceable cost is still unknown, and saying so is the whole point.
         """
         repo = self._repo([])
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(0), "1m", _T0)
         assert result.points[0].valuation_status == "incomplete"
         assert result.points[0].fee_pnl is None
 
@@ -3654,7 +4034,7 @@ class TestForeignFeeConversion:
         )
         before = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -3681,7 +4061,7 @@ class TestForeignFeeConversion:
         ] == [("GBP", "PLN", "walutomat")]
         after = await build_wallet_pnl_series(
             repo,
-            "w1",
+            _W1,
             "live",
             _T0,
             _T0,
@@ -3706,7 +4086,7 @@ class TestForeignFeeConversion:
     async def test_rate_from_another_minute_is_not_borrowed(self) -> None:
         """A rate that only covers a later minute cannot price an earlier fee."""
         repo = self._repo([_fx_row("EUR", "USD", 3, 1.25)])
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(0), "1m", _T0)
         assert result.points[0].valuation_status == "incomplete"
 
 
@@ -3728,7 +4108,7 @@ class TestFxRangeCoversPreWindowFlows:
             candles=[_candle(_m(-1), 100.0), _candle(_m(0), 100.0)],
             fx_rows=[_fx_row("EUR", "USD", -600, 1.25)],
         )
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(0), "1m", _T0)
         point = result.points[0]
         assert point.valuation_status == "complete"
         assert point.fee_pnl == pytest.approx(-0.05)
@@ -3743,7 +4123,7 @@ class TestFxRangeCoversPreWindowFlows:
             refs=[_ref(_I1, "BTC-USD", "USD")],
             candles=[_candle(_m(-1), 100.0), _candle(_m(0), 100.0)],
         )
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(0), "1m", _T0)
         assert result.points[0].valuation_status == "complete"
         assert repo.fx_pair_calls == []
 
@@ -3754,7 +4134,7 @@ class TestFxRangeCoversPreWindowFlows:
             refs=[_ref(_I1, "BTC-USD", "USD")],
             candles=[_candle(_m(-1), 100.0), _candle(_m(0), 100.0)],
         )
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(0), "1m", _T0)
         assert result.points[0].valuation_status == "complete"
         assert repo.fx_pair_calls == []
 
@@ -3771,7 +4151,1499 @@ class TestFxRangeCoversPreWindowFlows:
             refs=[_ref(_I1, "BTC-USD", "USD")],
             candles=[_candle(_m(-1), 100.0), _candle(_m(0), 100.0)],
         )
-        result = await build_wallet_pnl_series(repo, "w1", "live", _T0, _m(0), "1m", _T0)
+        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(0), "1m", _T0)
         assert result.points[0].valuation_status == "incomplete"
         assert result.points[0].fee_pnl is None
         assert repo.fx_pair_calls == []
+
+
+class TestDurableActivationAnchor:
+    """Cover exact-prefix anchor creation, parsing, and runtime boundaries."""
+
+    @pytest.mark.parametrize(
+        ("endpoint", "has_anchor"),
+        [
+            pytest.param("series", False, id="series-lazy-activation"),
+            pytest.param("series", True, id="series-existing-anchor"),
+            pytest.param("timeline", False, id="timeline-lazy-activation"),
+            pytest.param("timeline", True, id="timeline-existing-anchor"),
+        ],
+    )
+    async def test_request_reuses_one_sealed_execution_prefix(
+        self,
+        endpoint: Literal["series", "timeline"],
+        has_anchor: bool,
+    ) -> None:
+        """Series, markers, activation, and gap checks share one exact bundle."""
+        repo = FakeRepo(has_anchor=has_anchor)
+        as_of = _T0 + timedelta(seconds=30)
+
+        if endpoint == "series":
+            await build_wallet_pnl_series(
+                repo,
+                _W1,
+                "live",
+                _T0,
+                _T0,
+                "1m",
+                as_of,
+            )
+        else:
+            await build_wallet_pnl_timeline(
+                repo,
+                _W1,
+                "live",
+                _T0,
+                _T0,
+                "1m",
+                as_of,
+            )
+
+        activation_as_of = as_of if has_anchor else _T0
+        assert repo.execution_calls == [(_W1, "live", as_of)]
+        assert repo.execution_bundle_calls == [(_W1, "live", as_of, activation_as_of)]
+        assert len(repo.execution_prefix_bundles) == 1
+        assert len(repo.execution_prefixes) == 1
+        bundle = repo.execution_prefix_bundles[0]
+        if has_anchor:
+            assert repo.fill_gap_calls == [(_W1, "live", as_of)]
+            assert len(repo.fill_gap_prefixes) == 1
+            assert repo.fill_gap_prefixes[0] is bundle["request"]
+        else:
+            assert repo.fill_gap_calls == [
+                (_W1, "live", _T0),
+                (_W1, "live", as_of),
+            ]
+            assert len(repo.fill_gap_prefixes) == 2
+            assert repo.fill_gap_prefixes[0] is bundle["activation"]
+            assert repo.fill_gap_prefixes[1] is bundle["request"]
+        assert len(repo.anchor_calls) == 1
+        assert len(repo.anchor_record_calls) == (0 if has_anchor else 1)
+
+    async def test_subminute_lazy_activation_reuses_full_prefix_after_t0_cut(
+        self,
+    ) -> None:
+        """A current-minute fill stays out of t0 but remains in suffix replay."""
+        execution = _exec_row(
+            _I1,
+            1,
+            0,
+            "buy",
+            1.0,
+            100.0,
+            0.0,
+            "USD",
+        )
+        execution["timestamp"] = _T0 + timedelta(seconds=15)
+        as_of = _T0 + timedelta(seconds=30)
+        repo = FakeRepo(
+            executions=[execution],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_T0, 110.0)],
+            has_anchor=False,
+        )
+        repo.require_exact_fill_witnesses(
+            [
+                _TestFillWitness(
+                    observed_at=execution["timestamp"],
+                    exec_id=cast(str, execution["exec_id"]),
+                    shard_key=execution["shard_key"],
+                    size=execution["size"],
+                )
+            ]
+        )
+
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            as_of,
+        )
+
+        assert repo.execution_calls == [(_W1, "live", as_of)]
+        assert repo.execution_bundle_calls == [(_W1, "live", as_of, _T0)]
+        assert len(repo.execution_prefix_bundles) == 1
+        assert len(repo.execution_prefixes) == 1
+        assert json.loads(repo.anchor_record_calls[0]["watermarks_json"]) == {}
+        assert repo.lineage_calls == [([f"order-{_I1}-1"], as_of)]
+        assert repo.fill_gap_calls == [
+            (_W1, "live", _T0),
+            (_W1, "live", as_of),
+        ]
+        bundle = repo.execution_prefix_bundles[0]
+        assert repo.fill_gap_prefixes[0] is bundle["activation"]
+        assert repo.fill_gap_prefixes[0]["executions"] == []
+        assert repo.fill_gap_prefixes[1] is bundle["request"]
+        assert result.points[-1].unrealized_pnl == 10.0
+        assert result.points[-1].net_pnl == 10.0
+
+    async def test_activation_bundle_refuses_same_aggregate_orphan_fill(
+        self,
+    ) -> None:
+        """An id-mismatched pre-t0 fill cannot stand in for the proper later fill."""
+        execution = _exec_row(
+            _I1,
+            1,
+            0,
+            "buy",
+            1.0,
+            100.0,
+            0.0,
+            "USD",
+        )
+        as_of = _T0 + timedelta(seconds=30)
+        repo = FakeRepo(
+            executions=[execution],
+            has_anchor=False,
+        )
+        repo.require_exact_fill_witnesses(
+            [
+                _TestFillWitness(
+                    observed_at=_T0 + timedelta(seconds=15),
+                    exec_id=cast(str, execution["exec_id"]),
+                    shard_key=execution["shard_key"],
+                    size=execution["size"],
+                ),
+                _TestFillWitness(
+                    observed_at=_T0 - timedelta(seconds=1),
+                    exec_id="orphan-exec-2",
+                    shard_key=execution["shard_key"],
+                    size=execution["size"],
+                ),
+            ]
+        )
+
+        with pytest.raises(PnlAnchorEvidenceError, match="cannot be proven"):
+            await build_wallet_pnl_series(
+                repo,
+                _W1,
+                "live",
+                _T0,
+                _m(1),
+                "1m",
+                as_of,
+            )
+
+        assert repo.execution_calls == [(_W1, "live", as_of)]
+        assert repo.execution_bundle_calls == [(_W1, "live", as_of, _T0)]
+        assert repo.execution_prefix_bundles == []
+        assert repo.fill_gap_calls == []
+        assert repo.anchor_record_calls == []
+
+    @pytest.mark.parametrize(
+        ("request_watermarks", "activation_watermarks", "message"),
+        [
+            pytest.param(
+                {},
+                {"kraken": 1},
+                "regressed",
+                id="activation-exchange-missing-from-request",
+            ),
+            pytest.param(
+                {"kraken": 1},
+                {"kraken": 2},
+                "regressed",
+                id="request-sequence-below-activation",
+            ),
+            pytest.param(
+                {"Kraken": 1},
+                {},
+                "not canonical",
+                id="request-exchange-not-canonical",
+            ),
+        ],
+    )
+    async def test_bundle_watermark_regression_refuses_anchor_before_write(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        request_watermarks: dict[str, int],
+        activation_watermarks: dict[str, int],
+        message: str,
+    ) -> None:
+        """Invalid request-to-activation watermark relations cannot persist."""
+        repo = FakeRepo(has_anchor=False)
+        bundle = PnlTimelineExecutionPrefixBundle(
+            request=PnlTimelineExecutionPrefix(
+                watermarks=request_watermarks,
+                executions=[],
+            ),
+            activation=PnlTimelineExecutionPrefix(
+                watermarks=activation_watermarks,
+                executions=[],
+            ),
+        )
+
+        async def load_bundle(
+            wallet_public_id: str,
+            mode: str,
+            request_as_of: datetime,
+            activation_as_of: datetime,
+        ) -> PnlTimelineExecutionPrefixBundle:
+            """Return one deliberately invalid independently captured bundle."""
+            del wallet_public_id, mode, request_as_of, activation_as_of
+            return bundle
+
+        monkeypatch.setattr(repo, "get_pnl_timeline_execution_prefix_bundle", load_bundle)
+
+        with pytest.raises(PnlAnchorEvidenceError, match=message):
+            await ensure_wallet_pnl_anchor(
+                repo,
+                _W1,
+                "live",
+                "USD",
+                _m(1),
+                _m(2),
+            )
+
+        assert repo.anchor_record_calls == []
+
+    async def test_request_only_exchange_after_activation_is_legal(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A new exchange in the later request cut does not regress activation."""
+        repo = FakeRepo(has_anchor=False)
+        bundle = PnlTimelineExecutionPrefixBundle(
+            request=PnlTimelineExecutionPrefix(
+                watermarks={"zonda": 1},
+                executions=[],
+            ),
+            activation=PnlTimelineExecutionPrefix(
+                watermarks={},
+                executions=[],
+            ),
+        )
+
+        async def load_bundle(
+            wallet_public_id: str,
+            mode: str,
+            request_as_of: datetime,
+            activation_as_of: datetime,
+        ) -> PnlTimelineExecutionPrefixBundle:
+            """Return a monotonic bundle with one request-only exchange."""
+            del wallet_public_id, mode, request_as_of, activation_as_of
+            return bundle
+
+        monkeypatch.setattr(repo, "get_pnl_timeline_execution_prefix_bundle", load_bundle)
+
+        row = await ensure_wallet_pnl_anchor(
+            repo,
+            _W1,
+            "live",
+            "USD",
+            _m(1),
+            _m(2),
+        )
+
+        assert len(repo.anchor_record_calls) == 1
+        assert row["watermarks_json"] == "{}"
+
+    async def test_atomic_writer_mismatch_is_mapped_to_anchor_evidence_error(
+        self,
+    ) -> None:
+        """A fence-time prefix change cannot escape as a repository detail."""
+        repo = FakeRepo(has_anchor=False)
+        repo.atomic_anchor_error = PnlTimelineAnchorEvidenceMismatchError("prefix changed")
+
+        with pytest.raises(
+            PnlAnchorEvidenceError,
+            match="changed before anchor persistence",
+        ):
+            await ensure_wallet_pnl_anchor(
+                repo,
+                _W1,
+                "live",
+                "USD",
+                _m(1),
+                _m(2),
+            )
+
+        assert repo.anchor_record_calls == []
+        assert len(repo.anchor_write_evidence) == 1
+        evidence = repo.anchor_write_evidence[0]
+        assert evidence["wallet_public_id"] == _W1
+        assert evidence["mode"] == "live"
+        assert evidence["request_as_of"] == _m(2)
+        assert evidence["activation_as_of"] == _m(1)
+        assert evidence["execution_prefix_bundle"] is repo.execution_prefix_bundles[0]
+
+    async def test_wallet_uuid_aliases_create_and_reuse_one_anchor(self) -> None:
+        """Service calls canonicalize UUID spelling before every anchor boundary."""
+        repo = FakeRepo(has_anchor=False)
+
+        created = await ensure_wallet_pnl_anchor(
+            repo,
+            _W1.upper(),
+            "live",
+            "USD",
+            _m(1),
+            _m(2),
+        )
+        repeated = await ensure_wallet_pnl_anchor(
+            repo,
+            _W1,
+            "live",
+            "USD",
+            _m(1),
+            _m(3),
+        )
+
+        assert created["wallet_public_id"] == _W1
+        assert repeated == created
+        assert len(repo.anchor_record_calls) == 1
+        assert all(call[0] == _W1 for call in repo.anchor_calls)
+
+    async def test_creates_canonical_rebased_anchor_and_reuses_it(self) -> None:
+        """A surviving shard retains raw audit while its public t0 is zero."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    2.0,
+                    100.0,
+                    0.0,
+                    "USD",
+                    shard_key="shard-a",
+                )
+            ],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(0), 110.0)],
+            has_anchor=False,
+        )
+        row = await ensure_wallet_pnl_anchor(
+            repo,
+            _W1,
+            "live",
+            "usd",
+            _m(1),
+            _m(2),
+        )
+        parsed = _parse_anchor(row)
+        assert row["unrealized_pnl"] == 20.0
+        assert row["watermarks_json"] == '{"kraken":1}'
+        assert len(parsed.opening.pools) == 1
+        pool = parsed.opening.pools[0]
+        assert pool.shard_key == "shard-a"
+        assert pool.position_qty == 2.0
+        assert pool.entry_price == 110.0
+        opening_payload = json.loads(row["opening_basket_json"] or "")
+        assert opening_payload["native_basket"] == {_I1: 2.0}
+        assert opening_payload["pools"][0]["historical_entry_price"] == 100.0
+        assert opening_payload["pools"][0]["t0_mark"] == 110.0
+        assert opening_payload["pools"][0]["opening_unrealized_value"] == 20.0
+        again = await ensure_wallet_pnl_anchor(
+            repo,
+            _W1,
+            "live",
+            "USD",
+            _m(1),
+            _m(3),
+        )
+        assert again == row
+        assert len(repo.anchor_record_calls) == 1
+
+    async def test_opposing_shards_keep_raw_value_but_public_t0_is_zero(self) -> None:
+        """Net-zero aggregate inventory cannot hide two non-flat opening shards."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    1.0,
+                    100.0,
+                    0.0,
+                    "USD",
+                    shard_key="long-shard",
+                ),
+                _exec_row(
+                    _I1,
+                    2,
+                    0,
+                    "sell",
+                    1.0,
+                    120.0,
+                    0.0,
+                    "USD",
+                    shard_key="short-shard",
+                ),
+            ],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(0), 110.0)],
+            has_anchor=False,
+        )
+        row = await ensure_wallet_pnl_anchor(
+            repo,
+            _W1,
+            "live",
+            "USD",
+            _m(1),
+            _m(2),
+        )
+        assert row["unrealized_pnl"] == 20.0
+        payload = json.loads(row["opening_basket_json"] or "")
+        assert payload["native_basket"] == {_I1: 0.0}
+        assert len(payload["pools"]) == 2
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _m(1),
+            _m(1),
+            "1m",
+            _m(2),
+        )
+        point = result.points[0]
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    async def test_fully_flat_prefix_needs_no_t0_mark(self) -> None:
+        """Historical round trips freeze watermarks without a phantom mark need."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    1.0,
+                    100.0,
+                    0.0,
+                    "USD",
+                    shard_key="flat-shard",
+                ),
+                _exec_row(
+                    _I1,
+                    2,
+                    1,
+                    "sell",
+                    1.0,
+                    105.0,
+                    0.0,
+                    "USD",
+                    shard_key="flat-shard",
+                ),
+            ],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            has_anchor=False,
+        )
+        row = await ensure_wallet_pnl_anchor(
+            repo,
+            _W1,
+            "live",
+            "USD",
+            _m(2),
+            _m(2),
+        )
+        assert row["unrealized_pnl"] == 0.0
+        assert json.loads(row["opening_basket_json"] or "")["pools"] == []
+        assert repo.candle_calls == []
+
+    @pytest.mark.parametrize(
+        ("refs", "candles"),
+        [
+            pytest.param([], [], id="missing-reference"),
+            pytest.param([_ref(_I1, "BTC-USD", "USD")], [], id="missing-mark"),
+            pytest.param(
+                [_ref(_I1, "BTC-EUR", "EUR")],
+                [_candle(_m(0), 110.0)],
+                id="missing-fx",
+            ),
+        ],
+    )
+    async def test_refuses_unproven_opening_evidence(
+        self,
+        refs: list[InstrumentSymbolRefRow],
+        candles: list[PnlTimelineCandleRow],
+    ) -> None:
+        """Missing price identity, t0 mark, or exact FX refuses persistence."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    1.0,
+                    100.0,
+                    0.0,
+                    "USD",
+                    shard_key="shard-a",
+                )
+            ],
+            refs=refs,
+            candles=candles,
+            has_anchor=False,
+        )
+        with pytest.raises(PnlAnchorEvidenceError):
+            await ensure_wallet_pnl_anchor(
+                repo,
+                _W1,
+                "live",
+                "USD",
+                _m(1),
+                _m(2),
+            )
+        assert repo.anchor_record_calls == []
+
+    async def test_race_loser_uses_the_canonical_different_minute_winner(self) -> None:
+        """The scope UUID, not candidate t0, arbitrates concurrent first reads."""
+        winner = _empty_anchor(_W1, "live", "USD", point_time=_m(0))
+        repo = FakeRepo(
+            has_anchor=False,
+            record_winner=winner,
+        )
+        row = await ensure_wallet_pnl_anchor(
+            repo,
+            _W1,
+            "live",
+            "USD",
+            _m(1),
+            _m(2),
+        )
+        assert row == winner
+        assert repo.anchor_record_calls[0]["point_time"] == _m(1)
+        assert repo.execution_bundle_calls == [(_W1, "live", _m(2), _m(1))]
+        assert len(repo.execution_prefix_bundles) == 1
+        assert repo.fill_gap_prefixes[0] is repo.execution_prefix_bundles[0]["activation"]
+
+    async def test_historical_missing_anchor_returns_empty_without_creation(self) -> None:
+        """An explicit historical horizon never mutates durable activation state."""
+        repo = FakeRepo(has_anchor=False)
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+            allow_anchor_creation=False,
+        )
+        assert result.points == ()
+        assert repo.anchor_record_calls == []
+        assert repo.execution_calls == []
+        assert repo.execution_bundle_calls == []
+        assert repo.execution_prefix_bundles == []
+        assert repo.execution_prefixes == []
+        assert repo.fill_gap_calls == []
+
+    async def test_historical_horizon_before_anchor_timestamp_cannot_see_or_create_it(
+        self,
+    ) -> None:
+        """Knowledge-time visibility excludes a later-created durable anchor."""
+        anchor = _empty_anchor(_W1, "live", "USD", point_time=_m(0))
+        anchor["timestamp"] = _m(2)
+        repo = FakeRepo(anchor=anchor)
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(1),
+            allow_anchor_creation=False,
+        )
+        assert result.points == ()
+        assert repo.anchor_record_calls == []
+        assert repo.execution_calls == []
+
+    async def test_current_empty_scope_creates_a_zero_anchor(self) -> None:
+        """An exact empty prefix is a valid activation cut and public zero."""
+        repo = FakeRepo(has_anchor=False)
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+        )
+        assert len(repo.anchor_record_calls) == 1
+        assert result.points[0].valuation_status == "complete"
+        assert result.points[0].net_pnl == 0.0
+
+    async def test_first_current_request_wholly_before_lazy_t0_is_withheld(
+        self,
+    ) -> None:
+        """Lazy activation cannot turn an older requested window into a 500."""
+        repo = FakeRepo(has_anchor=False)
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(1),
+            "1m",
+            _m(3),
+        )
+        assert len(repo.anchor_record_calls) == 1
+        assert repo.anchor_record_calls[0]["point_time"] == _m(3)
+        assert len(result.points) == 2
+        assert all(point.valuation_status == "incomplete" for point in result.points)
+        assert all(point.net_pnl is None for point in result.points)
+        assert all(
+            ("before_activation", "untrusted", "global", None) in _reason_rows(point)
+            for point in result.points
+        )
+
+    async def test_late_pre_activation_suffix_globally_withholds(self) -> None:
+        """A post-watermark row timestamped at t0 is retained but never trusted."""
+        anchor = _empty_anchor(_W1, "live", "USD", point_time=_T0)
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    1.0,
+                    100.0,
+                    0.0,
+                    "USD",
+                )
+            ],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0)],
+            anchor=anchor,
+        )
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(1),
+        )
+        point = result.points[0]
+        assert point.valuation_status == "incomplete"
+        assert point.net_pnl is None
+        assert (
+            "late_pre_activation_execution",
+            "untrusted",
+            "global",
+            None,
+        ) in _reason_rows(point)
+
+    async def test_prefix_regression_below_anchor_is_refused(self) -> None:
+        """A missing frozen exchange range cannot be interpreted as a flat suffix."""
+        anchor = _empty_anchor(
+            _W1,
+            "live",
+            "USD",
+            point_time=_m(-1),
+            watermarks={"kraken": 2},
+        )
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
+            anchor=anchor,
+        )
+        with pytest.raises(PnlAnchorEvidenceError, match="regressed"):
+            await build_wallet_pnl_series(
+                repo,
+                _W1,
+                "live",
+                _T0,
+                _T0,
+                "1m",
+                _m(1),
+            )
+
+    async def test_suffix_after_window_does_not_expand_accounting_evidence(
+        self,
+    ) -> None:
+        """A future-only suffix pool needs no refs, marks, FX, or work fan-out."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    10,
+                    "buy",
+                    1.0,
+                    100.0,
+                    1.0,
+                    "EUR",
+                )
+            ],
+            anchor=_empty_anchor(_W1, "live", "USD", point_time=_m(-1)),
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(10),
+        )
+        point = result.series.points[0]
+        assert point.valuation_status == "complete"
+        assert point.net_pnl == 0.0
+        assert result.markers == ()
+        assert repo.execution_calls == [(_W1, "live", _m(10))]
+        assert repo.symbol_ref_calls == []
+        assert repo.candle_calls == []
+        assert repo.fx_pair_calls == []
+
+    async def test_regressed_suffix_after_future_row_withholds_without_fx(
+        self,
+    ) -> None:
+        """A regressed row is shadowed at its effective time without fake flows."""
+        shard_key = "kraken:live:future-regression"
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    10,
+                    "buy",
+                    1.0,
+                    100.0,
+                    1.0,
+                    "EUR",
+                    shard_key=shard_key,
+                ),
+                _exec_row(
+                    _I1,
+                    2,
+                    0,
+                    "sell",
+                    1.0,
+                    110.0,
+                    1.0,
+                    "EUR",
+                    shard_key=shard_key,
+                ),
+            ],
+            refs=[_ref(_I1, "BTC-EUR", "EUR")],
+            anchor=_empty_anchor(_W1, "live", "USD", point_time=_m(-1)),
+        )
+        result = await build_wallet_pnl_timeline(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _m(10),
+        )
+        point = result.series.points[0]
+        assert point.valuation_status == "incomplete"
+        assert (
+            "scope_order_regression",
+            "untrusted",
+            "global",
+            _I1,
+        ) in _reason_rows(point)
+        assert (
+            point.realized_pnl,
+            point.fee_pnl,
+            point.accrual_pnl,
+            point.unrealized_pnl,
+            point.net_pnl,
+        ) == (None, None, None, None, None)
+        assert [
+            marker.execution_public_id
+            for marker in result.markers
+            if isinstance(marker, PnlFillMarker)
+        ] == [f"execution-{_I1}-2"]
+        assert repo.execution_calls == [(_W1, "live", _m(10))]
+        assert repo.candle_calls == []
+        assert repo.fx_pair_calls == []
+
+    async def test_parser_rejects_noncanonical_and_inconsistent_payloads(self) -> None:
+        """Whitespace and poisoned raw arithmetic cannot survive restart parsing."""
+        repo = FakeRepo(
+            executions=[
+                _exec_row(
+                    _I1,
+                    1,
+                    0,
+                    "buy",
+                    1.0,
+                    100.0,
+                    0.0,
+                    "USD",
+                    shard_key="shard-a",
+                )
+            ],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(0), 110.0)],
+            has_anchor=False,
+        )
+        row = await ensure_wallet_pnl_anchor(
+            repo,
+            _W1,
+            "live",
+            "USD",
+            _m(1),
+            _m(2),
+        )
+        noncanonical = row.copy()
+        noncanonical["opening_basket_json"] = f" {row['opening_basket_json']}"
+        with pytest.raises(PnlAnchorEvidenceError, match="not canonical"):
+            _parse_anchor(noncanonical)
+        inconsistent = row.copy()
+        inconsistent["unrealized_pnl"] = 11.0
+        with pytest.raises(PnlAnchorEvidenceError, match="does not reconcile"):
+            _parse_anchor(inconsistent)
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            pytest.param(
+                {"wallet_public_id": "not-a-wallet"},
+                "scope identity",
+                id="wallet",
+            ),
+            pytest.param({"mode": "backtest"}, "scope identity", id="mode"),
+            pytest.param({"valuation_ccy": "usd"}, "metadata", id="currency"),
+            pytest.param(
+                {"public_id": "00000000-0000-7000-8000-000000000bee"},
+                "metadata",
+                id="public-id",
+            ),
+            pytest.param(
+                {"epoch_public_id": "00000000-0000-7000-8000-000000000bee"},
+                "metadata",
+                id="epoch-id",
+            ),
+            pytest.param({"calc_version": "5A.12"}, "metadata", id="version"),
+            pytest.param({"realized_pnl": False}, "metadata", id="boolean-zero"),
+            pytest.param({"fee_pnl": 1.0}, "metadata", id="nonzero-component"),
+            pytest.param({"cash_usd": 0.0}, "metadata", id="phase-5b-field"),
+            pytest.param({"session_id": "not-a-uuid"}, "must be a UUID", id="session-uuid"),
+            pytest.param(
+                {"session_id": _ANCHOR_SESSION.upper()},
+                "must be canonical",
+                id="session-uuid-case",
+            ),
+            pytest.param({"sequence_id": True}, "sequence_id", id="boolean-sequence"),
+            pytest.param({"sequence_id": 0}, "sequence_id", id="zero-sequence"),
+            pytest.param(
+                {"timestamp": datetime(2026, 7, 20, 10, 0)},
+                "timestamps",
+                id="naive-timestamp",
+            ),
+            pytest.param(
+                {"timestamp": _m(0)},
+                "timestamps",
+                id="timestamp-before-t0",
+            ),
+            pytest.param({"unrealized_pnl": None}, "raw opening", id="null-raw"),
+            pytest.param({"unrealized_pnl": 0}, "raw opening", id="integer-raw"),
+            pytest.param({"unrealized_pnl": math.nan}, "raw opening", id="nan-raw"),
+        ],
+    )
+    def test_parser_rejects_poisoned_row_metadata(
+        self,
+        overrides: dict[str, object],
+        message: str,
+    ) -> None:
+        """Every persisted row-level invariant is rechecked after restart."""
+        row = cast(PortfolioPnlAnchorRow, _one_pool_anchor() | overrides)
+        with pytest.raises(PnlAnchorEvidenceError, match=message):
+            _parse_anchor(row)
+
+    @pytest.mark.parametrize(
+        ("field_name", "payload", "message"),
+        [
+            pytest.param(
+                "opening_basket_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 1,
+                        "pools": [_test_anchor_pool()],
+                        "native_basket": {_I1: 1.0},
+                    }
+                ),
+                "payload validation",
+                id="opening-schema",
+            ),
+            pytest.param(
+                "opening_basket_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 2,
+                        "pools": [_test_anchor_pool(shard_key=" shard-a")],
+                        "native_basket": {_I1: 1.0},
+                    }
+                ),
+                "payload validation",
+                id="opening-identity",
+            ),
+            pytest.param(
+                "opening_basket_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 2,
+                        "pools": [_test_anchor_pool(t0_mark=0.0)],
+                        "native_basket": {_I1: 1.0},
+                    }
+                ),
+                "payload validation",
+                id="opening-mark",
+            ),
+            pytest.param(
+                "opening_basket_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 2,
+                        "pools": [_test_anchor_pool(exchange="Kraken")],
+                        "native_basket": {_I1: 1.0},
+                    }
+                ),
+                "payload validation",
+                id="opening-exchange",
+            ),
+            pytest.param(
+                "opening_basket_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 2,
+                        "pools": [_test_anchor_pool(position_qty=0.0)],
+                        "native_basket": {_I1: 0.0},
+                    }
+                ),
+                "payload validation",
+                id="opening-flat",
+            ),
+            pytest.param(
+                "opening_basket_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 2,
+                        "pools": [_test_anchor_pool()],
+                        "native_basket": {_I1: 2.0},
+                    }
+                ),
+                "native basket",
+                id="native-basket",
+            ),
+            pytest.param(
+                "contributions_json",
+                _canonical_test_json({"schema_version": 2, "pools": []}),
+                "do not match",
+                id="missing-contribution",
+            ),
+            pytest.param(
+                "contributions_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 2,
+                        "pools": [_test_anchor_contribution(shard_key="")],
+                    }
+                ),
+                "payload validation",
+                id="contribution-identity",
+            ),
+            pytest.param(
+                "contributions_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 2,
+                        "pools": [_test_anchor_contribution(exchange="Kraken")],
+                    }
+                ),
+                "payload validation",
+                id="contribution-canonical-exchange",
+            ),
+            pytest.param(
+                "contributions_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 2,
+                        "pools": [_test_anchor_contribution(quantity=0.0)],
+                    }
+                ),
+                "payload validation",
+                id="contribution-positive-weight",
+            ),
+            pytest.param(
+                "contributions_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 2,
+                        "pools": [_test_anchor_contribution(exchange="coinbase")],
+                    }
+                ),
+                "inconsistent",
+                id="contribution-exchange",
+            ),
+            pytest.param(
+                "contributions_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 2,
+                        "pools": [_test_anchor_contribution(quantity=2.0)],
+                    }
+                ),
+                "inconsistent",
+                id="contribution-weight",
+            ),
+            pytest.param(
+                "contributions_json",
+                _canonical_test_json(
+                    {
+                        "schema_version": 2,
+                        "pools": [
+                            {
+                                **_test_anchor_contribution(),
+                                "weights": [
+                                    {
+                                        "origin": "unattributed",
+                                        "strategy_name": None,
+                                        "quantity": 0.5,
+                                    },
+                                    {
+                                        "origin": "unattributed",
+                                        "strategy_name": None,
+                                        "quantity": 0.5,
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                "inconsistent",
+                id="multiple-weights",
+            ),
+            pytest.param(
+                "watermarks_json",
+                '{"kraken":1, "walutomat":2}',
+                "not canonical",
+                id="json-whitespace",
+            ),
+            pytest.param(
+                "watermarks_json",
+                '{"Kraken":1}',
+                "not canonical",
+                id="watermark-key",
+            ),
+            pytest.param(
+                "watermarks_json",
+                '{"kraken":0}',
+                "not canonical",
+                id="watermark-value",
+            ),
+            pytest.param(
+                "opening_basket_json",
+                (
+                    '{"native_basket":{"' + _I1 + '":1.0},"pools":[{"exchange":"kraken",'
+                    '"historical_entry_price":100.0,"instrument_public_id":"'
+                    + _I1
+                    + '","opening_unrealized_value":NaN,"position_qty":1.0,'
+                    '"shard_key":"shard-a","t0_mark":110.0}],"schema_version":2}'
+                ),
+                "payload validation",
+                id="nonfinite-json",
+            ),
+        ],
+    )
+    def test_parser_rejects_payload_poison(
+        self,
+        field_name: str,
+        payload: str,
+        message: str,
+    ) -> None:
+        """Strict JSON, topology, contribution, and arithmetic checks fail closed."""
+        row = cast(
+            PortfolioPnlAnchorRow,
+            _one_pool_anchor() | {field_name: payload},
+        )
+        with pytest.raises(PnlAnchorEvidenceError, match=message):
+            _parse_anchor(row)
+
+
+class TestAnchorEvidenceDefenses:
+    """Cover refusal branches that protect durable activation evidence."""
+
+    async def test_anchor_creation_rejects_gap_prefix_failure_and_bad_watermark(
+        self,
+    ) -> None:
+        """No candidate persists when the exact activation prefix is unprovable."""
+        gapped = FakeRepo(has_fill_gap=True, has_anchor=False)
+        failed = FakeRepo(
+            has_anchor=False,
+            execution_prefix_error=RuntimeError("forced prefix failure"),
+        )
+        bad_watermark = FakeRepo(
+            has_anchor=False,
+            execution_watermarks={"Kraken": 1},
+        )
+        for repo, message in (
+            (gapped, "gap"),
+            (failed, "cannot be proven"),
+            (bad_watermark, "watermarks"),
+        ):
+            with pytest.raises(PnlAnchorEvidenceError, match=message):
+                await ensure_wallet_pnl_anchor(
+                    repo,
+                    _W1,
+                    "live",
+                    "USD",
+                    _m(1),
+                    _m(2),
+                )
+            assert repo.anchor_record_calls == []
+
+    async def test_anchor_creation_normalizes_public_input_errors(self) -> None:
+        """Invalid public mode and time cuts fail before any repository write."""
+        repo = FakeRepo(has_anchor=False)
+        with pytest.raises(ValueError, match="mode"):
+            await ensure_wallet_pnl_anchor(
+                repo,
+                _W1,
+                "backtest",
+                "USD",
+                _m(1),
+                _m(2),
+            )
+        with pytest.raises(ValueError, match="UTC minute"):
+            await ensure_wallet_pnl_anchor(
+                repo,
+                _W1,
+                "live",
+                "USD",
+                _m(1) + timedelta(seconds=1),
+                _m(2),
+            )
+        with pytest.raises(ValueError, match="knowledge_horizon"):
+            await ensure_wallet_pnl_anchor(
+                repo,
+                _W1,
+                "live",
+                "USD",
+                _m(1),
+                datetime(2026, 7, 20, 10, 2),
+            )
+        with pytest.raises(ValueError, match="knowledge_horizon"):
+            await ensure_wallet_pnl_anchor(
+                repo,
+                _W1,
+                "live",
+                "USD",
+                _m(2),
+                _m(1),
+            )
+        assert repo.anchor_calls == []
+        assert repo.anchor_record_calls == []
+
+    async def test_anchor_creation_wraps_kernel_derivation_refusal(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pure-kernel opening refusal becomes typed evidence failure."""
+
+        def refuse_derivation(*_args: object, **_kwargs: object) -> Never:
+            raise ValueError("forced derivation refusal")
+
+        monkeypatch.setattr(
+            pnl_timeline_service,
+            "derive_timeline_opening",
+            refuse_derivation,
+        )
+        repo = FakeRepo(has_anchor=False)
+        with pytest.raises(PnlAnchorEvidenceError, match="opening replay"):
+            await ensure_wallet_pnl_anchor(
+                repo,
+                _W1,
+                "live",
+                "USD",
+                _m(1),
+                _m(2),
+            )
+        assert repo.anchor_record_calls == []
+
+    async def test_visible_anchor_cannot_cross_requested_scope(self) -> None:
+        """A repository scope leak is rejected even when the row is canonical."""
+        other_wallet = "00000000-0000-7000-8000-000000000bee"
+        repo = FakeRepo(anchor=_empty_anchor(other_wallet, "live", "USD"))
+        with pytest.raises(PnlAnchorEvidenceError, match="crossed"):
+            await ensure_wallet_pnl_anchor(
+                repo,
+                _W1,
+                "live",
+                "USD",
+                _m(1),
+                _m(2),
+            )
+
+    async def test_empty_historical_result_still_validates_granularity(self) -> None:
+        """No-anchor history cannot bypass the public granularity contract."""
+        with pytest.raises(ValueError, match="Unsupported granularity"):
+            await build_wallet_pnl_series(
+                FakeRepo(has_anchor=False),
+                _W1,
+                "live",
+                _T0,
+                _T0,
+                "30m",
+                _T0,
+                allow_anchor_creation=False,
+            )
+
+    def test_opening_pool_scan_rejects_identity_scope_and_numeric_poison(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Shard replay refuses malformed identities, scopes, and arithmetic."""
+        valid = _exec_row(
+            _I1,
+            1,
+            0,
+            "buy",
+            1.0,
+            100.0,
+            0.0,
+            "USD",
+            shard_key="shard-a",
+        )
+        missing_identity = valid.copy()
+        missing_identity["shard_key"] = ""
+        with pytest.raises(PnlAnchorEvidenceError, match="identity"):
+            _opening_nonflat_instruments([missing_identity], {_I1: "BTC"})
+
+        crossed_exchange = _exec_row(
+            _I1,
+            2,
+            0,
+            "buy",
+            1.0,
+            100.0,
+            0.0,
+            "USD",
+            exchange="coinbase",
+            shard_key="shard-a",
+        )
+        with pytest.raises(PnlAnchorEvidenceError, match="multiple exchanges"):
+            _opening_nonflat_instruments([valid, crossed_exchange], {_I1: "BTC"})
+
+        invalid_size = valid.copy()
+        invalid_size["size"] = math.nan
+        with pytest.raises(PnlAnchorEvidenceError, match="size"):
+            _opening_nonflat_instruments([invalid_size], {_I1: "BTC"})
+
+        def invalid_quantity(*_args: object, **_kwargs: object) -> float:
+            return math.nan
+
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                pnl_timeline_service,
+                "booked_signed_quantity",
+                invalid_quantity,
+            )
+            with pytest.raises(PnlAnchorEvidenceError, match="quantity arithmetic"):
+                _opening_nonflat_instruments([valid], {_I1: "BTC"})
+
+        first_huge = valid.copy()
+        first_huge["size"] = 1e308
+        second_huge = valid.copy()
+        second_huge["scope_sequence"] = 2
+        second_huge["size"] = 1e308
+        with pytest.raises(PnlAnchorEvidenceError, match="overflowed"):
+            _opening_nonflat_instruments([first_huge, second_huge], {_I1: "BTC"})
+
+    def test_opening_mark_helpers_ignore_irrelevant_rows_and_refuse_poison(
+        self,
+    ) -> None:
+        """Only one positive t0 close may seed each non-flat instrument."""
+        t0 = _m(1)
+        irrelevant = _candle(_m(0), 50.0, _I2)
+        valid = _candle(_m(0), 110.0)
+        requirements = _opening_mark_requirements(
+            [irrelevant, valid],
+            {_I1},
+            {_I1: "EUR"},
+            "USD",
+            t0,
+        )
+        assert requirements == {_I1: {("EUR", "USD"): {t0}}}
+        assert _opening_marks_from_candles(
+            [irrelevant, valid],
+            {_I1},
+            {_I1: "USD"},
+            "USD",
+            {},
+            {},
+            t0,
+        ) == {_I1: 110.0}
+        with pytest.raises(PnlAnchorEvidenceError, match="duplicated"):
+            _opening_marks_from_candles(
+                [valid, valid],
+                {_I1},
+                {_I1: "USD"},
+                "USD",
+                {},
+                {},
+                t0,
+            )
+        with pytest.raises(PnlAnchorEvidenceError, match="positive and finite"):
+            _opening_marks_from_candles(
+                [_candle(_m(0), 0.0)],
+                {_I1},
+                {_I1: "USD"},
+                "USD",
+                {},
+                {},
+                t0,
+            )
+
+    def test_mark_fx_requirements_support_pre_anchor_callers(self) -> None:
+        """The optional opening remains compatible with an empty starting pool."""
+        requirements = _mark_fx_minutes(
+            [_candle(_m(-1), 100.0)],
+            [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
+            {_I1: "BTC"},
+            {_I1: "EUR"},
+            "USD",
+            _T0,
+            _T0,
+        )
+        assert requirements == {_I1: {("EUR", "USD"): {_T0}}}
+
+    @pytest.mark.parametrize(
+        ("opening_pools", "contribution_pools", "native_basket", "raw", "message"),
+        [
+            pytest.param(
+                [
+                    _test_anchor_pool(
+                        instrument_public_id=_I2,
+                        shard_key="shard-b",
+                    ),
+                    _test_anchor_pool(),
+                ],
+                [
+                    _test_anchor_contribution(
+                        instrument_public_id=_I2,
+                        shard_key="shard-b",
+                    ),
+                    _test_anchor_contribution(),
+                ],
+                {_I1: 1.0, _I2: 1.0},
+                20.0,
+                "stably ordered",
+                id="pool-order",
+            ),
+            pytest.param(
+                [_test_anchor_pool(), _test_anchor_pool()],
+                [_test_anchor_contribution(), _test_anchor_contribution()],
+                {_I1: 2.0},
+                20.0,
+                "not unique",
+                id="duplicate-pool",
+            ),
+            pytest.param(
+                [
+                    _test_anchor_pool(),
+                    _test_anchor_pool(
+                        shard_key="shard-b",
+                        t0_mark=111.0,
+                        opening_unrealized_value=11.0,
+                    ),
+                ],
+                [
+                    _test_anchor_contribution(),
+                    _test_anchor_contribution(shard_key="shard-b"),
+                ],
+                {_I1: 2.0},
+                21.0,
+                "conflicting t0 marks",
+                id="conflicting-mark",
+            ),
+            pytest.param(
+                [
+                    _test_anchor_pool(
+                        position_qty=1e308,
+                        historical_entry_price=1.0,
+                        t0_mark=1.0,
+                        opening_unrealized_value=0.0,
+                    ),
+                    _test_anchor_pool(
+                        shard_key="shard-b",
+                        position_qty=1e308,
+                        historical_entry_price=1.0,
+                        t0_mark=1.0,
+                        opening_unrealized_value=0.0,
+                    ),
+                ],
+                [
+                    _test_anchor_contribution(quantity=1e308),
+                    _test_anchor_contribution(shard_key="shard-b", quantity=1e308),
+                ],
+                {_I1: 0.0},
+                0.0,
+                "native basket audit overflows",
+                id="native-overflow",
+            ),
+            pytest.param(
+                [
+                    _test_anchor_pool(
+                        historical_entry_price=1.0,
+                        t0_mark=1e308,
+                        opening_unrealized_value=1e308,
+                    ),
+                    _test_anchor_pool(
+                        instrument_public_id=_I2,
+                        shard_key="shard-b",
+                        historical_entry_price=1.0,
+                        t0_mark=1e308,
+                        opening_unrealized_value=1e308,
+                    ),
+                ],
+                [
+                    _test_anchor_contribution(),
+                    _test_anchor_contribution(
+                        instrument_public_id=_I2,
+                        shard_key="shard-b",
+                    ),
+                ],
+                {_I1: 1.0, _I2: 1.0},
+                0.0,
+                "raw opening audit overflows",
+                id="raw-overflow",
+            ),
+        ],
+    )
+    def test_parser_rejects_multi_pool_poison(
+        self,
+        opening_pools: list[dict[str, object]],
+        contribution_pools: list[dict[str, object]],
+        native_basket: dict[str, float],
+        raw: float,
+        message: str,
+    ) -> None:
+        """Cross-pool ordering, uniqueness, mark, and finite-sum invariants hold."""
+        row = _one_pool_anchor()
+        row["unrealized_pnl"] = raw
+        row["opening_basket_json"] = _canonical_test_json(
+            {
+                "schema_version": 2,
+                "pools": opening_pools,
+                "native_basket": native_basket,
+            }
+        )
+        row["contributions_json"] = _canonical_test_json(
+            {
+                "schema_version": 2,
+                "pools": contribution_pools,
+            }
+        )
+        with pytest.raises(PnlAnchorEvidenceError, match=message):
+            _parse_anchor(row)

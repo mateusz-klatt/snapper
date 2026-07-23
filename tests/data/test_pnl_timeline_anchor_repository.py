@@ -1,0 +1,1739 @@
+"""Repository tests for durable P&L activation anchors."""
+
+import asyncio
+import os
+from collections.abc import AsyncIterator
+from copy import deepcopy
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
+from pathlib import Path
+from typing import Literal
+from typing import Protocol
+from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import PropertyMock
+from unittest.mock import patch
+from uuid import uuid7
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy import event
+from sqlalchemy import func
+from sqlalchemy import select
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import MultipleResultsFound
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from snapper.application.portfolio.execution_chain import ExecutionChainError
+from snapper.application.portfolio.pnl_anchor_identity import normalize_portfolio_pnl_valuation_ccy
+from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Execution
+from snapper.data.models import Instrument
+from snapper.data.models import Order
+from snapper.data.models import PortfolioPnlPoint
+from snapper.data.models import Symbol
+from snapper.data.models import VenueEvent
+from snapper.data.repository import PnlTimelineAnchorEvidenceMismatchError
+from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import PnlTimelineExecutionPrefix
+from snapper.data.repository_types import PnlTimelineExecutionPrefixBundle
+from snapper.data.repository_types import PortfolioPnlAnchorRow
+from snapper.data.repository_types import PortfolioPnlAnchorWriteEvidence
+
+_T0 = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+_FUTURE = datetime(2099, 1, 1, tzinfo=UTC)
+_WALLET = "0000face-0000-7000-8000-0000000000a1"
+_ANCHOR_PUBLIC_ID = portfolio_pnl_anchor_public_id(_WALLET, "live", "USD")
+_EPOCH_PUBLIC_ID = "00000000-0000-7000-8000-000000000102"
+_SESSION_PUBLIC_ID = "00000000-0000-7000-8000-000000000103"
+_SYMBOL_PUBLIC_ID = "00000000-0000-7000-8000-000000000104"
+_INSTRUMENT_PUBLIC_ID = "00000000-0000-7000-8000-000000000105"
+_ORDER_PUBLIC_ID = "00000000-0000-7000-8000-000000000106"
+_CLIENT_ORDER_ID = "anchor-fence-client"
+_LOCAL_POSTGRES_URL_ENV = "PNL_ANCHOR_FENCE_POSTGRES_URL"
+
+
+class _SyncCursor(Protocol):
+    """Synchronous DBAPI cursor surface used by the connect event."""
+
+    def execute(self, statement: str) -> object:
+        """Execute one connection configuration statement."""
+        ...
+
+    def close(self) -> None:
+        """Close the configuration cursor."""
+        ...
+
+
+class _SyncDbapiConnection(Protocol):
+    """Synchronous DBAPI connection surface exposed by SQLAlchemy events."""
+
+    def cursor(self) -> _SyncCursor:
+        """Return a cursor for one session-level setting."""
+        ...
+
+    def commit(self) -> None:
+        """Commit the session-level setting outside test transactions."""
+        ...
+
+
+def _configured_local_postgresql_url() -> str | None:
+    """Return only the explicitly opted-in local disposable-schema target."""
+    database_url = os.environ.get(_LOCAL_POSTGRES_URL_ENV)
+    if database_url is None:
+        return None
+    try:
+        parsed = make_url(database_url)
+    except ArgumentError:
+        return None
+    if (
+        parsed.get_backend_name() != "postgresql"
+        or parsed.host != "127.0.0.1"
+        or parsed.port != 5432
+        or parsed.username != "snapper"
+        or parsed.password != "example"
+        or parsed.database != "snapper"
+    ):
+        return None
+    return database_url
+
+
+def _anchor(
+    public_id: str = _ANCHOR_PUBLIC_ID,
+    point_time: datetime = _T0,
+    timestamp: datetime = _T0,
+) -> PortfolioPnlAnchorRow:
+    """Build one complete anchor payload containing every persisted field."""
+    return {
+        "public_id": public_id,
+        "session_id": _SESSION_PUBLIC_ID,
+        "sequence_id": 41,
+        "timestamp": timestamp,
+        "wallet_public_id": _WALLET,
+        "mode": "live",
+        "valuation_ccy": "USD",
+        "point_time": point_time,
+        "point_kind": "anchor",
+        "epoch_public_id": _EPOCH_PUBLIC_ID,
+        "calc_version": "5A.2",
+        "valuation_status": "complete",
+        "realized_pnl": 0.0,
+        "fee_pnl": 0.0,
+        "accrual_pnl": 0.0,
+        "unrealized_pnl": 812.25,
+        "external_flow_adjustment": 0.0,
+        "cash_usd": 1200.5,
+        "position_value_usd": 4812.75,
+        "drawdown": None,
+        "mark_source": "finalized_1m",
+        "mark_time": point_time,
+        "watermarks_json": '{"kraken":7,"zonda":3}',
+        "opening_basket_json": '{"native":{"BTC":"1.25"},"pools":{"pool-a":"2"}}',
+        "contributions_json": '{"unattributed":1.0}',
+    }
+
+
+def _malformed_anchor(**overrides: object) -> PortfolioPnlAnchorRow:
+    """Build a deliberately invalid runtime payload for writer guard tests."""
+    return cast(PortfolioPnlAnchorRow, {**_anchor(), **overrides})
+
+
+def _atomic_anchor(
+    point_time: datetime = _T0,
+    timestamp: datetime = _T0,
+) -> PortfolioPnlAnchorRow:
+    """Build one empty-prefix candidate for atomic writer tests."""
+    anchor = _anchor(point_time=point_time, timestamp=timestamp)
+    anchor["watermarks_json"] = "{}"
+    return anchor
+
+
+def _empty_anchor_write_evidence(
+    request_as_of: datetime = _T0,
+    activation_as_of: datetime = _T0,
+) -> PortfolioPnlAnchorWriteEvidence:
+    """Build one valid empty derivation bundle for an atomic anchor write."""
+    empty = PnlTimelineExecutionPrefix(watermarks={}, executions=[])
+    return PortfolioPnlAnchorWriteEvidence(
+        wallet_public_id=_WALLET,
+        mode="live",
+        request_as_of=request_as_of,
+        activation_as_of=activation_as_of,
+        execution_prefix_bundle=PnlTimelineExecutionPrefixBundle(
+            request=empty,
+            activation=empty,
+        ),
+    )
+
+
+def _source_symbol() -> Symbol:
+    """Build one active symbol row used by real writer-fence tests."""
+    return Symbol(
+        public_id=_SYMBOL_PUBLIC_ID,
+        native_symbol="BTC-USD",
+        base="BTC",
+        quote="USD",
+        asset_type="crypto",
+        created_at=_T0 - timedelta(minutes=1),
+        timestamp=_T0 - timedelta(minutes=1),
+        known_to=KNOWN_TO_MAX,
+        session_id=_SESSION_PUBLIC_ID,
+        sequence_id=1,
+    )
+
+
+def _source_instrument() -> Instrument:
+    """Build one active execution instrument lineage row."""
+    return Instrument(
+        public_id=_INSTRUMENT_PUBLIC_ID,
+        symbol_public_id=_SYMBOL_PUBLIC_ID,
+        exchange="kraken",
+        timestamp=_T0 - timedelta(minutes=1),
+        known_to=KNOWN_TO_MAX,
+        session_id=_SESSION_PUBLIC_ID,
+        sequence_id=1,
+    )
+
+
+def _source_order() -> Order:
+    """Build one active execution order lineage row."""
+    return Order(
+        public_id=_ORDER_PUBLIC_ID,
+        instrument_public_id=_INSTRUMENT_PUBLIC_ID,
+        wallet_public_id=_WALLET,
+        mode="live",
+        client_order_id=_CLIENT_ORDER_ID,
+        exchange_order_id="anchor-fence-venue-order",
+        created_at=_T0 - timedelta(minutes=1),
+        timestamp=_T0 - timedelta(minutes=1),
+        side="buy",
+        order_type="limit",
+        price=100.0,
+        size=1.0,
+        status="filled",
+        session_id=_SESSION_PUBLIC_ID,
+        sequence_id=1,
+        known_to=KNOWN_TO_MAX,
+    )
+
+
+def _source_execution() -> Execution:
+    """Build one execution that advances the tested scope prefix."""
+    return Execution(
+        order_public_id=_ORDER_PUBLIC_ID,
+        wallet_public_id=_WALLET,
+        operator_public_id=None,
+        exchange="kraken",
+        mode="live",
+        scope_sequence=1,
+        exec_id="anchor-fence-exec",
+        trade_id="anchor-fence-trade",
+        side="buy",
+        status="filled",
+        price=100.0,
+        size=1.0,
+        fee=0.25,
+        fee_asset="USD",
+        executed_at=None,
+        liquidity_role="maker",
+        timestamp=_T0 - timedelta(minutes=1),
+        known_to=KNOWN_TO_MAX,
+        session_id=_SESSION_PUBLIC_ID,
+        sequence_id=1,
+    )
+
+
+def _source_fill() -> VenueEvent:
+    """Build exact durable fill evidence for the source execution."""
+    return VenueEvent(
+        event_type="fill_observed",
+        shard_key="kraken.BTC-USD.live",
+        wallet_public_id=_WALLET,
+        command_public_id=None,
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        exchange_order_id="anchor-fence-venue-order",
+        client_order_id=_CLIENT_ORDER_ID,
+        venue_client_id=_CLIENT_ORDER_ID,
+        side="buy",
+        status="filled",
+        fill_price=100.0,
+        fill_size=1.0,
+        cum_fill_size=1.0,
+        fee=0.25,
+        fee_asset="USD",
+        exec_id="anchor-fence-exec",
+        trade_id="anchor-fence-trade",
+        error=None,
+        venue_timestamp=_T0 - timedelta(minutes=1),
+        received_at=_T0 - timedelta(minutes=1),
+        payload_json=None,
+        liquidity_role="maker",
+        paired_group_id=None,
+        timestamp=_T0 - timedelta(minutes=1),
+        known_to=KNOWN_TO_MAX,
+        session_id=_SESSION_PUBLIC_ID,
+        sequence_id=1,
+    )
+
+
+@pytest.fixture()
+async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
+    """Create an isolated repository with anchor and prefix-source tables."""
+    db_path = tmp_path / "pnl-anchor.db"
+    schema_engine = create_engine(f"sqlite:///{db_path}")
+    Symbol.__table__.create(schema_engine)
+    Instrument.__table__.create(schema_engine)
+    Order.__table__.create(schema_engine)
+    Execution.__table__.create(schema_engine)
+    VenueEvent.__table__.create(schema_engine)
+    PortfolioPnlPoint.__table__.create(schema_engine)
+    schema_engine.dispose()
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    try:
+        yield repo
+    finally:
+        await repo.engine.dispose()
+
+
+def _create_postgresql_anchor_fence_tables(connection: Connection) -> None:
+    """Create only the six isolated relations exercised by the live proof."""
+    for table in (
+        Symbol.__table__,
+        Instrument.__table__,
+        Order.__table__,
+        Execution.__table__,
+        VenueEvent.__table__,
+        PortfolioPnlPoint.__table__,
+    ):
+        table.create(connection)
+
+
+@pytest.fixture()
+async def postgresql_repository() -> AsyncIterator[SQLAlchemyRepository]:
+    """Create and later drop one randomized schema on the validated local PG16."""
+    database_url = _configured_local_postgresql_url()
+    if database_url is None:
+        pytest.skip(f"local PG16 proof requires a validated {_LOCAL_POSTGRES_URL_ENV}")
+    schema_name = f"pnl_anchor_fence_{uuid7().hex}"
+    quoted_schema = f'"{schema_name}"'
+    repo = SQLAlchemyRepository(database_url)
+
+    def set_search_path(
+        dbapi_connection: _SyncDbapiConnection,
+        connection_record: object,
+    ) -> None:
+        """Bind every pooled connection to the disposable schema."""
+        del connection_record
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(f"SET SESSION search_path TO {quoted_schema}, public")
+            dbapi_connection.commit()
+        finally:
+            cursor.close()
+
+    event.listen(repo.engine.sync_engine, "connect", set_search_path)
+    try:
+        async with repo.engine.begin() as connection:
+            await connection.execute(text(f"CREATE SCHEMA {quoted_schema}"))
+            await connection.run_sync(_create_postgresql_anchor_fence_tables)
+        yield repo
+    finally:
+        async with repo.engine.begin() as connection:
+            await connection.execute(text(f"DROP SCHEMA IF EXISTS {quoted_schema} CASCADE"))
+        event.remove(repo.engine.sync_engine, "connect", set_search_path)
+        await repo.engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param([], False, id="not_a_mapping"),
+        pytest.param({1: 1}, False, id="non_string_exchange"),
+        pytest.param({"": 1}, False, id="empty_exchange"),
+        pytest.param({"Kraken": 1}, False, id="noncanonical_exchange"),
+        pytest.param({"kraken": "1"}, False, id="non_integer_sequence"),
+        pytest.param({"kraken": True}, False, id="boolean_sequence"),
+        pytest.param({"kraken": 0}, False, id="nonpositive_sequence"),
+        pytest.param({"kraken": 1}, True, id="valid"),
+    ],
+)
+def test_atomic_watermark_runtime_validator_covers_every_guard(
+    value: object,
+    expected: bool,
+) -> None:
+    """Malformed runtime watermark values fail each structural guard."""
+    assert SQLAlchemyRepository._pnl_timeline_watermarks_are_valid(value) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_size"),
+    [
+        pytest.param({}, None, id="not_a_list"),
+        pytest.param([1], None, id="not_a_row"),
+        pytest.param(
+            [{"exchange": 1, "scope_sequence": 1}],
+            None,
+            id="non_string_exchange",
+        ),
+        pytest.param(
+            [{"exchange": "kraken", "scope_sequence": "1"}],
+            None,
+            id="non_integer_sequence",
+        ),
+        pytest.param(
+            [{"exchange": "kraken", "scope_sequence": True}],
+            None,
+            id="boolean_sequence",
+        ),
+        pytest.param(
+            [
+                {"exchange": "kraken", "scope_sequence": 1},
+                {"exchange": "kraken", "scope_sequence": 1},
+            ],
+            None,
+            id="duplicate_sequence",
+        ),
+        pytest.param(
+            [{"exchange": "kraken", "scope_sequence": 1}],
+            1,
+            id="valid",
+        ),
+    ],
+)
+def test_atomic_prefix_row_index_refuses_malformed_or_duplicate_keys(
+    value: object,
+    expected_size: int | None,
+) -> None:
+    """The activation-subset index never accepts ambiguous runtime rows."""
+    result = SQLAlchemyRepository._pnl_timeline_prefix_rows_by_sequence(value)
+    assert (None if result is None else len(result)) == expected_size
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param([], id="not_a_bundle"),
+        pytest.param({}, id="missing_cuts"),
+        pytest.param({"request": {}, "activation": []}, id="non_mapping_cut"),
+        pytest.param(
+            {
+                "request": {"watermarks": [], "executions": []},
+                "activation": {"watermarks": {}, "executions": []},
+            },
+            id="invalid_watermarks",
+        ),
+        pytest.param(
+            {
+                "request": {"watermarks": {}, "executions": []},
+                "activation": {
+                    "watermarks": {"kraken": 1},
+                    "executions": [],
+                },
+            },
+            id="missing_request_exchange",
+        ),
+        pytest.param(
+            {
+                "request": {
+                    "watermarks": {"kraken": 1},
+                    "executions": [],
+                },
+                "activation": {
+                    "watermarks": {"kraken": 2},
+                    "executions": [],
+                },
+            },
+            id="regressed_request_sequence",
+        ),
+        pytest.param(
+            {
+                "request": {"watermarks": {}, "executions": {}},
+                "activation": {"watermarks": {}, "executions": []},
+            },
+            id="invalid_request_rows",
+        ),
+        pytest.param(
+            {
+                "request": {"watermarks": {}, "executions": []},
+                "activation": {"watermarks": {}, "executions": {}},
+            },
+            id="invalid_activation_rows",
+        ),
+        pytest.param(
+            {
+                "request": {
+                    "watermarks": {"kraken": 1},
+                    "executions": [{"exchange": "kraken", "scope_sequence": 1, "price": 1.0}],
+                },
+                "activation": {
+                    "watermarks": {"kraken": 1},
+                    "executions": [{"exchange": "kraken", "scope_sequence": 1, "price": 2.0}],
+                },
+            },
+            id="activation_row_not_exact_subset",
+        ),
+    ],
+)
+def test_atomic_bundle_monotonicity_refuses_every_invalid_relation(
+    value: object,
+) -> None:
+    """Malformed cuts, regressed maps, and changed subset rows all fail."""
+    assert not SQLAlchemyRepository._pnl_timeline_prefix_bundle_is_monotonic(value)
+
+
+def test_atomic_bundle_monotonicity_accepts_request_only_exchange() -> None:
+    """A later request-only exchange remains a valid monotonic relation."""
+    value = {
+        "request": {
+            "watermarks": {"zonda": 1},
+            "executions": [{"exchange": "zonda", "scope_sequence": 1}],
+        },
+        "activation": {"watermarks": {}, "executions": []},
+    }
+    assert SQLAlchemyRepository._pnl_timeline_prefix_bundle_is_monotonic(value)
+
+
+def _apply_atomic_scope_mismatch(
+    mismatch: str,
+    runtime_evidence: dict[str, object],
+) -> None:
+    """Apply one identity, mode, type, or request-cut mismatch."""
+    if mismatch == "noncanonical_wallet":
+        runtime_evidence["wallet_public_id"] = _WALLET.upper()
+    elif mismatch == "different_wallet":
+        runtime_evidence["wallet_public_id"] = "0000face-0000-7000-8000-0000000000a2"
+    elif mismatch == "mode":
+        runtime_evidence["mode"] = "paper"
+    elif mismatch == "request_type":
+        runtime_evidence["request_as_of"] = "not-a-time"
+    elif mismatch == "activation_type":
+        runtime_evidence["activation_as_of"] = "not-a-time"
+    else:
+        runtime_evidence["request_as_of"] = _T0 + timedelta(minutes=1)
+
+
+def _apply_atomic_cut_mismatch(
+    mismatch: str,
+    anchor: PortfolioPnlAnchorRow,
+    runtime_evidence: dict[str, object],
+) -> None:
+    """Apply one activation, timezone, ordering, or bundle mismatch."""
+    if mismatch == "activation_cut":
+        runtime_evidence["activation_as_of"] = _T0 - timedelta(minutes=1)
+    elif mismatch == "request_timezone":
+        runtime_evidence["request_as_of"] = _T0.astimezone(timezone(timedelta(hours=1)))
+    elif mismatch == "activation_timezone":
+        runtime_evidence["activation_as_of"] = _T0.astimezone(timezone(timedelta(hours=1)))
+    elif mismatch == "inverted_cuts":
+        activation = _T0 + timedelta(minutes=1)
+        anchor["point_time"] = activation
+        runtime_evidence["activation_as_of"] = activation
+    elif mismatch == "bundle":
+        runtime_evidence["execution_prefix_bundle"] = {}
+    else:
+        anchor["watermarks_json"] = '{"kraken":1}'
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "noncanonical_wallet",
+        "different_wallet",
+        "mode",
+        "request_type",
+        "activation_type",
+        "request_cut",
+        "activation_cut",
+        "request_timezone",
+        "activation_timezone",
+        "inverted_cuts",
+        "bundle",
+        "watermarks_json",
+    ],
+)
+def test_atomic_write_evidence_refuses_every_scope_and_cut_mismatch(
+    mismatch: str,
+) -> None:
+    """Every caller-controlled relation is checked before a transaction."""
+    anchor = _atomic_anchor()
+    evidence = _empty_anchor_write_evidence()
+    runtime_evidence = cast(dict[str, object], evidence)
+    if mismatch in {
+        "noncanonical_wallet",
+        "different_wallet",
+        "mode",
+        "request_type",
+        "activation_type",
+        "request_cut",
+    }:
+        _apply_atomic_scope_mismatch(mismatch, runtime_evidence)
+    else:
+        _apply_atomic_cut_mismatch(mismatch, anchor, runtime_evidence)
+
+    with pytest.raises(PnlTimelineAnchorEvidenceMismatchError, match="does not match"):
+        SQLAlchemyRepository._validate_portfolio_pnl_anchor_write_evidence(
+            anchor,
+            cast(PortfolioPnlAnchorWriteEvidence, runtime_evidence),
+        )
+
+
+def test_atomic_write_evidence_wraps_malformed_wallet_identity() -> None:
+    """A runtime identity parser failure becomes the typed repository error."""
+    evidence = _empty_anchor_write_evidence()
+    evidence["wallet_public_id"] = "not-a-wallet"
+
+    with pytest.raises(PnlTimelineAnchorEvidenceMismatchError, match="malformed"):
+        SQLAlchemyRepository._validate_portfolio_pnl_anchor_write_evidence(
+            _atomic_anchor(),
+            evidence,
+        )
+
+
+async def test_atomic_anchor_writer_sets_read_committed_then_locks_in_order(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """PostgreSQL begins before advisory and deterministic source table locks."""
+    events: list[str] = []
+    session = AsyncMock()
+    session.add = MagicMock()
+
+    async def execute(statement: object, parameters: object = None) -> MagicMock:
+        """Record every SQL statement issued by the atomic writer."""
+        del parameters
+        events.append(str(statement))
+        return MagicMock()
+
+    async def load(
+        loaded_session: AsyncSession,
+        evidence: PortfolioPnlAnchorWriteEvidence,
+    ) -> PnlTimelineExecutionPrefixBundle:
+        """Record that source reload begins only after every PostgreSQL lock."""
+        assert loaded_session is session
+        events.append("load")
+        return evidence["execution_prefix_bundle"]
+
+    session.execute = AsyncMock(side_effect=execute)
+    current_anchor = AsyncMock(return_value=None)
+    with (
+        patch.object(
+            SQLAlchemyRepository,
+            "dialect_name",
+            new_callable=PropertyMock,
+            return_value="postgresql",
+        ),
+        patch.object(repository, "session") as session_context,
+        patch.object(
+            repository,
+            "_load_pnl_timeline_execution_prefix_bundle_in_session",
+            side_effect=load,
+        ),
+        patch.object(
+            repository,
+            "_pnl_timeline_scope_has_fill_gap_in_session",
+            new=AsyncMock(return_value=False),
+        ) as gap_check,
+        patch.object(
+            repository,
+            "_read_current_portfolio_pnl_anchor",
+            new=current_anchor,
+        ),
+    ):
+        session_context.return_value.__aenter__.return_value = session
+        session_context.return_value.__aexit__.return_value = None
+        result = await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            _atomic_anchor(),
+            _empty_anchor_write_evidence(),
+        )
+
+    assert events == [
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+        "SELECT pg_advisory_xact_lock(hashtext('portfolio_pnl_anchor'), hashtext(:scope))",
+        "LOCK TABLE executions, instruments, orders, symbols, venue_events IN SHARE MODE",
+        "load",
+    ]
+    assert result == _atomic_anchor()
+    session.add.assert_called_once()
+    session.commit.assert_awaited_once_with()
+    session.rollback.assert_not_awaited()
+    gap_check.assert_awaited_once()
+    assert gap_check.await_args_list[0].args[0] is session
+
+
+async def test_atomic_anchor_writer_rolls_back_changed_sqlite_bundle(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """SQLite takes its reservation first and writes no anchor after a change."""
+    session = AsyncMock()
+    session.add = MagicMock()
+    current = PnlTimelineExecutionPrefixBundle(
+        request=PnlTimelineExecutionPrefix(watermarks={"kraken": 1}, executions=[]),
+        activation=PnlTimelineExecutionPrefix(watermarks={"kraken": 1}, executions=[]),
+    )
+    with (
+        patch.object(repository, "session") as session_context,
+        patch.object(
+            repository,
+            "_load_pnl_timeline_execution_prefix_bundle_in_session",
+            new=AsyncMock(return_value=current),
+        ),
+        patch.object(
+            repository,
+            "_read_current_portfolio_pnl_anchor",
+            new=AsyncMock(return_value=None),
+        ) as current_anchor,
+    ):
+        session_context.return_value.__aenter__.return_value = session
+        session_context.return_value.__aexit__.return_value = None
+        with pytest.raises(
+            PnlTimelineAnchorEvidenceMismatchError,
+            match="changed before anchor persistence",
+        ):
+            await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+                _atomic_anchor(),
+                _empty_anchor_write_evidence(),
+            )
+
+    first_statement = session.execute.await_args_list[0].args[0]
+    assert str(first_statement) == "BEGIN IMMEDIATE"
+    assert session.execute.await_count == 1
+    session.add.assert_not_called()
+    session.commit.assert_not_awaited()
+    session.rollback.assert_awaited_once_with()
+    current_anchor.assert_not_awaited()
+
+
+async def test_atomic_transaction_and_fence_refuse_unknown_dialect(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Neither half of the durability protocol silently weakens on a new DB."""
+    session = AsyncMock()
+    with patch.object(
+        SQLAlchemyRepository,
+        "dialect_name",
+        new_callable=PropertyMock,
+        return_value="unknown",
+    ):
+        with pytest.raises(NotImplementedError, match="write transaction"):
+            await repository._begin_portfolio_pnl_anchor_write_transaction(session)
+        with pytest.raises(NotImplementedError, match="evidence fence"):
+            await repository._acquire_portfolio_pnl_anchor_evidence_fence(
+                session,
+                _atomic_anchor(),
+            )
+    session.execute.assert_not_awaited()
+
+
+async def test_fenced_bundle_reload_reads_distinct_cuts_independently(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Different request and activation cuts each invoke the proven loader."""
+    request = PnlTimelineExecutionPrefix(watermarks={"kraken": 2}, executions=[])
+    activation = PnlTimelineExecutionPrefix(watermarks={"kraken": 1}, executions=[])
+    loader = AsyncMock(side_effect=[request, activation])
+    evidence = _empty_anchor_write_evidence(
+        request_as_of=_T0 + timedelta(minutes=1),
+        activation_as_of=_T0,
+    )
+    with patch.object(
+        repository,
+        "_load_pnl_timeline_execution_prefix_snapshot",
+        new=loader,
+    ):
+        bundle = await repository._load_pnl_timeline_execution_prefix_bundle_in_session(
+            AsyncMock(),
+            evidence,
+        )
+
+    assert bundle == {"request": request, "activation": activation}
+    assert loader.await_count == 2
+
+
+@pytest.mark.parametrize("failure", ["unproven", "inconsistent"])
+async def test_atomic_writer_rolls_back_unprovable_or_inconsistent_current_bundle(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Literal["unproven", "inconsistent"],
+) -> None:
+    """Fence-time validation failures are typed and leave no durable anchor."""
+
+    async def fail_reload(
+        session: AsyncSession,
+        evidence: PortfolioPnlAnchorWriteEvidence,
+    ) -> PnlTimelineExecutionPrefixBundle:
+        """Raise or return the requested invalid current evidence."""
+        del session, evidence
+        if failure == "unproven":
+            raise ExecutionChainError("backfilled lineage")
+        return PnlTimelineExecutionPrefixBundle(
+            request=PnlTimelineExecutionPrefix(
+                watermarks={},
+                executions=[],
+            ),
+            activation=PnlTimelineExecutionPrefix(
+                watermarks={"kraken": 1},
+                executions=[],
+            ),
+        )
+
+    monkeypatch.setattr(
+        repository,
+        "_load_pnl_timeline_execution_prefix_bundle_in_session",
+        fail_reload,
+    )
+    message = "cannot be proven" if failure == "unproven" else "inconsistent"
+    with pytest.raises(PnlTimelineAnchorEvidenceMismatchError, match=message):
+        await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            _atomic_anchor(),
+            _empty_anchor_write_evidence(),
+        )
+
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 0
+
+
+async def test_atomic_writer_integrity_race_returns_validated_winner(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy concurrent insert collision still returns its canonical winner."""
+    winner = _atomic_anchor()
+    async with repository.session() as s:
+        s.add(PortfolioPnlPoint(**winner, known_to=KNOWN_TO_MAX))
+        await s.commit()
+    original_read = repository._read_current_portfolio_pnl_anchor
+    read_count = 0
+
+    async def hide_first_winner(
+        session: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        valuation_ccy: str,
+    ) -> PortfolioPnlPoint | None:
+        """Force one duplicate insert before exposing the stored winner."""
+        nonlocal read_count
+        read_count += 1
+        if read_count == 1:
+            return None
+        return await original_read(
+            session,
+            wallet_public_id,
+            mode,
+            valuation_ccy,
+        )
+
+    monkeypatch.setattr(
+        repository,
+        "_read_current_portfolio_pnl_anchor",
+        hide_first_winner,
+    )
+    result = await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+        _atomic_anchor(),
+        _empty_anchor_write_evidence(),
+    )
+
+    assert result == winner
+    assert read_count == 2
+
+
+async def test_atomic_writer_reraises_integrity_failure_without_winner(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """An unrelated insert constraint failure is never classified as a race."""
+    invalid = cast(
+        PortfolioPnlAnchorRow,
+        {
+            **_atomic_anchor(),
+            "session_id": None,
+        },
+    )
+
+    with pytest.raises(IntegrityError):
+        await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            invalid,
+            _empty_anchor_write_evidence(),
+        )
+
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 0
+
+
+async def test_sqlite_atomic_writer_refuses_append_committed_after_initial_bundle(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A source append between derivation and the fence leaves no anchor."""
+    initial = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0,
+        _T0,
+    )
+    assert initial["request"]["watermarks"] == {}
+    async with repository.session() as s:
+        s.add_all(
+            [
+                _source_symbol(),
+                _source_instrument(),
+                _source_order(),
+                _source_execution(),
+                _source_fill(),
+            ]
+        )
+        await s.commit()
+
+    evidence = _empty_anchor_write_evidence()
+    evidence["execution_prefix_bundle"] = initial
+    with pytest.raises(
+        PnlTimelineAnchorEvidenceMismatchError,
+        match="changed before anchor persistence",
+    ):
+        await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            _atomic_anchor(),
+            evidence,
+        )
+
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 0
+
+
+async def test_sqlite_atomic_writer_refuses_orphan_fill_after_clean_bundle(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A committed orphan CID is found by the fenced scope-wide gap read."""
+    initial = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0,
+        _T0,
+    )
+    assert initial["request"]["executions"] == []
+    async with repository.session() as s:
+        s.add(_source_fill())
+        await s.commit()
+    evidence = _empty_anchor_write_evidence()
+    evidence["execution_prefix_bundle"] = initial
+
+    with pytest.raises(
+        PnlTimelineAnchorEvidenceMismatchError,
+        match="unconsumed fill evidence",
+    ):
+        await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            _atomic_anchor(),
+            evidence,
+        )
+
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 0
+
+
+async def test_sqlite_atomic_writer_persists_exact_no_gap_prefix(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Matching scope-wide fill and execution quantities still permit a write."""
+    async with repository.session() as s:
+        s.add_all(
+            [
+                _source_symbol(),
+                _source_instrument(),
+                _source_order(),
+                _source_execution(),
+                _source_fill(),
+            ]
+        )
+        await s.commit()
+    bundle = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0,
+        _T0,
+    )
+    evidence = _empty_anchor_write_evidence()
+    evidence["execution_prefix_bundle"] = bundle
+    candidate = _atomic_anchor()
+    candidate["watermarks_json"] = '{"kraken":1}'
+
+    recorded = await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+        candidate,
+        evidence,
+    )
+
+    assert recorded == candidate
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 1
+
+
+async def test_sqlite_source_append_after_atomic_fence_waits_for_anchor_commit(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BEGIN IMMEDIATE blocks a relevant source append until anchor commit."""
+    initial = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0,
+        _T0,
+    )
+    evidence = _empty_anchor_write_evidence()
+    evidence["execution_prefix_bundle"] = initial
+    original_load = repository._load_pnl_timeline_execution_prefix_snapshot
+    fence_acquired = asyncio.Event()
+    release_reload = asyncio.Event()
+    writer_attempted = asyncio.Event()
+
+    async def pause_after_fence(
+        session: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> PnlTimelineExecutionPrefix:
+        """Hold the fenced writer immediately before its source reload."""
+        fence_acquired.set()
+        await asyncio.wait_for(release_reload.wait(), timeout=5.0)
+        return await original_load(session, wallet_public_id, mode, as_of)
+
+    async def append_relevant_source() -> None:
+        """Attempt an orphan fill insert on a second connection after the fence."""
+        async with repository.session() as s:
+            s.add(_source_fill())
+            writer_attempted.set()
+            await s.commit()
+
+    monkeypatch.setattr(
+        repository,
+        "_load_pnl_timeline_execution_prefix_snapshot",
+        pause_after_fence,
+    )
+    anchor_task = asyncio.create_task(
+        repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            _atomic_anchor(),
+            evidence,
+        )
+    )
+    await asyncio.wait_for(fence_acquired.wait(), timeout=5.0)
+    writer_task = asyncio.create_task(append_relevant_source())
+    try:
+        await asyncio.wait_for(writer_attempted.wait(), timeout=5.0)
+        done, pending = await asyncio.wait({writer_task}, timeout=0.1)
+        assert done == set()
+        assert pending == {writer_task}
+        release_reload.set()
+        recorded = await asyncio.wait_for(anchor_task, timeout=5.0)
+        await asyncio.wait_for(writer_task, timeout=5.0)
+    finally:
+        release_reload.set()
+        await asyncio.gather(anchor_task, writer_task, return_exceptions=True)
+
+    assert recorded == _atomic_anchor()
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+        fill_count = await s.scalar(select(func.count()).select_from(VenueEvent))
+    assert anchor_count == 1
+    assert fill_count == 1
+
+
+async def test_postgresql_atomic_writer_refuses_append_after_initial_bundle(
+    postgresql_repository: SQLAlchemyRepository,
+) -> None:
+    """A real PG16 commit after the RR bundle is visible behind the fence."""
+    initial = await postgresql_repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0,
+        _T0,
+    )
+    assert initial["request"]["watermarks"] == {}
+    async with postgresql_repository.session() as s:
+        s.add_all(
+            [
+                _source_symbol(),
+                _source_instrument(),
+                _source_order(),
+                _source_execution(),
+                _source_fill(),
+            ]
+        )
+        await s.commit()
+    evidence = _empty_anchor_write_evidence()
+    evidence["execution_prefix_bundle"] = initial
+
+    with pytest.raises(
+        PnlTimelineAnchorEvidenceMismatchError,
+        match="changed before anchor persistence",
+    ):
+        await postgresql_repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            _atomic_anchor(),
+            evidence,
+        )
+
+    async with postgresql_repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+        server_version = await s.scalar(text("SHOW server_version_num"))
+    assert anchor_count == 0
+    assert server_version is not None
+    assert int(server_version) >= 160_000
+
+
+async def test_postgresql_atomic_writer_refuses_orphan_fill_after_clean_bundle(
+    postgresql_repository: SQLAlchemyRepository,
+) -> None:
+    """The fenced local PG16 scope read detects an orphan committed beforehand."""
+    initial = await postgresql_repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0,
+        _T0,
+    )
+    assert initial["request"]["executions"] == []
+    async with postgresql_repository.session() as s:
+        s.add(_source_fill())
+        await s.commit()
+    evidence = _empty_anchor_write_evidence()
+    evidence["execution_prefix_bundle"] = initial
+
+    with pytest.raises(
+        PnlTimelineAnchorEvidenceMismatchError,
+        match="unconsumed fill evidence",
+    ):
+        await postgresql_repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            _atomic_anchor(),
+            evidence,
+        )
+
+    async with postgresql_repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 0
+
+
+async def test_postgresql_atomic_writer_persists_exact_no_gap_prefix(
+    postgresql_repository: SQLAlchemyRepository,
+) -> None:
+    """Matching local PG16 source planes remain eligible for atomic insert."""
+    async with postgresql_repository.session() as s:
+        s.add_all(
+            [
+                _source_symbol(),
+                _source_instrument(),
+                _source_order(),
+                _source_execution(),
+                _source_fill(),
+            ]
+        )
+        await s.commit()
+    bundle = await postgresql_repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0,
+        _T0,
+    )
+    evidence = _empty_anchor_write_evidence()
+    evidence["execution_prefix_bundle"] = bundle
+    candidate = _atomic_anchor()
+    candidate["watermarks_json"] = '{"kraken":1}'
+
+    recorded = await postgresql_repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+        candidate,
+        evidence,
+    )
+
+    assert recorded == candidate
+    async with postgresql_repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 1
+
+
+async def test_postgresql_source_append_after_fence_waits_for_anchor_commit(
+    postgresql_repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The PG SHARE table fence holds a source writer through anchor commit."""
+    initial = await postgresql_repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0,
+        _T0,
+    )
+    evidence = _empty_anchor_write_evidence()
+    evidence["execution_prefix_bundle"] = initial
+    original_load = postgresql_repository._load_pnl_timeline_execution_prefix_snapshot
+    fence_acquired = asyncio.Event()
+    release_reload = asyncio.Event()
+    writer_attempted = asyncio.Event()
+
+    async def pause_after_fence(
+        session: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> PnlTimelineExecutionPrefix:
+        """Hold the atomic transaction after all source table locks."""
+        fence_acquired.set()
+        await asyncio.wait_for(release_reload.wait(), timeout=5.0)
+        return await original_load(session, wallet_public_id, mode, as_of)
+
+    async def append_relevant_source() -> None:
+        """Try a real orphan fill insert after the source table fence is held."""
+        async with postgresql_repository.session() as s:
+            s.add(_source_fill())
+            writer_attempted.set()
+            await s.commit()
+
+    monkeypatch.setattr(
+        postgresql_repository,
+        "_load_pnl_timeline_execution_prefix_snapshot",
+        pause_after_fence,
+    )
+    anchor_task = asyncio.create_task(
+        postgresql_repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            _atomic_anchor(),
+            evidence,
+        )
+    )
+    await asyncio.wait_for(fence_acquired.wait(), timeout=5.0)
+    writer_task = asyncio.create_task(append_relevant_source())
+    try:
+        await asyncio.wait_for(writer_attempted.wait(), timeout=5.0)
+        done, pending = await asyncio.wait({writer_task}, timeout=0.1)
+        assert done == set()
+        assert pending == {writer_task}
+        release_reload.set()
+        recorded = await asyncio.wait_for(anchor_task, timeout=5.0)
+        await asyncio.wait_for(writer_task, timeout=5.0)
+    finally:
+        release_reload.set()
+        await asyncio.gather(anchor_task, writer_task, return_exceptions=True)
+
+    assert recorded == _atomic_anchor()
+    async with postgresql_repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+        fill_count = await s.scalar(select(func.count()).select_from(VenueEvent))
+    assert anchor_count == 1
+    assert fill_count == 1
+
+
+async def test_sqlite_atomic_anchor_candidates_return_one_concurrent_winner(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Serialized candidates re-read and return the first canonical winner."""
+    first = _atomic_anchor()
+    second = _atomic_anchor()
+    second["unrealized_pnl"] = 999.0
+    second["opening_basket_json"] = '{"native":{"ETH":"1"},"pools":{}}'
+    evidence = _empty_anchor_write_evidence()
+
+    results = await asyncio.gather(
+        repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            first,
+            evidence,
+        ),
+        repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            second,
+            evidence,
+        ),
+    )
+
+    assert results[0] == results[1]
+    assert results[0] in (first, second)
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 1
+
+
+def _mutated_prefix_evidence(
+    bundle: PnlTimelineExecutionPrefixBundle,
+    evidence_kind: Literal["execution", "fill", "lineage"],
+) -> PnlTimelineExecutionPrefixBundle:
+    """Change one exact execution, fill, or lineage field in both cuts."""
+    mutated = deepcopy(bundle)
+    rows = (
+        mutated["request"]["executions"][0],
+        mutated["activation"]["executions"][0],
+    )
+    for row in rows:
+        if evidence_kind == "execution":
+            row["price"] = 101.0
+        elif evidence_kind == "fill":
+            row["shard_key"] = "kraken.BTC-USD.live.changed"
+        else:
+            row["instrument_public_id"] = "00000000-0000-7000-8000-000000000199"
+    return mutated
+
+
+@pytest.mark.parametrize("evidence_kind", ["execution", "fill", "lineage"])
+async def test_atomic_writer_exactly_compares_every_prefix_evidence_plane(
+    repository: SQLAlchemyRepository,
+    evidence_kind: Literal["execution", "fill", "lineage"],
+) -> None:
+    """Scalar execution, fill-shard, and active lineage changes all refuse."""
+    async with repository.session() as s:
+        s.add_all(
+            [
+                _source_symbol(),
+                _source_instrument(),
+                _source_order(),
+                _source_execution(),
+                _source_fill(),
+            ]
+        )
+        await s.commit()
+    current = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET,
+        "live",
+        _T0,
+        _T0,
+    )
+    evidence = PortfolioPnlAnchorWriteEvidence(
+        wallet_public_id=_WALLET,
+        mode="live",
+        request_as_of=_T0,
+        activation_as_of=_T0,
+        execution_prefix_bundle=_mutated_prefix_evidence(current, evidence_kind),
+    )
+    candidate = _atomic_anchor()
+    candidate["watermarks_json"] = '{"kraken":1}'
+
+    with pytest.raises(
+        PnlTimelineAnchorEvidenceMismatchError,
+        match="changed before anchor persistence",
+    ):
+        await repository.record_portfolio_pnl_anchor_if_execution_prefix_matches(
+            candidate,
+            evidence,
+        )
+
+    async with repository.session() as s:
+        anchor_count = await s.scalar(select(func.count()).select_from(PortfolioPnlPoint))
+    assert anchor_count == 0
+
+
+async def test_record_stores_and_returns_every_anchor_field(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A successful first insert round-trips the complete typed payload."""
+    anchor = _anchor()
+
+    recorded = await repository.record_portfolio_pnl_anchor(anchor)
+    loaded = await repository.get_portfolio_pnl_anchor(_WALLET, "live", "USD", None)
+
+    assert recorded == anchor
+    assert loaded == anchor
+    async with repository.session() as s:
+        row = (await s.execute(select(PortfolioPnlPoint))).scalar_one()
+        assert row.known_to == KNOWN_TO_MAX
+
+
+async def test_wallet_uuid_aliases_share_one_persisted_anchor(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Uppercase and lowercase UUID spellings remain one durable scope."""
+    uppercase = _malformed_anchor(wallet_public_id=_WALLET.upper())
+
+    recorded = await repository.record_portfolio_pnl_anchor(uppercase)
+    repeated = await repository.record_portfolio_pnl_anchor(_anchor())
+    loaded = await repository.get_portfolio_pnl_anchor(
+        _WALLET.upper(),
+        "live",
+        "USD",
+        None,
+    )
+
+    assert recorded["wallet_public_id"] == _WALLET
+    assert repeated == recorded
+    assert loaded == recorded
+    async with repository.session() as s:
+        assert await s.scalar(select(func.count()).select_from(PortfolioPnlPoint)) == 1
+
+
+def test_anchor_scope_identity_is_normalized_and_deterministic() -> None:
+    """Equivalent scope spellings share one stable UUID5 anchor identity."""
+    assert normalize_portfolio_pnl_valuation_ccy(" usd ") == "USD"
+    assert portfolio_pnl_anchor_public_id(_WALLET.upper(), "live", " usd ") == _ANCHOR_PUBLIC_ID
+    assert portfolio_pnl_anchor_public_id(_WALLET, "paper", "USD") != _ANCHOR_PUBLIC_ID
+    assert portfolio_pnl_anchor_public_id(_WALLET, "live", "EUR") != _ANCHOR_PUBLIC_ID
+
+
+@pytest.mark.parametrize(
+    ("wallet_public_id", "mode", "valuation_ccy", "message"),
+    [
+        pytest.param("not-a-uuid", "live", "USD", "wallet identity", id="wallet"),
+        pytest.param(_WALLET, "shadow", "USD", "mode", id="mode"),
+        pytest.param(_WALLET, "live", "US", "three-letter", id="currency_length"),
+        pytest.param(_WALLET, "live", "U1D", "three-letter", id="currency_characters"),
+    ],
+)
+def test_anchor_scope_identity_rejects_invalid_components(
+    wallet_public_id: str,
+    mode: str,
+    valuation_ccy: str,
+    message: str,
+) -> None:
+    """Invalid scope components cannot mint an alternative durable identity."""
+    with pytest.raises(ValueError, match=message):
+        portfolio_pnl_anchor_public_id(wallet_public_id, mode, valuation_ccy)
+
+
+async def test_historical_anchor_read_uses_half_open_temporal_boundaries(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Explicit horizons select exact versions while current uses the sentinel."""
+    historical = _anchor()
+    current = _anchor(timestamp=_FUTURE)
+    current["unrealized_pnl"] = 900.0
+    current["opening_basket_json"] = '{"native":{"BTC":"2"},"pools":{}}'
+    async with repository.session() as s:
+        s.add_all(
+            [
+                PortfolioPnlPoint(**historical, known_to=_FUTURE),
+                PortfolioPnlPoint(**current, known_to=KNOWN_TO_MAX),
+            ]
+        )
+        await s.commit()
+
+    before = await repository.get_portfolio_pnl_anchor(
+        _WALLET, "live", "USD", _T0 - timedelta(microseconds=1)
+    )
+    at_start = await repository.get_portfolio_pnl_anchor(_WALLET, "live", "USD", _T0)
+    before_successor = await repository.get_portfolio_pnl_anchor(
+        _WALLET, "live", "USD", _FUTURE - timedelta(microseconds=1)
+    )
+    at_successor = await repository.get_portfolio_pnl_anchor(_WALLET, "live", "USD", _FUTURE)
+    sentinel_current = await repository.get_portfolio_pnl_anchor(_WALLET, "live", "USD", None)
+
+    assert before is None
+    assert at_start == historical
+    assert before_successor == historical
+    assert at_successor == current
+    assert sentinel_current == current
+
+
+async def test_current_anchor_read_fails_on_multiple_active_rows(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Corrupt duplicate anchors are never reduced to an arbitrary winner."""
+    first = _anchor()
+    second = _anchor(
+        public_id="00000000-0000-7000-8000-000000000105",
+        point_time=_T0 + timedelta(minutes=1),
+    )
+    async with repository.session() as s:
+        s.add_all(
+            [
+                PortfolioPnlPoint(**first, known_to=KNOWN_TO_MAX),
+                PortfolioPnlPoint(**second, known_to=KNOWN_TO_MAX),
+            ]
+        )
+        await s.commit()
+
+    with pytest.raises(MultipleResultsFound):
+        await repository.get_portfolio_pnl_anchor(_WALLET, "live", "USD", None)
+
+
+async def test_concurrent_different_minute_anchor_inserts_return_one_physical_winner(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent different-minute candidates share one unique scope identity."""
+    first = _anchor()
+    second = _anchor(point_time=_T0 + timedelta(minutes=1))
+    second["unrealized_pnl"] = 913.5
+    second["mark_time"] = second["point_time"]
+    second["opening_basket_json"] = '{"native":{"ETH":"4"},"pools":{}}'
+    original_read = repository._read_current_portfolio_pnl_anchor
+    both_candidates_ready = asyncio.Event()
+    pre_read_arrivals = 0
+
+    async def synchronize_empty_pre_reads(
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        valuation_ccy: str,
+    ) -> PortfolioPnlPoint | None:
+        """Force both candidates to reach their insert after an empty pre-read."""
+        nonlocal pre_read_arrivals
+        pre_read_arrivals += 1
+        if pre_read_arrivals <= 2:
+            if pre_read_arrivals == 2:
+                both_candidates_ready.set()
+            await asyncio.wait_for(both_candidates_ready.wait(), timeout=5.0)
+            return None
+        return await original_read(s, wallet_public_id, mode, valuation_ccy)
+
+    monkeypatch.setattr(
+        repository,
+        "_read_current_portfolio_pnl_anchor",
+        synchronize_empty_pre_reads,
+    )
+
+    results = await asyncio.gather(
+        repository.record_portfolio_pnl_anchor(first),
+        repository.record_portfolio_pnl_anchor(second),
+    )
+
+    assert results[0] == results[1]
+    assert results[0] in (first, second)
+    assert await repository.get_portfolio_pnl_anchor(_WALLET, "live", "USD", None) == results[0]
+    assert pre_read_arrivals == 4
+    async with repository.session() as s:
+        count = (await s.execute(select(func.count()).select_from(PortfolioPnlPoint))).scalar_one()
+        assert count == 1
+
+
+async def test_sequential_different_minute_anchor_insert_returns_first_winner(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A later valid candidate cannot create a second active scope anchor."""
+    first = _anchor()
+    second = _anchor(point_time=_T0 + timedelta(minutes=1))
+    second["unrealized_pnl"] = 913.5
+    second["mark_time"] = second["point_time"]
+    second["opening_basket_json"] = '{"native":{"ETH":"4"},"pools":{}}'
+
+    first_result = await repository.record_portfolio_pnl_anchor(first)
+    second_result = await repository.record_portfolio_pnl_anchor(second)
+
+    assert first_result == first
+    assert second_result == first
+    async with repository.session() as s:
+        count = (await s.execute(select(func.count()).select_from(PortfolioPnlPoint))).scalar_one()
+    assert count == 1
+
+
+async def test_anchor_integrity_error_without_winner_is_reraised(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A database failure beyond structural guards is not mistaken for a race."""
+    invalid = _malformed_anchor(session_id=None)
+
+    with pytest.raises(IntegrityError):
+        await repository.record_portfolio_pnl_anchor(invalid)
+
+    assert await repository.get_portfolio_pnl_anchor(_WALLET, "live", "USD", None) is None
+
+
+async def test_anchor_pre_read_does_not_accept_a_noncanonical_identity(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A pre-existing noncanonical row is corruption, never a scope winner."""
+    existing = _anchor(public_id="00000000-0000-7000-8000-000000000199")
+    async with repository.session() as s:
+        s.add(PortfolioPnlPoint(**existing, known_to=KNOWN_TO_MAX))
+        await s.commit()
+
+    with pytest.raises(ValueError, match="public_id"):
+        await repository.record_portfolio_pnl_anchor(_anchor())
+
+
+async def test_anchor_read_rejects_a_structurally_incomplete_stored_row(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A schema-valid incomplete anchor never escapes as the complete TypedDict."""
+    incomplete = _malformed_anchor(
+        valuation_status="incomplete",
+        unrealized_pnl=None,
+        mark_source=None,
+        mark_time=None,
+    )
+    async with repository.session() as s:
+        s.add(PortfolioPnlPoint(**incomplete, known_to=KNOWN_TO_MAX))
+        await s.commit()
+
+    with pytest.raises(ValueError, match="valuation_status"):
+        await repository.get_portfolio_pnl_anchor(_WALLET, "live", "USD", None)
+
+
+async def test_anchor_race_winner_is_validated_before_return(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed pre-existing winner cannot bypass the candidate writer guard."""
+    incomplete = _malformed_anchor(
+        valuation_status="incomplete",
+        unrealized_pnl=None,
+        mark_source=None,
+        mark_time=None,
+    )
+    async with repository.session() as s:
+        s.add(PortfolioPnlPoint(**incomplete, known_to=KNOWN_TO_MAX))
+        await s.commit()
+    original_read = repository._read_current_portfolio_pnl_anchor
+    read_count = 0
+
+    async def hide_winner_from_pre_read(
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        valuation_ccy: str,
+    ) -> PortfolioPnlPoint | None:
+        """Expose the stored row only after the candidate insert loses its race."""
+        nonlocal read_count
+        read_count += 1
+        if read_count == 1:
+            return None
+        return await original_read(s, wallet_public_id, mode, valuation_ccy)
+
+    monkeypatch.setattr(
+        repository,
+        "_read_current_portfolio_pnl_anchor",
+        hide_winner_from_pre_read,
+    )
+
+    with pytest.raises(ValueError, match="valuation_status"):
+        await repository.record_portfolio_pnl_anchor(_anchor())
+
+
+async def test_anchor_read_rejects_nonfinite_optional_component(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A non-finite optional value stored out of band never escapes the DAL."""
+    malformed = _anchor()
+    malformed["cash_usd"] = float("inf")
+    async with repository.session() as s:
+        s.add(PortfolioPnlPoint(**malformed, known_to=KNOWN_TO_MAX))
+        await s.commit()
+
+    with pytest.raises(ValueError, match="cash_usd"):
+        await repository.get_portfolio_pnl_anchor(_WALLET, "live", "USD", None)
+
+
+async def test_anchor_read_rejects_non_strict_stored_json(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A non-standard JSON constant stored out of band never escapes the DAL."""
+    malformed = _anchor()
+    malformed["opening_basket_json"] = '{"nested":{"value":NaN}}'
+    async with repository.session() as s:
+        s.add(PortfolioPnlPoint(**malformed, known_to=KNOWN_TO_MAX))
+        await s.commit()
+
+    with pytest.raises(ValueError, match="constant"):
+        await repository.get_portfolio_pnl_anchor(_WALLET, "live", "USD", None)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "raw", "message"),
+    [
+        pytest.param(
+            "watermarks_json",
+            '{"kraken":NaN}',
+            "constant",
+            id="watermark_nan",
+        ),
+        pytest.param(
+            "opening_basket_json",
+            '{"pools":{"pool-a":Infinity}}',
+            "constant",
+            id="basket_infinity",
+        ),
+        pytest.param(
+            "contributions_json",
+            '{"unattributed":1e400}',
+            "finite",
+            id="contribution_overflow",
+        ),
+        pytest.param(
+            "opening_basket_json",
+            '{"pools":{"pool-a":1,"pool-a":2}}',
+            "duplicate",
+            id="nested_duplicate_key",
+        ),
+    ],
+)
+async def test_anchor_writer_rejects_non_strict_json_before_insert(
+    repository: SQLAlchemyRepository,
+    field_name: str,
+    raw: str,
+    message: str,
+) -> None:
+    """Every anchor JSON field rejects non-standard or lossy numeric input."""
+    with pytest.raises(ValueError, match=message):
+        await repository.record_portfolio_pnl_anchor(_malformed_anchor(**{field_name: raw}))
+
+    async with repository.session() as s:
+        count = (await s.execute(select(func.count()).select_from(PortfolioPnlPoint))).scalar_one()
+    assert count == 0
+
+
+async def test_anchor_writer_accepts_finite_nested_json_arrays(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Strict JSON validation preserves ordinary nested finite payloads."""
+    anchor = _anchor()
+    anchor["contributions_json"] = '{"weights":[1.25,{"residual":2}]}'
+
+    assert await repository.record_portfolio_pnl_anchor(anchor) == anchor
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        pytest.param({"point_kind": "sample"}, "point_kind", id="sample_kind"),
+        pytest.param({"mode": "shadow"}, "mode", id="bad_mode"),
+        pytest.param(
+            {"valuation_status": "incomplete"},
+            "valuation_status",
+            id="incomplete_valuation",
+        ),
+        pytest.param({"realized_pnl": 1.0}, "finite zero", id="nonzero_realized"),
+        pytest.param({"fee_pnl": float("nan")}, "finite zero", id="nonfinite_fee"),
+        pytest.param({"unrealized_pnl": None}, "unrealized_pnl", id="missing_unrealized"),
+        pytest.param(
+            {"unrealized_pnl": float("inf")},
+            "unrealized_pnl",
+            id="nonfinite_unrealized",
+        ),
+        pytest.param({"cash_usd": float("inf")}, "cash_usd", id="nonfinite_cash"),
+        pytest.param(
+            {"position_value_usd": float("nan")},
+            "position_value_usd",
+            id="nonfinite_position_value",
+        ),
+        pytest.param({"drawdown": False}, "drawdown", id="boolean_drawdown"),
+        pytest.param({"mark_source": ""}, "mark_source", id="empty_mark_source"),
+        pytest.param({"mark_time": None}, "mark_time", id="missing_mark_time"),
+        pytest.param(
+            {"mark_time": _T0 + timedelta(minutes=1)},
+            "mark_time",
+            id="misaligned_mark_time",
+        ),
+        pytest.param({"watermarks_json": None}, "watermarks_json", id="missing_watermarks"),
+        pytest.param({"opening_basket_json": ""}, "opening_basket_json", id="empty_basket"),
+        pytest.param(
+            {"contributions_json": "[]"},
+            "contributions_json",
+            id="nonobject_contributions",
+        ),
+        pytest.param({"watermarks_json": "{"}, "valid JSON", id="invalid_watermark_json"),
+        pytest.param(
+            {"public_id": "00000000-0000-7000-8000-000000000199"},
+            "public_id",
+            id="noncanonical_public_id",
+        ),
+        pytest.param({"valuation_ccy": None}, "must be a string", id="nonstring_currency"),
+        pytest.param({"valuation_ccy": "usd"}, "normalized", id="noncanonical_currency"),
+    ],
+)
+async def test_anchor_writer_rejects_malformed_structure_before_insert(
+    repository: SQLAlchemyRepository,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    """Malformed anchor contracts fail before they can poison the active scope."""
+    with pytest.raises(ValueError, match=message):
+        await repository.record_portfolio_pnl_anchor(_malformed_anchor(**overrides))
+
+    async with repository.session() as s:
+        count = (await s.execute(select(func.count()).select_from(PortfolioPnlPoint))).scalar_one()
+    assert count == 0

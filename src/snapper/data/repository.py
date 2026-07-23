@@ -83,8 +83,10 @@ from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
 from inspect import isawaitable
+from struct import pack
 from typing import Any
 from typing import Final
+from typing import Literal
 from typing import Protocol
 from typing import Unpack
 from typing import cast
@@ -109,6 +111,7 @@ from sqlalchemy import exists
 from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import literal
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import text
@@ -136,6 +139,11 @@ from sqlalchemy.pool import StaticPool
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.execution_chain import ExecutionChainRecord
 from snapper.application.portfolio.execution_chain import extend_execution_chain
+from snapper.application.portfolio.pnl_anchor_identity import normalize_portfolio_pnl_valuation_ccy
+from snapper.application.portfolio.pnl_anchor_identity import (
+    normalize_portfolio_pnl_wallet_public_id,
+)
+from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.reconciliation_invariants import (
     unclassified_state_has_no_retained_evidence,
 )
@@ -154,6 +162,7 @@ from snapper.application.portfolio.reconciliation_invariants import (
 from snapper.application.portfolio.reconciliation_invariants import (
     validate_portfolio_reconciliation_spot_anchor_lineage,
 )
+from snapper.application.trade.command_request import parse_shard_key
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.core.json_types import JsonObject
@@ -208,6 +217,7 @@ from snapper.data.models import PairedExecutionGroup
 from snapper.data.models import PairedExecutionHalt
 from snapper.data.models import PairedExecutionLeg
 from snapper.data.models import PortfolioDriftEpisode
+from snapper.data.models import PortfolioPnlPoint
 from snapper.data.models import PortfolioReconciliationMethodConfig
 from snapper.data.models import PortfolioReconciliationObservation
 from snapper.data.models import PortfolioReconciliationState
@@ -315,10 +325,15 @@ from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAiDecisionMarkerRow
 from snapper.data.repository_types import PnlTimelineCandleRow
 from snapper.data.repository_types import PnlTimelineExecutionLineageRow
+from snapper.data.repository_types import PnlTimelineExecutionPrefix
+from snapper.data.repository_types import PnlTimelineExecutionPrefixBundle
 from snapper.data.repository_types import PnlTimelineExecutionRow
+from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 from snapper.data.repository_types import PortfolioDriftEpisodeRow
 from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
+from snapper.data.repository_types import PortfolioPnlAnchorRow
+from snapper.data.repository_types import PortfolioPnlAnchorWriteEvidence
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import PortfolioReconciliationLineageObservationRow
 from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
@@ -371,6 +386,7 @@ __all__ = [
     "ScopeGrantConflictError",
     "ScopeGrantNotFoundError",
     "ScopeGrantValidationError",
+    "PnlTimelineAnchorEvidenceMismatchError",
     "WalletConflictError",
     "CredentialConflictError",
     "CredentialNotFoundError",
@@ -408,6 +424,197 @@ unaffected. Registered on the shared ``.env`` allowlist via
 """
 
 _AI_RESEARCH_MANUAL_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({"superseded", "expired"})
+_PNL_TIMELINE_FILL_QUANTITY_TOLERANCE: Final[float] = 1e-9
+_PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE: Final[str] = " \t\n\r\f\v"
+
+type _PnlTimelineFillIdentity = tuple[str, str, str, str]
+type _PnlTimelineFillScopeKey = tuple[str, str, str, str]
+type _PnlTimelineFillNativeScopeKey = tuple[str, str, str, str, str]
+type _PnlTimelineNativeExactFillKey = tuple[_PnlTimelineFillNativeScopeKey, str]
+type _PnlTimelineScopeExactFillKey = tuple[_PnlTimelineFillScopeKey, str]
+type _PnlTimelineScopeExecTradeFillKey = tuple[
+    _PnlTimelineFillScopeKey,
+    str,
+    str,
+]
+type _PnlTimelineExactGroupKey = tuple[
+    _PnlTimelineFillScopeKey,
+    str | None,
+    str | None,
+]
+type _PnlTimelineQuantityNodeKey = tuple[int, int]
+type _PnlTimelineScopeLineageKey = tuple[_PnlTimelineFillScopeKey, str]
+type _PnlTimelineFallbackEvidenceKey = tuple[
+    _PnlTimelineFillScopeKey,
+    str,
+    str | None,
+]
+type _PnlTimelineOrderOwnerKey = tuple[
+    _PnlTimelineFillScopeKey,
+    str,
+    str,
+]
+type _PnlTimelineFallbackPoolKey = (
+    tuple[
+        Literal["idless", "native"],
+        _PnlTimelineFillScopeKey,
+        str,
+        str,
+    ]
+    | tuple[
+        Literal["order"],
+        _PnlTimelineOrderOwnerKey,
+    ]
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _PnlTimelineExecutionCandidate:
+    """Validated execution lineage awaiting one injective fill witness."""
+
+    execution: Execution
+    order: Order
+    client_order_id: str
+    symbol_public_id: str
+    allowed_native_symbols: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _PnlTimelineIndexedFill:
+    """One fill normalized once for every execution-lineage lookup."""
+
+    row: VenueEvent
+    scope_key: _PnlTimelineFillScopeKey
+    native_scope_key: _PnlTimelineFillNativeScopeKey
+    identity: _PnlTimelineFillIdentity
+    exec_id: str | None
+    trade_id: str | None
+    exchange_order_id: str | None
+    stable_order: int
+
+
+@dataclass(slots=True)
+class _PnlTimelineFillIndex:
+    """Linear-build lookup plane over one sealed venue-event prefix."""
+
+    client_order_ids: set[str]
+    wallets_by_client_order_id: dict[str, set[str]]
+    scopes_by_client_order_id: dict[str, set[tuple[str, str, str]]]
+    fills_by_native_scope: dict[_PnlTimelineFillNativeScopeKey, list[_PnlTimelineIndexedFill]]
+    idless_fills_by_native_scope: dict[
+        _PnlTimelineFillNativeScopeKey,
+        list[_PnlTimelineIndexedFill],
+    ]
+    native_scopes_with_exchange_order_id: set[_PnlTimelineFillNativeScopeKey]
+    fills_by_exchange_order_id: dict[
+        _PnlTimelineNativeExactFillKey,
+        list[_PnlTimelineIndexedFill],
+    ]
+    fills_by_exec_id: dict[
+        _PnlTimelineScopeExactFillKey,
+        dict[_PnlTimelineFillNativeScopeKey, list[_PnlTimelineIndexedFill]],
+    ]
+    fills_by_exec_trade_id: dict[
+        _PnlTimelineScopeExecTradeFillKey,
+        dict[_PnlTimelineFillNativeScopeKey, list[_PnlTimelineIndexedFill]],
+    ]
+    fills_by_trade_id: dict[
+        _PnlTimelineScopeExactFillKey,
+        dict[_PnlTimelineFillNativeScopeKey, list[_PnlTimelineIndexedFill]],
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class _PnlTimelineFillWitness:
+    """One validated redelivery-equivalence class used exactly once."""
+
+    identity: _PnlTimelineFillIdentity
+    rows: list[VenueEvent]
+    quantity: float
+    shard_key: str
+    stable_order: int
+
+
+@dataclass(slots=True)
+class _PnlTimelineQuantityNode:
+    """One canonical range-index node with lazy identity consumption."""
+
+    identities: list[_PnlTimelineFillIdentity]
+    cursor: int
+    shard_counts: dict[str, int]
+
+
+@dataclass(slots=True)
+class _PnlTimelineFallbackPool:
+    """Mutable linear-size quantity index for one fallback evidence scope."""
+
+    witnesses: dict[_PnlTimelineFillIdentity, _PnlTimelineFillWitness]
+    active_identities: set[_PnlTimelineFillIdentity]
+    quantity_nodes: dict[_PnlTimelineQuantityNodeKey, _PnlTimelineQuantityNode]
+
+
+@dataclass(frozen=True, slots=True)
+class _PnlTimelineScopeLineageEvidence:
+    """Presence facts scanned once for one fill scope and symbol lineage."""
+
+    has_native_evidence: bool
+    has_order_identity: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PnlTimelineFallbackEvidence:
+    """Reusable fallback partition selected once for one complete evidence key."""
+
+    scope_key: _PnlTimelineFillScopeKey
+    exchange_order_id: str | None
+    has_order_identity: bool
+    order_owner_key: _PnlTimelineOrderOwnerKey | None
+
+
+@dataclass(slots=True)
+class _PnlTimelineFillAssignmentState:
+    """Mutable witness-consumption state shared across one sealed prefix."""
+
+    fill_index: _PnlTimelineFillIndex
+    order_instrument_ids_by_scope: dict[str, set[str]]
+    consumed_identities: set[_PnlTimelineFillIdentity]
+    fallback_identities: set[_PnlTimelineFillIdentity]
+    exact_witnesses: dict[
+        tuple[
+            _PnlTimelineFillScopeKey,
+            str,
+            str | None,
+            str | None,
+        ],
+        dict[_PnlTimelineFillIdentity, list[VenueEvent]],
+    ]
+    fallback_pools: dict[_PnlTimelineFallbackPoolKey, _PnlTimelineFallbackPool]
+    scope_lineage_evidence: dict[
+        _PnlTimelineScopeLineageKey,
+        _PnlTimelineScopeLineageEvidence,
+    ]
+    fallback_evidence_by_execution_public_id: dict[
+        str,
+        _PnlTimelineFallbackEvidence,
+    ]
+    order_partitions_by_owner: dict[
+        _PnlTimelineOrderOwnerKey,
+        frozenset[_PnlTimelineNativeExactFillKey],
+    ]
+    fallback_pools_by_identity: dict[
+        _PnlTimelineFillIdentity,
+        list[_PnlTimelineFallbackPool],
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class _PnlTimelineScopeGapRequest:
+    """One complete scope-gap read bound to a caller-owned session."""
+
+    wallet_public_id: str
+    mode: str
+    as_of: datetime
+    execution_prefix: PnlTimelineExecutionPrefix | None
 
 
 class _SpotAssetPrecisionEvidenceAbsentConflictError(Exception):
@@ -486,6 +693,10 @@ class ExecutionPhysicalMutationError(RuntimeError):
     ledger as new append-only signed events with a fresh ``scope_sequence``
     above every captured watermark.
     """
+
+
+class PnlTimelineAnchorEvidenceMismatchError(RuntimeError):
+    """Raised when an anchor's frozen execution evidence changed before write."""
 
 
 class ScopeGrantConflictError(Exception):
@@ -871,25 +1082,99 @@ def where_active_now(model: type[Any]) -> tuple[Any, Any]:
     return where_active(model, datetime.now(UTC))
 
 
+def _canonical_uuid_text_sql(value: ColumnElement[str]) -> ColumnElement[str]:
+    """Return canonical UUID text or SQL ``NULL`` for an invalid spelling."""
+    normalized = func.lower(
+        func.ltrim(
+            func.rtrim(value, _PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE),
+            _PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE,
+        )
+    )
+    compact = func.replace(normalized, "-", "")
+    non_hex = compact
+    for character in "0123456789abcdef":
+        non_hex = func.replace(non_hex, character, "")
+    compact_shape = and_(
+        func.length(normalized) == 32,
+        normalized == compact,
+    )
+    hyphenated_shape = and_(
+        func.length(normalized) == 36,
+        func.substr(normalized, 9, 1) == "-",
+        func.substr(normalized, 14, 1) == "-",
+        func.substr(normalized, 19, 1) == "-",
+        func.substr(normalized, 24, 1) == "-",
+    )
+    canonical = (
+        func.substr(compact, 1, 8)
+        .concat(literal("-"))
+        .concat(func.substr(compact, 9, 4))
+        .concat(literal("-"))
+        .concat(func.substr(compact, 13, 4))
+        .concat(literal("-"))
+        .concat(func.substr(compact, 17, 4))
+        .concat(literal("-"))
+        .concat(func.substr(compact, 21, 12))
+    )
+    return cast(
+        ColumnElement[str],
+        case(
+            (
+                and_(
+                    or_(compact_shape, hyphenated_shape),
+                    func.length(compact) == 32,
+                    non_hex == "",
+                ),
+                canonical,
+            ),
+            else_=None,
+        ),
+    )
+
+
 def venue_event_fill_identity() -> ColumnElement[str]:
     """Return the venue-event fill dedup identity, cast to one SQL type.
 
-    Fills dedup by ``exec_id``, else ``trade_id``, else the row's unique
-    ``public_id`` so id-less rows never collapse. Every operand is cast to
-    ``TEXT`` because ``public_id`` is a native ``uuid`` on PostgreSQL while
-    the venue ids are ``varchar`` — a mixed-type ``COALESCE`` raises
-    ``DatatypeMismatchError`` (42804) there, while the SQLite test backend
-    stores UUIDs as ``String(36)`` and cannot surface the mismatch. The
-    casts are semantics-neutral on both backends: ``CAST(NULL AS TEXT)``
-    stays ``NULL``, so coalesce precedence and grouping are unchanged.
+    Fills dedup by the first identifier left after stripping the explicit ASCII
+    whitespace set space, tab, LF, CR, FF, and VT: ``exec_id``, then
+    ``trade_id``, then the row's unique ``public_id``. Each value carries an
+    explicit ``exec:``, ``trade:``, or ``event:`` namespace so equal text in
+    different identifier columns cannot collapse distinct fills. The
+    two-argument ``LTRIM``/``RTRIM`` form has identical character-set
+    semantics on SQLite and PostgreSQL. Every operand is cast to ``TEXT``
+    because ``public_id`` is a native ``uuid`` on PostgreSQL while the venue
+    ids are ``varchar``.
 
     Returns:
-        ``COALESCE`` over the three identity columns, each cast to ``TEXT``.
+        Namespaced ``COALESCE`` over ASCII-trimmed, blank-nullified columns.
     """
-    return func.coalesce(
-        VenueEvent.exec_id.cast(Text),
-        VenueEvent.trade_id.cast(Text),
+    exec_id = func.nullif(
+        func.ltrim(
+            func.rtrim(
+                VenueEvent.exec_id.cast(Text),
+                _PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE,
+            ),
+            _PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE,
+        ),
+        "",
+    )
+    trade_id = func.nullif(
+        func.ltrim(
+            func.rtrim(
+                VenueEvent.trade_id.cast(Text),
+                _PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE,
+            ),
+            _PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE,
+        ),
+        "",
+    )
+    public_id = _canonical_uuid_text_sql(
         VenueEvent.public_id.cast(Text),
+    )
+    return func.coalesce(
+        literal("exec:").concat(exec_id),
+        literal("trade:").concat(trade_id),
+        literal("event:").concat(public_id),
     )
 
 
@@ -2166,6 +2451,83 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_portfolio_pnl_anchor(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        valuation_ccy: str,
+        as_of: datetime | None,
+    ) -> PortfolioPnlAnchorRow | None:
+        """Return the single activation anchor active at a knowledge horizon.
+
+        ``as_of=None`` selects the sentinel-current temporal version. An
+        explicit timestamp applies the standard half-open temporal interval.
+        Duplicate qualifying anchors fail closed.
+        """
+        ...
+
+    @abstractmethod
+    async def record_portfolio_pnl_anchor(
+        self, anchor: PortfolioPnlAnchorRow
+    ) -> PortfolioPnlAnchorRow:
+        """Insert the canonical scope anchor or return its existing winner.
+
+        ``public_id`` must equal :func:`portfolio_pnl_anchor_public_id` for the
+        row's ``(wallet_public_id, mode, valuation_ccy)`` scope.
+        """
+        ...
+
+    @abstractmethod
+    async def record_portfolio_pnl_anchor_if_execution_prefix_matches(
+        self,
+        anchor: PortfolioPnlAnchorRow,
+        evidence: PortfolioPnlAnchorWriteEvidence,
+    ) -> PortfolioPnlAnchorRow:
+        """Atomically revalidate frozen prefix cuts and persist their anchor.
+
+        The implementation fences every writer that can change execution,
+        fill, or active lineage evidence, reloads both cuts under that fence,
+        and inserts only when they exactly equal the caller's derivation
+        bundle. A concurrent canonical anchor winner is returned unchanged.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_timeline_execution_prefix(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> PnlTimelineExecutionPrefix:
+        """Capture and replay an exact execution prefix for a P&L scope.
+
+        The method first captures one ``scope_sequence`` watermark per exchange
+        whose bus timestamp is at or before ``as_of``. It then reads every row
+        in each frozen range ``[1, W]`` without an execution ``known_to``
+        predicate. The returned bundle is ordered by ``(exchange,
+        scope_sequence)`` and fails closed when any frozen range is inactive,
+        non-contiguous, duplicated, lacks exactly one active Order lineage, or
+        cannot prove one exact durable fill shard owned by the requested wallet.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_timeline_execution_prefix_bundle(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        request_as_of: datetime,
+        activation_as_of: datetime,
+    ) -> PnlTimelineExecutionPrefixBundle:
+        """Return independently proven request and activation prefix cuts.
+
+        When the horizons differ, each snapshot captures its own watermarks,
+        sealed fill lineage, and exact identity proof. Callers must not derive
+        the activation snapshot by pruning a later request snapshot.
+        """
+        ...
+
+    @abstractmethod
     async def get_pnl_timeline_executions(
         self,
         wallet_public_id: str,
@@ -2493,23 +2855,24 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def pnl_timeline_shard_has_fill_gap(
+    async def pnl_timeline_scope_has_fill_gap(
         self,
-        shard_key: str,
         wallet_public_id: str,
         mode: str,
         as_of: datetime,
+        execution_prefix: PnlTimelineExecutionPrefix | None = None,
     ) -> bool:
-        """Compare historical venue and execution prefixes for one P&L shard.
+        """Compare sealed venue and execution prefixes for one P&L scope.
 
         Args:
-            shard_key: Exact fill-bearing shard to evaluate.
             wallet_public_id: Full wallet identity to match.
             mode: Exact execution mode to match.
             as_of: Knowledge horizon for both append-only ledgers.
+            execution_prefix: Optional already sealed and validated scope
+                execution evidence for the same horizon.
 
         Returns:
-            True when durable recorded quantity is provably unconsumed.
+            True unless every recorded and consumed shard quantity agrees.
         """
         ...
 
@@ -9640,6 +10003,2156 @@ class SQLAlchemyRepository(Repository):
                 for exe, order, inst, sym in result.all()
             ]
 
+    @staticmethod
+    def _portfolio_pnl_anchor_to_row(anchor: PortfolioPnlPoint) -> PortfolioPnlAnchorRow:
+        """Project one persisted activation anchor to its repository contract."""
+        row: PortfolioPnlAnchorRow = {
+            "public_id": anchor.public_id,
+            "session_id": anchor.session_id,
+            "sequence_id": anchor.sequence_id,
+            "timestamp": anchor.timestamp,
+            "wallet_public_id": anchor.wallet_public_id,
+            "mode": cast(Literal["live", "paper"], anchor.mode),
+            "valuation_ccy": anchor.valuation_ccy,
+            "point_time": anchor.point_time,
+            "point_kind": cast(Literal["anchor"], anchor.point_kind),
+            "epoch_public_id": anchor.epoch_public_id,
+            "calc_version": anchor.calc_version,
+            "valuation_status": cast(Literal["complete"], anchor.valuation_status),
+            "realized_pnl": anchor.realized_pnl,
+            "fee_pnl": anchor.fee_pnl,
+            "accrual_pnl": anchor.accrual_pnl,
+            "unrealized_pnl": anchor.unrealized_pnl,
+            "external_flow_adjustment": anchor.external_flow_adjustment,
+            "cash_usd": anchor.cash_usd,
+            "position_value_usd": anchor.position_value_usd,
+            "drawdown": anchor.drawdown,
+            "mark_source": anchor.mark_source,
+            "mark_time": anchor.mark_time,
+            "watermarks_json": anchor.watermarks_json,
+            "opening_basket_json": anchor.opening_basket_json,
+            "contributions_json": anchor.contributions_json,
+        }
+        SQLAlchemyRepository._validate_portfolio_pnl_anchor(row)
+        return row
+
+    @staticmethod
+    def _reject_portfolio_pnl_json_constant(value: str) -> JsonValue:
+        """Reject non-standard JSON numeric constants before anchor persistence."""
+        raise ValueError(f"portfolio P&L anchor JSON constant {value!r} is not permitted")
+
+    @staticmethod
+    def _portfolio_pnl_json_object(
+        pairs: list[tuple[str, JsonValue]],
+    ) -> JsonObject:
+        """Build one JSON object while refusing duplicate member names."""
+        value: JsonObject = {}
+        for key, member in pairs:
+            if key in value:
+                raise ValueError(f"portfolio P&L anchor JSON object contains duplicate key {key!r}")
+            value[key] = member
+        return value
+
+    @staticmethod
+    def _validate_portfolio_pnl_json_numbers(
+        field_name: str,
+        value: JsonValue,
+    ) -> None:
+        """Reject non-finite numbers anywhere inside one anchor JSON value."""
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError(f"portfolio P&L anchor {field_name} numbers must be finite")
+            return
+        if isinstance(value, list):
+            for member in value:
+                SQLAlchemyRepository._validate_portfolio_pnl_json_numbers(
+                    field_name,
+                    member,
+                )
+            return
+        if isinstance(value, dict):
+            for member in value.values():
+                SQLAlchemyRepository._validate_portfolio_pnl_json_numbers(
+                    field_name,
+                    member,
+                )
+
+    @staticmethod
+    def _is_finite_portfolio_pnl_number(value: object) -> bool:
+        """Return whether one anchor component is a real finite number."""
+        return (
+            not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+        )
+
+    @staticmethod
+    def _validate_portfolio_pnl_anchor(anchor: PortfolioPnlAnchorRow) -> None:
+        """Refuse structurally incomplete or malformed activation anchors."""
+        if anchor["point_kind"] != "anchor":
+            raise ValueError("portfolio P&L anchor point_kind must be 'anchor'")
+        if anchor["mode"] not in ("live", "paper"):
+            raise ValueError("portfolio P&L anchor mode must be 'live' or 'paper'")
+        if anchor["valuation_status"] != "complete":
+            raise ValueError("portfolio P&L anchor valuation_status must be 'complete'")
+        valuation_ccy = anchor["valuation_ccy"]
+        if not isinstance(valuation_ccy, str):
+            raise ValueError("portfolio P&L anchor valuation_ccy must be a string")
+        normalized_ccy = normalize_portfolio_pnl_valuation_ccy(valuation_ccy)
+        if valuation_ccy != normalized_ccy:
+            raise ValueError("portfolio P&L anchor valuation_ccy must be normalized")
+        expected_public_id = portfolio_pnl_anchor_public_id(
+            anchor["wallet_public_id"],
+            anchor["mode"],
+            normalized_ccy,
+        )
+        if anchor["public_id"] != expected_public_id:
+            raise ValueError(
+                "portfolio P&L anchor public_id must match its canonical scope identity"
+            )
+        zero_components = (
+            anchor["realized_pnl"],
+            anchor["fee_pnl"],
+            anchor["accrual_pnl"],
+            anchor["external_flow_adjustment"],
+        )
+        if any(
+            not SQLAlchemyRepository._is_finite_portfolio_pnl_number(value) or value != 0.0
+            for value in zero_components
+        ):
+            raise ValueError("portfolio P&L anchor cumulative components must be finite zero")
+        unrealized_pnl = anchor["unrealized_pnl"]
+        if unrealized_pnl is None or not SQLAlchemyRepository._is_finite_portfolio_pnl_number(
+            unrealized_pnl
+        ):
+            raise ValueError("portfolio P&L anchor unrealized_pnl must be finite")
+        for field_name in ("cash_usd", "position_value_usd", "drawdown"):
+            value = anchor[field_name]
+            if value is not None and not SQLAlchemyRepository._is_finite_portfolio_pnl_number(
+                value
+            ):
+                raise ValueError(f"portfolio P&L anchor {field_name} must be finite when present")
+        mark_source = anchor["mark_source"]
+        if mark_source is None or not mark_source.strip():
+            raise ValueError("portfolio P&L anchor mark_source must be nonempty")
+        if anchor["mark_time"] is None or anchor["mark_time"] != anchor["point_time"]:
+            raise ValueError("portfolio P&L anchor mark_time must equal point_time")
+        for field_name, raw in (
+            ("watermarks_json", anchor["watermarks_json"]),
+            ("opening_basket_json", anchor["opening_basket_json"]),
+            ("contributions_json", anchor["contributions_json"]),
+        ):
+            if raw is None or not raw.strip():
+                raise ValueError(f"portfolio P&L anchor {field_name} must be nonempty")
+            try:
+                payload = cast(
+                    JsonValue,
+                    json.loads(
+                        raw,
+                        parse_constant=SQLAlchemyRepository._reject_portfolio_pnl_json_constant,
+                        object_pairs_hook=SQLAlchemyRepository._portfolio_pnl_json_object,
+                    ),
+                )
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"portfolio P&L anchor {field_name} must contain valid JSON"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise ValueError(f"portfolio P&L anchor {field_name} must contain a JSON object")
+            SQLAlchemyRepository._validate_portfolio_pnl_json_numbers(
+                field_name,
+                payload,
+            )
+
+    @staticmethod
+    async def _read_current_portfolio_pnl_anchor(
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        valuation_ccy: str,
+    ) -> PortfolioPnlPoint | None:
+        """Read the single sentinel-current anchor for one canonical scope."""
+        return (
+            (
+                await s.execute(
+                    select(PortfolioPnlPoint).where(
+                        PortfolioPnlPoint.wallet_public_id == wallet_public_id,
+                        PortfolioPnlPoint.mode == mode,
+                        PortfolioPnlPoint.valuation_ccy == valuation_ccy,
+                        PortfolioPnlPoint.point_kind == "anchor",
+                        PortfolioPnlPoint.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            )
+            .scalars()
+            .one_or_none()
+        )
+
+    async def get_portfolio_pnl_anchor(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        valuation_ccy: str,
+        as_of: datetime | None,
+    ) -> PortfolioPnlAnchorRow | None:
+        """Return exactly one activation anchor at the requested horizon.
+
+        Sentinel-current reads deliberately do not apply the wall clock.
+        Historical reads use the standard half-open temporal interval.
+        ``scalar_one_or_none`` fails closed if corrupt data exposes more than
+        one anchor for the scope.
+        """
+        normalized_wallet_public_id = normalize_portfolio_pnl_wallet_public_id(wallet_public_id)
+        normalized_ccy = normalize_portfolio_pnl_valuation_ccy(valuation_ccy)
+        if as_of is None:
+            async with self.session() as s:
+                anchor = await self._read_current_portfolio_pnl_anchor(
+                    s,
+                    normalized_wallet_public_id,
+                    mode,
+                    normalized_ccy,
+                )
+                return None if anchor is None else self._portfolio_pnl_anchor_to_row(anchor)
+        query = select(PortfolioPnlPoint).where(
+            PortfolioPnlPoint.wallet_public_id == normalized_wallet_public_id,
+            PortfolioPnlPoint.mode == mode,
+            PortfolioPnlPoint.valuation_ccy == normalized_ccy,
+            PortfolioPnlPoint.point_kind == "anchor",
+            *where_active(PortfolioPnlPoint, as_of),
+        )
+        async with self.session() as s:
+            anchor = (await s.execute(query)).scalar_one_or_none()
+            return None if anchor is None else self._portfolio_pnl_anchor_to_row(anchor)
+
+    async def record_portfolio_pnl_anchor(
+        self, anchor: PortfolioPnlAnchorRow
+    ) -> PortfolioPnlAnchorRow:
+        """Insert the first temporal anchor or return the concurrent winner.
+
+        The insert never closes or supersedes an existing row. The caller's
+        canonical scope ``public_id`` makes the active unique index the race
+        arbiter even when candidates choose different activation minutes.
+        After an integrity failure, the scope is re-read only after rollback;
+        an unrelated constraint failure with no winner is re-raised.
+        """
+        normalized_anchor = cast(
+            PortfolioPnlAnchorRow,
+            {
+                **anchor,
+                "wallet_public_id": normalize_portfolio_pnl_wallet_public_id(
+                    anchor["wallet_public_id"]
+                ),
+            },
+        )
+        self._validate_portfolio_pnl_anchor(normalized_anchor)
+        async with self.session() as s:
+            winner = await self._read_current_portfolio_pnl_anchor(
+                s,
+                normalized_anchor["wallet_public_id"],
+                normalized_anchor["mode"],
+                normalized_anchor["valuation_ccy"],
+            )
+            if winner is not None:
+                return self._portfolio_pnl_anchor_to_row(winner)
+            row = PortfolioPnlPoint(**normalized_anchor, known_to=KNOWN_TO_MAX)
+            s.add(row)
+            try:
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                winner = await self._read_current_portfolio_pnl_anchor(
+                    s,
+                    normalized_anchor["wallet_public_id"],
+                    normalized_anchor["mode"],
+                    normalized_anchor["valuation_ccy"],
+                )
+                if winner is None:
+                    raise
+                return self._portfolio_pnl_anchor_to_row(winner)
+            return self._portfolio_pnl_anchor_to_row(row)
+
+    @staticmethod
+    def _pnl_timeline_watermarks_are_valid(value: object) -> bool:
+        """Return whether one runtime value is a canonical watermark map."""
+        if not isinstance(value, dict):
+            return False
+        return all(
+            isinstance(exchange, str)
+            and bool(exchange)
+            and exchange == exchange.strip().lower()
+            and isinstance(sequence, int)
+            and not isinstance(sequence, bool)
+            and sequence > 0
+            for exchange, sequence in value.items()
+        )
+
+    @staticmethod
+    def _pnl_timeline_prefix_rows_by_sequence(
+        value: object,
+    ) -> dict[tuple[str, int], object] | None:
+        """Index one runtime execution list or refuse malformed/duplicate keys."""
+        if not isinstance(value, list):
+            return None
+        rows: dict[tuple[str, int], object] = {}
+        for row in value:
+            if not isinstance(row, dict):
+                return None
+            exchange = row.get("exchange")
+            sequence = row.get("scope_sequence")
+            if (
+                not isinstance(exchange, str)
+                or not isinstance(sequence, int)
+                or isinstance(sequence, bool)
+            ):
+                return None
+            key = (exchange, sequence)
+            if key in rows:
+                return None
+            rows[key] = row
+        return rows
+
+    @staticmethod
+    def _pnl_timeline_prefix_bundle_is_monotonic(value: object) -> bool:
+        """Validate activation as an exact execution subset of request."""
+        if not isinstance(value, dict):
+            return False
+        request = value.get("request")
+        activation = value.get("activation")
+        if not isinstance(request, dict) or not isinstance(activation, dict):
+            return False
+        request_watermarks = request.get("watermarks")
+        activation_watermarks = activation.get("watermarks")
+        if not SQLAlchemyRepository._pnl_timeline_watermarks_are_valid(
+            request_watermarks
+        ) or not SQLAlchemyRepository._pnl_timeline_watermarks_are_valid(activation_watermarks):
+            return False
+        canonical_request_watermarks = cast(dict[str, int], request_watermarks)
+        canonical_activation_watermarks = cast(dict[str, int], activation_watermarks)
+        if any(
+            exchange not in canonical_request_watermarks
+            or canonical_request_watermarks[exchange] < activation_watermark
+            for exchange, activation_watermark in canonical_activation_watermarks.items()
+        ):
+            return False
+        request_rows = SQLAlchemyRepository._pnl_timeline_prefix_rows_by_sequence(
+            request.get("executions")
+        )
+        activation_rows = SQLAlchemyRepository._pnl_timeline_prefix_rows_by_sequence(
+            activation.get("executions")
+        )
+        return (
+            request_rows is not None
+            and activation_rows is not None
+            and all(request_rows.get(key) == row for key, row in activation_rows.items())
+        )
+
+    @staticmethod
+    def _validate_portfolio_pnl_anchor_write_evidence(
+        anchor: PortfolioPnlAnchorRow,
+        evidence: PortfolioPnlAnchorWriteEvidence,
+    ) -> None:
+        """Refuse evidence whose scope, cuts, or activation relation is invalid."""
+        try:
+            evidence_wallet = normalize_portfolio_pnl_wallet_public_id(evidence["wallet_public_id"])
+            mode = evidence["mode"]
+            request_as_of = evidence["request_as_of"]
+            activation_as_of = evidence["activation_as_of"]
+            bundle = evidence["execution_prefix_bundle"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PnlTimelineAnchorEvidenceMismatchError(
+                "portfolio P&L anchor write evidence is malformed"
+            ) from exc
+        bundle_is_monotonic = SQLAlchemyRepository._pnl_timeline_prefix_bundle_is_monotonic(bundle)
+        activation_watermarks_json = (
+            json.dumps(
+                bundle["activation"]["watermarks"],
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if bundle_is_monotonic
+            else None
+        )
+        if (
+            evidence_wallet != evidence["wallet_public_id"]
+            or evidence_wallet != anchor["wallet_public_id"]
+            or mode != anchor["mode"]
+            or not isinstance(request_as_of, datetime)
+            or not isinstance(activation_as_of, datetime)
+            or request_as_of != anchor["timestamp"]
+            or activation_as_of != anchor["point_time"]
+            or request_as_of.utcoffset() != timedelta(0)
+            or activation_as_of.utcoffset() != timedelta(0)
+            or activation_as_of > request_as_of
+            or not bundle_is_monotonic
+            or anchor["watermarks_json"] != activation_watermarks_json
+        ):
+            raise PnlTimelineAnchorEvidenceMismatchError(
+                "portfolio P&L anchor write evidence does not match its candidate"
+            )
+
+    async def _begin_portfolio_pnl_anchor_write_transaction(
+        self,
+        s: AsyncSession,
+    ) -> None:
+        """Begin the writer transaction before any query or fence wait."""
+        if self.dialect_name == "postgresql":
+            await s.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        elif self.dialect_name == "sqlite":
+            await s.execute(text("BEGIN IMMEDIATE"))
+        else:
+            raise NotImplementedError(
+                "portfolio P&L anchor write transaction is not implemented "
+                f"for dialect={self.dialect_name}"
+            )
+
+    async def _acquire_portfolio_pnl_anchor_evidence_fence(
+        self,
+        s: AsyncSession,
+        anchor: PortfolioPnlAnchorRow,
+    ) -> None:
+        """Fence concurrent anchor candidates and every prefix source writer."""
+        if self.dialect_name == "sqlite":
+            return
+        if self.dialect_name != "postgresql":
+            raise NotImplementedError(
+                "portfolio P&L anchor evidence fence is not implemented "
+                f"for dialect={self.dialect_name}"
+            )
+        scope = "|".join(
+            (
+                anchor["wallet_public_id"],
+                anchor["mode"],
+                anchor["valuation_ccy"],
+            )
+        )
+        await s.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtext('portfolio_pnl_anchor'), hashtext(:scope))"
+            ),
+            {"scope": scope},
+        )
+        await s.execute(
+            text("LOCK TABLE executions, instruments, orders, symbols, venue_events IN SHARE MODE")
+        )
+
+    async def _load_pnl_timeline_execution_prefix_bundle_in_session(
+        self,
+        s: AsyncSession,
+        evidence: PortfolioPnlAnchorWriteEvidence,
+    ) -> PnlTimelineExecutionPrefixBundle:
+        """Reload both derivation cuts inside an already fenced transaction."""
+        request = await self._load_pnl_timeline_execution_prefix_snapshot(
+            s,
+            evidence["wallet_public_id"],
+            evidence["mode"],
+            evidence["request_as_of"],
+        )
+        if evidence["activation_as_of"] == evidence["request_as_of"]:
+            activation = request
+        else:
+            activation = await self._load_pnl_timeline_execution_prefix_snapshot(
+                s,
+                evidence["wallet_public_id"],
+                evidence["mode"],
+                evidence["activation_as_of"],
+            )
+        return {"request": request, "activation": activation}
+
+    async def record_portfolio_pnl_anchor_if_execution_prefix_matches(
+        self,
+        anchor: PortfolioPnlAnchorRow,
+        evidence: PortfolioPnlAnchorWriteEvidence,
+    ) -> PortfolioPnlAnchorRow:
+        """Fence prefix writers, revalidate both cuts, then insert atomically."""
+        normalized_anchor = cast(
+            PortfolioPnlAnchorRow,
+            {
+                **anchor,
+                "wallet_public_id": normalize_portfolio_pnl_wallet_public_id(
+                    anchor["wallet_public_id"]
+                ),
+            },
+        )
+        self._validate_portfolio_pnl_anchor(normalized_anchor)
+        self._validate_portfolio_pnl_anchor_write_evidence(normalized_anchor, evidence)
+        async with self.session() as s:
+            try:
+                await self._begin_portfolio_pnl_anchor_write_transaction(s)
+                await self._acquire_portfolio_pnl_anchor_evidence_fence(
+                    s,
+                    normalized_anchor,
+                )
+                try:
+                    current_bundle = (
+                        await self._load_pnl_timeline_execution_prefix_bundle_in_session(
+                            s,
+                            evidence,
+                        )
+                    )
+                except ExecutionChainError as exc:
+                    raise PnlTimelineAnchorEvidenceMismatchError(
+                        "current portfolio P&L execution prefix cannot be proven"
+                    ) from exc
+                if not self._pnl_timeline_prefix_bundle_is_monotonic(current_bundle):
+                    raise PnlTimelineAnchorEvidenceMismatchError(
+                        "current portfolio P&L execution prefix cuts are inconsistent"
+                    )
+                if current_bundle != evidence["execution_prefix_bundle"]:
+                    raise PnlTimelineAnchorEvidenceMismatchError(
+                        "portfolio P&L execution prefix changed before anchor persistence"
+                    )
+                if await self._pnl_timeline_scope_has_fill_gap_in_session(
+                    s,
+                    _PnlTimelineScopeGapRequest(
+                        wallet_public_id=evidence["wallet_public_id"],
+                        mode=evidence["mode"],
+                        as_of=evidence["activation_as_of"],
+                        execution_prefix=current_bundle["activation"],
+                    ),
+                ):
+                    raise PnlTimelineAnchorEvidenceMismatchError(
+                        "portfolio P&L activation scope has unconsumed fill evidence"
+                    )
+                winner = await self._read_current_portfolio_pnl_anchor(
+                    s,
+                    normalized_anchor["wallet_public_id"],
+                    normalized_anchor["mode"],
+                    normalized_anchor["valuation_ccy"],
+                )
+                if winner is not None:
+                    result = self._portfolio_pnl_anchor_to_row(winner)
+                    await s.commit()
+                    return result
+                row = PortfolioPnlPoint(**normalized_anchor, known_to=KNOWN_TO_MAX)
+                s.add(row)
+                await s.commit()
+                return self._portfolio_pnl_anchor_to_row(row)
+            except IntegrityError:
+                await s.rollback()
+                winner = await self._read_current_portfolio_pnl_anchor(
+                    s,
+                    normalized_anchor["wallet_public_id"],
+                    normalized_anchor["mode"],
+                    normalized_anchor["valuation_ccy"],
+                )
+                if winner is None:
+                    raise
+                return self._portfolio_pnl_anchor_to_row(winner)
+            except Exception:
+                await s.rollback()
+                raise
+
+    @staticmethod
+    async def _read_pnl_timeline_execution_prefix(
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        watermarks: dict[str, int],
+    ) -> list[tuple[Execution, Order | None, Instrument | None]]:
+        """Read each frozen execution range with nullable active Order lineage."""
+        if not watermarks:
+            return []
+        scope_bounds = [
+            and_(
+                Execution.exchange == exchange,
+                Execution.scope_sequence >= 1,
+                Execution.scope_sequence <= watermark,
+            )
+            for exchange, watermark in watermarks.items()
+        ]
+        result = await s.execute(
+            select(
+                Execution,
+                Order,
+                Instrument,
+            )
+            .outerjoin(
+                Order,
+                and_(
+                    Execution.order_public_id == Order.public_id,
+                    Order.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .outerjoin(
+                Instrument,
+                and_(
+                    Order.instrument_public_id == Instrument.public_id,
+                    Instrument.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .where(
+                Execution.wallet_public_id == wallet_public_id,
+                Execution.mode == mode,
+                or_(*scope_bounds),
+            )
+            .order_by(Execution.exchange.asc(), Execution.scope_sequence.asc())
+        )
+        return [(execution, order, instrument) for execution, order, instrument in result.all()]
+
+    @staticmethod
+    async def _read_pnl_timeline_fill_lineage(
+        s: AsyncSession,
+        client_order_ids: list[str],
+        as_of: datetime,
+    ) -> list[VenueEvent]:
+        """Read each shared shard's sealed fill prefix for target client ids."""
+        watermark_map = (
+            select(
+                VenueEvent.shard_key.label("shard_key"),
+                func.max(VenueEvent.id).label("event_id"),
+            )
+            .where(
+                VenueEvent.timestamp <= as_of,
+            )
+            .group_by(VenueEvent.shard_key)
+            .subquery()
+        )
+        fill_rows: list[VenueEvent] = []
+        for start in range(0, len(client_order_ids), _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE):
+            chunk = client_order_ids[start : start + _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE]
+            result = await s.execute(
+                select(VenueEvent)
+                .join(
+                    watermark_map,
+                    and_(
+                        VenueEvent.shard_key == watermark_map.c.shard_key,
+                        VenueEvent.id <= watermark_map.c.event_id,
+                    ),
+                )
+                .where(
+                    VenueEvent.event_type == "fill_observed",
+                    VenueEvent.client_order_id.in_(chunk),
+                )
+            )
+            fill_rows.extend(result.scalars().all())
+        return fill_rows
+
+    @staticmethod
+    async def _read_pnl_timeline_scope_fill_prefix(
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> list[VenueEvent]:
+        """Read all exact-scope fills inside each shared sealed shard prefix."""
+        watermark_map = (
+            select(
+                VenueEvent.shard_key.label("shard_key"),
+                func.max(VenueEvent.id).label("event_id"),
+            )
+            .where(
+                VenueEvent.known_to == KNOWN_TO_MAX,
+                VenueEvent.timestamp <= as_of,
+            )
+            .group_by(VenueEvent.shard_key)
+            .subquery()
+        )
+        result = await s.execute(
+            select(VenueEvent)
+            .join(
+                watermark_map,
+                and_(
+                    VenueEvent.shard_key == watermark_map.c.shard_key,
+                    VenueEvent.id <= watermark_map.c.event_id,
+                ),
+            )
+            .where(
+                VenueEvent.event_type == "fill_observed",
+                VenueEvent.wallet_public_id == wallet_public_id,
+                VenueEvent.mode == mode,
+                VenueEvent.known_to == KNOWN_TO_MAX,
+            )
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def _read_pnl_timeline_native_symbol_lineage(
+        s: AsyncSession,
+        symbol_public_ids: list[str],
+    ) -> dict[str, set[str]]:
+        """Read every historical native spelling for stable symbol identities."""
+        if not symbol_public_ids:
+            return {}
+        native_symbols: dict[str, set[str]] = {}
+        for start in range(0, len(symbol_public_ids), _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE):
+            chunk = symbol_public_ids[start : start + _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE]
+            result = await s.execute(
+                select(Symbol.public_id, Symbol.native_symbol).where(Symbol.public_id.in_(chunk))
+            )
+            for symbol_public_id, native_symbol in result.all():
+                native_symbols.setdefault(str(symbol_public_id), set()).add(str(native_symbol))
+        return native_symbols
+
+    @staticmethod
+    async def _read_pnl_timeline_order_instrument_lineage(
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        client_order_ids: list[str],
+    ) -> dict[str, set[str]]:
+        """Read all stable Order instrument identities for each full-wallet CID."""
+        identities: dict[str, set[str]] = {}
+        for start in range(0, len(client_order_ids), _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE):
+            chunk = client_order_ids[start : start + _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE]
+            result = await s.execute(
+                select(
+                    Order.client_order_id,
+                    Order.instrument_public_id,
+                )
+                .where(
+                    Order.wallet_public_id == wallet_public_id,
+                    Order.mode == mode,
+                    Order.client_order_id.in_(chunk),
+                )
+                .distinct()
+            )
+            for client_order_id, instrument_public_id in result.all():
+                identities.setdefault(str(client_order_id), set()).add(str(instrument_public_id))
+        return identities
+
+    @staticmethod
+    def _validated_pnl_timeline_shard_key(
+        execution: Execution,
+        fill_row: VenueEvent,
+    ) -> str:
+        """Validate one persisted shard string against its exact fill evidence."""
+        shard_key = fill_row.shard_key
+        if not shard_key or any(character.isspace() for character in shard_key):
+            raise ExecutionChainError(
+                f"ambiguous_execution_shard_lineage: execution_public_id={execution.public_id}"
+            )
+        parsed = parse_shard_key(shard_key)
+        if parsed is None:
+            raise ExecutionChainError(
+                f"ambiguous_execution_shard_lineage: execution_public_id={execution.public_id}"
+            )
+        exchange, instrument, mode, wallet_short, strategy_tag = parsed
+        canonical = f"{exchange}.{instrument}.{mode}"
+        if wallet_short:
+            canonical = f"{canonical}.w{wallet_short}"
+        if strategy_tag is not None:
+            canonical = f"{canonical}.{strategy_tag}"
+        if (
+            canonical != shard_key
+            or not exchange
+            or not instrument
+            or not mode
+            or strategy_tag == ""
+        ):
+            raise ExecutionChainError(
+                f"ambiguous_execution_shard_lineage: execution_public_id={execution.public_id}"
+            )
+        if (
+            exchange != execution.exchange
+            or instrument != fill_row.instrument
+            or mode != execution.mode
+            or (mode != "paper" and strategy_tag is not None)
+        ):
+            raise ExecutionChainError(
+                f"crossed_execution_shard_key_lineage: execution_public_id={execution.public_id}"
+            )
+        if wallet_short and wallet_short != compute_wallet_short(execution.wallet_public_id):
+            raise ExecutionChainError(
+                "crossed_execution_shard_wallet_lineage: "
+                f"execution_public_id={execution.public_id}"
+            )
+        return shard_key
+
+    @staticmethod
+    def _validated_pnl_timeline_witness_shard(
+        execution: Execution,
+        witnesses: list[VenueEvent],
+    ) -> str:
+        """Return one canonical shard shared by every selected fill witness."""
+        if any(row.known_to != KNOWN_TO_MAX for row in witnesses):
+            raise ExecutionChainError(
+                f"superseded_execution_fill_lineage: execution_public_id={execution.public_id}"
+            )
+        shard_keys = {
+            SQLAlchemyRepository._validated_pnl_timeline_shard_key(execution, row)
+            for row in witnesses
+        }
+        if len(shard_keys) != 1:
+            raise ExecutionChainError(
+                f"ambiguous_execution_shard_lineage: execution_public_id={execution.public_id}"
+            )
+        return next(iter(shard_keys))
+
+    @staticmethod
+    def _normalized_pnl_timeline_optional_fill_id(value: str | None) -> str | None:
+        """Return one ASCII-trimmed identifier or ``None`` when it is blank."""
+        if value is None:
+            return None
+        normalized = value.strip(_PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE)
+        return normalized or None
+
+    @staticmethod
+    def _validated_pnl_timeline_identity_component(
+        value: str,
+        field_name: str,
+    ) -> str:
+        """Return one nonblank ASCII-trimmed fill-scope identity component."""
+        normalized = value.strip(_PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE)
+        if not normalized:
+            raise ExecutionChainError(f"invalid_execution_fill_identity: {field_name}")
+        return normalized
+
+    @staticmethod
+    def _pnl_timeline_fill_identity(fill_row: VenueEvent) -> _PnlTimelineFillIdentity:
+        """Return one account-scoped identity for injective witness consumption."""
+        exec_id = SQLAlchemyRepository._normalized_pnl_timeline_optional_fill_id(fill_row.exec_id)
+        trade_id = SQLAlchemyRepository._normalized_pnl_timeline_optional_fill_id(fill_row.trade_id)
+        return SQLAlchemyRepository._pnl_timeline_fill_identity_from_ids(
+            fill_row,
+            exec_id,
+            trade_id,
+        )
+
+    @staticmethod
+    def _canonical_pnl_timeline_fill_event_public_id(value: object) -> str:
+        """Return one canonical UUID from the SQL-supported text spellings."""
+        normalized = str(value).strip(_PNL_TIMELINE_IDENTITY_ASCII_WHITESPACE)
+        compact = normalized.replace("-", "")
+        compact_shape = len(normalized) == 32 and normalized == compact
+        hyphenated_shape = len(normalized) == 36 and all(
+            normalized[index] == "-" for index in (8, 13, 18, 23)
+        )
+        if (
+            not (compact_shape or hyphenated_shape)
+            or len(compact) != 32
+            or any(character not in "0123456789abcdefABCDEF" for character in compact)
+        ):
+            raise ExecutionChainError("invalid_execution_fill_identity")
+        return str(UUID(compact))
+
+    @staticmethod
+    def _pnl_timeline_fill_identity_from_ids(
+        fill_row: VenueEvent,
+        exec_id: str | None,
+        trade_id: str | None,
+    ) -> _PnlTimelineFillIdentity:
+        """Build one fill identity from identifiers normalized exactly once."""
+        try:
+            wallet_public_id = normalize_portfolio_pnl_wallet_public_id(fill_row.wallet_public_id)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ExecutionChainError("invalid_execution_fill_identity") from exc
+        if exec_id is not None:
+            fill_identity = f"exec:{exec_id}"
+        elif trade_id is not None:
+            fill_identity = f"trade:{trade_id}"
+        else:
+            public_id = SQLAlchemyRepository._canonical_pnl_timeline_fill_event_public_id(
+                fill_row.public_id
+            )
+            fill_identity = f"event:{public_id}"
+        exchange = SQLAlchemyRepository._validated_pnl_timeline_identity_component(
+            fill_row.exchange,
+            "exchange",
+        )
+        mode = SQLAlchemyRepository._validated_pnl_timeline_identity_component(
+            fill_row.mode,
+            "mode",
+        )
+        return (
+            wallet_public_id,
+            exchange,
+            mode,
+            fill_identity,
+        )
+
+    @staticmethod
+    def _pnl_timeline_fill_stable_order(fill_row: VenueEvent) -> int:
+        """Return one fixed-width durable ordering key for a venue event."""
+        if isinstance(fill_row.id, int) and fill_row.id >= 0:
+            return fill_row.id
+        try:
+            return UUID(str(fill_row.public_id)).int
+        except (AttributeError, TypeError, ValueError):
+            if isinstance(fill_row.sequence_id, int) and fill_row.sequence_id >= 0:
+                return fill_row.sequence_id
+            raise ExecutionChainError("invalid_execution_fill_identity") from None
+
+    @staticmethod
+    def _group_pnl_timeline_fill_witnesses(
+        fill_rows: list[VenueEvent],
+    ) -> dict[_PnlTimelineFillIdentity, list[VenueEvent]]:
+        """Group redeliveries without collapsing identities across accounts."""
+        witnesses: dict[_PnlTimelineFillIdentity, list[VenueEvent]] = {}
+        for fill_row in fill_rows:
+            identity = SQLAlchemyRepository._pnl_timeline_fill_identity(fill_row)
+            witnesses.setdefault(identity, []).append(fill_row)
+        return witnesses
+
+    @staticmethod
+    def _pnl_timeline_execution_fill_ids(
+        execution: Execution,
+    ) -> tuple[str | None, str | None]:
+        """Return normalized exact venue identifiers carried by an execution."""
+        return (
+            SQLAlchemyRepository._normalized_pnl_timeline_optional_fill_id(execution.exec_id),
+            SQLAlchemyRepository._normalized_pnl_timeline_optional_fill_id(execution.trade_id),
+        )
+
+    @staticmethod
+    def _freeze_pnl_timeline_native_symbol_lineage(
+        native_symbols: set[str],
+    ) -> frozenset[str]:
+        """Freeze one stable symbol lineage exactly once for all candidates."""
+        return frozenset(native_symbols)
+
+    @staticmethod
+    def _validated_pnl_timeline_execution_quantity(execution: Execution) -> float:
+        """Return one finite positive consumed quantity or refuse the prefix."""
+        if not math.isfinite(execution.size) or execution.size <= 0.0:
+            raise ExecutionChainError(
+                f"invalid_execution_fill_quantity: execution_public_id={execution.public_id}"
+            )
+        return execution.size
+
+    @staticmethod
+    def _validated_pnl_timeline_fill_quantity(
+        witnesses: list[VenueEvent],
+        evidence_identity: str,
+    ) -> float:
+        """Return one finite positive quantity shared by every redelivery."""
+        quantities: list[float] = []
+        for row in witnesses:
+            if row.fill_size is None or not math.isfinite(row.fill_size) or row.fill_size <= 0.0:
+                raise ExecutionChainError(f"invalid_execution_fill_quantity: {evidence_identity}")
+            quantities.append(row.fill_size)
+        canonical_quantity = min(quantities)
+        if max(quantities) - canonical_quantity > _PNL_TIMELINE_FILL_QUANTITY_TOLERANCE:
+            raise ExecutionChainError(f"conflicting_execution_fill_quantity: {evidence_identity}")
+        return canonical_quantity
+
+    @staticmethod
+    def _validated_pnl_timeline_witness_quantity(
+        execution: Execution,
+        witnesses: list[VenueEvent],
+    ) -> float:
+        """Return one canonical quantity for an execution's fill witness."""
+        return SQLAlchemyRepository._validated_pnl_timeline_fill_quantity(
+            witnesses,
+            f"execution_public_id={execution.public_id}",
+        )
+
+    @staticmethod
+    def _pnl_timeline_recorded_shard_quantities(
+        fill_rows: list[VenueEvent],
+    ) -> list[tuple[str, float]]:
+        """Collapse consistent redeliveries into one quantity per fill identity."""
+        shard_quantities: list[tuple[str, float]] = []
+        witnesses_by_identity = SQLAlchemyRepository._group_pnl_timeline_fill_witnesses(fill_rows)
+        for identity, witnesses in witnesses_by_identity.items():
+            shard_keys = {row.shard_key for row in witnesses}
+            if len(shard_keys) != 1:
+                raise ExecutionChainError(f"ambiguous_execution_shard_lineage: {identity!r}")
+            shard_key = next(iter(shard_keys))
+            if not shard_key or any(character.isspace() for character in shard_key):
+                raise ExecutionChainError(f"ambiguous_execution_shard_lineage: {identity!r}")
+            quantity = SQLAlchemyRepository._validated_pnl_timeline_fill_quantity(
+                witnesses,
+                f"fill_identity={identity!r}",
+            )
+            shard_quantities.append((shard_key, quantity))
+        return shard_quantities
+
+    @staticmethod
+    def _pnl_timeline_quantity_totals_by_shard(
+        shard_quantities: Sequence[tuple[str, float]],
+    ) -> dict[str, float]:
+        """Aggregate finite positive quantities once for every resolved shard."""
+        quantities_by_shard: dict[str, list[float]] = {}
+        for shard_key, quantity in shard_quantities:
+            if not shard_key or not math.isfinite(quantity) or quantity <= 0.0:
+                raise ExecutionChainError("invalid_execution_fill_quantity")
+            quantities_by_shard.setdefault(shard_key, []).append(quantity)
+        totals: dict[str, float] = {}
+        for shard_key, quantities in quantities_by_shard.items():
+            try:
+                total = math.fsum(quantities)
+            except OverflowError as exc:
+                raise ExecutionChainError("invalid_execution_fill_quantity") from exc
+            if not math.isfinite(total):
+                raise ExecutionChainError("invalid_execution_fill_quantity")
+            totals[shard_key] = total
+        return totals
+
+    @staticmethod
+    def _index_pnl_timeline_fill_rows(
+        fill_rows: list[VenueEvent],
+    ) -> _PnlTimelineFillIndex:
+        """Normalize and index every sealed fill row exactly once."""
+        client_order_ids: set[str] = set()
+        wallets_by_client_order_id: dict[str, set[str]] = {}
+        scopes_by_client_order_id: dict[str, set[tuple[str, str, str]]] = {}
+        fills_by_native_scope: dict[
+            _PnlTimelineFillNativeScopeKey,
+            list[_PnlTimelineIndexedFill],
+        ] = {}
+        idless_fills_by_native_scope: dict[
+            _PnlTimelineFillNativeScopeKey,
+            list[_PnlTimelineIndexedFill],
+        ] = {}
+        native_scopes_with_exchange_order_id: set[_PnlTimelineFillNativeScopeKey] = set()
+        fills_by_exchange_order_id: dict[
+            _PnlTimelineNativeExactFillKey,
+            list[_PnlTimelineIndexedFill],
+        ] = {}
+        fills_by_exec_id: dict[
+            _PnlTimelineScopeExactFillKey,
+            dict[_PnlTimelineFillNativeScopeKey, list[_PnlTimelineIndexedFill]],
+        ] = {}
+        fills_by_exec_trade_id: dict[
+            _PnlTimelineScopeExecTradeFillKey,
+            dict[_PnlTimelineFillNativeScopeKey, list[_PnlTimelineIndexedFill]],
+        ] = {}
+        fills_by_trade_id: dict[
+            _PnlTimelineScopeExactFillKey,
+            dict[_PnlTimelineFillNativeScopeKey, list[_PnlTimelineIndexedFill]],
+        ] = {}
+        for fill_row in fill_rows:
+            client_order_id = fill_row.client_order_id
+            if client_order_id is None:
+                continue
+            exec_id = SQLAlchemyRepository._normalized_pnl_timeline_optional_fill_id(
+                fill_row.exec_id
+            )
+            trade_id = SQLAlchemyRepository._normalized_pnl_timeline_optional_fill_id(
+                fill_row.trade_id
+            )
+            exchange_order_id = SQLAlchemyRepository._normalized_pnl_timeline_optional_fill_id(
+                fill_row.exchange_order_id
+            )
+            identity = SQLAlchemyRepository._pnl_timeline_fill_identity_from_ids(
+                fill_row,
+                exec_id,
+                trade_id,
+            )
+            wallet_public_id, exchange, mode, _ = identity
+            scope_key = (
+                client_order_id,
+                wallet_public_id,
+                exchange,
+                mode,
+            )
+            native_scope_key = (*scope_key, fill_row.instrument)
+            indexed_fill = _PnlTimelineIndexedFill(
+                row=fill_row,
+                scope_key=scope_key,
+                native_scope_key=native_scope_key,
+                identity=identity,
+                exec_id=exec_id,
+                trade_id=trade_id,
+                exchange_order_id=exchange_order_id,
+                stable_order=SQLAlchemyRepository._pnl_timeline_fill_stable_order(fill_row),
+            )
+            client_order_ids.add(client_order_id)
+            wallets_by_client_order_id.setdefault(client_order_id, set()).add(wallet_public_id)
+            scopes_by_client_order_id.setdefault(client_order_id, set()).add(
+                (wallet_public_id, exchange, mode)
+            )
+            fills_by_native_scope.setdefault(native_scope_key, []).append(indexed_fill)
+            if exchange_order_id is None:
+                idless_fills_by_native_scope.setdefault(native_scope_key, []).append(indexed_fill)
+            else:
+                native_scopes_with_exchange_order_id.add(native_scope_key)
+                partition_key = (native_scope_key, exchange_order_id)
+                fills_by_exchange_order_id.setdefault(
+                    partition_key,
+                    [],
+                ).append(indexed_fill)
+            if exec_id is not None:
+                fills_by_exec_id.setdefault((scope_key, exec_id), {}).setdefault(
+                    native_scope_key,
+                    [],
+                ).append(indexed_fill)
+                if trade_id is not None:
+                    fills_by_exec_trade_id.setdefault(
+                        (scope_key, exec_id, trade_id),
+                        {},
+                    ).setdefault(native_scope_key, []).append(indexed_fill)
+            if trade_id is not None:
+                fills_by_trade_id.setdefault((scope_key, trade_id), {}).setdefault(
+                    native_scope_key,
+                    [],
+                ).append(indexed_fill)
+        return _PnlTimelineFillIndex(
+            client_order_ids=client_order_ids,
+            wallets_by_client_order_id=wallets_by_client_order_id,
+            scopes_by_client_order_id=scopes_by_client_order_id,
+            fills_by_native_scope=fills_by_native_scope,
+            idless_fills_by_native_scope=idless_fills_by_native_scope,
+            native_scopes_with_exchange_order_id=native_scopes_with_exchange_order_id,
+            fills_by_exchange_order_id=fills_by_exchange_order_id,
+            fills_by_exec_id=fills_by_exec_id,
+            fills_by_exec_trade_id=fills_by_exec_trade_id,
+            fills_by_trade_id=fills_by_trade_id,
+        )
+
+    @staticmethod
+    def _validated_pnl_timeline_candidate_scope(
+        candidate: _PnlTimelineExecutionCandidate,
+        state: _PnlTimelineFillAssignmentState,
+    ) -> _PnlTimelineFillScopeKey:
+        """Validate one candidate against constant-time fill-scope diagnostics."""
+        execution = candidate.execution
+        client_order_id = candidate.client_order_id
+        if client_order_id not in state.fill_index.client_order_ids:
+            raise ExecutionChainError(
+                f"missing_execution_shard_lineage: execution_public_id={execution.public_id}"
+            )
+        try:
+            wallet_public_id = normalize_portfolio_pnl_wallet_public_id(execution.wallet_public_id)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ExecutionChainError("invalid_execution_fill_identity") from exc
+        exchange = SQLAlchemyRepository._validated_pnl_timeline_identity_component(
+            execution.exchange,
+            "exchange",
+        )
+        mode = SQLAlchemyRepository._validated_pnl_timeline_identity_component(
+            execution.mode,
+            "mode",
+        )
+        scope_key = (client_order_id, wallet_public_id, exchange, mode)
+        if (wallet_public_id, exchange, mode) not in state.fill_index.scopes_by_client_order_id.get(
+            client_order_id,
+            set(),
+        ):
+            if wallet_public_id not in state.fill_index.wallets_by_client_order_id.get(
+                client_order_id,
+                set(),
+            ):
+                raise ExecutionChainError(
+                    f"crossed_execution_shard_lineage: execution_public_id={execution.public_id}"
+                )
+            raise ExecutionChainError(
+                "crossed_execution_fill_scope_lineage: "
+                f"execution_public_id={execution.public_id}"
+            )
+        lineage_key = (scope_key, candidate.symbol_public_id)
+        lineage_evidence = state.scope_lineage_evidence.get(lineage_key)
+        if lineage_evidence is None:
+            has_native_evidence = False
+            has_order_identity = False
+            for native_symbol in candidate.allowed_native_symbols:
+                native_presence, order_presence = (
+                    SQLAlchemyRepository._pnl_timeline_native_scope_presence(
+                        (*scope_key, native_symbol),
+                        state.fill_index,
+                    )
+                )
+                has_native_evidence = has_native_evidence or native_presence
+                has_order_identity = has_order_identity or order_presence
+            lineage_evidence = _PnlTimelineScopeLineageEvidence(
+                has_native_evidence=has_native_evidence,
+                has_order_identity=has_order_identity,
+            )
+            state.scope_lineage_evidence[lineage_key] = lineage_evidence
+        if not lineage_evidence.has_native_evidence:
+            raise ExecutionChainError(
+                "crossed_execution_fill_instrument_lineage: "
+                f"execution_public_id={execution.public_id}"
+            )
+        return scope_key
+
+    @staticmethod
+    def _pnl_timeline_native_scope_presence(
+        native_scope_key: _PnlTimelineFillNativeScopeKey,
+        fill_index: _PnlTimelineFillIndex,
+    ) -> tuple[bool, bool]:
+        """Probe native and venue-order presence once for one lineage alias."""
+        return (
+            native_scope_key in fill_index.fills_by_native_scope,
+            native_scope_key in fill_index.native_scopes_with_exchange_order_id,
+        )
+
+    @staticmethod
+    def _pnl_timeline_order_partition_for_alias(
+        scope_key: _PnlTimelineFillScopeKey,
+        exchange_order_id: str,
+        native_symbol: str,
+        fill_index: _PnlTimelineFillIndex,
+    ) -> _PnlTimelineNativeExactFillKey | None:
+        """Look up one atomic venue-order partition without scanning peers."""
+        partition_key = ((*scope_key, native_symbol), exchange_order_id)
+        if partition_key in fill_index.fills_by_exchange_order_id:
+            return partition_key
+        return None
+
+    @staticmethod
+    def _native_scoped_pnl_timeline_indexed_fills(
+        scope_key: _PnlTimelineFillScopeKey,
+        allowed_native_symbols: frozenset[str],
+        state: _PnlTimelineFillAssignmentState,
+        idless_only: bool,
+    ) -> list[_PnlTimelineIndexedFill]:
+        """Join complete native-symbol buckets without rescanning shared rows."""
+        fill_buckets = (
+            state.fill_index.idless_fills_by_native_scope
+            if idless_only
+            else state.fill_index.fills_by_native_scope
+        )
+        indexed_fills: list[_PnlTimelineIndexedFill] = []
+        for native_symbol in allowed_native_symbols:
+            indexed_fills.extend(fill_buckets.get((*scope_key, native_symbol), []))
+        return indexed_fills
+
+    @staticmethod
+    def _order_scoped_pnl_timeline_indexed_fills(
+        order_partition_keys: frozenset[_PnlTimelineNativeExactFillKey],
+        state: _PnlTimelineFillAssignmentState,
+    ) -> list[_PnlTimelineIndexedFill]:
+        """Join owned atomic venue-order buckets exactly once per pool."""
+        indexed_fills: list[_PnlTimelineIndexedFill] = []
+        for partition_key in order_partition_keys:
+            indexed_fills.extend(state.fill_index.fills_by_exchange_order_id.get(partition_key, []))
+        return indexed_fills
+
+    @staticmethod
+    def _precompute_pnl_timeline_fallback_evidence(
+        candidates: list[_PnlTimelineExecutionCandidate],
+        state: _PnlTimelineFillAssignmentState,
+    ) -> None:
+        """Prepare reusable presence and owned order partitions in one pass."""
+        owners: dict[_PnlTimelineNativeExactFillKey, str] = {}
+        partitions_by_owner: dict[
+            _PnlTimelineOrderOwnerKey,
+            set[_PnlTimelineNativeExactFillKey],
+        ] = {}
+        evidence_by_key: dict[
+            _PnlTimelineFallbackEvidenceKey,
+            _PnlTimelineFallbackEvidence,
+        ] = {}
+        for candidate in candidates:
+            scope_key = SQLAlchemyRepository._validated_pnl_timeline_candidate_scope(
+                candidate,
+                state,
+            )
+            exchange_order_id = SQLAlchemyRepository._normalized_pnl_timeline_optional_fill_id(
+                candidate.order.exchange_order_id
+            )
+            evidence_key = (
+                scope_key,
+                candidate.symbol_public_id,
+                exchange_order_id,
+            )
+            evidence = evidence_by_key.get(evidence_key)
+            if evidence is not None:
+                cached_owner_key = evidence.order_owner_key
+                if (
+                    cached_owner_key is not None
+                    and cached_owner_key[2] != candidate.order.instrument_public_id
+                ):
+                    raise ExecutionChainError(
+                        "ambiguous_execution_order_instrument_lineage: "
+                        f"exchange_order_id={exchange_order_id}"
+                    )
+                state.fallback_evidence_by_execution_public_id[candidate.execution.public_id] = (
+                    evidence
+                )
+                continue
+            lineage_evidence = state.scope_lineage_evidence[(scope_key, candidate.symbol_public_id)]
+            matching_partitions = (
+                frozenset()
+                if exchange_order_id is None
+                else frozenset(
+                    partition_key
+                    for native_symbol in candidate.allowed_native_symbols
+                    if (
+                        partition_key := SQLAlchemyRepository._pnl_timeline_order_partition_for_alias(
+                            scope_key,
+                            exchange_order_id,
+                            native_symbol,
+                            state.fill_index,
+                        )
+                    )
+                    is not None
+                )
+            )
+            owner_key: _PnlTimelineOrderOwnerKey | None = None
+            if matching_partitions and exchange_order_id is not None:
+                instrument_public_id = candidate.order.instrument_public_id
+                owner_key = (
+                    scope_key,
+                    exchange_order_id,
+                    instrument_public_id,
+                )
+                owner_partitions = partitions_by_owner.setdefault(owner_key, set())
+                for partition_key in matching_partitions:
+                    owner = owners.setdefault(partition_key, instrument_public_id)
+                    if owner != instrument_public_id:
+                        raise ExecutionChainError(
+                            "ambiguous_execution_order_instrument_lineage: "
+                            f"exchange_order_id={exchange_order_id}"
+                        )
+                    owner_partitions.add(partition_key)
+            evidence = _PnlTimelineFallbackEvidence(
+                scope_key=scope_key,
+                exchange_order_id=exchange_order_id,
+                has_order_identity=lineage_evidence.has_order_identity,
+                order_owner_key=owner_key,
+            )
+            evidence_by_key[evidence_key] = evidence
+            state.fallback_evidence_by_execution_public_id[candidate.execution.public_id] = evidence
+        state.order_partitions_by_owner = {
+            owner_key: frozenset(partition_keys)
+            for owner_key, partition_keys in partitions_by_owner.items()
+        }
+
+    @staticmethod
+    def _claim_pnl_timeline_fill_witness(
+        candidate: _PnlTimelineExecutionCandidate,
+        identity: _PnlTimelineFillIdentity,
+        witnesses: list[VenueEvent],
+        state: _PnlTimelineFillAssignmentState,
+    ) -> str:
+        """Consume one quantity-equal witness identity exactly once."""
+        execution = candidate.execution
+        if identity in state.consumed_identities:
+            raise ExecutionChainError(
+                f"reused_execution_fill_lineage: execution_public_id={execution.public_id}"
+            )
+        execution_quantity = SQLAlchemyRepository._validated_pnl_timeline_execution_quantity(
+            execution
+        )
+        witness_quantity = SQLAlchemyRepository._validated_pnl_timeline_witness_quantity(
+            execution,
+            witnesses,
+        )
+        if abs(execution_quantity - witness_quantity) > _PNL_TIMELINE_FILL_QUANTITY_TOLERANCE:
+            raise ExecutionChainError(
+                f"execution_fill_quantity_mismatch: execution_public_id={execution.public_id}"
+            )
+        shard_key = SQLAlchemyRepository._validated_pnl_timeline_witness_shard(
+            execution,
+            witnesses,
+        )
+        SQLAlchemyRepository._consume_pnl_timeline_fill_identity(identity, state)
+        return shard_key
+
+    @staticmethod
+    def _consume_pnl_timeline_fill_identity(
+        identity: _PnlTimelineFillIdentity,
+        state: _PnlTimelineFillAssignmentState,
+    ) -> None:
+        """Consume one identity and remove it from every materialized pool."""
+        state.consumed_identities.add(identity)
+        for pool in state.fallback_pools_by_identity.get(identity, []):
+            SQLAlchemyRepository._discard_pnl_timeline_fallback_identity(
+                identity,
+                pool,
+            )
+
+    @staticmethod
+    def _pnl_timeline_exact_group_key(
+        candidate: _PnlTimelineExecutionCandidate,
+        scope_key: _PnlTimelineFillScopeKey,
+    ) -> _PnlTimelineExactGroupKey:
+        """Return one complete scope-and-identifier group key."""
+        exec_id, trade_id = SQLAlchemyRepository._pnl_timeline_execution_fill_ids(
+            candidate.execution
+        )
+        return (
+            scope_key,
+            exec_id,
+            trade_id,
+        )
+
+    @staticmethod
+    def _pnl_timeline_exact_fill_partitions(
+        group_key: _PnlTimelineExactGroupKey,
+        fill_index: _PnlTimelineFillIndex,
+    ) -> dict[_PnlTimelineFillNativeScopeKey, list[_PnlTimelineIndexedFill]]:
+        """Return only native partitions carrying one complete exact key."""
+        scope_key, exec_id, trade_id = group_key
+        if exec_id is not None and trade_id is not None:
+            return fill_index.fills_by_exec_trade_id.get(
+                (scope_key, exec_id, trade_id),
+                {},
+            )
+        if exec_id is not None:
+            return fill_index.fills_by_exec_id.get((scope_key, exec_id), {})
+        return fill_index.fills_by_trade_id.get((scope_key, cast(str, trade_id)), {})
+
+    @staticmethod
+    def _pnl_timeline_exact_native_owners(
+        lineages: dict[str, frozenset[str]],
+    ) -> dict[str, str | None]:
+        """Build one native ownership map with explicit overlap sentinels."""
+        owners: dict[str, str | None] = {}
+        for symbol_public_id, native_symbols in lineages.items():
+            for native_symbol in native_symbols:
+                if native_symbol in owners:
+                    owners[native_symbol] = None
+                else:
+                    owners[native_symbol] = symbol_public_id
+        return owners
+
+    @staticmethod
+    def _assign_pnl_timeline_exact_fill_partitions(
+        group_key: _PnlTimelineExactGroupKey,
+        lineages: dict[str, frozenset[str]],
+        partitions: dict[_PnlTimelineFillNativeScopeKey, list[_PnlTimelineIndexedFill]],
+    ) -> dict[str, dict[_PnlTimelineFillIdentity, list[VenueEvent]]]:
+        """Assign each actual exact partition once to its stable lineage."""
+        assigned: dict[
+            str,
+            dict[_PnlTimelineFillIdentity, list[VenueEvent]],
+        ] = {symbol_public_id: {} for symbol_public_id in lineages}
+        if len(lineages) == 1:
+            symbol_public_id, native_symbols = next(iter(lineages.items()))
+            for native_scope_key, indexed_fills in partitions.items():
+                if native_scope_key[-1] in native_symbols:
+                    SQLAlchemyRepository._extend_pnl_timeline_exact_witnesses(
+                        assigned[symbol_public_id],
+                        indexed_fills,
+                    )
+            return assigned
+        owners = SQLAlchemyRepository._pnl_timeline_exact_native_owners(lineages)
+        owned_partitions: list[tuple[str, list[_PnlTimelineIndexedFill]]] = []
+        ambiguous = False
+        for native_scope_key, indexed_fills in partitions.items():
+            native_symbol = native_scope_key[-1]
+            if native_symbol not in owners:
+                continue
+            owner = owners[native_symbol]
+            if owner is None:
+                ambiguous = True
+                continue
+            owned_partitions.append((owner, indexed_fills))
+        if ambiguous:
+            raise ExecutionChainError(
+                f"ambiguous_execution_fill_instrument_lineage: exact_identity={group_key!r}"
+            )
+        for owner, indexed_fills in owned_partitions:
+            SQLAlchemyRepository._extend_pnl_timeline_exact_witnesses(
+                assigned[owner],
+                indexed_fills,
+            )
+        return assigned
+
+    @staticmethod
+    def _extend_pnl_timeline_exact_witnesses(
+        witnesses: dict[_PnlTimelineFillIdentity, list[VenueEvent]],
+        indexed_fills: list[_PnlTimelineIndexedFill],
+    ) -> None:
+        """Append one owned source partition directly to an exact cache."""
+        for indexed_fill in indexed_fills:
+            witnesses.setdefault(indexed_fill.identity, []).append(indexed_fill.row)
+
+    @staticmethod
+    def _precompute_pnl_timeline_exact_evidence(
+        candidates: list[_PnlTimelineExecutionCandidate],
+        state: _PnlTimelineFillAssignmentState,
+    ) -> None:
+        """Process every complete exact-identity group and partition once."""
+        groups: dict[
+            _PnlTimelineExactGroupKey,
+            dict[str, frozenset[str]],
+        ] = {}
+        for candidate in candidates:
+            scope_key = SQLAlchemyRepository._validated_pnl_timeline_candidate_scope(
+                candidate,
+                state,
+            )
+            group_key = SQLAlchemyRepository._pnl_timeline_exact_group_key(
+                candidate,
+                scope_key,
+            )
+            lineages = groups.setdefault(group_key, {})
+            known_symbols = lineages.setdefault(
+                candidate.symbol_public_id,
+                candidate.allowed_native_symbols,
+            )
+            if known_symbols != candidate.allowed_native_symbols:
+                raise ExecutionChainError(
+                    f"ambiguous_execution_fill_instrument_lineage: exact_identity={group_key!r}"
+                )
+        for group_key, lineages in groups.items():
+            partitions = SQLAlchemyRepository._pnl_timeline_exact_fill_partitions(
+                group_key,
+                state.fill_index,
+            )
+            assigned = SQLAlchemyRepository._assign_pnl_timeline_exact_fill_partitions(
+                group_key,
+                lineages,
+                partitions,
+            )
+            scope_key, exec_id, trade_id = group_key
+            for symbol_public_id, witnesses in assigned.items():
+                state.exact_witnesses[
+                    (
+                        scope_key,
+                        symbol_public_id,
+                        exec_id,
+                        trade_id,
+                    )
+                ] = witnesses
+
+    @staticmethod
+    def _exact_pnl_timeline_witnesses(
+        candidate: _PnlTimelineExecutionCandidate,
+        state: _PnlTimelineFillAssignmentState,
+        scope_key: _PnlTimelineFillScopeKey,
+    ) -> dict[_PnlTimelineFillIdentity, list[VenueEvent]]:
+        """Return one group-precomputed exact witness set."""
+        exec_id, trade_id = SQLAlchemyRepository._pnl_timeline_execution_fill_ids(
+            candidate.execution
+        )
+        return state.exact_witnesses.get(
+            (
+                scope_key,
+                candidate.symbol_public_id,
+                exec_id,
+                trade_id,
+            ),
+            {},
+        )
+
+    @staticmethod
+    def _resolve_exact_pnl_timeline_execution_shard(
+        candidate: _PnlTimelineExecutionCandidate,
+        state: _PnlTimelineFillAssignmentState,
+        scope_key: _PnlTimelineFillScopeKey,
+    ) -> str:
+        """Resolve one exact execution without scanning its full CID bucket."""
+        execution = candidate.execution
+        witnesses = SQLAlchemyRepository._exact_pnl_timeline_witnesses(
+            candidate,
+            state,
+            scope_key,
+        )
+        if not witnesses:
+            raise ExecutionChainError(
+                "missing_execution_fill_identity_lineage: "
+                f"execution_public_id={execution.public_id}"
+            )
+        if len(witnesses) != 1:
+            raise ExecutionChainError(
+                f"ambiguous_execution_fill_lineage: execution_public_id={execution.public_id}"
+            )
+        identity, witness_rows = next(iter(witnesses.items()))
+        return SQLAlchemyRepository._claim_pnl_timeline_fill_witness(
+            candidate,
+            identity,
+            witness_rows,
+            state,
+        )
+
+    @staticmethod
+    def _pnl_timeline_quantity_bits(quantity: float) -> int:
+        """Return the monotonic IEEE-754 key for one positive finite quantity."""
+        return int.from_bytes(pack(">d", quantity), "big")
+
+    @staticmethod
+    def _pnl_timeline_quantity_path(
+        quantity: float,
+    ) -> list[_PnlTimelineQuantityNodeKey]:
+        """Return the fixed-depth radix path containing one quantity."""
+        bits = SQLAlchemyRepository._pnl_timeline_quantity_bits(quantity)
+        return [(depth, bits >> (64 - depth)) for depth in range(65)]
+
+    @staticmethod
+    def _pnl_timeline_quantity_range(
+        lower: float,
+        upper: float,
+    ) -> list[_PnlTimelineQuantityNodeKey]:
+        """Decompose one inclusive float interval into bounded radix nodes."""
+        left = SQLAlchemyRepository._pnl_timeline_quantity_bits(lower)
+        right = SQLAlchemyRepository._pnl_timeline_quantity_bits(upper)
+        nodes: list[_PnlTimelineQuantityNodeKey] = []
+        while left <= right:
+            remaining = right - left + 1
+            if left == 0:
+                block_size = 1 << (remaining.bit_length() - 1)
+            else:
+                block_size = left & -left
+                while block_size > remaining:
+                    block_size >>= 1
+            exponent = block_size.bit_length() - 1
+            nodes.append((64 - exponent, left >> exponent))
+            left += block_size
+        return nodes
+
+    @staticmethod
+    def _validated_pnl_timeline_fallback_instrument(
+        candidate: _PnlTimelineExecutionCandidate,
+        state: _PnlTimelineFillAssignmentState,
+    ) -> None:
+        """Require one stable instrument before using CID-only evidence."""
+        stable_instrument_ids = state.order_instrument_ids_by_scope.get(
+            candidate.client_order_id,
+            set(),
+        )
+        if stable_instrument_ids != {candidate.order.instrument_public_id}:
+            raise ExecutionChainError(
+                "ambiguous_execution_order_instrument_lineage: "
+                f"execution_public_id={candidate.execution.public_id}"
+            )
+
+    @staticmethod
+    def _pnl_timeline_fallback_pool_key(
+        candidate: _PnlTimelineExecutionCandidate,
+        state: _PnlTimelineFillAssignmentState,
+        scope_key: _PnlTimelineFillScopeKey,
+    ) -> _PnlTimelineFallbackPoolKey:
+        """Choose one complete evidence partition before visiting its rows."""
+        evidence = state.fallback_evidence_by_execution_public_id[candidate.execution.public_id]
+        if evidence.exchange_order_id is not None:
+            if evidence.order_owner_key is not None:
+                return (
+                    "order",
+                    evidence.order_owner_key,
+                )
+            if evidence.has_order_identity:
+                raise ExecutionChainError(
+                    "missing_execution_order_identity_lineage: "
+                    f"execution_public_id={candidate.execution.public_id}"
+                )
+        SQLAlchemyRepository._validated_pnl_timeline_fallback_instrument(candidate, state)
+        return (
+            "native" if evidence.has_order_identity else "idless",
+            scope_key,
+            candidate.symbol_public_id,
+            candidate.order.instrument_public_id,
+        )
+
+    @staticmethod
+    def _pnl_timeline_fill_witness_from_index(
+        execution: Execution,
+        identity: _PnlTimelineFillIdentity,
+        indexed_fills: list[_PnlTimelineIndexedFill],
+    ) -> _PnlTimelineFillWitness:
+        """Validate one indexed redelivery class and retain its stable order."""
+        rows = [indexed_fill.row for indexed_fill in indexed_fills]
+        return _PnlTimelineFillWitness(
+            identity=identity,
+            rows=rows,
+            quantity=SQLAlchemyRepository._validated_pnl_timeline_witness_quantity(
+                execution,
+                rows,
+            ),
+            shard_key=SQLAlchemyRepository._validated_pnl_timeline_witness_shard(
+                execution,
+                rows,
+            ),
+            stable_order=min(indexed_fill.stable_order for indexed_fill in indexed_fills),
+        )
+
+    @staticmethod
+    def _radix_order_pnl_timeline_fill_identities(
+        witnesses: dict[_PnlTimelineFillIdentity, _PnlTimelineFillWitness],
+    ) -> list[_PnlTimelineFillIdentity]:
+        """Order stable 128-bit event keys with fixed-pass linear radix buckets."""
+        ordered = list(witnesses)
+        for shift in range(0, 128, 8):
+            buckets: list[list[_PnlTimelineFillIdentity]] = [[] for _ in range(256)]
+            for identity in ordered:
+                bucket = (witnesses[identity].stable_order >> shift) & 255
+                buckets[bucket].append(identity)
+            ordered = [identity for bucket in buckets for identity in bucket]
+        return ordered
+
+    @staticmethod
+    def _build_pnl_timeline_fallback_pool(
+        candidate: _PnlTimelineExecutionCandidate,
+        state: _PnlTimelineFillAssignmentState,
+        scope_key: _PnlTimelineFillScopeKey,
+    ) -> _PnlTimelineFallbackPool:
+        """Build or return one validated fallback pool exactly once."""
+        execution = candidate.execution
+        pool_key = SQLAlchemyRepository._pnl_timeline_fallback_pool_key(
+            candidate,
+            state,
+            scope_key,
+        )
+        cached = state.fallback_pools.get(pool_key)
+        if cached is not None:
+            return cached
+        pool_kind = pool_key[0]
+        if pool_kind == "order":
+            owner_key = cast(_PnlTimelineOrderOwnerKey, pool_key[1])
+            selected = SQLAlchemyRepository._order_scoped_pnl_timeline_indexed_fills(
+                state.order_partitions_by_owner[owner_key],
+                state,
+            )
+        else:
+            selected = SQLAlchemyRepository._native_scoped_pnl_timeline_indexed_fills(
+                scope_key,
+                candidate.allowed_native_symbols,
+                state,
+                pool_kind == "idless",
+            )
+        rows_by_identity: dict[
+            _PnlTimelineFillIdentity,
+            list[_PnlTimelineIndexedFill],
+        ] = {}
+        for indexed_fill in selected:
+            rows_by_identity.setdefault(indexed_fill.identity, []).append(indexed_fill)
+        witnesses: dict[_PnlTimelineFillIdentity, _PnlTimelineFillWitness] = {}
+        for identity, indexed_fills in rows_by_identity.items():
+            witnesses[identity] = SQLAlchemyRepository._pnl_timeline_fill_witness_from_index(
+                execution,
+                identity,
+                indexed_fills,
+            )
+        state.fallback_identities.update(witnesses)
+        active_identities = set(witnesses).difference(state.consumed_identities)
+        quantity_nodes: dict[_PnlTimelineQuantityNodeKey, _PnlTimelineQuantityNode] = {}
+        ordered_identities = SQLAlchemyRepository._radix_order_pnl_timeline_fill_identities(
+            {identity: witnesses[identity] for identity in active_identities}
+        )
+        for identity in ordered_identities:
+            witness = witnesses[identity]
+            for node_key in SQLAlchemyRepository._pnl_timeline_quantity_path(witness.quantity):
+                node = quantity_nodes.setdefault(
+                    node_key,
+                    _PnlTimelineQuantityNode(
+                        identities=[],
+                        cursor=0,
+                        shard_counts={},
+                    ),
+                )
+                node.identities.append(identity)
+                node.shard_counts[witness.shard_key] = (
+                    node.shard_counts.get(witness.shard_key, 0) + 1
+                )
+        pool = _PnlTimelineFallbackPool(
+            witnesses=witnesses,
+            active_identities=active_identities,
+            quantity_nodes=quantity_nodes,
+        )
+        state.fallback_pools[pool_key] = pool
+        for identity in active_identities:
+            state.fallback_pools_by_identity.setdefault(identity, []).append(pool)
+        return pool
+
+    @staticmethod
+    def _discard_pnl_timeline_fallback_identity(
+        identity: _PnlTimelineFillIdentity,
+        pool: _PnlTimelineFallbackPool,
+    ) -> None:
+        """Remove one consumed identity from every node on its quantity path."""
+        pool.active_identities.remove(identity)
+        witness = pool.witnesses[identity]
+        for node_key in SQLAlchemyRepository._pnl_timeline_quantity_path(witness.quantity):
+            node = pool.quantity_nodes[node_key]
+            remaining = node.shard_counts[witness.shard_key] - 1
+            if remaining:
+                node.shard_counts[witness.shard_key] = remaining
+            else:
+                del node.shard_counts[witness.shard_key]
+
+    @staticmethod
+    def _matching_pnl_timeline_fallback_witness(
+        candidate: _PnlTimelineExecutionCandidate,
+        pool: _PnlTimelineFallbackPool,
+    ) -> _PnlTimelineFillWitness:
+        """Find one canonical quantity match with bounded radix-node visits."""
+        execution = candidate.execution
+        execution_quantity = SQLAlchemyRepository._validated_pnl_timeline_execution_quantity(
+            execution
+        )
+        lower = max(0.0, execution_quantity - _PNL_TIMELINE_FILL_QUANTITY_TOLERANCE)
+        upper = execution_quantity + _PNL_TIMELINE_FILL_QUANTITY_TOLERANCE
+        selected_identity: _PnlTimelineFillIdentity | None = None
+        selected_shard: str | None = None
+        for node_key in SQLAlchemyRepository._pnl_timeline_quantity_range(lower, upper):
+            node = pool.quantity_nodes.get(node_key)
+            if node is None:
+                continue
+            if len(node.shard_counts) > 1:
+                raise ExecutionChainError(
+                    f"ambiguous_execution_shard_lineage: execution_public_id={execution.public_id}"
+                )
+            if node.shard_counts:
+                node_shard = next(iter(node.shard_counts))
+                if selected_shard is not None and selected_shard != node_shard:
+                    raise ExecutionChainError(
+                        "ambiguous_execution_shard_lineage: "
+                        f"execution_public_id={execution.public_id}"
+                    )
+                selected_shard = node_shard
+            while (
+                node.cursor < len(node.identities)
+                and node.identities[node.cursor] not in pool.active_identities
+            ):
+                node.cursor += 1
+            if node.cursor < len(node.identities):
+                node_identity = node.identities[node.cursor]
+                if selected_identity is None or node_identity < selected_identity:
+                    selected_identity = node_identity
+        if selected_identity is None:
+            if not pool.active_identities:
+                raise ExecutionChainError(
+                    f"reused_execution_fill_lineage: execution_public_id={execution.public_id}"
+                )
+            raise ExecutionChainError(
+                f"execution_fill_quantity_mismatch: execution_public_id={execution.public_id}"
+            )
+        return pool.witnesses[selected_identity]
+
+    @staticmethod
+    def _resolve_fallback_pnl_timeline_execution_shard(
+        candidate: _PnlTimelineExecutionCandidate,
+        state: _PnlTimelineFillAssignmentState,
+        scope_key: _PnlTimelineFillScopeKey,
+    ) -> str:
+        """Resolve one id-less execution from one indexed fallback pool."""
+        pool = SQLAlchemyRepository._build_pnl_timeline_fallback_pool(
+            candidate,
+            state,
+            scope_key,
+        )
+        witness = SQLAlchemyRepository._matching_pnl_timeline_fallback_witness(
+            candidate,
+            pool,
+        )
+        SQLAlchemyRepository._consume_pnl_timeline_fill_identity(
+            witness.identity,
+            state,
+        )
+        return witness.shard_key
+
+    @staticmethod
+    def _resolve_pnl_timeline_execution_shard(
+        candidate: _PnlTimelineExecutionCandidate,
+        state: _PnlTimelineFillAssignmentState,
+    ) -> str:
+        """Prove one shard while consuming one exact fill witness."""
+        execution = candidate.execution
+        has_exact_identity = any(SQLAlchemyRepository._pnl_timeline_execution_fill_ids(execution))
+        if has_exact_identity:
+            scope_key = SQLAlchemyRepository._validated_pnl_timeline_candidate_scope(
+                candidate,
+                state,
+            )
+            return SQLAlchemyRepository._resolve_exact_pnl_timeline_execution_shard(
+                candidate,
+                state,
+                scope_key,
+            )
+        scope_key = state.fallback_evidence_by_execution_public_id[execution.public_id].scope_key
+        return SQLAlchemyRepository._resolve_fallback_pnl_timeline_execution_shard(
+            candidate,
+            state,
+            scope_key,
+        )
+
+    @staticmethod
+    def _resolve_pnl_timeline_execution_shards(
+        candidates: list[_PnlTimelineExecutionCandidate],
+        fill_rows: list[VenueEvent],
+        order_instrument_ids_by_scope: dict[str, set[str]],
+    ) -> dict[str, str]:
+        """Resolve a sealed prefix with one fill-index and linear partitions."""
+        state = _PnlTimelineFillAssignmentState(
+            fill_index=SQLAlchemyRepository._index_pnl_timeline_fill_rows(fill_rows),
+            order_instrument_ids_by_scope=order_instrument_ids_by_scope,
+            consumed_identities=set(),
+            fallback_identities=set(),
+            exact_witnesses={},
+            fallback_pools={},
+            scope_lineage_evidence={},
+            fallback_evidence_by_execution_public_id={},
+            order_partitions_by_owner={},
+            fallback_pools_by_identity={},
+        )
+        exact: list[_PnlTimelineExecutionCandidate] = []
+        fallback: list[_PnlTimelineExecutionCandidate] = []
+        for candidate in candidates:
+            target = (
+                exact
+                if any(SQLAlchemyRepository._pnl_timeline_execution_fill_ids(candidate.execution))
+                else fallback
+            )
+            target.append(candidate)
+        SQLAlchemyRepository._precompute_pnl_timeline_fallback_evidence(
+            fallback,
+            state,
+        )
+        SQLAlchemyRepository._precompute_pnl_timeline_exact_evidence(
+            exact,
+            state,
+        )
+        resolved: dict[str, str] = {}
+        for candidate in (*exact, *fallback):
+            resolved[candidate.execution.public_id] = (
+                SQLAlchemyRepository._resolve_pnl_timeline_execution_shard(
+                    candidate,
+                    state,
+                )
+            )
+        if not state.fallback_identities.issubset(state.consumed_identities):
+            raise ExecutionChainError("unconsumed_execution_fill_lineage")
+        return resolved
+
+    @staticmethod
+    def _project_pnl_timeline_execution_candidate(
+        candidate: _PnlTimelineExecutionCandidate,
+        shard_key: str,
+    ) -> PnlTimelineOpeningExecutionRow:
+        """Project one fully certified execution into the replay contract."""
+        execution = candidate.execution
+        return {
+            "public_id": execution.public_id,
+            "instrument_public_id": candidate.order.instrument_public_id,
+            "exchange": execution.exchange,
+            "scope_sequence": int(execution.scope_sequence),
+            "order_public_id": execution.order_public_id,
+            "client_order_id": candidate.client_order_id,
+            "shard_key": shard_key,
+            "side": execution.side,
+            "status": execution.status,
+            "size": execution.size,
+            "price": execution.price,
+            "fee": execution.fee,
+            "fee_asset": execution.fee_asset,
+            "executed_at": execution.executed_at,
+            "timestamp": execution.timestamp,
+            "exec_id": execution.exec_id,
+            "trade_id": execution.trade_id,
+        }
+
+    @staticmethod
+    def _validate_pnl_timeline_execution_prefix(
+        wallet_public_id: str,
+        mode: str,
+        watermarks: dict[str, int],
+        source_rows: list[tuple[Execution, Order | None, Instrument | None]],
+        fill_rows: list[VenueEvent],
+        native_symbols_by_symbol_public_id: dict[str, set[str]],
+        order_instrument_ids_by_scope: dict[str, set[str]],
+    ) -> list[PnlTimelineOpeningExecutionRow]:
+        """Validate and project one frozen multi-exchange execution prefix."""
+        seen: set[tuple[str, int]] = set()
+        sequences: dict[str, list[int]] = {exchange: [] for exchange in watermarks}
+        candidates: list[_PnlTimelineExecutionCandidate] = []
+        native_symbol_lineages: dict[str, frozenset[str]] = {}
+        for execution, order, instrument in source_rows:
+            sequence = int(execution.scope_sequence)
+            watermark = watermarks.get(execution.exchange)
+            if watermark is None or sequence < 1 or sequence > watermark:
+                raise ExecutionChainError(
+                    "out_of_range_execution_prefix_row: "
+                    f"scope=({wallet_public_id}, {execution.exchange}, {mode}) "
+                    f"scope_sequence={sequence}"
+                )
+            key = (execution.exchange, sequence)
+            if key in seen:
+                raise ExecutionChainError(
+                    "duplicate_execution_prefix_row: "
+                    f"scope=({wallet_public_id}, {execution.exchange}, {mode}) "
+                    f"scope_sequence={sequence}"
+                )
+            seen.add(key)
+            if execution.known_to != KNOWN_TO_MAX:
+                raise ExecutionChainError(
+                    "superseded_execution_row: "
+                    f"scope=({wallet_public_id}, {execution.exchange}, {mode}) "
+                    f"scope_sequence={sequence}"
+                )
+            if order is None or not order.instrument_public_id:
+                raise ExecutionChainError(
+                    f"dangling_execution_order_lineage: execution_public_id={execution.public_id}"
+                )
+            if order.wallet_public_id != wallet_public_id or order.mode != mode:
+                raise ExecutionChainError(
+                    f"crossed_execution_order_lineage: execution_public_id={execution.public_id}"
+                )
+            if instrument is None:
+                raise ExecutionChainError(
+                    "dangling_execution_instrument_lineage: "
+                    f"execution_public_id={execution.public_id}"
+                )
+            if instrument.exchange != execution.exchange:
+                raise ExecutionChainError(
+                    "crossed_execution_instrument_lineage: "
+                    f"execution_public_id={execution.public_id}"
+                )
+            symbol_public_id = instrument.symbol_public_id
+            allowed_native_symbols = native_symbol_lineages.get(symbol_public_id)
+            if allowed_native_symbols is None:
+                native_symbols = native_symbols_by_symbol_public_id.get(symbol_public_id)
+                if not native_symbols:
+                    raise ExecutionChainError(
+                        "missing_execution_native_symbol_lineage: "
+                        f"execution_public_id={execution.public_id}"
+                    )
+                allowed_native_symbols = (
+                    SQLAlchemyRepository._freeze_pnl_timeline_native_symbol_lineage(native_symbols)
+                )
+                native_symbol_lineages[symbol_public_id] = allowed_native_symbols
+            client_order_id = order.client_order_id
+            if client_order_id is None or not client_order_id.strip():
+                raise ExecutionChainError(
+                    "missing_execution_client_order_lineage: "
+                    f"execution_public_id={execution.public_id}"
+                )
+            sequences[execution.exchange].append(sequence)
+            candidates.append(
+                _PnlTimelineExecutionCandidate(
+                    execution=execution,
+                    order=order,
+                    client_order_id=client_order_id,
+                    symbol_public_id=symbol_public_id,
+                    allowed_native_symbols=allowed_native_symbols,
+                )
+            )
+        for exchange, watermark in watermarks.items():
+            exchange_sequences = sequences[exchange]
+            if len(exchange_sequences) != watermark or any(
+                actual != expected for expected, actual in enumerate(exchange_sequences, start=1)
+            ):
+                raise ExecutionChainError(
+                    "non_contiguous_execution_prefix: "
+                    f"scope=({wallet_public_id}, {exchange}, {mode}) "
+                    f"watermark={watermark} rows={len(exchange_sequences)}"
+                )
+        shard_by_execution_public_id = SQLAlchemyRepository._resolve_pnl_timeline_execution_shards(
+            candidates,
+            fill_rows,
+            order_instrument_ids_by_scope,
+        )
+        return [
+            SQLAlchemyRepository._project_pnl_timeline_execution_candidate(
+                candidate,
+                shard_by_execution_public_id[candidate.execution.public_id],
+            )
+            for candidate in candidates
+        ]
+
+    async def _load_pnl_timeline_execution_prefix_snapshot(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> PnlTimelineExecutionPrefix:
+        """Capture and validate one exact execution-prefix snapshot."""
+        captured_rows = (
+            await s.execute(
+                select(
+                    Execution.exchange,
+                    func.max(Execution.scope_sequence),
+                )
+                .where(
+                    Execution.wallet_public_id == wallet_public_id,
+                    Execution.mode == mode,
+                    Execution.timestamp <= as_of,
+                )
+                .group_by(Execution.exchange)
+                .order_by(Execution.exchange.asc())
+            )
+        ).all()
+        watermarks = {
+            exchange: int(watermark)
+            for exchange, watermark in captured_rows
+            if watermark is not None
+        }
+        source_rows = await self._read_pnl_timeline_execution_prefix(
+            s,
+            wallet_public_id,
+            mode,
+            watermarks,
+        )
+        client_order_ids = list(
+            dict.fromkeys(
+                order.client_order_id
+                for _, order, _ in source_rows
+                if order is not None and order.client_order_id is not None
+            )
+        )
+        fill_rows = await self._read_pnl_timeline_fill_lineage(
+            s,
+            client_order_ids,
+            as_of,
+        )
+        order_instrument_ids_by_scope = await self._read_pnl_timeline_order_instrument_lineage(
+            s,
+            wallet_public_id,
+            mode,
+            client_order_ids,
+        )
+        symbol_public_ids = list(
+            dict.fromkeys(
+                instrument.symbol_public_id
+                for _, _, instrument in source_rows
+                if instrument is not None
+            )
+        )
+        native_symbols_by_symbol_public_id = await self._read_pnl_timeline_native_symbol_lineage(
+            s,
+            symbol_public_ids,
+        )
+        executions = self._validate_pnl_timeline_execution_prefix(
+            wallet_public_id,
+            mode,
+            watermarks,
+            source_rows,
+            fill_rows,
+            native_symbols_by_symbol_public_id,
+            order_instrument_ids_by_scope,
+        )
+        return {"watermarks": watermarks, "executions": executions}
+
+    async def get_pnl_timeline_execution_prefix(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+    ) -> PnlTimelineExecutionPrefix:
+        """Capture watermarks first, then validate and return each exact range.
+
+        Neither the capture nor the bounded replay filters Execution by
+        ``known_to``. A later commit receives a sequence above the captured
+        watermark and cannot enter the bundle; a closed in-range row remains
+        visible so validation refuses it instead of silently changing prefix
+        membership. Each execution proves its shard against append-only
+        ``fill_observed`` rows through exact wallet, exchange, mode, historical
+        native-symbol lineage, and every available execution fill id. Id-less
+        fills use matching venue order identity when available, then scoped
+        client-order and instrument lineage for legacy pre-ACK evidence.
+        Missing, ambiguous, empty, crossed-scope, or identity-mismatched
+        evidence refuses the whole opening prefix.
+        """
+        async with self.session() as s:
+            return await self._load_pnl_timeline_execution_prefix_snapshot(
+                s,
+                wallet_public_id,
+                mode,
+                as_of,
+            )
+
+    async def get_pnl_timeline_execution_prefix_bundle(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        request_as_of: datetime,
+        activation_as_of: datetime,
+    ) -> PnlTimelineExecutionPrefixBundle:
+        """Return request and activation cuts with independent identity proof."""
+        async with self.session() as s, s.begin():
+            if self.dialect_name == "postgresql":
+                await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            request = await self._load_pnl_timeline_execution_prefix_snapshot(
+                s,
+                wallet_public_id,
+                mode,
+                request_as_of,
+            )
+            if activation_as_of == request_as_of:
+                activation = request
+            else:
+                activation = await self._load_pnl_timeline_execution_prefix_snapshot(
+                    s,
+                    wallet_public_id,
+                    mode,
+                    activation_as_of,
+                )
+        return {"request": request, "activation": activation}
+
     async def get_pnl_timeline_executions(
         self,
         wallet_public_id: str,
@@ -10461,126 +12974,82 @@ class SQLAlchemyRepository(Repository):
             )
             return list(result.scalars().all())
 
-    async def pnl_timeline_shard_has_fill_gap(
+    async def _pnl_timeline_scope_has_fill_gap_in_session(
         self,
-        shard_key: str,
+        s: AsyncSession,
+        request: _PnlTimelineScopeGapRequest,
+    ) -> bool:
+        """Compare every sealed venue shard using one caller-owned session."""
+        wallet_public_id = normalize_portfolio_pnl_wallet_public_id(request.wallet_public_id)
+        fill_rows = await self._read_pnl_timeline_scope_fill_prefix(
+            s,
+            wallet_public_id,
+            request.mode,
+            request.as_of,
+        )
+        try:
+            recorded_totals = self._pnl_timeline_quantity_totals_by_shard(
+                self._pnl_timeline_recorded_shard_quantities(fill_rows)
+            )
+            resolved_prefix = (
+                await self._load_pnl_timeline_execution_prefix_snapshot(
+                    s,
+                    wallet_public_id,
+                    request.mode,
+                    request.as_of,
+                )
+                if request.execution_prefix is None
+                else request.execution_prefix
+            )
+            consumed_totals = self._pnl_timeline_quantity_totals_by_shard(
+                [(row["shard_key"], row["size"]) for row in resolved_prefix["executions"]]
+            )
+        except ExecutionChainError:
+            return True
+        shard_keys = set(recorded_totals) | set(consumed_totals)
+        return any(
+            abs(recorded_totals.get(shard_key, 0.0) - consumed_totals.get(shard_key, 0.0))
+            > _PNL_TIMELINE_FILL_QUANTITY_TOLERANCE
+            for shard_key in shard_keys
+        )
+
+    async def pnl_timeline_scope_has_fill_gap(
+        self,
         wallet_public_id: str,
         mode: str,
         as_of: datetime,
+        execution_prefix: PnlTimelineExecutionPrefix | None = None,
     ) -> bool:
-        """Compare a shared venue prefix with an exact execution prefix.
+        """Compare every sealed venue shard with one exact execution prefix.
 
-        The highest event ``id`` anywhere in the shard within the horizon seals
-        its shared prefix; exact wallet and mode filters apply to evidence after
-        that bound. Consumed fills use the highest per-exchange
-        ``scope_sequence`` within the same horizon and retain that whole prefix.
-        Direct timestamp predicates on either ledger are unsound under clock
-        skew. Sentinel-current Order versions contribute only immutable
-        ``client_order_id`` lineage, so their clocks cannot drop prefix rows.
+        One shared-watermark venue read captures all exact wallet and mode fill
+        evidence. The caller's independently sealed execution prefix has
+        already injectively resolved each execution to its durable shard. Both
+        multisets are aggregated once by resolved shard and compared in both
+        directions. Missing, ambiguous, reused, conflicting, non-finite,
+        under-consumed, and over-consumed evidence all report a gap.
 
         Args:
-            shard_key: Exact fill-bearing shard to evaluate.
             wallet_public_id: Full wallet identity to match.
             mode: Exact execution mode to match.
             as_of: Knowledge horizon for both append-only ledgers.
+            execution_prefix: Optional already sealed and validated scope
+                execution evidence for the same horizon.
 
         Returns:
-            True when recorded gross fill quantity exceeds consumed quantity.
+            True unless every recorded and consumed shard quantity agrees
+            within the fill tolerance.
         """
         async with self.session() as s:
-            venue_watermark = (
-                await s.execute(
-                    select(func.max(VenueEvent.id)).where(
-                        VenueEvent.shard_key == shard_key,
-                        VenueEvent.known_to == KNOWN_TO_MAX,
-                        VenueEvent.timestamp <= as_of,
-                    )
-                )
-            ).scalar()
-            if venue_watermark is None:
-                return False
-            exchange = (
-                await s.execute(
-                    select(VenueEvent.exchange)
-                    .where(
-                        VenueEvent.shard_key == shard_key,
-                        VenueEvent.wallet_public_id == wallet_public_id,
-                        VenueEvent.mode == mode,
-                        VenueEvent.event_type == "fill_observed",
-                        VenueEvent.known_to == KNOWN_TO_MAX,
-                        VenueEvent.id <= venue_watermark,
-                    )
-                    .order_by(VenueEvent.id.asc())
-                    .limit(1)
-                )
-            ).scalar()
-            if exchange is None:
-                return False
-            recorded_per_identity = (
-                select(func.max(VenueEvent.fill_size).label("size"))
-                .where(
-                    VenueEvent.shard_key == shard_key,
-                    VenueEvent.wallet_public_id == wallet_public_id,
-                    VenueEvent.mode == mode,
-                    VenueEvent.event_type == "fill_observed",
-                    VenueEvent.fill_size.isnot(None),
-                    VenueEvent.known_to == KNOWN_TO_MAX,
-                    VenueEvent.id <= venue_watermark,
-                )
-                .group_by(venue_event_fill_identity())
-                .subquery()
+            return await self._pnl_timeline_scope_has_fill_gap_in_session(
+                s,
+                _PnlTimelineScopeGapRequest(
+                    wallet_public_id=wallet_public_id,
+                    mode=mode,
+                    as_of=as_of,
+                    execution_prefix=execution_prefix,
+                ),
             )
-            recorded_total = (
-                await s.execute(select(func.coalesce(func.sum(recorded_per_identity.c.size), 0.0)))
-            ).scalar() or 0.0
-            shard_client_order_ids = (
-                select(VenueEvent.client_order_id)
-                .where(
-                    VenueEvent.shard_key == shard_key,
-                    VenueEvent.wallet_public_id == wallet_public_id,
-                    VenueEvent.mode == mode,
-                    VenueEvent.event_type == "fill_observed",
-                    VenueEvent.client_order_id.isnot(None),
-                    VenueEvent.known_to == KNOWN_TO_MAX,
-                    VenueEvent.id <= venue_watermark,
-                )
-                .distinct()
-            )
-            execution_watermark = (
-                select(func.max(Execution.scope_sequence))
-                .where(
-                    Execution.wallet_public_id == wallet_public_id,
-                    Execution.exchange == exchange,
-                    Execution.mode == mode,
-                    Execution.known_to == KNOWN_TO_MAX,
-                    Execution.timestamp <= as_of,
-                )
-                .scalar_subquery()
-            )
-            consumed_total = (
-                await s.execute(
-                    select(func.coalesce(func.sum(Execution.size), 0.0))
-                    .select_from(Execution)
-                    .join(
-                        Order,
-                        and_(
-                            Execution.order_public_id == Order.public_id,
-                            Order.known_to == KNOWN_TO_MAX,
-                        ),
-                    )
-                    .where(
-                        Order.client_order_id.in_(shard_client_order_ids),
-                        Order.wallet_public_id == wallet_public_id,
-                        Order.mode == mode,
-                        Execution.wallet_public_id == wallet_public_id,
-                        Execution.exchange == exchange,
-                        Execution.mode == mode,
-                        Execution.known_to == KNOWN_TO_MAX,
-                        Execution.scope_sequence <= execution_watermark,
-                    )
-                )
-            ).scalar() or 0.0
-            return recorded_total - consumed_total > 1e-9
 
     async def get_positions(
         self,
@@ -14667,6 +17136,18 @@ class SQLAlchemyRepository(Repository):
             if scope_row is None:
                 return False
             shard_wallet_public_id, shard_mode = scope_row
+            fill_identity = venue_event_fill_identity()
+            invalid_identity_id = await s.scalar(
+                select(VenueEvent.id)
+                .where(
+                    VenueEvent.shard_key == shard_key,
+                    VenueEvent.event_type == "fill_observed",
+                    fill_identity.is_(None),
+                )
+                .limit(1)
+            )
+            if invalid_identity_id is not None:
+                return True
             recorded_per_identity = (
                 select(func.max(VenueEvent.fill_size).label("s"))
                 .where(
@@ -14674,7 +17155,7 @@ class SQLAlchemyRepository(Repository):
                     VenueEvent.event_type == "fill_observed",
                     VenueEvent.fill_size.isnot(None),
                 )
-                .group_by(VenueEvent.wallet_public_id, venue_event_fill_identity())
+                .group_by(VenueEvent.wallet_public_id, fill_identity)
                 .subquery()
             )
             recorded_result = await s.execute(

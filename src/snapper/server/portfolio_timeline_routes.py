@@ -107,6 +107,7 @@ class _ValidatedTimelineRequest:
     window_to: datetime
     as_of: datetime
     valuation_ccy: str
+    allow_anchor_creation: bool
 
 
 def _parse_utc_query_datetime(value: str, parameter_name: str) -> datetime:
@@ -266,6 +267,7 @@ async def _validate_timeline_request(
         window_to=window_to,
         as_of=effective_as_of,
         valuation_ccy=normalized_ccy,
+        allow_anchor_creation=as_of is None,
     )
 
 
@@ -439,6 +441,7 @@ async def get_pnl_series(
             validated.granularity,
             validated.as_of,
             validated.valuation_ccy,
+            allow_anchor_creation=validated.allow_anchor_creation,
         )
         tracker: SequenceTracker = request.app.state.rest_tracker
         sid = tracker.session_id
@@ -571,6 +574,7 @@ async def get_pnl_timeline(
             validated.granularity,
             validated.as_of,
             validated.valuation_ccy,
+            allow_anchor_creation=validated.allow_anchor_creation,
         )
         tracker: SequenceTracker = request.app.state.rest_tracker
         sid = tracker.session_id

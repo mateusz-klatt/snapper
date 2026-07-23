@@ -8,24 +8,31 @@ an unexpected reconstruction failure. The response checks include causal,
 instrument-identified incompleteness records, including a real multi-cause point.
 """
 
+import json
 from collections.abc import AsyncGenerator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from typing import Literal
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
+from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
+from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARKER_LIMIT
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository_types import CandleRow
+from snapper.data.repository_types import PortfolioPnlAnchorRow
 from snapper.data.repository_types import WalletRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server import portfolio_timeline_routes
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
 
@@ -33,6 +40,8 @@ _FROM = "2026-07-20T10:00:00Z"
 _TO = "2026-07-20T10:02:00Z"
 _AS_OF = "2026-07-20T10:02:30Z"
 _WALLET = "0000face-0000-7000-8000-0000000000a1"
+_ANCHOR_TIME = datetime(2026, 7, 1, tzinfo=UTC)
+_ANCHOR_SESSION = "0000face-0000-7000-8000-0000000000a2"
 
 
 async def _noop_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -74,31 +83,97 @@ def _wallet_row(*, is_paper: bool = False) -> WalletRow:
     }
 
 
+def _empty_anchor(
+    mode: Literal["live", "paper"] = "live",
+    valuation_ccy: str = "USD",
+) -> PortfolioPnlAnchorRow:
+    """Build the canonical empty anchor used by route-only mocks."""
+    public_id = portfolio_pnl_anchor_public_id(_WALLET, mode, valuation_ccy)
+    return {
+        "public_id": public_id,
+        "session_id": _ANCHOR_SESSION,
+        "sequence_id": 1,
+        "timestamp": _ANCHOR_TIME,
+        "wallet_public_id": _WALLET,
+        "mode": mode,
+        "valuation_ccy": valuation_ccy,
+        "point_time": _ANCHOR_TIME,
+        "point_kind": "anchor",
+        "epoch_public_id": public_id,
+        "calc_version": PNL_TIMELINE_CALC_VERSION,
+        "valuation_status": "complete",
+        "realized_pnl": 0.0,
+        "fee_pnl": 0.0,
+        "accrual_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+        "external_flow_adjustment": 0.0,
+        "cash_usd": None,
+        "position_value_usd": None,
+        "drawdown": None,
+        "mark_source": PNL_TIMELINE_MARK_SOURCE,
+        "mark_time": _ANCHOR_TIME,
+        "watermarks_json": "{}",
+        "opening_basket_json": json.dumps(
+            {"native_basket": {}, "pools": [], "schema_version": 2},
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        "contributions_json": json.dumps(
+            {"pools": [], "schema_version": 2},
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    }
+
+
+def _anchor_for_read(
+    _wallet_public_id: str,
+    mode: Literal["live", "paper"],
+    valuation_ccy: str,
+    _as_of: datetime | None,
+) -> PortfolioPnlAnchorRow:
+    """Return a scope-matching empty anchor for one mocked repository read."""
+    return _empty_anchor(mode, valuation_ccy)
+
+
 def _seeded_repo() -> AsyncMock:
     """Build a repo mock returning one buy on a USD instrument with marks."""
     t0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
     repo = AsyncMock()
-    repo.get_pnl_timeline_executions = AsyncMock(
-        return_value=[
-            {
-                "public_id": "execution-1",
-                "instrument_public_id": "i1",
-                "exchange": "kraken",
-                "scope_sequence": 1,
-                "order_public_id": "o1",
-                "side": "buy",
-                "status": "filled",
-                "size": 1.0,
-                "price": 100.0,
-                "fee": 0.5,
-                "fee_asset": "USD",
-                "executed_at": None,
-                "timestamp": t0,
-                "exec_id": "e1",
-                "trade_id": "t1",
-            }
-        ]
+    execution_rows = [
+        {
+            "public_id": "execution-1",
+            "instrument_public_id": "i1",
+            "exchange": "kraken",
+            "scope_sequence": 1,
+            "order_public_id": "o1",
+            "client_order_id": "c1",
+            "shard_key": "kraken:live:i1:untagged",
+            "side": "buy",
+            "status": "filled",
+            "size": 1.0,
+            "price": 100.0,
+            "fee": 0.5,
+            "fee_asset": "USD",
+            "executed_at": None,
+            "timestamp": t0,
+            "exec_id": "e1",
+            "trade_id": "t1",
+        }
+    ]
+    execution_prefix = {
+        "watermarks": {"kraken": 1},
+        "executions": execution_rows,
+    }
+    repo.get_pnl_timeline_execution_prefix = AsyncMock(return_value=execution_prefix)
+    repo.get_pnl_timeline_execution_prefix_bundle = AsyncMock(
+        return_value={
+            "request": execution_prefix,
+            "activation": execution_prefix,
+        }
     )
+    repo.get_portfolio_pnl_anchor = AsyncMock(side_effect=_anchor_for_read)
+    repo.record_portfolio_pnl_anchor = AsyncMock()
     repo.get_pnl_timeline_execution_lineage = AsyncMock(
         return_value=[
             {
@@ -183,8 +258,7 @@ def _seeded_repo() -> AsyncMock:
     )
     repo.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
     repo.list_active_wallets = AsyncMock(return_value=[_wallet_row()])
-    repo.get_fill_shard_keys_for_scope = AsyncMock(return_value=[])
-    repo.pnl_timeline_shard_has_fill_gap = AsyncMock(return_value=False)
+    repo.pnl_timeline_scope_has_fill_gap = AsyncMock(return_value=False)
     return repo
 
 
@@ -237,7 +311,7 @@ class TestHappyPath:
         assert payload["valuation_ccy"] == "USD"
         assert payload["mark_source"] == "finalized_1m_candle_close"
         assert payload["rate_sources"] == []
-        assert payload["calc_version"] == "5A.12"
+        assert payload["calc_version"] == "5A.13"
         points = payload["points"]
         assert len(points) == 3
         assert points[0]["valuation_status"] == "complete"
@@ -333,24 +407,37 @@ class TestHappyPath:
         assert len(points) == 1
         assert points[0]["point_time"] == _FROM
 
-    def test_explicit_as_of_is_shared_and_exposed(self) -> None:
+    def test_explicit_as_of_is_shared_and_exposed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """An explicit knowledge horizon is used by every series input read."""
         repo = _seeded_repo()
+        build = AsyncMock(wraps=portfolio_timeline_routes.build_wallet_pnl_series)
+        monkeypatch.setattr(portfolio_timeline_routes, "build_wallet_pnl_series", build)
         client = _create_client(repo)
         response = client.get(_url(as_of=_AS_OF))
         assert response.status_code == 200
         response_as_of = datetime.fromisoformat(response.json()["payload"]["as_of"])
         assert response_as_of == datetime.fromisoformat(_AS_OF)
         assert repo.list_active_wallets.await_args.args[0] == response_as_of
-        assert repo.get_pnl_timeline_executions.await_args.args[2] == response_as_of
+        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] == response_as_of
         assert repo.get_pnl_timeline_execution_lineage.await_args.args[1] == response_as_of
         assert repo.get_accruals_for_pnl.await_args.args[2] == response_as_of
         assert repo.get_instrument_symbol_refs.await_args.args[1] == response_as_of
         assert repo.get_pnl_timeline_candles.await_args.args[3] == response_as_of
+        build_call = build.await_args
+        assert build_call is not None
+        assert build_call.kwargs["allow_anchor_creation"] is False
 
-    def test_default_read_horizon_remains_current(self) -> None:
+    def test_default_read_horizon_remains_current(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Omitting ``as_of`` captures one current UTC horizon as before."""
         repo = _seeded_repo()
+        build = AsyncMock(wraps=portfolio_timeline_routes.build_wallet_pnl_series)
+        monkeypatch.setattr(portfolio_timeline_routes, "build_wallet_pnl_series", build)
         client = _create_client(repo)
         before = datetime.now(UTC)
         response = client.get(_url())
@@ -359,7 +446,10 @@ class TestHappyPath:
         response_as_of = datetime.fromisoformat(response.json()["payload"]["as_of"])
         assert before <= response_as_of <= after
         assert repo.list_active_wallets.await_args.args[0] == response_as_of
-        assert repo.get_pnl_timeline_executions.await_args.args[2] == response_as_of
+        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] == response_as_of
+        build_call = build.await_args
+        assert build_call is not None
+        assert build_call.kwargs["allow_anchor_creation"] is True
 
     def test_paper_mode_accepts_a_paper_wallet(self) -> None:
         """A paper request succeeds when the active wallet is also paper."""
@@ -382,8 +472,7 @@ class TestHappyPath:
     def test_fill_gap_withholds_attribution_components(self) -> None:
         """A proven untrusted prefix transports bucket values as null."""
         repo = _seeded_repo()
-        repo.get_fill_shard_keys_for_scope = AsyncMock(return_value=["shard-1"])
-        repo.pnl_timeline_shard_has_fill_gap = AsyncMock(return_value=True)
+        repo.pnl_timeline_scope_has_fill_gap = AsyncMock(return_value=True)
         response = _create_client(repo).get(_url())
         assert response.status_code == 200
         point = response.json()["payload"]["points"][0]
@@ -416,13 +505,15 @@ class TestHappyPath:
         """A MARK cause and an UNTRUSTED cause retain both instrument identities."""
         repo = _seeded_repo()
         t0 = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
-        repo.get_pnl_timeline_executions.return_value.append(
+        repo.get_pnl_timeline_execution_prefix_bundle.return_value["request"]["executions"].append(
             {
                 "public_id": "execution-2",
                 "instrument_public_id": "i2",
                 "exchange": "kraken",
                 "scope_sequence": 2,
                 "order_public_id": "o2",
+                "client_order_id": "c2",
+                "shard_key": "kraken:live:i2:untagged",
                 "side": "buy",
                 "status": "filled",
                 "size": 1.0,
@@ -435,6 +526,9 @@ class TestHappyPath:
                 "trade_id": "t2",
             }
         )
+        repo.get_pnl_timeline_execution_prefix_bundle.return_value["request"]["watermarks"][
+            "kraken"
+        ] = 2
         repo.get_pnl_timeline_candles = AsyncMock(return_value=[])
         response = _create_client(repo).get(_url(**{"to": _FROM}))
         assert response.status_code == 200
@@ -479,9 +573,14 @@ class TestHappyPath:
 class TestMarkerTimeline:
     """Cover the marker-bearing endpoint response and failure disclosure."""
 
-    def test_default_read_horizon_remains_current(self) -> None:
+    def test_default_read_horizon_remains_current(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """The marker endpoint keeps live behavior when ``as_of`` is omitted."""
         repo = _seeded_repo()
+        build = AsyncMock(wraps=portfolio_timeline_routes.build_wallet_pnl_timeline)
+        monkeypatch.setattr(portfolio_timeline_routes, "build_wallet_pnl_timeline", build)
         client = _create_client(repo)
         before = datetime.now(UTC)
         response = client.get(_timeline_url())
@@ -489,13 +588,21 @@ class TestMarkerTimeline:
         assert response.status_code == 200
         response_as_of = datetime.fromisoformat(response.json()["payload"]["as_of"])
         assert before <= response_as_of <= after
-        assert repo.get_pnl_timeline_executions.await_args.args[2] == response_as_of
+        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] == response_as_of
         assert repo.get_pnl_timeline_signals.await_args.args[4] == response_as_of
         assert repo.get_pnl_timeline_ai_decisions.await_args.args[4] == response_as_of
+        build_call = build.await_args
+        assert build_call is not None
+        assert build_call.kwargs["allow_anchor_creation"] is True
 
-    def test_returns_all_marker_kinds_with_no_fill_and_rejection(self) -> None:
+    def test_returns_all_marker_kinds_with_no_fill_and_rejection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Independent signal and AI reads preserve decisions without fills."""
         repo = _seeded_repo()
+        build = AsyncMock(wraps=portfolio_timeline_routes.build_wallet_pnl_timeline)
+        monkeypatch.setattr(portfolio_timeline_routes, "build_wallet_pnl_timeline", build)
         client = _create_client(repo)
         response = client.get(_timeline_url(as_of=_AS_OF))
         assert response.status_code == 200
@@ -523,12 +630,15 @@ class TestMarkerTimeline:
         assert markers["ai_decision"]["outcome"] == "rejected"
         response_as_of = datetime.fromisoformat(payload["as_of"])
         assert response_as_of == datetime.fromisoformat(_AS_OF)
-        repo.get_pnl_timeline_executions.assert_awaited_once()
-        assert repo.get_pnl_timeline_executions.await_args.args[2] == response_as_of
+        repo.get_pnl_timeline_execution_prefix_bundle.assert_awaited_once()
+        assert repo.get_pnl_timeline_execution_prefix_bundle.await_args.args[2] == response_as_of
         assert repo.get_pnl_timeline_signals.await_args.args[4] == response_as_of
         assert repo.get_pnl_timeline_ai_decisions.await_args.args[4] == response_as_of
         assert repo.get_pnl_timeline_signals.await_args.args[5] == 2_001
         assert repo.get_pnl_timeline_ai_decisions.await_args.args[5] == 2_001
+        build_call = build.await_args
+        assert build_call is not None
+        assert build_call.kwargs["allow_anchor_creation"] is False
 
     def test_withholds_fill_marker_price_without_denomination_proof(self) -> None:
         """The API keeps a fill marker but emits null for its unproved price."""
@@ -651,7 +761,7 @@ class TestParameterGuards:
         response = client.get(_url())
         assert response.status_code == 400
         assert response.json()["detail"] == f"Unknown wallet_public_id: {_WALLET}"
-        repo.get_pnl_timeline_executions.assert_not_awaited()
+        repo.get_pnl_timeline_execution_prefix_bundle.assert_not_awaited()
 
     def test_live_mode_rejects_paper_wallet(self) -> None:
         """A paper wallet cannot be queried under live mode."""
@@ -717,7 +827,7 @@ class TestParameterGuards:
             "to must be less than or equal to as_of; shorten the window or move as_of forward"
         }
         repo.list_active_wallets.assert_not_awaited()
-        repo.get_pnl_timeline_executions.assert_not_awaited()
+        repo.get_pnl_timeline_execution_prefix_bundle.assert_not_awaited()
 
     def test_offset_normalization_underflow_is_rejected_as_400(self) -> None:
         """A representable local datetime that underflows in UTC returns 400."""
@@ -786,7 +896,7 @@ class TestScopeAndFailures:
     def test_reconstruction_failure_is_wrapped_as_500(self) -> None:
         """An unexpected repository error is surfaced as a 500."""
         repo = _seeded_repo()
-        repo.get_pnl_timeline_executions = AsyncMock(side_effect=RuntimeError("boom"))
+        repo.get_pnl_timeline_execution_prefix_bundle = AsyncMock(side_effect=RuntimeError("boom"))
         client = _create_client(repo)
         response = client.get(_url())
         assert response.status_code == 500
