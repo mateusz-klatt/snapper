@@ -850,9 +850,6 @@
       "SQLAlchemyRepository._leg_successor": {
         "PLR0913": 10
       },
-      "SQLAlchemyRepository._lock_active_drift_episode": {
-        "PLR0913": 6
-      },
       "SQLAlchemyRepository._matching_pnl_timeline_fallback_witness": {
         "C901": 11
       },
@@ -883,19 +880,11 @@
         "C901": 17,
         "PLR0912": 16
       },
-      "SQLAlchemyRepository._validate_spot_anchor_balances_json": {
-        "C901": 12
-      },
       "SQLAlchemyRepository._version_drift_episode": {
         "PLR0913": 8
       },
       "SQLAlchemyRepository._write_original_fill_successor": {
         "PLR0913": 9
-      },
-      "SQLAlchemyRepository._write_portfolio_reconciliation": {
-        "C901": 23,
-        "PLR0912": 26,
-        "PLR0915": 123
       },
       "SQLAlchemyRepository.advance_trade_command_lifecycle": {
         "PLR0913": 11
@@ -942,10 +931,6 @@
       "SQLAlchemyRepository.get_funding_rates": {
         "PLR0913": 7
       },
-      "SQLAlchemyRepository.get_futures_reconciliation_bundle": {
-        "C901": 19,
-        "PLR0912": 18
-      },
       "SQLAlchemyRepository.get_orders": {
         "PLR0913": 7
       },
@@ -954,9 +939,6 @@
       },
       "SQLAlchemyRepository.get_pnl_timeline_signals": {
         "PLR0913": 6
-      },
-      "SQLAlchemyRepository.get_portfolio_reconciliation_read_contexts": {
-        "C901": 12
       },
       "SQLAlchemyRepository.get_signals": {
         "PLR0913": 7
