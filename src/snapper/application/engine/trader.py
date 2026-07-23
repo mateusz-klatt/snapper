@@ -247,6 +247,16 @@ class GapRecoveryContext:
     effective_wallet: str
 
 
+@dataclass(frozen=True)
+class ActiveOrderRecoveryContext:
+    """Normalized identity fields from one active order row."""
+
+    instrument: str
+    exchange: str
+    wallet_public_id: str
+    mode: str
+
+
 class _EngineRegistry(dict[str, "TradingEngineService"]):
     """``self.engines`` subclass that auto-indexes engines on insert.
 
@@ -2309,33 +2319,73 @@ class TraderCoordinator(RegisterableProcess):
         instrument = getattr(engine, "instrument", None)
         wallet_public_id = getattr(engine, "wallet_public_id", "")
         if exchange is not None and instrument is not None:
-            scope_legacy_key = (exchange, instrument)
-            self._engines_by_scope_legacy.setdefault(scope_legacy_key, engine)
-            shard = getattr(engine, "_shard_key", None)
-            if isinstance(shard, str) and shard:
-                legacy_shards = getattr(self, "_legacy_scope_shard_keys", None)
-                if legacy_shards is None:
-                    legacy_shards = {}
-                    self._legacy_scope_shard_keys = legacy_shards
-                legacy_shards.setdefault(scope_legacy_key, set()).add(
-                    (shard, wallet_public_id or "")
-                )
-            if wallet_public_id:
-                scope_key = (exchange, instrument, wallet_public_id)
-                self._engines_by_scope.setdefault(scope_key, engine)
-                if isinstance(shard, str) and shard:
-                    scope_shards = getattr(self, "_scope_shard_keys", None)
-                    if scope_shards is None:
-                        scope_shards = {}
-                        self._scope_shard_keys = scope_shards
-                    scope_shards.setdefault(scope_key, set()).add((shard, wallet_public_id))
+            self._register_engine_scope_lookups(
+                engine,
+                exchange,
+                instrument,
+                wallet_public_id,
+            )
+        self._register_engine_pending_lookup(engine)
+        self._register_projection_identity(engine)
+
+    def _register_engine_scope_lookups(
+        self,
+        engine: TradingEngineService,
+        exchange: OrderExchange,
+        instrument: str,
+        wallet_public_id: str,
+    ) -> None:
+        """Register legacy and wallet-specific scope indices for one engine."""
+        legacy_key = (exchange, instrument)
+        self._engines_by_scope_legacy.setdefault(legacy_key, engine)
+        shard_key = getattr(engine, "_shard_key", None)
+        if isinstance(shard_key, str) and shard_key:
+            self._register_legacy_scope_shard(
+                legacy_key,
+                shard_key,
+                wallet_public_id,
+            )
+        if not wallet_public_id:
+            return
+        scope_key = (exchange, instrument, wallet_public_id)
+        self._engines_by_scope.setdefault(scope_key, engine)
+        if isinstance(shard_key, str) and shard_key:
+            self._register_wallet_scope_shard(scope_key, shard_key, wallet_public_id)
+
+    def _register_legacy_scope_shard(
+        self,
+        scope_key: tuple[OrderExchange, str],
+        shard_key: str,
+        wallet_public_id: str,
+    ) -> None:
+        """Record the exact shard owner behind a legacy scope lookup."""
+        legacy_shards = getattr(self, "_legacy_scope_shard_keys", None)
+        if legacy_shards is None:
+            legacy_shards = {}
+            self._legacy_scope_shard_keys = legacy_shards
+        legacy_shards.setdefault(scope_key, set()).add((shard_key, wallet_public_id or ""))
+
+    def _register_wallet_scope_shard(
+        self,
+        scope_key: tuple[OrderExchange, str, str],
+        shard_key: str,
+        wallet_public_id: str,
+    ) -> None:
+        """Record the exact shard owner behind a wallet-specific scope lookup."""
+        scope_shards = getattr(self, "_scope_shard_keys", None)
+        if scope_shards is None:
+            scope_shards = {}
+            self._scope_shard_keys = scope_shards
+        scope_shards.setdefault(scope_key, set()).add((shard_key, wallet_public_id))
+
+    def _register_engine_pending_lookup(self, engine: TradingEngineService) -> None:
+        """Wire and seed the pending-client-order lookup for one engine."""
         engine.pending_coid_listener = lambda old, new: self._on_engine_pending_coid_change(
             engine, old, new
         )
         current_pending = getattr(engine, "pending_client_order_id", None)
         if current_pending is not None:
             self._engines_by_pending_coid.setdefault(current_pending, engine)
-        self._register_projection_identity(engine)
 
     def _register_projection_identity(self, engine: TradingEngineService) -> None:
         """First-wins truthful-identity registration from engine IDs.
@@ -2460,7 +2510,20 @@ class TraderCoordinator(RegisterableProcess):
         Returns:
             All recovered execution rows.
         """
-        skip_keys = checkpoint_recovered or set()
+        del checkpoint_recovered
+        executions = await self._load_execution_recovery_rows(now)
+        if not executions:
+            return []
+        durable_by_cid = await self._load_execution_recovery_lineage(executions)
+        grouped = self._group_execution_recovery_rows(executions, durable_by_cid)
+        await self._recover_execution_groups(*grouped)
+        return executions
+
+    async def _load_execution_recovery_rows(
+        self,
+        now: datetime,
+    ) -> list[ExecutionRow]:
+        """Load execution rows, failing certification when the query fails."""
         try:
             executions = await self.repository.get_executions_for_recovery(as_of=now)
         except Exception as e:
@@ -2469,62 +2532,89 @@ class TraderCoordinator(RegisterableProcess):
             return []
         if not executions:
             logger.info("ZMQTrader: No executions to recover")
-            return []
-        durable_by_cid: dict[str, tuple[str, str]] = {}
-        if isinstance(self.repository, SQLAlchemyRepository):
-            try:
-                lineage_result = await self.repository.get_fill_shard_keys_by_client_order_ids(
-                    [row["client_order_id"] for row in executions if row["client_order_id"]]
-                )
-            except Exception:
-                lineage_result = None
-                logger.warning(
-                    "ZMQTrader: durable fill-lineage lookup failed; execution replay "
-                    "falls back to reconstructed shard keys (paper stays uncertified)"
-                )
-            if (
-                isinstance(lineage_result, tuple)
-                and len(lineage_result) == 2
-                and isinstance(lineage_result[0], dict)
-            ):
-                durable_by_cid, ambiguous_cids = lineage_result
-                if ambiguous_cids:
-                    logger.warning(
-                        f"ZMQTrader: {len(ambiguous_cids)} client order ids carry "
-                        f"CONTRADICTORY durable fill lineage — failing the whole "
-                        f"projection certification (contradictory append-only "
-                        f"evidence must never certify)"
-                    )
-                    self._recovery_certification_failed = True
-        fills_by_shard, wallet_for_shard, operator_for_shard, lineage_for_shard = (
-            self._group_execution_recovery_rows(executions, durable_by_cid)
+        return executions
+
+    async def _load_execution_recovery_lineage(
+        self,
+        executions: list[ExecutionRow],
+    ) -> dict[str, tuple[str, str]]:
+        """Load unambiguous durable fill lineage for execution recovery."""
+        repository = self.repository
+        if not isinstance(repository, SQLAlchemyRepository):
+            return {}
+        try:
+            lineage_result = await repository.get_fill_shard_keys_by_client_order_ids(
+                [row["client_order_id"] for row in executions if row["client_order_id"]]
+            )
+        except Exception:
+            logger.warning(
+                "ZMQTrader: durable fill-lineage lookup failed; execution replay "
+                "falls back to reconstructed shard keys (paper stays uncertified)"
+            )
+            return {}
+        valid_shape = (
+            isinstance(lineage_result, tuple)
+            and len(lineage_result) == 2
+            and isinstance(lineage_result[0], dict)
         )
-        del skip_keys
+        if not valid_shape:
+            return {}
+        durable_by_cid, ambiguous_cids = lineage_result
+        if ambiguous_cids:
+            logger.warning(
+                f"ZMQTrader: {len(ambiguous_cids)} client order ids carry "
+                f"CONTRADICTORY durable fill lineage — failing the whole "
+                f"projection certification (contradictory append-only "
+                f"evidence must never certify)"
+            )
+            self._recovery_certification_failed = True
+        return durable_by_cid
+
+    async def _recover_execution_groups(
+        self,
+        fills_by_shard: dict[str, list[ExecutionRow]],
+        wallet_for_shard: dict[str, str],
+        operator_for_shard: dict[str, str],
+        lineage_for_shard: dict[str, tuple[str, str | None, bool]],
+    ) -> None:
+        """Replay every execution bucket not already restored from a checkpoint."""
         for shard_key, fills in fills_by_shard.items():
             engine_key, strategy_tag, durable_lineage = lineage_for_shard[shard_key]
-            if shard_key in self._checkpoint_recovered_shard_keys:
-                checkpoint_wallet = self._checkpoint_recovered_shard_wallets.get(shard_key, "")
-                bucket_wallet = wallet_for_shard.get(shard_key, "")
-                if checkpoint_wallet and bucket_wallet and checkpoint_wallet != bucket_wallet:
-                    logger.warning(
-                        f"ZMQTrader: shard {shard_key} was checkpoint-recovered for "
-                        f"wallet {checkpoint_wallet} but execution lineage belongs to "
-                        f"{bucket_wallet} (suffix-twin collision on the shard string) "
-                        f"— failing the whole projection certification"
-                    )
-                    self._recovery_certification_failed = True
-                logger.debug(f"ZMQTrader: Skipping full replay for {shard_key} (checkpoint)")
+            bucket_wallet = wallet_for_shard.get(shard_key, "")
+            if self._checkpoint_execution_replay_should_skip(
+                shard_key,
+                bucket_wallet,
+            ):
                 continue
             await self._recover_execution_group(
                 engine_key=engine_key,
                 fills=fills,
-                wallet_public_id=wallet_for_shard.get(shard_key, ""),
+                wallet_public_id=bucket_wallet,
                 operator_public_id=operator_for_shard.get(shard_key, ""),
                 strategy_tag=strategy_tag,
                 durable_lineage=durable_lineage,
                 expected_shard_key=shard_key,
             )
-        return executions
+
+    def _checkpoint_execution_replay_should_skip(
+        self,
+        shard_key: str,
+        bucket_wallet: str,
+    ) -> bool:
+        """Skip checkpoint-backed buckets while detecting suffix-twin contradictions."""
+        if shard_key not in self._checkpoint_recovered_shard_keys:
+            return False
+        checkpoint_wallet = self._checkpoint_recovered_shard_wallets.get(shard_key, "")
+        if checkpoint_wallet and bucket_wallet and checkpoint_wallet != bucket_wallet:
+            logger.warning(
+                f"ZMQTrader: shard {shard_key} was checkpoint-recovered for "
+                f"wallet {checkpoint_wallet} but execution lineage belongs to "
+                f"{bucket_wallet} (suffix-twin collision on the shard string) "
+                f"— failing the whole projection certification"
+            )
+            self._recovery_certification_failed = True
+        logger.debug(f"ZMQTrader: Skipping full replay for {shard_key} (checkpoint)")
+        return True
 
     def _group_execution_recovery_rows(
         self,
@@ -2622,44 +2712,14 @@ class TraderCoordinator(RegisterableProcess):
             )
             return None
         wallet_public_id = execution.get("wallet_public_id") or ""
-        strategy_tag: str | None = None
-        durable_lineage = False
-        recovery_shard_key: str | None = None
-        if durable_lineage_pair is not None:
-            durable_shard_key, durable_wallet = durable_lineage_pair
-            parsed = self._parse_shard_key(durable_shard_key)
-            wallet_agrees = bool(durable_wallet) and durable_wallet == wallet_public_id
-            mode_agrees = parsed is not None and (
-                (parsed[2] == "paper") == (str(execution["exchange"]) == "paper")
-            )
-            if (
-                parsed is not None
-                and parsed[1] == execution["instrument"]
-                and parsed[0] == str(execution["exchange"])
-                and wallet_agrees
-                and mode_agrees
-            ):
-                recovery_shard_key = durable_shard_key
-                strategy_tag = parsed[4]
-                durable_lineage = True
-            else:
-                logger.warning(
-                    f"ZMQTrader: durable fill lineage {durable_shard_key} (wallet "
-                    f"{durable_wallet or '?'}) CONTRADICTS the execution row "
-                    f"({execution['instrument']} on {execution['exchange']}, wallet "
-                    f"{wallet_public_id or '?'}) — failing the whole projection "
-                    f"certification and skipping the row"
-                )
-                self._recovery_certification_failed = True
-                return None
-        if recovery_shard_key is None:
-            recovery_shard_key = compute_shard_key(
-                instrument=execution["instrument"],
-                exchange=cast(OrderExchange, execution["exchange"]),
-                mode=ExecutionModeEnum.LIVE,
-                wallet_public_id=wallet_public_id,
-                strategy_tag=None,
-            )
+        lineage = self._resolve_execution_recovery_lineage(
+            execution,
+            durable_lineage_pair,
+            wallet_public_id,
+        )
+        if lineage is None:
+            return None
+        recovery_shard_key, strategy_tag, durable_lineage = lineage
         if self._ownership is not None and not self._ownership.owns(recovery_shard_key):
             logger.debug(
                 "ZMQTrader: skipping execution for foreign shard {} (owner {}/{})",
@@ -2683,6 +2743,42 @@ class TraderCoordinator(RegisterableProcess):
             operator_public_id,
             (recovery_shard_key, strategy_tag, durable_lineage),
         )
+
+    def _resolve_execution_recovery_lineage(
+        self,
+        execution: ExecutionRow,
+        durable_lineage_pair: tuple[str, str] | None,
+        wallet_public_id: str,
+    ) -> tuple[str, str | None, bool] | None:
+        """Resolve one execution's exact shard or reject contradictory lineage."""
+        if durable_lineage_pair is None:
+            shard_key = compute_shard_key(
+                instrument=execution["instrument"],
+                exchange=cast(OrderExchange, execution["exchange"]),
+                mode=ExecutionModeEnum.LIVE,
+                wallet_public_id=wallet_public_id,
+                strategy_tag=None,
+            )
+            return shard_key, None, False
+        durable_shard_key, durable_wallet = durable_lineage_pair
+        parsed = self._parse_shard_key(durable_shard_key)
+        if parsed is not None:
+            wallet_agrees = bool(durable_wallet) and durable_wallet == wallet_public_id
+            mode_agrees = (parsed[2] == "paper") == (str(execution["exchange"]) == "paper")
+            identity_agrees = parsed[1] == execution["instrument"] and parsed[0] == str(
+                execution["exchange"]
+            )
+            if wallet_agrees and mode_agrees and identity_agrees:
+                return durable_shard_key, parsed[4], True
+        logger.warning(
+            f"ZMQTrader: durable fill lineage {durable_shard_key} (wallet "
+            f"{durable_wallet or '?'}) CONTRADICTS the execution row "
+            f"({execution['instrument']} on {execution['exchange']}, wallet "
+            f"{wallet_public_id or '?'}) — failing the whole projection "
+            f"certification and skipping the row"
+        )
+        self._recovery_certification_failed = True
+        return None
 
     async def _recover_execution_group(
         self,
@@ -2712,93 +2808,188 @@ class TraderCoordinator(RegisterableProcess):
                 certification failure instead of trusting a divergent
                 identity.
         """
-        engine = await self._create_engine_for_recovery(
-            fills[0]["instrument"],
-            fills[0]["exchange"],
-            strategy_tag=strategy_tag,
-            wallet_public_id=wallet_public_id,
-            operator_public_id=operator_public_id,
+        engine = await self._execution_recovery_engine(
+            fills,
+            wallet_public_id,
+            operator_public_id,
+            strategy_tag,
         )
         if engine is None:
             return
         shard_key = engine._shard_key
-        if expected_shard_key is not None and shard_key != expected_shard_key:
-            logger.warning(
-                f"ZMQTrader: recreated engine shard {shard_key} diverges from its "
-                f"bucket lineage {expected_shard_key} — recording BOTH identities as "
-                f"failed and skipping the replay (a divergent shard must never "
-                f"certify as truth)"
-            )
-            await self._record_recovery_shard_failure(
-                expected_shard_key,
-                durable_wallet_public_id=wallet_public_id or None,
-                anchor=fills[0].get("timestamp"),
-            )
-            await self._record_recovery_shard_failure(
-                shard_key,
-                durable_wallet_public_id=wallet_public_id or None,
-                anchor=fills[0].get("timestamp"),
-            )
+        if not await self._execution_recovery_shard_matches(
+            engine,
+            expected_shard_key,
+            wallet_public_id,
+            fills[0],
+        ):
             return
-        shard = self.trade_service._get_or_create_shard(shard_key)
-        start_id = shard.last_venue_event_id + 1
-        replay_events = [
-            self._build_replay_venue_event(engine, fill_row, synthetic_id=start_id + offset)
-            for offset, fill_row in enumerate(fills)
-        ]
-        if not self._fill_events_sound(replay_events):
-            logger.warning(
-                f"ZMQTrader: {shard_key} execution-replay bucket carries malformed or "
-                f"identity-conflicting fill payloads (non-finite/non-positive size or "
-                f"price, or a side outside buy/sell) — refusing to fold and leaving "
-                f"the identity UNCERTIFIED (execution rows fold directly into position "
-                f"and turnover, so a poisoned row must never reach a trust grant)"
-            )
-            await self._record_recovery_shard_failure(
-                shard_key,
-                durable_wallet_public_id=wallet_public_id or None,
-                anchor=fills[0].get("timestamp"),
-            )
+        replay_events = await self._sound_execution_replay_events(
+            engine,
+            fills,
+            wallet_public_id,
+        )
+        if replay_events is None:
             return
         for event in replay_events:
             self.trade_service.apply_venue_event(event)
         self._restore_engine_from_shard(engine, shard_key, engine.instrument)
         self._register_recovered_engine(engine_key, engine)
-        if isinstance(self.repository, SQLAlchemyRepository):
-            matched_watermark = 0
-            for fill_row in fills:
-                try:
-                    resolved_id = await self.repository.get_consumed_fill_venue_event_id(
-                        shard_key=shard_key,
-                        client_order_id=fill_row["client_order_id"],
-                        exec_id=fill_row.get("exec_id"),
-                        cum_fill_size=fill_row["size"],
-                        trade_id=fill_row["trade_id"],
-                    )
-                except Exception:
-                    resolved_id = None
-                if isinstance(resolved_id, int) and resolved_id > matched_watermark:
-                    matched_watermark = resolved_id
-            if matched_watermark:
-                self._consumed_venue_event_watermarks[shard_key] = matched_watermark
-        parsed_lineage = self._parse_shard_key(shard_key)
-        reconstructed_live = (
-            parsed_lineage is not None
-            and parsed_lineage[2] == "live"
-            and str(engine.exchange) != "paper"
-        )
-        if not (durable_lineage or reconstructed_live):
+        await self._advance_execution_replay_watermark(shard_key, fills)
+        if not self._execution_replay_lineage_is_certifiable(
+            engine,
+            shard_key,
+            durable_lineage,
+        ):
             logger.warning(
                 f"ZMQTrader: {shard_key} recovered from executions carries "
                 f"reconstructed paper lineage (no durable venue-event shard key); "
                 f"leaving UNCERTIFIED for the position projection"
             )
             return
-        lineage_repository = self.repository
+        await self._certify_execution_replay(
+            engine,
+            shard_key,
+            wallet_public_id,
+            fills[0].get("timestamp"),
+        )
+        logger.info(
+            f"ZMQTrader: Recovered {engine_key} via full-replay shadow: "
+            f"pos={engine.position_qty:.6f}, "
+            f"entry={engine.entry_price}, "
+            f"fills={len(fills)}"
+        )
+
+    async def _execution_recovery_engine(
+        self,
+        fills: list[ExecutionRow],
+        wallet_public_id: str,
+        operator_public_id: str,
+        strategy_tag: str | None,
+    ) -> TradingEngineService | None:
+        """Create the engine selected by an execution recovery bucket."""
+        return await self._create_engine_for_recovery(
+            fills[0]["instrument"],
+            fills[0]["exchange"],
+            strategy_tag=strategy_tag,
+            wallet_public_id=wallet_public_id,
+            operator_public_id=operator_public_id,
+        )
+
+    async def _execution_recovery_shard_matches(
+        self,
+        engine: TradingEngineService,
+        expected_shard_key: str | None,
+        wallet_public_id: str,
+        first_fill: ExecutionRow,
+    ) -> bool:
+        """Reject a recreated engine that diverges from durable bucket lineage."""
+        shard_key = engine._shard_key
+        if expected_shard_key is None or shard_key == expected_shard_key:
+            return True
+        logger.warning(
+            f"ZMQTrader: recreated engine shard {shard_key} diverges from its "
+            f"bucket lineage {expected_shard_key} — recording BOTH identities as "
+            f"failed and skipping the replay (a divergent shard must never "
+            f"certify as truth)"
+        )
+        anchor = first_fill.get("timestamp")
+        await self._record_recovery_shard_failure(
+            expected_shard_key,
+            durable_wallet_public_id=wallet_public_id or None,
+            anchor=anchor,
+        )
+        await self._record_recovery_shard_failure(
+            shard_key,
+            durable_wallet_public_id=wallet_public_id or None,
+            anchor=anchor,
+        )
+        return False
+
+    async def _sound_execution_replay_events(
+        self,
+        engine: TradingEngineService,
+        fills: list[ExecutionRow],
+        wallet_public_id: str,
+    ) -> list[VenueEventRow] | None:
+        """Build replay events and quarantine malformed execution economics."""
+        shard_key = engine._shard_key
+        shard = self.trade_service._get_or_create_shard(shard_key)
+        start_id = shard.last_venue_event_id + 1
+        replay_events = [
+            self._build_replay_venue_event(engine, fill_row, synthetic_id=start_id + offset)
+            for offset, fill_row in enumerate(fills)
+        ]
+        if self._fill_events_sound(replay_events):
+            return replay_events
+        logger.warning(
+            f"ZMQTrader: {shard_key} execution-replay bucket carries malformed or "
+            f"identity-conflicting fill payloads (non-finite/non-positive size or "
+            f"price, or a side outside buy/sell) — refusing to fold and leaving "
+            f"the identity UNCERTIFIED (execution rows fold directly into position "
+            f"and turnover, so a poisoned row must never reach a trust grant)"
+        )
+        await self._record_recovery_shard_failure(
+            shard_key,
+            durable_wallet_public_id=wallet_public_id or None,
+            anchor=fills[0].get("timestamp"),
+        )
+        return None
+
+    async def _advance_execution_replay_watermark(
+        self,
+        shard_key: str,
+        fills: list[ExecutionRow],
+    ) -> None:
+        """Advance the durable consumed-event watermark across one replay bucket."""
+        repository = self.repository
+        if not isinstance(repository, SQLAlchemyRepository):
+            return
+        matched_watermark = 0
+        for fill_row in fills:
+            try:
+                resolved_id = await repository.get_consumed_fill_venue_event_id(
+                    shard_key=shard_key,
+                    client_order_id=fill_row["client_order_id"],
+                    exec_id=fill_row.get("exec_id"),
+                    cum_fill_size=fill_row["size"],
+                    trade_id=fill_row["trade_id"],
+                )
+            except Exception:
+                resolved_id = None
+            if isinstance(resolved_id, int) and resolved_id > matched_watermark:
+                matched_watermark = resolved_id
+        if matched_watermark:
+            self._consumed_venue_event_watermarks[shard_key] = matched_watermark
+
+    def _execution_replay_lineage_is_certifiable(
+        self,
+        engine: TradingEngineService,
+        shard_key: str,
+        durable_lineage: bool,
+    ) -> bool:
+        """Return whether replay lineage is durable or exact live reconstruction."""
+        parsed_lineage = self._parse_shard_key(shard_key)
+        reconstructed_live = (
+            parsed_lineage is not None
+            and parsed_lineage[2] == "live"
+            and str(engine.exchange) != "paper"
+        )
+        return durable_lineage or reconstructed_live
+
+    async def _certify_execution_replay(
+        self,
+        engine: TradingEngineService,
+        shard_key: str,
+        wallet_public_id: str,
+        anchor: datetime | None,
+    ) -> None:
+        """Grant trust only when replay omitted no durable accrual state."""
+        repository = self.repository
         try:
             shard_has_accruals = not isinstance(
-                lineage_repository, SQLAlchemyRepository
-            ) or await lineage_repository.shard_has_any_accruals(
+                repository, SQLAlchemyRepository
+            ) or await repository.shard_has_any_accruals(
                 wallet_public_id, str(engine.exchange), str(engine.mode)
             )
         except Exception:
@@ -2815,14 +3006,8 @@ class TraderCoordinator(RegisterableProcess):
             await self._record_recovery_shard_failure(
                 shard_key,
                 durable_wallet_public_id=wallet_public_id or None,
-                anchor=fills[0].get("timestamp"),
+                anchor=anchor,
             )
-        logger.info(
-            f"ZMQTrader: Recovered {engine_key} via full-replay shadow: "
-            f"pos={engine.position_qty:.6f}, "
-            f"entry={engine.entry_price}, "
-            f"fills={len(fills)}"
-        )
 
     def _build_replay_venue_event(
         self,
@@ -3067,6 +3252,53 @@ class TraderCoordinator(RegisterableProcess):
             Tuple of (engine_key, wallet_public_id, operator_public_id,
             recovery_shard_key, strategy_tag) or None when skipped.
         """
+        context = self._active_order_recovery_context(db_order, lineage_ambiguous)
+        if context is None:
+            return None
+        lineage = self._resolve_active_order_recovery_lineage(
+            db_order,
+            context,
+            durable_lineage_pair,
+        )
+        if lineage is None:
+            return None
+        recovery_shard_key, strategy_tag = lineage
+        if recovery_shard_key is None:
+            recovery_shard_key = await self._fallback_active_order_recovery_shard(
+                db_order,
+                context,
+            )
+        if recovery_shard_key is None:
+            return None
+        if self._ownership is not None and not self._ownership.owns(recovery_shard_key):
+            logger.debug(
+                "ZMQTrader: skipping active order for foreign shard {} (owner {}/{})",
+                recovery_shard_key,
+                self._ownership.instance_id,
+                self._ownership.instance_count,
+            )
+            return None
+        operator_public_id = db_order.get("operator_public_id") or ""
+        engine_key = self._build_engine_key(
+            context.instrument,
+            context.exchange,
+            strategy_tag if strategy_tag else context.mode,
+            context.wallet_public_id,
+        )
+        return (
+            engine_key,
+            context.wallet_public_id,
+            operator_public_id,
+            recovery_shard_key,
+            strategy_tag,
+        )
+
+    def _active_order_recovery_context(
+        self,
+        db_order: OrderRow,
+        lineage_ambiguous: bool,
+    ) -> ActiveOrderRecoveryContext | None:
+        """Normalize an active order and reject unsupported recovery contexts."""
         partitioned = self._ownership is not None and self._ownership.instance_count > 1
         instrument = db_order["instrument"]
         exchange_str = db_order["exchange"]
@@ -3089,74 +3321,75 @@ class TraderCoordinator(RegisterableProcess):
         mode_str = str(db_order.get("mode") or "") or (
             "paper" if exchange_str == ExchangeEnum.PAPER else "live"
         )
-        strategy_tag: str | None = None
-        recovery_shard_key: str | None = None
-        if durable_lineage_pair is not None:
-            durable_shard_key, durable_wallet = durable_lineage_pair
-            parsed = self._parse_shard_key(durable_shard_key)
-            wallet_agrees = bool(durable_wallet) and durable_wallet == wallet_public_id
-            if (
-                parsed is not None
-                and parsed[0] == str(exchange_str)
-                and parsed[1] == instrument
-                and parsed[2] == mode_str
-                and wallet_agrees
-            ):
-                recovery_shard_key = durable_shard_key
-                strategy_tag = parsed[4]
-            else:
-                logger.warning(
-                    f"ZMQTrader: durable command lineage {durable_shard_key} (wallet "
-                    f"{durable_wallet or '?'}) CONTRADICTS the active order row "
-                    f"({instrument} on {exchange_str}, mode {mode_str}, wallet "
-                    f"{wallet_public_id or '?'}) — failing the whole projection "
-                    f"certification and skipping the row"
-                )
-                self._recovery_certification_failed = True
-                return None
-        if recovery_shard_key is None:
-            if mode_str == "paper" or exchange_str == ExchangeEnum.PAPER:
-                logger.error(
-                    f"ZMQTrader: active order {db_order['client_order_id']} is "
-                    f"paper-mode but has NO resolved durable command lineage — "
-                    f"quarantining its canonical identity instead of installing "
-                    f"an untagged phantom pending route"
-                )
-                await self._record_recovery_shard_failure(
-                    compute_shard_key(
-                        instrument=instrument,
-                        exchange=cast(OrderExchange, exchange_str),
-                        mode=ExecutionModeEnum.PAPER,
-                        wallet_public_id=wallet_public_id,
-                        strategy_tag=None,
-                    ),
-                    durable_wallet_public_id=wallet_public_id or None,
-                    anchor=db_order.get("created_at"),
-                )
-                return None
-            recovery_shard_key = compute_shard_key(
-                instrument=instrument,
-                exchange=cast(OrderExchange, exchange_str),
-                mode=ExecutionModeEnum.LIVE,
-                wallet_public_id=wallet_public_id,
-                strategy_tag=None,
-            )
-        if self._ownership is not None and not self._ownership.owns(recovery_shard_key):
-            logger.debug(
-                "ZMQTrader: skipping active order for foreign shard {} (owner {}/{})",
-                recovery_shard_key,
-                self._ownership.instance_id,
-                self._ownership.instance_count,
-            )
-            return None
-        operator_public_id = db_order.get("operator_public_id") or ""
-        engine_key = self._build_engine_key(
+        return ActiveOrderRecoveryContext(
             instrument,
             exchange_str,
-            strategy_tag if strategy_tag else mode_str,
             wallet_public_id,
+            mode_str,
         )
-        return engine_key, wallet_public_id, operator_public_id, recovery_shard_key, strategy_tag
+
+    def _resolve_active_order_recovery_lineage(
+        self,
+        db_order: OrderRow,
+        context: ActiveOrderRecoveryContext,
+        durable_lineage_pair: tuple[str, str] | None,
+    ) -> tuple[str | None, str | None] | None:
+        """Resolve exact command lineage or reject contradictory durable evidence."""
+        if durable_lineage_pair is None:
+            return None, None
+        durable_shard_key, durable_wallet = durable_lineage_pair
+        parsed = self._parse_shard_key(durable_shard_key)
+        wallet_agrees = bool(durable_wallet) and durable_wallet == context.wallet_public_id
+        identity_agrees = (
+            parsed is not None
+            and parsed[0] == str(context.exchange)
+            and parsed[1] == context.instrument
+            and parsed[2] == context.mode
+        )
+        if identity_agrees and wallet_agrees and parsed is not None:
+            return durable_shard_key, parsed[4]
+        logger.warning(
+            f"ZMQTrader: durable command lineage {durable_shard_key} (wallet "
+            f"{durable_wallet or '?'}) CONTRADICTS the active order row "
+            f"({context.instrument} on {context.exchange}, mode {context.mode}, wallet "
+            f"{context.wallet_public_id or '?'}) — failing the whole projection "
+            f"certification and skipping the row"
+        )
+        self._recovery_certification_failed = True
+        return None
+
+    async def _fallback_active_order_recovery_shard(
+        self,
+        db_order: OrderRow,
+        context: ActiveOrderRecoveryContext,
+    ) -> str | None:
+        """Reconstruct exact live lineage or quarantine lineage-less paper state."""
+        if context.mode == "paper" or context.exchange == ExchangeEnum.PAPER:
+            logger.error(
+                f"ZMQTrader: active order {db_order['client_order_id']} is "
+                f"paper-mode but has NO resolved durable command lineage — "
+                f"quarantining its canonical identity instead of installing "
+                f"an untagged phantom pending route"
+            )
+            await self._record_recovery_shard_failure(
+                compute_shard_key(
+                    instrument=context.instrument,
+                    exchange=cast(OrderExchange, context.exchange),
+                    mode=ExecutionModeEnum.PAPER,
+                    wallet_public_id=context.wallet_public_id,
+                    strategy_tag=None,
+                ),
+                durable_wallet_public_id=context.wallet_public_id or None,
+                anchor=db_order.get("created_at"),
+            )
+            return None
+        return compute_shard_key(
+            instrument=context.instrument,
+            exchange=cast(OrderExchange, context.exchange),
+            mode=ExecutionModeEnum.LIVE,
+            wallet_public_id=context.wallet_public_id,
+            strategy_tag=None,
+        )
 
     async def _get_or_create_active_order_engine(
         self,
@@ -5569,52 +5802,8 @@ class TraderCoordinator(RegisterableProcess):
         repository = self.repository
         if not isinstance(repository, SQLAlchemyRepository):
             return
-        if getattr(self, "_recovery_certification_failed", False):
-            logger.warning(
-                f"TraderCoordinator: position projection refused for {identity}: "
-                f"recovery certification failed this boot — the projection surface "
-                f"is quarantined for the process lifetime"
-            )
-            return
-        components = [sk for sk, ident in self._projection_identities.items() if ident == identity]
-        if identity in getattr(self, "_failed_recovery_identities", set()):
-            logger.warning(
-                f"TraderCoordinator: position projection skipped for {identity}: "
-                f"a candidate of this identity failed recovery — the aggregate "
-                f"cannot be certified"
-            )
-            return
-        failed_prefixes: set[tuple[str, str, str, str]] = getattr(
-            self, "_failed_recovery_shard_prefixes", set()
-        )
-        if failed_prefixes:
-            for sk in components:
-                parsed = self._parse_shard_key(sk)
-                if parsed is not None and parsed[:4] in failed_prefixes:
-                    logger.warning(
-                        f"TraderCoordinator: position projection skipped for {identity}: "
-                        f"a sibling shard of {sk} failed recovery before identity "
-                        f"registration — the aggregate cannot be certified"
-                    )
-                    return
-        baseline: set[str] = getattr(self, "_recovery_baseline_shards", set())
-        trusted: set[str] = getattr(self, "_trusted_recovery_shards", set())
-        uncertified = [sk for sk in components if sk in baseline and sk not in trusted]
-        if uncertified:
-            logger.warning(
-                f"TraderCoordinator: position projection skipped for {identity}: "
-                f"recovery-materialized components without positive certification "
-                f"{uncertified} — refusing to project uncertain truth"
-            )
-            return
-        known = self.trade_service.known_shard_keys()
-        missing = [sk for sk in components if sk not in known]
-        if not components or missing:
-            logger.warning(
-                f"TraderCoordinator: position projection skipped for {identity}: "
-                f"components without materialized state {missing} — refusing to "
-                f"fabricate flatness"
-            )
+        components = self._certified_projection_components(identity)
+        if components is None:
             return
         frozen: list[tuple[str, float, float | None, float, int]] = [
             (
@@ -5668,6 +5857,70 @@ class TraderCoordinator(RegisterableProcess):
             "bus_time": now,
         }
         await repository.upsert_position_projection(row)
+
+    def _certified_projection_components(
+        self,
+        identity: tuple[str, str, str],
+    ) -> list[str] | None:
+        """Return materialized component shards only when recovery certified them."""
+        if getattr(self, "_recovery_certification_failed", False):
+            logger.warning(
+                f"TraderCoordinator: position projection refused for {identity}: "
+                f"recovery certification failed this boot — the projection surface "
+                f"is quarantined for the process lifetime"
+            )
+            return None
+        components = [sk for sk, ident in self._projection_identities.items() if ident == identity]
+        if identity in getattr(self, "_failed_recovery_identities", set()):
+            logger.warning(
+                f"TraderCoordinator: position projection skipped for {identity}: "
+                f"a candidate of this identity failed recovery — the aggregate "
+                f"cannot be certified"
+            )
+            return None
+        failed_prefixes: set[tuple[str, str, str, str]] = getattr(
+            self, "_failed_recovery_shard_prefixes", set()
+        )
+        failed_sibling = self._projection_failed_sibling(components, failed_prefixes)
+        if failed_sibling is not None:
+            logger.warning(
+                f"TraderCoordinator: position projection skipped for {identity}: "
+                f"a sibling shard of {failed_sibling} failed recovery before identity "
+                f"registration — the aggregate cannot be certified"
+            )
+            return None
+        baseline: set[str] = getattr(self, "_recovery_baseline_shards", set())
+        trusted: set[str] = getattr(self, "_trusted_recovery_shards", set())
+        uncertified = [sk for sk in components if sk in baseline and sk not in trusted]
+        if uncertified:
+            logger.warning(
+                f"TraderCoordinator: position projection skipped for {identity}: "
+                f"recovery-materialized components without positive certification "
+                f"{uncertified} — refusing to project uncertain truth"
+            )
+            return None
+        known = self.trade_service.known_shard_keys()
+        missing = [sk for sk in components if sk not in known]
+        if not components or missing:
+            logger.warning(
+                f"TraderCoordinator: position projection skipped for {identity}: "
+                f"components without materialized state {missing} — refusing to "
+                f"fabricate flatness"
+            )
+            return None
+        return components
+
+    def _projection_failed_sibling(
+        self,
+        components: list[str],
+        failed_prefixes: set[tuple[str, str, str, str]],
+    ) -> str | None:
+        """Return the first component shadowed by an unattributed failed sibling."""
+        for shard_key in components:
+            parsed = self._parse_shard_key(shard_key)
+            if parsed is not None and parsed[:4] in failed_prefixes:
+                return shard_key
+        return None
 
     async def stop(self) -> None:
         """Stop the trader coordinator and cleanup resources.

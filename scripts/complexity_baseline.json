@@ -219,8 +219,6 @@
         "PLR0913": 8
       },
       "TraderCoordinator._recover_execution_group": {
-        "C901": 14,
-        "PLR0912": 14,
         "PLR0913": 7
       },
       "TraderCoordinator._replay_checkpoint_accruals": {
@@ -228,9 +226,6 @@
       },
       "TraderCoordinator._sync_flip_position_cycle": {
         "PLR0913": 6
-      },
-      "TraderCoordinator._write_position_projection_locked": {
-        "C901": 12
       }
     },
     "src/snapper/application/market_data_watchdog/watchdog.py": {
