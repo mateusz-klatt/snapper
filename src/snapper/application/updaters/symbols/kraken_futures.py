@@ -394,6 +394,39 @@ def _integral_position_limit(value: object) -> int | None:
     return int(parsed)
 
 
+def _optional_decimal_string(value: Decimal | None) -> str | None:
+    """Render an optional decimal without changing its precision."""
+    return str(value) if value is not None else None
+
+
+def _optional_decimal_float(value: Decimal | None) -> float | None:
+    """Convert an optional validated decimal to its storage float."""
+    return float(value) if value is not None else None
+
+
+def _futures_order_steps(
+    schema: KrakenFuturesInstrumentSchema,
+    contract_decimal: Decimal | None,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Resolve parsed order steps with the established contract-size fallback."""
+    try:
+        descriptor = parse_kraken_futures_instrument(schema.model_dump(by_alias=True))
+        return (
+            _positive_decimal(descriptor.qty_increment),
+            _positive_decimal(descriptor.qty_min),
+        )
+    except InvalidOperation, ValueError:
+        return contract_decimal, contract_decimal
+
+
+def _quantity_decimals(schema: KrakenFuturesInstrumentSchema) -> int | None:
+    """Return the non-negative venue contract precision."""
+    precision = schema.contract_value_trade_precision
+    if precision is None or precision < 0:
+        return None
+    return precision
+
+
 def _instrument_metadata(
     schema: KrakenFuturesInstrumentSchema,
     observed_at: datetime,
@@ -401,54 +434,46 @@ def _instrument_metadata(
     """Build one atomic metadata observation from a validated futures definition."""
     tick_decimal = _positive_decimal(schema.tick_size)
     contract_decimal = _positive_decimal(schema.contract_size)
-    try:
-        descriptor = parse_kraken_futures_instrument(schema.model_dump(by_alias=True))
-        lot_decimal = _positive_decimal(descriptor.qty_increment)
-        min_order_decimal = _positive_decimal(descriptor.qty_min)
-    except InvalidOperation, ValueError:
-        lot_decimal = contract_decimal
-        min_order_decimal = contract_decimal
-    qty_decimals = (
-        schema.contract_value_trade_precision
-        if schema.contract_value_trade_precision is not None
-        and schema.contract_value_trade_precision >= 0
-        else None
-    )
-    margin_decimal = (
-        _positive_decimal(schema.margin_levels[0].initial_margin) if schema.margin_levels else None
-    )
+    lot_decimal, min_order_decimal = _futures_order_steps(schema, contract_decimal)
+    qty_decimals = _quantity_decimals(schema)
+    margin_decimal = None
+    if schema.margin_levels:
+        margin_decimal = _positive_decimal(schema.margin_levels[0].initial_margin)
     position_limit = _integral_position_limit(schema.max_position_size)
     status = "active" if schema.tradeable else "inactive"
     is_reference = schema.symbol.lower().startswith((_RR_PREFIX, _IN_PREFIX))
-    complete = (
-        tick_decimal is not None
-        and contract_decimal is not None
-        and lot_decimal is not None
-        and min_order_decimal is not None
-        and qty_decimals is not None
+    complete = all(
+        value is not None
+        for value in (
+            tick_decimal,
+            contract_decimal,
+            lot_decimal,
+            min_order_decimal,
+            qty_decimals,
+        )
     )
     version_payload = {
         "symbol": schema.symbol,
         "type": schema.type,
-        "tick_size": str(tick_decimal) if tick_decimal is not None else None,
-        "lot_size": str(lot_decimal) if lot_decimal is not None else None,
-        "min_order_size": str(min_order_decimal) if min_order_decimal is not None else None,
-        "contract_size": str(contract_decimal) if contract_decimal is not None else None,
+        "tick_size": _optional_decimal_string(tick_decimal),
+        "lot_size": _optional_decimal_string(lot_decimal),
+        "min_order_size": _optional_decimal_string(min_order_decimal),
+        "contract_size": _optional_decimal_string(contract_decimal),
         "qty_decimals": qty_decimals,
-        "margin_initial": str(margin_decimal) if margin_decimal is not None else None,
+        "margin_initial": _optional_decimal_string(margin_decimal),
         "position_limit": position_limit,
         "status": status,
     }
     content = json.dumps(version_payload, sort_keys=True, separators=(",", ":"))
     version = f"{_SPEC_ETL_VERSION}:{hashlib.sha256(content.encode()).hexdigest()}"
     return InstrumentMetadataInput(
-        tick_size=float(tick_decimal) if tick_decimal is not None else None,
-        lot_size=float(lot_decimal) if lot_decimal is not None else None,
-        min_order_size=float(min_order_decimal) if min_order_decimal is not None else None,
+        tick_size=_optional_decimal_float(tick_decimal),
+        lot_size=_optional_decimal_float(lot_decimal),
+        min_order_size=_optional_decimal_float(min_order_decimal),
         max_order_size=None,
         cost_decimals=None,
         qty_decimals=qty_decimals,
-        margin_initial=float(margin_decimal) if margin_decimal is not None else None,
+        margin_initial=_optional_decimal_float(margin_decimal),
         position_limit_long=position_limit,
         position_limit_short=position_limit,
         status=status,

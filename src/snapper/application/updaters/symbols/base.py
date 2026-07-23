@@ -487,6 +487,115 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
 
     @staticmethod
+    def _preserved_instrument_metadata(
+        existing: InstrumentSpec | None,
+    ) -> InstrumentMetadataInput:
+        """Project the existing atomic metadata block without refreshing it."""
+        quantity_unit: Literal["base_asset", "contract_count"] | None = None
+        if existing is not None and existing.quantity_unit == "base_asset":
+            quantity_unit = "base_asset"
+        elif existing is not None and existing.quantity_unit == "contract_count":
+            quantity_unit = "contract_count"
+        return InstrumentMetadataInput(
+            tick_size=existing.tick_size if existing else None,
+            lot_size=existing.lot_size if existing else None,
+            min_order_size=existing.min_order_size if existing else None,
+            max_order_size=existing.max_order_size if existing else None,
+            cost_decimals=existing.cost_decimals if existing else None,
+            qty_decimals=existing.qty_decimals if existing else None,
+            margin_initial=existing.margin_initial if existing else None,
+            position_limit_long=existing.position_limit_long if existing else None,
+            position_limit_short=existing.position_limit_short if existing else None,
+            status=existing.status if existing else None,
+            contract_size=existing.contract_size if existing else None,
+            quantity_unit=quantity_unit,
+            spec_source=existing.spec_source if existing else None,
+            spec_version=existing.spec_version if existing else None,
+            spec_observed_at=existing.spec_observed_at if existing else None,
+            unit_certified=existing.unit_certified if existing else False,
+        )
+
+    @staticmethod
+    def _unit_evidence_is_complete(
+        metadata: InstrumentMetadataInput,
+        provenance_complete: bool,
+    ) -> bool:
+        """Return whether replacement metadata can certify contract-count units."""
+        positive_contract_size = metadata.contract_size is not None and metadata.contract_size > 0
+        return (
+            provenance_complete
+            and metadata.quantity_unit == "contract_count"
+            and positive_contract_size
+            and metadata.tick_size is not None
+            and metadata.tick_size > 0
+            and metadata.lot_size is not None
+            and metadata.lot_size > 0
+            and metadata.min_order_size is not None
+            and metadata.min_order_size > 0
+            and metadata.qty_decimals is not None
+            and metadata.qty_decimals >= 0
+            and metadata.status == "active"
+        )
+
+    @staticmethod
+    def _replacement_instrument_metadata(
+        metadata: InstrumentMetadataInput,
+        instrument_public_id: str,
+    ) -> InstrumentMetadataInput:
+        """Normalize one caller-supplied atomic metadata replacement."""
+        provenance_complete = (
+            metadata.spec_source is not None
+            and metadata.spec_version is not None
+            and metadata.spec_observed_at is not None
+        )
+        provenance_empty = (
+            metadata.spec_source is None
+            and metadata.spec_version is None
+            and metadata.spec_observed_at is None
+        )
+        if not provenance_complete and not provenance_empty:
+            logger.warning(
+                "Discarding partial instrument metadata provenance for {}",
+                instrument_public_id,
+            )
+        complete_unit_evidence = SymbolUpdaterService._unit_evidence_is_complete(
+            metadata,
+            provenance_complete,
+        )
+        return InstrumentMetadataInput(
+            tick_size=metadata.tick_size,
+            lot_size=metadata.lot_size,
+            min_order_size=metadata.min_order_size,
+            max_order_size=metadata.max_order_size,
+            cost_decimals=metadata.cost_decimals,
+            qty_decimals=metadata.qty_decimals,
+            margin_initial=metadata.margin_initial,
+            position_limit_long=metadata.position_limit_long,
+            position_limit_short=metadata.position_limit_short,
+            status=metadata.status,
+            contract_size=metadata.contract_size,
+            quantity_unit=metadata.quantity_unit,
+            spec_source=metadata.spec_source if provenance_complete else None,
+            spec_version=metadata.spec_version if provenance_complete else None,
+            spec_observed_at=metadata.spec_observed_at if provenance_complete else None,
+            unit_certified=metadata.unit_certified and complete_unit_evidence,
+        )
+
+    @staticmethod
+    def _resolve_instrument_metadata(
+        existing: InstrumentSpec | None,
+        metadata: InstrumentMetadataInput | _Preserve,
+        instrument_public_id: str,
+    ) -> InstrumentMetadataInput:
+        """Carry forward or atomically normalize venue metadata."""
+        if isinstance(metadata, _Preserve):
+            return SymbolUpdaterService._preserved_instrument_metadata(existing)
+        return SymbolUpdaterService._replacement_instrument_metadata(
+            metadata,
+            instrument_public_id,
+        )
+
+    @staticmethod
     def _revise_instrument_spec(
         session: Any,
         instrument_public_id: str,
@@ -554,84 +663,11 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             rollover_rate_short,
             max_funding_rate,
         )
-        if isinstance(metadata, _Preserve):
-            existing_quantity_unit: Literal["base_asset", "contract_count"] | None = None
-            if existing is not None and existing.quantity_unit == "base_asset":
-                existing_quantity_unit = "base_asset"
-            elif existing is not None and existing.quantity_unit == "contract_count":
-                existing_quantity_unit = "contract_count"
-            resolved_metadata = InstrumentMetadataInput(
-                tick_size=existing.tick_size if existing else None,
-                lot_size=existing.lot_size if existing else None,
-                min_order_size=existing.min_order_size if existing else None,
-                max_order_size=existing.max_order_size if existing else None,
-                cost_decimals=existing.cost_decimals if existing else None,
-                qty_decimals=existing.qty_decimals if existing else None,
-                margin_initial=existing.margin_initial if existing else None,
-                position_limit_long=existing.position_limit_long if existing else None,
-                position_limit_short=existing.position_limit_short if existing else None,
-                status=existing.status if existing else None,
-                contract_size=existing.contract_size if existing else None,
-                quantity_unit=existing_quantity_unit,
-                spec_source=existing.spec_source if existing else None,
-                spec_version=existing.spec_version if existing else None,
-                spec_observed_at=existing.spec_observed_at if existing else None,
-                unit_certified=existing.unit_certified if existing else False,
-            )
-        else:
-            provenance_complete = (
-                metadata.spec_source is not None
-                and metadata.spec_version is not None
-                and metadata.spec_observed_at is not None
-            )
-            provenance_empty = (
-                metadata.spec_source is None
-                and metadata.spec_version is None
-                and metadata.spec_observed_at is None
-            )
-            spec_source = metadata.spec_source if provenance_complete else None
-            spec_version = metadata.spec_version if provenance_complete else None
-            spec_observed_at = metadata.spec_observed_at if provenance_complete else None
-            positive_contract_size = (
-                metadata.contract_size is not None and metadata.contract_size > 0
-            )
-            complete_unit_evidence = (
-                provenance_complete
-                and metadata.quantity_unit == "contract_count"
-                and positive_contract_size
-                and metadata.tick_size is not None
-                and metadata.tick_size > 0
-                and metadata.lot_size is not None
-                and metadata.lot_size > 0
-                and metadata.min_order_size is not None
-                and metadata.min_order_size > 0
-                and metadata.qty_decimals is not None
-                and metadata.qty_decimals >= 0
-                and metadata.status == "active"
-            )
-            resolved_metadata = InstrumentMetadataInput(
-                tick_size=metadata.tick_size,
-                lot_size=metadata.lot_size,
-                min_order_size=metadata.min_order_size,
-                max_order_size=metadata.max_order_size,
-                cost_decimals=metadata.cost_decimals,
-                qty_decimals=metadata.qty_decimals,
-                margin_initial=metadata.margin_initial,
-                position_limit_long=metadata.position_limit_long,
-                position_limit_short=metadata.position_limit_short,
-                status=metadata.status,
-                contract_size=metadata.contract_size,
-                quantity_unit=metadata.quantity_unit,
-                spec_source=spec_source,
-                spec_version=spec_version,
-                spec_observed_at=spec_observed_at,
-                unit_certified=metadata.unit_certified and complete_unit_evidence,
-            )
-            if not provenance_complete and not provenance_empty:
-                logger.warning(
-                    "Discarding partial instrument metadata provenance for {}",
-                    instrument_public_id,
-                )
+        resolved_metadata = SymbolUpdaterService._resolve_instrument_metadata(
+            existing,
+            metadata,
+            instrument_public_id,
+        )
         spec = InstrumentSpecInput(
             tick_size=resolved_metadata.tick_size,
             lot_size=resolved_metadata.lot_size,

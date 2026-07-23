@@ -502,6 +502,38 @@ def _strict_native_balance_field(currency: str, data: dict[str, Any], field: str
     return value
 
 
+def _raw_native_balance_decimal(data: dict[str, Any], field: str) -> str | None:
+    """Return one venue decimal string without coercing other values."""
+    value = data.get(field)
+    return value if isinstance(value, str) else None
+
+
+def _parse_native_balance_entry(currency: object, data: object) -> NativeBalanceEntry:
+    """Validate and project one faithful Kraken native balance row."""
+    if not isinstance(currency, str) or not currency:
+        raise ValueError(_NATIVE_BALANCE_MALFORMED_ROW_MSG)
+    if not isinstance(data, dict):
+        raise ValueError(_NATIVE_BALANCE_MALFORMED_ROW_MSG)
+    decimal_fields = {
+        field: _raw_native_balance_decimal(data, field) for field in ("total", "free", "used")
+    }
+    provenance = (
+        "venue_raw"
+        if any(value is not None for value in decimal_fields.values())
+        else "legacy_float"
+    )
+    return NativeBalanceEntry(
+        currency=currency,
+        total=_strict_native_balance_field(currency, data, "total"),
+        free=_strict_native_balance_field(currency, data, "free"),
+        used=_strict_native_balance_field(currency, data, "used"),
+        total_decimal=decimal_fields["total"],
+        free_decimal=decimal_fields["free"],
+        used_decimal=decimal_fields["used"],
+        numeric_provenance=provenance,
+    )
+
+
 class KrakenExchangeClient(ExchangeClientBase):
     """Kraken exchange client with REST and WebSocket support.
 
@@ -1604,28 +1636,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         for currency, data in balance_data.items():
             if currency in _NATIVE_BALANCE_AGGREGATE_KEYS:
                 continue
-            if not isinstance(currency, str) or not currency:
-                raise ValueError(_NATIVE_BALANCE_MALFORMED_ROW_MSG)
-            if not isinstance(data, dict):
-                raise ValueError(_NATIVE_BALANCE_MALFORMED_ROW_MSG)
-            entries.append(
-                NativeBalanceEntry(
-                    currency=currency,
-                    total=_strict_native_balance_field(currency, data, "total"),
-                    free=_strict_native_balance_field(currency, data, "free"),
-                    used=_strict_native_balance_field(currency, data, "used"),
-                    total_decimal=(data["total"] if isinstance(data.get("total"), str) else None),
-                    free_decimal=(data["free"] if isinstance(data.get("free"), str) else None),
-                    used_decimal=(data["used"] if isinstance(data.get("used"), str) else None),
-                    numeric_provenance=(
-                        "venue_raw"
-                        if any(
-                            isinstance(data.get(field), str) for field in ("total", "free", "used")
-                        )
-                        else "legacy_float"
-                    ),
-                )
-            )
+            entries.append(_parse_native_balance_entry(currency, data))
         return entries
 
     def subscribe_ticks(

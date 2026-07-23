@@ -1249,10 +1249,6 @@
       "_create_monitoring_endpoints_router": {
         "PLR0915": 58
       },
-      "_create_orders_executions_router": {
-        "C901": 13,
-        "PLR0915": 74
-      },
       "_create_orders_executions_router.get_executions": {
         "PLR0913": 6
       },

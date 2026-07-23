@@ -41,7 +41,9 @@ import datetime as dt
 import os
 import uuid
 from collections.abc import AsyncGenerator
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC
 from datetime import datetime
@@ -2391,6 +2393,18 @@ def _create_exchange_router() -> APIRouter:
     return router
 
 
+@contextmanager
+def _translate_endpoint_errors(operation: str, detail: str) -> Iterator[None]:
+    """Map unexpected endpoint failures while preserving explicit HTTP errors."""
+    try:
+        yield
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Failed to {operation}: {exc}")
+        raise HTTPException(status_code=500, detail=detail) from exc
+
+
 def _create_orders_executions_router() -> APIRouter:
     """Create router for orders, executions, and positions endpoints.
 
@@ -2432,7 +2446,7 @@ def _create_orders_executions_router() -> APIRouter:
             OrderListResponse wrapping the order data.
         """
         processing_date = as_of or datetime.now(UTC)
-        try:
+        with _translate_endpoint_errors("fetch orders", "Failed to fetch orders"):
             target_wallets = await resolve_target_wallets(
                 _auth, repo, operator_public_id, wallet_public_id
             )
@@ -2458,11 +2472,6 @@ def _create_orders_executions_router() -> APIRouter:
                 payload=items,
                 count=len(items),
             )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Failed to fetch orders: {exc}")
-            raise HTTPException(status_code=500, detail="Failed to fetch orders") from exc
 
     @router.get(
         "/executions",
@@ -2494,7 +2503,7 @@ def _create_orders_executions_router() -> APIRouter:
             ExecutionListResponse wrapping the execution data.
         """
         processing_date = as_of or datetime.now(UTC)
-        try:
+        with _translate_endpoint_errors("fetch executions", "Failed to fetch executions"):
             target_wallets = await resolve_target_wallets(
                 _auth, repo, operator_public_id, wallet_public_id
             )
@@ -2528,11 +2537,6 @@ def _create_orders_executions_router() -> APIRouter:
                 payload=items,
                 count=len(items),
             )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Failed to fetch executions: {exc}")
-            raise HTTPException(status_code=500, detail="Failed to fetch executions") from exc
 
     @router.get(
         "/positions",
@@ -2562,7 +2566,7 @@ def _create_orders_executions_router() -> APIRouter:
             PositionListResponse wrapping the position data.
         """
         processing_date = as_of or datetime.now(UTC)
-        try:
+        with _translate_endpoint_errors("fetch positions", "Failed to fetch positions"):
             target_wallets = await resolve_target_wallets(
                 _auth, repo, operator_public_id, wallet_public_id
             )
@@ -2581,11 +2585,6 @@ def _create_orders_executions_router() -> APIRouter:
                 payload=items,
                 count=len(items),
             )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Failed to fetch positions: {exc}")
-            raise HTTPException(status_code=500, detail="Failed to fetch positions") from exc
 
     @router.get(
         "/portfolio/accounts",
@@ -2626,7 +2625,10 @@ def _create_orders_executions_router() -> APIRouter:
             PortfolioAccountStateListResponse wrapping the account-state data.
         """
         now = datetime.now(UTC)
-        try:
+        with _translate_endpoint_errors(
+            "fetch portfolio accounts",
+            "Failed to fetch portfolio accounts",
+        ):
             target_wallets = await resolve_target_wallets(
                 _auth, repo, operator_public_id, wallet_public_id
             )
@@ -2653,13 +2655,6 @@ def _create_orders_executions_router() -> APIRouter:
                 payload=items,
                 count=len(items),
             )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Failed to fetch portfolio accounts: {exc}")
-            raise HTTPException(
-                status_code=500, detail="Failed to fetch portfolio accounts"
-            ) from exc
 
     return router
 

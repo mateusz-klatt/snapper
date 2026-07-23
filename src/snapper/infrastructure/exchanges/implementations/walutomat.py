@@ -210,6 +210,18 @@ class _TrackedOrder:
     filled_decimal: str | None = None
 
 
+@dataclass(frozen=True)
+class _TerminalExecutionFields:
+    """Execution economics resolved for a terminal order snapshot."""
+
+    last_qty: float | None
+    last_price: float | None
+    average_price: float | None
+    counter_amount_decimal: str | None
+    cum_fee: float | None
+    cum_fee_currency: str | None
+
+
 def _snapshot_tracked_order(order: ExchangeOrderSnapshot) -> _TrackedOrder:
     """Convert an order snapshot into the tracked polling state."""
     return _TrackedOrder(
@@ -224,6 +236,61 @@ def _snapshot_tracked_order(order: ExchangeOrderSnapshot) -> _TrackedOrder:
         counter_filled=order.counter_filled,
         counter_filled_decimal=order.counter_filled_decimal,
         filled_decimal=order.filled_decimal,
+    )
+
+
+def _disappeared_fill_update(
+    final: ExchangeOrderSnapshot,
+    tracked: _TrackedOrder,
+    order_status: ExchangeOrderStatusEnum,
+    fields: _TerminalExecutionFields,
+) -> ExecutionUpdate:
+    """Build one fill event from a terminal disappeared-order snapshot."""
+    exec_id = _walutomat_exec_id(final.id, final.filled)
+    if order_status is ExchangeOrderStatusEnum.FILLED:
+        exec_id += "-t"
+    return ExecutionUpdate(
+        order_id=final.id,
+        exec_type="trade",
+        symbol=final.symbol,
+        side=final.side,
+        order_type=final.type,
+        order_status=order_status,
+        timestamp=datetime.now(UTC),
+        cum_qty=final.filled,
+        cum_qty_decimal=final.filled_decimal,
+        cum_cost=final.counter_filled,
+        exec_id=exec_id,
+        cl_ord_id=final.client_order_id or tracked.cl_ord_id,
+        order_qty=final.amount,
+        limit_price=final.price,
+        last_qty=fields.last_qty,
+        last_price=fields.last_price,
+        average_price=fields.average_price,
+        counter_amount_decimal=fields.counter_amount_decimal,
+        cum_fee=fields.cum_fee,
+        cum_fee_decimal=final.fee_decimal if fields.cum_fee is not None else None,
+        cum_fee_currency=fields.cum_fee_currency,
+    )
+
+
+def _disappeared_cancel_update(
+    final: ExchangeOrderSnapshot,
+    tracked: _TrackedOrder,
+) -> ExecutionUpdate:
+    """Build the terminal cancellation event for a disappeared order."""
+    return ExecutionUpdate(
+        order_id=final.id,
+        exec_type="canceled",
+        symbol=final.symbol,
+        side=final.side,
+        order_type=final.type,
+        order_status=ExchangeOrderStatusEnum.CANCELED,
+        timestamp=datetime.now(UTC),
+        cum_qty=final.filled,
+        cl_ord_id=final.client_order_id or tracked.cl_ord_id,
+        order_qty=final.amount,
+        limit_price=final.price,
     )
 
 
@@ -291,6 +358,32 @@ def _effective_price_fields(
         float(delta_counter / delta_filled),
         average_price,
         str(delta_counter),
+    )
+
+
+def _terminal_execution_fields(
+    final: ExchangeOrderSnapshot,
+    tracked: _TrackedOrder,
+) -> _TerminalExecutionFields:
+    """Resolve terminal execution economics before status-specific emission."""
+    last_qty, last_price, average_price, counter_amount_decimal = _effective_price_fields(
+        final,
+        tracked,
+    )
+    if average_price is None:
+        logger.warning(
+            f"Walutomat order {final.id}: no counter cumulative on terminal "
+            f"snapshot — falling back to limit price for the execution economics"
+        )
+        average_price = final.price
+    cum_fee = final.fee if final.fee and final.fee_currency else None
+    return _TerminalExecutionFields(
+        last_qty=last_qty,
+        last_price=last_price,
+        average_price=average_price,
+        counter_amount_decimal=counter_amount_decimal,
+        cum_fee=cum_fee,
+        cum_fee_currency=final.fee_currency if cum_fee is not None else None,
     )
 
 
@@ -1318,10 +1411,6 @@ class WalutomatExchangeClient(ExchangeClientBase):
         """
         try:
             final = await self.get_order(oid)
-            has_new_fill = final.filled > tracked.filled
-            cum_fee = final.fee if final.fee and final.fee_currency else None
-            cum_fee_currency = final.fee_currency if cum_fee is not None else None
-
             if final.status == ExchangeOrderStatusEnum.OPEN:
                 logger.warning(
                     "Order {} disappeared from active list but API reports OPEN, "
@@ -1329,100 +1418,50 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     oid,
                 )
                 return
-            last_qty, last_price, average_price, counter_amount_decimal = _effective_price_fields(
-                final, tracked
-            )
-            if average_price is None:
-                logger.warning(
-                    f"Walutomat order {final.id}: no counter cumulative on terminal "
-                    f"snapshot — falling back to limit price for the execution economics"
-                )
-                average_price = final.price
+            fields = _terminal_execution_fields(final, tracked)
             if final.status == ExchangeOrderStatusEnum.CLOSED:
-                yield ExecutionUpdate(
-                    order_id=final.id,
-                    exec_type="trade",
-                    symbol=final.symbol,
-                    side=final.side,
-                    order_type=final.type,
-                    order_status=ExchangeOrderStatusEnum.FILLED,
-                    timestamp=datetime.now(UTC),
-                    cum_qty=final.filled,
-                    cum_qty_decimal=final.filled_decimal,
-                    cum_cost=final.counter_filled,
-                    exec_id=_walutomat_exec_id(final.id, final.filled) + "-t",
-                    cl_ord_id=final.client_order_id or tracked.cl_ord_id,
-                    order_qty=final.amount,
-                    limit_price=final.price,
-                    last_qty=last_qty,
-                    last_price=last_price,
-                    average_price=average_price,
-                    counter_amount_decimal=counter_amount_decimal,
-                    cum_fee=cum_fee,
-                    cum_fee_decimal=final.fee_decimal if cum_fee is not None else None,
-                    cum_fee_currency=cum_fee_currency,
+                yield _disappeared_fill_update(
+                    final,
+                    tracked,
+                    ExchangeOrderStatusEnum.FILLED,
+                    fields,
                 )
             elif final.status == ExchangeOrderStatusEnum.CANCELED:
-                if has_new_fill:
-                    yield ExecutionUpdate(
-                        order_id=final.id,
-                        exec_type="trade",
-                        symbol=final.symbol,
-                        side=final.side,
-                        order_type=final.type,
-                        order_status=ExchangeOrderStatusEnum.PARTIALLY_FILLED,
-                        timestamp=datetime.now(UTC),
-                        cum_qty=final.filled,
-                        cum_qty_decimal=final.filled_decimal,
-                        cum_cost=final.counter_filled,
-                        exec_id=_walutomat_exec_id(final.id, final.filled),
-                        cl_ord_id=final.client_order_id or tracked.cl_ord_id,
-                        order_qty=final.amount,
-                        limit_price=final.price,
-                        last_qty=last_qty,
-                        last_price=last_price,
-                        average_price=average_price,
-                        counter_amount_decimal=counter_amount_decimal,
-                        cum_fee=cum_fee,
-                        cum_fee_decimal=final.fee_decimal if cum_fee is not None else None,
-                        cum_fee_currency=cum_fee_currency,
+                if final.filled > tracked.filled:
+                    yield _disappeared_fill_update(
+                        final,
+                        tracked,
+                        ExchangeOrderStatusEnum.PARTIALLY_FILLED,
+                        fields,
                     )
-                yield ExecutionUpdate(
-                    order_id=final.id,
-                    exec_type="canceled",
-                    symbol=final.symbol,
-                    side=final.side,
-                    order_type=final.type,
-                    order_status=ExchangeOrderStatusEnum.CANCELED,
-                    timestamp=datetime.now(UTC),
-                    cum_qty=final.filled,
-                    cl_ord_id=final.client_order_id or tracked.cl_ord_id,
-                    order_qty=final.amount,
-                    limit_price=final.price,
-                )
+                yield _disappeared_cancel_update(final, tracked)
             self._disappeared_retry_counts.pop(oid, None)
         except Exception as exc:
-            count = self._disappeared_retry_counts.get(oid, 0) + 1
-            self._disappeared_retry_counts[oid] = count
-            if count == _DISAPPEARED_RETRY_MAX:
-                logger.critical(
-                    "Walutomat order {} disappeared {} polls ago and the final-state "
-                    "query keeps failing ({}) — NOT guessing a terminal state; the "
-                    "order stays tracked and the query retries every poll until venue "
-                    "truth is available (operator attention required)",
-                    oid,
-                    count,
-                    exc,
-                )
-            else:
-                logger.warning(
-                    "Failed to query final state for disappeared order {} "
-                    "(attempt {}): {} — retrying next poll, never guessing "
-                    "filled-vs-canceled",
-                    oid,
-                    count,
-                    exc,
-                )
+            self._record_disappeared_failure(oid, exc)
+
+    def _record_disappeared_failure(self, oid: str, exc: Exception) -> None:
+        """Record a failed terminal query without guessing order state."""
+        count = self._disappeared_retry_counts.get(oid, 0) + 1
+        self._disappeared_retry_counts[oid] = count
+        if count == _DISAPPEARED_RETRY_MAX:
+            logger.critical(
+                "Walutomat order {} disappeared {} polls ago and the final-state "
+                "query keeps failing ({}) — NOT guessing a terminal state; the "
+                "order stays tracked and the query retries every poll until venue "
+                "truth is available (operator attention required)",
+                oid,
+                count,
+                exc,
+            )
+            return
+        logger.warning(
+            "Failed to query final state for disappeared order {} "
+            "(attempt {}): {} — retrying next poll, never guessing "
+            "filled-vs-canceled",
+            oid,
+            count,
+            exc,
+        )
 
     def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to instrument/pair information.

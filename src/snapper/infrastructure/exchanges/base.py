@@ -84,6 +84,102 @@ _ACCOUNT_HISTORY_UNSUPPORTED_MSG = "This exchange client does not support accoun
 _ORDER_FILL_LEGS_UNSUPPORTED_MSG = "This exchange client does not support order fill leg reads"
 
 
+def _resolved_execution_number(
+    override: float | None,
+    primary: float | None,
+    secondary: float | None,
+) -> float:
+    """Return an explicit resolved value or the established truthy fallback chain."""
+    if override is not None:
+        return override
+    return primary or secondary or 0.0
+
+
+def _matching_execution_decimal(
+    resolved: float,
+    raw_decimal: str | None,
+    raw_number: float | None,
+) -> str | None:
+    """Return raw decimal evidence only when it represents the resolved number."""
+    if raw_decimal is None or raw_number is None or resolved != raw_number:
+        return None
+    return raw_decimal
+
+
+def _execution_price_decimal(execution: ExecutionUpdate, resolved_price: float) -> str | None:
+    """Resolve exact price evidence from last price or average price."""
+    price_decimal = _matching_execution_decimal(
+        resolved_price,
+        execution.last_price_decimal,
+        execution.last_price,
+    )
+    if price_decimal is not None:
+        return price_decimal
+    return _matching_execution_decimal(
+        resolved_price,
+        execution.average_price_decimal,
+        execution.average_price,
+    )
+
+
+def _execution_size_decimal(execution: ExecutionUpdate, resolved_size: float) -> str | None:
+    """Resolve exact size evidence from last quantity or cumulative quantity."""
+    size_decimal = _matching_execution_decimal(
+        resolved_size,
+        execution.last_qty_decimal,
+        execution.last_qty,
+    )
+    if size_decimal is not None:
+        return size_decimal
+    return _matching_execution_decimal(
+        resolved_size,
+        execution.cum_qty_decimal,
+        execution.cum_qty,
+    )
+
+
+def _execution_fee_decimal(
+    execution: ExecutionUpdate,
+    resolved_fee: float,
+    resolved_fee_asset: str,
+) -> str | None:
+    """Resolve exact fee evidence from equivalent, breakdown, or cumulative values."""
+    if resolved_fee_asset == "USD":
+        fee_decimal = _matching_execution_decimal(
+            resolved_fee,
+            execution.fee_usd_equiv_decimal,
+            execution.fee_usd_equiv,
+        )
+        if fee_decimal is not None:
+            return fee_decimal
+    if execution.fees is not None:
+        matching_fees = [
+            item
+            for item in execution.fees
+            if item.asset == resolved_fee_asset
+            and item.quantity == resolved_fee
+            and item.quantity_decimal is not None
+        ]
+        if len(matching_fees) == 1:
+            return matching_fees[0].quantity_decimal
+    return _matching_execution_decimal(
+        resolved_fee,
+        execution.cum_fee_decimal,
+        execution.cum_fee,
+    )
+
+
+def _execution_counter_decimal(execution: ExecutionUpdate, resolved_size: float) -> str | None:
+    """Retain counter amount only when the resolved size is the same venue delta."""
+    if (
+        execution.counter_amount_decimal is None
+        or execution.last_qty is None
+        or resolved_size != execution.last_qty
+    ):
+        return None
+    return execution.counter_amount_decimal
+
+
 class ExchangeClientBase(ABC):
     """Abstract base class defining the interface for exchange clients.
 
@@ -1323,81 +1419,25 @@ class ExchangeClientBase(ABC):
         """
         if self.repository is None or self._tracker is None:
             return
-        resolved_size = (
-            delta_size
-            if delta_size is not None
-            else (execution.last_qty or execution.cum_qty or 0.0)
+        resolved_size = _resolved_execution_number(
+            delta_size,
+            execution.last_qty,
+            execution.cum_qty,
         )
-        resolved_price = (
-            delta_price
-            if delta_price is not None
-            else (execution.last_price or execution.average_price or 0.0)
+        resolved_price = _resolved_execution_number(
+            delta_price,
+            execution.last_price,
+            execution.average_price,
         )
-        resolved_fee = fee if fee is not None else (execution.fee_usd_equiv or 0.0)
+        resolved_fee = _resolved_execution_number(fee, execution.fee_usd_equiv, None)
         resolved_fee_asset = fee_asset if fee_asset is not None else "USD"
         resolved_status = status if status is not None else to_fill_status(execution)
         liq_map = {"m": "maker", "t": "taker"}
         resolved_liquidity = liq_map.get(getattr(execution, "liquidity_ind", None) or "", "unknown")
-        price_decimal = (
-            execution.last_price_decimal
-            if execution.last_price_decimal is not None
-            and execution.last_price is not None
-            and resolved_price == execution.last_price
-            else None
-        )
-        if (
-            price_decimal is None
-            and execution.average_price_decimal is not None
-            and execution.average_price is not None
-            and resolved_price == execution.average_price
-        ):
-            price_decimal = execution.average_price_decimal
-        size_decimal = (
-            execution.last_qty_decimal
-            if execution.last_qty_decimal is not None
-            and execution.last_qty is not None
-            and resolved_size == execution.last_qty
-            else None
-        )
-        if (
-            size_decimal is None
-            and execution.cum_qty_decimal is not None
-            and execution.cum_qty is not None
-            and resolved_size == execution.cum_qty
-        ):
-            size_decimal = execution.cum_qty_decimal
-        fee_decimal = (
-            execution.fee_usd_equiv_decimal
-            if execution.fee_usd_equiv_decimal is not None
-            and execution.fee_usd_equiv is not None
-            and resolved_fee == execution.fee_usd_equiv
-            and resolved_fee_asset == "USD"
-            else None
-        )
-        if fee_decimal is None and execution.fees is not None:
-            matching_fees = [
-                item
-                for item in execution.fees
-                if item.asset == resolved_fee_asset
-                and item.quantity == resolved_fee
-                and item.quantity_decimal is not None
-            ]
-            if len(matching_fees) == 1:
-                fee_decimal = matching_fees[0].quantity_decimal
-        if (
-            fee_decimal is None
-            and execution.cum_fee_decimal is not None
-            and execution.cum_fee is not None
-            and resolved_fee == execution.cum_fee
-        ):
-            fee_decimal = execution.cum_fee_decimal
-        counter_amount_decimal = (
-            execution.counter_amount_decimal
-            if execution.counter_amount_decimal is not None
-            and execution.last_qty is not None
-            and resolved_size == execution.last_qty
-            else None
-        )
+        price_decimal = _execution_price_decimal(execution, resolved_price)
+        size_decimal = _execution_size_decimal(execution, resolved_size)
+        fee_decimal = _execution_fee_decimal(execution, resolved_fee, resolved_fee_asset)
+        counter_amount_decimal = _execution_counter_decimal(execution, resolved_size)
         numeric_provenance = (
             "venue_raw"
             if any(
