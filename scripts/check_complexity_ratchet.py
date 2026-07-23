@@ -596,7 +596,9 @@ def inventory_problems(
 
 def _find_ruff() -> Path:
     """Locate Ruff beside the active Python interpreter or on PATH."""
-    adjacent = Path(sys.executable).with_name("ruff")
+    interpreter = Path(sys.executable)
+    suffix = ".exe" if interpreter.suffix.casefold() == ".exe" else ""
+    adjacent = interpreter.with_name(f"ruff{suffix}")
     if adjacent.is_file():
         return adjacent
     discovered = shutil.which("ruff")

@@ -699,6 +699,24 @@ class TestEntrypoint:
         with patch("scripts.check_complexity_ratchet.sys.executable", str(executable)):
             assert ratchet._find_ruff() == ruff
 
+    def test_find_ruff_uses_windows_executable_suffix(self, tmp_path: Path) -> None:
+        """A Windows interpreter resolves its adjacent Ruff executable."""
+        scripts = tmp_path / "Scripts"
+        scripts.mkdir()
+        executable = scripts / "python.exe"
+        ruff = scripts / "ruff.exe"
+        ruff.touch()
+        with patch("scripts.check_complexity_ratchet.sys.executable", str(executable)):
+            assert ratchet._find_ruff() == ruff
+
+    def test_find_ruff_ignores_posix_version_suffix(self, tmp_path: Path) -> None:
+        """A versioned POSIX interpreter still resolves an extensionless Ruff."""
+        executable = tmp_path / "python3.13"
+        ruff = tmp_path / "ruff"
+        ruff.touch()
+        with patch("scripts.check_complexity_ratchet.sys.executable", str(executable)):
+            assert ratchet._find_ruff() == ruff
+
     def test_find_ruff_uses_path_or_fails(self, tmp_path: Path) -> None:
         """PATH is the fallback and a missing executable fails closed."""
         executable = tmp_path / "python"
