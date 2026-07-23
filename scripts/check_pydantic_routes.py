@@ -295,8 +295,10 @@ def _function_violations(
         violations.append(
             (
                 func.lineno,
-                "route declares `response_model=None` without a `responses={...}`"
-                " entry carrying a Pydantic `model` — OpenAPI emits no schema",
+                (
+                    "route declares `response_model=None` without a `responses={...}`"
+                    " entry carrying a Pydantic `model` — OpenAPI emits no schema"
+                ),
             ),
         )
     return_violation = _return_annotation_violation(func.returns)

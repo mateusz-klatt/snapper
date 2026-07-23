@@ -367,8 +367,10 @@ class TradeService:
             keys = [key for key in (exec_id, trade_id) if key]
             if not keys:
                 keys = [
-                    f"fallback-{event.get('client_order_id')}"
-                    f"-{event.get('fill_size')}-{event.get('fill_price')}"
+                    (
+                        f"fallback-{event.get('client_order_id')}"
+                        f"-{event.get('fill_size')}-{event.get('fill_price')}"
+                    )
                 ]
             if any(key in seen for key in keys):
                 continue

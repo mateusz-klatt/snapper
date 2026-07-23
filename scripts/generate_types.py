@@ -776,8 +776,10 @@ def get_any_codable_helper() -> list[str]:
         "        } else if let dict = try? container.decode([String: AnyCodable].self) {",
         "            value = dict.mapValues { $0.value }",
         "        } else {",
-        "            throw DecodingError.dataCorruptedError(in: container, "
-        'debugDescription: "Cannot decode AnyCodable")',
+        (
+            "            throw DecodingError.dataCorruptedError(in: container, "
+            'debugDescription: "Cannot decode AnyCodable")'
+        ),
         "        }",
         "    }",
         "",

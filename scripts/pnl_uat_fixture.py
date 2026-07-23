@@ -152,82 +152,102 @@ _OSS_BASELINE_SETTINGS: Final[dict[str, tuple[str, str, str, int, int]]] = {
     "market_persist_ticks": (
         '{"mode": "auto"}',
         "market_persist",
-        "Tick persistence mode (auto = wallet-scope-derived, explicit = configured "
-        "allowlist). MarketPersistPolicy",
+        (
+            "Tick persistence mode (auto = wallet-scope-derived, explicit = configured "
+            "allowlist). MarketPersistPolicy"
+        ),
         2,
         2,
     ),
     "market_persist_trades": (
         '{"mode": "auto"}',
         "market_persist",
-        "Trade persistence mode (auto = wallet-scope-derived, explicit = configured "
-        "allowlist). MarketPersistPolicy",
+        (
+            "Trade persistence mode (auto = wallet-scope-derived, explicit = configured "
+            "allowlist). MarketPersistPolicy"
+        ),
         3,
         3,
     ),
     "market_persist_candles": (
         '{"mode": "auto"}',
         "market_persist",
-        "Candle persistence mode (auto = wallet-scope-derived, explicit = configured "
-        "allowlist). MarketPersistPolicy",
+        (
+            "Candle persistence mode (auto = wallet-scope-derived, explicit = configured "
+            "allowlist). MarketPersistPolicy"
+        ),
         4,
         4,
     ),
     "market_persist_extra": (
         '{"ticks": {}, "trades": {}, "candles": {}}',
         "market_persist",
-        "Per-data-type per-exchange overlay-INCLUDE allowlist applied on top of mode. "
-        "MarketPersistPolicy",
+        (
+            "Per-data-type per-exchange overlay-INCLUDE allowlist applied on top of mode. "
+            "MarketPersistPolicy"
+        ),
         5,
         5,
     ),
     "market_persist_exclude": (
         '{"ticks": {}, "trades": {}, "candles": {}}',
         "market_persist",
-        "Per-data-type per-exchange overlay-EXCLUDE blocklist subtracted from the "
-        "resolved set. MarketPersistPolicy",
+        (
+            "Per-data-type per-exchange overlay-EXCLUDE blocklist subtracted from the "
+            "resolved set. MarketPersistPolicy"
+        ),
         6,
         6,
     ),
     "market_stats_pairs": (
         "[]",
         "market_stats",
-        "Cross-exchange pairs for Pearson + cointegration computation (cap 50, "
-        "configured at implementation time)",
+        (
+            "Cross-exchange pairs for Pearson + cointegration computation (cap 50, "
+            "configured at implementation time)"
+        ),
         7,
         7,
     ),
     "live_trading_mode": (
         "halted",
         "risk",
-        "Live-trading interlock: halted|reduce_only|enabled. Seeded halted; only enabled "
-        "admits non-paper submits. Read fresh from DB on every non-paper submit; paper "
-        "is exempt. Flipping to enabled is an explicit operator money-risk action.",
+        (
+            "Live-trading interlock: halted|reduce_only|enabled. Seeded halted; only enabled "
+            "admits non-paper submits. Read fresh from DB on every non-paper submit; paper "
+            "is exempt. Flipping to enabled is an explicit operator money-risk action."
+        ),
         8,
         8,
     ),
     "risk_max_leverage": (
         "1.0",
         "risk",
-        "Maximum prospective gross exposure as a multiple of equity, enforced by the "
-        "portfolio risk gate (Phase 6). Placeholder until the gate ships.",
+        (
+            "Maximum prospective gross exposure as a multiple of equity, enforced by the "
+            "portfolio risk gate (Phase 6). Placeholder until the gate ships."
+        ),
         9,
         9,
     ),
     "risk_max_drawdown": (
         "0.15",
         "risk",
-        "Maximum flow-adjusted drawdown fraction from the epoch peak before the "
-        "portfolio risk gate blocks exposure increases (Phase 6). Placeholder until "
-        "the gate ships.",
+        (
+            "Maximum flow-adjusted drawdown fraction from the epoch peak before the "
+            "portfolio risk gate blocks exposure increases (Phase 6). Placeholder until "
+            "the gate ships."
+        ),
         10,
         10,
     ),
     "risk_r_per_trade": (
         "0.005",
         "risk",
-        "Fraction of equity risked per trade for risk-based position sizing. Placeholder "
-        "until the sizing/gate path ships.",
+        (
+            "Fraction of equity risked per trade for risk-based position sizing. Placeholder "
+            "until the sizing/gate path ships."
+        ),
         11,
         11,
     ),

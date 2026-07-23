@@ -258,8 +258,10 @@ def _validate_market_data_type(
         if timeframe is None:
             return (
                 False,
-                f"Candles topic must include timeframe: "
-                f"market.{exchange_name}.{instrument_name}.candles.<timeframe>",
+                (
+                    f"Candles topic must include timeframe: "
+                    f"market.{exchange_name}.{instrument_name}.candles.<timeframe>"
+                ),
             )
         return True, ""
     if segment_count > 0 and timeframe is not None:
@@ -592,16 +594,20 @@ def _validate_executor_heartbeat(segments: list[str]) -> tuple[bool, str]:
     if len(segments) != 5:
         return (
             False,
-            "system.heartbeats.executor requires 4 segments (template) "
-            "or 5 segments (per-wallet instance with wallet_short)",
+            (
+                "system.heartbeats.executor requires 4 segments (template) "
+                "or 5 segments (per-wallet instance with wallet_short)"
+            ),
         )
     wallet_short = segments[4]
     if _is_valid_wallet_short(wallet_short):
         return True, ""
     return (
         False,
-        "system.heartbeats.executor.{exchange}.{wallet_short}: "
-        "wallet_short must be 12 lowercase hex characters",
+        (
+            "system.heartbeats.executor.{exchange}.{wallet_short}: "
+            "wallet_short must be 12 lowercase hex characters"
+        ),
     )
 
 
@@ -637,8 +643,10 @@ def _validate_marketdata_heartbeat(segments: list[str]) -> tuple[bool, str]:
     if len(segments) != 4:
         return (
             False,
-            "system.heartbeats.marketdata requires exactly 4 segments: "
-            "system.heartbeats.marketdata.{exchange}",
+            (
+                "system.heartbeats.marketdata requires exactly 4 segments: "
+                "system.heartbeats.marketdata.{exchange}"
+            ),
         )
     return _validate_market_source(segments[3])
 
@@ -656,8 +664,10 @@ def _validate_ai_delegate_heartbeat(segments: list[str]) -> tuple[bool, str]:
     if len(segments) != 4:
         return (
             False,
-            "system.heartbeats.ai_delegate requires exactly 4 segments: "
-            "system.heartbeats.ai_delegate.global",
+            (
+                "system.heartbeats.ai_delegate requires exactly 4 segments: "
+                "system.heartbeats.ai_delegate.global"
+            ),
         )
     if segments[3] != "global":
         return False, "system.heartbeats.ai_delegate supports only the global scope"
@@ -747,8 +757,10 @@ def _validate_system_topic(topic: str) -> tuple[bool, str]:
         return True, ""
     return (
         False,
-        "Invalid system type "
-        f"'{system_type}'. Must be: egress, heartbeats, settings, symbol_aliases",
+        (
+            "Invalid system type "
+            f"'{system_type}'. Must be: egress, heartbeats, settings, symbol_aliases"
+        ),
     )
 
 
@@ -822,8 +834,10 @@ def _validate_accruals_topic(topic: str) -> tuple[bool, str]:
     if accrual_type not in _ACCRUAL_TYPES:
         return (
             False,
-            f"Invalid accrual_type '{accrual_type}'. Must be one of: "
-            f"{', '.join(sorted(_ACCRUAL_TYPES))}",
+            (
+                f"Invalid accrual_type '{accrual_type}'. Must be one of: "
+                f"{', '.join(sorted(_ACCRUAL_TYPES))}"
+            ),
         )
     return True, ""
 
@@ -1382,8 +1396,10 @@ def _validate_market_source(exchange: str) -> tuple[bool, str]:
     if exchange not in valid:
         return (
             False,
-            f"Unknown market feed exchange '{exchange}'. "
-            f"Must be one of: {', '.join(sorted(valid))}",
+            (
+                f"Unknown market feed exchange '{exchange}'. "
+                f"Must be one of: {', '.join(sorted(valid))}"
+            ),
         )
     return True, ""
 

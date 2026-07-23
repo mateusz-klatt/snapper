@@ -420,8 +420,10 @@ def _check_nav_alerts_drift(committed: Path, regenerated: Path, label: str) -> l
         return [f"  MISSING nav.alerts in committed {label}"]
     if regenerated_label != committed_label:
         return [
-            f"  DIFFERS: {label} nav.alerts "
-            f"(committed={committed_label!r} != regenerated={regenerated_label!r})"
+            (
+                f"  DIFFERS: {label} nav.alerts "
+                f"(committed={committed_label!r} != regenerated={regenerated_label!r})"
+            )
         ]
 
     return []

@@ -5235,8 +5235,10 @@ class TestCancelReplaceHandlers:
             if recv_count == 1:
                 return (
                     "orders.commands.kraken.BTC-USD.cancel",
-                    b'{"type":"order_cancel","exchange":"kraken","instrument":"BTC-USD",'
-                    b'"exchange_order_id":"K123","client_order_id":"c456"}',
+                    (
+                        b'{"type":"order_cancel","exchange":"kraken","instrument":"BTC-USD",'
+                        b'"exchange_order_id":"K123","client_order_id":"c456"}'
+                    ),
                 )
             service_any.running = False
             return ("", b"")
@@ -5273,8 +5275,10 @@ class TestCancelReplaceHandlers:
             if recv_count == 1:
                 return (
                     "orders.commands.kraken.BTC-USD.replace",
-                    b'{"type":"order_replace","exchange":"kraken","instrument":"BTC-USD",'
-                    b'"exchange_order_id":"K123","client_order_id":"c456","new_price":50000.0}',
+                    (
+                        b'{"type":"order_replace","exchange":"kraken","instrument":"BTC-USD",'
+                        b'"exchange_order_id":"K123","client_order_id":"c456","new_price":50000.0}'
+                    ),
                 )
             service_any.running = False
             return ("", b"")
