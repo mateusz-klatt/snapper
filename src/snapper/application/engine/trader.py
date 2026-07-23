@@ -210,6 +210,43 @@ class SignalRoutingContext:
     shard_key: str
 
 
+@dataclass(frozen=True)
+class CheckpointRecoveryContext:
+    """Resolved identity needed to recover one checkpoint-backed shard."""
+
+    shard_key: str
+    exchange: str
+    instrument: str
+    mode: str
+    strategy_tag: str | None
+    wallet_public_id: str
+
+
+@dataclass(frozen=True)
+class CheckpointGapContext:
+    """Inputs needed to validate or correct one checkpoint fill gap."""
+
+    shard_key: str
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    now: datetime
+    checkpoint: TradeProjectionCheckpointRow | None
+
+
+@dataclass(frozen=True)
+class GapRecoveryContext:
+    """Durable inputs needed to rebuild one venue-event gap."""
+
+    shard_key: str
+    exchange: str
+    instrument: str
+    mode: str
+    strategy_tag: str | None
+    events: list[VenueEventRow]
+    effective_wallet: str
+
+
 class _EngineRegistry(dict[str, "TradingEngineService"]):
     """``self.engines`` subclass that auto-indexes engines on insert.
 
@@ -1001,6 +1038,51 @@ class TraderCoordinator(RegisterableProcess):
                 self._ownership.instance_count,
             )
             return None
+        context = await self._checkpoint_recovery_context(checkpoint, now)
+        if context is None:
+            return None
+        delta_events = await self._load_checkpoint_delta_events(checkpoint, shard_key)
+        if delta_events is None:
+            return None
+        await self._validate_checkpoint_delta(context, checkpoint, delta_events)
+        self._restore_trade_service_from_checkpoint(checkpoint, shard_key, delta_events)
+        self._checkpoint_recovered_shard_keys.add(shard_key)
+        if context.wallet_public_id:
+            self._checkpoint_recovered_shard_wallets[shard_key] = context.wallet_public_id
+        fill_state_certain = await self._correct_checkpoint_fill_gap(
+            shard_key,
+            context.wallet_public_id,
+            context.exchange,
+            context.mode,
+            now,
+            checkpoint,
+        )
+        await self._register_checkpoint_open_orders(checkpoint, shard_key, now)
+        accruals_certain = await self._replay_checkpoint_accruals(
+            checkpoint=checkpoint,
+            now=now,
+            instrument=context.instrument,
+            exchange_str=context.exchange,
+            mode_str=context.mode,
+            wallet_public_id=context.wallet_public_id,
+            shard_key=shard_key,
+        )
+        accruals_certain = await self._checkpoint_accruals_certain(context, accruals_certain)
+        self._restore_balance_service_from_shard(shard_key)
+        return await self._complete_checkpoint_recovery(
+            context,
+            checkpoint,
+            fill_state_certain=fill_state_certain,
+            accruals_certain=accruals_certain,
+        )
+
+    async def _checkpoint_recovery_context(
+        self,
+        checkpoint: TradeProjectionCheckpointRow,
+        now: datetime,
+    ) -> CheckpointRecoveryContext | None:
+        """Resolve and validate the durable identity of one checkpoint."""
+        shard_key = checkpoint["shard_key"]
         parsed_shard = self._parse_shard_key(shard_key)
         if parsed_shard is None:
             logger.warning(
@@ -1010,9 +1092,9 @@ class TraderCoordinator(RegisterableProcess):
             )
             self._recovery_certification_failed = True
             return None
-        exchange_str, instrument, mode_str, wallet_short, strategy_tag = parsed_shard
-        if exchange_str not in get_args(OrderExchange):
-            logger.warning(f"ZMQTrader: Checkpoint exchange {exchange_str} not valid, skipping")
+        exchange, instrument, mode, wallet_short, strategy_tag = parsed_shard
+        if exchange not in get_args(OrderExchange):
+            logger.warning(f"ZMQTrader: Checkpoint exchange {exchange} not valid, skipping")
             await self._record_recovery_shard_failure(
                 shard_key,
                 durable_wallet_public_id=checkpoint.get("wallet_public_id") or None,
@@ -1026,34 +1108,55 @@ class TraderCoordinator(RegisterableProcess):
             wallet_short,
             checkpoint["checkpoint_at"] or now,
         )
-        delta_events = await self._load_checkpoint_delta_events(checkpoint, shard_key)
-        if delta_events is None:
-            return None
-        if wallet_public_id and wallet_short and not wallet_public_id.endswith(wallet_short):
+        return CheckpointRecoveryContext(
+            shard_key=shard_key,
+            exchange=exchange,
+            instrument=instrument,
+            mode=mode,
+            strategy_tag=strategy_tag,
+            wallet_public_id=wallet_public_id,
+        )
+
+    async def _validate_checkpoint_delta(
+        self,
+        context: CheckpointRecoveryContext,
+        checkpoint: TradeProjectionCheckpointRow,
+        delta_events: list[VenueEventRow],
+    ) -> None:
+        """Apply fail-closed identity and payload checks to checkpoint delta events."""
+        parsed_shard = self._parse_shard_key(context.shard_key)
+        wallet_short = parsed_shard[3] if parsed_shard is not None else ""
+        if (
+            context.wallet_public_id
+            and wallet_short
+            and not context.wallet_public_id.endswith(wallet_short)
+        ):
             logger.warning(
-                f"ZMQTrader: checkpoint {shard_key} embeds wallet segment "
+                f"ZMQTrader: checkpoint {context.shard_key} embeds wallet segment "
                 f"{wallet_short} that DISAGREES with its durable wallet "
-                f"{wallet_public_id} — failing the whole projection certification"
+                f"{context.wallet_public_id} — failing the whole projection certification"
             )
             self._recovery_certification_failed = True
         foreign_delta = [
             event
             for event in delta_events
             if event.get("wallet_public_id")
-            and wallet_public_id
-            and event["wallet_public_id"] != wallet_public_id
+            and context.wallet_public_id
+            and event["wallet_public_id"] != context.wallet_public_id
         ]
         if foreign_delta:
             logger.warning(
-                f"ZMQTrader: checkpoint {shard_key} delta replay carries "
+                f"ZMQTrader: checkpoint {context.shard_key} delta replay carries "
                 f"{len(foreign_delta)} events from a DIFFERENT full wallet (suffix-twin "
                 f"collision on the shard string) — failing the whole projection "
                 f"certification"
             )
             self._recovery_certification_failed = True
-        if not self._venue_events_match_shard(delta_events, exchange_str, instrument, mode_str):
+        if not self._venue_events_match_shard(
+            delta_events, context.exchange, context.instrument, context.mode
+        ):
             logger.warning(
-                f"ZMQTrader: checkpoint {shard_key} delta replay carries events whose "
+                f"ZMQTrader: checkpoint {context.shard_key} delta replay carries events whose "
                 f"exchange/instrument/mode CONTRADICT the shard identity — failing "
                 f"the whole projection certification"
             )
@@ -1063,79 +1166,81 @@ class TraderCoordinator(RegisterableProcess):
         ]
         if not self._fill_events_sound(delta_fills):
             logger.warning(
-                f"ZMQTrader: checkpoint {shard_key} delta replay carries malformed or "
+                f"ZMQTrader: checkpoint {context.shard_key} delta replay carries malformed or "
                 f"identity-conflicting fill payloads — leaving the identity UNCERTIFIED "
                 f"(an attributable malformed row quarantines only its own identity, not "
                 f"the whole node)"
             )
             await self._record_recovery_shard_failure(
-                shard_key,
-                durable_wallet_public_id=wallet_public_id or None,
+                context.shard_key,
+                durable_wallet_public_id=context.wallet_public_id or None,
                 anchor=checkpoint.get("checkpoint_at"),
             )
-        self._restore_trade_service_from_checkpoint(checkpoint, shard_key, delta_events)
-        self._checkpoint_recovered_shard_keys.add(shard_key)
-        if wallet_public_id:
-            self._checkpoint_recovered_shard_wallets[shard_key] = wallet_public_id
-        fill_state_certain = await self._correct_checkpoint_fill_gap(
-            shard_key, wallet_public_id, exchange_str, mode_str, now, checkpoint
+
+    async def _checkpoint_accruals_certain(
+        self,
+        context: CheckpointRecoveryContext,
+        replay_certain: bool,
+    ) -> bool:
+        """Confirm that checkpoint recovery does not depend on an unknown accrual watermark."""
+        repository = self.repository
+        if not replay_certain or not isinstance(repository, SQLAlchemyRepository):
+            return replay_certain
+        try:
+            has_accruals = await repository.shard_has_any_accruals(
+                context.wallet_public_id, context.exchange, context.mode
+            )
+        except Exception:
+            return False
+        if not has_accruals:
+            return True
+        logger.warning(
+            f"ZMQTrader: {context.shard_key} carries funding accruals; certification "
+            f"requires the durable accrual watermark (Phase 4) — accrual "
+            f"timestamps are coordinator-clock and a skewed writer could "
+            f"hide one from the replay window; leaving UNCERTIFIED"
         )
-        await self._register_checkpoint_open_orders(checkpoint, shard_key, now)
-        accruals_certain = await self._replay_checkpoint_accruals(
-            checkpoint=checkpoint,
-            now=now,
-            instrument=instrument,
-            exchange_str=exchange_str,
-            mode_str=mode_str,
-            wallet_public_id=wallet_public_id,
-            shard_key=shard_key,
-        )
-        certification_repository = self.repository
-        if accruals_certain and isinstance(certification_repository, SQLAlchemyRepository):
-            try:
-                if await certification_repository.shard_has_any_accruals(
-                    wallet_public_id, exchange_str, mode_str
-                ):
-                    logger.warning(
-                        f"ZMQTrader: {shard_key} carries funding accruals; certification "
-                        f"requires the durable accrual watermark (Phase 4) — accrual "
-                        f"timestamps are coordinator-clock and a skewed writer could "
-                        f"hide one from the replay window; leaving UNCERTIFIED"
-                    )
-                    accruals_certain = False
-            except Exception:
-                accruals_certain = False
-        self._restore_balance_service_from_shard(shard_key)
+        return False
+
+    async def _complete_checkpoint_recovery(
+        self,
+        context: CheckpointRecoveryContext,
+        checkpoint: TradeProjectionCheckpointRow,
+        *,
+        fill_state_certain: bool,
+        accruals_certain: bool,
+    ) -> str | None:
+        """Restore, register, and certify the engine for one checkpoint."""
         engine = await self._create_engine_for_recovery(
-            instrument,
-            exchange_str,
-            strategy_tag=strategy_tag,
-            wallet_public_id=wallet_public_id,
+            context.instrument,
+            context.exchange,
+            strategy_tag=context.strategy_tag,
+            wallet_public_id=context.wallet_public_id,
             operator_public_id=checkpoint.get("operator_public_id") or "",
         )
         if engine is None:
             await self._record_recovery_shard_failure(
-                shard_key,
-                durable_wallet_public_id=wallet_public_id or None,
+                context.shard_key,
+                durable_wallet_public_id=context.wallet_public_id or None,
                 anchor=checkpoint.get("checkpoint_at"),
             )
             return None
-        self._restore_engine_from_shard(engine, shard_key, instrument)
+        self._restore_engine_from_shard(engine, context.shard_key, context.instrument)
         engine_key = self._build_engine_key(
-            instrument,
-            exchange_str,
-            strategy_tag if strategy_tag else mode_str,
-            wallet_public_id,
+            context.instrument,
+            context.exchange,
+            context.strategy_tag if context.strategy_tag else context.mode,
+            context.wallet_public_id,
         )
         self._register_recovered_engine(engine_key, engine)
-        if shard_key not in self._projection_identities:
+        if context.shard_key not in self._projection_identities:
             await self._record_recovery_shard_failure(
-                shard_key,
-                durable_wallet_public_id=wallet_public_id or None,
+                context.shard_key,
+                durable_wallet_public_id=context.wallet_public_id or None,
                 anchor=checkpoint.get("checkpoint_at"),
             )
         elif fill_state_certain and accruals_certain:
-            self._trusted_recovery_shards.add(shard_key)
+            self._trusted_recovery_shards.add(context.shard_key)
         logger.info(
             f"ZMQTrader: Recovered {engine_key} from checkpoint: "
             f"pos={engine.position_qty:.6f}, "
@@ -1335,98 +1440,133 @@ class TraderCoordinator(RegisterableProcess):
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return True
+        context = CheckpointGapContext(
+            shard_key=shard_key,
+            wallet_public_id=wallet_public_id,
+            exchange=exchange_str,
+            mode=mode_str,
+            now=now,
+            checkpoint=checkpoint,
+        )
         try:
-            if not await self.repository.shard_has_fill_gap(shard_key, now):
-                return await self._checkpoint_fill_evidence_certain(
-                    shard_key, wallet_public_id, checkpoint
-                )
-            if await self.repository.shard_has_accruals(
-                wallet_public_id, exchange_str, mode_str, now
-            ):
-                logger.warning(
-                    f"ZMQTrader: {shard_key} has a recorded>consumed fill gap but carries "
-                    f"funding accruals; leaving to status-quo recovery (R9 rebuild is "
-                    f"spot-scoped, futures funding cash cannot be reconstructed from venue "
-                    f"events)"
-                )
-                return False
-            events = await self.repository.get_venue_events_after(shard_key, 0)
-            foreign_events = [
-                event
-                for event in events
-                if event.get("wallet_public_id")
-                and wallet_public_id
-                and event["wallet_public_id"] != wallet_public_id
-            ]
-            if foreign_events:
-                logger.warning(
-                    f"ZMQTrader: {shard_key} full-history gap replay carries "
-                    f"{len(foreign_events)} events from a DIFFERENT full wallet "
-                    f"(suffix-twin collision) — failing the whole projection "
-                    f"certification and leaving checkpoint state in place"
-                )
-                self._recovery_certification_failed = True
-                return False
-            parsed = self._parse_shard_key(shard_key)
-            gap_fills = [event for event in events if event.get("event_type") == "fill_observed"]
-            if parsed is not None and not self._venue_events_match_shard(
-                events, parsed[0], parsed[1], parsed[2]
-            ):
-                logger.warning(
-                    f"ZMQTrader: {shard_key} full-history gap replay carries events "
-                    f"whose exchange/instrument/mode CONTRADICT the shard identity — "
-                    f"failing the whole projection certification and leaving "
-                    f"checkpoint state in place"
-                )
-                self._recovery_certification_failed = True
-                return False
-            if not self._fill_events_sound(gap_fills):
-                logger.warning(
-                    f"ZMQTrader: {shard_key} full-history gap replay carries malformed "
-                    f"or identity-conflicting fill payloads — leaving the identity "
-                    f"UNCERTIFIED (an attributable malformed row quarantines only its "
-                    f"own identity, not the whole node)"
-                )
-                await self._record_recovery_shard_failure(
-                    shard_key,
-                    durable_wallet_public_id=wallet_public_id or None,
-                    anchor=(checkpoint.get("checkpoint_at") if checkpoint else now),
-                )
-                return False
-            attributed = {
-                str(event.get("wallet_public_id") or "")
-                for event in gap_fills
-                if event.get("wallet_public_id")
-            }
-            if (
-                not wallet_public_id
-                or attributed != {wallet_public_id}
-                or any(not (event.get("wallet_public_id") or "") for event in gap_fills)
-            ):
-                logger.warning(
-                    f"ZMQTrader: {shard_key} full-history gap replay is not fully "
-                    f"wallet-attributable (resolved {wallet_public_id or '?'}, evidence "
-                    f"{sorted(attributed) or '?'}) — leaving UNCERTIFIED rather than "
-                    f"overlaying unattributed fills"
-                )
-                return False
-            projection = self.trade_service.project_fill_state_from_events(events)
-            self.trade_service.overlay_fill_state(shard_key, projection)
-            self._consumed_venue_event_watermarks[shard_key] = (
-                events[-1]["id"] if events else projection["last_venue_event_id"]
-            )
-            logger.warning(
-                f"ZMQTrader: corrected dropped fill on checkpoint shard {shard_key} via "
-                f"venue-event overlay (pos={projection['position_qty']:.6f}, "
-                f"cash={projection['cash']:.2f})"
-            )
-            return True
+            return await self._correct_checkpoint_fill_gap_from_repository(context)
         except Exception as e:
             logger.error(
                 f"ZMQTrader: fill-gap correction failed for {shard_key}: {e}; "
                 f"leaving checkpoint-restored state in place"
             )
             return False
+
+    async def _correct_checkpoint_fill_gap_from_repository(
+        self,
+        context: CheckpointGapContext,
+    ) -> bool:
+        """Read durable gap evidence and apply a sound overlay when needed."""
+        repository = cast(SQLAlchemyRepository, self.repository)
+        if not await repository.shard_has_fill_gap(context.shard_key, context.now):
+            return await self._checkpoint_fill_evidence_certain(
+                context.shard_key,
+                context.wallet_public_id,
+                context.checkpoint,
+            )
+        if await repository.shard_has_accruals(
+            context.wallet_public_id,
+            context.exchange,
+            context.mode,
+            context.now,
+        ):
+            logger.warning(
+                f"ZMQTrader: {context.shard_key} has a recorded>consumed fill gap but carries "
+                f"funding accruals; leaving to status-quo recovery (R9 rebuild is "
+                f"spot-scoped, futures funding cash cannot be reconstructed from venue "
+                f"events)"
+            )
+            return False
+        events = await repository.get_venue_events_after(context.shard_key, 0)
+        return await self._overlay_checkpoint_fill_gap(context, events)
+
+    async def _overlay_checkpoint_fill_gap(
+        self,
+        context: CheckpointGapContext,
+        events: list[VenueEventRow],
+    ) -> bool:
+        """Validate and overlay a checkpoint's complete durable fill history."""
+        foreign_events = [
+            event
+            for event in events
+            if event.get("wallet_public_id")
+            and context.wallet_public_id
+            and event["wallet_public_id"] != context.wallet_public_id
+        ]
+        if foreign_events:
+            logger.warning(
+                f"ZMQTrader: {context.shard_key} full-history gap replay carries "
+                f"{len(foreign_events)} events from a DIFFERENT full wallet "
+                f"(suffix-twin collision) — failing the whole projection "
+                f"certification and leaving checkpoint state in place"
+            )
+            self._recovery_certification_failed = True
+            return False
+        parsed = self._parse_shard_key(context.shard_key)
+        gap_fills = [event for event in events if event.get("event_type") == "fill_observed"]
+        if parsed is not None and not self._venue_events_match_shard(
+            events, parsed[0], parsed[1], parsed[2]
+        ):
+            logger.warning(
+                f"ZMQTrader: {context.shard_key} full-history gap replay carries events "
+                f"whose exchange/instrument/mode CONTRADICT the shard identity — "
+                f"failing the whole projection certification and leaving "
+                f"checkpoint state in place"
+            )
+            self._recovery_certification_failed = True
+            return False
+        if not self._fill_events_sound(gap_fills):
+            logger.warning(
+                f"ZMQTrader: {context.shard_key} full-history gap replay carries malformed "
+                f"or identity-conflicting fill payloads — leaving the identity "
+                f"UNCERTIFIED (an attributable malformed row quarantines only its "
+                f"own identity, not the whole node)"
+            )
+            anchor = (
+                context.checkpoint.get("checkpoint_at")
+                if context.checkpoint is not None
+                else context.now
+            )
+            await self._record_recovery_shard_failure(
+                context.shard_key,
+                durable_wallet_public_id=context.wallet_public_id or None,
+                anchor=anchor,
+            )
+            return False
+        attributed = {
+            str(event.get("wallet_public_id") or "")
+            for event in gap_fills
+            if event.get("wallet_public_id")
+        }
+        fully_attributed = (
+            bool(context.wallet_public_id)
+            and attributed == {context.wallet_public_id}
+            and all(event.get("wallet_public_id") for event in gap_fills)
+        )
+        if not fully_attributed:
+            logger.warning(
+                f"ZMQTrader: {context.shard_key} full-history gap replay is not fully "
+                f"wallet-attributable (resolved {context.wallet_public_id or '?'}, evidence "
+                f"{sorted(attributed) or '?'}) — leaving UNCERTIFIED rather than "
+                f"overlaying unattributed fills"
+            )
+            return False
+        projection = self.trade_service.project_fill_state_from_events(events)
+        self.trade_service.overlay_fill_state(context.shard_key, projection)
+        self._consumed_venue_event_watermarks[context.shard_key] = (
+            events[-1]["id"] if events else projection["last_venue_event_id"]
+        )
+        logger.warning(
+            f"ZMQTrader: corrected dropped fill on checkpoint shard "
+            f"{context.shard_key} via venue-event overlay "
+            f"(pos={projection['position_qty']:.6f}, cash={projection['cash']:.2f})"
+        )
+        return True
 
     async def _checkpoint_fill_evidence_certain(
         self,
@@ -1472,10 +1612,12 @@ class TraderCoordinator(RegisterableProcess):
         """
         if checkpoint is None:
             return True
-        fill_bearing = (
-            float(checkpoint.get("position_qty") or 0.0) != 0.0
-            or float(checkpoint.get("realized_pnl") or 0.0) != 0.0
-            or float(checkpoint.get("turnover") or 0.0) != 0.0
+        fill_bearing = any(
+            (
+                float(checkpoint.get("position_qty") or 0.0),
+                float(checkpoint.get("realized_pnl") or 0.0),
+                float(checkpoint.get("turnover") or 0.0),
+            )
         )
         evidence_repository = self.repository
         if not isinstance(evidence_repository, SQLAlchemyRepository):
@@ -1490,14 +1632,43 @@ class TraderCoordinator(RegisterableProcess):
             return False
         fill_events = [event for event in events if event.get("event_type") == "fill_observed"]
         if not fill_events:
-            if not fill_bearing:
-                return True
-            logger.warning(
-                f"ZMQTrader: checkpoint {shard_key} carries fill state but its "
-                f"exact shard has NO durable fill events — leaving UNCERTIFIED "
-                f"(fill state without exact-shard evidence cannot certify)"
-            )
+            return self._checkpoint_without_fill_evidence_certain(shard_key, fill_bearing)
+        if not await self._checkpoint_fill_identity_certain(
+            shard_key,
+            wallet_public_id,
+            checkpoint,
+            events,
+            fill_events,
+        ):
             return False
+        if not self._checkpoint_fill_wallet_certain(shard_key, wallet_public_id, fill_events):
+            return False
+        return self._checkpoint_fill_digest_certain(shard_key, events)
+
+    @staticmethod
+    def _checkpoint_without_fill_evidence_certain(
+        shard_key: str,
+        fill_bearing: bool,
+    ) -> bool:
+        """Accept only empty checkpoints when exact-shard fill evidence is absent."""
+        if not fill_bearing:
+            return True
+        logger.warning(
+            f"ZMQTrader: checkpoint {shard_key} carries fill state but its "
+            f"exact shard has NO durable fill events — leaving UNCERTIFIED "
+            f"(fill state without exact-shard evidence cannot certify)"
+        )
+        return False
+
+    async def _checkpoint_fill_identity_certain(
+        self,
+        shard_key: str,
+        wallet_public_id: str,
+        checkpoint: TradeProjectionCheckpointRow,
+        events: list[VenueEventRow],
+        fill_events: list[VenueEventRow],
+    ) -> bool:
+        """Validate shard identity and fill payloads for checkpoint evidence."""
         parsed = self._parse_shard_key(shard_key)
         if parsed is not None and not self._venue_events_match_shard(
             events, parsed[0], parsed[1], parsed[2]
@@ -1522,6 +1693,15 @@ class TraderCoordinator(RegisterableProcess):
                 anchor=checkpoint.get("checkpoint_at"),
             )
             return False
+        return True
+
+    def _checkpoint_fill_wallet_certain(
+        self,
+        shard_key: str,
+        wallet_public_id: str,
+        fill_events: list[VenueEventRow],
+    ) -> bool:
+        """Require checkpoint fill evidence to resolve to exactly one expected wallet."""
         wallets = {str(event.get("wallet_public_id") or "") for event in fill_events}
         attributed = {wallet for wallet in wallets if wallet}
         unattributed = any(not wallet for wallet in wallets)
@@ -1541,6 +1721,14 @@ class TraderCoordinator(RegisterableProcess):
                 f"wallet-attributable — leaving UNCERTIFIED"
             )
             return False
+        return True
+
+    def _checkpoint_fill_digest_certain(
+        self,
+        shard_key: str,
+        events: list[VenueEventRow],
+    ) -> bool:
+        """Require restored fill state to equal the durable full-history fold."""
         projection = self.trade_service.project_fill_state_from_events(events)
         shard = self.trade_service._get_or_create_shard(shard_key)
         if not self._fill_digest_matches(shard, projection):
@@ -1579,30 +1767,45 @@ class TraderCoordinator(RegisterableProcess):
             (shard.position.realized_pnl, projection["realized_pnl"]),
             (shard.turnover, projection["turnover"]),
         )
-        for restored, replayed in numeric_pairs:
-            if not (math.isfinite(restored) and math.isfinite(replayed)):
-                return False
-            if restored != replayed:
-                return False
+        if not all(self._finite_values_match(*pair) for pair in numeric_pairs):
+            return False
         restored_entry = shard.position.entry_price
         replayed_entry = projection["entry_price"]
-        if (restored_entry is None) != (replayed_entry is None):
+        if not self._optional_finite_values_match(restored_entry, replayed_entry):
             return False
-        if restored_entry is not None and replayed_entry is not None:
-            if not (math.isfinite(restored_entry) and math.isfinite(replayed_entry)):
-                return False
-            if restored_entry != replayed_entry:
-                return False
-        if shard.position.position_opened_at != projection["position_opened_at"]:
-            return False
-        if shard.last_venue_event_id != projection["last_venue_event_id"]:
+        metadata_matches = (
+            shard.position.position_opened_at == projection["position_opened_at"]
+            and shard.last_venue_event_id == projection["last_venue_event_id"]
+        )
+        if not metadata_matches:
             return False
         restored_seen = set(shard.seen_exec_ids)
         replayed_seen = set(projection["seen_exec_ids"])
         identity_cap = 10_000
-        if len(restored_seen) >= identity_cap or len(replayed_seen) >= identity_cap:
-            return False
-        return restored_seen == replayed_seen
+        identities_complete = (
+            len(restored_seen) < identity_cap and len(replayed_seen) < identity_cap
+        )
+        return identities_complete and restored_seen == replayed_seen
+
+    @staticmethod
+    def _finite_values_match(restored: float, replayed: float) -> bool:
+        """Return whether two finite fill-derived values match exactly."""
+        return (
+            math.isfinite(restored)
+            and math.isfinite(replayed)
+            and math.isclose(restored, replayed, rel_tol=0.0, abs_tol=0.0)
+        )
+
+    @classmethod
+    def _optional_finite_values_match(
+        cls,
+        restored: float | None,
+        replayed: float | None,
+    ) -> bool:
+        """Return whether two optional finite fill-derived values match exactly."""
+        if restored is None or replayed is None:
+            return restored is replayed
+        return cls._finite_values_match(restored, replayed)
 
     @staticmethod
     def _fill_events_sound(fill_events: list[VenueEventRow]) -> bool:
@@ -1671,22 +1874,32 @@ class TraderCoordinator(RegisterableProcess):
             self._recovery_certification_failed = True
             return
         for shard_key in shard_keys:
-            if shard_key in self._checkpoint_recovered_shard_keys:
+            if not self._venue_gap_shard_is_local(shard_key):
                 continue
-            if self._ownership is not None and not self._ownership.owns(shard_key):
-                continue
-            try:
-                if await self._rebuild_shard_if_gapped(shard_key, now):
-                    if shard_key in self._projection_identities:
-                        self._trusted_recovery_shards.add(shard_key)
-                    else:
-                        await self._record_recovery_shard_failure(shard_key, anchor=now)
-            except Exception as e:
-                logger.error(
-                    f"ZMQTrader: venue-event gap rebuild failed for {shard_key}: {e}; skipping"
-                )
-                self._trusted_recovery_shards.discard(shard_key)
+            await self._recover_venue_event_gap(shard_key, now)
+
+    def _venue_gap_shard_is_local(self, shard_key: str) -> bool:
+        """Return whether a venue-only gap belongs to this coordinator."""
+        checkpoint_recovered = shard_key in self._checkpoint_recovered_shard_keys
+        foreign = self._ownership is not None and not self._ownership.owns(shard_key)
+        return not checkpoint_recovered and not foreign
+
+    async def _recover_venue_event_gap(self, shard_key: str, now: datetime) -> None:
+        """Recover one venue-only gap without blocking the remaining shards."""
+        try:
+            rebuilt = await self._rebuild_shard_if_gapped(shard_key, now)
+            if not rebuilt:
+                return
+            if shard_key in self._projection_identities:
+                self._trusted_recovery_shards.add(shard_key)
+            else:
                 await self._record_recovery_shard_failure(shard_key, anchor=now)
+        except Exception as e:
+            logger.error(
+                f"ZMQTrader: venue-event gap rebuild failed for {shard_key}: {e}; skipping"
+            )
+            self._trusted_recovery_shards.discard(shard_key)
+            await self._record_recovery_shard_failure(shard_key, anchor=now)
 
     def _venue_events_match_shard(
         self,
@@ -1745,16 +1958,33 @@ class TraderCoordinator(RegisterableProcess):
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return False
+        context = await self._load_gap_recovery_context(shard_key, now)
+        if context is None:
+            return False
+        resolved_engine = await self._resolve_gap_recovery_engine(context, now)
+        if resolved_engine is None:
+            return False
+        engine, created = resolved_engine
+        self._apply_gap_recovery(context, engine, created=created)
+        return True
+
+    async def _load_gap_recovery_context(
+        self,
+        shard_key: str,
+        now: datetime,
+    ) -> GapRecoveryContext | None:
+        """Load and validate every durable input before a gap rebuild mutates state."""
+        repository = cast(SQLAlchemyRepository, self.repository)
         parsed_shard = self._parse_shard_key(shard_key)
         if parsed_shard is None:
             logger.warning(f"ZMQTrader: Invalid shard_key for gap recovery: {shard_key}, skipping")
             self._trusted_recovery_shards.discard(shard_key)
             await self._record_recovery_shard_failure(shard_key)
-            return False
+            return None
         exchange_str, instrument, mode_str, wallet_short, strategy_tag = parsed_shard
-        if not await self.repository.shard_has_fill_gap(shard_key, now):
-            return False
-        events = await self.repository.get_venue_events_after(shard_key, 0)
+        if not await repository.shard_has_fill_gap(shard_key, now):
+            return None
+        events = await repository.get_venue_events_after(shard_key, 0)
         if not self._venue_events_match_shard(events, exchange_str, instrument, mode_str):
             logger.warning(
                 f"ZMQTrader: {shard_key} venue-only rebuild carries events whose "
@@ -1763,7 +1993,50 @@ class TraderCoordinator(RegisterableProcess):
             )
             self._recovery_certification_failed = True
             self._trusted_recovery_shards.discard(shard_key)
-            return False
+            return None
+        effective_wallet = await self._validated_gap_recovery_wallet(
+            shard_key,
+            wallet_short,
+            events,
+            now,
+        )
+        if effective_wallet is None:
+            return None
+        if await repository.shard_has_accruals(
+            effective_wallet,
+            exchange_str,
+            mode_str,
+            now,
+        ):
+            logger.warning(
+                f"ZMQTrader: {shard_key} has a venue-event fill gap but carries funding "
+                f"accruals; leaving to status-quo recovery (R9 rebuild is spot-scoped)"
+            )
+            self._trusted_recovery_shards.discard(shard_key)
+            await self._record_recovery_shard_failure(
+                shard_key,
+                durable_wallet_public_id=effective_wallet,
+                anchor=now,
+            )
+            return None
+        return GapRecoveryContext(
+            shard_key=shard_key,
+            exchange=exchange_str,
+            instrument=instrument,
+            mode=mode_str,
+            strategy_tag=strategy_tag,
+            events=events,
+            effective_wallet=effective_wallet,
+        )
+
+    async def _validated_gap_recovery_wallet(
+        self,
+        shard_key: str,
+        wallet_short: str,
+        events: list[VenueEventRow],
+        now: datetime,
+    ) -> str | None:
+        """Resolve one fully attributed durable wallet for a venue-only gap."""
         event_wallets = {
             event["wallet_public_id"] for event in events if event.get("wallet_public_id")
         }
@@ -1780,7 +2053,7 @@ class TraderCoordinator(RegisterableProcess):
             )
             self._recovery_certification_failed = True
             self._trusted_recovery_shards.discard(shard_key)
-            return False
+            return None
         rebuild_fills = [event for event in events if event.get("event_type") == "fill_observed"]
         if not self._fill_events_sound(rebuild_fills):
             logger.warning(
@@ -1793,7 +2066,7 @@ class TraderCoordinator(RegisterableProcess):
             await self._record_recovery_shard_failure(
                 shard_key, durable_wallet_public_id=wallet_public_id or None, anchor=now
             )
-            return False
+            return None
         attributed_fill_wallets = {
             str(event.get("wallet_public_id") or "")
             for event in rebuild_fills
@@ -1816,80 +2089,90 @@ class TraderCoordinator(RegisterableProcess):
             await self._record_recovery_shard_failure(
                 shard_key, durable_wallet_public_id=effective_wallet or None, anchor=now
             )
-            return False
-        if await self.repository.shard_has_accruals(effective_wallet, exchange_str, mode_str, now):
-            logger.warning(
-                f"ZMQTrader: {shard_key} has a venue-event fill gap but carries funding "
-                f"accruals; leaving to status-quo recovery (R9 rebuild is spot-scoped)"
-            )
-            self._trusted_recovery_shards.discard(shard_key)
-            await self._record_recovery_shard_failure(
-                shard_key, durable_wallet_public_id=effective_wallet or None, anchor=now
-            )
-            return False
+            return None
+        return effective_wallet
+
+    async def _resolve_gap_recovery_engine(
+        self,
+        context: GapRecoveryContext,
+        now: datetime,
+    ) -> tuple[TradingEngineService, bool] | None:
+        """Select or create an engine that exactly matches durable gap evidence."""
         incumbents = [
             candidate
             for candidate in self.engines.values()
-            if getattr(candidate, "_shard_key", None) == shard_key
+            if getattr(candidate, "_shard_key", None) == context.shard_key
         ]
         foreign_incumbents = [
             candidate
             for candidate in incumbents
-            if effective_wallet
-            and (getattr(candidate, "wallet_public_id", "") or "") != effective_wallet
+            if context.effective_wallet
+            and (getattr(candidate, "wallet_public_id", "") or "") != context.effective_wallet
         ]
         if foreign_incumbents or len(incumbents) > 1:
             logger.warning(
-                f"ZMQTrader: {shard_key} venue-only rebuild would mutate an engine "
+                f"ZMQTrader: {context.shard_key} venue-only rebuild would mutate an engine "
                 f"whose FULL wallet disagrees with the durable evidence wallet "
-                f"{effective_wallet or '?'} (suffix-twin collision on the shard "
+                f"{context.effective_wallet or '?'} (suffix-twin collision on the shard "
                 f"string) — failing the whole projection certification and skipping "
                 f"the rebuild"
             )
             self._recovery_certification_failed = True
-            self._trusted_recovery_shards.discard(shard_key)
-            return False
+            self._trusted_recovery_shards.discard(context.shard_key)
+            return None
         engine = incumbents[0] if incumbents else None
         created = engine is None
         if engine is None:
             engine = await self._create_engine_for_recovery(
-                instrument,
-                exchange_str,
-                strategy_tag=strategy_tag,
-                wallet_public_id=effective_wallet,
+                context.instrument,
+                context.exchange,
+                strategy_tag=context.strategy_tag,
+                wallet_public_id=context.effective_wallet,
                 operator_public_id="",
             )
-        if engine is None or engine._shard_key != shard_key:
+        if engine is None or engine._shard_key != context.shard_key:
             logger.warning(
                 f"ZMQTrader: gap-recovery could not resolve a matching engine for "
-                f"{shard_key}, skipping"
+                f"{context.shard_key}, skipping"
             )
-            self._trusted_recovery_shards.discard(shard_key)
+            self._trusted_recovery_shards.discard(context.shard_key)
             await self._record_recovery_shard_failure(
-                shard_key, durable_wallet_public_id=effective_wallet or None, anchor=now
+                context.shard_key,
+                durable_wallet_public_id=context.effective_wallet,
+                anchor=now,
             )
-            return False
-        self.trade_service.reset_shard(shard_key)
-        for event in self.trade_service.dedup_fill_events(events):
+            return None
+        return engine, created
+
+    def _apply_gap_recovery(
+        self,
+        context: GapRecoveryContext,
+        engine: TradingEngineService,
+        *,
+        created: bool,
+    ) -> None:
+        """Apply validated durable events and mirror the rebuilt shard into its engine."""
+        self.trade_service.reset_shard(context.shard_key)
+        for event in self.trade_service.dedup_fill_events(context.events):
             self.trade_service.apply_venue_event(event)
-        last_id = events[-1]["id"] if events else 0
-        self._consumed_venue_event_watermarks[shard_key] = last_id
-        self._restore_balance_service_from_shard(shard_key)
-        self._restore_engine_from_shard(engine, shard_key, instrument)
+        last_id = context.events[-1]["id"] if context.events else 0
+        self._consumed_venue_event_watermarks[context.shard_key] = last_id
+        self._restore_balance_service_from_shard(context.shard_key)
+        self._restore_engine_from_shard(engine, context.shard_key, context.instrument)
         if created:
             engine_key = self._build_engine_key(
-                instrument,
-                exchange_str,
-                strategy_tag if strategy_tag else mode_str,
-                effective_wallet,
+                context.instrument,
+                context.exchange,
+                context.strategy_tag if context.strategy_tag else context.mode,
+                context.effective_wallet,
             )
             self._register_recovered_engine(engine_key, engine)
         logger.warning(
-            f"ZMQTrader: rebuilt {shard_key} from venue events (recovered dropped fill): "
+            f"ZMQTrader: rebuilt {context.shard_key} from venue events "
+            f"(recovered dropped fill): "
             f"pos={engine.position_qty:.6f}, entry={engine.entry_price}, "
             f"cash={engine.portfolio.cash:.2f}"
         )
-        return True
 
     async def _replay_checkpoint_accruals(
         self,

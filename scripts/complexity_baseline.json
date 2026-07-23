@@ -206,33 +206,17 @@
       "TraderCoordinator._build_position_cycle_insert_row": {
         "PLR0913": 8
       },
-      "TraderCoordinator._checkpoint_fill_evidence_certain": {
-        "C901": 11
-      },
       "TraderCoordinator._correct_checkpoint_fill_gap": {
         "PLR0913": 6
       },
-      "TraderCoordinator._fill_digest_matches": {
-        "C901": 11
-      },
       "TraderCoordinator._hydrate_reconciled_position_cycle": {
         "PLR0913": 6
-      },
-      "TraderCoordinator._rebuild_shard_if_gapped": {
-        "C901": 14,
-        "PLR0912": 13,
-        "PLR0915": 59
       },
       "TraderCoordinator._reconcile_direction_mismatch_cycle": {
         "PLR0913": 8
       },
       "TraderCoordinator._reconcile_existing_position_cycle": {
         "PLR0913": 8
-      },
-      "TraderCoordinator._recover_checkpoint_row": {
-        "C901": 16,
-        "PLR0912": 15,
-        "PLR0915": 56
       },
       "TraderCoordinator._recover_execution_group": {
         "C901": 14,
