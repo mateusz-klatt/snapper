@@ -1122,11 +1122,6 @@
     "src/snapper/interface/websocket/bridge.py": {
       "ZmqWebSocketBridgeService._coalesce_account_frame": {
         "PLR0913": 6
-      },
-      "ZmqWebSocketBridgeService._dispatch_to_subscription": {
-        "C901": 14,
-        "PLR0912": 13,
-        "PLR0913": 14
       }
     },
     "src/snapper/interface/websocket/dispatcher.py": {

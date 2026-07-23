@@ -4553,7 +4553,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return "unsupported", None, None, None
         except Exception as exc:
             logger.warning(f"[{self._get_exchange_name()}] native balance read failed: {exc}")
-            return "error", None, None, (str(exc) or exc.__class__.__name__)[:512]
+            error = str(exc) or exc.__class__.__name__
+            return "error", None, None, error[:512]
         if capability is CapabilityStatus.SUPPORTED:
             return "observed", self._serialize_native_balances(entries), now, None
         if capability is CapabilityStatus.SIMULATED:
@@ -4591,7 +4592,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return "unsupported", None, None, None
         except Exception as exc:
             logger.warning(f"[{self._get_exchange_name()}] native position read failed: {exc}")
-            return "error", None, None, (str(exc) or exc.__class__.__name__)[:512]
+            error = str(exc) or exc.__class__.__name__
+            return "error", None, None, error[:512]
         if capability is CapabilityStatus.SUPPORTED:
             return "observed", self._serialize_open_positions(positions), now, None
         return "error", None, None, _ACCOUNT_UNEXPECTED_POSITION_CAPABILITY_MSG

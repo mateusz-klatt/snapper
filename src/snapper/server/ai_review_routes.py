@@ -275,10 +275,8 @@ async def submit_ai_review_decision_route(
             detail={
                 "success": False,
                 "error_code": "invalid_decision",
-                "message": (
-                    "decision must be 'approve' or 'reject'; got an "
-                    "unrecognised value (see details.decision)."
-                ),
+                "message": "decision must be 'approve' or 'reject'; got an "
+                "unrecognised value (see details.decision).",
                 "details": {"decision": body.decision},
             },
         ) from exc

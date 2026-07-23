@@ -125,7 +125,11 @@ def _spot_metadata(market: dict[str, Any], observed_at: datetime) -> InstrumentM
     cost_decimals = _precision_decimals(cost_precision)
     qty_decimals = _precision_decimals(amount_precision)
     active = market.get("active")
-    status = "active" if active is True else "inactive" if active is False else None
+    status = None
+    if active is True:
+        status = "active"
+    elif active is False:
+        status = "inactive"
     version = kraken_instrument_precision_version(
         tick_size=tick_decimal,
         lot_size=lot_decimal,

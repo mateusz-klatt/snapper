@@ -1592,10 +1592,9 @@ class ProcessLauncherService:
             except Exception as e:
                 logger.error(f"Failed to start process '{config.name}': {e}")
                 failed_count += 1
-                if (
-                    config.role is ProcessRoleEnum.CORE
-                    and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
-                ):
+                is_core = config.role is ProcessRoleEnum.CORE
+                is_long_running = config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+                if is_core and is_long_running:
                     failed_core_names.append(config.name)
         logger.info(
             f"Process startup complete ({self.settings.process_autostart_profile} profile): "
@@ -1654,10 +1653,9 @@ class ProcessLauncherService:
                 started_count += 1
             except Exception as e:
                 logger.error(f"Failed to start publisher '{config.name}': {e}")
-                if (
-                    config.role is ProcessRoleEnum.CORE
-                    and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
-                ):
+                is_core = config.role is ProcessRoleEnum.CORE
+                is_long_running = config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+                if is_core and is_long_running:
                     failed_core_names.append(config.name)
         logger.info(
             f"Feed publisher startup complete: {started_count} started, "
@@ -3491,10 +3489,10 @@ class ProcessLauncherService:
                         return
                     self._total_failed_restarts[name] = self._total_failed_restarts.get(name, 0) + 1
                     self._restart_attempts[name] = self._restart_attempts.get(name, 0) + 1
-                    if (
-                        self._restart_attempts[name] >= _MAX_RESTART_ATTEMPTS
-                        or self._total_failed_restarts[name] >= _MAX_TOTAL_FAILED_RESTARTS
-                    ):
+                    attempt_budget_exhausted = self._restart_attempts[name] >= _MAX_RESTART_ATTEMPTS
+                    failed_restart_total = self._total_failed_restarts[name]
+                    total_budget_exhausted = failed_restart_total >= _MAX_TOTAL_FAILED_RESTARTS
+                    if attempt_budget_exhausted or total_budget_exhausted:
                         self._escalate_restart(name, config)
                         self._clear_watchdog_state(name)
                         return

@@ -289,12 +289,12 @@ def build_portfolio_account_state(
     if row["balances_json"] is not None:
         try:
             balances = _parse_balances(row["balances_json"])
-        except json.JSONDecodeError, ValueError:
+        except ValueError:
             corrupt = True
     if row["open_positions_json"] is not None:
         try:
             positions = _parse_positions(row["open_positions_json"])
-        except json.JSONDecodeError, ValueError:
+        except ValueError:
             corrupt = True
     if corrupt:
         effective_status = EFFECTIVE_CORRUPT

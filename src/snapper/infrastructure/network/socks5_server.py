@@ -347,11 +347,9 @@ class Socks5Server:
             await self._reply_failure(client_writer, REP_CONNECTION_REFUSED)
             raise _Socks5Error(f"upstream refused: {host}:{port}") from exc
         except OSError as exc:
-            reply_code = (
-                REP_NETWORK_UNREACHABLE
-                if exc.errno in {socket.EAI_NONAME, 101, 113}
-                else REP_GENERAL_FAILURE
-            )
+            reply_code = REP_GENERAL_FAILURE
+            if exc.errno in {socket.EAI_NONAME, 101, 113}:
+                reply_code = REP_NETWORK_UNREACHABLE
             await self._reply_failure(client_writer, reply_code)
             raise _Socks5Error(f"upstream connect failed for {host}:{port}: {exc}") from exc
 

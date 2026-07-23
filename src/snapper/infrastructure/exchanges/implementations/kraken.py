@@ -1085,9 +1085,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                 raise AmbiguousOrderSubmitError(
                     client_order_id=request.client_order_id or "",
                     instrument=request.symbol,
-                    message=(
-                        f"Kraken native create_order transport failure (order may exist): {e}"
-                    ),
+                    message=f"Kraken native create_order transport failure (order may exist): {e}",
                 ) from e
             order = self._convert_kraken_native_order(result, request)
             db_result = await self._log_order_to_db(request, order)

@@ -1536,10 +1536,8 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 raise AmbiguousOrderSubmitError(
                     client_order_id=submit_id,
                     instrument=request.symbol,
-                    message=(
-                        f"Walutomat create_order gateway error "
-                        f"{e.response.status_code} (order may exist): {e}"
-                    ),
+                    message=f"Walutomat create_order gateway error {e.response.status_code} "
+                    f"(order may exist): {e}",
                 ) from e
             raise
         try:
@@ -1558,10 +1556,8 @@ class WalutomatExchangeClient(ExchangeClientBase):
             raise AmbiguousOrderSubmitError(
                 client_order_id=submit_id,
                 instrument=request.symbol,
-                message=(
-                    f"Walutomat accepted the submit but the response lacks orderId "
-                    f"(order may exist): {result}"
-                ),
+                message=f"Walutomat accepted the submit but the response lacks orderId "
+                f"(order may exist): {result}",
             ) from e
         if not isinstance(order_id, str) or not order_id:
             raise AmbiguousOrderSubmitError(

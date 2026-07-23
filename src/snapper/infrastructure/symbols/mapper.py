@@ -315,9 +315,8 @@ class SymbolMapperService:
                 return [(r[0], r[1], r[2], r[3]) for r in rows]
         except OperationalError as exc:
             error_message = str(exc).lower()
-            if "no such table" in error_message and (
-                "symbol_aliases" in error_message or "symbols" in error_message
-            ):
+            aliases_table_missing = "symbol_aliases" in error_message or "symbols" in error_message
+            if "no such table" in error_message and aliases_table_missing:
                 logger.warning(
                     "Symbol aliases table missing; skipping cache warm-up until migrations finish."
                 )
@@ -403,9 +402,10 @@ class SymbolMapperService:
                 return [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows]
         except OperationalError as exc:
             error_message = str(exc).lower()
-            if "no such table" in error_message and (
-                "symbol_exchange_capabilities" in error_message or "symbols" in error_message
-            ):
+            capabilities_table_missing = "symbol_exchange_capabilities" in error_message
+            symbols_table_missing = "symbols" in error_message
+            related_table_missing = capabilities_table_missing or symbols_table_missing
+            if "no such table" in error_message and related_table_missing:
                 logger.warning(
                     "Symbol capabilities table missing; skipping until migrations finish."
                 )

@@ -880,7 +880,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             Datetime of last update, or None if no previous update exists.
         """
         try:
-            assert self.repository is not None, "Repository not initialized"
+            if self.repository is None:
+                raise RuntimeError("Repository not initialized")
             with self.repository.get_session() as session:
                 stmt = select(Setting).where(
                     Setting.key == self._get_setting_key(), *where_active_now(Setting)

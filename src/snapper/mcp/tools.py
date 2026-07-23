@@ -1151,10 +1151,8 @@ async def _submit_ai_review_decision_tool(
         return to_call_tool_result(
             success=False,
             error_code="invalid_decision",
-            message=(
-                "decision must be 'approve' or 'reject'; got an "
-                "unrecognised value (see details.decision)."
-            ),
+            message="decision must be 'approve' or 'reject'; got an "
+            "unrecognised value (see details.decision).",
             details=sanitize_output({"decision": decision}),
         )
     result = await get_ai_review_service().submit_decision(

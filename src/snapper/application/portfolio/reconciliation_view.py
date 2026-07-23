@@ -8,7 +8,6 @@ from typing import cast
 
 from pydantic import ConfigDict
 from pydantic import TypeAdapter
-from pydantic import ValidationError
 
 from snapper.api.schemas.portfolio import PortfolioReconciliationDriftEpisode
 from snapper.api.schemas.portfolio import PortfolioReconciliationEffectiveStatus
@@ -400,5 +399,5 @@ def build_portfolio_reconciliation_view(
             error=state["error"],
             open_drift_episode=open_episode,
         )
-    except AttributeError, KeyError, RuntimeError, TypeError, ValueError, ValidationError:
+    except AttributeError, KeyError, RuntimeError, TypeError, ValueError:
         return _empty_reconciliation_view("corrupt", _CORRUPT_ERROR)

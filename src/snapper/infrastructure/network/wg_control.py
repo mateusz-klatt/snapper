@@ -109,14 +109,11 @@ def check_kernel_wireguard() -> str | None:
             ipr.link("add", ifname=_PROBE_INTERFACE_NAME, kind="wireguard")
         except NetlinkError as exc:
             if exc.code == errno.EOPNOTSUPP:
-                return (
-                    "kernel WireGuard not available — run `modprobe wireguard` on the Docker host"
-                )
+                message = "kernel WireGuard not available — "
+                message += "run `modprobe wireguard` on the Docker host"
+                return message
             if exc.code == errno.EPERM:
-                return (
-                    "snapper-egress missing NET_ADMIN capability — "
-                    "check Compose cap_add: [NET_ADMIN]"
-                )
+                return "snapper-egress missing NET_ADMIN capability — check Compose cap_add: [NET_ADMIN]"
             raise
         idx = ipr.link_lookup(ifname=_PROBE_INTERFACE_NAME)
         if idx:

@@ -12,6 +12,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -70,6 +71,23 @@ SEND_TIMEOUT_SECONDS = 1.0
 
 type _AccountTrailingKey = tuple[WebSocket, str, str]
 type _AccountTrailingFrame = tuple[str, AccountStateChangedEventData]
+
+
+@dataclass(frozen=True)
+class _DispatchFrame:
+    """Normalized frame and shared fan-out state for one dispatch cycle."""
+
+    topic: str
+    received_topic: str
+    message_str: str
+    current_time: float
+    max_pending: int
+    ai_review_payload: dict[str, Any] | None
+    orders_events_payload: JsonObject | None
+    account_state_payload: AccountStateChangedEventData | None
+    alerts_payload: dict[str, Any] | None
+    wallet_access_cache: WalletAccessCache
+    wallet_scope_as_of: datetime | None
 
 
 class ZmqWebSocketBridgeService:
@@ -426,7 +444,8 @@ class ZmqWebSocketBridgeService:
             logger.error(f"No configuration found for topic: {topic} (no matching pattern)")
             return
         try:
-            assert self.context is not None, "ZMQ context must be initialized in start()"
+            if self.context is None:
+                raise RuntimeError("ZMQ context must be initialized in start()")
             socket = self.context.socket(zmq.SUB)
             apply_hwm(socket, rcvhwm=HWM_MARKET_DATA)
             socket.connect(topic_config.endpoint)
@@ -696,25 +715,27 @@ class ZmqWebSocketBridgeService:
         """
         try:
             await asyncio.sleep(initial_delay)
-            websocket, topic, received_topic = key
+            _, topic, received_topic = key
             while True:
                 if not self._is_registered_subscription(subscription, topic):
                     return
                 message_str, payload = self._account_trailing_frames.pop(key)
-                await self._dispatch_to_subscription(
-                    subscription=subscription,
+                frame = _DispatchFrame(
                     topic=topic,
                     received_topic=received_topic,
                     message_str=message_str,
                     current_time=time.time(),
                     max_pending=self._get_max_pending(topic),
-                    is_trade=self._is_trade_topic(topic),
                     ai_review_payload=None,
                     orders_events_payload=None,
                     account_state_payload=payload,
                     alerts_payload=None,
                     wallet_access_cache={},
                     wallet_scope_as_of=datetime.now(UTC),
+                )
+                await self._dispatch_to_subscription(
+                    subscription=subscription,
+                    frame=frame,
                     apply_throttle=False,
                 )
                 if key not in self._account_trailing_frames:
@@ -926,23 +947,24 @@ class ZmqWebSocketBridgeService:
         )
         current_time = time.time()
         max_pending = self._get_max_pending(topic)
-        is_trade = self._is_trade_topic(topic)
+        frame = _DispatchFrame(
+            topic=topic,
+            received_topic=received_topic,
+            message_str=message_str,
+            current_time=current_time,
+            max_pending=max_pending,
+            ai_review_payload=ai_review_payload,
+            orders_events_payload=orders_events_payload,
+            account_state_payload=account_state_payload,
+            alerts_payload=alerts_payload,
+            wallet_access_cache=wallet_access_cache,
+            wallet_scope_as_of=wallet_scope_as_of,
+        )
         snapshot = tuple(self.topic_subscriptions[topic].values())
         for subscription in snapshot:
             await self._dispatch_to_subscription(
                 subscription=subscription,
-                topic=topic,
-                received_topic=received_topic,
-                message_str=message_str,
-                current_time=current_time,
-                max_pending=max_pending,
-                is_trade=is_trade,
-                ai_review_payload=ai_review_payload,
-                orders_events_payload=orders_events_payload,
-                account_state_payload=account_state_payload,
-                alerts_payload=alerts_payload,
-                wallet_access_cache=wallet_access_cache,
-                wallet_scope_as_of=wallet_scope_as_of,
+                frame=frame,
             )
 
     def _alerts_frame_is_valid(self, topic: str, alerts_payload: dict[str, Any] | None) -> bool:
@@ -1062,22 +1084,70 @@ class ZmqWebSocketBridgeService:
             self.topic_metrics[topic].invalid_messages += 1
         return False
 
+    def _subscription_frame_is_throttled(
+        self,
+        subscription: TopicSubscriptionModel,
+        frame: _DispatchFrame,
+        apply_throttle: bool,
+    ) -> bool:
+        """Return whether throttling consumed or rejected one subscriber frame."""
+        if not apply_throttle:
+            return False
+        if frame.account_state_payload is not None:
+            return self._coalesce_account_frame(
+                subscription=subscription,
+                topic=frame.topic,
+                received_topic=frame.received_topic,
+                message_str=frame.message_str,
+                payload=frame.account_state_payload,
+                current_time=frame.current_time,
+            )
+        return self._is_throttled(
+            subscription,
+            frame.current_time,
+            frame.topic,
+            frame.received_topic,
+        )
+
+    async def _subscription_scope_is_allowed(
+        self,
+        subscription: TopicSubscriptionModel,
+        frame: _DispatchFrame,
+    ) -> bool:
+        """Return whether every applicable per-frame scope gate admits a frame."""
+        if frame.ai_review_payload is not None and not await self._enforce_ai_review_scope(
+            subscription=subscription,
+            topic=frame.topic,
+            payload=frame.ai_review_payload,
+        ):
+            return False
+        if frame.orders_events_payload is not None and not await self._enforce_orders_events_scope(
+            subscription=subscription,
+            topic=frame.topic,
+            payload=frame.orders_events_payload,
+            access_cache=frame.wallet_access_cache,
+            as_of=frame.wallet_scope_as_of,
+        ):
+            return False
+        if frame.account_state_payload is not None and not await self._enforce_account_state_scope(
+            subscription=subscription,
+            topic=frame.received_topic,
+            payload=frame.account_state_payload,
+            access_cache=frame.wallet_access_cache,
+            as_of=frame.wallet_scope_as_of,
+        ):
+            return False
+        return frame.alerts_payload is None or self._enforce_alerts_scope(
+            subscription=subscription,
+            topic=frame.topic,
+            payload=frame.alerts_payload,
+        )
+
     async def _dispatch_to_subscription(
         self,
         *,
         subscription: TopicSubscriptionModel,
-        topic: str,
-        received_topic: str,
-        message_str: str,
-        current_time: float,
-        max_pending: int,
-        is_trade: bool,
-        ai_review_payload: dict[str, Any] | None,
-        orders_events_payload: JsonObject | None,
-        account_state_payload: AccountStateChangedEventData | None,
-        alerts_payload: dict[str, Any] | None,
-        wallet_access_cache: WalletAccessCache,
-        wallet_scope_as_of: datetime | None,
+        frame: _DispatchFrame,
         apply_throttle: bool = True,
     ) -> None:
         """Apply throttle + per-frame scope + backpressure filters to one subscriber.
@@ -1087,58 +1157,37 @@ class ZmqWebSocketBridgeService:
         so a misbehaving socket cannot wedge the fan-out loop.
         """
         try:
-            if not self._is_registered_subscription(subscription, topic):
+            if not self._is_registered_subscription(subscription, frame.topic):
                 return
-            if apply_throttle:
-                if account_state_payload is not None:
-                    if self._coalesce_account_frame(
-                        subscription=subscription,
-                        topic=topic,
-                        received_topic=received_topic,
-                        message_str=message_str,
-                        payload=account_state_payload,
-                        current_time=current_time,
-                    ):
-                        return
-                elif self._is_throttled(subscription, current_time, topic, received_topic):
-                    return
-            if ai_review_payload is not None and not await self._enforce_ai_review_scope(
+            if self._subscription_frame_is_throttled(
                 subscription=subscription,
-                topic=topic,
-                payload=ai_review_payload,
+                frame=frame,
+                apply_throttle=apply_throttle,
             ):
                 return
-            if orders_events_payload is not None and not await self._enforce_orders_events_scope(
+            if not await self._subscription_scope_is_allowed(
                 subscription=subscription,
-                topic=topic,
-                payload=orders_events_payload,
-                access_cache=wallet_access_cache,
-                as_of=wallet_scope_as_of,
+                frame=frame,
             ):
                 return
-            if account_state_payload is not None and not await self._enforce_account_state_scope(
-                subscription=subscription,
-                topic=received_topic,
-                payload=account_state_payload,
-                access_cache=wallet_access_cache,
-                as_of=wallet_scope_as_of,
+            if not self._is_registered_subscription(subscription, frame.topic):
+                return
+            if await self._handle_backpressure(
+                subscription,
+                frame.topic,
+                frame.max_pending,
+                self._is_trade_topic(frame.topic),
             ):
-                return
-            if alerts_payload is not None and not self._enforce_alerts_scope(
-                subscription=subscription,
-                topic=topic,
-                payload=alerts_payload,
-            ):
-                return
-            if not self._is_registered_subscription(subscription, topic):
-                return
-            if await self._handle_backpressure(subscription, topic, max_pending, is_trade):
                 return
             await self._try_send_message(
-                subscription, topic, message_str, current_time, received_topic
+                subscription,
+                frame.topic,
+                frame.message_str,
+                frame.current_time,
+                frame.received_topic,
             )
         except Exception as e:
-            if not self._is_registered_subscription(subscription, topic):
+            if not self._is_registered_subscription(subscription, frame.topic):
                 return
             logger.warning(f"Failed to send message to client {subscription.client_id}: {e}")
             with contextlib.suppress(Exception):
@@ -1401,7 +1450,8 @@ class ZmqWebSocketBridgeService:
             logger.warning(f"Unknown topic: {topic}")
             return
         try:
-            assert self.context is not None, "ZMQ context must be initialized in start()"
+            if self.context is None:
+                raise RuntimeError("ZMQ context must be initialized in start()")
             socket = self.context.socket(zmq.SUB)
             apply_hwm(socket, rcvhwm=HWM_MARKET_DATA)
             socket.connect(config.endpoint)
