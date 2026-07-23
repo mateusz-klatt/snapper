@@ -26,7 +26,8 @@ _SECOND_TS = "2026-07-16 09:00:00.000000"
 _AS_OF_SQL = (
     "SELECT * FROM spot_asset_precision_evidence "
     "WHERE exchange = :exchange AND asset IN (:asset) "
-    "AND timestamp <= :as_of AND known_to > :as_of ORDER BY asset, id"
+    "AND timestamp <= :as_of AND known_to > :as_of "
+    "ORDER BY asset, known_to, timestamp, id"
 )
 
 

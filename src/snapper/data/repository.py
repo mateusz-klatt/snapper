@@ -7667,7 +7667,12 @@ class SQLAlchemyRepository(Repository):
                 SpotAssetPrecisionEvidence.asset.in_(requested_assets),
                 *where_active(SpotAssetPrecisionEvidence, as_of),
             )
-            .order_by(SpotAssetPrecisionEvidence.asset, SpotAssetPrecisionEvidence.id)
+            .order_by(
+                SpotAssetPrecisionEvidence.asset,
+                SpotAssetPrecisionEvidence.known_to,
+                SpotAssetPrecisionEvidence.timestamp,
+                SpotAssetPrecisionEvidence.id,
+            )
         )
         evidence: dict[str, SpotAssetPrecisionEvidenceRow] = {}
         for persisted in result.scalars().all():
