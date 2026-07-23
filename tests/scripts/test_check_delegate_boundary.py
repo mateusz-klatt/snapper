@@ -18,25 +18,26 @@ def _write(tmp_path: Path, name: str, source: str) -> Path:
 class TestAllowlistFor:
     """Test suite for per-file allowlist selection."""
 
-    def test_runner_uses_the_wide_process_manager_allowlist(self) -> None:
-        """The runner may reach the three process-manager modules and core.
+    def test_registration_uses_the_wide_process_manager_allowlist(self) -> None:
+        """Only the managed registration may reach process-manager modules.
 
-        Given: The runner module name,
+        Given: The registration module name,
         When: The allowlist is resolved,
         Then: It includes the process-manager models module and core types.
         """
-        allowed = boundary.allowlist_for("runner.py")
+        allowed = boundary.allowlist_for("registration.py")
         assert "snapper.application.process_manager.models" in allowed
         assert "snapper.core.types" in allowed
 
-    def test_other_modules_get_only_json_types(self) -> None:
-        """Non-runner agent-plane modules may reach only json_types.
+    @pytest.mark.parametrize("filename", ["runner.py", "chat_completions.py", "pid1.py"])
+    def test_agent_lifecycle_modules_get_only_json_types(self, filename: str) -> None:
+        """Dependency-light agent modules may reach only json_types.
 
-        Given: A non-runner module name,
+        Given: A non-registration module name,
         When: The allowlist is resolved,
         Then: It is exactly the json_types single-entry default.
         """
-        allowed = boundary.allowlist_for("chat_completions.py")
+        allowed = boundary.allowlist_for(filename)
         assert allowed == frozenset({"snapper.core.json_types"})
 
 
@@ -139,12 +140,18 @@ class TestLookalikeAndAllowlist:
     def test_allowlisted_first_party_passes(self, tmp_path: Path) -> None:
         """An allowlisted first-party import produces no violation.
 
-        Given: An agent-plane file importing an allowlisted core module,
+        Given: The registration file importing an allowlisted core module,
         When: The file is checked,
         Then: No violation is reported.
         """
-        module = _write(tmp_path, "runner.py", "from snapper.core.types import ProcessRoleEnum\n")
-        findings = boundary.check_delegate_boundary(module, boundary.allowlist_for("runner.py"))
+        module = _write(
+            tmp_path,
+            "registration.py",
+            "from snapper.core.types import ProcessRoleEnum\n",
+        )
+        findings = boundary.check_delegate_boundary(
+            module, boundary.allowlist_for("registration.py")
+        )
         assert findings == []
 
     def test_relative_import_is_not_a_first_party_violation(self, tmp_path: Path) -> None:
@@ -255,7 +262,7 @@ class TestScanAndRun:
         When: run_scan executes in strict mode,
         Then: It returns exit code 0.
         """
-        _write(tmp_path, "runner.py", "from snapper.core.types import ProcessRoleEnum\n")
+        _write(tmp_path, "registration.py", "from snapper.core.types import ProcessRoleEnum\n")
         assert boundary.run_scan(tmp_path, strict_mode=True) == 0
 
     def test_real_delegate_package_is_clean(self) -> None:

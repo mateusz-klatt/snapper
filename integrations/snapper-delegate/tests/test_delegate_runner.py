@@ -31,6 +31,7 @@ from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import StartProcessStatusEnum
+from snapper_delegate.registration import ManagedDelegateRunner
 from snapper_delegate.runner import DelegateRunner
 
 _VALID_PARAMETERS: dict[str, object] = {
@@ -106,7 +107,7 @@ def _delegate_config(tags: tuple[str, ...] = ("delegate", "runner")) -> ProcessC
         name="delegate_runner",
         enabled=True,
         mode=ProcessModeEnum.PROCESS,
-        class_path="snapper_delegate.runner.DelegateRunner",
+        class_path="snapper_delegate.registration.ManagedDelegateRunner",
         method="start",
         parameters={},
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
@@ -227,19 +228,24 @@ def test_delegate_extra_package_discovery_registers_runner(
     Then: The generic runner appears in the shared process registry.
     """
     previous_entry = registry_module._PROCESS_REGISTRY.pop("delegate_runner", None)
-    previous_module: ModuleType | None = sys.modules.pop("snapper_delegate.runner", None)
+    previous_runner_module: ModuleType | None = sys.modules.pop("snapper_delegate.runner", None)
+    previous_registration_module: ModuleType | None = sys.modules.pop(
+        "snapper_delegate.registration", None
+    )
     bootstrap = SimpleNamespace(strategy_extra_packages="snapper_delegate")
     monkeypatch.setattr(registry_module, "get_bootstrap_settings", lambda: bootstrap)
     try:
         registry_module.discover_processes()
         entry = get_registered_processes()["delegate_runner"]
-        assert entry.class_path == "snapper_delegate.runner.DelegateRunner"
+        assert entry.class_path == "snapper_delegate.registration.ManagedDelegateRunner"
     finally:
         registry_module._PROCESS_REGISTRY.pop("delegate_runner", None)
         if previous_entry is not None:
             registry_module._PROCESS_REGISTRY["delegate_runner"] = previous_entry
-        if previous_module is not None:
-            sys.modules["snapper_delegate.runner"] = previous_module
+        if previous_runner_module is not None:
+            sys.modules["snapper_delegate.runner"] = previous_runner_module
+        if previous_registration_module is not None:
+            sys.modules["snapper_delegate.registration"] = previous_registration_module
 
 
 def test_delegate_runner_registration_is_process_managed() -> None:
@@ -250,7 +256,7 @@ def test_delegate_runner_registration_is_process_managed() -> None:
     Then: It is a disabled long-running PROCESS template with strict parameters.
     """
     entry: ProcessRegistryEntry = get_registered_processes()["delegate_runner"]
-    assert entry.class_ref is DelegateRunner
+    assert entry.class_ref is ManagedDelegateRunner
     assert entry.parameters_model is DelegateProcessParameters
     assert entry.mode is ProcessModeEnum.PROCESS
     assert entry.lifecycle is ProcessLifecycleEnum.LONG_RUNNING

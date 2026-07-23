@@ -17,7 +17,7 @@ This module reconstructs that safety net at a higher layer:
   * :data:`KNOWN_ENV_KEYS` is the union of every subsystem's contract —
     :data:`BOOTSTRAP_ENV_VARS` (mirrors :class:`BootstrapSettingsLoader`
     field aliases) plus each owning module's exported ``ENV_VARS``
-    frozenset.
+    frozenset, including host-side Compose profile inputs.
   * :func:`validate_env_file` parses ``.env`` and rejects any key not
     in the allowlist, surfacing :mod:`difflib` suggestions so the
     typo is visible at startup rather than as a silent default.
@@ -49,6 +49,7 @@ from snapper.application.notify.portfolio_drift_recovery import (
 )
 from snapper.application.retention.policies import ENV_VARS as RETENTION_ENV_VARS
 from snapper.application.system_metrics.snapshotter import ENV_VARS as SYSTEM_METRICS_ENV_VARS
+from snapper.config.delegate_profile import ENV_VARS as DELEGATE_PROFILE_ENV_VARS
 from snapper.data.repository import ENV_VARS as DB_ENGINE_ENV_VARS
 from snapper.messaging.infrastructure.tick_probe import ENV_VARS as TICK_PROBE_ENV_VARS
 from snapper.messaging.infrastructure.trade_probe import ENV_VARS as TRADE_PROBE_ENV_VARS
@@ -101,11 +102,11 @@ Mirrored manually to keep this module free of a back-import. The
 stay aligned with the actual loader fields.
 """
 
-
 KNOWN_ENV_KEYS: frozenset[str] = (
     BOOTSTRAP_ENV_VARS
     | AI_RESEARCH_TRIGGER_ENV_VARS
     | AI_REVIEW_MAINTENANCE_ENV_VARS
+    | DELEGATE_PROFILE_ENV_VARS
     | DB_ENGINE_ENV_VARS
     | DB_STATS_ENV_VARS
     | MARKET_WATCHDOG_ENV_VARS

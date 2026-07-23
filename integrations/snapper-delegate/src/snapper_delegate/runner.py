@@ -1,8 +1,10 @@
-"""Generic managed-process runner for delegate workloads.
+"""Generic idle runner lifecycle for delegate workloads.
 
 The current runner intentionally provides lifecycle plumbing only. It
 does not perform model calls, network requests, tool execution, or consult
-handling.
+handling. The class is dependency-light so the runner-only container can
+import it without loading Snapper's coordinator, database, message bus, or
+broker stack. Managed-process registration lives in a separate module.
 """
 
 import asyncio
@@ -10,29 +12,11 @@ import signal
 
 from loguru import logger
 
-from snapper.application.process_manager.models import RegisterableProcess
-from snapper.application.process_manager.process_parameters import DelegateProcessParameters
-from snapper.application.process_manager.registry import register_process
-from snapper.core.json_types import JsonObject
-from snapper.core.types import ProcessLifecycleEnum
-from snapper.core.types import ProcessModeEnum
-from snapper.core.types import ProcessRoleEnum
-
 _HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
-@register_process(
-    name="delegate_runner",
-    description="Generic managed delegate workload",
-    lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
-    role=ProcessRoleEnum.CORE,
-    tags=("delegate", "runner"),
-    parameters_model=DelegateProcessParameters,
-    enabled=False,
-    mode=ProcessModeEnum.PROCESS,
-)
-class DelegateRunner(RegisterableProcess):
-    """Run an idle delegate lifecycle under the process manager.
+class DelegateRunner:
+    """Run an idle delegate lifecycle directly or under process management.
 
     The configuration values are retained for later increments but are
     deliberately unused here. This first increment only proves that the
@@ -120,7 +104,7 @@ class DelegateRunner(RegisterableProcess):
         self._stop_event.set()
         await asyncio.sleep(0)
 
-    def get_status(self) -> JsonObject:
+    def get_status(self) -> dict[str, object]:
         """Return the runner's local lifecycle status.
 
         Returns:

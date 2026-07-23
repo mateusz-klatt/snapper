@@ -25,7 +25,7 @@ FORBIDDEN_ROOTS: Final[tuple[tuple[str, ...], ...]] = (
     ("snapper", "data"),
 )
 
-_RUNNER_ALLOWLIST: Final[frozenset[str]] = frozenset(
+_REGISTRATION_ALLOWLIST: Final[frozenset[str]] = frozenset(
     {
         "snapper.application.process_manager.models",
         "snapper.application.process_manager.registry",
@@ -35,7 +35,7 @@ _RUNNER_ALLOWLIST: Final[frozenset[str]] = frozenset(
     }
 )
 _DEFAULT_ALLOWLIST: Final[frozenset[str]] = frozenset({"snapper.core.json_types"})
-_PER_FILE_ALLOWLIST: Final[dict[str, frozenset[str]]] = {"runner.py": _RUNNER_ALLOWLIST}
+_PER_FILE_ALLOWLIST: Final[dict[str, frozenset[str]]] = {"registration.py": _REGISTRATION_ALLOWLIST}
 
 
 def allowlist_for(filename: str) -> frozenset[str]:

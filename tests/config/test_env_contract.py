@@ -32,6 +32,7 @@ from snapper.application.notify.portfolio_drift_recovery import (
 from snapper.application.retention.policies import ENV_VARS as RETENTION_ENV_VARS
 from snapper.application.system_metrics.snapshotter import ENV_VARS as SYSTEM_METRICS_ENV_VARS
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.config.delegate_profile import ENV_VARS as DELEGATE_PROFILE_ENV_VARS
 from snapper.config.env_contract import BOOTSTRAP_ENV_VARS
 from snapper.config.env_contract import KNOWN_ENV_KEYS
 from snapper.config.env_contract import UnknownEnvKeyError
@@ -67,6 +68,10 @@ class TestKnownEnvKeys:
         assert "MASTER_PASSWORD" in KNOWN_ENV_KEYS
         assert "SERVER_PORT" in KNOWN_ENV_KEYS
         assert "SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS" in KNOWN_ENV_KEYS
+
+    def test_includes_delegate_profile_keys(self) -> None:
+        """The optional Compose profile contributes only its host inputs."""
+        assert DELEGATE_PROFILE_ENV_VARS.issubset(KNOWN_ENV_KEYS)
 
     def test_includes_system_metrics_keys(self) -> None:
         """The system-metrics subsystem contributes its ENV_VARS."""

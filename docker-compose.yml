@@ -157,6 +157,49 @@ services:
         condition: service_healthy
       snapper:
         condition: service_healthy
+  snapper-delegate:
+    image: klattm/snapper:latest
+    build:
+      context: .
+      target: runtime
+    container_name: snapper-delegate
+    profiles:
+      - delegate
+    entrypoint: ["python", "-m", "snapper_delegate.pid1"]
+    command: []
+    environment:
+      PYTHONPATH: /app/integrations/snapper-delegate/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONNOUSERSITE: "1"
+      PYTHONSAFEPATH: "1"
+      PYTHONUNBUFFERED: "1"
+      SNAPPER_DELEGATE_MODEL_ALIAS: ${SNAPPER_DELEGATE_MODEL_ALIAS:-unconfigured}
+      SNAPPER_DELEGATE_BASE_URL: ${SNAPPER_DELEGATE_BASE_URL:-}
+      SNAPPER_DELEGATE_API_KEY_FILE: /run/secrets/delegate/api_key
+      SNAPPER_DELEGATE_TOKEN_FILE: /run/secrets/delegate/delegate_token
+      SNAPPER_DELEGATE_MAX_TOOL_ROUNDS: ${SNAPPER_DELEGATE_MAX_TOOL_ROUNDS:-4}
+      SNAPPER_LOG_FILE: /app/data/log/delegate/model/delegate.log
+    user: "888:888"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: "none"
+    volumes:
+      - type: bind
+        source: ./data/log/delegate/no-egress
+        target: /app/data/log/delegate/model
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16777216,uid=888,gid=888,mode=1770
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 64
+    restart: unless-stopped
+    healthcheck:
+      disable: true
   snapper-web:
     image: klattm/snapper:latest
     container_name: snapper-web

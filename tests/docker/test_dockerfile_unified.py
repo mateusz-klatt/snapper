@@ -20,7 +20,11 @@ from typing import Final
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent.parent
 _DOCKERFILE: Final[Path] = _REPO_ROOT / "Dockerfile"
+_DOCKERIGNORE: Final[Path] = _REPO_ROOT / ".dockerignore"
 _LEGACY_EGRESS_DOCKERFILE: Final[Path] = _REPO_ROOT / "docker" / "Dockerfile.egress"
+_DELEGATE_SOURCE: Final[Path] = (
+    _REPO_ROOT / "integrations" / "snapper-delegate" / "src" / "snapper_delegate"
+)
 
 
 def _runtime_stage_lines() -> list[str]:
@@ -180,3 +184,42 @@ def test_runtime_stage_exposes_both_ports() -> None:
     expose_blob = " ".join(expose_lines)
     assert "8000" in expose_blob
     assert "8081" in expose_blob
+
+
+def test_runtime_stage_bakes_delegate_integration_source() -> None:
+    """Spec — the runner-only package is present in the unified runtime.
+
+    Given: The local delegate integration and the runtime Docker stage,
+    When: Build-context packaging is inspected,
+    Then: The source package exists and is copied to its stable image path.
+    """
+    assert (_DELEGATE_SOURCE / "pid1.py").is_file()
+    assert (_DELEGATE_SOURCE / "registration.py").is_file()
+    assert (_DELEGATE_SOURCE / "runner.py").is_file()
+    runtime = "\n".join(_runtime_stage_lines())
+    assert "COPY integrations/snapper-delegate/src ./integrations/snapper-delegate/src" in runtime
+    assert "mkdir -p /app/data/log/delegate/model" in runtime
+    assert "chown -R snapper:snapper /app/data" in runtime
+
+
+def test_docker_build_context_does_not_exclude_delegate_source() -> None:
+    """Spec — Docker ignore rules preserve the baked integration.
+
+    Given: The root Docker build context and its ignore rules,
+    When: Delegate-related exclusion patterns are inspected,
+    Then: No active rule removes the integration directory from the context.
+    """
+    active_rules = [
+        line.strip()
+        for line in _DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    forbidden_rules = {
+        "integrations/",
+        "integrations/*",
+        "integrations/**",
+        "integrations/snapper-delegate/",
+        "integrations/snapper-delegate/**",
+        "**/snapper-delegate/**",
+    }
+    assert forbidden_rules.isdisjoint(active_rules)

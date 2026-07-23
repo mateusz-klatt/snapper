@@ -80,8 +80,10 @@ COPY docker/web/Caddyfile /etc/caddy/Caddyfile
 COPY alembic.ini ./
 COPY src/snapper/data/migrations ./src/snapper/data/migrations
 COPY *proprietary/data/migrations ./proprietary/data/migrations
+COPY integrations/snapper-delegate/src ./integrations/snapper-delegate/src
 
-RUN mkdir -p /app/data && chown snapper:snapper /app/data
+RUN mkdir -p /app/data/log/delegate/model \
+ && chown -R snapper:snapper /app/data
 
 # start-period must cover a legitimate slow boot: the DB readiness gate
 # alone may wait up to 120s for Postgres after a host reboot, plus

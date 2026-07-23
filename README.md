@@ -545,7 +545,8 @@ The compose stack runs seven application services on the internal
 (`klattm/snapper:latest`) that bundles the python runtime + the Caddy
 binary. Each service overrides `entrypoint` / `command` to launch the
 right process. The optional `postgres` service is gated behind the
-`dev` compose profile.
+`dev` compose profile. A separate runner-only delegate canary is gated
+behind the `delegate` profile and is not part of the default stack.
 
 - `snapper-broker` — dedicated ZeroMQ XPUB/XSUB broker container
   (`command: ["broker", "--xsub", "tcp://0.0.0.0:7500", "--xpub",
@@ -578,16 +579,27 @@ right process. The optional `postgres` service is gated behind the
   WebSocket bridge, and fans deliveries out to APNs using the
   `apns_*` settings. Without this container the ENTIRE alert chain is
   dark — no alert rows, no UI alerts, no push.
+- `snapper-delegate` — optional runner-only Python PID1 under the
+  `delegate` profile. This no-egress increment is deliberately inert:
+  `network_mode: none`, no coordinator, DB, broker, Docker socket,
+  source-tree bind mount, full `data/` mount, secret mount, or host port.
+  It runs as `888:888` on a read-only root filesystem with all
+  capabilities dropped, a no-exec temporary filesystem, fixed resource
+  limits, and only `data/log/delegate/no-egress` mounted at its model log
+  path. The host log directory must already exist and be writable by
+  UID/GID 888; Compose will not create it. Missing configuration or
+  secret files leaves the PID1 safely idle. This profile does not enable
+  a vendor request or any network path.
 - `snapper-web` — Caddy serving the React SPA from `/srv/dist` and
   reverse-proxying `/api/*`, `/api/ws`, `/api/mcp`, `/docs`, `/redoc`,
   `/openapi.json` to `snapper:8000`. `entrypoint: ["/usr/bin/caddy"]`,
   `command: ["run", "--config", "/etc/caddy/Caddyfile"]`. Owns the host
   `127.0.0.1:8000:8000` bind.
 
-All seven application services are `restart: unless-stopped` so they come back automatically
-after a host reboot (assuming `systemctl is-enabled docker` returns
-`enabled`). Services explicitly stopped via `docker compose stop` stay
-stopped.
+Every listed application service is `restart: unless-stopped` so it comes
+back automatically after a host reboot (assuming
+`systemctl is-enabled docker` returns `enabled`). Services explicitly stopped
+via `docker compose stop` stay stopped.
 
 ### Targeted restarts (no tick-stream drop)
 
