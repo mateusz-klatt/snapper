@@ -448,6 +448,31 @@ async def test_replay_paths_without_a_boundary_stay_boundary_unavailable() -> No
     bundle_read.assert_not_awaited()
 
 
+def test_replay_boundary_builder_rejects_an_absent_capture() -> None:
+    """The extracted boundary builder preserves the dispatch fail-closed guard.
+
+    Given: An internal spot dispatch context without a boundary capture.
+    When: The replay-boundary builder is called outside the guarded dispatch path.
+    Then: It rejects the impossible state with the public boundary-unavailable reason.
+    """
+    repository, _, _ = _repository()
+    context = reconciliation_dispatch._DispatchContext(
+        repository=repository,
+        account=_account(),
+        method="spot_execution_replay",
+        position_capability=CapabilityStatus.NOT_APPLICABLE,
+        evaluated_at=_NOW,
+        boundary=None,
+        history_capture=None,
+    )
+    with pytest.raises(ValueError, match="^spot_boundary_unavailable$"):
+        reconciliation_dispatch._spot_replay_boundary(
+            context,
+            _unanchored_spot_bundle(),
+            None,
+        )
+
+
 @pytest.mark.parametrize(
     "foreign_boundary",
     [
