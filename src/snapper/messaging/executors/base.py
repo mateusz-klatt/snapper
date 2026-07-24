@@ -32,6 +32,7 @@ import zmq.asyncio
 from loguru import logger
 
 from snapper.application.engine.service import compute_shard_key
+from snapper.application.portfolio.account_status import ACCOUNT_FRESHNESS_CEILING_S
 from snapper.application.portfolio.account_view import build_portfolio_account_state
 from snapper.application.portfolio.execution_chain import execution_chain_genesis
 from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
@@ -440,10 +441,12 @@ _ACCOUNT_OBSERVE_INTERVAL_S = 240.0
 Account state changes slowly; ~4 min keeps every state comfortably inside its
 ``_ACCOUNT_FRESHNESS_CEILING_S`` window while staying well under Kraken's REST
 pressure. Independent of the 60s order-reconciliation cycle."""
-_ACCOUNT_FRESHNESS_CEILING_S = 300.0
+_ACCOUNT_FRESHNESS_CEILING_S = ACCOUNT_FRESHNESS_CEILING_S
 """Authority window stamped on a freshly observed account balance. Past this
 the read layer demotes an ``observed`` row to ``stale`` rather than serving it
-as live truth."""
+as live truth. Sourced from
+:data:`snapper.application.portfolio.account_status.ACCOUNT_FRESHNESS_CEILING_S`
+so the observer's stamp and every read-side reconstruction share one literal."""
 _ACCOUNT_FETCH_TIMEOUT_S = 15.0
 """Per-call bound on a native balance/position read. A wedged venue call is
 recorded as an ``error`` observation (last-good retained, stale-visible) and

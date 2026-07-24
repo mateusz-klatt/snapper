@@ -438,6 +438,114 @@ class PortfolioPnlAnchorWriteEvidence(TypedDict):
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
 
 
+PNL_SAMPLE_CALC_VERSION = "5B.1"
+"""Algorithm version stamped on every persisted Phase-5B sample point.
+
+Independent of the anchor read gate's frozen ``5A.13`` timeline contract: the
+forward-only sample writer carries its own version. A persisted sample is only
+read back (peak re-derivation, progress, equity overlay) when its
+``calc_version`` matches this exact constant, so a contract change orphans stale
+samples instead of silently mixing shapes. Hosted in the cycle-free data-layer
+types module so the repository validator can compare against the REAL constant
+(never a caller-echoed scope value); ``pnl_timeline_service`` re-exposes it."""
+
+
+class PortfolioPnlSampleRow(TypedDict):
+    """One persisted Phase-5B continuous sample point (write and read shape).
+
+    A ``sample`` sibling of :class:`PortfolioPnlAnchorRow` on the same
+    ``portfolio_pnl_points`` table. The single ``valuation_status`` covers BOTH
+    the P&L projection and the equity observation plane (decision R1/A4): a
+    ``complete`` row carries a finite ``unrealized_pnl``, mark provenance, the USD
+    equity trio (``cash_usd`` + ``position_value_usd``) and a ``drawdown`` in
+    ``[0, 1]``; an ``incomplete`` row carries ``unrealized_pnl`` NULL, mark
+    provenance NULL, the equity trio NULL and ``drawdown`` NULL. The cumulatives
+    (``realized_pnl`` / ``fee_pnl`` / ``accrual_pnl``) are always finite and
+    epoch-relative; ``external_flow_adjustment`` is ``0.0`` in v1 (external flows
+    are unadjusted, decision R10). ``audit_json`` is the sample's provenance
+    envelope stored in the ``opening_basket_json`` column: for a ``complete`` row
+    it records per-currency valuation provenance and per-exchange observation
+    provenance (A3/A5) with no failure reason codes; for an ``incomplete`` row it
+    carries the non-empty canonical reason-code list (R9). ``point_kind`` is always
+    ``sample`` and a sample's ``point_time`` is strictly after the anchor ``t0``.
+    """
+
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    wallet_public_id: str
+    mode: Literal["live", "paper"]
+    valuation_ccy: str
+    point_time: datetime
+    point_kind: Literal["sample"]
+    epoch_public_id: str
+    calc_version: str
+    valuation_status: Literal["complete", "incomplete"]
+    realized_pnl: float
+    fee_pnl: float
+    accrual_pnl: float
+    external_flow_adjustment: float
+    unrealized_pnl: float | None
+    cash_usd: float | None
+    position_value_usd: float | None
+    drawdown: float | None
+    mark_source: str | None
+    mark_time: datetime | None
+    audit_json: str
+
+
+class PortfolioPnlSampleBatchResult(TypedDict):
+    """Outcome of one ``record_portfolio_pnl_samples`` catch-up chunk.
+
+    Every requested minute lands in exactly one bucket. ``inserted`` are the
+    ``point_time`` instants freshly persisted by this call. ``already_present``
+    are minutes whose active row was byte-for-byte the value being written
+    (winner idempotency — a success skip). ``conflicts`` are minutes whose active
+    row differs from the value being written (a correction that must go through
+    :meth:`supersede_portfolio_pnl_sample`, never silently overwritten) plus, on
+    the defensive IntegrityError rollback path, any requested minute that could
+    not be confirmed as an identical winner. All three are ascending, deduplicated
+    ``point_time`` tuples.
+    """
+
+    inserted: tuple[datetime, ...]
+    already_present: tuple[datetime, ...]
+    conflicts: tuple[datetime, ...]
+
+
+class VenueAccountObservationAttemptRow(TypedDict):
+    """One append-only venue account-observation attempt, returned AS-IS.
+
+    The temporal basket read
+    (:meth:`get_venue_account_observation_attempts_at`) returns the single latest
+    attempt per exchange known by a grid minute — including a failed or
+    balance-unobserved attempt — so the caller never skips past a later failure to
+    an older success. ``attempt_status`` / ``balance_status`` / ``error`` are the
+    raw poll outcome; ``balances_json`` and ``balance_observed_at`` are populated
+    only when the balance was freshly ``observed`` or ``simulated``. ``timestamp``
+    is the observation bus time (the knowledge instant), and ``id`` is the
+    immutable row identity used for tie-break determinism and provenance.
+    """
+
+    id: int
+    public_id: str
+    wallet_public_id: str
+    exchange: str
+    mode: str
+    attempt_status: str
+    balance_status: str
+    position_status: str
+    balances_json: str | None
+    open_positions_json: str | None
+    balance_observed_at: datetime | None
+    position_observed_at: datetime | None
+    error: str | None
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
 class PnlTimelineExecutionLineageRow(TypedDict):
     """One order's candidate initiating lineage for P&L attribution.
 

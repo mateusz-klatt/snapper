@@ -91,6 +91,7 @@ from snapper.application.portfolio.pnl_timeline import derive_timeline_opening
 from snapper.core.numeric import is_positive_finite
 from snapper.data.repository import PnlTimelineAnchorEvidenceMismatchError
 from snapper.data.repository import Repository
+from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION as _PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlFxRateRow
@@ -115,6 +116,15 @@ PNL_TIMELINE_CALC_VERSION = "5A.13"
 Bumped whenever the pool replay, decomposition, mark resolution, or public point
 contract changes so a cached or persisted point can be told apart from a
 re-derivation under a newer contract.
+"""
+
+PNL_SAMPLE_CALC_VERSION = _PNL_SAMPLE_CALC_VERSION
+"""Re-exposed Phase-5B sample algorithm version.
+
+The canonical definition lives in :mod:`snapper.data.repository_types` so the
+data-layer sample validator compares against the real constant rather than a
+caller-supplied scope echo; this module re-exposes it for the snapshotter and
+overlay callers that already import from here.
 """
 
 PNL_TIMELINE_MAX_WORK_UNITS: Final[int] = 131_040

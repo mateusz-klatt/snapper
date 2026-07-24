@@ -77,6 +77,7 @@ from contextlib import asynccontextmanager
 from contextlib import suppress
 from dataclasses import asdict
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC
 from datetime import date
 from datetime import datetime
@@ -248,6 +249,7 @@ from snapper.data.models import VenueFeeSchedule
 from snapper.data.models import Wallet
 from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
+from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import AiDelegateRow
@@ -335,6 +337,8 @@ from snapper.data.repository_types import PortfolioDriftEpisodeRow
 from snapper.data.repository_types import PortfolioDriftEpisodeTransitionRow
 from snapper.data.repository_types import PortfolioPnlAnchorRow
 from snapper.data.repository_types import PortfolioPnlAnchorWriteEvidence
+from snapper.data.repository_types import PortfolioPnlSampleBatchResult
+from snapper.data.repository_types import PortfolioPnlSampleRow
 from snapper.data.repository_types import PortfolioReconciliationEvaluationRow
 from snapper.data.repository_types import PortfolioReconciliationLineageObservationRow
 from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
@@ -372,6 +376,7 @@ from snapper.data.repository_types import UserOperatorMembershipRow
 from snapper.data.repository_types import UserRecentSubmitRow
 from snapper.data.repository_types import UserTradingCapsRow
 from snapper.data.repository_types import VenueAccountAttemptRow
+from snapper.data.repository_types import VenueAccountObservationAttemptRow
 from snapper.data.repository_types import VenueAccountStateRow
 from snapper.data.repository_types import VenueEventInsertRow
 from snapper.data.repository_types import VenueEventRow
@@ -747,6 +752,27 @@ class ExecutionPhysicalMutationError(RuntimeError):
 
 class PnlTimelineAnchorEvidenceMismatchError(RuntimeError):
     """Raised when an anchor's frozen execution evidence changed before write."""
+
+
+class PortfolioPnlSampleScopeError(RuntimeError):
+    """Raised when a Phase-5B sample write scope cannot be sampled.
+
+    The scope's active anchor is missing (never sampleable) or its claimed
+    ``epoch_public_id`` / ``anchor_point_time`` do not match the anchor persisted
+    for ``(wallet, mode, valuation_ccy)``. Verified against the database inside
+    the locked writer transaction so a caller-supplied scope can never fork the
+    series onto a stale or invented epoch.
+    """
+
+
+class PortfolioPnlSampleSupersedeError(RuntimeError):
+    """Raised when a Phase-5B sample supersede is refused.
+
+    Guards the two sanctioned close-and-insert paths: no active sample exists for
+    the minute, the active row's epoch does not match the write scope, or a
+    self-heal attempt (no late-fill-correction flag) targets a complete row or a
+    row carrying a final (non-retryable) reason code.
+    """
 
 
 class ScopeGrantConflictError(Exception):
@@ -1619,6 +1645,81 @@ def _resolve_disposable_engine(engine: object) -> _DisposableEngine | None:
     if not callable(dispose):
         return None
     return cast(_DisposableEngine, engine)
+
+
+_PNL_SAMPLE_RETRYABLE_REASONS: frozenset[str] = frozenset(
+    {"missing_mark", "missing_fx_rate", "basket_stale", "basket_missing_venue"}
+)
+"""Canonical retryable reason codes (R9): a self-heal supersede may replace an
+``incomplete`` sample carrying only these when its evidence later lands."""
+
+_PNL_SAMPLE_FINAL_REASONS: frozenset[str] = frozenset(
+    {"fill_gap_evidence", "non_finite", "future_clock", "pnl_untrusted"}
+)
+"""Canonical final reason codes (R9): an ``incomplete`` sample carrying any of
+these is honest and terminal; self-heal never retries it."""
+
+_PNL_SAMPLE_REASON_CODES: frozenset[str] = _PNL_SAMPLE_RETRYABLE_REASONS | _PNL_SAMPLE_FINAL_REASONS
+"""Every canonical persisted reason code the sample validator accepts."""
+
+_PNL_SAMPLE_NEVER_PERSIST_REASONS: frozenset[str] = frozenset({"pnl_untrusted"})
+"""A ``pnl_untrusted`` minute writes NO row at all (R1); the validator rejects one
+defensively if ever handed it."""
+
+_PNL_SAMPLE_AUDIT_KEYS: frozenset[str] = frozenset({"valuation", "observations", "reason_codes"})
+"""The only permitted top-level keys of a sample audit envelope. Unknown
+top-level keys are rejected; forward-compatible extra fields inside individual
+records are allowed."""
+
+_PNL_SAMPLE_VALUATION_KINDS: frozenset[str] = frozenset({"identity", "fiat_fx", "crypto_candle"})
+"""Canonical price-plane kinds for one audit valuation record (A3/A5), mirroring
+the basket valuator's provenance kinds."""
+
+_PNL_SAMPLE_VALUATION_CANDLE_KINDS: frozenset[str] = frozenset({"fiat_fx", "crypto_candle"})
+"""Valuation kinds that MUST carry a candle version identity; ``identity``
+(USD) consumes no candle and must carry none."""
+
+
+@dataclass(frozen=True)
+class PortfolioPnlSampleScope:
+    """Write-side scope binding one Phase-5B sample chunk to its anchor.
+
+    Every row in a ``record_portfolio_pnl_samples`` chunk (and every
+    ``supersede_portfolio_pnl_sample`` replacement) must belong to exactly this
+    ``(wallet_public_id, mode, valuation_ccy)`` identity, carry this
+    ``epoch_public_id`` and sit strictly after ``anchor_point_time`` (the anchor
+    ``t0`` — the identity index omits ``point_kind`` so a ``t0`` sample would
+    collide with the anchor). The caller's ``epoch_public_id`` and
+    ``anchor_point_time`` are not trusted: the writers load the scope's active
+    anchor inside the locked transaction and refuse unless both match the anchor,
+    so a stale or forged scope can never fork the series. ``calc_version`` is NOT
+    carried here — the validator pins it to the real
+    :data:`PNL_SAMPLE_CALC_VERSION` constant, never a scope echo.
+    """
+
+    wallet_public_id: str
+    mode: str
+    valuation_ccy: str
+    epoch_public_id: str
+    anchor_point_time: datetime
+
+
+@dataclass(frozen=True)
+class PortfolioPnlSampleQuery:
+    """Read-side scope pinning the exact-predicate Phase-5B sample reads.
+
+    The range, peak and progress reads all filter the active
+    (``known_to == KNOWN_TO_MAX``) ``sample`` rows for exactly this
+    ``(wallet_public_id, mode, valuation_ccy)`` identity, ``epoch_public_id`` and
+    ``calc_version`` (decision R4). No caller-clock ``as_of`` is applied: a sample
+    is finalized truth, not a historical projection.
+    """
+
+    wallet_public_id: str
+    mode: str
+    valuation_ccy: str
+    epoch_public_id: str
+    calc_version: str
 
 
 class Repository(ABC):
@@ -2975,6 +3076,107 @@ class Repository(ABC):
 
         Returns:
             Rows ordered by ``(base, quote, exchange, open_at, instrument)``.
+        """
+        ...
+
+    @abstractmethod
+    async def record_portfolio_pnl_samples(
+        self,
+        rows: Sequence[PortfolioPnlSampleRow],
+        scope: PortfolioPnlSampleScope,
+    ) -> PortfolioPnlSampleBatchResult:
+        """Persist one validated Phase-5B sample catch-up chunk atomically.
+
+        Every row is validated against ``scope`` (combined-status truth table,
+        canonical reason codes, epoch / calc_version / after-``t0`` pins); any
+        invalid row rejects the whole chunk before a write. The insert runs in one
+        transaction under a per-scope advisory lock (Postgres) or ``BEGIN
+        IMMEDIATE`` (SQLite). An identical active row for a minute is an idempotent
+        success skip; a different active row is a returned conflict, never
+        overwritten. See :class:`PortfolioPnlSampleBatchResult`.
+        """
+        ...
+
+    @abstractmethod
+    async def supersede_portfolio_pnl_sample(
+        self,
+        scope: PortfolioPnlSampleScope,
+        replacement: PortfolioPnlSampleRow,
+        *,
+        late_fill_correction: bool,
+    ) -> PortfolioPnlSampleRow:
+        """Close the active sample for one minute and insert its replacement.
+
+        SCD2 close-and-insert within the SAME epoch for the two sanctioned paths:
+        late-fill recompute-forward (``late_fill_correction=True``) and bounded
+        self-heal of a retryable ``incomplete`` row (``late_fill_correction=False``
+        — refused unless the active row is ``incomplete`` and carries only
+        retryable reason codes). Refuses when no active sample exists for the
+        minute or its scope/epoch does not match.
+        """
+        ...
+
+    @abstractmethod
+    async def get_portfolio_pnl_samples(
+        self,
+        query: PortfolioPnlSampleQuery,
+        window_start: datetime,
+        window_end: datetime,
+        *,
+        status: str | None = None,
+    ) -> list[PortfolioPnlSampleRow]:
+        """Return active samples for one scope within an inclusive minute window.
+
+        Applies the R4 predicate set verbatim (active, ``point_kind='sample'``,
+        exact scope, epoch and calc_version) plus ``window_start <= point_time <=
+        window_end`` and an optional ``valuation_status`` filter, ordered by
+        ``point_time`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def get_portfolio_pnl_sample_peak(
+        self,
+        query: PortfolioPnlSampleQuery,
+    ) -> float | None:
+        """Return the peak equity over one epoch's complete samples.
+
+        The maximum of ``cash_usd + position_value_usd`` across the full R4
+        predicate set plus ``valuation_status='complete'`` (decision R4/D8), for
+        peak re-derivation on restart. Returns ``None`` when the epoch has no
+        complete sample. Callers re-check finiteness app-side.
+        """
+        ...
+
+    @abstractmethod
+    async def get_latest_portfolio_pnl_sample(
+        self,
+        query: PortfolioPnlSampleQuery,
+    ) -> PortfolioPnlSampleRow | None:
+        """Return the last active sample for one scope, any valuation status.
+
+        The durable snapshotter progress read (decision R5): the active
+        ``sample`` row with the greatest ``point_time`` for the scope, epoch and
+        calc_version, or ``None`` when the epoch has no sample yet.
+        """
+        ...
+
+    @abstractmethod
+    async def get_venue_account_observation_attempts_at(
+        self,
+        wallet_public_id: str,
+        exchanges: Sequence[str],
+        mode: str,
+        at: datetime,
+    ) -> dict[str, VenueAccountObservationAttemptRow]:
+        """Return the latest account-observation attempt per exchange as-of ``at``.
+
+        The Phase-5B temporal basket contract (decision A1): for each requested
+        exchange, the single latest attempt whose bus ``timestamp <= at``,
+        tie-broken by the highest row ``id``, returned AS-IS including a failed or
+        balance-unobserved attempt. An exchange with no attempt known by ``at`` is
+        absent from the result. The caller reconstructs authority and gates; this
+        read never skips a later failed attempt for an older success.
         """
         ...
 
@@ -10696,6 +10898,801 @@ class SQLAlchemyRepository(Repository):
             except Exception:
                 await s.rollback()
                 raise
+
+    @staticmethod
+    def _parse_portfolio_pnl_sample_audit(raw: object) -> JsonObject:
+        """Parse one sample audit envelope into a finite-numbers JSON object."""
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("portfolio P&L sample audit_json must be a nonempty string")
+        try:
+            payload = cast(
+                JsonValue,
+                json.loads(
+                    raw,
+                    parse_constant=SQLAlchemyRepository._reject_portfolio_pnl_json_constant,
+                    object_pairs_hook=SQLAlchemyRepository._portfolio_pnl_json_object,
+                ),
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError("portfolio P&L sample audit_json must contain valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("portfolio P&L sample audit_json must contain a JSON object")
+        SQLAlchemyRepository._validate_portfolio_pnl_json_numbers("audit_json", payload)
+        return payload
+
+    @staticmethod
+    def _portfolio_pnl_sample_reason_codes(audit: JsonObject) -> list[str]:
+        """Extract the reason-code list from one parsed sample audit envelope."""
+        raw_codes = audit.get("reason_codes", [])
+        if not isinstance(raw_codes, list):
+            raise ValueError("portfolio P&L sample audit reason_codes must be a list")
+        codes: list[str] = []
+        for code in raw_codes:
+            if not isinstance(code, str):
+                raise ValueError("portfolio P&L sample audit reason_codes must be strings")
+            codes.append(code)
+        return codes
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_reason_codes(codes: list[str]) -> None:
+        """Enforce a non-empty, canonical, non-duplicate incomplete reason list."""
+        if not codes:
+            raise ValueError("portfolio P&L incomplete sample must carry at least one reason code")
+        if len(set(codes)) != len(codes):
+            raise ValueError("portfolio P&L sample reason codes must not repeat")
+        if any(code not in _PNL_SAMPLE_REASON_CODES for code in codes):
+            raise ValueError("portfolio P&L sample reason codes must be canonical")
+        if any(code in _PNL_SAMPLE_NEVER_PERSIST_REASONS for code in codes):
+            raise ValueError(
+                "portfolio P&L sample carrying 'pnl_untrusted' must never be persisted"
+            )
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_cumulatives(sample: PortfolioPnlSampleRow) -> None:
+        """Require finite cumulatives and a v1 zero external-flow adjustment."""
+        finite_components = (
+            ("realized_pnl", sample["realized_pnl"]),
+            ("fee_pnl", sample["fee_pnl"]),
+            ("accrual_pnl", sample["accrual_pnl"]),
+            ("external_flow_adjustment", sample["external_flow_adjustment"]),
+        )
+        for field_name, value in finite_components:
+            if not SQLAlchemyRepository._is_finite_portfolio_pnl_number(value):
+                raise ValueError(f"portfolio P&L sample {field_name} must be finite")
+        if sample["external_flow_adjustment"] != 0.0:
+            raise ValueError("portfolio P&L sample external_flow_adjustment must be 0.0 in v1")
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_point_time(
+        sample: PortfolioPnlSampleRow, scope: PortfolioPnlSampleScope
+    ) -> None:
+        """Require a UTC minute-aligned instant strictly after the anchor t0."""
+        point_time = sample["point_time"]
+        if point_time.tzinfo is None or point_time.utcoffset() != timedelta(0):
+            raise ValueError("portfolio P&L sample point_time must be UTC timezone-aware")
+        if point_time.second != 0 or point_time.microsecond != 0:
+            raise ValueError("portfolio P&L sample point_time must be aligned to a minute")
+        if point_time <= scope.anchor_point_time:
+            raise ValueError("portfolio P&L sample point_time must be strictly after the anchor t0")
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_scope(
+        sample: PortfolioPnlSampleRow, scope: PortfolioPnlSampleScope
+    ) -> None:
+        """Refuse a sample that violates its scope, epoch, version or t0 pins."""
+        if sample["point_kind"] != "sample":
+            raise ValueError("portfolio P&L sample point_kind must be 'sample'")
+        if sample["mode"] != "live":
+            raise ValueError("portfolio P&L sample mode must be 'live' (paper unsupported in v1)")
+        valuation_ccy = sample["valuation_ccy"]
+        if not isinstance(valuation_ccy, str):
+            raise ValueError("portfolio P&L sample valuation_ccy must be a string")
+        normalized_ccy = normalize_portfolio_pnl_valuation_ccy(valuation_ccy)
+        if valuation_ccy != normalized_ccy or normalized_ccy != "USD":
+            raise ValueError("portfolio P&L sample valuation_ccy must be 'USD' in v1")
+        if (
+            sample["wallet_public_id"] != scope.wallet_public_id
+            or sample["mode"] != scope.mode
+            or valuation_ccy != scope.valuation_ccy
+        ):
+            raise ValueError("portfolio P&L sample does not match its write scope")
+        if sample["epoch_public_id"] != scope.epoch_public_id:
+            raise ValueError("portfolio P&L sample epoch_public_id must equal the anchor epoch")
+        if sample["calc_version"] != PNL_SAMPLE_CALC_VERSION:
+            raise ValueError("portfolio P&L sample calc_version must equal the sample constant")
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_point_time(sample, scope)
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_cumulatives(sample)
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_candle_identity(candle: JsonValue) -> None:
+        """Require candle_id / candle_public_id / candle_timestamp on a priced leg."""
+        if not isinstance(candle, dict):
+            raise ValueError("portfolio P&L priced valuation record must carry a candle identity")
+        candle_id = candle.get("candle_id")
+        if isinstance(candle_id, bool) or not isinstance(candle_id, int):
+            raise ValueError("portfolio P&L candle identity candle_id must be an integer")
+        public_id = candle.get("candle_public_id")
+        if not isinstance(public_id, str) or not public_id:
+            raise ValueError(
+                "portfolio P&L candle identity candle_public_id must be a nonempty string"
+            )
+        candle_timestamp = candle.get("candle_timestamp")
+        if not isinstance(candle_timestamp, str) or not candle_timestamp:
+            raise ValueError(
+                "portfolio P&L candle identity candle_timestamp must be a nonempty string"
+            )
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_valuation_record(record: JsonValue) -> None:
+        """Enforce the A3/A5 schema of one audit valuation record."""
+        if not isinstance(record, dict):
+            raise ValueError("portfolio P&L sample valuation record must be an object")
+        kind = record.get("kind")
+        if kind not in _PNL_SAMPLE_VALUATION_KINDS:
+            raise ValueError("portfolio P&L sample valuation record kind is not canonical")
+        for field_name in ("base", "quote", "exchange"):
+            value = record.get(field_name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"portfolio P&L sample valuation record {field_name} must be a nonempty string"
+                )
+        rate = record.get("rate")
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate):
+            raise ValueError("portfolio P&L sample valuation record rate must be a finite number")
+        candle = record.get("candle")
+        if kind in _PNL_SAMPLE_VALUATION_CANDLE_KINDS:
+            SQLAlchemyRepository._validate_portfolio_pnl_sample_candle_identity(candle)
+        elif candle is not None:
+            raise ValueError(
+                "portfolio P&L identity valuation record must carry no candle identity"
+            )
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_observation_record(record: JsonValue) -> None:
+        """Enforce the A3 schema of one audit observation record."""
+        if not isinstance(record, dict):
+            raise ValueError("portfolio P&L sample observation record must be an object")
+        for field_name in ("observation_public_id", "exchange", "balance_observed_at"):
+            value = record.get(field_name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"portfolio P&L sample observation record {field_name} "
+                    "must be a nonempty string"
+                )
+
+    @staticmethod
+    def _portfolio_pnl_sample_audit_list(audit: JsonObject, key: str) -> list[JsonValue]:
+        """Return one audit envelope list member or refuse a missing/wrong type."""
+        value = audit.get(key)
+        if not isinstance(value, list):
+            raise ValueError(f"portfolio P&L sample audit {key} must be a present list")
+        return value
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_audit_records(
+        valuation: list[JsonValue], observations: list[JsonValue]
+    ) -> None:
+        """Validate every present valuation and observation record in an envelope."""
+        for record in valuation:
+            SQLAlchemyRepository._validate_portfolio_pnl_sample_valuation_record(record)
+        for record in observations:
+            SQLAlchemyRepository._validate_portfolio_pnl_sample_observation_record(record)
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_audit_envelope(audit: JsonObject) -> None:
+        """Reject unknown top-level audit keys (record extra fields stay allowed)."""
+        if set(audit) - _PNL_SAMPLE_AUDIT_KEYS:
+            raise ValueError("portfolio P&L sample audit has unknown top-level keys")
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_complete(sample: PortfolioPnlSampleRow) -> None:
+        """Enforce the complete-row plane: mark, equity trio, drawdown, audit."""
+        unrealized_pnl = sample["unrealized_pnl"]
+        if unrealized_pnl is None or not SQLAlchemyRepository._is_finite_portfolio_pnl_number(
+            unrealized_pnl
+        ):
+            raise ValueError("portfolio P&L complete sample unrealized_pnl must be finite")
+        mark_source = sample["mark_source"]
+        if mark_source is None or not mark_source.strip():
+            raise ValueError("portfolio P&L complete sample mark_source must be nonempty")
+        if sample["mark_time"] is None:
+            raise ValueError("portfolio P&L complete sample mark_time must be present")
+        equity_terms = (
+            ("cash_usd", sample["cash_usd"]),
+            ("position_value_usd", sample["position_value_usd"]),
+        )
+        for field_name, value in equity_terms:
+            if value is None or not SQLAlchemyRepository._is_finite_portfolio_pnl_number(value):
+                raise ValueError(f"portfolio P&L complete sample {field_name} must be finite")
+        drawdown = sample["drawdown"]
+        if (
+            drawdown is None
+            or not SQLAlchemyRepository._is_finite_portfolio_pnl_number(drawdown)
+            or not 0.0 <= drawdown <= 1.0
+        ):
+            raise ValueError("portfolio P&L complete sample drawdown must be finite within [0, 1]")
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_complete_audit(sample)
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_complete_audit(sample: PortfolioPnlSampleRow) -> None:
+        """Require non-empty observation and valuation provenance, no reason codes."""
+        audit = SQLAlchemyRepository._parse_portfolio_pnl_sample_audit(sample["audit_json"])
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_audit_envelope(audit)
+        if SQLAlchemyRepository._portfolio_pnl_sample_reason_codes(audit):
+            raise ValueError("portfolio P&L complete sample audit must carry no reason codes")
+        valuation = SQLAlchemyRepository._portfolio_pnl_sample_audit_list(audit, "valuation")
+        observations = SQLAlchemyRepository._portfolio_pnl_sample_audit_list(audit, "observations")
+        if not observations:
+            raise ValueError("portfolio P&L complete sample audit observations must be non-empty")
+        empty_basket = sample["cash_usd"] == 0.0 and sample["position_value_usd"] == 0.0
+        if not valuation and not empty_basket:
+            raise ValueError("portfolio P&L complete sample audit valuation must be non-empty")
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_audit_records(valuation, observations)
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample_incomplete(sample: PortfolioPnlSampleRow) -> None:
+        """Enforce the incomplete-row plane: null valuation, canonical reasons."""
+        null_terms = (
+            ("unrealized_pnl", sample["unrealized_pnl"]),
+            ("mark_source", sample["mark_source"]),
+            ("mark_time", sample["mark_time"]),
+            ("cash_usd", sample["cash_usd"]),
+            ("position_value_usd", sample["position_value_usd"]),
+            ("drawdown", sample["drawdown"]),
+        )
+        for field_name, value in null_terms:
+            if value is not None:
+                raise ValueError(f"portfolio P&L incomplete sample {field_name} must be null")
+        audit = SQLAlchemyRepository._parse_portfolio_pnl_sample_audit(sample["audit_json"])
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_audit_envelope(audit)
+        valuation = SQLAlchemyRepository._portfolio_pnl_sample_audit_list(audit, "valuation")
+        observations = SQLAlchemyRepository._portfolio_pnl_sample_audit_list(audit, "observations")
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_audit_records(valuation, observations)
+        codes = SQLAlchemyRepository._portfolio_pnl_sample_reason_codes(audit)
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_reason_codes(codes)
+
+    @staticmethod
+    def _validate_portfolio_pnl_sample(
+        sample: PortfolioPnlSampleRow, scope: PortfolioPnlSampleScope
+    ) -> None:
+        """Refuse any sample violating the R1/A4 combined-status truth table.
+
+        Stricter than the ``portfolio_pnl_points`` CHECK constraints: a row this
+        validator accepts also satisfies every CHECK (proven by inserting through
+        the writer). ``complete`` demands a finite ``unrealized_pnl``, mark
+        provenance, a finite equity trio, a ``drawdown`` in ``[0, 1]`` and an audit
+        with valuation + observation provenance and no reason codes; ``incomplete``
+        demands NULL valuation/mark provenance (A4) and a non-empty canonical
+        reason list. A ``pnl_untrusted`` minute is rejected outright (R1).
+        """
+        SQLAlchemyRepository._validate_portfolio_pnl_sample_scope(sample, scope)
+        status = sample["valuation_status"]
+        if status == "complete":
+            SQLAlchemyRepository._validate_portfolio_pnl_sample_complete(sample)
+        elif status == "incomplete":
+            SQLAlchemyRepository._validate_portfolio_pnl_sample_incomplete(sample)
+        else:
+            raise ValueError(
+                "portfolio P&L sample valuation_status must be 'complete' or 'incomplete'"
+            )
+
+    @staticmethod
+    def _normalize_portfolio_pnl_sample_scope(
+        scope: PortfolioPnlSampleScope,
+    ) -> PortfolioPnlSampleScope:
+        """Canonicalize the wallet identity and valuation currency of one scope."""
+        return replace(
+            scope,
+            wallet_public_id=normalize_portfolio_pnl_wallet_public_id(scope.wallet_public_id),
+            valuation_ccy=normalize_portfolio_pnl_valuation_ccy(scope.valuation_ccy),
+        )
+
+    @staticmethod
+    def _normalize_portfolio_pnl_sample(row: PortfolioPnlSampleRow) -> PortfolioPnlSampleRow:
+        """Canonicalize the wallet identity of one sample row before validation."""
+        return cast(
+            PortfolioPnlSampleRow,
+            {
+                **row,
+                "wallet_public_id": normalize_portfolio_pnl_wallet_public_id(
+                    row["wallet_public_id"]
+                ),
+            },
+        )
+
+    @staticmethod
+    def _portfolio_pnl_sample_orm_kwargs(row: PortfolioPnlSampleRow) -> dict[str, object]:
+        """Project one sample row to ORM column kwargs (audit → basket column)."""
+        return {
+            "public_id": row["public_id"],
+            "session_id": row["session_id"],
+            "sequence_id": row["sequence_id"],
+            "timestamp": row["timestamp"],
+            "wallet_public_id": row["wallet_public_id"],
+            "mode": row["mode"],
+            "valuation_ccy": row["valuation_ccy"],
+            "point_time": row["point_time"],
+            "point_kind": row["point_kind"],
+            "epoch_public_id": row["epoch_public_id"],
+            "calc_version": row["calc_version"],
+            "valuation_status": row["valuation_status"],
+            "realized_pnl": row["realized_pnl"],
+            "fee_pnl": row["fee_pnl"],
+            "accrual_pnl": row["accrual_pnl"],
+            "external_flow_adjustment": row["external_flow_adjustment"],
+            "unrealized_pnl": row["unrealized_pnl"],
+            "cash_usd": row["cash_usd"],
+            "position_value_usd": row["position_value_usd"],
+            "drawdown": row["drawdown"],
+            "mark_source": row["mark_source"],
+            "mark_time": row["mark_time"],
+            "watermarks_json": None,
+            "opening_basket_json": row["audit_json"],
+            "contributions_json": None,
+        }
+
+    @staticmethod
+    def _portfolio_pnl_sample_to_row(point: PortfolioPnlPoint) -> PortfolioPnlSampleRow:
+        """Project one persisted sample ORM row to its repository contract."""
+        return {
+            "public_id": point.public_id,
+            "session_id": point.session_id,
+            "sequence_id": point.sequence_id,
+            "timestamp": point.timestamp,
+            "wallet_public_id": point.wallet_public_id,
+            "mode": cast(Literal["live", "paper"], point.mode),
+            "valuation_ccy": point.valuation_ccy,
+            "point_time": point.point_time,
+            "point_kind": cast(Literal["sample"], point.point_kind),
+            "epoch_public_id": point.epoch_public_id,
+            "calc_version": point.calc_version,
+            "valuation_status": cast(Literal["complete", "incomplete"], point.valuation_status),
+            "realized_pnl": point.realized_pnl,
+            "fee_pnl": point.fee_pnl,
+            "accrual_pnl": point.accrual_pnl,
+            "external_flow_adjustment": point.external_flow_adjustment,
+            "unrealized_pnl": point.unrealized_pnl,
+            "cash_usd": point.cash_usd,
+            "position_value_usd": point.position_value_usd,
+            "drawdown": point.drawdown,
+            "mark_source": point.mark_source,
+            "mark_time": point.mark_time,
+            "audit_json": cast(str, point.opening_basket_json),
+        }
+
+    @staticmethod
+    def _portfolio_pnl_sample_identity_values(row: PortfolioPnlSampleRow) -> tuple[object, ...]:
+        """Value tuple deciding sample idempotency (provenance columns excluded)."""
+        return (
+            row["point_kind"],
+            row["epoch_public_id"],
+            row["calc_version"],
+            row["valuation_status"],
+            row["realized_pnl"],
+            row["fee_pnl"],
+            row["accrual_pnl"],
+            row["external_flow_adjustment"],
+            row["unrealized_pnl"],
+            row["cash_usd"],
+            row["position_value_usd"],
+            row["drawdown"],
+            row["mark_source"],
+            row["mark_time"],
+            row["audit_json"],
+        )
+
+    @staticmethod
+    def _portfolio_pnl_samples_equivalent(
+        existing: PortfolioPnlSampleRow, candidate: PortfolioPnlSampleRow
+    ) -> bool:
+        """Return whether two samples for one minute carry identical values."""
+        return SQLAlchemyRepository._portfolio_pnl_sample_identity_values(
+            existing
+        ) == SQLAlchemyRepository._portfolio_pnl_sample_identity_values(candidate)
+
+    @staticmethod
+    def _portfolio_pnl_sample_scope_filters(
+        scope: PortfolioPnlSampleScope,
+    ) -> list[ColumnElement[bool]]:
+        """Active-sample scope predicates shared by the write-side reads."""
+        return [
+            PortfolioPnlPoint.known_to == KNOWN_TO_MAX,
+            PortfolioPnlPoint.point_kind == "sample",
+            PortfolioPnlPoint.wallet_public_id == scope.wallet_public_id,
+            PortfolioPnlPoint.mode == scope.mode,
+            PortfolioPnlPoint.valuation_ccy == scope.valuation_ccy,
+        ]
+
+    @staticmethod
+    def _portfolio_pnl_sample_query_filters(
+        query: PortfolioPnlSampleQuery,
+    ) -> list[ColumnElement[bool]]:
+        """The exact R4 active-sample predicate set for the read surfaces."""
+        return [
+            PortfolioPnlPoint.known_to == KNOWN_TO_MAX,
+            PortfolioPnlPoint.point_kind == "sample",
+            PortfolioPnlPoint.wallet_public_id
+            == normalize_portfolio_pnl_wallet_public_id(query.wallet_public_id),
+            PortfolioPnlPoint.mode == query.mode,
+            PortfolioPnlPoint.valuation_ccy
+            == normalize_portfolio_pnl_valuation_ccy(query.valuation_ccy),
+            PortfolioPnlPoint.epoch_public_id == query.epoch_public_id,
+            PortfolioPnlPoint.calc_version == query.calc_version,
+        ]
+
+    async def _begin_portfolio_pnl_sample_write_transaction(
+        self, s: AsyncSession, scope: PortfolioPnlSampleScope
+    ) -> None:
+        """Begin the periodic sample writer under a per-scope advisory lock.
+
+        Postgres takes the two-argument ``pg_advisory_xact_lock`` on the sample
+        namespace and the ``wallet|mode|ccy`` scope; SQLite takes the database
+        write lock via ``BEGIN IMMEDIATE``. Deliberately WITHOUT the anchor
+        fence's ``LOCK TABLE IN SHARE MODE`` — a periodic writer must never hold a
+        table share lock.
+        """
+        if self.dialect_name == "postgresql":
+            await s.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+            lock_scope = "|".join((scope.wallet_public_id, scope.mode, scope.valuation_ccy))
+            await s.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock("
+                    "hashtext('portfolio_pnl_sample'), hashtext(:scope))"
+                ),
+                {"scope": lock_scope},
+            )
+        elif self.dialect_name == "sqlite":
+            await s.execute(text("BEGIN IMMEDIATE"))
+        else:
+            raise NotImplementedError(
+                "portfolio P&L sample write transaction is not implemented "
+                f"for dialect={self.dialect_name}"
+            )
+
+    async def _verify_portfolio_pnl_sample_scope_anchor(
+        self, s: AsyncSession, scope: PortfolioPnlSampleScope
+    ) -> None:
+        """Refuse a write scope whose epoch/t0 the persisted anchor does not back.
+
+        Loaded inside the already-locked writer transaction: the caller's
+        ``epoch_public_id`` and ``anchor_point_time`` are only honoured when the
+        scope's single active anchor exists and carries exactly them, so a stale
+        or forged scope can never fork the series (BLOCKER B1).
+        """
+        anchor = await self._read_current_portfolio_pnl_anchor(
+            s, scope.wallet_public_id, scope.mode, scope.valuation_ccy
+        )
+        if anchor is None:
+            raise PortfolioPnlSampleScopeError(
+                "portfolio P&L sample scope has no active anchor (unsampleable)"
+            )
+        if (
+            anchor.epoch_public_id != scope.epoch_public_id
+            or anchor.point_time != scope.anchor_point_time
+        ):
+            raise PortfolioPnlSampleScopeError(
+                "portfolio P&L sample scope epoch/t0 does not match the active anchor"
+            )
+
+    async def _read_active_portfolio_pnl_samples_by_minute(
+        self,
+        s: AsyncSession,
+        scope: PortfolioPnlSampleScope,
+        minutes: list[datetime],
+    ) -> dict[datetime, PortfolioPnlSampleRow]:
+        """Read the active sample per requested minute for the scope (any epoch)."""
+        if not minutes:
+            return {}
+        rows = (
+            (
+                await s.execute(
+                    select(PortfolioPnlPoint).where(
+                        *self._portfolio_pnl_sample_scope_filters(scope),
+                        PortfolioPnlPoint.point_time.in_(minutes),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {row.point_time: self._portfolio_pnl_sample_to_row(row) for row in rows}
+
+    async def _classify_portfolio_pnl_sample_collisions(
+        self,
+        s: AsyncSession,
+        scope: PortfolioPnlSampleScope,
+        normalized: list[PortfolioPnlSampleRow],
+    ) -> PortfolioPnlSampleBatchResult:
+        """Re-read after an integrity rollback and split idempotent vs conflict."""
+        minutes = [row["point_time"] for row in normalized]
+        existing = await self._read_active_portfolio_pnl_samples_by_minute(s, scope, minutes)
+        already_present: list[datetime] = []
+        conflicts: list[datetime] = []
+        for row in normalized:
+            current = existing.get(row["point_time"])
+            if current is not None and self._portfolio_pnl_samples_equivalent(current, row):
+                already_present.append(row["point_time"])
+            else:
+                conflicts.append(row["point_time"])
+        return {
+            "inserted": (),
+            "already_present": tuple(sorted(already_present)),
+            "conflicts": tuple(sorted(conflicts)),
+        }
+
+    async def record_portfolio_pnl_samples(
+        self,
+        rows: Sequence[PortfolioPnlSampleRow],
+        scope: PortfolioPnlSampleScope,
+    ) -> PortfolioPnlSampleBatchResult:
+        """Persist one validated Phase-5B sample chunk in one locked transaction.
+
+        Validates every row against the canonical ``scope`` first, so a single bad
+        row rejects the whole chunk before any write. On the happy path all rows
+        insert and commit as ``inserted``. On an integrity collision the whole
+        chunk rolls back and the requested minutes are re-read: a byte-identical
+        active row is ``already_present`` (winner idempotency), anything else is a
+        ``conflicts`` minute that must go through
+        :meth:`supersede_portfolio_pnl_sample`.
+        """
+        canonical_scope = self._normalize_portfolio_pnl_sample_scope(scope)
+        normalized = [self._normalize_portfolio_pnl_sample(row) for row in rows]
+        for row in normalized:
+            self._validate_portfolio_pnl_sample(row, canonical_scope)
+        minutes = [row["point_time"] for row in normalized]
+        if len(set(minutes)) != len(minutes):
+            raise ValueError("portfolio P&L sample chunk must not repeat a minute")
+        if not normalized:
+            return {"inserted": (), "already_present": (), "conflicts": ()}
+        async with self.session() as s:
+            await self._begin_portfolio_pnl_sample_write_transaction(s, canonical_scope)
+            try:
+                await self._verify_portfolio_pnl_sample_scope_anchor(s, canonical_scope)
+                for row in normalized:
+                    s.add(
+                        PortfolioPnlPoint(
+                            **self._portfolio_pnl_sample_orm_kwargs(row),
+                            known_to=KNOWN_TO_MAX,
+                        )
+                    )
+                await s.commit()
+                return {
+                    "inserted": tuple(sorted(minutes)),
+                    "already_present": (),
+                    "conflicts": (),
+                }
+            except IntegrityError:
+                await s.rollback()
+                return await self._classify_portfolio_pnl_sample_collisions(
+                    s, canonical_scope, normalized
+                )
+            except Exception:
+                await s.rollback()
+                raise
+
+    async def _read_active_portfolio_pnl_sample_at(
+        self,
+        s: AsyncSession,
+        scope: PortfolioPnlSampleScope,
+        point_time: datetime,
+    ) -> PortfolioPnlPoint | None:
+        """Read the single active sample ORM row for one scope minute."""
+        return (
+            (
+                await s.execute(
+                    select(PortfolioPnlPoint).where(
+                        *self._portfolio_pnl_sample_scope_filters(scope),
+                        PortfolioPnlPoint.point_time == point_time,
+                    )
+                )
+            )
+            .scalars()
+            .one_or_none()
+        )
+
+    def _guard_portfolio_pnl_sample_supersede(
+        self,
+        existing: PortfolioPnlPoint,
+        scope: PortfolioPnlSampleScope,
+        *,
+        late_fill_correction: bool,
+    ) -> None:
+        """Refuse a supersede that crosses epochs or self-heals a non-retryable row."""
+        if existing.epoch_public_id != scope.epoch_public_id:
+            raise PortfolioPnlSampleSupersedeError(
+                "portfolio P&L sample supersede must stay within the same epoch"
+            )
+        if late_fill_correction:
+            return
+        if existing.valuation_status != "incomplete":
+            raise PortfolioPnlSampleSupersedeError(
+                "self-heal supersede refuses a complete sample without a late-fill correction"
+            )
+        audit = self._parse_portfolio_pnl_sample_audit(existing.opening_basket_json)
+        codes = self._portfolio_pnl_sample_reason_codes(audit)
+        if not codes or any(code not in _PNL_SAMPLE_RETRYABLE_REASONS for code in codes):
+            raise PortfolioPnlSampleSupersedeError(
+                "self-heal supersede refuses a sample with a final reason code"
+            )
+
+    async def supersede_portfolio_pnl_sample(
+        self,
+        scope: PortfolioPnlSampleScope,
+        replacement: PortfolioPnlSampleRow,
+        *,
+        late_fill_correction: bool,
+    ) -> PortfolioPnlSampleRow:
+        """Close one active sample and insert its validated replacement (SCD2).
+
+        Both sanctioned paths (late-fill recompute-forward and bounded self-heal)
+        run inside one locked transaction. The replacement is validated against the
+        canonical scope; the active row for the minute must exist and match the
+        scope's epoch. Without ``late_fill_correction`` the active row must be
+        ``incomplete`` and carry only retryable reason codes. The SCD2 bus time is
+        clamped up to the closed row's timestamp so the close interval stays valid.
+        """
+        canonical_scope = self._normalize_portfolio_pnl_sample_scope(scope)
+        normalized = self._normalize_portfolio_pnl_sample(replacement)
+        self._validate_portfolio_pnl_sample(normalized, canonical_scope)
+        point_time = normalized["point_time"]
+        async with self.session() as s:
+            await self._begin_portfolio_pnl_sample_write_transaction(s, canonical_scope)
+            try:
+                await self._verify_portfolio_pnl_sample_scope_anchor(s, canonical_scope)
+                existing = await self._read_active_portfolio_pnl_sample_at(
+                    s, canonical_scope, point_time
+                )
+                if existing is None:
+                    raise PortfolioPnlSampleSupersedeError(
+                        "portfolio P&L sample supersede found no active row for the minute"
+                    )
+                self._guard_portfolio_pnl_sample_supersede(
+                    existing, canonical_scope, late_fill_correction=late_fill_correction
+                )
+                bus_time = max(normalized["timestamp"], existing.timestamp)
+                values = self._portfolio_pnl_sample_orm_kwargs(normalized)
+                values.pop("public_id")
+                values.pop("timestamp")
+                new_row = await close_and_insert(
+                    s,
+                    PortfolioPnlPoint,
+                    [
+                        PortfolioPnlPoint.wallet_public_id == canonical_scope.wallet_public_id,
+                        PortfolioPnlPoint.mode == canonical_scope.mode,
+                        PortfolioPnlPoint.valuation_ccy == canonical_scope.valuation_ccy,
+                        PortfolioPnlPoint.point_kind == "sample",
+                        PortfolioPnlPoint.point_time == point_time,
+                    ],
+                    values,
+                    bus_time,
+                )
+                await s.commit()
+                return self._portfolio_pnl_sample_to_row(new_row)
+            except Exception:
+                await s.rollback()
+                raise
+
+    async def get_portfolio_pnl_samples(
+        self,
+        query: PortfolioPnlSampleQuery,
+        window_start: datetime,
+        window_end: datetime,
+        *,
+        status: str | None = None,
+    ) -> list[PortfolioPnlSampleRow]:
+        """Return active samples for one scope in ``[window_start, window_end]``."""
+        stmt = select(PortfolioPnlPoint).where(
+            *self._portfolio_pnl_sample_query_filters(query),
+            PortfolioPnlPoint.point_time >= window_start,
+            PortfolioPnlPoint.point_time <= window_end,
+        )
+        if status is not None:
+            stmt = stmt.where(PortfolioPnlPoint.valuation_status == status)
+        stmt = stmt.order_by(PortfolioPnlPoint.point_time)
+        async with self.session() as s:
+            rows = (await s.execute(stmt)).scalars().all()
+            return [self._portfolio_pnl_sample_to_row(row) for row in rows]
+
+    async def get_portfolio_pnl_sample_peak(self, query: PortfolioPnlSampleQuery) -> float | None:
+        """Return MAX(cash_usd + position_value_usd) over the epoch's complete samples.
+
+        The full R4 predicate set plus ``valuation_status='complete'``. Callers
+        re-check finiteness app-side; ``None`` means the epoch has no complete
+        sample.
+        """
+        stmt = select(
+            func.max(PortfolioPnlPoint.cash_usd + PortfolioPnlPoint.position_value_usd)
+        ).where(
+            *self._portfolio_pnl_sample_query_filters(query),
+            PortfolioPnlPoint.valuation_status == "complete",
+        )
+        async with self.session() as s:
+            return (await s.execute(stmt)).scalar()
+
+    async def get_latest_portfolio_pnl_sample(
+        self, query: PortfolioPnlSampleQuery
+    ) -> PortfolioPnlSampleRow | None:
+        """Return the latest active sample for one scope, any valuation status."""
+        stmt = (
+            select(PortfolioPnlPoint)
+            .where(*self._portfolio_pnl_sample_query_filters(query))
+            .order_by(PortfolioPnlPoint.point_time.desc())
+            .limit(1)
+        )
+        async with self.session() as s:
+            row = (await s.execute(stmt)).scalars().first()
+            return None if row is None else self._portfolio_pnl_sample_to_row(row)
+
+    @staticmethod
+    def _venue_account_observation_attempt_to_row(
+        obs: VenueAccountObservation,
+    ) -> VenueAccountObservationAttemptRow:
+        """Project one observation ORM row to its as-is attempt contract."""
+        return {
+            "id": obs.id,
+            "public_id": obs.public_id,
+            "wallet_public_id": obs.wallet_public_id,
+            "exchange": obs.exchange,
+            "mode": obs.mode,
+            "attempt_status": obs.attempt_status,
+            "balance_status": obs.balance_status,
+            "position_status": obs.position_status,
+            "balances_json": obs.balances_json,
+            "open_positions_json": obs.open_positions_json,
+            "balance_observed_at": obs.balance_observed_at,
+            "position_observed_at": obs.position_observed_at,
+            "error": obs.error,
+            "timestamp": obs.timestamp,
+            "session_id": obs.session_id,
+            "sequence_id": obs.sequence_id,
+        }
+
+    async def get_venue_account_observation_attempts_at(
+        self,
+        wallet_public_id: str,
+        exchanges: Sequence[str],
+        mode: str,
+        at: datetime,
+    ) -> dict[str, VenueAccountObservationAttemptRow]:
+        """Return the latest attempt per exchange with bus ``timestamp <= at``.
+
+        The Phase-5B temporal basket contract (A1): per exchange the single latest
+        attempt (bus ``timestamp`` DESC, ``id`` DESC), returned AS-IS regardless of
+        ``attempt_status``/``balance_status`` so the caller never skips a later
+        failure for an older success. Duplicate exchanges collapse; an exchange
+        with no attempt known by ``at`` is absent from the result.
+        """
+        canonical_wallet = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
+        result: dict[str, VenueAccountObservationAttemptRow] = {}
+        seen: set[str] = set()
+        async with self.session() as s:
+            for exchange in exchanges:
+                if exchange in seen:
+                    continue
+                seen.add(exchange)
+                row = (
+                    (
+                        await s.execute(
+                            select(VenueAccountObservation)
+                            .where(
+                                VenueAccountObservation.wallet_public_id == canonical_wallet,
+                                VenueAccountObservation.exchange == exchange,
+                                VenueAccountObservation.mode == mode,
+                                VenueAccountObservation.timestamp <= at,
+                            )
+                            .order_by(
+                                VenueAccountObservation.timestamp.desc(),
+                                VenueAccountObservation.id.desc(),
+                            )
+                            .limit(1)
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if row is not None:
+                    result[exchange] = self._venue_account_observation_attempt_to_row(row)
+        return result
 
     @staticmethod
     async def _read_pnl_timeline_execution_prefix(

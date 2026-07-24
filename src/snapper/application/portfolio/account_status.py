@@ -17,6 +17,18 @@ but no longer live truth."""
 EFFECTIVE_CLOCK_ERROR = "clock_error"
 """A row observed with a future-dated clock — never trusted."""
 
+ACCOUNT_FRESHNESS_CEILING_S = 300.0
+"""Authority window stamped on a freshly observed account balance, in seconds.
+
+The account observer writes ``authoritative_until = balance_observed_at +
+ACCOUNT_FRESHNESS_CEILING_S`` (the messaging executor imports this exact value so
+the two never drift). Past this window the read layer demotes an ``observed`` row
+to ``stale`` rather than serving it as live truth. Hosted here — alongside
+:data:`AUTHORITY_MAX_WINDOW` — so any surface that must reconstruct a balance's
+effective authority window from ``balance_observed_at`` alone (for example the
+Phase-5B basket-observation gate) shares the same constant instead of copying the
+literal."""
+
 AUTHORITY_MAX_WINDOW = timedelta(seconds=900)
 """Hard cap on how far past the balance observation an ``observed`` row may
 still read as live truth, independent of the stored ``authoritative_until``.
