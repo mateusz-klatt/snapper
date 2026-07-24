@@ -114,6 +114,9 @@ _PG_UNIQUE_VIOLATION_SQLSTATE = "23505"
 _SQLITE_CONSTRAINT_UNIQUE_EXTCODE = 2067
 _ORDER_STATUS_VALUES: frozenset[str] = frozenset(member.value for member in OrderStatusEnum)
 _MANUAL_ORDER_EVALUATOR = ManualOnceEvaluator()
+_REVIEW_AFTERMATH_NOT_FOUND_MESSAGE = (
+    "No terminal review with that id was found in the caller's scope."
+)
 
 
 @dataclass(frozen=True)
@@ -1621,7 +1624,7 @@ async def _get_ai_review_aftermath_tool(
         return to_call_tool_result(
             success=False,
             error_code=ERROR_REVIEW_NOT_FOUND,
-            message="No terminal review with that id was found in the caller's scope.",
+            message=_REVIEW_AFTERMATH_NOT_FOUND_MESSAGE,
             details=sanitize_output({"review_public_id": review_public_id}),
         )
     scope_ok = await get_scope_grant_service().has_grant_for_delegate(
@@ -1634,7 +1637,7 @@ async def _get_ai_review_aftermath_tool(
         return to_call_tool_result(
             success=False,
             error_code=ERROR_REVIEW_NOT_FOUND,
-            message="No terminal review with that id was found in the caller's scope.",
+            message=_REVIEW_AFTERMATH_NOT_FOUND_MESSAGE,
             details=sanitize_output({"review_public_id": review_public_id}),
         )
     if review["status"] not in _TERMINAL_AI_REVIEW_STATUSES:
@@ -1654,7 +1657,7 @@ async def _get_ai_review_aftermath_tool(
         return to_call_tool_result(
             success=False,
             error_code=ERROR_REVIEW_NOT_FOUND,
-            message="No terminal review with that id was found in the caller's scope.",
+            message=_REVIEW_AFTERMATH_NOT_FOUND_MESSAGE,
             details=sanitize_output({"review_public_id": review_public_id}),
         )
     response = AiReviewAftermathResponse.model_validate(aftermath)

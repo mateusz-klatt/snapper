@@ -41,7 +41,7 @@ from snapper.application.portfolio.spot_precision_certification import (
 from snapper.infrastructure.exchanges.contracts import NativeBalanceEntry
 
 _MAX_RAW_DECIMAL_LENGTH = 64
-_PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?", flags=re.ASCII)
+_PLAIN_DECIMAL = re.compile(r"\d+(?:\.\d+)?", flags=re.ASCII)
 
 
 @dataclass(frozen=True)

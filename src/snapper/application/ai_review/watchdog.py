@@ -158,7 +158,7 @@ class AiDelegateWatchdog:
         """
         return self._interval_seconds
 
-    async def start(self) -> None:
+    def start(self) -> None:
         """Spawn the owned task that performs the delayed initial tick."""
         self._stopping.clear()
         self._loop_task = asyncio.create_task(self._run())

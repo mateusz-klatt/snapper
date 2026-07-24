@@ -166,11 +166,9 @@ class PortfolioTracker:
         """
         pos = self.positions.setdefault(instrument, PositionStateModel())
         self.turnover += size * price
-        signed_delta = (
-            position_delta
-            if position_delta is not None
-            else size if side == TradeSideEnum.BUY else -size
-        )
+        signed_delta = size if side == TradeSideEnum.BUY else -size
+        if position_delta is not None:
+            signed_delta = position_delta
         position_size = abs(signed_delta)
         is_increasing = (pos.quantity >= 0 and signed_delta > 0) or (
             pos.quantity <= 0 and signed_delta < 0

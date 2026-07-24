@@ -685,7 +685,7 @@ async def _start_ai_delegate_watchdog(
             repo=get_repository(db_url),
             msg_publisher=msg_publisher,
         )
-        await watchdog.start()
+        watchdog.start()
     except Exception:
         logger.exception("AiDelegateWatchdog startup failed — AI delegate alerting is offline")
         return

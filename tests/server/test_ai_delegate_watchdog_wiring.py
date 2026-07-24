@@ -30,7 +30,7 @@ class TestStartAiDelegateWatchdog:
             def __init__(self, **_kwargs: object) -> None:
                 """Accept the production constructor keywords."""
 
-            async def start(self) -> None:
+            def start(self) -> None:
                 """Raise a synthetic startup failure."""
                 raise RuntimeError("startup failed")
 
@@ -52,7 +52,7 @@ class TestStartAiDelegateWatchdog:
         When: The startup helper succeeds,
         Then: The started instance is attached with both dependencies.
         """
-        started = AsyncMock()
+        started = MagicMock()
         repository = MagicMock()
         publisher = MagicMock()
         get_repository = MagicMock(return_value=repository)
@@ -70,9 +70,9 @@ class TestStartAiDelegateWatchdog:
                 """
                 constructed.append({"repo": repo, "msg_publisher": msg_publisher})
 
-            async def start(self) -> None:
+            def start(self) -> None:
                 """Record successful startup."""
-                await started()
+                started()
 
         monkeypatch.setattr("snapper.server.app.AiDelegateWatchdog", SucceedingWatchdog)
         monkeypatch.setattr("snapper.server.app.get_repository", get_repository)
@@ -84,7 +84,7 @@ class TestStartAiDelegateWatchdog:
             msg_publisher=publisher,
         )
 
-        assert started.await_count == 1
+        started.assert_called_once_with()
         assert constructed == [{"repo": repository, "msg_publisher": publisher}]
         get_repository.assert_called_once_with("sqlite+aiosqlite:///:memory:")
         assert isinstance(app.state.ai_delegate_watchdog, SucceedingWatchdog)

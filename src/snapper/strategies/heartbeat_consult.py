@@ -410,7 +410,11 @@ async def _build_macro_snapshot(
     age_minutes = round(raw_age_minutes, 2)
     scheduled_closed = is_cme_closed(as_of)
     stale = not scheduled_closed and raw_age_minutes > stale_after_minutes
-    session = "closed" if scheduled_closed else "halted" if stale else "open"
+    session = "open"
+    if stale:
+        session = "halted"
+    if scheduled_closed:
+        session = "closed"
 
     one_hour_cutoff = latest["open_at"] - MACRO_ONE_HOUR
     one_hour_reference = next(

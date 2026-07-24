@@ -3256,7 +3256,6 @@ class TraderCoordinator(RegisterableProcess):
         if context is None:
             return None
         lineage = self._resolve_active_order_recovery_lineage(
-            db_order,
             context,
             durable_lineage_pair,
         )
@@ -3330,7 +3329,6 @@ class TraderCoordinator(RegisterableProcess):
 
     def _resolve_active_order_recovery_lineage(
         self,
-        db_order: OrderRow,
         context: ActiveOrderRecoveryContext,
         durable_lineage_pair: tuple[str, str] | None,
     ) -> tuple[str | None, str | None] | None:

@@ -602,7 +602,7 @@ class TradeService:
         pos.realized_pnl += outcome.realized_delta
         if outcome.opened_new_side:
             pos.position_opened_at = event_time
-        if outcome.position_qty == 0.0:
+        if math.isclose(outcome.position_qty, 0.0, rel_tol=0.0, abs_tol=0.0):
             pos.position_opened_at = None
 
     @staticmethod

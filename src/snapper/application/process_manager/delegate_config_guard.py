@@ -32,7 +32,7 @@ _JWT_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
 )
 _KEY_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"(?:api|key|pk|rk|secret|sk|token)[_-][A-Za-z0-9_+=./-]{12,}", re.IGNORECASE
+    r"(?:api|key|pk|rk|secret|sk|token)[_-][A-Z0-9_+=./-]{12,}", re.IGNORECASE
 )
 _BASE64_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9+/]{32,}={0,2}")
 _GENERIC_ERROR_MESSAGE: Final[str] = (

@@ -28,7 +28,7 @@ from snapper.messaging.schemas.data import PortfolioAccountState
 _METHOD = "spot_execution_replay"
 _MODE = "live"
 _WATERMARK_KIND = "scope_sequence"
-_PLAIN_DECIMAL = re.compile(r"[0-9]+(?:\.[0-9]+)?", flags=re.ASCII)
+_PLAIN_DECIMAL = re.compile(r"\d+(?:\.\d+)?", flags=re.ASCII)
 
 
 @dataclass(frozen=True)

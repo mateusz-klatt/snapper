@@ -72,6 +72,9 @@ _NON_DELEGATE_REQUEST = (
     "ai-reviews endpoints require an AI_DELEGATE principal "
     "(populated AuthPrincipal.delegate_public_id)."
 )
+_REVIEW_AFTERMATH_NOT_FOUND_MESSAGE = (
+    "No terminal review with that id was found in the caller's scope."
+)
 _TERMINAL_AI_REVIEW_STATUSES = frozenset(
     {
         AiReviewStatusEnum.RESOLVED_APPROVED.value,
@@ -451,7 +454,7 @@ async def get_ai_review_aftermath_route(
             detail={
                 "success": False,
                 "error_code": ERROR_REVIEW_NOT_FOUND,
-                "message": "No terminal review with that id was found in the caller's scope.",
+                "message": _REVIEW_AFTERMATH_NOT_FOUND_MESSAGE,
                 "details": {"review_public_id": review_public_id},
             },
         )
@@ -467,7 +470,7 @@ async def get_ai_review_aftermath_route(
             detail={
                 "success": False,
                 "error_code": ERROR_REVIEW_NOT_FOUND,
-                "message": "No terminal review with that id was found in the caller's scope.",
+                "message": _REVIEW_AFTERMATH_NOT_FOUND_MESSAGE,
                 "details": {"review_public_id": review_public_id},
             },
         )
@@ -491,7 +494,7 @@ async def get_ai_review_aftermath_route(
             detail={
                 "success": False,
                 "error_code": ERROR_REVIEW_NOT_FOUND,
-                "message": "No terminal review with that id was found in the caller's scope.",
+                "message": _REVIEW_AFTERMATH_NOT_FOUND_MESSAGE,
                 "details": {"review_public_id": review_public_id},
             },
         )

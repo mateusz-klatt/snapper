@@ -44,6 +44,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from itertools import chain
 from typing import Literal
 
 type WitnessRefusal = Literal[
@@ -344,7 +345,7 @@ def witness_bijection_holds(
     Returns:
         Whether the bijection holds.
     """
-    witnessed = sorted({item_id for legs in witnesses.values() for item_id in legs})
+    witnessed = sorted(set(chain.from_iterable(witnesses.values())))
     return witnessed == sorted(attributed_item_ids)
 
 

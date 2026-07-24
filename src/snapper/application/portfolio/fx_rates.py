@@ -93,7 +93,7 @@ def convert_amount(
         The converted amount, or ``None`` when the pinned plane has no usable
         close at that exact minute or does not match the requested currencies.
     """
-    if amount == 0.0:
+    if math.isclose(amount, 0.0, rel_tol=0.0, abs_tol=0.0):
         return 0.0
     if from_currency == to_currency:
         return amount

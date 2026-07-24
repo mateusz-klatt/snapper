@@ -156,7 +156,7 @@ class TestLifecycle:
         repo = _make_repo(has_live_delegate=True, timeout_count=0)
         watchdog = _make_watchdog(repo, None, interval_seconds=17.0)
 
-        await watchdog.start()
+        watchdog.start()
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
@@ -212,7 +212,7 @@ class TestLifecycle:
             msg_publisher=publisher,
         )
 
-        await watchdog.start()
+        watchdog.start()
         await asyncio.wait_for(grace_started.wait(), timeout=1.0)
 
         repo.has_live_ai_delegate.assert_not_awaited()
@@ -249,7 +249,7 @@ class TestLifecycle:
         publisher.send = AsyncMock(side_effect=blocked_send)
         watchdog = _make_watchdog(repo, publisher)
 
-        await watchdog.start()
+        watchdog.start()
         await asyncio.wait_for(publication_started.wait(), timeout=1.0)
 
         assert watchdog._loop_task is not None
@@ -270,7 +270,7 @@ class TestLifecycle:
         repo.has_live_ai_delegate = AsyncMock(side_effect=RuntimeError("database unavailable"))
         watchdog = _make_watchdog(repo, None)
 
-        await watchdog.start()
+        watchdog.start()
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
