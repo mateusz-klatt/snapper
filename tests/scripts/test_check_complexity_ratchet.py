@@ -302,7 +302,7 @@ class TestInventoryCollection:
         )
         assert "proprietary/src" not in inventory.active_roots
         command = run.call_args.args[0]
-        assert command[0] == "/tools/ruff"
+        assert command[0] == str(Path("/tools/ruff"))
         assert "--isolated" in command
         assert "--ignore-noqa" in command
         assert "--no-respect-gitignore" in command
@@ -377,23 +377,46 @@ class TestInventoryCollection:
             ratchet.collect_inventory(tmp_path, Path("ruff"))
 
     def test_scan_root_symlink_fails_closed(self, tmp_path: Path) -> None:
-        """A required root cannot redirect inventory outside the repository."""
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        for relative, required in ratchet.SCAN_ROOTS:
-            if required and relative != "src":
-                (tmp_path / relative).mkdir(parents=True)
-        (tmp_path / "src").symlink_to(outside, target_is_directory=True)
-        with pytest.raises(ratchet.RatchetError, match="scan root must not be a symlink"):
+        """A required root cannot redirect inventory outside the repository.
+
+        The symlink is simulated by patching ``Path.is_symlink`` because
+        creating a real one needs elevated privileges on Windows; the guard
+        under test only consults that predicate, so the patch exercises the
+        identical fail-closed branch on every platform.
+        """
+        _make_scan_roots(tmp_path)
+        link = tmp_path / "src"
+
+        def fake_is_symlink(self: Path) -> bool:
+            """Report only the redirected scan root as a symlink."""
+            return self == link
+
+        with (
+            patch.object(Path, "is_symlink", fake_is_symlink),
+            pytest.raises(ratchet.RatchetError, match="scan root must not be a symlink"),
+        ):
             ratchet.collect_inventory(tmp_path, Path("ruff"))
 
     def test_nested_symlink_fails_closed_before_ruff(self, tmp_path: Path) -> None:
-        """A nested alias cannot evade identity or leave the scan boundary."""
+        """A nested alias cannot evade identity or leave the scan boundary.
+
+        The symlink is simulated by patching ``Path.is_symlink`` (real links
+        need elevated privileges on Windows); no subprocess patch exists, so
+        reaching Ruff would fail loudly and the raise proves the guard fires
+        first.
+        """
         _make_scan_roots(tmp_path)
-        outside = tmp_path / "outside.py"
-        outside.write_text("def clean():\n    return None\n", encoding="utf-8")
-        (tmp_path / "src" / "linked.py").symlink_to(outside)
-        with pytest.raises(ratchet.RatchetError, match="must not contain symlinks"):
+        linked = tmp_path / "src" / "linked.py"
+        linked.write_text("def clean():\n    return None\n", encoding="utf-8")
+
+        def fake_is_symlink(self: Path) -> bool:
+            """Report only the nested alias as a symlink."""
+            return self == linked
+
+        with (
+            patch.object(Path, "is_symlink", fake_is_symlink),
+            pytest.raises(ratchet.RatchetError, match="must not contain symlinks"),
+        ):
             ratchet.collect_inventory(tmp_path, Path("ruff"))
 
     def test_explicit_source_listing_rejects_outside_root(self, tmp_path: Path) -> None:
